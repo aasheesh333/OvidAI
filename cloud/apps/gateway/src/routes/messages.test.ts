@@ -5,13 +5,14 @@ import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import {
   messageDtoSchema,
   pageSchema,
+  MintInternalError,
+  type InternalMintProvisioner,
   type Page,
   type MessageDto,
   type SendMessageResponse,
 } from "@ovid/shared";
 import { buildGateway } from "../app.js";
-import { createHttpMintProvisioner, MintHttpError } from "../keys.js";
-import type { MintProvisioner } from "@ovid/shared";
+import { createInternalMintProvisioner } from "../internalMint.js";
 import type { AttachmentPresigner } from "./attachments.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
@@ -60,7 +61,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       mintThrows?: unknown;
       presigner?: AttachmentPresigner;
       /** P10 Task 2: override the provisioner (e.g. a hung HTTP fetch seam). */
-      mint?: MintProvisioner;
+      mint?: InternalMintProvisioner;
       /** P10 Task 2: bounded mint deadline (default 10000). */
       mintTimeoutMs?: number;
     } = {},
@@ -160,11 +161,9 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     expect(add.opts.jobId).toBe(body.runId);
     expect(add.opts.priority).toBe(2); // users.tier default "free" → priority 2
 
-    // Mint received the caller's raw tokens (Authorization stripped of Bearer,
-    // X-Firebase-AppCheck verbatim).
-    expect(handle.mint.calls).toEqual([
-      { idToken: `test:${uid}`, appCheck: "app-check-stub" },
-    ]);
+    // P9 Task 9: mint receives the gateway's verified uid only — no client
+    // Firebase token or App Check header crosses this boundary.
+    expect(handle.mint.calls).toEqual([{ uid }]);
 
     // User message row persisted verbatim; run row queued.
     const page = await messages.page(db, sid, { limit: 10 });
@@ -199,7 +198,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     expect(handle.adds[0]!.data).toMatchObject({ prompt: "pro prompt", tier: "pro" });
   });
 
-  it("missing App Check header → mint gets appCheck null", async () => {
+  it("missing App Check header → mint still receives the verified uid", async () => {
     const handle = makeApp();
     const uid = testUid("msg-noac");
     const sid = await createSession(handle, uid);
@@ -207,7 +206,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       authorization: `Bearer test:${uid}`,
     });
     expect(res.statusCode).toBe(202);
-    expect(handle.mint.calls).toEqual([{ idToken: `test:${uid}`, appCheck: null }]);
+    expect(handle.mint.calls).toEqual([{ uid }]);
   });
 
   it("ensureKey failure BEFORE any write: 402/429 relayed verbatim, everything else → 409 key_not_minted; zero adds, zero rows", async () => {
@@ -218,10 +217,10 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     const paymentBody = { error: { code: "payment_required", message: "buy credits" } };
     const rateBody = { error: { code: "rate_limited", message: "slow down" } };
     const cases: Array<{ thrown: unknown; status: number; body?: unknown }> = [
-      { thrown: new MintHttpError(402, paymentBody), status: 402, body: paymentBody },
-      { thrown: new MintHttpError(429, rateBody), status: 429, body: rateBody },
+      { thrown: new MintInternalError(402, paymentBody), status: 402, body: paymentBody },
+      { thrown: new MintInternalError(429, rateBody), status: 429, body: rateBody },
       // Non-relayable mint statuses and plain failures → generic 409.
-      { thrown: new MintHttpError(500, { error: { code: "internal" } }), status: 409 },
+      { thrown: new MintInternalError(500, { error: { code: "internal" } }), status: 409 },
       { thrown: new Error("mint connection refused"), status: 409 },
     ];
 
@@ -244,12 +243,16 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
   });
 
   it("mint call gets a deadline: a hung internal-mint fetch → bounded 503 unavailable, no writes", async () => {
-    // P10 Task 2. The real HTTP provisioner seam (createHttpMintProvisioner,
-    // the current pre-P9-T9 shape) with a fetch that never settles. Without
-    // GatewayDeps.mintTimeoutMs the route would hang forever; with it the
-    // request must answer 503 `unavailable` well under 1 s.
+    // P10 Task 2. The real internal-mint HTTP provisioner with a fetch that
+    // never settles. Without GatewayDeps.mintTimeoutMs the route would hang
+    // forever; with it the request must answer 503 `unavailable` well under
+    // 1 s.
     const neverFetch = (() => new Promise<Response>(() => {})) as typeof fetch;
-    const mint = createHttpMintProvisioner("http://mint.invalid", neverFetch);
+    const mint = createInternalMintProvisioner(
+      "http://mint.invalid",
+      "test-internal-secret-0123456789abcdef",
+      neverFetch,
+    );
     const handle = makeApp({ mint, mintTimeoutMs: 50 });
     const uid = testUid("msg-mintdeadline");
     const sid = await createSession(handle, uid);

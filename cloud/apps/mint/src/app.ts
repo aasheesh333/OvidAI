@@ -6,6 +6,7 @@ import { registerAdminRoutes } from "./adminRoutes.js";
 import type { BillingService } from "./billing/service.js";
 import { registerBillingRoutes } from "./billing/routes.js";
 import type { MintEnv } from "./env.js";
+import { registerInternalRoutes } from "./internalRoutes.js";
 import type { LiteLlmAdmin } from "./litellmAdmin.js";
 import { registerMintRoutes } from "./mintRoutes.js";
 import { registerUsageRoutes } from "./usage.js";
@@ -140,6 +141,10 @@ export function buildMintApps(deps: MintDeps): {
   // OVID_ADMIN_MASTER_KEY. This app listens on its own ADMIN port — Caddy
   // never routes /admin, so the console is localhost / SSH-tunnel only.
   registerAdminRoutes(adminApp, deps);
+  // P9 Task 9: the signed server-to-server mint route lives on the ADMIN
+  // listener ONLY. It is never registered on publicApp (the public surface
+  // keeps Firebase verification; internalRoutes.test.ts pins the 404).
+  registerInternalRoutes(adminApp, deps);
 
   return { publicApp, adminApp };
 }

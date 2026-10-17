@@ -1,5 +1,7 @@
 export * from "./browser.js";
 export * from "./events.js";
+// P9 Task 9: HMAC signing for the internal server-to-server mint API.
+export * from "./internalAuth.js";
 export * from "./keys.js";
 // P5 Task 15: MCP/plugins REST DTOs (additive — consumed by the gateway
 // mcp/plugins routes and their tests).

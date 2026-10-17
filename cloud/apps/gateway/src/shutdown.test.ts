@@ -66,7 +66,7 @@ function spawnGateway(port: number): Child {
       DATABASE_URL: TEST_DATABASE_URL,
       REDIS_Q_URL: TEST_REDIS_URL,
       REDIS_MINT_URL: TEST_REDIS_URL,
-      MINT_BASE_URL: "http://127.0.0.1:1",
+      OVID_INTERNAL_MINT_URL: "http://127.0.0.1:1",
       OVID_FS_STORAGE_ROOT: storageRoot,
     },
     stdio: ["ignore", "pipe", "pipe"],

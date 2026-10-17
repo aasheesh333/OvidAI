@@ -110,7 +110,7 @@ function requireIdentityHeaders(
  * lock is reserved for admin mutations and billing verify). A tombstone in
  * any state except cancelled/active fences new keys and tier upgrades.
  */
-async function requireNoDeletionFence(deps: MintDeps, uid: string): Promise<void> {
+export async function requireNoDeletionFence(deps: MintDeps, uid: string): Promise<void> {
   const row = await accountDeletions.get(deps.db, uid);
   if (row !== null && row.state !== "cancelled" && row.state !== "active") {
     throw new HttpContractError(403, "account_deletion_pending");

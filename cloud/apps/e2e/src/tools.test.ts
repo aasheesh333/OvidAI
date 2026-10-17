@@ -19,7 +19,8 @@ import {
   sessionDtoSchema,
   wsServerMsg,
   type KeyProvider,
-  type MintProvisioner,
+  type KeyResolver,
+  type InternalMintProvisioner,
   type SendMessageResponse,
   type SessionEvent,
   type WsServerMsg,
@@ -394,8 +395,13 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
     // Mint/key stubs per the spine's binding decision: the mock LiteLLM
     // ignores key validity, so a constant "test-key" is enough end to end.
-    const keys: KeyProvider = { getKeyForUser: async () => "test-key" };
-    const mint: MintProvisioner = { ensureKey: async () => ({ key: "test-key" }) };
+    const keys: KeyProvider & KeyResolver = {
+      getKeyForUser: async () => "test-key",
+      resolveForRun: async () => ({ kind: "litellm", key: "test-key", baseUrl: "" }),
+    };
+    const mint: InternalMintProvisioner = {
+      ensureKeyForUid: async () => ({ key: "test-key", tier: "free", baseUrl: "" }),
+    };
 
     beforeAll(async () => {
       await migrate(TEST_DATABASE_URL!);

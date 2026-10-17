@@ -13,7 +13,8 @@ import type { QueueServices } from "@ovid/queue";
 import {
   wsServerMsg,
   type KeyProvider,
-  type MintProvisioner,
+  type KeyResolver,
+  type InternalMintProvisioner,
   type WsServerMsg,
 } from "@ovid/shared";
 import {
@@ -205,8 +206,13 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
 
     // Boundary stubs, spine.test.ts-style. No model calls happen; the queue
     // stub is LOUD so an accidental enqueue fails the test, not silently passes.
-    const keys: KeyProvider = { getKeyForUser: async () => "test-key" };
-    const mint: MintProvisioner = { ensureKey: async () => ({ key: "test-key" }) };
+    const keys: KeyProvider & KeyResolver = {
+      getKeyForUser: async () => "test-key",
+      resolveForRun: async () => ({ kind: "litellm", key: "test-key", baseUrl: "" }),
+    };
+    const mint: InternalMintProvisioner = {
+      ensureKeyForUid: async () => ({ key: "test-key", tier: "free", baseUrl: "" }),
+    };
     const neverQueues = {
       agentRuns: {
         add: async () => {

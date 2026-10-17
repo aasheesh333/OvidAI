@@ -29,7 +29,8 @@ import {
   sessionDtoSchema,
   wsServerMsg,
   type KeyProvider,
-  type MintProvisioner,
+  type KeyResolver,
+  type InternalMintProvisioner,
   type SendMessageResponse,
   type SessionEvent,
   type WsServerMsg,
@@ -347,8 +348,13 @@ describe.skipIf(
       ? `${process.env.OVID_TEST_QUEUE_PREFIX}-e2e-rj`
       : "ovid-test-e2e-rj";
 
-    const keys: KeyProvider = { getKeyForUser: async () => "test-key" };
-    const mint: MintProvisioner = { ensureKey: async () => ({ key: "test-key" }) };
+    const keys: KeyProvider & KeyResolver = {
+      getKeyForUser: async () => "test-key",
+      resolveForRun: async () => ({ kind: "litellm", key: "test-key", baseUrl: "" }),
+    };
+    const mint: InternalMintProvisioner = {
+      ensureKeyForUid: async () => ({ key: "test-key", tier: "free", baseUrl: "" }),
+    };
 
     beforeAll(async () => {
       await migrate(TEST_DATABASE_URL!);

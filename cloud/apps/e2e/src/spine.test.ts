@@ -18,7 +18,8 @@ import {
   wsServerMsg,
   type ApiError,
   type KeyProvider,
-  type MintProvisioner,
+  type KeyResolver,
+  type InternalMintProvisioner,
   type SendMessageResponse,
   type SessionEvent,
   type WsServerMsg,
@@ -38,7 +39,7 @@ import { createAgentRunProcessor, createOpenAiTransport } from "@ovid/worker";
  *
  * - LiteLLM → a local http server speaking OpenAI-dialect SSE with per-test
  *   pacing hooks (chunk delays, a mid-run gate, early socket close).
- * - mint → MintProvisioner stub resolving {key:"test-key"}; KeyProvider stub
+ * - mint → InternalMintProvisioner stub resolving {key:"test-key"}; KeyProvider stub
  *   returning "test-key" (the mock LiteLLM ignores key validity).
  * - auth → createTestVerifier(): `Authorization: Bearer test:<uid>`.
  *
@@ -288,8 +289,13 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
     // Mint/key stubs per the binding decision: the mock LiteLLM ignores key
     // validity, so a constant "test-key" is enough end to end.
-    const keys: KeyProvider = { getKeyForUser: async () => "test-key" };
-    const mint: MintProvisioner = { ensureKey: async () => ({ key: "test-key" }) };
+    const keys: KeyProvider & KeyResolver = {
+      getKeyForUser: async () => "test-key",
+      resolveForRun: async () => ({ kind: "litellm", key: "test-key", baseUrl: "" }),
+    };
+    const mint: InternalMintProvisioner = {
+      ensureKeyForUid: async () => ({ key: "test-key", tier: "free", baseUrl: "" }),
+    };
 
     beforeAll(async () => {
       await migrate(TEST_DATABASE_URL!);

@@ -33,6 +33,7 @@ import { createDb } from "@ovid/db";
 import { money } from "@ovid/money";
 import { buildMintApps, type MintDeps } from "./app.js";
 import { createAlerter } from "./alerts.js";
+import { startMintBackgroundLoops } from "./background.js";
 import { createBillingService } from "./billing/service.js";
 import { loadMintEnv } from "./env.js";
 import { createAdmission } from "./images/admission.js";
@@ -150,18 +151,31 @@ export async function main(
 
   const { publicApp, adminApp } = buildMintApps(mintDeps);
 
-  // Task 13: the images mount. Python always mounts it, defaulting the
+  // Task 18: the images mount. Python always mounts it, defaulting the
   // upstream bound to 1.00 (images_gateway.py:
   // `os.environ.get("OVID_IMAGE_MAX_UPSTREAM_USD", "1.00")`). The bound is
   // validated below; an invalid value aborts the boot.
   const images = buildImagesMount(mintDeps, cfg, litellm);
   registerImagesRoutes(publicApp, mintDeps, images.service, images.admission);
 
-  // Owned connections close with the apps (deploy scripts call app.close()).
-  publicApp.addHook("onClose", async () => {
-    redis.disconnect();
-    await db.$client.end({ timeout: 5 });
-  });
+  // Task 18 Step 3 (owner-gated Q1): installed-base first boot.
+  // `import-first` copies live db2 state into Postgres (insert-if-absent,
+  // never deletes Redis keys) BEFORE the authoritative resync can overwrite
+  // it. A failed import aborts the boot: continuing would let resync write
+  // Postgres-derived (empty) state over the live projection.
+  if (cfg.projectionMode === "import-first") {
+    try {
+      const imported = await projection.importFromRedisOnce();
+      console.log(
+        `[mint] projection import-first: ${imported.imported.users} users, ` +
+          `plans=${imported.imported.plans}, settings=${imported.imported.settings}`,
+      );
+    } catch (err) {
+      throw new Error(
+        `[mint] projection import-first failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
   // I3: reconcile the Redis db2 projection with the Postgres authority at
   // boot. A failed admin projection write (Postgres committed, Redis did
@@ -169,9 +183,9 @@ export async function main(
   // prevent the process from starting — the hook will recover when Redis
   // returns, and the durable state is already correct.
   try {
-    const report = await createProjection({ db, redis }).resyncAtBoot();
+    const report = await projection.resyncAtBoot();
     console.log(
-      `[mint] projection resync: ${report.rewritten.length} rewritten, ` +
+      `[mint] projection resync (${cfg.projectionMode}): ${report.rewritten.length} rewritten, ` +
         `${report.identical} identical, ${report.conflictsResolvedFromPostgres} conflicts resolved`,
     );
   } catch (err) {
@@ -179,6 +193,17 @@ export async function main(
       `[mint] projection resync failed: ${err instanceof Error ? err.name : String(err)}`,
     );
   }
+
+  // Task 7/18: the sweeper (slow-mode drain + catalog refresh) and the spend
+  // monitor run inside the mint process, exactly like Python's daemon threads.
+  const background = startMintBackgroundLoops(mintDeps);
+
+  // Owned connections close with the apps (deploy scripts call app.close()).
+  publicApp.addHook("onClose", async () => {
+    await background.stop();
+    redis.disconnect();
+    await db.$client.end({ timeout: 5 });
+  });
 
   await publicApp.listen({ host: cfg.host, port: cfg.publicPort });
   try {

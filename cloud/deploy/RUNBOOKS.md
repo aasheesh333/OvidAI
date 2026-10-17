@@ -779,7 +779,7 @@ key_not_minted` (non-402/429 mint failures collapse to this); `/usage` and
 **Diagnose.**
 
 ```bash
-# Live Python mint (MINT_BASE_URL points here today)
+# Live Python mint (pre-P9 surface; P9 gateways call OVID_INTERNAL_MINT_URL)
 curl -sf http://127.0.0.1:8090/healthz && echo ' MINT OK'
 docker logs --tail=120 ovid-gateway-mint-1
 
@@ -806,8 +806,10 @@ cd /opt/ovid-cloud/repo/cloud/deploy
 docker compose -p ovid-cloud --profile mint up -d mint   # [OWNER]
 ```
 
-- Do **not** change `MINT_BASE_URL` during an incident; flipping the mint
-  surface is a planned, owner-gated cutover (P9 Task 18).
+- Do **not** change `OVID_INTERNAL_MINT_URL` (or
+  `OVID_INTERNAL_API_SECRET`) during an incident; flipping the mint surface
+  is a planned, owner-gated cutover (P9 Task 18). Both gateway and worker
+  must carry the SAME secret as mint.
 - mint's own dependency failures (LiteLLM admin API, Redis db2, Postgres)
   must be fixed at the dependency (**I-12**, **I-2**, **I-5**), not by
   restarting mint repeatedly.

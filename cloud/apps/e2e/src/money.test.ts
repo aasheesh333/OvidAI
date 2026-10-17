@@ -28,7 +28,7 @@ import {
 } from "@ovid/mint";
 import {
   buildGateway,
-  createHttpMintProvisioner,
+  createInternalMintProvisioner,
   createTestVerifier,
   createTicketStore,
 } from "@ovid/gateway";
@@ -577,7 +577,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_MINT_REDIS_URL)(
         verifier: createTestVerifier(),
         tickets: createTicketStore(redis),
         keys: { getKeyForUser: async () => null } as KeyProvider,
-        mint: createHttpMintProvisioner(mintBase),
+        mint: createInternalMintProvisioner(adminBase, INTERNAL_SECRET),
         events: createRedisEventLog(redis),
         system: createRedisSystemBus(redis),
       });

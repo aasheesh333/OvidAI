@@ -1,7 +1,7 @@
 import type { Db } from "@ovid/db";
 import type { EventLog, SystemBus } from "@ovid/events";
 import type { AgentRunJob, QueueServices } from "@ovid/queue";
-import type { KeyProvider, MintProvisioner, SystemEvent } from "@ovid/shared";
+import type { InternalMintProvisioner, KeyProvider, SystemEvent } from "@ovid/shared";
 import type { Verifier } from "../auth.js";
 import type { TicketStore } from "../tickets.js";
 
@@ -109,19 +109,22 @@ export function stubSystemBus(): SystemBusStub {
   };
 }
 
-export interface MintStub extends MintProvisioner {
-  calls: Array<{ idToken: string; appCheck: string | null }>;
+export interface MintStub extends InternalMintProvisioner {
+  calls: Array<{ uid: string; platform?: "android" | "web" }>;
 }
 
-/** MintProvisioner stub; `throws` (any value) makes ensureKey reject with it. */
+/** InternalMintProvisioner stub; `throws` (any value) makes it reject. */
 export function stubMint(behavior: { throws?: unknown } = {}): MintStub {
   const calls: MintStub["calls"] = [];
   return {
     calls,
-    async ensureKey(idToken, appCheck) {
-      calls.push({ idToken, appCheck });
+    async ensureKeyForUid(uid, opts) {
+      calls.push({
+        uid,
+        ...(opts?.platform !== undefined ? { platform: opts.platform } : {}),
+      });
       if (behavior.throws !== undefined) throw behavior.throws;
-      return { key: "sk-stub" };
+      return { key: "sk-stub", tier: "free", baseUrl: "" };
     },
   };
 }

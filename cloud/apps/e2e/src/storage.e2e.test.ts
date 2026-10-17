@@ -468,7 +468,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         verifier: createTestVerifier(),
         tickets: createTicketStore(redis),
         keys: { getKeyForUser: async () => "test-key" },
-        mint: { ensureKey: async () => ({ key: "test-key" }) },
+        mint: { ensureKeyForUid: async () => ({ key: "test-key", tier: "free", baseUrl: "" }) },
         events,
         worker: workerClient as any,
         storage,

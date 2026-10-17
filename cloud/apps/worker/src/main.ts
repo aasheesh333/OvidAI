@@ -61,8 +61,10 @@ import {
   type EgressFetch,
   type GitHubApiPort,
 } from "@ovid/agent-core";
-import type { KeyProvider } from "@ovid/shared";
+import type { KeyResolver } from "@ovid/shared";
+import { createByokKeyProvider, createEnvelopeCrypto } from "@ovid/escrow";
 import { createFullAgentRunProcessor } from "./runProcessor.js";
+import { createServerKeyResolver } from "./keyResolver.js";
 import { buildFileService } from "./fileService.js";
 import { createMcpRuntime } from "./mcpRuntime.js";
 import { createNotifier, createFcmPushSender } from "./notify.js";
@@ -83,6 +85,13 @@ export interface WorkerEnv {
   databaseUrl: string;
   redisQUrl: string;
   redisMintUrl: string;
+  /**
+   * P9 Task 9: mint's ADMIN listener. The worker signs its own uid and calls
+   * /internal/mint-key for unattended runs whose key is missing from db2.
+   */
+  internalMintUrl: string;
+  /** P9 Task 9: shared HMAC secret (OVID_INTERNAL_API_SECRET, >= 32 bytes). */
+  internalApiSecret: string;
   litellmBaseUrl: string;
   defaultModel: string;
   anthropicBaseUrl: string;
@@ -252,11 +261,22 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
   }
   const masterKey = masterKeyRaw === "" ? null : masterKeyRaw;
 
+  // P9 Task 9: the internal mint endpoint + its HMAC secret. Both are
+  // required: a worker booted without them could not mint for unattended
+  // runs, and a short secret would weaken the only auth on that surface.
+  const internalMintUrl = required("OVID_INTERNAL_MINT_URL");
+  const internalApiSecret = required("OVID_INTERNAL_API_SECRET");
+  if (Buffer.byteLength(internalApiSecret, "utf8") < 32) {
+    throw new Error("OVID_INTERNAL_API_SECRET must be at least 32 bytes");
+  }
+
   return {
     nodeEnv: raw.NODE_ENV?.trim() || "development",
     databaseUrl: required("DATABASE_URL"),
     redisQUrl: required("REDIS_Q_URL"),
     redisMintUrl: required("REDIS_MINT_URL"),
+    internalMintUrl,
+    internalApiSecret,
     litellmBaseUrl: required("OVID_LITELLM_BASE"),
     defaultModel: required("OVID_DEFAULT_MODEL"),
     anthropicBaseUrl,
@@ -277,17 +297,36 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
 }
 
 /**
- * Worker-local copy of the gateway's mint-Redis key provider (controller
- * ruling: apps never import from apps — the KeyProvider INTERFACE comes from
- * @ovid/shared; slight duplication accepted until P9 consolidates).
- * REDIS_MINT_URL carries the db selector (mint's db2), so a plain GET.
+ * P9 Task 9: build the production key resolver. BYOK escrow is wired only
+ * when OVID_MASTER_KEY is present; a referenced BYOK key with no provider
+ * fails the run (never a silent fallback to Ovid's key — see keyResolver.ts).
+ * The internal mint client signs its own uid with the shared HMAC secret.
  */
-export function createMintRedisKeyProvider(redisMint: Redis): KeyProvider {
-  return {
-    getKeyForUser(uid) {
-      return redisMint.get(`user:${uid}:key`);
-    },
-  };
+export function createProductionKeyResolver(deps: {
+  db: ReturnType<typeof createDb>;
+  redisMint: Redis;
+  masterKey: string | null;
+  internalMintUrl: string;
+  internalApiSecret: string;
+  litellmBaseUrl: string;
+}): KeyResolver {
+  const byok =
+    deps.masterKey === null
+      ? null
+      : createByokKeyProvider(deps.db, createEnvelopeCrypto(deps.masterKey), {
+          log: (message, detail) => console.warn(`[worker] ${message}`, detail ?? ""),
+        });
+  if (byok === null) {
+    console.warn(
+      "[worker] OVID_MASTER_KEY is not set — BYOK runs will fail (no silent fallback to Ovid's key)",
+    );
+  }
+  return createServerKeyResolver({
+    redisMint: deps.redisMint,
+    internalMint: { baseUrl: deps.internalMintUrl, secret: deps.internalApiSecret },
+    byok,
+    litellmBaseUrl: deps.litellmBaseUrl,
+  });
 }
 
 /**
@@ -644,7 +683,14 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   const processor = createFullAgentRunProcessor({
     db,
     events,
-    keys: createMintRedisKeyProvider(redisMint),
+    keys: createProductionKeyResolver({
+      db,
+      redisMint,
+      masterKey: cfg.masterKey,
+      internalMintUrl: cfg.internalMintUrl,
+      internalApiSecret: cfg.internalApiSecret,
+      litellmBaseUrl: cfg.litellmBaseUrl,
+    }),
     redisQ,
     // P2's manager adapted onto the canonical SandboxPort (Task 9). The
     // provider egress inside the processor allowlists this configured
@@ -665,9 +711,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     runQueueWaitMs: cfg.runQueueWaitMs,
     ensureWarm,
     activity,
-    // P4 Task 10 / T10-review ruling: the P3-T12 timeoutPolicy seam. The hook
-    // pushes the approval card BEFORE the 120 s unattended default-deny fires
-    // and ledgers the auto-denial on the occurrence (Task 7's contract).
+    // P4 Task 10 / T10-review ruling: the P3-T12 approval seam. The hook's
+    // onRequested push runs BEFORE the 120 s unattended default-deny clock
+    // (the gate invokes it before bridge.ask) and onTimeout ledgers the
+    // auto-denial on the occurrence (Task 7's contract). Both are forwarded
+    // by the processor for unattended runs only.
     unattendedApprovalHook: createUnattendedApprovalHook({ db, notifier }),
     // P4 Task 13: the agent schedule tools enter P3's roster through the
     // additive FullRunDeps.extraTools seam (adapted beside P2's six).

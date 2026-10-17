@@ -15,7 +15,7 @@ import {
 } from "@ovid/sandbox";
 import {
   sanitizeAttachmentName,
-  type KeyProvider,
+  type KeyResolver,
   type SessionEvent,
   type SessionEventType,
 } from "@ovid/shared";
@@ -53,7 +53,6 @@ import {
   createWebSearchTool,
   findApplicableGrant,
   foldBoundaryFor,
-  litellmKeyResolver,
   normalizeGrantHost,
   presetById,
   resolveRoute,
@@ -72,6 +71,7 @@ import {
   type ToolRegistry as CoreToolRegistry,
 } from "@ovid/agent-core";
 import { createRedisApprovalBridge } from "./approvalBridge.js";
+import { agentKeyFor } from "./keyResolver.js";
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   TerminalModelError,
@@ -174,7 +174,12 @@ export interface RunAttachmentStorage {
 export interface RunDeps {
   db: Db;
   events: EventLog;
-  keys: KeyProvider;
+  /**
+   * P9 Task 9: server-side resolution (LiteLLM key, BYOK escrow, or a signed
+   * internal mint for unattended runs). The processor never reads mint's
+   * Redis directly — the resolver owns that order.
+   */
+  keys: KeyResolver;
   transport: ModelTransport;
   litellmBaseUrl: string;
   defaultModel: string;
@@ -248,7 +253,8 @@ export interface RunDeps {
 export interface FullRunDeps {
   db: Db;
   events: EventLog;
-  keys: KeyProvider;
+  /** P9 Task 9: see RunDeps.keys. */
+  keys: KeyResolver;
   redisQ: Redis;
   sandbox: SandboxPort;
   github: GitHubApiPort | null;
@@ -685,6 +691,12 @@ export function createAgentRunProcessor(
 
   return async (job) => {
     const { runId, sessionId, userId } = job.data;
+    // P9 Task 9: per-run resolution context. A scheduler-fired job is
+    // unattended even when the payload predates the explicit flag.
+    const runKeyCtx = {
+      unattended: job.data.unattended ?? job.data.schedule !== undefined,
+      byokKeyId: job.data.byokKeyId ?? null,
+    };
 
     const emit = async (
       type: SessionEventType,
@@ -768,12 +780,17 @@ export function createAgentRunProcessor(
 
     try {
 
-    const apiKey = await deps.keys.getKeyForUser(userId);
-    if (apiKey === null) {
+    const resolvedKey = await deps.keys.resolveForRun(userId, runKeyCtx);
+    if (resolvedKey === null) {
       await emit("run_failed", { code: "key_not_minted" });
       await runs.finish(deps.db, runId, "failed", "key_not_minted");
       return; // NOT a throw: the job completes, the client sees the failure event
     }
+    const apiKey = resolvedKey.kind === "litellm" ? resolvedKey.key : resolvedKey.apiKey;
+    const keyBaseUrl =
+      resolvedKey.kind === "litellm"
+        ? resolvedKey.baseUrl || deps.litellmBaseUrl
+        : resolvedKey.endpoint;
 
     // Runtime legacy-guard (see RunDeps): the P1 spine e2e constructs the
     // pre-P2 RunDeps shape and must stay green unmodified — without
@@ -826,6 +843,7 @@ export function createAgentRunProcessor(
         sessionId,
         history,
         apiKey,
+        baseUrl: keyBaseUrl,
         cancelCheckIntervalMs,
         emit,
         terminalizeCancelled,
@@ -928,11 +946,12 @@ export function createAgentRunProcessor(
       // of the pinned LoopDeps shape.
       sink: { async emit() {} },
       state: createPostgresSessionStateStore(deps.db),
-      keys: litellmKeyResolver({
-        keys: deps.keys,
-        baseUrl: deps.litellmBaseUrl,
-        defaultModel: deps.defaultModel,
-      }),
+      keys: {
+        async resolve(uid, requestedModel) {
+          const key = await deps.keys.resolveForRun(uid, runKeyCtx);
+          return key === null ? null : agentKeyFor(key, requestedModel, deps.defaultModel);
+        },
+      },
       transports: { openai: polled, anthropic: legacy },
       litellmBaseUrl: deps.litellmBaseUrl,
       defaultModel: deps.defaultModel,
@@ -990,6 +1009,8 @@ export function createAgentRunProcessor(
     sessionId: string;
     history: ChatMessage[];
     apiKey: string;
+    /** P9 Task 9: the resolved route origin (LiteLLM or a BYOK endpoint). */
+    baseUrl: string;
     cancelCheckIntervalMs: number;
     emit(type: SessionEventType, payload: Record<string, unknown>): Promise<SessionEvent>;
     terminalizeCancelled(): Promise<void>;
@@ -1029,7 +1050,7 @@ export function createAgentRunProcessor(
       try {
         const result = await transport.stream(
           {
-            baseUrl: deps.litellmBaseUrl,
+            baseUrl: o.baseUrl,
             apiKey: o.apiKey,
             model: deps.defaultModel,
             messages: o.history,
@@ -1241,11 +1262,9 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       ),
   });
 
-  const keys = litellmKeyResolver({
-    keys: deps.keys,
-    baseUrl: deps.litellmBaseUrl,
-    defaultModel: deps.defaultModel,
-  });
+  // P9 Task 9: key resolution is PER RUN (the resolver needs the run's
+  // unattended/byok context), so the agent-core adapter is built inside the
+  // processor below — there is deliberately no long-lived resolver here.
 
   // Deployment feature flags (M-3): the roster never advertises a family the
   // composition cannot honor. Memory tools are always wired today (the
@@ -1336,6 +1355,19 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     };
   }): Promise<void> => {
     const { runId, sessionId, userId } = job.data;
+    // P9 Task 9: the per-run resolution context and the agent-core adapter.
+    // Both the engine and the auxiliary model calls (hooks/compaction) ride
+    // the SAME resolved key for this run.
+    const runKeyCtx = {
+      unattended: job.data.unattended ?? job.data.schedule !== undefined,
+      byokKeyId: job.data.byokKeyId ?? null,
+    };
+    const keys = {
+      async resolve(uid: string, requestedModel: string) {
+        const key = await deps.keys.resolveForRun(uid, runKeyCtx);
+        return key === null ? null : agentKeyFor(key, requestedModel, deps.defaultModel);
+      },
+    };
 
     // ---- C1: the identical single-active-run-per-session contract --------
     const turn = await waitForSessionTurn({

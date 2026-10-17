@@ -19,7 +19,7 @@ import {
   wsServerMsg,
   type ApiError,
   type KeyProvider,
-  type MintProvisioner,
+  type InternalMintProvisioner,
   type ScheduleDto,
   type SystemEvent,
   type WsServerMsg,
@@ -294,7 +294,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
     const keys: KeyProvider = {
       getKeyForUser: async (userId) => (keylessUsers.has(userId) ? null : "test-key"),
     };
-    const mint: MintProvisioner = { ensureKey: async () => ({ key: "test-key" }) };
+    const mint: InternalMintProvisioner = {
+      ensureKeyForUid: async () => ({ key: "test-key", tier: "free", baseUrl: "" }),
+    };
     const push: PushSender = {
       async send(msg) {
         pushes.push(msg);

@@ -8,7 +8,7 @@ import type { Db } from "@ovid/db";
 import type { EventLog, SystemBus } from "@ovid/events";
 import type { EnvelopeCrypto, OAuthFlow } from "@ovid/mcp";
 import type { QueueServices } from "@ovid/queue";
-import type { KeyProvider, MintProvisioner } from "@ovid/shared";
+import type { InternalMintProvisioner, KeyProvider } from "@ovid/shared";
 import type { ApiError } from "@ovid/shared";
 import type { ActivityTracker, StorageAdapter } from "@ovid/storage";
 import { authHook, type Verifier } from "./auth.js";
@@ -53,7 +53,12 @@ export interface GatewayDeps {
   verifier: Verifier;
   tickets: TicketStore;
   keys: KeyProvider;
-  mint: MintProvisioner;
+  /**
+   * P9 Task 9: server-to-server key provisioning. The gateway signs its OWN
+   * verified principal (`ensureKeyForUid(uid)`) — the caller's Firebase
+   * token is never forwarded to mint.
+   */
+  mint: InternalMintProvisioner;
   /** Session event log (Task 4) — the WS channel's replay + live source. */
   events: EventLog;
   /**

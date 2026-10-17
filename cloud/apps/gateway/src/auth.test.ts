@@ -239,6 +239,7 @@ describe("createTestVerifier", () => {
       uid: "abc123",
       email: null,
       authTime: 0,
+      signInProvider: "google.com",
     });
     // App Check token is irrelevant in test mode.
     await expect(verifier("test:u2", "whatever")).resolves.toMatchObject({
@@ -283,7 +284,8 @@ describe("loadGatewayEnv", () => {
     DATABASE_URL: "postgres://db:5432/ovid",
     REDIS_Q_URL: "redis://q:6379",
     REDIS_MINT_URL: "redis://mint:6379",
-    MINT_BASE_URL: "http://mint:8000",
+    OVID_INTERNAL_MINT_URL: "http://mint:8092",
+    OVID_INTERNAL_API_SECRET: "test-internal-secret-0123456789abcdef",
     // P7 Task 12 additions (required in firebase mode).
     OVID_WORKER_INTERNAL_URL: "http://worker:8091",
     OVID_INTERNAL_TOKEN: "internal-token",
@@ -304,7 +306,8 @@ describe("loadGatewayEnv", () => {
       DATABASE_URL: "postgres://x",
       REDIS_Q_URL: "redis://x",
       REDIS_MINT_URL: "redis://x",
-      MINT_BASE_URL: "http://x",
+      OVID_INTERNAL_MINT_URL: "http://x",
+      OVID_INTERNAL_API_SECRET: "test-internal-secret-0123456789abcdef",
     });
     expect(env.nodeEnv).toBe("development");
     expect(env.port).toBe(8081);
@@ -318,7 +321,7 @@ describe("loadGatewayEnv", () => {
       "DATABASE_URL",
       "REDIS_Q_URL",
       "REDIS_MINT_URL",
-      "MINT_BASE_URL",
+      "OVID_INTERNAL_MINT_URL",
       "OVID_WORKER_INTERNAL_URL",
     ] as const) {
       const raw = { ...fullRaw, NODE_ENV: "development" };
@@ -328,6 +331,14 @@ describe("loadGatewayEnv", () => {
     const noToken = { ...fullRaw, NODE_ENV: "development" };
     delete noToken.OVID_INTERNAL_TOKEN;
     expect(() => loadGatewayEnv(noToken)).toThrow(/OVID_INTERNAL_TOKEN/);
+    const noSecret = { ...fullRaw, NODE_ENV: "development" };
+    delete noSecret.OVID_INTERNAL_API_SECRET;
+    expect(() => loadGatewayEnv(noSecret)).toThrow(/OVID_INTERNAL_API_SECRET/);
+  });
+
+  it("rejects an internal mint secret shorter than 32 bytes", () => {
+    const raw = { ...fullRaw, OVID_INTERNAL_API_SECRET: "too-short" };
+    expect(() => loadGatewayEnv(raw)).toThrow(/OVID_INTERNAL_API_SECRET/);
   });
 
   it("requires OVID_MASTER_KEY in firebase mode and names the variable", () => {
@@ -346,7 +357,8 @@ describe("loadGatewayEnv", () => {
       databaseUrl: "postgres://db:5432/ovid",
       redisQUrl: "redis://q:6379",
       redisMintUrl: "redis://mint:6379",
-      mintBaseUrl: "http://mint:8000",
+      internalMintUrl: "http://mint:8092",
+      internalApiSecret: "test-internal-secret-0123456789abcdef",
       workerInternalUrl: "http://worker:8091",
       internalToken: "internal-token",
       fileInlineMaxBytes: 1_048_576,
@@ -364,7 +376,8 @@ describe("loadGatewayEnv", () => {
     expect(env.databaseUrl).toBe("");
     expect(env.redisQUrl).toBe("");
     expect(env.redisMintUrl).toBe("");
-    expect(env.mintBaseUrl).toBe("");
+    expect(env.internalMintUrl).toBe("");
+    expect(env.internalApiSecret).toBe("");
   });
 
   it("throws on an invalid PORT", () => {

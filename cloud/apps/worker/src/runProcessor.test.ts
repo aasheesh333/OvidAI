@@ -35,7 +35,7 @@ import {
   type SandboxManager,
 } from "@ovid/sandbox";
 import type { SandboxPort } from "@ovid/agent-core";
-import type { KeyProvider, SessionEvent } from "@ovid/shared";
+import type { KeyResolver, SessionEvent } from "@ovid/shared";
 import { createToolRegistry } from "./tools/registry.js";
 import type { ToolRegistry } from "./tools/registry.js";
 import { SYSTEM_PROMPT_V1, TOOL_EVENT_CONTENT_CAP } from "./tools/systemPrompt.js";
@@ -64,8 +64,9 @@ function uid(prefix: string): string {
     .slice(2, 10)}`;
 }
 
-const stubKeys = (value: string | null): KeyProvider => ({
-  getKeyForUser: async () => value,
+const stubKeys = (value: string | null): KeyResolver => ({
+  resolveForRun: async () =>
+    value === null ? null : { kind: "litellm", key: value, baseUrl: "" },
 });
 
 // ---------------------------------------------------------------------------

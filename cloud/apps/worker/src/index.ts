@@ -7,6 +7,8 @@
 export * from "./approvalBridge.js";
 export * from "./accountSweep.js";
 export * from "./fileService.js";
+// P9 Task 9: the server-side key resolver (also consumed by the money e2e).
+export * from "./keyResolver.js";
 export * from "./liteLlm.js";
 export * from "./mcpRuntime.js";
 // mcpTools exports its own `ToolResult` (the canonical P5 seam with optional

@@ -14,6 +14,8 @@ const baseEnv = (overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
   DATABASE_URL: "postgres://postgres:ovid@127.0.0.1:5433/postgres",
   REDIS_Q_URL: "redis://127.0.0.1:6390",
   REDIS_MINT_URL: "redis://127.0.0.1:6390",
+  OVID_INTERNAL_MINT_URL: "http://127.0.0.1:18092",
+  OVID_INTERNAL_API_SECRET: "test-internal-secret-0123456789abcdef",
   OVID_LITELLM_BASE: "http://litellm.invalid",
   OVID_DEFAULT_MODEL: "ovid-default-model",
   OVID_INTERNAL_TOKEN: "shared-secret",

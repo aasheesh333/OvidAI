@@ -1,29 +1,13 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { attachments, messages, runs, sessions, users, type Db, type MessageRow } from "@ovid/db";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
-import type { MessageDto, Page, SendMessageResponse } from "@ovid/shared";
+import { MintInternalError, type MessageDto, type Page, type SendMessageResponse } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
-import { DEFAULT_MINT_TIMEOUT_MS, MintHttpError, MintTimeoutError } from "../keys.js";
+import { DEFAULT_MINT_TIMEOUT_MS, MintTimeoutError } from "../keys.js";
 import { badRequest, isUuid, notFound, parsePageLimit, queryValue, sendError, zodBadRequest } from "./http.js";
 
 // Message routes — all mounted inside the authenticated /cloud/v1 scope.
-
-const BEARER_PREFIX = "Bearer ";
-
-/**
- * The caller's raw identity headers for the mint passthrough (authHook has
- * already verified both). ensureKey's contract is (idToken, appCheck|null),
- * so Authorization is re-prefixed with Bearer by the HTTP provisioner.
- */
-function mintIdentity(request: FastifyRequest): { idToken: string; appCheck: string | null } {
-  const authorization = queryValue(request.headers.authorization);
-  const idToken =
-    authorization !== null && authorization.startsWith(BEARER_PREFIX)
-      ? authorization.slice(BEARER_PREFIX.length)
-      : "";
-  return { idToken, appCheck: queryValue(request.headers["x-firebase-appcheck"]) };
-}
 
 export function toMessageDto(row: MessageRow): MessageDto {
   return {
@@ -119,21 +103,19 @@ function isUniqueViolation(err: unknown): boolean {
 
 /**
  * P10 Task 2: bounded internal-mint call. The provisioner contract takes no
- * signal (and P9 Task 9's post-cutover shape is not landed yet), so the
- * deadline is enforced here with a race — every provisioner implementation
- * (the current HTTP one included) is bounded, and the HTTP implementation
- * ALSO passes its own AbortSignal to fetch so the socket is released.
+ * signal, so the deadline is enforced here with a race — every provisioner
+ * implementation is bounded, and the HTTP implementation ALSO passes its own
+ * AbortSignal to fetch so the socket is released.
+ *
+ * P9 Task 9: the call carries the gateway's OWN verified uid. No client
+ * Firebase token or App Check header crosses this boundary.
  */
-async function ensureKeyBounded(
-  deps: GatewayDeps,
-  idToken: string,
-  appCheck: string | null,
-): Promise<void> {
+async function ensureKeyBounded(deps: GatewayDeps, uid: string): Promise<void> {
   const timeoutMs = deps.mintTimeoutMs ?? DEFAULT_MINT_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
-      deps.mint.ensureKey(idToken, appCheck),
+      deps.mint.ensureKeyForUid(uid),
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => reject(new MintTimeoutError(timeoutMs)), timeoutMs);
         timer.unref?.();
@@ -216,10 +198,10 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     // 4. Key provisioning BEFORE any write: if mint fails, no message row,
     //    no run row and no queue job are left behind (ordering pinned by
     //    messages.test.ts). 402/429 envelopes are relayed verbatim; every
-    //    other failure collapses to 409 key_not_minted.
-    const { idToken, appCheck } = mintIdentity(request);
+    //    other failure collapses to 409 key_not_minted. P9 Task 9: mint is
+    //    called with the gateway's own verified uid (signed server-to-server).
     try {
-      await ensureKeyBounded(deps, idToken, appCheck);
+      await ensureKeyBounded(deps, uid);
     } catch (err) {
       // P10 Task 2: a deadline breach is a bounded, retryable dependency
       // failure — NOT a "this account has no key" verdict.
@@ -235,7 +217,7 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
           "Key provisioning timed out; please retry shortly.",
         );
       }
-      if (err instanceof MintHttpError && (err.status === 402 || err.status === 429)) {
+      if (err instanceof MintInternalError && (err.status === 402 || err.status === 429)) {
         return reply.code(err.status).send(err.body);
       }
       request.log.warn({ err, sessionId }, "key provisioning failed; run not enqueued");

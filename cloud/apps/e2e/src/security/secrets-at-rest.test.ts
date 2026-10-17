@@ -90,7 +90,7 @@ describe.skipIf(!TEST_DATABASE_URL)("secrets at rest — BYOK escrow (real postg
         verify: async () => null,
       },
       keys: { getKeyForUser: async () => null },
-      mint: { ensureKey: async () => ({ key: "sk-stub" }) },
+      mint: { ensureKeyForUid: async () => ({ key: "sk-stub", tier: "free", baseUrl: "" }) },
       events: {} as EventLog,
       crypto,
     });

@@ -3,6 +3,7 @@ export * from "./auth.js";
 export * from "./tickets.js";
 export * from "./app.js";
 export * from "./keys.js";
+export * from "./internalMint.js";
 export * from "./wsPty.js";
 
 import { initializeApp } from "firebase-admin/app";
@@ -30,7 +31,8 @@ import { buildGateway, installShutdownHandlers } from "./app.js";
 import type { AccountRouteDeps } from "./routes/account.js";
 import { createFirebaseVerifier, createTestVerifier } from "./auth.js";
 import { loadGatewayEnv } from "./env.js";
-import { createHttpMintProvisioner, createMintRedisKeyProvider } from "./keys.js";
+import { createMintRedisKeyProvider } from "./keys.js";
+import { createInternalMintProvisioner } from "./internalMint.js";
 import { createTicketStore } from "./tickets.js";
 import { createWorkerClient } from "./workerClient.js";
 import { createRedisPtyBridge } from "./wsPty.js";
@@ -209,7 +211,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       verifier,
       tickets: createTicketStore(redisQ),
       keys: createMintRedisKeyProvider(redisMint),
-      mint: createHttpMintProvisioner(cfg.mintBaseUrl),
+      mint: createInternalMintProvisioner(cfg.internalMintUrl, cfg.internalApiSecret),
       // Session event log shares the queue Redis; the worker (Task 9) appends
       // to the same instance, so gateway replay/live sees every event.
       events: createRedisEventLog(redisQ),

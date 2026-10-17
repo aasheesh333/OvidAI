@@ -940,7 +940,7 @@ describe("gateway env additions", () => {
     DATABASE_URL: "postgres://db",
     REDIS_Q_URL: "redis://q",
     REDIS_MINT_URL: "redis://m",
-    MINT_BASE_URL: "http://mint",
+    OVID_INTERNAL_MINT_URL: "http://mint:8092",
   };
 
   it("test-mode defaults: empty worker url/token, 1 MiB inline, 8 MiB PUT, 3600 s ttl, 20 s wait, redisC falls back to redisQ", () => {
@@ -964,6 +964,7 @@ describe("gateway env additions", () => {
       ...firebase,
       OVID_WORKER_INTERNAL_URL: "http://127.0.0.1:8091",
       OVID_INTERNAL_TOKEN: "tok",
+      OVID_INTERNAL_API_SECRET: "test-internal-secret-0123456789abcdef",
       // P5 Task 15: required in firebase mode (envelope sealing).
       OVID_MASTER_KEY: "ab7d31c4e59f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071829",
       REDIS_C_URL: "redis://c",

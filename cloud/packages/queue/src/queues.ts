@@ -61,6 +61,13 @@ export interface AgentRunJob {
    */
   attachmentIds?: string[];
   /**
+   * P9 Task 9 (additive, optional): the BYOK key row this run must use.
+   * Present → the worker resolves it through the escrow provider and FAILS
+   * the run (key_not_minted) if it cannot be decrypted; absent → the normal
+   * LiteLLM/internal-mint path. Old payloads still parse.
+   */
+  byokKeyId?: string | null;
+  /**
    * P3 Task 16 (additive, optional — old payloads still parse): the run has
    * no attending user, so approval cards may not wait forever; the gate's
    * timeout applies to every request kind.
@@ -94,6 +101,7 @@ export const agentRunJobSchema: z.ZodType<AgentRunJob> = z.object({
   prompt: z.string().min(1),
   tier: z.string().min(1).optional(),
   attachmentIds: z.array(z.string().min(1)).optional(),
+  byokKeyId: z.string().min(1).nullable().optional(),
   unattended: z.boolean().optional(),
   autonomy: z.enum(["safe", "auto"]).optional(),
   mode: z.enum(["safe", "auto", "drive", "studio"]).optional(),

@@ -6,7 +6,17 @@ export interface GatewayEnv {
   databaseUrl: string;
   redisQUrl: string;
   redisMintUrl: string;
-  mintBaseUrl: string;
+  /**
+   * P9 Task 9: mint's ADMIN listener (e.g. `http://mint:8092`) — the ONLY
+   * mint endpoint the gateway calls. The pre-P9 public `MINT_BASE_URL`
+   * (client-token forwarding) is deliberately gone.
+   */
+  internalMintUrl: string;
+  /**
+   * P9 Task 9: shared secret for the signed internal mint API. Env-only,
+   * >= 32 bytes (OVID_INTERNAL_API_SECRET); required in firebase mode.
+   */
+  internalApiSecret: string;
   /**
    * P7 Task 12: the worker file service's container-internal base URL
    * (e.g. `http://127.0.0.1:8091`). Required in firebase mode; test mode
@@ -52,6 +62,8 @@ const PRESIGN_TTL_MAX_SECONDS = 86_400;
 const DEFAULT_HYDRATE_WAIT_MS = 20_000;
 export const DEFAULT_MCP_REDIRECT_URI = "https://ovidsi.com/oauth/callback";
 const MASTER_KEY_HEX_RE = /^[0-9a-fA-F]{64}$/;
+/** P9 Task 9: minimum HMAC secret size (OVID_INTERNAL_API_SECRET). */
+const MIN_INTERNAL_SECRET_BYTES = 32;
 
 /**
  * Validate + default the gateway's environment.
@@ -138,12 +150,28 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
 
   // The internal token is required (non-empty) in firebase mode; it is
   // INVOKED from the return object so the required-var evaluation order
-  // stays pinned (DATABASE_URL…MINT_BASE_URL, then the worker URL, then the
-  // token — a missing var surfaces distinctly, never masked).
+  // stays pinned (DATABASE_URL…OVID_INTERNAL_MINT_URL, then the worker URL,
+  // then the token — a missing var surfaces distinctly, never masked).
   const requiredInternalToken = (): string => {
     const value = raw.OVID_INTERNAL_TOKEN?.trim() ?? "";
     if (authMode === "firebase" && value === "") {
       throw new Error("OVID_INTERNAL_TOKEN is required when OVID_AUTH_MODE=firebase");
+    }
+    return value;
+  };
+
+  // P9 Task 9: the HMAC secret for the internal mint API. Required in
+  // firebase mode; when present it must be at least 32 bytes. An empty value
+  // in test mode is allowed so bare compositions boot.
+  const requiredInternalApiSecret = (): string => {
+    const value = raw.OVID_INTERNAL_API_SECRET?.trim() ?? "";
+    if (authMode === "firebase" && value === "") {
+      throw new Error("OVID_INTERNAL_API_SECRET is required when OVID_AUTH_MODE=firebase");
+    }
+    if (value !== "" && Buffer.byteLength(value, "utf8") < MIN_INTERNAL_SECRET_BYTES) {
+      throw new Error(
+        `OVID_INTERNAL_API_SECRET must be at least ${MIN_INTERNAL_SECRET_BYTES} bytes`,
+      );
     }
     return value;
   };
@@ -153,7 +181,8 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
   // it); test mode may leave it empty. A present value must be exactly 64
   // hex chars — a malformed key fails at boot, never half-works. INVOKED from
   // the return object so the required-var evaluation order stays pinned
-  // (DATABASE_URL…MINT_BASE_URL, worker URL, internal token, then master key).
+  // (DATABASE_URL…OVID_INTERNAL_MINT_URL, worker URL, internal token, then
+  // master key).
   const requiredMasterKey = (): string => {
     const value = raw.OVID_MASTER_KEY?.trim() ?? "";
     if (value === "" && authMode === "firebase") {
@@ -184,9 +213,10 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
     databaseUrl: requiredUrl("DATABASE_URL"),
     redisQUrl: requiredUrl("REDIS_Q_URL"),
     redisMintUrl: requiredUrl("REDIS_MINT_URL"),
-    mintBaseUrl: requiredUrl("MINT_BASE_URL"),
+    internalMintUrl: requiredUrl("OVID_INTERNAL_MINT_URL"),
     workerInternalUrl: requiredUrl("OVID_WORKER_INTERNAL_URL"),
     internalToken: requiredInternalToken(),
+    internalApiSecret: requiredInternalApiSecret(),
     fileInlineMaxBytes,
     putMaxBytes,
     presignTtlSeconds,
