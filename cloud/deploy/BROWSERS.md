@@ -150,8 +150,16 @@ VERDICT: REGRESSION — peak exceeds the planned-peak alarm; investigate before 
 ```
 
 **Reading of the dev-box numbers (do not paper over at activation):** the
-measured peak **exceeds the 1300 MB planned-peak alarm by ~6%** (1376 MB)
-while staying **well inside the 2048 MB hard pool ceiling**. Per-context
+bench's PPID-tree sampling measures the **chromium tree ONLY** — the 1376 MB
+peak excludes the Lightpanda pool (100–400 MB) and the tier-1 fallback
+contexts (up to 2, ≤200 MB), both of which are additive in production. So
+the real worst-case headroom against the 2048 MB hard pool ceiling is
+**~272–572 MB**, not the 672 MB the bare 2048−1376 arithmetic suggests —
+still under, but tighter. Like-for-like at the component level: the plan
+sub-total for what the bench actually measures is ~678 MB (~78 MB base +
+4×150 MB contexts), so the measured 1376 MB is a **~2× component-level
+miss** — worse than the ~6% the aggregate 1376-vs-1300 comparison suggests.
+Per-context
 delta measured ~240 MB at this synthetic worst-case load (all 4 pages
 scrolled concurrently) vs the ≤150 MB/≤600 MB plan, and the chromium base
 measured 298 MB (5 procs: browser + gpu + network + utilities) vs the ~78
