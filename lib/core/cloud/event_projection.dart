@@ -15,7 +15,7 @@
 /// | `run_started{runId}` | busy=true, activeRunId, live `streaming` bubble, statusLine cleared |
 /// | `message_delta{runId,text}` | epoch-gated append into the bubble's content + [TranscriptProjection.liveBubbleTicks] tick |
 /// | `message_completed{messageId,content}` | bubble REPLACED by the server-authoritative text Message; activeRunId cleared (the double-apply guard) |
-/// | `run_started_retry{attempt,nextBackoffMs}` | the composer status line; stays busy |
+/// | `run_started_retry{attempt,nextBackoffMs}` | the composer status line; stays busy; the failed attempt's partial is DISCARDED and a fresh empty bubble re-armed (ruling 1 — AgentService `_discardLiveAttempt` parity) |
 /// | `run_failed{code,message?}` | busy=false, error fields, turn-tail row |
 /// | `run_completed{runId}` | busy=false, statusLine cleared |
 /// | `system_note` | turn-tail row |
@@ -26,6 +26,9 @@
 /// approval_requested, approval_resolved, todo_updated, goal_updated,
 /// plan_mode_changed, run_cancelled, subagent_started, subagent_completed,
 /// compaction_completed) and any future type — later P8+ tasks fold them.
+/// `run_cancelled` is union-only today (no emitter; cancels arrive as
+/// `run_failed{code:'cancelled'}`); see the HAZARD comment at the projector's
+/// default branch before ever emitting it as its own terminal.
 ///
 /// Payload field names mirror the BUILT emitters exactly (camelCase):
 /// cloud/apps/worker/src/runProcessor.ts (event-contract block). The server
@@ -179,6 +182,24 @@ class TranscriptProjection extends ChangeNotifier {
     _changed = true;
   }
 
+  /// Discards the run's live streaming bubble — the failed attempt's partial
+  /// text can never be appended to the retry's output — and re-arms [fresh]
+  /// in its place at the tail. busy / activeRunId / statusLine are untouched:
+  /// a retry is not a terminal. The re-arm matters because a bare remove
+  /// would swallow the next attempt's whole stream (`message_delta` drops
+  /// when no bubble is tracked). No-op when no run is in flight.
+  ///
+  /// Controller ruling 1 (fix round 1): AgentService `_discardLiveAttempt`
+  /// parity (agent_service.dart:12960, called before every retry at :13698).
+  void _resetLiveBubble(Message fresh) {
+    final live = _liveBubble;
+    if (live == null) return;
+    messages.remove(live);
+    _liveBubble = fresh;
+    messages.add(fresh);
+    _changed = true;
+  }
+
   /// One notification per mutating `apply` (the projector calls this at the
   /// end of every fold; no-op folds notify nothing).
   void _flushNotify() {
@@ -242,6 +263,18 @@ class EventTranscriptProjector {
       default:
         // Fold-table-absent type: no-op. Covers the LANDED @ovid/shared
         // union members listed in the library doc and any future type.
+        //
+        // HAZARD for future emitters (P3 carry, review ruling 2):
+        // run_cancelled is currently union-only — NO emitter exists in the
+        // built cloud (user cancels arrive as run_failed{code:'cancelled'}
+        // from both the gateway queued-cancel and the worker mid-stream
+        // abort, which this projector folds correctly). If a future server
+        // path starts emitting run_cancelled as its OWN terminal event, this
+        // no-op would leave the projection stuck busy=true with a
+        // shimmering live bubble (no terminal fold, nothing settles it
+        // until the NEXT run_started). That emitter must update this switch
+        // in the same change — fold it like run_failed (terminal-settle +
+        // busy=false) — or land its own client folding task.
         return;
     }
     target._flushNotify();
@@ -313,6 +346,19 @@ class EventTranscriptProjector {
     final attempt = _int(payload, 'attempt');
     final nextBackoffMs = _int(payload, 'nextBackoffMs');
     if (attempt == null || nextBackoffMs == null) return;
+    // Ruling 1 (controller-adopted, fix round 1): the failed attempt's
+    // partial is discarded and a FRESH empty bubble re-armed, so the retry
+    // streams fresh text (never attempt-N-partial + attempt-N+1 text). On
+    // the model_transient_exhausted path NO message_completed ever replaces
+    // the bubble, so without this reset the terminal-settle would bake the
+    // concatenated partials into a permanent settled row.
+    target._resetLiveBubble(Message(
+      role: 'assistant',
+      kind: MsgKind.streaming,
+      thinking: true,
+      content: '',
+      time: _clock(),
+    ));
     target._setStatusLine(
         'Retrying in ${nextBackoffMs ~/ 1000}s… (attempt $attempt)');
     // Stays busy: the run is still in flight (attempt is the one ABOUT to

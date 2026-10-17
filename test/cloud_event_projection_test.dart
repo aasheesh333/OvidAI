@@ -155,6 +155,93 @@ void main() {
       expect(p.busy, isTrue);
     });
 
+    test(
+        'run_started_retry discards the failed attempt\'s partial and '
+        're-arms a fresh bubble; the retry\'s deltas build fresh text '
+        '(retry succeeds — ruling 1, _discardLiveAttempt parity)', () {
+      final p = TranscriptProjection();
+      final proj = EventTranscriptProjector(p);
+      proj.apply(
+          _ev('run_started', <String, dynamic>{'runId': 'run-9'}, seq: '1-1'));
+      proj.apply(_ev('message_delta',
+          <String, dynamic>{'runId': 'run-9', 'text': 'attempt-1 partial'},
+          seq: '1-2'));
+      final firstBubble = p.messages.single;
+
+      proj.apply(_ev('run_started_retry',
+          <String, dynamic>{'attempt': 2, 'nextBackoffMs': 3000},
+          seq: '1-3'));
+
+      // A FRESH empty streaming bubble is re-armed (a bare remove would
+      // swallow the retry's whole stream — deltas drop with no bubble), and
+      // the failed attempt's partial is gone.
+      expect(p.messages, hasLength(1));
+      final reArmed = p.messages.single;
+      expect(reArmed, isNot(same(firstBubble)));
+      expect(reArmed.kind, MsgKind.streaming);
+      expect(reArmed.thinking, isTrue);
+      expect(reArmed.content, isEmpty);
+      // busy/activeRunId are KEPT (a retry is not a terminal); the same
+      // event sets the status line.
+      expect(p.busy, isTrue);
+      expect(p.activeRunId, 'run-9');
+      expect(p.statusLine, 'Retrying in 3s… (attempt 2)');
+
+      // The retry's deltas append to the FRESH bubble — no concatenation
+      // with the failed attempt's partial.
+      proj.apply(_ev('message_delta',
+          <String, dynamic>{'runId': 'run-9', 'text': 'attempt-2 answer'},
+          seq: '1-4'));
+      expect(p.messages.single.content, 'attempt-2 answer');
+      expect(p.liveBubbleTicks.value, 2);
+
+      // Success: message_completed replaces with the server-authoritative
+      // text; run_completed settles busy.
+      proj.apply(
+          _ev('message_completed',
+              <String, dynamic>{'messageId': 'msg-7', 'content': 'final answer'},
+              seq: '1-5'));
+      expect(p.messages, hasLength(1));
+      expect(p.messages.single.kind, MsgKind.text);
+      expect(p.messages.single.content, 'final answer');
+      proj.apply(
+          _ev('run_completed', <String, dynamic>{'runId': 'run-9'}, seq: '1-6'));
+      expect(p.busy, isFalse);
+    });
+
+    test(
+        'retry exhaustion settles only the LAST attempt\'s partial — no '
+        'cross-attempt concatenation baked into a permanent row (ruling 1)',
+        () {
+      final p = TranscriptProjection();
+      final proj = EventTranscriptProjector(p);
+      proj.apply(
+          _ev('run_started', <String, dynamic>{'runId': 'run-9'}, seq: '1-1'));
+      proj.apply(_ev('message_delta',
+          <String, dynamic>{'runId': 'run-9', 'text': 'attempt-1 partial'},
+          seq: '1-2'));
+      proj.apply(_ev('run_started_retry',
+          <String, dynamic>{'attempt': 2, 'nextBackoffMs': 3000},
+          seq: '1-3'));
+      proj.apply(_ev('message_delta',
+          <String, dynamic>{'runId': 'run-9', 'text': 'attempt-2 partial'},
+          seq: '1-4'));
+
+      // Exhausted: run_failed{model_transient_exhausted} — NO
+      // message_completed ever arrives on this path.
+      proj.apply(_ev('run_failed',
+          <String, dynamic>{'code': 'model_transient_exhausted'}, seq: '1-5'));
+
+      // Terminal-settle lands ONLY attempt 2's partial above the turn tail.
+      expect(p.messages, hasLength(2));
+      expect(p.messages[0].kind, MsgKind.text);
+      expect(p.messages[0].thinking, isFalse);
+      expect(p.messages[0].content, 'attempt-2 partial');
+      expect(p.messages[1].kind, MsgKind.turnTail);
+      expect(p.messages[1].content, 'model_transient_exhausted');
+      expect(p.busy, isFalse);
+    });
+
     test('run_failed: busy false, error fields, verbatim-message turn tail',
         () {
       final p = TranscriptProjection();
