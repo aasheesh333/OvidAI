@@ -409,6 +409,16 @@ describe("createSubagentSupervisor.dispatch", () => {
       "prompt is required",
     );
   });
+
+  it("refuses to start a child when the parent is already cancelled", async () => {
+    const { fake, supervisor } = build();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      supervisor.dispatch(parentCtx({ signal: controller.signal }), { prompt: "too late" }),
+    ).rejects.toThrow("parent run is cancelled");
+    expect(fake.childCreates).toBe(0);
+  });
 });
 
 // ── B20 refusal precedence ─────────────────────────────────────────────────

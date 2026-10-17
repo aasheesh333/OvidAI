@@ -506,6 +506,11 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
       if (parent.isSubagent) throw subagentParentRefusal();
 
       const rootSessionId = chain[0] ?? parent.sessionId;
+      // A parent that was already stopped must not start new work (the
+      // dispatch call can outlive a Stop that landed between turns).
+      if (parent.signal.aborted) {
+        throw new SubagentRefusalError("parent run is cancelled");
+      }
       const liveForRoot = handles.filter(
         (h) => h.rootSessionId === rootSessionId && h.status() === "running",
       ).length;
@@ -597,6 +602,10 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
 
       try {
         for (;;) {
+          if (parent.signal.aborted) {
+            finalStatus = "cancelled";
+            break;
+          }
           await deps.engine.run({
             runId,
             sessionId: child.sessionId,
