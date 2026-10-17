@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { messageDtoSchema, pageSchema, sessionDtoSchema } from "./rest.js";
+import { messageDtoSchema, pageSchema, runCancelResponseSchema, sessionDtoSchema } from "./rest.js";
 import type { MessageDto, SessionDto } from "./rest.js";
 
 const session: SessionDto = {
@@ -50,5 +50,21 @@ describe("rest schemas", () => {
   it("pageSchema rejects a page with non-array items", () => {
     expect(() => pageSchema(messageDtoSchema).parse({ items: "nope", nextCursor: null })).toThrow();
     expect(() => pageSchema(messageDtoSchema).parse({ items: {}, nextCursor: null })).toThrow();
+  });
+
+  it("runCancelResponseSchema parses both terminal answer statuses", () => {
+    expect(runCancelResponseSchema.parse({ runId: "r1", status: "cancelled" })).toEqual({
+      runId: "r1",
+      status: "cancelled",
+    });
+    expect(runCancelResponseSchema.parse({ runId: "r1", status: "cancelling" })).toEqual({
+      runId: "r1",
+      status: "cancelling",
+    });
+  });
+
+  it("runCancelResponseSchema rejects a non-status body", () => {
+    expect(() => runCancelResponseSchema.parse({ runId: "r1", status: "done" })).toThrow();
+    expect(() => runCancelResponseSchema.parse({ runId: "", status: "cancelled" })).toThrow();
   });
 });

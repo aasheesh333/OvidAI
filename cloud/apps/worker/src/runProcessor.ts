@@ -49,6 +49,10 @@ import type { ToolRegistry } from "./tools/registry.js";
  *                        | {code:"sandbox_unavailable", message}
  *                        | {code:"tool_rounds_exhausted"}}
  *                      | {code: "model_terminal", message}
+ *                      | {code: "cancelled", message: "Stopped by user."}
+ *                      — the cancelled variant (P8 Task 1) is emitted BOTH by
+ *                      the gateway (queued-run cancel) and by this processor
+ *                      (mid-stream abort after the throttled flag check).
  *   (the stale-run sweeper emits a third variant, {runId, code:"run_lost"} —
  *   see staleRuns.ts)
  *
@@ -84,6 +88,15 @@ export interface RunDeps {
    * reads OVID_RUN_QUEUE_WAIT_MS.
    */
   runQueueWaitMs?: number;
+  /**
+   * P8 Task 1: throttle window of the cooperative-cancel flag poll, in ms.
+   * Between streamed delta batches the processor checks
+   * runs.isCancelRequested at most once per window (monotonic Date.now
+   * guard). Default DEFAULT_CANCEL_CHECK_INTERVAL_MS (1 s) — the worker entry
+   * point never overrides it; tests collapse the window to 0 to pin the
+   * mid-stream abort.
+   */
+  cancelCheckIntervalMs?: number;
 }
 
 /** Model-call retry policy (spec §6.1): 5 attempts, backoff 3/9/27/60 s between them. */
@@ -105,6 +118,15 @@ const RUN_QUEUE_POLL_MS = 250;
  */
 const DEFAULT_RUN_QUEUE_WAIT_MS = 600_000;
 
+/** The cancelled-run failure payload (P8 Task 1) — same words the gateway emits. */
+const CANCELLED_MESSAGE = "Stopped by user.";
+
+/**
+ * P8 Task 1 default: the cooperative-cancel flag is polled at most once per
+ * second between streamed delta batches (one pk-indexed read per window).
+ */
+const DEFAULT_CANCEL_CHECK_INTERVAL_MS = 1_000;
+
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
@@ -118,6 +140,7 @@ export function createAgentRunProcessor(
 
   return async (job) => {
     const { runId, sessionId, userId } = job.data;
+    const cancelCheckIntervalMs = deps.cancelCheckIntervalMs ?? DEFAULT_CANCEL_CHECK_INTERVAL_MS;
 
     const emit = async (
       type: SessionEventType,
@@ -126,6 +149,17 @@ export function createAgentRunProcessor(
       const event = await deps.events.append(sessionId, type, payload);
       await eventMirror.put(deps.db, event);
       return event;
+    };
+
+    /**
+     * P8 Task 1 cooperative-cancel terminalization, used by the mid-stream
+     * flag check: the EXISTING run_failed event type with the cancelled
+     * payload, then the conditional 'cancelled' status flip — event-first,
+     * same ordering every terminal path here pins.
+     */
+    const terminalizeCancelled = async (): Promise<void> => {
+      await emit("run_failed", { code: "cancelled", message: CANCELLED_MESSAGE });
+      await runs.finish(deps.db, runId, "cancelled", CANCELLED_MESSAGE);
     };
 
     // ---- C1: single active run per session --------------------------------
@@ -252,6 +286,24 @@ export function createAgentRunProcessor(
         // v0 wires the AbortSignal through but sets no timeout (later: per-attempt caps).
         const controller = new AbortController();
 
+        // P8 Task 1: cooperative-cancel poll state, per attempt. `lastCancelCheck`
+        // is the monotonic Date.now() of the last poll; the first delta batch
+        // always polls (epoch 0), later batches only once the window elapses.
+        let cancelRequested = false;
+        let lastCancelCheck = 0;
+        const pollCancel = async (): Promise<void> => {
+          const now = Date.now();
+          if (now - lastCancelCheck < cancelCheckIntervalMs) return; // throttled
+          lastCancelCheck = now;
+          if (await runs.isCancelRequested(deps.db, runId)) {
+            cancelRequested = true;
+            // Best-effort transport stop: a real SSE/HTTP transport aborts on
+            // the signal and lands in the catch below; a transport that ignores
+            // it is still stopped at the post-flush flag check.
+            controller.abort();
+          }
+        };
+
         try {
           const result = await deps.transport.stream(
             {
@@ -264,9 +316,14 @@ export function createAgentRunProcessor(
             {
               onDelta(text) {
                 deltas.push(text);
-                flushed = flushed.then(() =>
-                  emit("message_delta", { runId, text }).then(() => undefined),
-                );
+                flushed = flushed
+                  .then(() =>
+                    emit("message_delta", { runId, text }).then(() => undefined),
+                  )
+                  // Cancel check between delta batches — ON the flush chain so
+                  // it never races the delta ordering, throttled to at most
+                  // one db poll per cancelCheckIntervalMs window.
+                  .then(() => pollCancel());
                 // Mark the rejection handled NOW (transport may still be
                 // streaming when an early append fails — an unawaited rejection
                 // would surface as an unhandledRejection); the real error
@@ -277,6 +334,15 @@ export function createAgentRunProcessor(
             controller.signal,
           );
           await flushed;
+
+          // The flag flipped mid-stream and the (possibly abort-ignoring)
+          // transport returned normally: terminalize before any completion
+          // event. Not a throw — the job completes (same contract as the
+          // run-level failures above).
+          if (cancelRequested) {
+            await terminalizeCancelled();
+            return;
+          }
 
           const content = deltas.join("");
           const toolCalls: ToolCall[] = result.toolCalls ?? [];
@@ -337,6 +403,14 @@ export function createAgentRunProcessor(
           // Keep ordering: pending deltas of the failed attempt settle (or are
           // abandoned) before the retry/failure event goes out.
           await flushed.catch(() => {});
+
+          // P8 Task 1: an abort raised BY the cancel poll (the real transport
+          // throws on the aborted signal) is a terminal cancel, never a
+          // transient/terminal model error or an infra failure.
+          if (cancelRequested) {
+            await terminalizeCancelled();
+            return;
+          }
 
           if (err instanceof TransientModelError) {
             if (attempt >= MAX_MODEL_ATTEMPTS) {

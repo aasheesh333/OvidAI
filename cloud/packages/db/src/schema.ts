@@ -1,4 +1,5 @@
 import {
+  boolean,
   char,
   index,
   integer,
@@ -67,6 +68,10 @@ export const runs = pgTable(
     promptMessageId: char("prompt_message_id", { length: 36 }),
     attempts: integer("attempts").notNull().default(0),
     lastError: text("last_error"),
+    // P8 Task 1: cooperative cancel flag — set by the gateway's cancel
+    // endpoint, polled (throttled) by the worker between streamed delta
+    // batches, which terminalizes the run as 'cancelled'.
+    cancelRequested: boolean("cancel_requested").notNull().default(false),
     startedAt: timestamptz("started_at"),
     finishedAt: timestamptz("finished_at"),
     createdAt: timestamptz("created_at").notNull().defaultNow(),

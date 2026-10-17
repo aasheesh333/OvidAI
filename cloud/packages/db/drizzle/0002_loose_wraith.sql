@@ -1,0 +1,1 @@
+ALTER TABLE "runs" ADD COLUMN "cancel_requested" boolean DEFAULT false NOT NULL;

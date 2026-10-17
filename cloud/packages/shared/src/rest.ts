@@ -26,6 +26,18 @@ export interface SendMessageResponse {
   status: "queued";
 }
 
+/**
+ * POST /cloud/v1/runs/:id/cancel answer (P8 Task 1). "cancelled" = the run was
+ * still queued and the gateway terminalized it inline (BullMQ job removed,
+ * run_failed{code:"cancelled"} emitted); "cancelling" = the run was already
+ * claimed by a worker — the cancelRequested flag is set and the worker's
+ * throttled cancel check terminalizes it as it streams.
+ */
+export interface RunCancelResponse {
+  runId: string;
+  status: "cancelling" | "cancelled";
+}
+
 export interface ApiError {
   error: { code: string; message: string };
 }
@@ -51,3 +63,8 @@ export function pageSchema<T>(inner: z.ZodType<T>): z.ZodType<Page<T>> {
     nextCursor: z.string().min(1).nullable(),
   });
 }
+
+export const runCancelResponseSchema: z.ZodType<RunCancelResponse> = z.object({
+  runId: z.string().min(1),
+  status: z.enum(["cancelling", "cancelled"]),
+});

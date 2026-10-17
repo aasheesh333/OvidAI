@@ -12,6 +12,7 @@ import type { ApiError } from "@ovid/shared";
 import { authHook, type Verifier } from "./auth.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerMessageRoutes } from "./routes/messages.js";
+import { registerRunRoutes } from "./routes/runs.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerWsRoute } from "./routes/wsRoute.js";
 import type { TicketStore } from "./tickets.js";
@@ -121,6 +122,7 @@ export function buildGateway(
 
       registerSessionRoutes(scope, deps);
       registerMessageRoutes(scope, deps);
+      registerRunRoutes(scope, deps);
     },
     { prefix: API_PREFIX },
   );

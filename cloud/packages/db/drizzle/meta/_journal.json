@@ -15,6 +15,13 @@
       "when": 1792184783257,
       "tag": "0001_large_morg",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792211428743,
+      "tag": "0002_loose_wraith",
+      "breakpoints": true
     }
   ]
 }

@@ -318,6 +318,61 @@ export const runs = {
   },
 
   /**
+   * Ownership-scoped fetch (owner = the run's session owner): null on unknown
+   * id OR wrong owner, so the gateway maps both to the same 404 (the runs
+   * cancel route's existence-leak rule, same as sessions.get).
+   */
+  async get(db: Db, runId: string, userId: string): Promise<RunRow | null> {
+    const rows = await db
+      .select({ run: runsTable })
+      .from(runsTable)
+      .innerJoin(sessionsTable, eq(runsTable.sessionId, sessionsTable.id))
+      .where(and(eq(runsTable.id, runId), eq(sessionsTable.userId, userId)))
+      .limit(1);
+    return rows[0]?.run ?? null;
+  },
+
+  /**
+   * P8 Task 1: ownership-scoped conditional request-cancel —
+   * UPDATE … SET cancel_requested = true WHERE id AND session-owner AND
+   * status IN ('queued','running') RETURNING row. null = unknown id, wrong
+   * owner, OR the run went terminal in the race window between the caller's
+   * terminal check and this write (the route re-checks and answers 409).
+   */
+  async requestCancel(db: Db, runId: string, userId: string): Promise<RunRow | null> {
+    const ownedSessions = db
+      .select({ id: sessionsTable.id })
+      .from(sessionsTable)
+      .where(eq(sessionsTable.userId, userId));
+    const rows = await db
+      .update(runsTable)
+      .set({ cancelRequested: true })
+      .where(
+        and(
+          eq(runsTable.id, runId),
+          inArray(runsTable.sessionId, ownedSessions),
+          inArray(runsTable.status, [...ACTIVE_RUN_STATUSES]),
+        ),
+      )
+      .returning();
+    return rows[0] ?? null;
+  },
+
+  /**
+   * P8 Task 1: the worker's throttled cancel poll — one indexed pk read, no
+   * ownership scoping (the worker already owns the job). Unknown id → false
+   * (defensive; a cancelled run's row always exists).
+   */
+  async isCancelRequested(db: Db, runId: string): Promise<boolean> {
+    const rows = await db
+      .select({ cancelRequested: runsTable.cancelRequested })
+      .from(runsTable)
+      .where(eq(runsTable.id, runId))
+      .limit(1);
+    return rows[0]?.cancelRequested ?? false;
+  },
+
+  /**
    * Runs stuck in 'running' whose startedAt is older than the cutoff, oldest
    * first, capped at 100 per call (one sweeper batch). With BullMQ attempts:1
    * a failed or crashed job is NEVER redelivered, so its run row would strand

@@ -583,6 +583,82 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       await runs.finish(db, two.older, "failed", "test cleanup");
     });
 
+    // -------------------------------------------------------------------------
+    // P8 Task 1: cooperative cancel. The gateway sets runs.cancel_requested;
+    // the processor polls it between streamed delta batches (throttled to one
+    // check per second) and terminalizes the run as 'cancelled' with the
+    // EXISTING run_failed event type.
+    // -------------------------------------------------------------------------
+
+    it("cancelRequested flips mid-stream → processor stops, run_failed{cancelled} appended+mirrored, run cancelled, no assistant message", async () => {
+      const seeded = await seedRun();
+      const transport: ModelTransport = {
+        async stream(_req, h) {
+          h.onDelta("first ");
+          // Let the cancel check run once while the flag is still false
+          // (cancelCheckIntervalMs: 0 → every delta batch gets a check).
+          await new Promise((r) => setTimeout(r, 25));
+          await runs.requestCancel(db, seeded.runId, seeded.uid);
+          h.onDelta("second");
+          // The check after this batch sees the flag and aborts.
+          await new Promise((r) => setTimeout(r, 25));
+          return { finishReason: "stop", toolCalls: [] };
+        },
+      };
+
+      await createAgentRunProcessor(
+        makeDeps(transport, { cancelCheckIntervalMs: 0 }),
+      )(jobOf(seeded));
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual([
+        "run_started",
+        "message_delta",
+        "message_delta",
+        "run_failed",
+      ]);
+      expect(evts[3]!.payload).toEqual({ code: "cancelled", message: "Stopped by user." });
+      expect(await readMirror(seeded.sessionId)).toEqual(evts);
+      expect(await runRow(seeded.runId)).toMatchObject({
+        status: "cancelled",
+        lastError: "Stopped by user.",
+      });
+      // Cancelled mid-stream: the partial assistant text is NEVER persisted.
+      expect(await assistantRows(seeded.sessionId)).toEqual([]);
+    });
+
+    it("cancel checks are throttled to one per second: a flip inside the window is caught by the next windowed check", async () => {
+      const seeded = await seedRun();
+      const transport: ModelTransport = {
+        async stream(_req, h) {
+          h.onDelta("a");
+          await new Promise((r) => setTimeout(r, 25)); // window-1 check: flag false
+          await runs.requestCancel(db, seeded.runId, seeded.uid);
+          h.onDelta("b"); // inside the 1 s window → this check is SKIPPED
+          await new Promise((r) => setTimeout(r, 1_050)); // window elapses
+          h.onDelta("c");
+          await new Promise((r) => setTimeout(r, 25)); // window-2 check: sees the flag
+          return { finishReason: "stop", toolCalls: [] };
+        },
+      };
+
+      // Default cancelCheckIntervalMs (1000) — no override.
+      await createAgentRunProcessor(makeDeps(transport))(jobOf(seeded));
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual([
+        "run_started",
+        "message_delta",
+        "message_delta",
+        "message_delta",
+        "run_failed",
+      ]);
+      expect(evts[4]!.payload).toEqual({ code: "cancelled", message: "Stopped by user." });
+      expect(await readMirror(seeded.sessionId)).toEqual(evts);
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "cancelled" });
+      expect(await assistantRows(seeded.sessionId)).toEqual([]);
+    });
+
     it("history reaches the transport oldest-first, ends with the prompt, tool rows skipped defensively", async () => {
       const seeded = await seedRun({
         prompt: "the-new-prompt",
