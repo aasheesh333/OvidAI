@@ -17,6 +17,13 @@ export interface AgentRunJob {
   sessionId: string;
   userId: string;
   prompt: string;
+  /**
+   * P2 Task 12 (additive, optional — old payloads still parse): the caller's
+   * users.tier at enqueue time; the worker passes it to
+   * SandboxManager.attach so the workspace quota project matches the user's
+   * tier. Raw DB tier text ("free" / anything-else-is-"pro").
+   */
+  tier?: string;
 }
 
 // Wire-format ids are plain nonempty strings (same convention as
@@ -26,6 +33,7 @@ export const agentRunJobSchema: z.ZodType<AgentRunJob> = z.object({
   sessionId: z.string().min(1),
   userId: z.string().min(1),
   prompt: z.string().min(1),
+  tier: z.string().min(1).optional(),
 });
 
 /**

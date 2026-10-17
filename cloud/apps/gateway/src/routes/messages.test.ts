@@ -130,7 +130,15 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     expect(handle.adds).toHaveLength(1);
     const add = handle.adds[0]!;
     expect(add.name).toBe(AGENT_RUN_JOB_NAME);
-    expect(add.data).toEqual({ runId: body.runId, sessionId: sid, userId: uid, prompt: content });
+    // P2 Task 12: the payload now carries the caller's tier (the worker's
+    // sandbox attach is tier-aware).
+    expect(add.data).toEqual({
+      runId: body.runId,
+      sessionId: sid,
+      userId: uid,
+      prompt: content,
+      tier: "free",
+    });
     expect(add.opts.jobId).toBe(body.runId);
     expect(add.opts.priority).toBe(2); // users.tier default "free" → priority 2
 
@@ -170,6 +178,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     expect(res.statusCode).toBe(202);
     expect(handle.adds).toHaveLength(1);
     expect(handle.adds[0]!.opts.priority).toBe(1);
+    expect(handle.adds[0]!.data).toMatchObject({ prompt: "pro prompt", tier: "pro" });
   });
 
   it("missing App Check header → mint gets appCheck null", async () => {

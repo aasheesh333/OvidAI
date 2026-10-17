@@ -98,7 +98,10 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     try {
       await deps.queues.agentRuns.add(
         AGENT_RUN_JOB_NAME,
-        { runId: run.id, sessionId, userId: uid, prompt: content },
+        // P2 Task 12: tier rides the payload so the worker's sandbox attach
+        // applies the tier-matched workspace quota (optional on the wire —
+        // old consumers simply never see it).
+        { runId: run.id, sessionId, userId: uid, prompt: content, tier: user.tier },
         { jobId: run.id, priority },
       );
     } catch (err) {

@@ -1,11 +1,21 @@
 import { pathToFileURL } from "node:url";
 import { Redis } from "ioredis";
-import { createDb } from "@ovid/db";
+import { createDb, users } from "@ovid/db";
 import { createRedisEventLog } from "@ovid/events";
 import { createAgentRunsWorker } from "@ovid/queue";
+import {
+  createCgroupManager,
+  createRootmapLauncher,
+  createSandboxManager,
+  createSetuidLauncher,
+  loadSandboxConfig,
+  resolveRootfs,
+  selectQuotaBackend,
+} from "@ovid/sandbox";
 import type { KeyProvider } from "@ovid/shared";
 import { createOpenAiTransport } from "./liteLlm.js";
 import { createAgentRunProcessor } from "./runProcessor.js";
+import { createToolRegistry } from "./tools/registry.js";
 import { sweepStaleRuns } from "./staleRuns.js";
 
 export interface WorkerEnv {
@@ -115,6 +125,31 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   const redisMint = new Redis(cfg.redisMintUrl);
   const events = createRedisEventLog(redisQ);
 
+  // ---- P2 Task 12: the SandboxManager chain (pinned composition order). ----
+  // Every step fails LOUDLY at boot: a worker without a rootfs must never run
+  // (the systemd unit is ordered after the rootfs install — Task 16), and a
+  // half-booted cgroup tree is worse than refusing to start. main() stays
+  // composition-root-thin on purpose (P1 convention): Task 14's e2e exercises
+  // this wiring end to end.
+  const sandboxConfig = loadSandboxConfig(env);
+  const rootfs = await resolveRootfs(sandboxConfig.rootfsPath);
+  const cgroups = createCgroupManager(sandboxConfig);
+  await cgroups.init(); // leaf-first bootstrap (no-internal-process rule)
+  const quota = await selectQuotaBackend(sandboxConfig.workspacesRoot);
+  const launcher =
+    sandboxConfig.launch === "rootmap"
+      ? createRootmapLauncher(sandboxConfig)
+      : createSetuidLauncher(sandboxConfig);
+  const manager = createSandboxManager({
+    config: sandboxConfig,
+    allocateUid: (userId) => users.allocateSandboxUid(db, userId),
+    cgroups,
+    quota,
+    launcher,
+    rootfs,
+  });
+  await manager.recover(); // orphan env cgroups from a crashed run die now
+
   const processor = createAgentRunProcessor({
     db,
     events,
@@ -123,6 +158,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     litellmBaseUrl: cfg.litellmBaseUrl,
     defaultModel: cfg.defaultModel,
     runQueueWaitMs: cfg.runQueueWaitMs,
+    sandbox: manager,
+    tools: createToolRegistry(),
   });
 
   // Connection OPTIONS OBJECT — a bare URL string silently spreads into
@@ -163,6 +200,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   const shutdown = (): Promise<void> => {
     shuttingDown ??= (async () => {
       clearInterval(sweeper);
+      // P2 Task 12 pin: manager.close() BEFORE the drain — sandbox envs (their
+      // cgroup trees, live leaves and admission slots) tear down first; Task 13
+      // will slot the pty-bridge stop in front of this same line.
+      await manager.close();
       // Drains in-flight jobs and stops fetching new ones (force=false).
       await worker.close();
       redisQ.disconnect();

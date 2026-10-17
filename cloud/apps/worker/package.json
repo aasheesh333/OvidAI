@@ -25,7 +25,9 @@
     "@ovid/db": "workspace:*",
     "@ovid/events": "workspace:*",
     "@ovid/queue": "workspace:*",
+    "@ovid/sandbox": "workspace:*",
     "@ovid/shared": "workspace:*",
-    "ioredis": "^5.11.1"
+    "ioredis": "^5.11.1",
+    "zod": "^3.25.76"
   }
 }

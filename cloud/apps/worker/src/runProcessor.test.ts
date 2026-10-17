@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Redis } from "ioredis";
@@ -19,13 +23,26 @@ import {
   createQueues,
   type AgentRunJob,
 } from "@ovid/queue";
+import {
+  REFUSAL_MESSAGE,
+  SandboxAdmissionError,
+  SandboxCapacityError,
+  type ExecRequest,
+  type ExecResult,
+  type SandboxHandle,
+  type SandboxManager,
+} from "@ovid/sandbox";
 import type { KeyProvider, SessionEvent } from "@ovid/shared";
+import { createToolRegistry } from "./tools/registry.js";
+import { SYSTEM_PROMPT_V1, TOOL_EVENT_CONTENT_CAP } from "./tools/systemPrompt.js";
+import type { ModelToolSpec } from "./tools/types.js";
 import {
   createOpenAiTransport,
   TerminalModelError,
   TransientModelError,
   type ChatMessage,
   type ModelTransport,
+  type ToolCall,
 } from "./liteLlm.js";
 import { createAgentRunProcessor, type RunDeps } from "./runProcessor.js";
 
@@ -51,7 +68,7 @@ const stubKeys = (value: string | null): KeyProvider => ({
 // ---------------------------------------------------------------------------
 
 type ScriptStep =
-  | { kind: "ok"; deltas: string[]; finishReason?: string | null }
+  | { kind: "ok"; deltas: string[]; finishReason?: string | null; toolCalls?: ToolCall[] }
   | { kind: "transient"; message?: string; deltas?: string[] }
   | { kind: "terminal"; message: string };
 
@@ -60,6 +77,7 @@ interface TransportCall {
   apiKey: string;
   model: string;
   messages: ChatMessage[];
+  tools?: ModelToolSpec[];
 }
 
 function stubTransport(script: ScriptStep[]): {
@@ -73,7 +91,11 @@ function stubTransport(script: ScriptStep[]): {
         baseUrl: req.baseUrl,
         apiKey: req.apiKey,
         model: req.model,
-        messages: req.messages,
+        // SNAPSHOT: the processor passes its live (growing) array on tool
+        // rounds — capturing the reference would show every call the final
+        // state.
+        messages: [...req.messages],
+        tools: req.tools,
       });
       const step = script[Math.min(calls.length - 1, script.length - 1)];
       if (step === undefined) throw new Error("stubTransport: empty script");
@@ -83,11 +105,73 @@ function stubTransport(script: ScriptStep[]): {
       }
       if (step.kind === "terminal") throw new TerminalModelError(step.message);
       for (const d of step.deltas) h.onDelta(d);
-      return { finishReason: step.finishReason ?? "stop" };
+      return { finishReason: step.finishReason ?? "stop", toolCalls: step.toolCalls ?? [] };
     },
   };
   return { transport, calls };
 }
+
+// ---------------------------------------------------------------------------
+// Stub SandboxManager (P2 Task 12): a fake handle whose workspaceDir is a REAL
+// mkdtemp — the host-side file tools hit the real filesystem; exec records
+// requests and returns a canned ExecResult; attach can be scripted to reject.
+// ---------------------------------------------------------------------------
+
+interface FakeSandbox {
+  manager: SandboxManager;
+  handle: SandboxHandle;
+  /** Every exec request the fake handle received (blocked commands must leave this empty). */
+  execs: ExecRequest[];
+  /** Every attach(userId, opts) call — pins the tier pass-through. */
+  attachCalls: Array<{ userId: string; tier?: "free" | "pro" }>;
+  workspaceDir: string;
+}
+
+function makeFakeSandbox(opts: { execResult?: Partial<ExecResult>; attachError?: Error } = {}): FakeSandbox {
+  const execs: ExecRequest[] = [];
+  const attachCalls: FakeSandbox["attachCalls"] = [];
+  const workspaceDir = mkdtempSync(join(tmpdir(), "ovid-w12-ws-"));
+  const execResult: ExecResult = {
+    exitCode: 0,
+    stdout: "",
+    stderr: "",
+    timedOut: false,
+    truncated: false,
+    blocked: false,
+    refusal: null,
+    ...opts.execResult,
+  };
+  const handle = {
+    userId: "fake",
+    uid: 200_001,
+    workspaceDir,
+    homeDir: join(workspaceDir, "..", ".home"),
+    jailWorkspaceDir: "/workspace",
+    exec: async (req: ExecRequest) => {
+      execs.push(req);
+      return execResult;
+    },
+  } as unknown as SandboxHandle;
+  const manager = {
+    attach: async (userId: string, sbxOpts?: { tier?: "free" | "pro" }) => {
+      attachCalls.push({ userId, tier: sbxOpts?.tier });
+      if (opts.attachError !== undefined) throw opts.attachError;
+      return handle;
+    },
+    get: () => undefined,
+    destroy: async () => {},
+    list: () => [],
+    activeCount: () => 0,
+    workspaceDir: async () => workspaceDir,
+    recover: async () => {},
+    close: async () => {},
+  } as unknown as SandboxManager;
+  return { manager, handle, execs, attachCalls, workspaceDir };
+}
+
+const rmWs = (dir: string): void => {
+  rmSync(dir, { recursive: true, force: true });
+};
 
 // ---------------------------------------------------------------------------
 // Real Postgres + real Redis (event log). skipIf on BOTH env vars per brief.
@@ -544,6 +628,255 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(sent.map((m) => m.content)).toEqual(
         Array.from({ length: 100 }, (_, i) => `m-${i + 5}`),
       );
+    });
+
+    // -------------------------------------------------------------------------
+    // P2 Task 12: the v1 tool-call loop. Stub transport scripting rounds +
+    // the stub SandboxManager above (file tools hit the REAL tmpdir workspace).
+    // -------------------------------------------------------------------------
+
+    it("v1 happy tool run: run_shell round → write_file round → text round; exact event order; round-2 messages carry role:tool; file written; tier passed to attach", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox({ execResult: { stdout: "hi\n" } });
+      const runShellArgs = JSON.stringify({ command: "echo hi > out.txt" });
+      const writeFileArgs = JSON.stringify({ path: "notes.md", content: "# x" });
+      const { transport, calls } = stubTransport([
+        { kind: "ok", deltas: [], toolCalls: [{ id: "call_1", name: "run_shell", arguments: runShellArgs }] },
+        { kind: "ok", deltas: [], toolCalls: [{ id: "call_2", name: "write_file", arguments: writeFileArgs }] },
+        { kind: "ok", deltas: ["done"] },
+      ]);
+
+      await createAgentRunProcessor(
+        makeDeps(transport, { sandbox: sbx.manager, tools: createToolRegistry() }),
+      )({
+        data: { runId: seeded.runId, sessionId: seeded.sessionId, userId: seeded.uid, prompt: seeded.prompt, tier: "free" },
+      });
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual([
+        "run_started",
+        "tool_started",
+        "tool_completed",
+        "tool_started",
+        "tool_completed",
+        "message_delta",
+        "message_completed",
+        "run_completed",
+      ]);
+      expect(evts[1]!.payload).toEqual({
+        runId: seeded.runId,
+        callId: "call_1",
+        name: "run_shell",
+        input: { command: "echo hi > out.txt" },
+      });
+      expect(evts[2]!.payload).toEqual({
+        runId: seeded.runId,
+        callId: "call_1",
+        name: "run_shell",
+        isError: false,
+        content: "hi\n\n[exit 0]",
+        truncated: false,
+      });
+      expect(evts[4]!.payload).toMatchObject({
+        name: "write_file",
+        isError: false,
+        content: "wrote 3 bytes",
+      });
+
+      // tier passed through to attach
+      expect(sbx.attachCalls).toEqual([{ userId: seeded.uid, tier: "free" }]);
+
+      // the model context: system prompt first, history, assistant tool_calls,
+      // then the role:"tool" result message
+      expect(calls).toHaveLength(3);
+      expect(calls[0]!.messages[0]).toEqual({ role: "system", content: SYSTEM_PROMPT_V1 });
+      expect(calls[1]!.messages).toEqual([
+        { role: "system", content: SYSTEM_PROMPT_V1 },
+        { role: "user", content: seeded.prompt },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_1", name: "run_shell", arguments: runShellArgs }],
+        },
+        { role: "tool", toolCallId: "call_1", content: "hi\n\n[exit 0]" },
+      ]);
+      expect(calls[2]!.messages.slice(-2)).toEqual([
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_2", name: "write_file", arguments: writeFileArgs }],
+        },
+        { role: "tool", toolCallId: "call_2", content: "wrote 3 bytes" },
+      ]);
+      // tools are sent on every round (sorted specs)
+      expect(calls[0]!.tools?.map((t) => t.function.name)).toEqual([
+        "edit_file", "glob_files", "grep_files", "read_file", "run_shell", "write_file",
+      ]);
+
+      // run_shell hit the fake exec once, with the clamped DEFAULT timeout
+      expect(sbx.execs).toHaveLength(1);
+      expect(sbx.execs[0]).toMatchObject({ command: "echo hi > out.txt", timeoutMs: 120_000 });
+
+      // write_file wrote into the REAL tmpdir workspace (host-side, no jail)
+      expect(await readFile(join(sbx.workspaceDir, "notes.md"), "utf8")).toBe("# x");
+
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed", attempts: 3 });
+      expect(await readMirror(seeded.sessionId)).toEqual(evts);
+      const assistants = await assistantRows(seeded.sessionId);
+      expect(assistants.map((r) => r.content)).toEqual(["done"]);
+      rmWs(sbx.workspaceDir);
+    });
+
+    it("v1 blocked command: run_shell 'gradle build' → tool_completed isError content === REFUSAL_MESSAGE, exactly one system_note, exec NEVER invoked", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox();
+      const { transport } = stubTransport([
+        {
+          kind: "ok",
+          deltas: [],
+          toolCalls: [{ id: "call_b", name: "run_shell", arguments: JSON.stringify({ command: "gradle build" }) }],
+        },
+        { kind: "ok", deltas: ["alright then"] },
+      ]);
+
+      await createAgentRunProcessor(
+        makeDeps(transport, { sandbox: sbx.manager, tools: createToolRegistry() }),
+      )(jobOf(seeded));
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual([
+        "run_started",
+        "tool_started",
+        "system_note",
+        "tool_completed",
+        "message_delta",
+        "message_completed",
+        "run_completed",
+      ]);
+      const completed = evts.find((e) => e.type === "tool_completed")!;
+      expect(completed.payload).toEqual({
+        runId: seeded.runId,
+        callId: "call_b",
+        name: "run_shell",
+        isError: true,
+        content: REFUSAL_MESSAGE,
+        truncated: false,
+      });
+      const notes = evts.filter((e) => e.type === "system_note");
+      expect(notes).toHaveLength(1);
+      expect(notes[0]!.payload).toEqual({
+        code: "command_blocked",
+        message: REFUSAL_MESSAGE,
+        command: "gradle build",
+      });
+      // Zero side effects: the layer-1 policy short-circuits BEFORE exec.
+      expect(sbx.execs).toEqual([]);
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+      rmWs(sbx.workspaceDir);
+    });
+
+    it("v1 attach rejects SandboxAdmissionError → run_failed {code:sandbox_unavailable}, run failed, job completes (no throw), model never called", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox({ attachError: new SandboxAdmissionError("gate full") });
+      const { transport, calls } = stubTransport([{ kind: "ok", deltas: ["never"] }]);
+
+      await createAgentRunProcessor(
+        makeDeps(transport, { sandbox: sbx.manager, tools: createToolRegistry() }),
+      )(jobOf(seeded));
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual(["run_failed"]);
+      expect(evts[0]!.payload).toEqual({ code: "sandbox_unavailable", message: "gate full" });
+      expect(await runRow(seeded.runId)).toMatchObject({
+        status: "failed",
+        attempts: 0,
+        lastError: "sandbox_unavailable",
+      });
+      expect(calls).toHaveLength(0);
+      expect(await readMirror(seeded.sessionId)).toEqual(evts);
+      rmWs(sbx.workspaceDir);
+    });
+
+    it("v1 attach rejects SandboxCapacityError → the same sandbox_unavailable failure (no throw)", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox({
+        attachError: new SandboxCapacityError("disk_pressure"),
+      });
+      const { transport } = stubTransport([{ kind: "ok", deltas: ["never"] }]);
+
+      await createAgentRunProcessor(
+        makeDeps(transport, { sandbox: sbx.manager, tools: createToolRegistry() }),
+      )(jobOf(seeded));
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual(["run_failed"]);
+      expect(evts[0]!.payload).toMatchObject({ code: "sandbox_unavailable" });
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "failed" });
+      rmWs(sbx.workspaceDir);
+    });
+
+    it("v1 transport always returning a tool call → tool_rounds_exhausted after exactly 50 rounds, unknown_tool result each round", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox();
+      const loop: ToolCall = { id: "call_loop", name: "loop_tool", arguments: "{}" };
+      const { transport, calls } = stubTransport([
+        { kind: "ok", deltas: [], toolCalls: [loop] },
+      ]);
+
+      await createAgentRunProcessor(
+        makeDeps(transport, { sandbox: sbx.manager, tools: createToolRegistry() }),
+      )(jobOf(seeded));
+
+      expect(calls).toHaveLength(50); // rounds 1..50, then the exhaustion failure
+      const evts = await readEvents(seeded.sessionId);
+      const failed = evts.find((e) => e.type === "run_failed")!;
+      expect(failed.payload).toEqual({ code: "tool_rounds_exhausted" });
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "failed", attempts: 50 });
+      const completions = evts.filter((e) => e.type === "tool_completed");
+      expect(completions).toHaveLength(50);
+      expect(completions[0]!.payload).toMatchObject({
+        name: "loop_tool",
+        isError: true,
+        content: "unknown_tool: loop_tool",
+      });
+      expect(await readMirror(seeded.sessionId)).toEqual(evts);
+      rmWs(sbx.workspaceDir);
+    });
+
+    it("v1 tool result > 8 KiB → tool_completed payload capped with truncated:true; the in-run role:tool message keeps the full content; timeoutMs clamps to 600000", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox({ execResult: { stdout: "y".repeat(9_000) } });
+      const { transport, calls } = stubTransport([
+        {
+          kind: "ok",
+          deltas: [],
+          toolCalls: [
+            { id: "call_big", name: "run_shell", arguments: JSON.stringify({ command: "cat big.log", timeoutMs: 999_999 }) },
+          ],
+        },
+        { kind: "ok", deltas: ["done"] },
+      ]);
+
+      await createAgentRunProcessor(
+        makeDeps(transport, { sandbox: sbx.manager, tools: createToolRegistry() }),
+      )(jobOf(seeded));
+
+      const evts = await readEvents(seeded.sessionId);
+      const completed = evts.find((e) => e.type === "tool_completed")!;
+      expect(completed.payload.content).toHaveLength(TOOL_EVENT_CONTENT_CAP);
+      expect(completed.payload.truncated).toBe(true);
+      expect(completed.payload.isError).toBe(false);
+
+      // the model-facing tool message is NOT the event cap — it carries the
+      // full (32 KiB-capped) tool result
+      const toolMsg = calls[1]!.messages.find((m) => m.role === "tool")!;
+      expect(toolMsg.toolCallId).toBe("call_big");
+      expect(toolMsg.content).toBe(`${"y".repeat(9_000)}\n[exit 0]`);
+
+      // the timeout was clamped to the 600 s max
+      expect(sbx.execs[0]).toMatchObject({ command: "cat big.log", timeoutMs: 600_000 });
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+      rmWs(sbx.workspaceDir);
     });
 
     // -------------------------------------------------------------------------

@@ -10,11 +10,30 @@
  * - TerminalModelError: any other 4xx → fail the run immediately.
  * An aborted AbortSignal rejects with the abort error itself (never wrapped),
  * so callers can distinguish "we gave up" from "the model failed".
+ *
+ * P2 Task 12 (additive, v0-compatible): tool support. delta.tool_calls[]
+ * fragments are merged by `index` — id/name set once, arguments concatenated
+ * in arrival order — so a call's arguments reassemble byte-identical even when
+ * the model splits them mid-JSON across frames. Text-only streams yield
+ * `toolCalls: []`; every other v0 behavior is untouched.
  */
 
+import type { ModelToolSpec } from "./tools/types.js";
+
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  /** role:"assistant" only — the calls this assistant turn requested. */
+  toolCalls?: ToolCall[];
+  /** role:"tool" only — which call this result answers. */
+  toolCallId?: string;
+}
+
+/** One model-requested function call; `arguments` is the raw JSON string from the model. */
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: string;
 }
 
 export interface StreamHandlers {
@@ -23,10 +42,16 @@ export interface StreamHandlers {
 
 export interface ModelTransport {
   stream(
-    req: { baseUrl: string; apiKey: string; model: string; messages: ChatMessage[] },
+    req: {
+      baseUrl: string;
+      apiKey: string;
+      model: string;
+      messages: ChatMessage[];
+      tools?: ModelToolSpec[];
+    },
     h: StreamHandlers,
     signal: AbortSignal,
-  ): Promise<{ finishReason: string | null }>;
+  ): Promise<{ finishReason: string | null; toolCalls: ToolCall[] }>;
 }
 
 export class TransientModelError extends Error {
@@ -47,26 +72,110 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** One parsed `data:` payload; mutates nothing, returns the delta (if any) and finish_reason (if any). */
-function readChunk(json: string): { delta: string | null; finishReason: string | null } {
+/** One `delta.tool_calls[]` fragment, loosely typed (validated in the aggregator). */
+interface ToolCallFragment {
+  index?: unknown;
+  id?: unknown;
+  function?: { name?: unknown; arguments?: unknown } | null;
+}
+
+/** One parsed `data:` payload; mutates nothing, returns the delta, tool-call fragments (if any) and finish_reason (if any). */
+function readChunk(json: string): {
+  delta: string | null;
+  toolCallDeltas: ToolCallFragment[] | null;
+  finishReason: string | null;
+} {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
   } catch {
-    return { delta: null, finishReason: null }; // garbage line: skip, keep streaming
+    return { delta: null, toolCallDeltas: null, finishReason: null }; // garbage line: skip, keep streaming
   }
   // The include_usage trailer chunk has an empty `choices` array — guard [0].
   const choice = (
     parsed as {
-      choices?: Array<{ delta?: { content?: unknown }; finish_reason?: unknown }>;
+      choices?: Array<{
+        delta?: { content?: unknown; tool_calls?: unknown };
+        finish_reason?: unknown;
+      }>;
     } | null
   )?.choices?.[0];
   const content = choice?.delta?.content;
+  const toolCalls = choice?.delta?.tool_calls;
   const finish = choice?.finish_reason;
   return {
     delta: typeof content === "string" && content !== "" ? content : null,
+    toolCallDeltas: Array.isArray(toolCalls) ? (toolCalls as ToolCallFragment[]) : null,
     finishReason: typeof finish === "string" && finish !== "" ? finish : null,
   };
+}
+
+/**
+ * SSE tool-call aggregator: merges `delta.tool_calls[]` fragments by `index`
+ * — id/name set once (first non-empty wins), arguments concatenated in
+ * arrival order. finish() is index-sorted; a call that never carried an id
+ * gets a stable synthesized one so the processor can always key results to
+ * calls.
+ */
+function createToolCallAggregator(): {
+  merge(fragments: ToolCallFragment[]): void;
+  finish(): ToolCall[];
+} {
+  const acc = new Map<number, { id?: string; name?: string; args: string }>();
+  return {
+    merge(fragments) {
+      for (const f of fragments) {
+        const index = typeof f.index === "number" && Number.isInteger(f.index) ? f.index : 0;
+        let entry = acc.get(index);
+        if (entry === undefined) {
+          entry = { args: "" };
+          acc.set(index, entry);
+        }
+        if (typeof f.id === "string" && f.id !== "" && entry.id === undefined) entry.id = f.id;
+        const fn = f.function;
+        if (fn !== null && fn !== undefined) {
+          if (typeof fn.name === "string" && fn.name !== "" && entry.name === undefined) {
+            entry.name = fn.name;
+          }
+          if (typeof fn.arguments === "string") entry.args += fn.arguments;
+        }
+      }
+    },
+    finish() {
+      return [...acc.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([index, e]) => ({
+          id: e.id ?? `call_${index}`,
+          name: e.name ?? "",
+          arguments: e.args,
+        }));
+    },
+  };
+}
+
+/**
+ * ChatMessage → [OI] wire shape: assistant toolCalls map onto
+ * message.tool_calls [{id, type:"function", function:{name, arguments}}];
+ * role:"tool" maps onto {role:"tool", tool_call_id}. system/user pass through.
+ */
+function toWireMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
+  return messages.map((m) => {
+    if (m.role === "assistant" && m.toolCalls !== undefined) {
+      return {
+        role: "assistant",
+        content: m.content,
+        tool_calls: m.toolCalls.map((c) => ({
+          id: c.id,
+          type: "function",
+          function: { name: c.name, arguments: c.arguments },
+        })),
+      };
+    }
+    if (m.role === "tool") {
+      return { role: "tool", content: m.content, tool_call_id: m.toolCallId };
+    }
+    return { role: m.role, content: m.content };
+  });
 }
 
 export function createOpenAiTransport(fetchImpl: typeof fetch = fetch): ModelTransport {
@@ -85,7 +194,9 @@ export function createOpenAiTransport(fetchImpl: typeof fetch = fetch): ModelTra
           },
           body: JSON.stringify({
             model: req.model,
-            messages: req.messages,
+            messages: toWireMessages(req.messages),
+            // v0 body shape: the tools key is absent unless tools are passed.
+            ...(req.tools !== undefined && req.tools.length > 0 ? { tools: req.tools } : {}),
             stream: true,
             stream_options: { include_usage: true },
           }),
@@ -110,6 +221,7 @@ export function createOpenAiTransport(fetchImpl: typeof fetch = fetch): ModelTra
 
       let finishReason: string | null = null;
       let sawDone = false;
+      const toolCalls = createToolCallAggregator();
       const decoder = new TextDecoder(); // streaming mode: splits multi-byte chars across chunks safely
       const reader = res.body.getReader();
 
@@ -123,8 +235,9 @@ export function createOpenAiTransport(fetchImpl: typeof fetch = fetch): ModelTra
           sawDone = true;
           return;
         }
-        const { delta, finishReason: fr } = readChunk(value);
+        const { delta, toolCallDeltas, finishReason: fr } = readChunk(value);
         if (delta !== null) h.onDelta(delta);
+        if (toolCallDeltas !== null) toolCalls.merge(toolCallDeltas);
         if (fr !== null) finishReason = fr;
       };
 
@@ -167,7 +280,7 @@ export function createOpenAiTransport(fetchImpl: typeof fetch = fetch): ModelTra
         await reader.cancel().catch(() => {});
       }
 
-      return { finishReason };
+      return { finishReason, toolCalls: toolCalls.finish() };
     },
   };
 }

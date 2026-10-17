@@ -7,7 +7,9 @@ export type SessionEventType =
   | "run_started_retry"
   | "run_failed"
   | "run_completed"
-  | "system_note";
+  | "system_note"
+  | "tool_started"
+  | "tool_completed";
 
 export interface SessionEvent {
   sessionId: string;
@@ -30,6 +32,8 @@ export const sessionEventSchema: z.ZodType<SessionEvent> = z.object({
     "run_failed",
     "run_completed",
     "system_note",
+    "tool_started",
+    "tool_completed",
   ]),
   payload: z.record(z.string(), z.unknown()),
   ts: z.string().min(1),

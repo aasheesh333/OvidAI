@@ -1,11 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, expect, it } from "vitest";
+import type { ModelToolSpec } from "./tools/types.js";
 import {
   createOpenAiTransport,
   TerminalModelError,
   TransientModelError,
   type ChatMessage,
+  type ToolCall,
 } from "./liteLlm.js";
 
 // ---------------------------------------------------------------------------
@@ -72,7 +74,25 @@ function sseHead(res: ServerResponse): void {
 
 const MESSAGES: ChatMessage[] = [{ role: "user", content: "hi" }];
 
-function streamCall(overrides?: { baseUrl?: string; onDelta?: (t: string) => void }) {
+const TOOL_SPECS: ModelToolSpec[] = [
+  {
+    type: "function",
+    function: {
+      name: "run_shell",
+      description: "Run a shell command",
+      parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+    },
+  },
+];
+
+function streamCall(
+  overrides?: {
+    baseUrl?: string;
+    onDelta?: (t: string) => void;
+    tools?: ModelToolSpec[];
+    messages?: ChatMessage[];
+  },
+) {
   const deltas: string[] = [];
   const transport = createOpenAiTransport();
   const controller = new AbortController();
@@ -81,7 +101,8 @@ function streamCall(overrides?: { baseUrl?: string; onDelta?: (t: string) => voi
       baseUrl: overrides?.baseUrl ?? baseUrl,
       apiKey: "sk-test",
       model: "ovid-test-model",
-      messages: MESSAGES,
+      messages: overrides?.messages ?? MESSAGES,
+      tools: overrides?.tools,
     },
     { onDelta: overrides?.onDelta ?? ((t) => deltas.push(t)) },
     controller.signal,
@@ -157,7 +178,7 @@ it("concatenates deltas exactly when the SSE arrives in awkward chunks", async (
   const { deltas, promise } = streamCall();
   const result = await promise;
   expect(deltas).toEqual(["Hello", " world", "🌊 wave"]);
-  expect(result).toEqual({ finishReason: "stop" });
+  expect(result).toEqual({ finishReason: "stop", toolCalls: [] });
 });
 
 it("accepts `data:[DONE]` without a space and without a trailing blank line", async () => {
@@ -169,7 +190,7 @@ it("accepts `data:[DONE]` without a space and without a trailing blank line", as
   const { deltas, promise } = streamCall();
   const result = await promise;
   expect(deltas).toEqual(["x"]);
-  expect(result).toEqual({ finishReason: "length" });
+  expect(result).toEqual({ finishReason: "length", toolCalls: [] });
 });
 
 it("returns finishReason null when the stream never carries one", async () => {
@@ -179,7 +200,7 @@ it("returns finishReason null when the stream never carries one", async () => {
     res.end("data: [DONE]\n\n");
   });
   const result = await streamCall().promise;
-  expect(result).toEqual({ finishReason: null });
+  expect(result).toEqual({ finishReason: null, toolCalls: [] });
 });
 
 it("429 → TransientModelError carrying the status", async () => {
@@ -302,4 +323,115 @@ it("AbortSignal already aborted → rejects immediately with AbortError", async 
   const { controller, promise } = streamCall();
   controller.abort();
   await expect(promise).rejects.toMatchObject({ name: "AbortError" });
+});
+
+// ---------------------------------------------------------------------------
+// Tool-call streaming (P2 Task 12): delta.tool_calls[] merged by index —
+// id/name set once, arguments concatenated in arrival order — and the wire
+// mapping for assistant tool_calls / role:"tool" messages and the tools param.
+// ---------------------------------------------------------------------------
+
+it("aggregates tool-call deltas split mid-JSON across frames into the exact ToolCall[] (two parallel calls, byte-identical arguments)", async () => {
+  await startMock(async (_req, res) => {
+    sseHead(res);
+    // call A: id+name first, arguments split MID-JSON across TCP chunks
+    res.write(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","fun',
+    );
+    await sleep(5);
+    res.write(
+      'ction":{"name":"run_shell","arguments":""}}]},"finish_reason":null}]}\n\n',
+    );
+    res.write(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"command\\":\\"e"}}]},"finish_reason":null}]}\n\n',
+    );
+    await sleep(5);
+    // call B interleaved between call A's argument fragments (index-merged)
+    res.write(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","function":{"name":"read_file","arguments":"{\\"path\\":\\"a.ts\\"}"}}]},"finish_reason":null}]}\n\n',
+    );
+    res.write(
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"cho hi\\"}"}}]},"finish_reason":null}]}\n\n',
+    );
+    await sleep(5);
+    res.write('data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n');
+    res.end("data: [DONE]\n\n");
+  });
+
+  const { promise } = streamCall();
+  const result = await promise;
+  const expected: ToolCall[] = [
+    { id: "call_a", name: "run_shell", arguments: '{"command":"echo hi"}' },
+    { id: "call_b", name: "read_file", arguments: '{"path":"a.ts"}' },
+  ];
+  expect(result.toolCalls).toEqual(expected); // index order: 0 before 1
+  expect(result.finishReason).toBe("tool_calls");
+});
+
+it("a text-only stream yields toolCalls: [] (v0-compatible result)", async () => {
+  await startMock((_req, res) => {
+    sseHead(res);
+    res.write('data: {"choices":[{"delta":{"content":"plain text"},"finish_reason":null}]}\n\n');
+    res.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n');
+    res.end("data: [DONE]\n\n");
+  });
+  const { promise } = streamCall();
+  const result = await promise;
+  expect(result).toEqual({ finishReason: "stop", toolCalls: [] });
+});
+
+it("maps the request wire shape: tools passed through, assistant tool_calls and role:tool messages", async () => {
+  await startMock((_req, res) => {
+    sseHead(res);
+    res.end("data: [DONE]\n\n");
+  });
+  const messages: ChatMessage[] = [
+    { role: "system", content: "sys" },
+    { role: "user", content: "list the files" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "call_1", name: "run_shell", arguments: '{"command":"ls"}' }],
+    },
+    { role: "tool", toolCallId: "call_1", content: "a.txt\nb.txt" },
+  ];
+  const { promise } = streamCall({ tools: TOOL_SPECS, messages });
+  await promise;
+
+  const body = lastRequest!.body as {
+    tools: ModelToolSpec[];
+    messages: Array<{
+      role: string;
+      content: string;
+      tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>;
+      tool_call_id?: string;
+    }>;
+  };
+  expect(body.tools).toEqual(TOOL_SPECS);
+  expect(body.messages).toEqual([
+    { role: "system", content: "sys" },
+    { role: "user", content: "list the files" },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        { id: "call_1", type: "function", function: { name: "run_shell", arguments: '{"command":"ls"}' } },
+      ],
+    },
+    { role: "tool", content: "a.txt\nb.txt", tool_call_id: "call_1" },
+  ]);
+});
+
+it("omits the tools key entirely when no tools are passed (v0 body shape unchanged)", async () => {
+  await startMock((_req, res) => {
+    sseHead(res);
+    res.end("data: [DONE]\n\n");
+  });
+  await streamCall().promise;
+  expect(lastRequest!.body).toEqual({
+    model: "ovid-test-model",
+    messages: MESSAGES,
+    stream: true,
+    stream_options: { include_usage: true },
+  });
 });
