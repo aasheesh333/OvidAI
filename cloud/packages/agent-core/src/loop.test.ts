@@ -49,7 +49,7 @@ import {
 import { TOOL_TIMEOUT_MESSAGE } from "./tools/spill.js";
 import { createSandboxTools } from "./tools/sandboxTools.js";
 import { convertMessagesToAnthropic } from "./transport/anthropic.js";
-import { createToolRegistry, type AgentRequest, type AgentResponse, type AgentTransport, type Tool, type ToolContext, type ToolResult } from "./types.js";
+import { createToolRegistry, type AgentRequest, type AgentResponse, type AgentTransport, type Tool, type ToolContext, type ToolResult, type ToolSpec } from "./types.js";
 import { TerminalModelError, TransientModelError } from "./transport/errors.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -218,12 +218,16 @@ function recordingApprovals(decision: "allow" | "deny" | "always" = "allow"): Ap
 function recordingCompactor(result?: (i: { messages: unknown[] }) => {
   compacted: boolean;
   messages: unknown[];
-}): Compactor & { calls: Array<{ messages: unknown[]; windowTokens: number }> } {
-  const calls: Array<{ messages: unknown[]; windowTokens: number }> = [];
+}): Compactor & { calls: Array<{ messages: unknown[]; windowTokens: number; foldBoundary?: number }> } {
+  const calls: Array<{ messages: unknown[]; windowTokens: number; foldBoundary?: number }> = [];
   return {
     calls,
     async maybeCompact(i) {
-      calls.push({ messages: i.messages, windowTokens: i.windowTokens });
+      calls.push({
+        messages: i.messages,
+        windowTokens: i.windowTokens,
+        ...(i.foldBoundary !== undefined ? { foldBoundary: i.foldBoundary } : {}),
+      });
       if (result) {
         const out = result(i);
         return { compacted: out.compacted, messages: out.messages as never[] };
@@ -349,8 +353,15 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     statePatch?: Partial<SessionAgentState>;
     mode?: NormalizedRunJob["mode"];
     prompt?: string;
+    /** Pre-seeded session (the caller appends the durable history itself). */
+    preSeeded?: { userId: string; sessionId: string };
+    /** A child run's supervisor-projected roster (fix I-2). */
+    roster?: ToolSpec[];
+    isSubagent?: boolean;
+    windowTokens?: number;
   }): Promise<Ctx & { transport: AgentTransport; seedRunId: string; runRow: () => Promise<RunRow | null> }> {
-    const { userId, sessionId } = await seedSession();
+    const seeded = o.preSeeded ?? (await seedSession());
+    const { userId, sessionId } = seeded;
     const prompt = o.prompt ?? "do the task";
     const promptMessageId = await seedPrompt(sessionId, prompt);
     const runId = await seedRun(sessionId, promptMessageId);
@@ -374,7 +385,7 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
       compactor: o.compactor ?? recordingCompactor(),
       skills,
       sandbox: o.sandbox === undefined ? null : o.sandbox,
-      windowTokens: 128_000,
+      windowTokens: o.windowTokens ?? 128_000,
       ...(o.maxToolRounds !== undefined ? { maxToolRounds: o.maxToolRounds } : {}),
       ...(o.systemPromptOverride !== undefined ? { systemPromptOverride: o.systemPromptOverride } : {}),
       sleep: o.sleep ?? (async () => {}),
@@ -386,6 +397,8 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
       prompt,
       unattended: false,
       ...(o.mode !== undefined ? { mode: o.mode } : {}),
+      ...(o.roster !== undefined ? { roster: o.roster } : {}),
+      ...(o.isSubagent !== undefined ? { isSubagent: o.isSubagent } : {}),
     };
     const controller = new AbortController();
     const rt: RunTime = { cancelled: false, generation: 1, signal: controller.signal };
@@ -577,6 +590,39 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     expect(result.status).toBe("completed");
     const row = c.requests[1]!.messages.find((m) => m.role === "tool")!;
     expect(row.content.startsWith("DENIED")).toBe(true);
+  });
+
+  it("a child run's projected roster is authoritative (fix I-2: run_shell is DENIED)", async () => {
+    const shell = tool("run_shell");
+    const read = tool("file_read");
+    const script = (): Scripted[] => [
+      {
+        text: "",
+        toolCalls: [{ id: "c1", name: "run_shell", args: { command: "echo hi" } }],
+      },
+      { text: "done" },
+    ];
+
+    // The supervisor projected a roster from `tools:["Read"]`: run_shell is
+    // absent even though `isToolPermitted` (which has no child-policy input)
+    // would admit it. Roster membership alone must decide.
+    const child = await makeCtx({
+      tools: [shell, read],
+      roster: [read.spec],
+      isSubagent: true,
+      script: script(),
+    });
+    const result = await runAgentLoop(child.job, child.deps, child.rt);
+    expect(result.status).toBe("completed");
+    expect(shell.calls).toHaveLength(0);
+    const row = child.requests[1]!.messages.find((m) => m.role === "tool")!;
+    expect(row.content).toContain("DENIED: run_shell");
+
+    // Control: the same call on a top-level run still reaches the registry
+    // through the permission projection (the pre-fix behavior).
+    const top = await makeCtx({ tools: [shell], script: script() });
+    await runAgentLoop(top.job, top.deps, top.rt);
+    expect(shell.calls).toHaveLength(1);
   });
 
   it("repeat guard fires at exactly the third identical call inside the tool row", async () => {
@@ -1322,6 +1368,51 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     expect(afterCompact.messages.some((m) => m.role === "user" && m.content === BUDGET_CONTINUATION_NUDGE)).toBe(true);
     expect(afterCompact.messages.some((m) => m.role === "tool" && m.content === "echo_tool ok" && m.toolCallId === "c0")).toBe(false);
     void turn;
+  });
+
+  it("replays a persisted checkpoint with the DURABLE fold boundary (fix I-3: no folded originals re-sent)", async () => {
+    const seeded = await seedSession();
+    const oldIds: string[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      const row = await messages.append(db, {
+        sessionId: seeded.sessionId,
+        role: i % 2 === 0 ? "user" : "assistant",
+        content: `OLD-${i}`,
+      });
+      oldIds.push(row.id);
+    }
+    const state = createMemoryStateStore();
+    await state.patch(seeded.sessionId, {
+      compaction: {
+        ledger: {},
+        summary: "PERSISTED-CHECKPOINT",
+        // The first four durable rows are already represented by the summary.
+        cutoffMessageId: oldIds[3]!,
+        compactedAtCount: 1,
+      },
+    });
+
+    const c = await makeCtx({
+      preSeeded: seeded,
+      state,
+      prompt: "NEW-PROMPT",
+      script: [{ text: "done" }],
+    });
+    const result = await runAgentLoop(c.job, c.deps, c.rt);
+    expect(result.status).toBe("completed");
+
+    const sent = c.requests[0]!.messages;
+    // The stable checkpoint row leads; the tail starts AFTER the cutoff.
+    expect(sent[0]!.role).toBe("system");
+    expect(sent[0]!.content).toContain("<compacted-summary>");
+    expect(sent[0]!.content).toContain("PERSISTED-CHECKPOINT");
+    const contents = sent.map((m) => m.content);
+    for (const folded of ["OLD-0", "OLD-1", "OLD-2", "OLD-3"]) {
+      expect(contents).not.toContain(folded);
+    }
+    for (const kept of ["OLD-4", "OLD-5", "NEW-PROMPT"]) {
+      expect(contents).toContain(kept);
+    }
   });
 
   it("recovers from a context-overflow terminal by compacting and rebuilding the request", async () => {

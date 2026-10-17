@@ -43,11 +43,12 @@
 // boundary pin.
 //
 // Plan pin vs Dart: the checkpoint replays as a SYSTEM row (Dart: user row);
-// `cutoffMessageId` stays null because cloud AgentMessages carry no ids (T16
-// can populate it from durable message rows); `compactedAtCount` is the plan's
-// compaction COUNT (Dart's same-named session field is the fold boundary
-// INDEX) — the fold boundary is now carried separately as `foldBoundary` /
-// `ledger.folded`.
+// `cutoffMessageId` is the DURABLE fold boundary — the last persisted message
+// row absorbed by the fold (fix round I-3; rows rebuilt from `messages` carry
+// an additive `id`), and `foldBoundaryFor` maps it back to a window-relative
+// index. `compactedAtCount` is the plan's compaction COUNT (Dart's same-named
+// session field is the fold boundary INDEX) — the fold boundary is carried
+// separately as `foldBoundary` / `ledger.folded` / `cutoffMessageId`.
 
 import type {
   CompactionStateJson,
@@ -215,10 +216,12 @@ function stableCheckpointRow(summary: string): AgentMessage {
  * system row followed by the UNFOLDED tail.
  *
  * Boundary resolution, in order:
- *  1. an explicit [foldBoundary] (the caller knows its window);
+ *  1. an explicit [foldBoundary] (the caller knows its window) — for a
+ *     DB-rebuilt history compute it with `foldBoundaryFor`;
  *  2. a leading checkpoint row in [messages] (strip it — idempotent replay);
- *  3. the ledger's cumulative `folded` count (a full history rebuilt from
- *     durable rows, oldest-first).
+ *  3. the ledger's cumulative `folded` count (an IN-MEMORY history that still
+ *     contains every folded row, tool rows included; never use this against
+ *     a DB-rebuilt window — see `foldBoundaryFor`).
  *
  * With no persisted summary the messages pass through unchanged.
  */
@@ -240,6 +243,41 @@ export function applyCheckpoint(
     tail = messages.slice(clamp(folded, 0, messages.length));
   }
   return [stableCheckpointRow(summary), ...tail];
+}
+
+/**
+ * The window-relative fold boundary for a history rebuilt from DURABLE rows
+ * (fix round I-3). `cutoffMessageId` is the last durable row absorbed into the
+ * persisted ledger; every durable row at or below it is already represented by
+ * the checkpoint. Returns the index of the first unfolded row:
+ *
+ *  - no persisted boundary (fresh session, or a pre-fix state): 0 — nothing
+ *    is known to be folded, so the whole window is replayable;
+ *  - the cutoff row is inside [messages]: its index + 1;
+ *  - the cutoff row predates the window (the newest-100 page has dropped it):
+ *    0 — every row in the window is newer than the cutoff and unfolded.
+ *
+ * This is the ONLY safe mapping from the ledger to a DB-derived window: the
+ * ledger's `foldedMessages` counts in-memory tool rows that are never
+ * persisted, so it cannot index durable rows.
+ */
+export function foldBoundaryFor(
+  compaction: CompactionStateJson | null,
+  messages: readonly AgentMessage[],
+): number {
+  const cutoffId = compaction?.cutoffMessageId ?? null;
+  if (cutoffId === null || cutoffId === "") return 0;
+  const index = messages.findIndex((m) => m.id === cutoffId);
+  return index >= 0 ? index + 1 : 0;
+}
+
+/** The last durable row id in a folded span, if any (fix round I-3). */
+function durableCutoffOf(span: readonly AgentMessage[]): string | null {
+  for (let i = span.length - 1; i >= 0; i -= 1) {
+    const id = span[i]!.id;
+    if (typeof id === "string" && id !== "") return id;
+  }
+  return null;
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -462,9 +500,12 @@ export function createCompactor(deps: CompactorDeps): CompactorWithManual {
     const next: CompactionStateJson = {
       ledger: ledger.toJson(),
       summary: checkpoint.text,
-      // AgentMessage carries no durable id; the plan's field is persisted as
-      // null and T16 can fill it from the message rows it owns.
-      cutoffMessageId: null,
+      // The durable fold boundary (fix round I-3): the last DB-persisted row
+      // absorbed by this fold. In-memory rows (tool calls/results, nudges)
+      // carry no id and are never persisted, so a span made only of those
+      // leaves the previous durable boundary intact.
+      cutoffMessageId:
+        durableCutoffOf(span) ?? state.compaction?.cutoffMessageId ?? null,
       compactedAtCount: (state.compaction?.compactedAtCount ?? 0) + 1,
     };
     await deps.state.patch(sessionId, { compaction: next });

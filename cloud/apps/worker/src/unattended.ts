@@ -1,15 +1,20 @@
 /**
  * P4 Task 7: the unattended-approval seam over P3's approval gate.
  *
- * P3 Task 12 exported that decision point on purpose — `createApprovalGate`'s
- * optional `timeoutPolicy(req, { unattended })` — so the scheduler lane could
- * extend it here without touching agent-core. When the scheduler fires a run
- * for a claimed `schedule_runs` occurrence, the wiring (Task 8/9's loop)
- * builds the gate's timeout policy from this hook: an approval that nobody
- * answers within UNATTENDED_APPROVAL_TIMEOUT_MS (spec §6.2 default-deny) is
- * auto-denied, the denial is ledgered on the occurrence (`auto_denied`), and
- * the user got a push BEFORE the clock ran out (onApprovalRequested).
- * Attended runs — a run no schedule_run references — are strict no-ops.
+ * P3 Task 12 exported the per-request decision point on purpose —
+ * `createApprovalGate`'s optional `timeoutPolicy(req, { unattended, runId })`
+ * — so the scheduler lane could extend it here without touching agent-core.
+ * When the scheduler fires a run for a claimed `schedule_runs` occurrence, the
+ * wiring (Task 8/9's loop) builds the gate's timeout policy from this hook: an
+ * approval that nobody answers within UNATTENDED_APPROVAL_TIMEOUT_MS (spec
+ * §6.2 default-deny) is auto-denied.
+ *
+ * The two side effects are wired through the gate's `onRequested`/`onTimeout`
+ * callbacks (P3 fix round, P4-T10 carry): `onRequested` pushes the approval
+ * card BEFORE the bridge starts the timeout clock, and `onTimeout` ledgers the
+ * denial on the occurrence (`auto_denied`) before the `approval_resolved`
+ * event. The processor's adapter forwards only for unattended runs; attended
+ * runs — a run no schedule_run references — are strict no-ops.
  */
 
 import type { ApprovalTimeoutPolicy } from "@ovid/agent-core";
@@ -101,23 +106,27 @@ export function createUnattendedApprovalHook(deps: {
 }
 
 /**
- * P4 Task 10 — the composition-root wiring of the hook into P3's
+ * P4 Task 10 — the timeout half of the composition-root wiring into P3's
  * `createApprovalGate` seam.
  *
- * P3 exports exactly one per-request decision point,
- * `timeoutPolicy(req, { unattended }) => number`, and it is synchronous. The
- * hook's push/ledger methods are async and keyed by runId, which the policy
- * does not receive — so this adapter supplies the half the gate can consume:
- * unattended requests get the hook's pinned 120 s default-deny; attended
- * requests keep the env override (or the 120 s default). `undefined` means
- * "do not install a policy" (the processor is used without the hook, e.g.
- * P1/P2 tests), preserving the gate's structural attended question/plan rule.
+ * `timeoutPolicy(req, { unattended, runId })` is synchronous and returns the
+ * per-request timeout: unattended requests get the hook's pinned 120 s
+ * default-deny; attended requests keep the env override (or the 120 s
+ * default). The run-scoped side effects are NOT here — they ride the gate's
+ * `onRequested`/`onTimeout` callbacks (see runProcessor), which receive the
+ * full approval context. `unattendedTimeoutMs` defaults to the spec's 120 s;
+ * the processor passes OVID_APPROVAL_TIMEOUT_MS through when it is set, so the
+ * documented env seam (and its short-timeout tests) applies to unattended
+ * requests too. `undefined` for the hook means "do not install a policy" (the
+ * processor is used without the hook, e.g. P1/P2 tests), preserving the
+ * gate's structural attended question/plan rule.
  */
 export function unattendedTimeoutPolicy(
   hook: UnattendedApprovalHook | undefined,
   attendedTimeoutMs: number,
+  unattendedTimeoutMs: number = UNATTENDED_APPROVAL_TIMEOUT_MS,
 ): ApprovalTimeoutPolicy | undefined {
   if (hook === undefined) return undefined;
   return (_req, ctx) =>
-    ctx.unattended ? UNATTENDED_APPROVAL_TIMEOUT_MS : attendedTimeoutMs;
+    ctx.unattended ? unattendedTimeoutMs : attendedTimeoutMs;
 }

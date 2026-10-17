@@ -545,6 +545,95 @@ describe.skipIf(!TEST_DATABASE_URL)("createApprovalGate (real postgres)", () => 
     expect(await pendingA).toBe("deny");
   });
 
+  it("the timeout policy context carries runId (P4-T10 carry)", async () => {
+    const ctx = await seedSession();
+    const { bridge, asks } = fakeBridge();
+    let seenRunId: string | null = null;
+    const gate = createApprovalGate({
+      db,
+      bridge,
+      sinkFactory: fakeSinkFactory().sinkFactory,
+      timeoutPolicy: (_req, policyCtx) => {
+        seenRunId = policyCtx.runId;
+        return 250;
+      },
+    });
+    const pending = gate.approve(ctx, approvalRequest());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(seenRunId).toBe(ctx.runId);
+    asks[0]!.settle("allow");
+    expect(await pending).toBe("allow");
+  });
+
+  it("onRequested fires before the bridge asks; onTimeout only on a timeout (P4-T10 carry)", async () => {
+    const ctx = { ...(await seedSession()), unattended: true };
+    const { bridge, asks } = fakeBridge();
+    const seen: Array<{ phase: string; runId: string; unattended: boolean; tool: string }> = [];
+    const gate = createApprovalGate({
+      db,
+      bridge,
+      sinkFactory: fakeSinkFactory().sinkFactory,
+      onRequested: (promptCtx, req) => {
+        // The bridge has NOT been called yet: the push beats the clock.
+        expect(asks).toHaveLength(0);
+        seen.push({
+          phase: "requested",
+          runId: promptCtx.runId,
+          unattended: promptCtx.unattended,
+          tool: req.tool,
+        });
+      },
+      onTimeout: (promptCtx, req) => {
+        seen.push({
+          phase: "timeout",
+          runId: promptCtx.runId,
+          unattended: promptCtx.unattended,
+          tool: req.tool,
+        });
+      },
+    });
+    const req = approvalRequest();
+    const pending = gate.approve(ctx, req);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(seen).toEqual([
+      { phase: "requested", runId: ctx.runId, unattended: true, tool: req.tool },
+    ]);
+    asks[0]!.settle("timeout");
+    expect(await pending).toBe("deny");
+    expect(seen.map((s) => s.phase)).toEqual(["requested", "timeout"]);
+
+    // A user allow never fires onTimeout. (A different tool/summary: the
+    // timed-out targetless request above is remembered as a denial.)
+    const pending2 = gate.approve(
+      ctx,
+      approvalRequest({ tool: "fetch_url", summary: "Fetch: example.test" }),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    asks[1]!.settle("allow");
+    expect(await pending2).toBe("allow");
+    expect(seen.filter((s) => s.phase === "timeout")).toHaveLength(1);
+  });
+
+  it("a failing side-effect callback never breaks the approval (best-effort seam)", async () => {
+    const ctx = await seedSession();
+    const { bridge, asks } = fakeBridge();
+    const gate = createApprovalGate({
+      db,
+      bridge,
+      sinkFactory: fakeSinkFactory().sinkFactory,
+      onRequested: () => {
+        throw new Error("push backend down");
+      },
+      onTimeout: () => {
+        throw new Error("ledger down");
+      },
+    });
+    const pending = gate.approve(ctx, approvalRequest());
+    await new Promise((r) => setTimeout(r, 20));
+    asks[0]!.settle("timeout");
+    expect(await pending).toBe("deny");
+  });
+
   it("the ctx signal is passed through to the bridge (abort → deny is the bridge's contract)", async () => {
     const ctx = await seedSession();
     const controller = new AbortController();

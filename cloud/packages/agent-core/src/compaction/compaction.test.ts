@@ -36,7 +36,7 @@ import {
   summarizerSystemPrompt,
   summarizerUserPrompt,
 } from "./checkpoint.js";
-import { applyCheckpoint, createCompactor, isCheckpointRow } from "./compactor.js";
+import { applyCheckpoint, createCompactor, foldBoundaryFor, isCheckpointRow } from "./compactor.js";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -688,6 +688,95 @@ describe("compactor", () => {
 
     // No compaction -> pass-through.
     expect(applyCheckpoint(null, msgs)).toEqual(msgs);
+  });
+
+  /** A durable history with stable ids, as the loop rebuilds it from rows. */
+  function durableSession(count: number): AgentMessage[] {
+    const out: AgentMessage[] = [];
+    for (let i = 0; i < count; i += 1) {
+      out.push({
+        role: "user",
+        content: `user message ${i} ${"x".repeat(80)}`,
+        id: `durable-${i}-user`,
+      });
+      out.push({
+        role: "assistant",
+        content: `assistant reply ${i} ${"y".repeat(80)}`,
+        id: `durable-${i}-assistant`,
+      });
+    }
+    return out;
+  }
+
+  it("manual compactNow after a durable rebuild does not double-count (fix I-3: 8→16 probe)", async () => {
+    const { state, compactor } = setup();
+    await patchState(state, "fix-i3-manual");
+    const first = await compactor.compactNow({
+      sessionId: "fix-i3-manual",
+      messages: durableSession(20),
+      windowTokens: 128_000,
+    });
+    expect(first.compacted).toBe(true);
+    const users1 = CompactionLedger.of((await state.get("fix-i3-manual")).compaction)!
+      .userMessages.length;
+    expect(users1).toBe(8);
+    // The durable boundary is the last folded row's id, not the in-memory
+    // (tool-row-inclusive) folded count.
+    expect((await state.get("fix-i3-manual")).compaction!.cutoffMessageId).toBe(
+      "durable-7-assistant",
+    );
+
+    // The /compact path rebuilds the SAME history from durable rows and
+    // passes the mapped boundary.
+    const rebuilt = durableSession(20);
+    const second = await compactor.compactNow({
+      sessionId: "fix-i3-manual",
+      messages: rebuilt,
+      windowTokens: 128_000,
+      foldBoundary: foldBoundaryFor(
+        (await state.get("fix-i3-manual")).compaction,
+        rebuilt,
+      ),
+    });
+    expect(second.compacted).toBe(false);
+    const users2 = CompactionLedger.of((await state.get("fix-i3-manual")).compaction)!
+      .userMessages.length;
+    expect(users2).toBe(users1); // was 16 before the fix
+  });
+
+  it("next-run replay + auto compaction does not double-count (fix I-3: 17→34 probe)", async () => {
+    const { state, compactor } = setup();
+    await patchState(state, "fix-i3-replay");
+    const first = await compactor.maybeCompact({
+      sessionId: "fix-i3-replay",
+      messages: durableSession(20),
+      windowTokens: 1_000,
+    });
+    expect(first.compacted).toBe(true);
+    const saved = (await state.get("fix-i3-replay")).compaction!;
+    const users1 = CompactionLedger.of(saved)!.userMessages.length;
+    expect(users1).toBeGreaterThan(0);
+
+    // The loop's next run: rebuild from durable rows, map the boundary, replay
+    // (checkpoint row + unfolded tail), then compact at a budget boundary with
+    // the checkpoint row excluded.
+    const dbHistory = durableSession(20);
+    const boundary = foldBoundaryFor(saved, dbHistory);
+    expect(boundary).toBeGreaterThan(0);
+    const replay = applyCheckpoint(saved, dbHistory, boundary);
+    expect(isCheckpointRow(replay[0])).toBe(true);
+    expect(replay.length).toBe(1 + dbHistory.length - boundary);
+
+    const second = await compactor.maybeCompact({
+      sessionId: "fix-i3-replay",
+      messages: replay,
+      windowTokens: 1_000,
+      foldBoundary: 1,
+    });
+    expect(second.compacted).toBe(false);
+    const users2 = CompactionLedger.of((await state.get("fix-i3-replay")).compaction)!
+      .userMessages.length;
+    expect(users2).toBe(users1); // was 34 before the fix
   });
 
   it("absorbs only the span after an explicit fold boundary (no re-absorption)", async () => {

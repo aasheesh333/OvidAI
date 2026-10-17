@@ -1526,11 +1526,14 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
     // -----------------------------------------------------------------------
 
     /** A fake SandboxPort recording exec requests (callKey included). */
-    function makeFakePort(execResult: { exitCode: number; stdout: string; stderr: string } = {
-      exitCode: 0,
-      stdout: "",
-      stderr: "",
-    }): { port: SandboxPort; execs: Array<{ cmd: string; callKey?: string }> } {
+    function makeFakePort(
+      execResult: { exitCode: number; stdout: string; stderr: string } = {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      },
+      files: Record<string, string> = {},
+    ): { port: SandboxPort; execs: Array<{ cmd: string; callKey?: string }> } {
       const execs: Array<{ cmd: string; callKey?: string }> = [];
       const port: SandboxPort = {
         async exec(_userId, o) {
@@ -1538,8 +1541,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
           return execResult;
         },
         async killCall() {},
-        async readFile() {
-          return "";
+        async readFile(_userId, path) {
+          return files[path] ?? "";
         },
         async writeFile() {},
         async exists() {
@@ -1700,6 +1703,98 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(await readMirror(seeded.sessionId)).toEqual(evts);
     });
 
+    it("full processor: the five subagent tools are registered (fix I-1)", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort();
+      const sse = await startTurnSse([textTurn("done")]);
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      const advertised = (
+        sse.requests[0]!.tools as Array<{ function: { name: string } }>
+      ).map((t) => t.function.name);
+      for (const name of [
+        "dispatch_agent",
+        "send_message",
+        "list_agents",
+        "interrupt_agent",
+        "report",
+      ]) {
+        expect(advertised).toContain(name);
+      }
+    });
+
+    it("full processor: dispatch_agent runs a real child loop and returns its report (fix I-1)", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort();
+      const sse = await startTurnSse([
+        toolCallTurn("call_d", "dispatch_agent", { prompt: "child task" }),
+        textTurn("child answer"),
+        textTurn("parent done"),
+      ]);
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toContain("subagent_started");
+      expect(types(evts)).toContain("subagent_completed");
+      const completed = evts.find(
+        (e) => e.type === "tool_completed" && e.payload.name === "dispatch_agent",
+      )!;
+      expect(completed.payload).toMatchObject({ ok: true, content: "child answer" });
+      // The child is a real session with its own persisted transcript.
+      const started = evts.find((e) => e.type === "subagent_started")!;
+      const childSessionId = String(started.payload.childSessionId);
+      const childRows = await messages.page(db, childSessionId, { limit: 10 });
+      expect(childRows.rows.some((r) => r.role === "assistant" && r.content === "child answer")).toBe(true);
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+    });
+
+    it("full processor: a prompt hook is model-evaluated and can block (fix I-6)", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort(undefined, {
+        ".dsh/hooks.json": JSON.stringify([
+          {
+            event: "UserPromptSubmit",
+            type: "prompt",
+            prompt: "Never allow the word banana.",
+            id: "h1",
+          },
+        ]),
+      });
+      const sse = await startTurnSse([textTurn("block: banana is forbidden")]);
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      const evts = await readEvents(seeded.sessionId);
+      const failed = evts.find((e) => e.type === "run_failed")!;
+      expect(failed.payload).toMatchObject({ code: "hook_blocked" });
+      expect(String(failed.payload.message)).toContain("banana");
+      // The evaluator is a QUIET one-shot call: exactly one model request
+      // (the rule), no transcript deltas, and the main run never starts.
+      expect(sse.requests).toHaveLength(1);
+      expect(JSON.stringify(sse.requests[0]!.messages)).toContain(
+        "Never allow the word banana.",
+      );
+      expect(evts.some((e) => e.type === "message_delta")).toBe(false);
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "failed" });
+    });
+
     it("full processor: unattended approval timeout → approval_resolved{unattended_timeout}, DENIED tool result, run CONTINUES", async () => {
       const seeded = await seedRun();
       const sbx = makeFakePort();
@@ -1739,6 +1834,103 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(sbx.execs).toEqual([]);
       // spec §8: reported, never crashed — the run finishes normally.
       expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+    });
+
+    /**
+     * P4-T10 carry: the run-scoped approval hook. `onApprovalRequested` must
+     * fire BEFORE the timeout clock (the push) and `onApprovalAutoDenied` when
+     * that clock fires, so the schedule occurrence's `auto_denied` ledger is
+     * populated. Attended runs must invoke neither.
+     */
+    function recordingUnattendedHook(): {
+      hook: NonNullable<FullRunDeps["unattendedApprovalHook"]>;
+      calls: string[];
+    } {
+      const calls: string[] = [];
+      return {
+        calls,
+        hook: {
+          async isUnattendedRun() {
+            return true;
+          },
+          async onApprovalRequested(runId, req) {
+            calls.push(`requested:${runId}:${req.toolName}`);
+          },
+          async onApprovalAutoDenied(runId, req) {
+            calls.push(`denied:${runId}:${req.toolName}`);
+          },
+        },
+      };
+    }
+
+    it("full processor: an unattended timeout invokes the hook's push then auto-denied ledger (P4 carry)", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort();
+      const sse = await startTurnSse([
+        toolCallTurn("call_p", "run_shell", { command: "rm -rf /tmp/ovid-p4-seam" }),
+        textTurn("understood"),
+      ]);
+      const { hook, calls } = recordingUnattendedHook();
+      const processor = createFullAgentRunProcessor(
+        makeFullDeps(sse.url, sbx.port, {
+          approvalTimeoutMs: 150,
+          unattendedApprovalHook: hook,
+        }),
+      );
+      try {
+        await processor({
+          data: {
+            runId: seeded.runId,
+            sessionId: seeded.sessionId,
+            userId: seeded.uid,
+            prompt: seeded.prompt,
+            unattended: true,
+          },
+        });
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      expect(calls).toEqual([
+        `requested:${seeded.runId}:run_shell`,
+        `denied:${seeded.runId}:run_shell`,
+      ]);
+      const evts = await readEvents(seeded.sessionId);
+      expect(evts.find((e) => e.type === "approval_resolved")!.payload).toMatchObject({
+        decision: "deny",
+        reason: "unattended_timeout",
+      });
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+    });
+
+    it("full processor: an ATTENDED timeout does not invoke the unattended hook (P4 carry)", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort();
+      const sse = await startTurnSse([
+        toolCallTurn("call_p", "run_shell", { command: "rm -rf /tmp/ovid-p4-attended" }),
+        textTurn("understood"),
+      ]);
+      const { hook, calls } = recordingUnattendedHook();
+      const processor = createFullAgentRunProcessor(
+        makeFullDeps(sse.url, sbx.port, {
+          approvalTimeoutMs: 150,
+          unattendedApprovalHook: hook,
+        }),
+      );
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      expect(calls).toEqual([]);
+      const evts = await readEvents(seeded.sessionId);
+      expect(evts.find((e) => e.type === "approval_resolved")!.payload).toMatchObject({
+        decision: "deny",
+        reason: "timeout",
+      });
     });
 
     it("full processor: mode:'safe' feeds modePolicy — write_file denied outright, no approval card", async () => {

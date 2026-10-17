@@ -37,7 +37,7 @@ import {
   todoNudgeMessage,
   type GuardState,
 } from "./guards.js";
-import { applyCheckpoint } from "./compaction/compactor.js";
+import { applyCheckpoint, foldBoundaryFor, isCheckpointRow } from "./compaction/compactor.js";
 import type { KeyResolver } from "./keys.js";
 import { presetById, type AgentPreset } from "./presets.js";
 import { canonicalTools, markCacheBreakpoints } from "./promptCache.js";
@@ -599,16 +599,24 @@ export async function runAgentLoop(
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     const row = rows[i]!;
     if (row.role === "user" || row.role === "assistant" || row.role === "system") {
-      history.push({ role: row.role, content: row.content });
+      // `id` is the durable-row seam for the compaction fold boundary (fix
+      // round I-3); transports never serialize it.
+      history.push({ role: row.role, content: row.content, id: row.id });
     }
   }
   let msgs: AgentMessage[] = history;
   // Checkpoint replay (T16 review I4): a persisted compaction summary is the
-  // stable system row for every later run of the session. `foldBoundary: 0`
-  // keeps the whole (already HISTORY_LIMIT-bounded) history as the tail — the
-  // ledger's folded count indexes the FULL history, not this window, so
-  // slicing by it could drop retained messages.
-  msgs = applyCheckpoint(state.compaction, msgs, 0);
+  // stable system row for every later run of the session. The tail starts at
+  // the DURABLE fold boundary (fix round I-3): `cutoffMessageId` marks the last
+  // persisted row already absorbed into the ledger, so folded originals are
+  // neither re-sent below the summary nor re-absorbed by the next compaction.
+  // The ledger's in-memory `foldedMessages` count cannot be used here (it
+  // counts tool rows, which are never persisted).
+  msgs = applyCheckpoint(
+    state.compaction,
+    msgs,
+    foldBoundaryFor(state.compaction, msgs),
+  );
   // The CURRENT turn's prompt is authoritative: a slash-command pre-pass
   // (full processor) may have rewritten it (e.g. a skill invocation). The
   // gateway persisted the raw composer line, so replace the trailing user row
@@ -874,6 +882,10 @@ export async function runAgentLoop(
             sessionId,
             messages: msgs,
             windowTokens: deps.windowTokens,
+            // The checkpoint row at index 0 is never part of the foldable
+            // span (fix round I-3). Without a checkpoint this run's history
+            // starts at a real row.
+            foldBoundary: isCheckpointRow(msgs[0]) ? 1 : 0,
           });
           msgs = [...compacted.messages];
           continue;
@@ -1041,21 +1053,31 @@ export async function runAgentLoop(
         // is wired (nothing to advertise), but the dispatch gate must still
         // admit them so the mode policy produces the pinned denial (the T15
         // mode-policy tests). Permission is the conjunctive source of truth.
-        if (
-          result === null &&
-          !rosterNames.has(call.name) &&
-          !isToolPermitted(
-            call.name,
-            rosterContext(state, mode, deps, job.isSubagent ?? false),
-          ) &&
-          deps.allowUnrosteredTools !== true
-        ) {
-          result = {
-            content: `DENIED: ${call.name} is not available in ${
-              state.planMode ? "plan" : mode
-            } mode`,
-            isError: true,
-          };
+        //
+        // CONTAINMENT (fix round I-2): a CHILD run's roster is authoritative.
+        // `job.roster` is the supervisor's projection after
+        // CHILD_DENIED_TOOLS + the dispatch's `tools`/`disallowedTools`
+        // policy, and `isToolPermitted` has no child-policy input — so for a
+        // child, roster membership alone decides. Without this a
+        // prompt-injected child could call a tool its policy removed simply
+        // because the permission projection (which knows nothing about that
+        // policy) admits it.
+        if (result === null && !rosterNames.has(call.name)) {
+          const admitted =
+            job.roster === undefined &&
+            (deps.allowUnrosteredTools === true ||
+              isToolPermitted(
+                call.name,
+                rosterContext(state, mode, deps, job.isSubagent ?? false),
+              ));
+          if (!admitted) {
+            result = {
+              content: `DENIED: ${call.name} is not available in ${
+                state.planMode ? "plan" : mode
+              } mode`,
+              isError: true,
+            };
+          }
         }
 
         const tool: Tool | undefined = deps.registry.get(call.name);
@@ -1265,6 +1287,7 @@ export async function runAgentLoop(
           sessionId,
           messages: msgs,
           windowTokens: deps.windowTokens,
+          foldBoundary: isCheckpointRow(msgs[0]) ? 1 : 0,
         });
         // T19 carry (T16 review I4): apply the RETURNED messages even when
         // `compacted === false` — prune-only relief rewrites oversized tool

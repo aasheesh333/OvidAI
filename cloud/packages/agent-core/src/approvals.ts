@@ -26,7 +26,15 @@
 // seam the unattended-timeout tests inject short timeouts through).
 // deps.timeoutPolicy, when provided, computes the per-request timeout for
 // everything outside the attended question/plan exception — the exported
-// decision point P4's UnattendedApprovalHook extends at its own seam.
+// decision point P4's UnattendedApprovalHook extends at its own seam. Its
+// context carries the owning `runId` (additive, fix round) because P4's hook
+// is run-scoped.
+//
+// deps.onRequested / deps.onTimeout are the run-scoped side-effect seam: the
+// former runs after `approval_requested` and before the bridge's timeout
+// clock, the latter only when the bridge settles as a timeout. The worker
+// forwards both to P4's UnattendedApprovalHook (push + auto-denied ledger),
+// and it — not the gate — decides that attended runs are no-ops.
 //
 // The ABORT signal resolves "deny" inside the bridge (worker
 // approvalBridge.ts) — the gate only passes ctx.signal through.
@@ -50,13 +58,46 @@ export const APPROVAL_TIMEOUT_MS = 120_000;
 
 /**
  * Per-request timeout decision point. P4's UnattendedApprovalHook extends
- * this seam: it receives the request and the unattended flag and returns
- * the timeout (the fixed default / the env override applies when unset).
+ * this seam: it receives the request, the unattended flag and the owning
+ * runId (additive — existing `(req, {unattended}) => number` implementations
+ * remain assignable and simply ignore it) and returns the timeout (the fixed
+ * default / the env override applies when unset).
  */
 export type ApprovalTimeoutPolicy = (
   req: ApprovalRequest,
-  ctx: { unattended: boolean },
+  ctx: { unattended: boolean; runId: string },
 ) => number;
+
+/**
+ * The run/session context handed to the gate's side-effect callbacks. This is
+ * the subset of the approve() context the P4 unattended hook needs (its
+ * push/ledger methods are run-scoped).
+ */
+export interface ApprovalPromptContext {
+  sessionId: string;
+  runId: string;
+  userId: string;
+  mode: ToolContext["mode"];
+  planMode: boolean;
+  unattended: boolean;
+}
+
+/**
+ * Optional side effects around the prompt (P4-T10 carry): `onRequested` runs
+ * after `approval_requested` is emitted and BEFORE the bridge starts the
+ * timeout clock (the push must beat the clock); `onTimeout` runs when the
+ * bridge settles as `"timeout"` (never on a user deny). Both are best-effort:
+ * a rejection is swallowed so an observability/push failure can never break
+ * the approval flow.
+ */
+export type ApprovalRequestedCallback = (
+  ctx: ApprovalPromptContext,
+  req: ApprovalRequest,
+) => void | Promise<void>;
+export type ApprovalTimeoutCallback = (
+  ctx: ApprovalPromptContext,
+  req: ApprovalRequest,
+) => void | Promise<void>;
 
 /** The gate's deps: grants + bridge + the session event sink factory. */
 export interface ApprovalGateDeps {
@@ -67,6 +108,10 @@ export interface ApprovalGateDeps {
   timeoutMs?: number;
   /** Computes the per-request timeout when provided (P4 seam). */
   timeoutPolicy?: ApprovalTimeoutPolicy;
+  /** Push/ledger seam: a prompt is about to be raised (P4 unattended hook). */
+  onRequested?: ApprovalRequestedCallback;
+  /** Push/ledger seam: the prompt timed out (P4 unattended hook). */
+  onTimeout?: ApprovalTimeoutCallback;
 }
 
 /**
@@ -89,15 +134,35 @@ export function createApprovalGate(deps: ApprovalGateDeps): ApprovalGateHandle {
 
   const baseTimeout = deps.timeoutMs ?? APPROVAL_TIMEOUT_MS;
 
-  function effectiveTimeoutMs(req: ApprovalRequest, unattended: boolean): number {
+  function effectiveTimeoutMs(
+    req: ApprovalRequest,
+    ctx: { unattended: boolean; runId: string },
+  ): number {
     // Structural rule first: an attended question/plan card waits — the
     // interaction itself is the point, and a policy/override must not be
     // able to time it out. Everything else: policy, else the default.
-    if ((req.kind === "question" || req.kind === "plan") && !unattended) return 0;
+    if ((req.kind === "question" || req.kind === "plan") && !ctx.unattended) return 0;
     if (deps.timeoutPolicy !== undefined) {
-      return deps.timeoutPolicy(req, { unattended });
+      return deps.timeoutPolicy(req, {
+        unattended: ctx.unattended,
+        runId: ctx.runId,
+      });
     }
     return baseTimeout;
+  }
+
+  /** Best-effort side effect: a failure never breaks the approval flow. */
+  async function fireCallback(
+    fn: ApprovalRequestedCallback | ApprovalTimeoutCallback | undefined,
+    ctx: ApprovalPromptContext,
+    req: ApprovalRequest,
+  ): Promise<void> {
+    if (fn === undefined) return;
+    try {
+      await fn(ctx, req);
+    } catch {
+      // Push/ledger failures are observability, never a decision.
+    }
   }
 
   function rememberDenial(sessionId: string, key: string): void {
@@ -143,9 +208,17 @@ export function createApprovalGate(deps: ApprovalGateDeps): ApprovalGateHandle {
         return "deny"; // auto-deny WITHOUT prompting (Dart parity: silent)
       }
 
-      // ---- 3. prompt: request event → bridge → resolved event ----
+      // ---- 3. prompt: request event → onRequested → bridge → resolved ----
       const sink: EventSink = deps.sinkFactory(ctx.sessionId);
-      const timeoutMs = effectiveTimeoutMs(req, ctx.unattended);
+      const promptCtx: ApprovalPromptContext = {
+        sessionId: ctx.sessionId,
+        runId: ctx.runId,
+        userId: ctx.userId,
+        mode: ctx.mode,
+        planMode: ctx.planMode,
+        unattended: ctx.unattended,
+      };
+      const timeoutMs = effectiveTimeoutMs(req, promptCtx);
       const expiresAt =
         timeoutMs > 0 ? new Date(Date.now() + timeoutMs).toISOString() : null;
       await sink.emit("approval_requested", {
@@ -157,6 +230,9 @@ export function createApprovalGate(deps: ApprovalGateDeps): ApprovalGateHandle {
         allowAlways: req.allowAlways,
         expiresAt,
       });
+      // The push/ledger seam runs BEFORE the bridge starts the clock, so an
+      // unattended run's notification always precedes the auto-deny.
+      await fireCallback(deps.onRequested, promptCtx, req);
 
       const settled = await deps.bridge.ask(req, {
         sessionId: ctx.sessionId,
@@ -168,6 +244,12 @@ export function createApprovalGate(deps: ApprovalGateDeps): ApprovalGateHandle {
       const decision: ApprovalDecision = timedOut ? "deny" : settled;
       const reason =
         timedOut === true ? (ctx.unattended ? "unattended_timeout" : "timeout") : undefined;
+      if (timedOut) {
+        // The occurrence's auto-denied ledger entry lands before the resolved
+        // event, so a schedule run that reads the ledger after this point sees
+        // the denial (P4 §8).
+        await fireCallback(deps.onTimeout, promptCtx, req);
+      }
 
       // ---- 4. "always" + targets → one grant row per target ----
       if (decision === "always" && targets.length > 0) {

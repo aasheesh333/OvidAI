@@ -88,7 +88,13 @@ export interface HookEngine {
   promptContextFor(sessionId: string): string | null;
 }
 export interface Compactor {              // Task 19
-  maybeCompact(i: { sessionId: string; messages: AgentMessage[]; windowTokens: number }): Promise<{ compacted: boolean; messages: AgentMessage[] }>;
+  /**
+   * `foldBoundary` (additive, fix round I-3) is the window-relative index of
+   * the first unfolded message — compute it for a DB-rebuilt history with
+   * `foldBoundaryFor`. The returned `foldBoundary` is the boundary of the
+   * RETURNED array (0 = nothing folded, 1 = the checkpoint row at index 0).
+   */
+  maybeCompact(i: { sessionId: string; messages: AgentMessage[]; windowTokens: number; foldBoundary?: number }): Promise<{ compacted: boolean; messages: AgentMessage[]; foldBoundary?: number }>;
   pruneOversizedToolResults(i: { sessionId: string; messages: AgentMessage[]; thresholdTokens: number }): Promise<{ pruned: number; messages: AgentMessage[] }>;
 }
 export interface TodoItem { content: string; status: "pending" | "in_progress" | "completed"; }

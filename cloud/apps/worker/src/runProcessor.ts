@@ -47,13 +47,18 @@ import {
   createSkillCatalog,
   createSkillTool,
   createSsrfGuard,
+  createSubagentSupervisor,
+  createSubagentTools,
   createToolRegistry as createCoreToolRegistry,
   createWebSearchTool,
   findApplicableGrant,
+  foldBoundaryFor,
   litellmKeyResolver,
   normalizeGrantHost,
   presetById,
+  resolveRoute,
   type AgentTransport,
+  type AgentEngine,
   type Compactor,
   type EgressFetch,
   type EgressHopHook,
@@ -274,6 +279,15 @@ export interface FullRunDeps {
    * get the pinned 120 s default-deny. Absent → the gate's pre-P4 behavior.
    */
   unattendedApprovalHook?: UnattendedApprovalHook;
+  /**
+   * P4 Task 13: extra tools registered on the per-run roster. The scheduler
+   * tools (`createScheduleTools`) enter production this way. Canonical
+   * `Tool[]` (not the P2 shape): they need no sandbox handle, so adapting
+   * them through `adaptAgentTool` would force a needless per-call attach.
+   * Additive (same pattern as `unattendedApprovalHook` above): absent → the
+   * pre-P4 roster exactly.
+   */
+  extraTools?: readonly CoreTool[];
 }
 
 /** The full processor plus its shutdown handle (the redis approval bridge). */
@@ -1111,19 +1125,20 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     db: deps.db,
   });
 
-  // P4 Task 10: the P3-T12 timeout seam. The hook's presence (wired by
-  // main.ts) installs the per-request policy; the gate still owns the
-  // structural attended question/plan rule.
-  //
-  // P4-SEAM: P3's `timeoutPolicy(req, { unattended })` receives NO runId, so
-  // the hook's async `onApprovalRequested` / `onApprovalAutoDenied` cannot be
-  // called from this decision point. The 120 s default-deny IS wired here;
-  // if the P3 fix round widens the policy context with `runId` (or adds
-  // request/timeout callbacks), invoke the hook's two side-effect methods
-  // there. Boot logs `[scheduler] P3 tool/approval seam not wired` until then.
+  // P4 Task 10 + P3 fix round: the P3-T12 approval seam. The hook's presence
+  // (wired by main.ts) installs the per-request policy AND the run-scoped
+  // side-effect callbacks; the gate still owns the structural attended
+  // question/plan rule. `timeoutPolicy` now receives `runId`, and
+  // `onRequested`/`onTimeout` forward to the hook's push/ledger methods for
+  // unattended runs. Attended runs remain strict no-ops (checked here, not in
+  // the gate, so the gate stays a generic seam).
+  const unattendedHook = deps.unattendedApprovalHook;
   const timeoutPolicy = unattendedTimeoutPolicy(
-    deps.unattendedApprovalHook,
+    unattendedHook,
     deps.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS,
+    // The env override applies to unattended requests too when explicitly set;
+    // absent → the spec's 120 s constant.
+    deps.approvalTimeoutMs,
   );
 
   const approvals = createApprovalGate({
@@ -1136,6 +1151,25 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       ? { timeoutMs: deps.approvalTimeoutMs }
       : {}),
     ...(timeoutPolicy !== undefined ? { timeoutPolicy } : {}),
+    ...(unattendedHook !== undefined
+      ? {
+          onRequested: async (ctx, req) => {
+            if (!ctx.unattended) return;
+            await unattendedHook.onApprovalRequested(ctx.runId, {
+              toolName: req.tool,
+              summary: req.summary,
+              question: req.kind === "question",
+            });
+          },
+          onTimeout: async (ctx, req) => {
+            if (!ctx.unattended) return;
+            await unattendedHook.onApprovalAutoDenied(ctx.runId, {
+              toolName: req.tool,
+              summary: req.summary,
+            });
+          },
+        }
+      : {}),
   });
 
   // Guarded egress for EVERY provider/tool call (spec D3/§11). No raw fetch.
@@ -1206,6 +1240,8 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     userId: string;
     tier: "free" | "pro";
     skills: SkillCatalog;
+    /** Run-scoped tools that need the live engine/supervisor (Task 20). */
+    extraTools?: readonly CoreTool[];
   }): CoreToolRegistry => {
     const p2Tools = adaptAgentTools(workerRegistry.tools, {
       sandboxFor: async (ctx) =>
@@ -1216,8 +1252,12 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       emitEventFor: (ctx) => (type, payload) => sinkFor(ctx.sessionId).emit(type, payload),
     });
 
+    // P4 Task 13: additive roster extension (schedule tools in production).
+    // Canonical tools spread beside the built-ins; the registry stays the
+    // only roster builder.
     const coreTools = [
       ...p2Tools,
+      ...(deps.extraTools ?? []),
       ...createSandboxTools({ sandbox: o.sandbox }),
       withGrantHop(
         createFetchUrlTool({
@@ -1239,6 +1279,12 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
         catalog: o.skills,
         onActivate: createSkillActivation(state),
       }),
+      // Task 20 (fix round I-1): the subagent family. The supervisor's engine
+      // and registry are late-bound (both are constructed after this list —
+      // the engine consumes the registry, and the supervisor reads it to
+      // project a child's roster), so the five tools are reachable here
+      // without a second registry.
+      ...(o.extraTools ?? []),
     ];
     return createCoreToolRegistry(coreTools);
   };
@@ -1356,12 +1402,73 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     // Hooks: workspace `.dsh/hooks.json`, executing in the run owner's jail.
     // A missing userId resolver is a hard error by design (never a
     // sessionId-keyed fallback); the run's userId is the correct resolver.
+    //
+    // Prompt-type hooks (fix round I-6): a quiet one-shot model call on the
+    // run's own route — no delta handlers, so nothing reaches the transcript
+    // or the event stream. The hook engine owns the timeout race and parses
+    // the reply through `parsePromptHookDecision`; a route/model failure
+    // returns null (fail-open, the pinned hook contract).
+    const promptEvaluator = async (prompt: string): Promise<string | null> => {
+      try {
+        const preset = presetById(sessionState.presetId);
+        const route = await resolveRoute(
+          {
+            userId,
+            requestedModel: sessionState.modelPin,
+            preset:
+              preset === null
+                ? null
+                : { model: preset.model, temperature: preset.temperature },
+          },
+          {
+            keys,
+            litellmBaseUrl: deps.litellmBaseUrl,
+            defaultModel: deps.defaultModel,
+          },
+        );
+        if (route === null) return null;
+        const transport = route.transportKind === "anthropic" ? anthropic : openai;
+        // The anthropic transport appends `/v1/messages`; a `/v1`-suffixed
+        // route base would double it (the loop's T5-C1 carry).
+        const baseUrl =
+          route.transportKind === "anthropic"
+            ? route.baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "")
+            : route.baseUrl;
+        const response = await transport.stream(
+          {
+            model: route.model,
+            baseUrl,
+            apiKey: route.apiKey,
+            system: [
+              {
+                role: "system",
+                content:
+                  "You are a plugin-hook rule evaluator. Follow the " +
+                  "instruction in the user message exactly and reply with " +
+                  "only the requested decision.",
+              },
+            ],
+            messages: [{ role: "user", content: prompt }],
+            tools: [],
+            cacheMode: "none",
+            ...(route.effort !== null ? { effort: route.effort } : {}),
+            ...(route.temperature !== undefined
+              ? { temperature: route.temperature }
+              : {}),
+          },
+          { onTextDelta() {} },
+          new AbortController().signal,
+        );
+        return response.content;
+      } catch {
+        return null;
+      }
+    };
+
     const hooks = createHookEngine({
       sandbox: runSandbox,
       sources: [createFileHookSource({ sandbox: runSandbox, userId })],
-      // Prompt-type hooks need a model evaluator; none is wired in v1
-      // (command hooks are fully supported). Returning null = no verdict.
-      promptEvaluator: async () => null,
+      promptEvaluator,
       secrets: deps.hookSecrets ?? (() => []),
       userIdForSession: () => userId,
       onNotification: (message, ctx) => {
@@ -1369,6 +1476,47 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
           .emit("system_note", { code: "hook_notification", message, pluginId: ctx.pluginId })
           .catch(() => {});
       },
+    });
+
+    // Subagents (Task 20 / fix round I-1). The supervisor and its five tools
+    // are part of every full-path registry. The engine is per-run and the
+    // registry is built after this point, so both are reached through
+    // late-bound proxies: the child loop only starts from a tool call, which
+    // can only happen inside `engine.run` — by then both refs are set.
+    let engineRef: ReturnType<typeof createAgentEngine> | undefined;
+    let registryRef: CoreToolRegistry | undefined;
+    const lateRegistry: CoreToolRegistry = {
+      get: (name) => registryRef?.get(name),
+      all: () => registryRef?.all() ?? [],
+    };
+    const lateEngine: AgentEngine = {
+      async run(childJob) {
+        if (engineRef === undefined) {
+          throw new Error("subagent dispatch before the run engine is ready");
+        }
+        await engineRef.run(childJob);
+      },
+      async cancel(sessionIdToCancel, reason) {
+        return (await engineRef?.cancel(sessionIdToCancel, reason)) ?? false;
+      },
+      activeRun(sessionIdToInspect) {
+        return engineRef?.activeRun(sessionIdToInspect) ?? null;
+      },
+    };
+    const subagentSupervisor = createSubagentSupervisor({
+      engine: lateEngine,
+      db: deps.db,
+      state,
+      hooks,
+      sinkFactory: sinkFor,
+      registry: lateRegistry,
+      memoryEnabled,
+      githubConnected,
+    });
+    const subagentTools = createSubagentTools({
+      supervisor: subagentSupervisor,
+      state,
+      sink: sinkFor(sessionId),
     });
 
     // Compactor: per-run (state/sandbox/sink are per-session). The quiet
@@ -1410,7 +1558,9 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       userId,
       tier,
       skills,
+      extraTools: subagentTools,
     });
+    registryRef = registry;
 
     // ---- slash-command pre-pass (T16 review I4) --------------------------
     // finish → message_completed with the feedback, no model call;
@@ -1425,11 +1575,20 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
         const history = [...page.rows]
           .reverse()
           .filter((r) => r.role === "user" || r.role === "assistant" || r.role === "system")
-          .map((r) => ({ role: r.role as "user" | "assistant" | "system", content: r.content }));
+          .map((r) => ({
+            role: r.role as "user" | "assistant" | "system",
+            content: r.content,
+            id: r.id,
+          }));
+        // Fix round I-3: the durable fold boundary keeps a manual /compact
+        // from re-absorbing (and duplicating) rows an earlier compaction
+        // already folded.
+        const compactState = await state.get(sid);
         const out = await compactor.compactNow({
           sessionId: sid,
           messages: history,
           windowTokens,
+          foldBoundary: foldBoundaryFor(compactState.compaction, history),
         });
         return out.status;
       },
@@ -1494,6 +1653,8 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       githubConnected,
       ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
     });
+    // Late-bound seams for the subagent tools (see their construction above).
+    engineRef = engine;
 
     await engine.run({
       runId,

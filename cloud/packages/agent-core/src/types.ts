@@ -7,6 +7,14 @@ export interface ToolCall { id: string; name: string; args: Record<string, unkno
 export interface AgentMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
+  /**
+   * Durable message-row id, when this row was rebuilt from `messages` (P3 fix
+   * round I-3). Additive and never serialized to a provider: the compaction
+   * ledger uses it as its durable fold boundary (`cutoffMessageId`), because
+   * the ledger's in-memory `foldedMessages` count includes tool rows that are
+   * never persisted and therefore cannot index a DB-rebuilt window.
+   */
+  id?: string;
   toolCallId?: string;        // role:"tool" — the ToolCall.id this answers
   toolCalls?: ToolCall[];     // role:"assistant"
   volatile?: boolean;         // true → never cache-marked, rides last (Task 3/7)
