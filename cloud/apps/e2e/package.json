@@ -27,6 +27,7 @@
     "@ovid/events": "workspace:*",
     "@ovid/gateway": "workspace:*",
     "@ovid/queue": "workspace:*",
+    "@ovid/sandbox": "workspace:*",
     "@ovid/shared": "workspace:*",
     "@ovid/worker": "workspace:*",
     "ioredis": "^5.11.1"

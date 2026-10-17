@@ -184,6 +184,9 @@ importers:
       '@ovid/queue':
         specifier: workspace:*
         version: link:../../packages/queue
+      '@ovid/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
       '@ovid/shared':
         specifier: workspace:*
         version: link:../../packages/shared
