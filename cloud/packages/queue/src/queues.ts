@@ -24,6 +24,14 @@ export interface AgentRunJob {
    * tier. Raw DB tier text ("free" / anything-else-is-"pro").
    */
   tier?: string;
+  /**
+   * P8 Task 3 (additive, optional): attachment ids the message was sent with.
+   * The gateway validated every id against the session's attachment rows
+   * BEFORE enqueueing; the processor materializes each into
+   * uploads/{sanitizedName} inside the sandbox workspace before the first
+   * provider call. Absent/empty = no attachments.
+   */
+  attachmentIds?: string[];
 }
 
 // Wire-format ids are plain nonempty strings (same convention as
@@ -34,6 +42,7 @@ export const agentRunJobSchema: z.ZodType<AgentRunJob> = z.object({
   userId: z.string().min(1),
   prompt: z.string().min(1),
   tier: z.string().min(1).optional(),
+  attachmentIds: z.array(z.string().min(1)).optional(),
 });
 
 /**

@@ -3,11 +3,13 @@ import { uuidv7 } from "uuidv7";
 import type { MessageDto, SessionEvent, SessionEventType } from "@ovid/shared";
 import type { Db } from "./client.js";
 import {
+  attachments as attachmentsTable,
   messages as messagesTable,
   runs as runsTable,
   sessions as sessionsTable,
   sessionEventMirror,
   users as usersTable,
+  type AttachmentRow,
   type MessageRow,
   type RunRow,
   type SessionEventMirrorRow,
@@ -424,6 +426,56 @@ export const runs = {
       .where(eq(runsTable.id, runId))
       .returning({ attempts: runsTable.attempts });
     return rows[0]?.attempts ?? 0;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// attachments (P8 Task 3)
+// ---------------------------------------------------------------------------
+
+export const attachments = {
+  /**
+   * Insert an attachment row. The id (and r2Key built around it) are
+   * caller-generated: the gateway presigns the PUT URL for that exact key
+   * BEFORE inserting, so a presign failure leaves no row behind.
+   */
+  async create(
+    db: Db,
+    a: {
+      id: string;
+      sessionId: string;
+      userId: string;
+      name: string;
+      size: number;
+      r2Key: string;
+    },
+  ): Promise<AttachmentRow> {
+    const [row] = await db.insert(attachmentsTable).values(a).returning();
+    return row!;
+  },
+
+  /**
+   * The session's attachments, oldest-first (id order). With `ids`, only rows
+   * whose id is in the list — SESSION-scoped: an id that exists under another
+   * session is simply absent from the answer, which is how the gateway's
+   * sendMessage validation (unknown id → 400) also catches cross-session id
+   * reuse. An empty `ids` list matches nothing.
+   */
+  async getForSession(
+    db: Db,
+    sessionId: string,
+    ids?: readonly string[],
+  ): Promise<AttachmentRow[]> {
+    if (ids !== undefined && ids.length === 0) return [];
+    const where =
+      ids !== undefined
+        ? and(eq(attachmentsTable.sessionId, sessionId), inArray(attachmentsTable.id, [...ids]))
+        : eq(attachmentsTable.sessionId, sessionId);
+    return db
+      .select()
+      .from(attachmentsTable)
+      .where(where)
+      .orderBy(asc(attachmentsTable.id));
   },
 };
 

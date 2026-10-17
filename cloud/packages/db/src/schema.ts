@@ -94,8 +94,34 @@ export const sessionEventMirror = pgTable(
   (t) => [primaryKey({ columns: [t.sessionId, t.seq] })],
 );
 
+// P8 Task 3: an attachment created by POST /sessions/:id/attachments. The row
+// is written at creation time (BEFORE the client uploads the bytes to the
+// presigned R2 URL) — it records the intent; object presence is the client's
+// side of the contract (the worker fails the run with attachment_unavailable
+// when the object never landed). r2Key is
+// users/{userId}/sessions/{sessionId}/uploads/{id}; `name` is the raw display
+// name (sanitization happens at the workspace-path boundary, never here).
+export const attachments = pgTable(
+  "attachments",
+  {
+    id: char("id", { length: 36 }).primaryKey(), // UUIDv7
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid),
+    name: text("name").notNull(),
+    size: integer("size").notNull(),
+    r2Key: text("r2_key").notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("attachments_session_id_idx").on(t.sessionId)],
+);
+
 export type UserRow = typeof users.$inferSelect;
 export type SessionRow = typeof sessions.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
 export type RunRow = typeof runs.$inferSelect;
 export type SessionEventMirrorRow = typeof sessionEventMirror.$inferSelect;
+export type AttachmentRow = typeof attachments.$inferSelect;

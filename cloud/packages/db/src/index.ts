@@ -4,6 +4,7 @@ export * from "./repos.js";
 // runs), so the schema is exported under its own namespace instead of `export *`.
 export * as schema from "./schema.js";
 export type {
+  AttachmentRow,
   MessageRow,
   RunRow,
   SessionEventMirrorRow,

@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { messages, newId, runs, type Db } from "@ovid/db";
+import { attachments, messages, newId, runs, type Db } from "@ovid/db";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import {
   messageDtoSchema,
@@ -11,6 +11,7 @@ import {
 } from "@ovid/shared";
 import { buildGateway } from "../app.js";
 import { MintHttpError } from "../keys.js";
+import type { AttachmentPresigner } from "./attachments.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
   authHeaders,
@@ -51,7 +52,9 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
   });
 
   /** Fresh gateway per test so stub behavior (failing add/mint) never leaks. */
-  function makeApp(behavior: { failAdd?: boolean; mintThrows?: unknown } = {}): TestApp {
+  function makeApp(
+    behavior: { failAdd?: boolean; mintThrows?: unknown; presigner?: AttachmentPresigner } = {},
+  ): TestApp {
     const { queues, adds } = stubQueues({ failAdd: behavior.failAdd });
     const mint = stubMint(behavior.mintThrows === undefined ? {} : { throws: behavior.mintThrows });
     const app = buildGateway({
@@ -62,6 +65,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       keys: stubKeys(),
       mint,
       events: noopEvents,
+      ...(behavior.presigner !== undefined ? { presigner: behavior.presigner } : {}),
     });
     const handle = { app, adds, mint };
     built.push(handle);
@@ -469,6 +473,109 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       const res = await handle.app.inject({ ...req, headers: {} });
       expect(res.statusCode, req.url).toBe(401);
       expect(res.json()).toMatchObject({ error: { code: "unauthenticated" } });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // P8 Task 3: message attachmentIds — validated against the attachments of
+  // the SAME session, then carried on the enqueued job payload (additive: the
+  // key is present only when the request sent one).
+  // -------------------------------------------------------------------------
+
+  /** Fake presigner (the P8-Q3 seam) so the attachments route can create rows. */
+  const fakePresigner: AttachmentPresigner = {
+    async presignPut(key) {
+      return `https://r2.test/bucket/${encodeURIComponent(key)}`;
+    },
+  };
+
+  it("send with attachmentIds → 202 and the enqueued job payload carries the ids", async () => {
+    const handle = makeApp({ presigner: fakePresigner });
+    const uid = testUid("msg-atts");
+    const sid = await createSession(handle, uid);
+
+    // Create two attachments through the route (exactly the client flow).
+    const ids: string[] = [];
+    for (const name of ["a.txt", "b.png"]) {
+      const res = await handle.app.inject({
+        method: "POST",
+        url: `/cloud/v1/sessions/${sid}/attachments`,
+        headers: authHeaders(uid),
+        payload: { name, size: 4 },
+      });
+      expect(res.statusCode).toBe(201);
+      ids.push((res.json() as { attachmentId: string }).attachmentId);
+    }
+
+    const res = await sendMessage(handle, uid, sid, {
+      content: "here are the files",
+      attachmentIds: ids,
+    });
+    expect(res.statusCode).toBe(202);
+    expect(handle.adds).toHaveLength(1);
+    // Exact payload pin: the pre-existing fields PLUS attachmentIds.
+    expect(handle.adds[0]!.data).toEqual({
+      runId: expect.any(String) as string,
+      sessionId: sid,
+      userId: uid,
+      prompt: "here are the files",
+      tier: "free",
+      attachmentIds: ids,
+    });
+  });
+
+  it("unknown attachment id, or an id belonging to ANOTHER session → 400 bad_request, nothing written or enqueued", async () => {
+    const handle = makeApp({ presigner: fakePresigner });
+    const uid = testUid("msg-attbad");
+    const other = testUid("msg-attbad-other");
+    const sid = await createSession(handle, uid);
+    const otherSid = await createSession(handle, other);
+
+    // A real attachment — but for a DIFFERENT session (cross-session id reuse
+    // must not pass: getForSession is session-scoped).
+    const foreign = await handle.app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${otherSid}/attachments`,
+      headers: authHeaders(other),
+      payload: { name: "foreign.txt", size: 4 },
+    });
+    const foreignId = (foreign.json() as { attachmentId: string }).attachmentId;
+
+    for (const attachmentIds of [[newId()], [foreignId]]) {
+      const res = await sendMessage(handle, uid, sid, { content: "x", attachmentIds });
+      expect(res.statusCode, JSON.stringify(attachmentIds)).toBe(400);
+      expect(res.json().error.code).toBe("bad_request");
+    }
+    expect(handle.adds).toHaveLength(0);
+    expect(await tableCounts(sid)).toEqual({ messages: 0, runs: 0 });
+
+    // Malformed ids never reach the db: z.array(z.string().uuid()) rejects them.
+    const malformed = await sendMessage(handle, uid, sid, {
+      content: "x",
+      attachmentIds: ["not-a-uuid"],
+    });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json().error.code).toBe("bad_request");
+    expect(handle.adds).toHaveLength(0);
+  });
+
+  it("absent or empty attachmentIds → 202 and the job payload carries NO attachmentIds key (wire stays additive)", async () => {
+    const handle = makeApp({ presigner: fakePresigner });
+    const uid = testUid("msg-attnone");
+    const sid = await createSession(handle, uid);
+
+    for (const payload of [{ content: "no key at all" }, { content: "empty list", attachmentIds: [] }]) {
+      const res = await sendMessage(handle, uid, sid, payload);
+      expect(res.statusCode, JSON.stringify(payload)).toBe(202);
+      const add = handle.adds.at(-1)!;
+      expect(add.data).toEqual({
+        runId: expect.any(String) as string,
+        sessionId: sid,
+        userId: uid,
+        prompt: payload.content,
+        tier: "free",
+      });
+      expect("attachmentIds" in add.data).toBe(false);
     }
   });
 });

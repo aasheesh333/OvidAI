@@ -8,9 +8,11 @@ import { Redis } from "ioredis";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   createDb,
+  attachments,
   eventMirror,
   messages,
   migrate,
+  newId,
   runs,
   sessions,
   users,
@@ -953,6 +955,170 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(sbx.execs[0]).toMatchObject({ command: "cat big.log", timeoutMs: 600_000 });
       expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
       rmWs(sbx.workspaceDir);
+    });
+
+    // -------------------------------------------------------------------------
+    // P8 Task 3: attachment materialization. The job payload carries
+    // attachmentIds; the processor resolves them against the session's
+    // attachment rows and downloads each R2 object (storage seam) into
+    // uploads/{sanitizedName} inside the sandbox workspace BEFORE the first
+    // provider call.
+    // -------------------------------------------------------------------------
+
+    /** Seeds an attachment row for the session and returns it. */
+    async function seedAttachment(
+      sessionId: string,
+      userId: string,
+      name: string,
+    ): Promise<{ id: string; r2Key: string; name: string }> {
+      const id = newId();
+      const r2Key = `users/${userId}/sessions/${sessionId}/uploads/${id}`;
+      await attachments.create(db, { id, sessionId, userId, name, size: 16, r2Key });
+      return { id, r2Key, name };
+    }
+
+    it("job attachmentIds → one storage download per id into uploads/<sanitizedName> before streaming, then a normal completed run", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox();
+      const a1 = await seedAttachment(seeded.sessionId, seeded.uid, "photo 1.png");
+      const a2 = await seedAttachment(seeded.sessionId, seeded.uid, "../evil.txt");
+
+      const downloads: string[] = [];
+      const storage = {
+        async getBuffer(key: string): Promise<Buffer | null> {
+          downloads.push(key);
+          return Buffer.from(`content-of-${key}`, "utf8");
+        },
+      };
+      const { transport, calls } = stubTransport([{ kind: "ok", deltas: ["done"] }]);
+
+      await createAgentRunProcessor(
+        makeDeps(transport, { sandbox: sbx.manager, tools: createToolRegistry(), storage }),
+      )({
+        data: {
+          runId: seeded.runId,
+          sessionId: seeded.sessionId,
+          userId: seeded.uid,
+          prompt: seeded.prompt,
+          attachmentIds: [a1.id, a2.id],
+        },
+      });
+
+      // Exactly one download per id, in payload order, with the exact r2 keys.
+      expect(downloads).toEqual([a1.r2Key, a2.r2Key]);
+
+      // Both files landed in the sandbox workspace under uploads/ with the
+      // sanitized single-segment names (the raw name is stored, the path is safe).
+      const uploads = join(sbx.workspaceDir, "uploads");
+      expect(await readFile(join(uploads, "photo_1.png"), "utf8")).toBe(
+        `content-of-${a1.r2Key}`,
+      );
+      expect(await readFile(join(uploads, "_evil.txt"), "utf8")).toBe(
+        `content-of-${a2.r2Key}`,
+      );
+
+      // The model call happened exactly once — after materialization — and the
+      // run completed normally (materialization emits no events).
+      expect(calls).toHaveLength(1);
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual([
+        "run_started",
+        "message_delta",
+        "message_completed",
+        "run_completed",
+      ]);
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+      rmWs(sbx.workspaceDir);
+    });
+
+    it("missing R2 object (storage returns null) → run_failed{attachment_unavailable}, model never called, job completes", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox();
+      const a1 = await seedAttachment(seeded.sessionId, seeded.uid, "gone.txt");
+      const storage = {
+        async getBuffer(): Promise<Buffer | null> {
+          return null; // object absent — the upload never completed
+        },
+      };
+      const { transport, calls } = stubTransport([{ kind: "ok", deltas: ["never"] }]);
+
+      await createAgentRunProcessor(
+        makeDeps(transport, { sandbox: sbx.manager, tools: createToolRegistry(), storage }),
+      )({
+        data: {
+          runId: seeded.runId,
+          sessionId: seeded.sessionId,
+          userId: seeded.uid,
+          prompt: seeded.prompt,
+          attachmentIds: [a1.id],
+        },
+      });
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual(["run_failed"]);
+      expect(evts[0]!.payload).toMatchObject({ code: "attachment_unavailable" });
+      expect(await readMirror(seeded.sessionId)).toEqual(evts);
+      expect(calls).toHaveLength(0);
+      expect(await runRow(seeded.runId)).toMatchObject({
+        status: "failed",
+        attempts: 0,
+        lastError: "attachment_unavailable",
+      });
+      rmWs(sbx.workspaceDir);
+    });
+
+    it("attachment id with no db row (or no storage wired) → the same attachment_unavailable terminal failure", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox();
+      const { transport, calls } = stubTransport([{ kind: "ok", deltas: ["never"] }]);
+
+      // No row for this id — the gateway validated at enqueue time, so this is
+      // the defensive path; it must still be loud, never a silent skip.
+      await createAgentRunProcessor(
+        makeDeps(transport, {
+          sandbox: sbx.manager,
+          tools: createToolRegistry(),
+          storage: { async getBuffer() { return Buffer.from("x"); } },
+        }),
+      )({
+        data: {
+          runId: seeded.runId,
+          sessionId: seeded.sessionId,
+          userId: seeded.uid,
+          prompt: seeded.prompt,
+          attachmentIds: [newId()],
+        },
+      });
+
+      let evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual(["run_failed"]);
+      expect(evts[0]!.payload).toMatchObject({ code: "attachment_unavailable" });
+      expect(calls).toHaveLength(0);
+      await runs.finish(db, seeded.runId, "failed", "test cleanup"); // hygiene: already failed, keep row terminal
+
+      // And with attachments requested but NO storage seam wired: same loud
+      // failure (misconfiguration must never be a silent no-op).
+      const seeded2 = await seedRun();
+      const sbx2 = makeFakeSandbox();
+      const a1 = await seedAttachment(seeded2.sessionId, seeded2.uid, "x.txt");
+      await createAgentRunProcessor(
+        makeDeps(transport, { sandbox: sbx2.manager, tools: createToolRegistry() }),
+      )({
+        data: {
+          runId: seeded2.runId,
+          sessionId: seeded2.sessionId,
+          userId: seeded2.uid,
+          prompt: seeded2.prompt,
+          attachmentIds: [a1.id],
+        },
+      });
+      evts = await readEvents(seeded2.sessionId);
+      expect(types(evts)).toEqual(["run_failed"]);
+      expect(evts[0]!.payload).toMatchObject({ code: "attachment_unavailable" });
+      expect(calls).toHaveLength(0);
+      expect(await runRow(seeded2.runId)).toMatchObject({ status: "failed" });
+      rmWs(sbx.workspaceDir);
+      rmWs(sbx2.workspaceDir);
     });
 
     // -------------------------------------------------------------------------

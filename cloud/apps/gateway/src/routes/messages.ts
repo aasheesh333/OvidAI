@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { messages, runs, sessions, users, type MessageRow } from "@ovid/db";
+import { attachments, messages, runs, sessions, users, type MessageRow } from "@ovid/db";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import type { MessageDto, Page, SendMessageResponse } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
@@ -36,7 +36,15 @@ export function toMessageDto(row: MessageRow): MessageDto {
 }
 
 // content required non-empty string; .strict() rejects unknown keys.
-const sendMessageBody = z.object({ content: z.string() }).strict();
+// attachmentIds (P8 Task 3, additive + optional): uuid-shaped ids of
+// attachments created via POST /sessions/:id/attachments; validated against
+// the session's attachment rows below (unknown or cross-session id → 400).
+const sendMessageBody = z
+  .object({
+    content: z.string(),
+    attachmentIds: z.array(z.string().uuid()).optional(),
+  })
+  .strict();
 
 export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): void {
   app.post("/sessions/:id/messages", async (request, reply) => {
@@ -58,6 +66,22 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     const content = parsed.data.content;
     if (content.trim() === "") {
       return badRequest(reply, "content must be a non-empty string.");
+    }
+
+    // 2b. Attachment validation (P8 Task 3) — BEFORE any write (no orphan
+    //     rows on a 400). Every id must resolve to an attachment row of THIS
+    //     session; getForSession is session-scoped, so a valid id belonging to
+    //     another session counts as unknown.
+    const requestedAttachmentIds = [...new Set(parsed.data.attachmentIds ?? [])];
+    if (requestedAttachmentIds.length > 0) {
+      const known = await attachments.getForSession(
+        deps.db,
+        sessionId,
+        requestedAttachmentIds,
+      );
+      if (known.length !== requestedAttachmentIds.length) {
+        return badRequest(reply, "attachmentIds contains an unknown attachment id.");
+      }
     }
 
     // 3. Provision the users row (FK target for everything below); its tier
@@ -100,8 +124,19 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
         AGENT_RUN_JOB_NAME,
         // P2 Task 12: tier rides the payload so the worker's sandbox attach
         // applies the tier-matched workspace quota (optional on the wire —
-        // old consumers simply never see it).
-        { runId: run.id, sessionId, userId: uid, prompt: content, tier: user.tier },
+        // old consumers simply never see it). P8 Task 3: attachmentIds ride
+        // the same way, present ONLY when the request sent a non-empty list
+        // (the job wire stays additive for pre-P8 consumers).
+        {
+          runId: run.id,
+          sessionId,
+          userId: uid,
+          prompt: content,
+          tier: user.tier,
+          ...(requestedAttachmentIds.length > 0
+            ? { attachmentIds: requestedAttachmentIds }
+            : {}),
+        },
         { jobId: run.id, priority },
       );
     } catch (err) {

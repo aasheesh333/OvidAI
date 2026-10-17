@@ -44,6 +44,75 @@ export interface ApiError {
   error: { code: string; message: string };
 }
 
+// ---------------------------------------------------------------------------
+// P8 Task 3: attachment upload wire contract (presigned R2 PUT)
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /cloud/v1/sessions/:id/attachments answer. `uploadUrl` is a presigned
+ * R2 PUT for the object key `users/{uid}/sessions/{sessionId}/uploads/{attachmentId}`
+ * (the client uploads the raw bytes there); `path` is the workspace-relative
+ * path the worker materializes the file at (`uploads/{sanitizedName}`) — also
+ * the path the client should show to the agent; `expiresAt` is when the
+ * presigned URL stops working (ISO timestamp).
+ */
+export interface AttachmentUploadResponse {
+  attachmentId: string;
+  uploadUrl: string;
+  path: string;
+  expiresAt: string;
+}
+
+export const attachmentUploadResponseSchema: z.ZodType<AttachmentUploadResponse> = z
+  .object({
+    attachmentId: z.string().min(1),
+    uploadUrl: z.string().min(1),
+    path: z.string().min(1),
+    expiresAt: z.string().min(1),
+  })
+  .strict();
+
+/** A stored attachment as it appears on the wire (Tasks 5/8 consume this). */
+export interface AttachmentDto {
+  id: string;
+  sessionId: string;
+  /** Raw display name exactly as the client sent it (never rewritten). */
+  name: string;
+  size: number;
+  createdAt: string;
+}
+
+export const attachmentDtoSchema: z.ZodType<AttachmentDto> = z.object({
+  id: z.string().min(1),
+  sessionId: z.string().min(1),
+  name: z.string().min(1),
+  size: z.number().int().positive(),
+  createdAt: z.string().min(1),
+});
+
+/**
+ * Attachment display name → safe workspace filename piece for `uploads/`:
+ * [^A-Za-z0-9._-] → "_", leading dots stripped, dot-runs ("..") collapsed to
+ * "_", truncated to 80 chars, "" → "attachment". The result is always a safe
+ * single path segment — never empty, never a traversal — so the worker can
+ * join it under uploads/ without further checks.
+ *
+ * NOTE (kept in sync deliberately): these are the same rules as
+ * @ovid/storage's sanitizeArtifactName. The duplication exists because the
+ * gateway and worker must sanitize identically but do not (yet) depend on
+ * @ovid/storage; when either gains that dependency, the storage helper becomes
+ * the single source and this one is retired.
+ */
+export function sanitizeAttachmentName(name: string): string {
+  let out = name.replace(/[^A-Za-z0-9._-]+/g, "_");
+  out = out.replace(/^\.+/, "");
+  // Dots are allowed characters, so a hostile name can still smuggle a ".."
+  // run — neutralize it (the result is a filename piece, never a path).
+  out = out.replace(/\.{2,}/g, "_");
+  if (out.length > 80) out = out.slice(0, 80);
+  return out === "" ? "attachment" : out;
+}
+
 /** Session interaction mode (spec D5) — "control" was retired; never re-add it. */
 export const sessionModeSchema = z.enum(["safe", "auto", "drive", "studio"]);
 

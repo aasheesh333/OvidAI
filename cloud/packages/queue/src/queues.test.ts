@@ -65,6 +65,22 @@ describe("agentRunJobSchema", () => {
     ).toBe(false);
     expect(agentRunJobSchema.safeParse(null).success).toBe(false);
   });
+
+  it("accepts an optional attachmentIds list (P8 Task 3) and rejects malformed ones", () => {
+    expect(
+      agentRunJobSchema.safeParse({ ...valid, attachmentIds: ["a1", "a2"] }),
+    ).toEqual({ success: true, data: { ...valid, attachmentIds: ["a1", "a2"] } });
+    expect(agentRunJobSchema.safeParse(valid).success).toBe(true);
+    expect(
+      agentRunJobSchema.safeParse({ ...valid, attachmentIds: [] }).success,
+    ).toBe(true);
+    expect(
+      agentRunJobSchema.safeParse({ ...valid, attachmentIds: "a1" }).success,
+    ).toBe(false);
+    expect(
+      agentRunJobSchema.safeParse({ ...valid, attachmentIds: [""] }).success,
+    ).toBe(false);
+  });
 });
 
 describe("AGENT_RUN_JOB_DEFAULTS", () => {

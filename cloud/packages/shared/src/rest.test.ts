@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  attachmentDtoSchema,
+  attachmentUploadResponseSchema,
   messageDtoSchema,
   pageSchema,
   runCancelResponseSchema,
+  sanitizeAttachmentName,
   sessionDtoSchema,
   sessionPatchSchema,
 } from "./rest.js";
@@ -106,5 +109,70 @@ describe("rest schemas", () => {
   it("runCancelResponseSchema rejects a non-status body", () => {
     expect(() => runCancelResponseSchema.parse({ runId: "r1", status: "done" })).toThrow();
     expect(() => runCancelResponseSchema.parse({ runId: "", status: "cancelled" })).toThrow();
+  });
+
+  it("attachmentUploadResponseSchema parses a valid answer (P8 Task 3 wire contract)", () => {
+    const res = {
+      attachmentId: "018f3e11-aaaa-7bbb-8ccc-2d2d2d2d2d2d",
+      uploadUrl: "https://example.r2.cloudflarestorage.com/bucket/x?sig=abc",
+      path: "uploads/report_final.pdf",
+      expiresAt: "2026-10-17T12:15:00.000Z",
+    };
+    expect(attachmentUploadResponseSchema.parse(res)).toEqual(res);
+  });
+
+  it("attachmentUploadResponseSchema rejects a missing field, an empty string, and unknown keys", () => {
+    const res = {
+      attachmentId: "a1",
+      uploadUrl: "https://r2.example/put",
+      path: "uploads/a_b.txt",
+      expiresAt: "2026-10-17T12:15:00.000Z",
+    };
+    const { path: _noPath, ...missingPath } = res;
+    expect(() => attachmentUploadResponseSchema.parse(missingPath)).toThrow();
+    expect(() => attachmentUploadResponseSchema.parse({ ...res, uploadUrl: "" })).toThrow();
+    expect(() => attachmentUploadResponseSchema.parse({ ...res, extra: 1 })).toThrow();
+  });
+
+  it("attachmentDtoSchema parses a valid dto and rejects a non-positive size", () => {
+    const dto = {
+      id: "a1",
+      sessionId: "s1",
+      name: "photo 1.png",
+      size: 1_024,
+      createdAt: "2026-10-17T12:00:00.000Z",
+    };
+    expect(attachmentDtoSchema.parse(dto)).toEqual(dto);
+    expect(() => attachmentDtoSchema.parse({ ...dto, size: 0 })).toThrow();
+    expect(() => attachmentDtoSchema.parse({ ...dto, size: -1 })).toThrow();
+    expect(() => attachmentDtoSchema.parse({ ...dto, size: 1.5 })).toThrow();
+  });
+
+  describe("sanitizeAttachmentName", () => {
+    it("keeps safe names untouched", () => {
+      expect(sanitizeAttachmentName("report_final.pdf")).toBe("report_final.pdf");
+      expect(sanitizeAttachmentName("a-b.c_d")).toBe("a-b.c_d");
+    });
+
+    it("replaces unsafe runs with a single underscore", () => {
+      expect(sanitizeAttachmentName("photo 1.png")).toBe("photo_1.png");
+      expect(sanitizeAttachmentName("a/b.txt")).toBe("a_b.txt");
+      expect(sanitizeAttachmentName("héllo.txt")).toBe("h_llo.txt");
+    });
+
+    it("neutralizes traversal shapes: no leading dots, no dot-runs, never empty", () => {
+      // ".." alone collapses to the fallback; leading dots are stripped;
+      // interior ".." runs become "_" — the result is always a safe single
+      // filename segment (the worker joins it under uploads/).
+      expect(sanitizeAttachmentName("..")).toBe("attachment");
+      expect(sanitizeAttachmentName(".hidden")).toBe("hidden");
+      expect(sanitizeAttachmentName("my report ..pdf")).toBe("my_report__pdf");
+      expect(sanitizeAttachmentName("a..b")).toBe("a_b");
+      expect(sanitizeAttachmentName("...")).toBe("attachment");
+    });
+
+    it("caps the name at 80 characters", () => {
+      expect(sanitizeAttachmentName("a".repeat(120))).toHaveLength(80);
+    });
   });
 });

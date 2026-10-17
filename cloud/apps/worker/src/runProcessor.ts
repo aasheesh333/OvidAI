@@ -1,4 +1,6 @@
-import { eventMirror, messages, runs, type Db } from "@ovid/db";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { attachments, eventMirror, messages, runs, type Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
 import type { AgentRunJob } from "@ovid/queue";
 import {
@@ -8,7 +10,12 @@ import {
   type SandboxHandle,
   type SandboxManager,
 } from "@ovid/sandbox";
-import type { KeyProvider, SessionEvent, SessionEventType } from "@ovid/shared";
+import {
+  sanitizeAttachmentName,
+  type KeyProvider,
+  type SessionEvent,
+  type SessionEventType,
+} from "@ovid/shared";
 import {
   TerminalModelError,
   TransientModelError,
@@ -63,6 +70,17 @@ import type { ToolRegistry } from "./tools/registry.js";
  * terminal event.
  */
 
+/**
+ * P8 Task 3: the attachment-download seam — structurally
+ * StorageAdapter.getBuffer from @ovid/storage, so the R2 adapter (or the fs
+ * adapter in dev) satisfies it as-is. Injectable via RunDeps.storage; the
+ * composition root wires it.
+ */
+export interface RunAttachmentStorage {
+  /** null = object missing (the client never completed the upload). */
+  getBuffer(key: string): Promise<Buffer | null>;
+}
+
 export interface RunDeps {
   db: Db;
   events: EventLog;
@@ -97,6 +115,15 @@ export interface RunDeps {
    * mid-stream abort.
    */
   cancelCheckIntervalMs?: number;
+  /**
+   * P8 Task 3: object-download seam for attachment materialization (see
+   * RunAttachmentStorage). OPTIONAL for the same source-compat reason as
+   * sandbox/tools: the P1 spine e2e's pre-P2 composition must stay green
+   * unmodified. When a job carries attachmentIds but this is absent, the
+   * run fails loudly with attachment_unavailable (never a silent skip);
+   * main.ts always wires it.
+   */
+  storage?: RunAttachmentStorage;
 }
 
 /** Model-call retry policy (spec §6.1): 5 attempts, backoff 3/9/27/60 s between them. */
@@ -235,10 +262,57 @@ export function createAgentRunProcessor(
     let handle: SandboxHandle | undefined;
     let convo: ChatMessage[] = history;
     if (useTools) {
+      /**
+       * P8 Task 3 failure helper: run_failed {code:"attachment_unavailable"},
+       * then the conditional 'failed' flip — event-first, same as every
+       * terminal path here. A job that asked for attachments the processor
+       * cannot materialize must NEVER silently skip them.
+       */
+      const failAttachments = async (message: string): Promise<void> => {
+        await emit("run_failed", { code: "attachment_unavailable", message });
+        await runs.finish(deps.db, runId, "failed", "attachment_unavailable");
+      };
       try {
         handle = await deps.sandbox.attach(userId, {
           tier: job.data.tier === "free" ? "free" : "pro",
         });
+
+        // ---- P8 Task 3: attachment materialization -------------------------
+        // The job payload's attachmentIds (validated by the gateway against
+        // the session's attachment rows at enqueue time) resolve back to rows
+        // here, and each object is downloaded through the storage seam into
+        // uploads/{sanitizedName} inside the sandbox workspace — BEFORE the
+        // first provider call, so the model's tools see the files from
+        // round 1. Misses (row gone, object never uploaded, seam unwired)
+        // are loud run-level failures; an unexpected storage/filesystem
+        // error falls through to the catch below and fails the job loudly
+        // (infra, not a run state — the stale-run sweeper is the recovery).
+        const requestedAttachmentIds = [...new Set(job.data.attachmentIds ?? [])];
+        if (requestedAttachmentIds.length > 0) {
+          const rows = await attachments.getForSession(
+            deps.db,
+            sessionId,
+            requestedAttachmentIds,
+          );
+          if (rows.length !== requestedAttachmentIds.length) {
+            await failAttachments("attachment id has no attachment row for this session");
+            return;
+          }
+          if (deps.storage === undefined) {
+            await failAttachments("attachment storage is not configured");
+            return;
+          }
+          const uploadsDir = join(handle.workspaceDir, "uploads");
+          await mkdir(uploadsDir, { recursive: true });
+          for (const row of rows) {
+            const buffer = await deps.storage.getBuffer(row.r2Key);
+            if (buffer === null) {
+              await failAttachments(`attachment object not found: ${row.r2Key}`);
+              return;
+            }
+            await writeFile(join(uploadsDir, sanitizeAttachmentName(row.name)), buffer);
+          }
+        }
       } catch (err) {
         if (
           err instanceof SandboxAdmissionError ||

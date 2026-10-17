@@ -10,6 +10,8 @@ import type { QueueServices } from "@ovid/queue";
 import type { KeyProvider, MintProvisioner } from "@ovid/shared";
 import type { ApiError } from "@ovid/shared";
 import { authHook, type Verifier } from "./auth.js";
+import { registerAttachmentRoutes } from "./routes/attachments.js";
+import type { AttachmentPresigner } from "./routes/attachments.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerMessageRoutes } from "./routes/messages.js";
 import { registerRunRoutes } from "./routes/runs.js";
@@ -37,9 +39,19 @@ export interface GatewayDeps {
    */
   pty?: PtyBridge;
   /**
+   * P8 Task 3: presigned-PUT seam for attachment uploads (ruling P8-Q3 —
+   * structurally @ovid/storage's StorageAdapter.presignPut, so the R2 adapter
+   * satisfies it as-is). OPTIONAL only so pre-P8 compositions (spine e2e + P1
+   * suites) stay source-compatible; when absent the attachments route answers
+   * a loud 503 attachments_not_configured instead of silently no-opping. The
+   * composition root wires it.
+   */
+  presigner?: AttachmentPresigner;
+  /**
    * Reserved for time-sensitive logic (Task 8 WS heartbeats, TTL math); the
    * REST routes deliberately use DB time (repos) so pagination and ordering
-   * never depend on gateway clocks.
+   * never depend on gateway clocks. (The attachments route's expiresAt is the
+   * one deliberate exception: it mirrors the presigner TTL, not row state.)
    */
   clock?: () => Date;
 }
@@ -122,6 +134,7 @@ export function buildGateway(
 
       registerSessionRoutes(scope, deps);
       registerMessageRoutes(scope, deps);
+      registerAttachmentRoutes(scope, deps);
       registerRunRoutes(scope, deps);
     },
     { prefix: API_PREFIX },
