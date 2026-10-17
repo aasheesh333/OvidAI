@@ -27,10 +27,14 @@ export class NotFoundError extends StorageError {
   }
 }
 
-/** Workspace-state persistence failure (code "workspace_state"). */
+/**
+ * Workspace-state failure (default code "workspace_state"). Callers may pin a
+ * more specific code — Task 9's pinned surfaces are "not_warm" (a write
+ * against a cold workspace) and "hydrate_timeout" (awaitWarm gave up).
+ */
 export class WorkspaceStateError extends StorageError {
-  constructor(message: string, opts?: { cause?: unknown }) {
-    super(message, { code: "workspace_state", cause: opts?.cause });
+  constructor(message: string, opts?: { cause?: unknown; code?: string }) {
+    super(message, { code: opts?.code ?? "workspace_state", cause: opts?.cause });
   }
 }
 

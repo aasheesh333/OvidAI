@@ -12,6 +12,8 @@ export * from "./contract.js";
 // the package root — this line is the reason the barrel reaches it.
 export * from "./activity.js";
 export * from "./hibernate.js";
+export * from "./hydrate.js";
+export * from "./artifacts.js";
 export * from "./archive/format.js";
 export * from "./archive/memberStream.js";
 export * from "./archive/pack.js";
