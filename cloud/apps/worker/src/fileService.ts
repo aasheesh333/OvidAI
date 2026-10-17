@@ -40,13 +40,14 @@ import {
   liveTree,
   readWorkspaceFile,
   registerArtifact,
+  resolveWorkspaceDir,
   shouldPresign,
-  workspaceDir,
   writeWorkspaceFile,
   type ActivityTracker,
   type ArtifactWorkspaceObjectsRepo,
   type HydrateEventMirror,
   type HydrateFileManifestsRepo,
+  type SandboxUidResolver,
   type StorageAdapter,
 } from "@ovid/storage";
 
@@ -61,6 +62,12 @@ export interface FileServiceDeps {
   events: EventLog;
   storage: StorageAdapter;
   workspacesRoot: string;
+  /**
+   * Firebase userId → P2's numeric sandbox uid. Production wires
+   * `users.allocateSandboxUid`; the file service must target the SAME
+   * `{root}/{uid}/workspace` tree the agent runs in (C1).
+   */
+  sandboxUid: SandboxUidResolver;
   activity: ActivityTracker;
   internalToken: string;
   inlineMaxBytes: number;
@@ -139,6 +146,7 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
     events: deps.events,
     storage: deps.storage,
     workspacesRoot: deps.workspacesRoot,
+    sandboxUid: deps.sandboxUid,
     activity: deps.activity,
     fileManifests: deps.fileManifests,
     eventMirror: deps.eventMirror,
@@ -162,7 +170,12 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
     async (req, reply) => {
       const userId = String(req.headers["x-ovid-user-id"]);
       try {
-        const dir = workspaceDir(deps.workspacesRoot, userId, req.params.sid);
+        const dir = await resolveWorkspaceDir(
+          deps.sandboxUid,
+          deps.workspacesRoot,
+          userId,
+          req.params.sid,
+        );
         if (!(await isDirectory(dir))) {
           return fail(reply, 404, "not_found", `workspace ${req.params.sid} is not warm`);
         }
@@ -216,7 +229,12 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
                 name: rel,
                 contentType,
                 sourcePath: join(
-                  workspaceDir(deps.workspacesRoot, userId, req.params.sid),
+                  await resolveWorkspaceDir(
+                    deps.sandboxUid,
+                    deps.workspacesRoot,
+                    userId,
+                    req.params.sid,
+                  ),
                   rel,
                 ),
               }
@@ -265,7 +283,12 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
           const sizeBytes = err.sizeBytes;
           const contentType = contentTypeFor(rel);
           const warm = await isDirectory(
-            workspaceDir(deps.workspacesRoot, userId, req.params.sid),
+            await resolveWorkspaceDir(
+              deps.sandboxUid,
+              deps.workspacesRoot,
+              userId,
+              req.params.sid,
+            ),
           );
           if (warm) {
             return await redirect(sizeBytes, contentType, "warm");

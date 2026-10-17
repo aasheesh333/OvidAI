@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   createCgroupManager,
@@ -14,17 +14,27 @@ import type { JailLauncher } from "../../sandbox/src/launcher.js";
 import type { RootfsManifest } from "../../sandbox/src/rootfs.js";
 import type { QuotaBackend } from "../../sandbox/src/quota.js";
 
-import { sessionWorkspacePath, workspaceDir } from "./workspacePaths.js";
+import {
+  resolveWorkspaceDir,
+  sessionWorkspacePath,
+  workspaceDir,
+  type SandboxUidResolver,
+} from "./workspacePaths.js";
 import { KeyLayoutError } from "./errors.js";
 
 /**
- * Contract 1 (fix round 1): this helper's output must EQUAL P2's landed
- * SandboxManager.workspaceDir(userId, sessionId) seam — the controller ruled
- * the numeric-uid layout {workspacesRoot}/{uid}/sessions/{sessionId} wins.
- * The test drives the REAL manager (stub allocator + tmpdir roots — the
- * portable-fixture pattern from sandbox's own manager.test.ts; workspaceDir
- * spawns no jail and creates no cgroups, so the stub launcher is never
- * called).
+ * Contract 1 (fix round 1, C1): P7's directory must be the directory the agent
+ * actually runs in — P2's `SandboxHandle.workspaceDir`
+ * (`{workspacesRoot}/{numericUid}/workspace`, manager.ts:308-309) — resolved
+ * from the SAME numeric uid `SandboxManager` allocates. The previous version
+ * of this suite passed a fixed uid to the helper and `"u1"` to the manager, so
+ * it proved only that two independently chosen numbers produced the same
+ * shape. This suite drives the REAL manager to learn its uid, feeds that uid
+ * through the resolver, and asserts byte equality against the agent path.
+ *
+ * The manager's `workspaceDir(userId, sessionId)` seam creates the SIBLING
+ * `{root}/{uid}/sessions/{sid}` (P6 browser artifacts); it is deliberately
+ * not P7's target (see workspacePaths.ts).
  */
 
 const roots: string[] = [];
@@ -84,15 +94,21 @@ async function freshManager(wsRoot: string): Promise<SandboxManager> {
   });
 }
 
-describe("workspaceDir — landed layout", () => {
-  it("keys by the numeric uid with no users/ segment and no workspace suffix", () => {
+/** The uid P2 allocated, read back from its own session-dir seam. */
+function uidFromSessionDir(sessionDir: string): number {
+  // {root}/{uid}/sessions/{sid}
+  return Number(basename(dirname(dirname(sessionDir))));
+}
+
+describe("workspaceDir — P2's agent workspace", () => {
+  it("is {root}/{numericUid}/workspace — no session segment", () => {
     expect(workspaceDir("/workspaces/users", 200001, "sess-1")).toBe(
-      join("/workspaces/users", "200001", "sessions", "sess-1"),
+      join("/workspaces/users", "200001", "workspace"),
     );
   });
 
   it("accepts the uid as a string too", () => {
-    expect(workspaceDir("/ws", "200001", "s")).toBe(join("/ws", "200001", "sessions", "s"));
+    expect(workspaceDir("/ws", "200001", "s")).toBe(join("/ws", "200001", "workspace"));
   });
 
   it("still asserts both segments", () => {
@@ -106,27 +122,50 @@ describe("workspaceDir — landed layout", () => {
   });
 });
 
-describe("workspaceDir — equality with @ovid/sandbox's landed seam (contract 1)", () => {
-  it("equals SandboxManager.workspaceDir(userId, sessionId) for the same inputs", async () => {
+describe("resolveWorkspaceDir — equality with P2's landed identity (contract 1)", () => {
+  it("resolves the SAME numeric uid the manager allocates and equals the agent cwd", async () => {
     const wsRoot = mkdtempSync(join(tmpdir(), "ovid-wsp-ws-"));
     roots.push(wsRoot);
     const manager = await freshManager(wsRoot);
-    const sandboxPath = await manager.workspaceDir("u1", "sess-1");
-    const helperPath = workspaceDir(wsRoot, FIXED_UID, "sess-1");
-    expect(sandboxPath).toBe(join(wsRoot, "200001", "sessions", "sess-1"));
-    expect(helperPath).toBe(sandboxPath);
-    // the seam mkdir -p's the dir; our pure helper only names it
-    expect(existsSync(sandboxPath)).toBe(true);
+
+    // P2's session seam creates {root}/{uid}/sessions/{sid}; read the uid it
+    // actually allocated from that path.
+    const sessionDir = await manager.workspaceDir("u1", "sess-1");
+    const p2Uid = uidFromSessionDir(sessionDir);
+    expect(p2Uid).toBe(FIXED_UID);
+
+    let seenUserId: string | null = null;
+    const resolver: SandboxUidResolver = async (userId) => {
+      seenUserId = userId;
+      return p2Uid;
+    };
+
+    const helperPath = await resolveWorkspaceDir(resolver, wsRoot, "u1", "sess-1");
+    expect(seenUserId).toBe("u1");
+
+    // Byte-for-byte P2's SandboxHandle.workspaceDir (manager.ts:308-309).
+    expect(helperPath).toBe(join(wsRoot, String(FIXED_UID), "workspace"));
+    // And the sibling relationship to P2's session seam is exact: the agent
+    // workspace lives beside `sessions/`, under the same numeric uid.
+    expect(helperPath).toBe(join(dirname(dirname(sessionDir)), "workspace"));
+    expect(existsSync(sessionDir)).toBe(true);
   });
 
-  it("two sessionIds are siblings under the same uid", async () => {
+  it("two sessions of one user resolve to the SAME per-user agent workspace", async () => {
     const wsRoot = mkdtempSync(join(tmpdir(), "ovid-wsp-ws-"));
     roots.push(wsRoot);
     const manager = await freshManager(wsRoot);
+    const resolver: SandboxUidResolver = async () => FIXED_UID;
+
     const p1 = await manager.workspaceDir("u1", "s-a");
     const p2 = await manager.workspaceDir("u1", "s-b");
-    expect(workspaceDir(wsRoot, FIXED_UID, "s-a")).toBe(p1);
-    expect(workspaceDir(wsRoot, FIXED_UID, "s-b")).toBe(p2);
-    expect(join(p1, "..")).toBe(join(p2, ".."));
+    const a = await resolveWorkspaceDir(resolver, wsRoot, "u1", "s-a");
+    const b = await resolveWorkspaceDir(resolver, wsRoot, "u1", "s-b");
+
+    // P2's session trees are siblings...
+    expect(dirname(p1)).toBe(dirname(p2));
+    // ...but the agent workspace is per-user, so P7 targets the same dir.
+    expect(a).toBe(b);
+    expect(a).toBe(join(dirname(dirname(p1)), "workspace"));
   });
 });

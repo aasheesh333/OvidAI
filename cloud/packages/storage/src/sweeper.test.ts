@@ -301,6 +301,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         events: createRedisEventLog(redis),
         storage: baseStorage,
         workspacesRoot: wsRoot,
+        sandboxUid: async (userId: string) => userId,
         sandbox,
         activity: createActivityTracker(redis, {
           keyPrefix: ACTIVITY_PREFIX,

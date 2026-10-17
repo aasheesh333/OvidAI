@@ -106,6 +106,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         events,
         storage,
         workspacesRoot,
+        sandboxUid: async (userId: string) => userId,
         sandbox: createNoopSandboxEviction(),
         activity: {
           async bump() {},

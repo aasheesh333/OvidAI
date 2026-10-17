@@ -29,6 +29,13 @@ COPY packages/shared/package.json packages/shared/
 COPY packages/db/package.json packages/db/
 COPY packages/events/package.json packages/events/
 COPY packages/queue/package.json packages/queue/
+# Every workspace package the gateway imports (direct dependencies): storage
+# (P7), account (P9), escrow (P10), mcp (P5). Missing manifests break the
+# frozen-lockfile install; missing dist trees break `node main.js` at import.
+COPY packages/storage/package.json packages/storage/
+COPY packages/account/package.json packages/account/
+COPY packages/escrow/package.json packages/escrow/
+COPY packages/mcp/package.json packages/mcp/
 COPY apps/gateway/package.json apps/gateway/
 COPY apps/worker/package.json apps/worker/
 COPY apps/e2e/package.json apps/e2e/
@@ -43,6 +50,10 @@ COPY --from=build /repo/packages/db/dist ./packages/db/dist
 COPY --from=build /repo/packages/db/drizzle ./packages/db/drizzle
 COPY --from=build /repo/packages/events/dist ./packages/events/dist
 COPY --from=build /repo/packages/queue/dist ./packages/queue/dist
+COPY --from=build /repo/packages/storage/dist ./packages/storage/dist
+COPY --from=build /repo/packages/account/dist ./packages/account/dist
+COPY --from=build /repo/packages/escrow/dist ./packages/escrow/dist
+COPY --from=build /repo/packages/mcp/dist ./packages/mcp/dist
 COPY --from=build /repo/apps/gateway/dist ./apps/gateway/dist
 RUN pnpm install --frozen-lockfile --prod
 USER node

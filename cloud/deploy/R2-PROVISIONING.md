@@ -193,8 +193,12 @@ node --check ../scripts/verify-r2.mjs
 
 ```bash
 cd /opt/ovid-cloud/repo/cloud/deploy
-docker compose up -d
+docker compose up -d --build
 ```
+
+`--build` is REQUIRED: the P7 gateway imports `@ovid/storage` (and other
+lanes' packages), and Compose would otherwise reuse a pre-P7 image that does
+not contain them. (This matches `DEPLOY.md`'s first-run command.)
 
 This starts `redis-c` (plus the existing services) and recreates the gateway
 with the `redis-c` dependency and `host.docker.internal` mapping. It does

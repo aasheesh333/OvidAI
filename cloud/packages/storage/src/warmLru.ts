@@ -60,7 +60,7 @@ import {
 } from "./hibernate.js";
 import { r2Keys } from "./keys.js";
 import { openReader } from "./rangeReader.js";
-import { workspaceDir } from "./workspacePaths.js";
+import { resolveWorkspaceDir } from "./workspacePaths.js";
 
 // ---------------------------------------------------------------------------
 // Pinned constants
@@ -201,8 +201,23 @@ export interface WarmFileManifestsRepo extends FileManifestsRepo {
   markColdRetry(db: DbLike, sessionId: string): Promise<void>;
 }
 
+/**
+ * The minimal BullMQ `Queue.add` surface. The returned job carries `id` and
+ * the creation `timestamp`; the latter is how a DEDUPED add is detected: an
+ * existing waiting/active job is returned with its ORIGINAL (older) timestamp
+ * instead of enqueuing a new one (C2 fix round 1).
+ */
+export interface QueuedHibernateJob {
+  readonly id?: string;
+  readonly timestamp?: number;
+}
+
 export interface HibernateQueue {
-  add(name: string, job: HibernateJobInput, opts: { jobId: string }): unknown;
+  add(
+    name: string,
+    job: HibernateJobInput,
+    opts: { jobId: string },
+  ): QueuedHibernateJob | unknown;
 }
 
 export type WarmDeps = HibernateDeps & {
@@ -334,9 +349,10 @@ export async function reconcileWarmRegistry(
     }
     if (current.state === "cold") {
       // T8-F1: cold row + a live dir the seam still reports = post-markCold
-      // crash residue. Reclaim ONLY when the archive is verifiably present;
-      // otherwise the dir may be the only copy and is left alone.
-      await reclaimColdResidue(deps, current);
+      // crash residue. Reclaim ONLY when the archive is verifiably present
+      // AND no other warm row of the same user still owns the shared dir
+      // (P2's agent workspace is per-user — see reclaimColdResidue).
+      await reclaimColdResidue(deps, current, rows);
       continue;
     }
     if (
@@ -373,7 +389,7 @@ export async function reconcileWarmRegistry(
       // State re-check (T6 carry): only a row still cold is ours.
       const row = await deps.fileManifests.get(deps.db, scanned.sessionId);
       if (row === null || row.state !== "cold") continue;
-      await reclaimColdResidue(deps, row);
+      await reclaimColdResidue(deps, row, rows);
     }
   }
 
@@ -396,7 +412,12 @@ export async function reconcileWarmRegistry(
     // Wipe the partial tree FIRST (a crash mid-extract leaves a partial
     // workspace), then state-rechecked cold. A failed rm leaves the residue
     // to hydrate's own wipe-on-hydrate path; the row must still go cold.
-    const dir = workspaceDir(deps.workspacesRoot, row.userId, row.sessionId);
+    const dir = await resolveWorkspaceDir(
+      deps.sandboxUid,
+      deps.workspacesRoot,
+      row.userId,
+      row.sessionId,
+    );
     try {
       await rmDir(dir, { recursive: true, force: true });
     } catch (err) {
@@ -438,12 +459,26 @@ async function refreshWarmBytes(
  * T8-F1 residue reclaim: a COLD row whose warm dir is still present (found
  * through the seam or the bounded cold-row scan). Deletes the dir only after
  * confirming the archive exists — the dir is never the last copy.
+ *
+ * C1 follow-up safety: P2's agent workspace is PER-USER
+ * (`{root}/{uid}/workspace`), so another session of the same user may still
+ * be warm and using that dir. In that case the dir is NOT residue — removing
+ * it would destroy a live workspace. `warmRows` is the sweep's warm scan.
  */
 async function reclaimColdResidue(
   deps: WarmDeps,
   row: FileManifestRowView,
+  warmRows: WarmRowView[],
 ): Promise<boolean> {
-  const dir = workspaceDir(deps.workspacesRoot, row.userId, row.sessionId);
+  if (warmRows.some((w) => w.userId === row.userId)) {
+    return false;
+  }
+  const dir = await resolveWorkspaceDir(
+    deps.sandboxUid,
+    deps.workspacesRoot,
+    row.userId,
+    row.sessionId,
+  );
   // Cheap existence probe first: the cold-row scan is bounded but runs every
   // sweep, and the overwhelming majority of cold rows have no dir.
   if (!(await pathExists(dir))) return false;
@@ -673,7 +708,14 @@ export async function enforceWarmCap(
     const row = candidate.row;
     const generation = row.generation + 1;
     try {
-      await Promise.resolve(
+      // C2 fix round 1: `add` with an existing jobId returns the EXISTING job
+      // (waiting/active) without enqueuing. BullMQ stamps a new job with
+      // `timestamp = Date.now()` at add time, so a returned timestamp older
+      // than the instant we called add means "already queued". A deduped add
+      // must NOT be counted as an eviction or subtract bytes: no new work was
+      // created by this pass.
+      const addStartedMs = Date.now();
+      const queued = (await Promise.resolve(
         deps.queues.hibernate.add(
           HIBERNATE_JOB_NAME,
           {
@@ -684,7 +726,10 @@ export async function enforceWarmCap(
           },
           { jobId: storageJobId(row.sessionId, generation) },
         ),
-      );
+      )) as QueuedHibernateJob | undefined;
+      if (typeof queued?.timestamp === "number" && queued.timestamp < addStartedMs) {
+        continue;
+      }
       evicted += 1;
       freedBytes += row.workspaceBytes ?? 0;
       totalBytes -= row.workspaceBytes ?? 0;

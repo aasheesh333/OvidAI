@@ -50,7 +50,7 @@ import { uiTree } from "./archive/uiTree.js";
 import { StorageError } from "./errors.js";
 import { r2Keys } from "./keys.js";
 import { openReader } from "./rangeReader.js";
-import { workspaceDir } from "./workspacePaths.js";
+import { resolveWorkspaceDir, type SandboxUidResolver } from "./workspacePaths.js";
 
 /** G7: 3-minute idle before a warm workspace is hibernated. */
 export const HIBERNATE_IDLE_MS = 180_000;
@@ -228,8 +228,14 @@ export interface HibernateDeps {
   db: DbLike;
   events: SessionEventLog;
   storage: StorageAdapter;
-  /** The warm-workspace tree root (dev/tests pass the user id as the uid segment — the helper accepts both). */
+  /** P2's resolved root (OVID_WORKSPACES_ROOT); the path is `{root}/{uid}/workspace`. */
   workspacesRoot: string;
+  /**
+   * Firebase userId → P2's numeric sandbox uid. Production wires
+   * `users.allocateSandboxUid`; tests may use an identity resolver. Required
+   * so a raw userId can never silently become the path segment again (C1).
+   */
+  sandboxUid: SandboxUidResolver;
   sandbox: SandboxEviction;
   activity: ActivityTracker;
   clock?: () => Date;
@@ -369,7 +375,14 @@ export async function hibernateWorkspace(
   const clock = deps.clock ?? (() => new Date());
   const idleMs = opts.idleMs ?? HIBERNATE_IDLE_MS;
   const startedMs = clock().getTime();
-  const dir = workspaceDir(deps.workspacesRoot, job.userId, job.sessionId);
+  // C1: the agent workspace (P2's handle.workspaceDir), keyed by the numeric
+  // sandbox uid — never the raw Firebase userId.
+  const dir = await resolveWorkspaceDir(
+    deps.sandboxUid,
+    deps.workspacesRoot,
+    job.userId,
+    job.sessionId,
+  );
   const archiveKey = r2Keys.workspaceArchive(job.userId, job.sessionId);
   const manifestKey = r2Keys.workspaceManifest(job.userId, job.sessionId);
 
@@ -549,7 +562,12 @@ export async function reconcileStuckHibernations(
     const row = await deps.fileManifests.get(deps.db, scanned.sessionId);
     if (row === null || row.state !== "hibernating") continue;
 
-    const dir = workspaceDir(deps.workspacesRoot, row.userId, row.sessionId);
+    const dir = await resolveWorkspaceDir(
+      deps.sandboxUid,
+      deps.workspacesRoot,
+      row.userId,
+      row.sessionId,
+    );
     if (await pathExists(dir)) {
       await deps.fileManifests.markWarm(deps.db, {
         sessionId: row.sessionId,

@@ -243,6 +243,14 @@ export const AGENT_RUNS_DEFAULT_CONCURRENCY = 8;
 export const STORAGE_JOB_DEFAULTS = {
   attempts: 3,
   backoff: { type: "exponential", delay: 5_000 },
+  // C2 (fix round 1, LOAD-BEARING): BullMQ dedupes on jobId for a job key in
+  // ANY state, including completed/failed. `storageJobId` is stable per
+  // (session, generation), so without removal a skipped idle hibernate (or a
+  // hydrate that exhausted its attempts) would permanently wedge that
+  // generation — including the manual POST hibernate. Dedupe is only needed
+  // while a job is waiting/active; drop the record as soon as it settles.
+  removeOnComplete: true,
+  removeOnFail: true,
 } as const;
 
 /**

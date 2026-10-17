@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import type { ConnectionOptions, Job, Worker } from "bullmq";
+import type { ConnectionOptions, Job, Queue, Worker } from "bullmq";
 import {
   AGENT_RUN_JOB_DEFAULTS,
   AGENT_RUN_JOB_NAME,
@@ -179,10 +179,12 @@ describe("storage job ids and defaults", () => {
     expect(storageJobId("s", 0)).toBe("s~0");
   });
 
-  it("STORAGE_JOB_DEFAULTS pins 3 attempts with exponential 5 s backoff (storage retries are safe: generation-checked idempotency)", () => {
+  it("STORAGE_JOB_DEFAULTS pins 3 attempts with exponential 5 s backoff and removes settled jobs (C2: completed/failed jobIds must be reusable)", () => {
     expect(STORAGE_JOB_DEFAULTS).toEqual({
       attempts: 3,
       backoff: { type: "exponential", delay: 5_000 },
+      removeOnComplete: true,
+      removeOnFail: true,
     });
   });
 
@@ -333,6 +335,22 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs and storage queues against real red
     const i = openWorkers.indexOf(w);
     if (i >= 0) openWorkers.splice(i, 1);
     await w.close();
+  }
+
+  /** Wait until a settled job's key is gone (removeOnComplete/removeOnFail). */
+  async function waitForJobGone(
+    queue: Queue<HibernateJob> | Queue<HydrateJob>,
+    jobId: string,
+    timeoutMs = 5_000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if ((await queue.getJob(jobId)) === undefined) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`job ${jobId} was not removed within ${timeoutMs} ms`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
   }
 
   beforeAll(() => {
@@ -568,6 +586,8 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs and storage queues against real red
     );
     expect(stored?.opts.attempts).toBe(3);
     expect(stored?.opts.backoff).toEqual({ type: "exponential", delay: 5_000 });
+    expect(stored?.opts.removeOnComplete).toBe(true);
+    expect(stored?.opts.removeOnFail).toBe(true);
 
     const yjob: HydrateJob = {
       sessionId: uid("sess"),
@@ -583,6 +603,105 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs and storage queues against real red
     );
     expect(ystored?.opts.attempts).toBe(3);
     expect(ystored?.opts.backoff).toEqual({ type: "exponential", delay: 5_000 });
+    expect(ystored?.opts.removeOnComplete).toBe(true);
+    expect(ystored?.opts.removeOnFail).toBe(true);
+  });
+
+  it("re-runs a COMPLETED storage jobId (C2: removeOnComplete releases the dedupe key)", async () => {
+    const runs: string[] = [];
+    const worker = trackWorker(
+      createHibernateWorker(
+        connection,
+        async (job) => {
+          runs.push(String(job.id));
+        },
+        { prefix: QUEUE_PREFIX },
+      ),
+    );
+
+    const payload: HibernateJob = {
+      sessionId: uid("sess"),
+      userId: uid("user"),
+      generation: 1,
+      reason: "idle",
+    };
+    const jobId = storageJobId(payload.sessionId, payload.generation);
+
+    const onceCompleted = () =>
+      new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("timed out waiting for hibernate completion")),
+          5_000,
+        );
+        worker.once("completed", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+
+    // First run completes (this is the "skipped idle hibernate" shape: the
+    // processor returns and the job settles).
+    const first = onceCompleted();
+    await queues.hibernate.add(HIBERNATE_JOB_NAME, payload, { jobId });
+    await first;
+    await waitForJobGone(queues.hibernate, jobId);
+
+    // Re-adding the SAME (session, generation) id must actually run again —
+    // without removeOnComplete BullMQ would return the settled job and the
+    // processor would never be invoked (C2 reproduction).
+    const second = onceCompleted();
+    await queues.hibernate.add(HIBERNATE_JOB_NAME, payload, { jobId });
+    await second;
+
+    expect(runs).toHaveLength(2);
+    await closeWorker(worker);
+  });
+
+  it("re-runs a FAILED storage jobId (C2: removeOnFail releases the dedupe key)", async () => {
+    let runs = 0;
+    const worker = trackWorker(
+      createHydrateWorker(
+        connection,
+        async () => {
+          runs += 1;
+          throw new Error("simulated extract failure");
+        },
+        { prefix: QUEUE_PREFIX },
+      ),
+    );
+
+    const payload: HydrateJob = {
+      sessionId: uid("sess"),
+      userId: uid("user"),
+      generation: 7,
+      reason: "run",
+    };
+    const jobId = storageJobId(payload.sessionId, payload.generation);
+
+    const onceFailed = () =>
+      new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("timed out waiting for hydrate failure")),
+          5_000,
+        );
+        worker.once("failed", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+
+    // attempts: 1 keeps the test fast; the failure is terminal either way.
+    const first = onceFailed();
+    await queues.hydrate.add(HYDRATE_JOB_NAME, payload, { jobId, attempts: 1 });
+    await first;
+    await waitForJobGone(queues.hydrate, jobId);
+
+    const second = onceFailed();
+    await queues.hydrate.add(HYDRATE_JOB_NAME, payload, { jobId, attempts: 1 });
+    await second;
+
+    expect(runs).toBe(2);
+    await closeWorker(worker);
   });
 
   it("createHibernateWorker consumes an added job (exact payload, concurrency 2 default)", async () => {

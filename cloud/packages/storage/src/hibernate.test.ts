@@ -292,6 +292,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         events: createRedisEventLog(redis),
         storage,
         workspacesRoot: wsRoot,
+        // Tests seed/read through the same helper with the userId as the uid
+        // segment; production wires users.allocateSandboxUid (C1).
+        sandboxUid: async (userId: string) => userId,
         sandbox: {
           listWarmWorkspaces: async () => [],
           evictWorkspace: async (userId: string, sessionId: string) => {

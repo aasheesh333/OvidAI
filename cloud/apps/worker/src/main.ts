@@ -1,6 +1,4 @@
 import { pathToFileURL } from "node:url";
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { Redis } from "ioredis";
 import { createDb, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
@@ -32,7 +30,7 @@ import {
 import {
   awaitWarm,
   createActivityTracker,
-  createNoopSandboxEviction,
+  createSandboxManagerEviction,
   createStorage,
   diskAlertFractionFromEnv,
   hibernateWorkspace,
@@ -498,14 +496,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     cfg: browserEngineCfg,
     redisFactory: () => new Redis(cfg.redisQUrl),
     persistence: browserPersistence,
-    // P2's resolved root (OVID_WORKSPACES_ROOT) — the same layout the
-    // SandboxManager and the hydrator engines use, so browser artifacts land
-    // inside the session's workspace jail.
-    workspaceDir: async (userId: string, sessionId: string) => {
-      const dir = join(sandboxConfig.workspacesRoot, userId, "sessions", sessionId);
-      await mkdir(dir, { recursive: true });
-      return dir;
-    },
+    // P2's session seam: allocates the numeric sandbox uid and creates
+    // `{root}/{uid}/sessions/{sessionId}`. Browser artifacts live in this
+    // per-session sibling of the agent workspace (the agent itself runs in
+    // `{root}/{uid}/workspace` — see the P7 block below).
+    workspaceDir: (userId: string, sessionId: string) =>
+      manager.workspaceDir(userId, sessionId),
   });
 
   // ---- P7 Task 8/9/10: state-hydrator engines + internal file service. ----
@@ -513,14 +509,52 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   // /workspaces/users by default): P7 MUST use the same root or the engines
   // and the SandboxManager would disagree about where a session lives.
   const workspacesRoot = sandboxConfig.workspacesRoot;
+  // C1: ONE userId → numeric-sandbox-uid resolver for EVERY P7 caller. P2's
+  // idempotent allocator is the same function the SandboxManager uses, so the
+  // engines now target `{root}/{uid}/workspace` — the directory the agent
+  // actually runs in (P2's SandboxHandle.workspaceDir), not a sibling and not
+  // a raw Firebase userId path segment.
+  //
+  // Memoized: allocateSandboxUid consumes a sequence value on every call
+  // (idempotent but not free), and the file service resolves on every
+  // request. sandbox_uid is immutable once assigned, so a process-local cache
+  // is safe (P2's manager keeps the same cache).
+  const uidByUser = new Map<string, number>();
+  const sandboxUid = async (userId: string): Promise<number> => {
+    const cached = uidByUser.get(userId);
+    if (cached !== undefined) return cached;
+    const uid = await users.allocateSandboxUid(db, userId);
+    uidByUser.set(userId, uid);
+    return uid;
+  };
+  // C3: the authoritative SandboxEviction seam built from P2's landed
+  // manager surface (destroy = kill leaves, leave data). Enumeration is
+  // disk-authoritative over the known userId/uid/sessionId triples; a
+  // handle-only list would close every idle warm row on the first sweep.
+  const sandboxEviction = createSandboxManagerEviction({
+    workspacesRoot,
+    manager,
+    listKnownSessions: async () => {
+      const rows = (await db.$client.unsafe(
+        `SELECT u.uid AS user_id, u.sandbox_uid AS uid, s.id AS session_id
+           FROM users u
+           JOIN sessions s ON s.user_id = u.uid
+          WHERE u.sandbox_uid IS NOT NULL`,
+      )) as Array<{ user_id: string; uid: number | string; session_id: string }>;
+      return rows.map((r) => ({
+        userId: r.user_id,
+        uid: r.uid,
+        sessionId: r.session_id,
+      }));
+    },
+  });
   const hibernateDeps: HibernateDeps = {
     db,
     events,
     storage,
     workspacesRoot,
-    // TODO(P2): replace the noop seam with the real SandboxManager-backed
-    // eviction once P2 exposes it (contract 1). The engine itself is done.
-    sandbox: createNoopSandboxEviction((msg) => console.warn(`[worker] ${msg}`)),
+    sandboxUid,
+    sandbox: sandboxEviction,
     activity,
     fileManifests: fileManifestsRepo,
     workspaceObjects: workspaceObjectsRepo,
@@ -533,6 +567,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     events,
     storage,
     workspacesRoot,
+    sandboxUid,
     activity,
     fileManifests: fileManifestsRepo,
     eventMirror: eventMirrorRepo,
@@ -570,6 +605,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     events,
     storage,
     workspacesRoot,
+    sandboxUid,
     activity,
     internalToken: cfg.internalToken,
     inlineMaxBytes: cfg.inlineMaxBytes,

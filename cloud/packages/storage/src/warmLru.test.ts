@@ -299,6 +299,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         events: createRedisEventLog(redis),
         storage: baseStorage,
         workspacesRoot: wsRoot,
+        sandboxUid: async (userId: string) => userId,
         sandbox: { listWarmWorkspaces: async () => [], evictWorkspace: async () => {} },
         activity: createActivityTracker(redis, {
           keyPrefix: ACTIVITY_PREFIX,
@@ -425,6 +426,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       disk?: DiskUsage;
       authoritative?: boolean;
       sandbox?: WarmDeps["sandbox"];
+      /** Simulate BullMQ returning an EXISTING (deduped) job. */
+      dedupeTimestamp?: number;
     } = {}): Harness {
       const adds: AddRecord[] = [];
       const evictCalls: Array<[string, string]> = [];
@@ -445,7 +448,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       const hibernateQueue: HibernateQueue = {
         add(name, job, addOpts) {
           adds.push({ name, job, opts: addOpts });
-          return { id: addOpts.jobId };
+          return opts.dedupeTimestamp === undefined
+            ? { id: addOpts.jobId }
+            : { id: addOpts.jobId, timestamp: opts.dedupeTimestamp };
         },
       };
       const hydrationScan: StuckHydrationScan = { listStuckHydrating };
@@ -455,6 +460,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         events: createRedisEventLog(redis),
         storage: baseStorage,
         workspacesRoot: wsRoot,
+        sandboxUid: async (userId: string) => userId,
         sandbox,
         activity: createActivityTracker(redis, {
           keyPrefix: ACTIVITY_PREFIX,
@@ -716,6 +722,25 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       } finally {
         warn.mockRestore();
       }
+    });
+
+    it("does not count a DEDUPED pressure add as evicted (C2 fix round 1)", async () => {
+      const uid = await seedUser();
+      const sid = await seedSession(uid);
+      await seedWarmRow(uid, sid, 500);
+
+      // BullMQ returns the existing waiting/active job with its ORIGINAL
+      // timestamp; no new work was created, so the pass must not claim an
+      // eviction or subtract the row's bytes.
+      const h = makeHarness({ nowMs: T0, dedupeTimestamp: 1 });
+      const out = await enforceWarmCap(
+        h.deps,
+        { maxWarmBytes: 0, diskAlertFraction: 0.8 },
+        {},
+      );
+
+      expect(out).toEqual({ evicted: 0, freedBytes: 0 });
+      expect(h.adds).toHaveLength(1); // the add was still attempted
     });
 
     it("maxEvictions bounds the pass (anti-thrash)", async () => {

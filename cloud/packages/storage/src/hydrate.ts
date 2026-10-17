@@ -70,7 +70,7 @@ import {
 import type { FileManifestRowView } from "./hibernate.js";
 import { assertSafeRelPath, r2Keys } from "./keys.js";
 import { openReader } from "./rangeReader.js";
-import { workspaceDir } from "./workspacePaths.js";
+import { resolveWorkspaceDir, type SandboxUidResolver } from "./workspacePaths.js";
 
 // ---------------------------------------------------------------------------
 // Structural mirrors of the @ovid/db / @ovid/queue surfaces (exact signatures;
@@ -135,7 +135,13 @@ export interface HydrateDeps {
   db: HydrateDbLike;
   events: HydrateEventLog;
   storage: StorageAdapter;
+  /** P2's resolved root; the agent workspace is `{root}/{numericUid}/workspace`. */
   workspacesRoot: string;
+  /**
+   * Firebase userId → P2's numeric sandbox uid (production:
+   * `users.allocateSandboxUid`). Required — see C1 in workspacePaths.ts.
+   */
+  sandboxUid: SandboxUidResolver;
   activity: ActivityTracker;
   clock?: () => Date;
   /** The real @ovid/db repo namespaces, injected by the wiring layer. */
@@ -364,7 +370,14 @@ export async function hydrateWorkspace(
 ): Promise<HydrateResult> {
   const clock = deps.clock ?? (() => new Date());
   const startedMs = clock().getTime();
-  const dir = workspaceDir(deps.workspacesRoot, job.userId, job.sessionId);
+  // C1/I1: extract into the SAME directory the agent runs in (P2's
+  // handle.workspaceDir = {root}/{numericUid}/workspace), not a sibling.
+  const dir = await resolveWorkspaceDir(
+    deps.sandboxUid,
+    deps.workspacesRoot,
+    job.userId,
+    job.sessionId,
+  );
 
   const row = await deps.fileManifests.get(deps.db, job.sessionId);
   if (row === null) {
@@ -576,7 +589,12 @@ export async function readWorkspaceFile(
 ): Promise<ReadFileResult> {
   const rel = assertSafeRelPath(ref.path);
   const maxBytes = opts.maxBytes ?? Number.POSITIVE_INFINITY;
-  const dir = workspaceDir(deps.workspacesRoot, ref.userId, ref.sessionId);
+  const dir = await resolveWorkspaceDir(
+    deps.sandboxUid,
+    deps.workspacesRoot,
+    ref.userId,
+    ref.sessionId,
+  );
 
   // -- warm truth ----------------------------------------------------------
   if (await isDirectory(dir)) {
@@ -676,7 +694,12 @@ export async function writeWorkspaceFile(
   content: Buffer,
 ): Promise<{ path: string; sizeBytes: number; sha256Hex: string }> {
   const rel = assertSafeRelPath(ref.path);
-  const dir = workspaceDir(deps.workspacesRoot, ref.userId, ref.sessionId);
+  const dir = await resolveWorkspaceDir(
+    deps.sandboxUid,
+    deps.workspacesRoot,
+    ref.userId,
+    ref.sessionId,
+  );
   if (!(await isDirectory(dir))) {
     throw new WorkspaceStateError(
       `workspace ${ref.sessionId} is not warm — hydrate before writing`,
