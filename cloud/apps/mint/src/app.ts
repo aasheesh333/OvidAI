@@ -2,6 +2,7 @@ import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import type { Db } from "@ovid/db";
 import type { Redis } from "ioredis";
 import type { Alerter } from "./alerts.js";
+import { registerAdminRoutes } from "./adminRoutes.js";
 import type { MintEnv } from "./env.js";
 import type { LiteLlmAdmin } from "./litellmAdmin.js";
 import { registerMintRoutes } from "./mintRoutes.js";
@@ -120,8 +121,10 @@ export function buildMintApps(deps: MintDeps): {
 
   const adminApp = Fastify({ logger: false });
   installErrorHandling(adminApp);
-  // Task 8 ports the console routes here; the scaffold has none yet, so the
-  // admin surface answers 404 for everything except the error contract.
+  // Task 8: the owner console + /admin/* JSON API, guarded by
+  // OVID_ADMIN_MASTER_KEY. This app listens on its own ADMIN port — Caddy
+  // never routes /admin, so the console is localhost / SSH-tunnel only.
+  registerAdminRoutes(adminApp, deps);
 
   return { publicApp, adminApp };
 }

@@ -15,6 +15,9 @@ export * from "./catalog.js";
 export * from "./verifier.js";
 export * from "./keyMint.js";
 export * from "./mintRoutes.js";
+// Task 8: the owner admin console + /admin/* JSON API and audit trail.
+export * from "./adminAudit.js";
+export * from "./adminRoutes.js";
 
 import { Redis } from "ioredis";
 import type { FastifyInstance } from "fastify";

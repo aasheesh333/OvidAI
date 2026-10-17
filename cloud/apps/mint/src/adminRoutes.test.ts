@@ -1,0 +1,914 @@
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { plansRepo, users as usersRepo, type Db } from "@ovid/db";
+import type { Redis } from "ioredis";
+import type { FastifyInstance } from "fastify";
+import type { MintDeps } from "./app.js";
+import { buildMintApps, HttpContractError } from "./app.js";
+import { requireAdmin } from "./adminRoutes.js";
+import { AUDIT_LIST } from "./adminAudit.js";
+import { loadMintEnv, type MintEnv } from "./env.js";
+import { findPlan } from "./planMath.js";
+import { createLiteLlmAdmin } from "./litellmAdmin.js";
+import { getSettings, publishSettingsToRedis } from "./settings.js";
+import {
+  closeDb,
+  closeRedis,
+  openFlushedRedis,
+  resetTestDb,
+  testUid,
+  TEST_DATABASE_URL,
+  TEST_MINT_REDIS_URL,
+} from "./test/env.js";
+import { FakeLiteLlm, MASTER_KEY, standardModels } from "./test/litellmFake.js";
+
+/**
+ * The /admin JSON API + console — port of server/mint/tests/test_admin.py.
+ * Real Postgres + Redis db9 + a local FakeLiteLLM; the console is served on
+ * the ADMIN listener (buildMintApps' adminApp) only.
+ *
+ * Differences pinned by the plan (not Python bugs to copy):
+ *  - auth compares OVID_ADMIN_MASTER_KEY (env.adminMasterKey) with
+ *    timingSafeEqual, 401 "missing authorization" / 403 "not admin";
+ *  - overrides/tier/bans are durable in Postgres and re-published to db2 by
+ *    the projection (Python wrote Redis directly).
+ */
+
+const RUN = TEST_DATABASE_URL !== undefined && TEST_MINT_REDIS_URL !== undefined;
+
+const FIXED_NOW = new Date("2026-10-17T12:34:56.000Z");
+const ADMIN_KEY = "sk-admin-test";
+const ADMIN = { authorization: `Bearer ${ADMIN_KEY}` };
+
+const AUTH_MATRIX: Array<[string, string, unknown]> = [
+  ["GET", "/admin/settings", null],
+  ["POST", "/admin/settings", { free_daily_usd: 9 }],
+  ["GET", "/admin/plans", null],
+  ["POST", "/admin/plans", { id: "x", kind: "split" }],
+  ["POST", "/admin/plans/pro/disable", null],
+  ["GET", "/admin/models", null],
+  ["POST", "/admin/set-base-budget", { daily_usd: 9 }],
+  ["POST", "/admin/set-tier", { uid: "u", tier: "max" }],
+  ["POST", "/admin/user/update", { uid: "u", daily_usd: 5 }],
+  ["POST", "/admin/reset-window", { uid: "u" }],
+  ["POST", "/admin/reset-usage", {}],
+  ["GET", "/admin/reset-status", null],
+  ["POST", "/admin/ban", { uid: "u" }],
+  ["POST", "/admin/unban", { uid: "u" }],
+  ["GET", "/admin/user?q=u", null],
+  ["GET", "/admin/audit", null],
+  ["GET", "/admin/reapply-status", null],
+  ["POST", "/admin/sweep", null],
+  ["GET", "/admin/export", null],
+];
+
+describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
+  let db: Db;
+  let redis: Redis;
+  let fake: FakeLiteLlm;
+  let deps: MintDeps;
+  let adminApp: FastifyInstance;
+  let publicApp: FastifyInstance;
+  let stateDir: string;
+
+  beforeAll(async () => {
+    db = await resetTestDb();
+    redis = await openFlushedRedis();
+    stateDir = mkdtempSync(join(tmpdir(), "mint-admin-"));
+    fake = new FakeLiteLlm();
+    await fake.start();
+    deps = {
+      db,
+      redis,
+      litellm: createLiteLlmAdmin(fake.baseUrl, MASTER_KEY),
+      env: loadMintEnv({
+        NODE_ENV: "test",
+        DATABASE_URL: TEST_DATABASE_URL!,
+        REDIS_DB2_URL: TEST_MINT_REDIS_URL!,
+        LITELLM_BASE: fake.baseUrl,
+        LITELLM_MASTER_KEY: MASTER_KEY,
+        OVID_ADMIN_MASTER_KEY: ADMIN_KEY,
+        OVID_INTERNAL_API_SECRET: "sk-internal-test",
+        FIREBASE_PROJECT_ID: "ovid-test",
+        APPCHECK_ENABLED: "true",
+        USAGE_CACHE_S: "15",
+        MINT_STATE_DIR: stateDir,
+      }),
+      alerter: async () => {},
+      verifyIdentity: async ({ authorization }) => {
+        const token = authorization.replace(/^bearer\s+/i, "");
+        return { uid: token, email: null, platform: "android" };
+      },
+      clock: () => FIXED_NOW,
+    };
+    const apps = buildMintApps(deps);
+    publicApp = apps.publicApp;
+    adminApp = apps.adminApp;
+    await getSettings({ db });
+    standardModels(fake);
+  }, 60_000);
+
+  afterAll(async () => {
+    await publicApp.close();
+    await adminApp.close();
+    await fake.stop();
+    await closeRedis(redis);
+    await closeDb(db);
+  });
+
+  beforeEach(async () => {
+    await redis.flushdb();
+    fake.reset();
+    standardModels(fake);
+    deps.env.reapplySyncMax = 200;
+    // re-publish the db2 projection the flush wiped (parity with a live boot)
+    await publishSettingsToRedis(redis, await getSettings({ db }));
+  });
+
+  function admin(
+    method: string,
+    url: string,
+    payload?: unknown,
+    headers: Record<string, string> = {},
+  ): ReturnType<FastifyInstance["inject"]> {
+    return adminApp.inject({
+      method: method as "GET" | "POST",
+      url,
+      headers: { ...ADMIN, ...headers },
+      ...(payload === undefined || payload === null ? {} : { payload: payload as object }),
+    });
+  }
+
+  /** conftest user_with_keys: android+web keys, tier in Redis AND Postgres. */
+  async function userWithKeys(
+    uid: string,
+    tier: string | null = null,
+  ): Promise<{ android: string; web: string }> {
+    await usersRepo.ensure(db, uid, null);
+    if (tier !== null && tier !== "free") {
+      const s = await getSettings({ db });
+      await redis.set(`user:${uid}:tier`, tier);
+      await db.$client`UPDATE users SET tier = ${findPlan(s, tier).id} WHERE uid = ${uid}`;
+    }
+    const android = fake.addKey(`tok-${uid}-a`);
+    const web = fake.addKey(`tok-${uid}-w`);
+    await redis.set(`user:${uid}:keyid`, android);
+    await redis.set(`user:${uid}:web:keyid`, web);
+    // conftest default: the LiteLLM user budget already runs on a 30d clock
+    fake.users.set(uid, { spend: 0, budget_duration: "30d" });
+    return { android, web };
+  }
+
+  /** conftest _prime: a mid-window user with spend, auto hits, slow mode. */
+  async function prime(uid: string, tier = "pro") {
+    const toks = await userWithKeys(uid, tier);
+    for (const t of Object.values(toks)) fake.keys.get(t)!.spend = 0.7;
+    const old = FIXED_NOW.getTime() / 1000 - 5 * 3600;
+    await redis.set(`pool:${uid}:start`, String(old));
+    await redis.set(`pool:${uid}:spend`, "6");
+    await redis.hset(`pool:${uid}:auto`, "glm-5.3-flash", "4");
+    await redis.hset("pools:slow", uid, "9999999999");
+    fake.users.get(uid)!.spend = 4.0;
+    return { toks, old };
+  }
+
+  async function getUsage(uid: string): Promise<Record<string, unknown>> {
+    const res = await publicApp.inject({
+      method: "POST",
+      url: "/usage",
+      headers: { authorization: `Bearer ${uid}`, "x-firebase-appcheck": "x" },
+    });
+    expect(res.statusCode).toBe(200);
+    return res.json() as Record<string, unknown>;
+  }
+
+  async function auditEntries(limit = 200): Promise<Array<Record<string, unknown>>> {
+    const res = await admin("GET", `/admin/audit?limit=${limit}`);
+    expect(res.statusCode).toBe(200);
+    return (res.json() as { entries: Array<Record<string, unknown>> }).entries;
+  }
+
+  // ------------------------------------------------------------------ reset ALL
+  // FIRST test in the file: the users table holds exactly these 3 users, so
+  // the "all users" reset pins Python's users=3 / keys=6 numbers.
+
+  it("reset-window {} over all users runs SYNC and reports done status", async () => {
+    const uids = [testUid("ra"), testUid("rb"), testUid("rc")];
+    for (const u of uids) await prime(u);
+
+    const res = await admin("POST", "/admin/reset-window", {});
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      ok: true,
+      reset: 6,
+      detail: { mode: "sync", users: 3, keys: 6, errors: 0 },
+    });
+
+    const status = (await admin("GET", "/admin/reset-status")).json();
+    expect(status).toMatchObject({ state: "done", total: 3, done: 3, users: 3, keys: 6 });
+
+    for (const u of uids) {
+      expect(await redis.get(`pool:${u}:spend`)).toBeNull();
+      expect(await redis.hgetall(`pool:${u}:auto`)).toEqual({});
+    }
+    expect(await redis.hgetall("pools:slow")).toEqual({});
+
+    const entries = await auditEntries();
+    expect(entries[0]).toMatchObject({ action: "reset-window", target: "ALL" });
+  });
+
+  it("reset-window {} above REAPPLY_SYNC_MAX runs in the BACKGROUND with progress", async () => {
+    const uidA = testUid("bga");
+    const uidB = testUid("bgb");
+    const a = await prime(uidA);
+    const b = await prime(uidB, "free");
+    const total = (await plansRepo.allUids(db)).length;
+
+    deps.env.reapplySyncMax = 1;
+    try {
+      const res = await admin("POST", "/admin/reset-window", {});
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        ok: true,
+        reset: 0,
+        detail: { mode: "background", users: total },
+      });
+
+      const deadline = Date.now() + 15_000;
+      let status: Record<string, unknown> = {};
+      for (;;) {
+        status = (await admin("GET", "/admin/reset-status")).json();
+        if (status.state === "done") break;
+        if (Date.now() > deadline) throw new Error("background reset never finished");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(status).toMatchObject({ state: "done", total, done: total, users: total });
+
+      for (const t of [...Object.values(a.toks), ...Object.values(b.toks)]) {
+        expect(fake.keys.get(t)!.spend).toBe(0);
+      }
+      expect(await redis.get(`pool:${uidA}:spend`)).toBeNull();
+      expect(await redis.get(`pool:${uidB}:spend`)).toBeNull();
+      expect(await redis.hgetall("pools:slow")).toEqual({});
+    } finally {
+      deps.env.reapplySyncMax = 200;
+    }
+  });
+
+  // ---------------------------------------------------------------------- auth
+
+  it("every admin endpoint requires the master key: 401 missing, 403 wrong, no side effects", async () => {
+    const uid = testUid("auth");
+    await userWithKeys(uid);
+    const settingsBefore = await getSettings({ db });
+
+    for (const [method, path, payload] of AUTH_MATRIX) {
+      const noAuth = await adminApp.inject({
+        method: method as "GET" | "POST",
+        url: path,
+        ...(payload === null ? {} : { payload: payload as object }),
+      });
+      expect(noAuth.statusCode, `${method} ${path} without auth`).toBe(401);
+      expect(noAuth.json()).toEqual({ detail: "missing authorization" });
+
+      const wrong = await adminApp.inject({
+        method: method as "GET" | "POST",
+        url: path,
+        headers: { authorization: "Bearer nope" },
+        ...(payload === null ? {} : { payload: payload as object }),
+      });
+      expect(wrong.statusCode, `${method} ${path} with a wrong key`).toBe(403);
+      expect(wrong.json()).toEqual({ detail: "not admin" });
+    }
+
+    // nothing happened: settings unchanged, no ban, no audit rows
+    expect(await getSettings({ db })).toEqual(settingsBefore);
+    expect(await redis.get(`user:${uid}:banned`)).toBeNull();
+    expect(await redis.llen(AUDIT_LIST)).toBe(0);
+  });
+
+  it("requireAdmin: timing-safe compare, equal-length wrong key is a 403 not a throw", () => {
+    const env = loadMintEnv({
+      NODE_ENV: "test",
+      DATABASE_URL: "postgres://u:p@localhost:5432/t",
+      REDIS_DB2_URL: "redis://localhost:6379/9",
+      LITELLM_MASTER_KEY: MASTER_KEY,
+      OVID_ADMIN_MASTER_KEY: ADMIN_KEY,
+      OVID_INTERNAL_API_SECRET: "sk-internal-test",
+      FIREBASE_PROJECT_ID: "ovid-test",
+    }) as MintEnv;
+
+    expect(() => requireAdmin(env, "")).toThrowError(HttpContractError);
+    expect(() => requireAdmin(env, "")).toThrowError(
+      expect.objectContaining({ status: 401, detail: "missing authorization" }),
+    );
+    expect(() => requireAdmin(env, "Token abc")).toThrowError(
+      expect.objectContaining({ status: 401 }),
+    );
+    // equal length, wrong bytes: exercises timingSafeEqual, not the length guard
+    expect(() => requireAdmin(env, `Bearer ${"x".repeat(ADMIN_KEY.length)}`)).toThrowError(
+      expect.objectContaining({ status: 403, detail: "not admin" }),
+    );
+    expect(() => requireAdmin(env, `Bearer ${ADMIN_KEY}`)).not.toThrow();
+    expect(() => requireAdmin(env, `bearer ${ADMIN_KEY}`)).not.toThrow();
+  });
+
+  // ------------------------------------------------------------------ settings
+
+  it("GET /admin/settings returns settings, user count, scalar bounds and statuses", async () => {
+    const uid = testUid("setg");
+    await userWithKeys(uid);
+    const res = await admin("GET", "/admin/settings");
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as Record<string, unknown>;
+    expect(body.users).toBe((await plansRepo.allUids(db)).length);
+    const settings = body.settings as Record<string, unknown>;
+    expect(settings.free_daily_usd).toBe(0.15);
+    expect((settings.plans as Array<{ id: string }>)[0]!.id).toBe("free");
+    const scalars = body.scalars as Record<string, { min: number; max: number }>;
+    expect(scalars.free_monthly_cap_usd).toEqual({ min: 0, max: 100000 });
+    expect(scalars.est_input_tokens).toEqual({ min: 1, max: 10_000_000 });
+    expect(body.reapply_status).toBeNull();
+    expect(body.reset_status).toBeNull(); // beforeEach flushed db2's status keys
+  });
+
+  it("POST /admin/settings partial update keeps other fields, re-publishes db2, reapplies to every key", async () => {
+    const uid = testUid("setp");
+    const toks = await userWithKeys(uid);
+
+    const hashBefore = await redis.hgetall("config:limits");
+    expect(await redis.get("config:base_daily_usd")).toBe("0.15");
+
+    const res = await admin("POST", "/admin/settings", { free_daily_usd: 9 });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      ok: boolean;
+      settings: Record<string, unknown>;
+      reapplied: Record<string, unknown>;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.settings.free_daily_usd).toBe(9);
+    // untouched fields survive the partial update
+    expect(body.settings.free_monthly_cap_usd).toBe(10);
+    expect(
+      (body.settings.auto_oss_members as Array<{ model: string; weight: number }>).map((m) => m.model),
+    ).toEqual(["glm-5.3-flash", "deepseek-v4.1-flash", "minimax-m3"]);
+    const hashAfter = await redis.hgetall("config:limits");
+    expect(hashAfter.free_monthly_cap_usd).toBe(hashBefore.free_monthly_cap_usd);
+    expect(hashAfter.plans).toBe(hashBefore.plans);
+    expect(await redis.get("config:base_daily_usd")).toBe("9.0");
+
+    // re-applied to EVERY key (android + web namespaces)
+    expect(body.reapplied).toMatchObject({ mode: "sync" });
+    for (const t of Object.values(toks)) {
+      const upd = fake.posts("/key/update").filter((p) => p.key === t).pop()!;
+      expect(upd.max_budget).toBe(9); // free plan: 9 × 1 per 24h
+    }
+
+    // audited with before/after
+    const entries = await auditEntries();
+    const s = entries.find((e) => e.action === "settings")!;
+    expect((s.before as Record<string, unknown>).free_daily_usd).toBe(0.15);
+    expect((s.after as Record<string, unknown>).free_daily_usd).toBe(9);
+
+    // restore
+    await admin("POST", "/admin/settings", { free_daily_usd: 0.15 });
+  });
+
+  it("POST /admin/settings with reapply=false skips the key sweep (?reapply=false opt-out)", async () => {
+    const uid = testUid("setr");
+    await userWithKeys(uid);
+    fake.calls.length = 0;
+
+    const res = await admin("POST", "/admin/settings", {
+      auto_oss_members: [{ model: "glm-5.3-flash", weight: 2 }],
+      reapply: false,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, reapplied: { mode: "skipped" } });
+    expect(fake.posts("/key/update")).toHaveLength(0);
+    expect(
+      ((res.json() as { settings: { auto_oss_members: unknown[] } }).settings.auto_oss_members),
+    ).toEqual([{ model: "glm-5.3-flash", weight: 2 }]);
+
+    // the query-string spelling works too
+    const q = await adminApp.inject({
+      method: "POST",
+      url: "/admin/settings?reapply=false",
+      headers: ADMIN,
+      payload: { free_monthly_cap_usd: 12 },
+    });
+    expect(q.statusCode).toBe(200);
+    expect(q.json()).toMatchObject({ reapplied: { mode: "skipped" } });
+    expect(fake.posts("/key/update")).toHaveLength(0);
+
+    // restore
+    await admin("POST", "/admin/settings", {
+      auto_oss_members: [
+        { model: "glm-5.3-flash", weight: 1 },
+        { model: "deepseek-v4.1-flash", weight: 1 },
+        { model: "minimax-m3", weight: 1 },
+      ],
+      free_monthly_cap_usd: 10,
+      reapply: false,
+    });
+  });
+
+  it("POST /admin/settings rejects invalid values with Python's messages", async () => {
+    const invalid: Array<[Record<string, unknown>, string]> = [
+      [{ bogus: 1 }, "unknown setting 'bogus'"],
+      [{ auto_oss_members: [{ model: "nope" }] }, "not LiteLLM models: nope"],
+      [{ auto_oss_members: ["auto"] }, "auto_oss_members cannot contain 'auto'"],
+      [
+        { plans: [{ id: "FREE" }] },
+        "plan id must be 1-32 chars of a-z 0-9 _ -",
+      ],
+    ];
+    for (const [payload, message] of invalid) {
+      const res = await admin("POST", "/admin/settings", payload);
+      expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+      expect(res.json()).toEqual({ detail: message });
+    }
+  });
+
+  it("GET /admin/reapply-status: never → done after a settings change", async () => {
+    const uid = testUid("reps");
+    await userWithKeys(uid);
+    await redis.del("config:reapply_status");
+    const never = (await admin("GET", "/admin/reapply-status")).json();
+    expect(never).toEqual({ state: "never" });
+    await admin("POST", "/admin/settings", { est_input_tokens: 2000 });
+    const done = (await admin("GET", "/admin/reapply-status")).json();
+    expect(done).toMatchObject({ state: "done", total: expect.any(Number) });
+  });
+
+  // --------------------------------------------------------------------- plans
+
+  it("plans-as-data: add, edit, disable (stop selling) keeps existing users, re-enable", async () => {
+    const uid = testUid("plan");
+    await userWithKeys(uid, "pro");
+    const budgetBefore = (await getUsage(uid)).daily_budget_usd;
+
+    // add
+    const add = await admin("POST", "/admin/plans", {
+      id: "team",
+      name: "Team",
+      price_usd: 15,
+      mult: 10,
+      window_hours: 24,
+    });
+    expect(add.statusCode).toBe(200);
+    expect((add.json() as { settings: { plans: Array<{ id: string }> } }).settings.plans.map((p) => p.id)).toContain("team");
+    expect((await auditEntries()).find((e) => e.action === "plan-add")!.target).toBe("team");
+
+    // edit by id: missing fields keep their stored values
+    const edit = await admin("POST", "/admin/plans", { id: "team", mult: 12 });
+    expect(edit.statusCode).toBe(200);
+    const team = ((await admin("GET", "/admin/plans")).json() as {
+      plans: Array<{ id: string; name: string; mult: number }>;
+    }).plans.find((p) => p.id === "team")!;
+    expect(team.name).toBe("Team");
+    expect(team.mult).toBe(12);
+    expect((await auditEntries()).find((e) => e.action === "plan-edit")!.target).toBe("team");
+
+    // disable: vanishes from the PUBLIC /plans, existing users keep it
+    const disable = await admin("POST", "/admin/plans/pro/disable");
+    expect(disable.statusCode).toBe(200);
+    const publicPlans = (
+      (await publicApp.inject({ method: "GET", url: "/plans" }).then((r) => r.json())) as {
+        plans: Array<{ id: string }>;
+      }
+    ).plans.map((p) => p.id);
+    expect(publicPlans).not.toContain("pro");
+    expect(publicPlans).toContain("team");
+    await redis.del(`usagecache:${uid}`); // prove findPlan ignores `enabled`
+    expect((await getUsage(uid)).daily_budget_usd).toBe(budgetBefore);
+    expect((await auditEntries()).find((e) => e.action === "plan-disable")!.target).toBe("pro");
+
+    // re-enable
+    const enable = await admin("POST", "/admin/plans/pro/enable");
+    expect(enable.statusCode).toBe(200);
+    expect(
+      ((await publicApp.inject({ method: "GET", url: "/plans" }).then((r) => r.json())) as {
+        plans: Array<{ id: string }>;
+      }).plans.map((p) => p.id),
+    ).toContain("pro");
+
+    // guards
+    const noPlan = await admin("POST", "/admin/plans/nope/disable");
+    expect(noPlan.statusCode).toBe(404);
+    expect(noPlan.json()).toEqual({ detail: "unknown plan" });
+    const noAction = await admin("POST", "/admin/plans/pro/bogus");
+    expect(noAction.statusCode).toBe(404);
+    expect(noAction.json()).toEqual({ detail: "unknown action" });
+    const freeOff = await admin("POST", "/admin/plans/free/disable");
+    expect(freeOff.statusCode).toBe(400);
+    expect(freeOff.json()).toEqual({ detail: "the 'free' plan must stay enabled" });
+  });
+
+  // -------------------------------------------------------------- user/update
+
+  it("user/update tier + custom free limit: Postgres + db2 + reapply, then clear", async () => {
+    const uid = testUid("su1");
+    const toks = await userWithKeys(uid);
+
+    const res = await admin("POST", "/admin/user/update", {
+      uid,
+      tier: "starter",
+      daily_usd: 2,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      ok: boolean;
+      user: Record<string, unknown>;
+      reapplied: { keys: number; errors: number };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.user.tier).toBe("3x");
+    expect(body.user.plan).toBe("starter");
+    expect(body.user.daily_usd_override).toBe("2.0");
+    expect(body.reapplied).toEqual({ keys: 2, errors: 0 });
+
+    // Postgres authority
+    const rows = (await db.$client`SELECT tier FROM users WHERE uid = ${uid}`) as {
+      tier: string;
+    }[];
+    expect(rows[0]!.tier).toBe("starter");
+    expect((await plansRepo.getOverride(db, uid))?.dailyUsd).toBe("2.0");
+    // db2 projection
+    expect(await redis.get(`user:${uid}:tier`)).toBe("3x");
+    expect(await redis.get(`user:${uid}:dailyUsd`)).toBe("2.0");
+    // re-applied: 2 × mult 3 per 24h window
+    for (const t of Object.values(toks)) {
+      expect(fake.keys.get(t)!.max_budget).toBeCloseTo(6, 10);
+    }
+
+    // the /admin/set-tier alias + clear_daily_usd
+    const alias = await admin("POST", "/admin/set-tier", { uid, clear_daily_usd: true });
+    expect(alias.statusCode).toBe(200);
+    expect((alias.json() as { user: { daily_usd_override: string | null } }).user.daily_usd_override).toBeNull();
+    expect(await redis.get(`user:${uid}:dailyUsd`)).toBeNull();
+    expect(fake.keys.get(toks.web)!.max_budget).toBeCloseTo(0.45, 10);
+    expect(await plansRepo.getOverride(db, uid)).toBeNull();
+
+    // audited with before/after — two set-user calls happened (set, then clear)
+    const setUser = (await auditEntries()).filter((e) => e.action === "set-user");
+    expect(setUser).toHaveLength(2);
+    expect((setUser[1]!.before as Record<string, unknown>).plan).toBe("free");
+    expect((setUser[1]!.after as Record<string, unknown>).plan).toBe("starter");
+    expect((setUser[1]!.after as Record<string, unknown>).tier).toBe("3x");
+    expect((setUser[1]!.after as Record<string, unknown>).daily_usd_override).toBe("2.0");
+    expect((setUser[0]!.after as Record<string, unknown>).daily_usd_override).toBeNull();
+  });
+
+  it("user/update pools override (mult/slow/auto-oss) with clear", async () => {
+    const uid = testUid("su2");
+    const toks = await userWithKeys(uid, "pro");
+
+    const res = await admin("POST", "/admin/user/update", {
+      uid,
+      pools: { mult: 40, slow_mode: true, auto_oss: false },
+    });
+    expect(res.statusCode).toBe(200);
+    // allowance 0.15 × 40 = 6; slow-mode plans get the key ceiling ×3
+    expect(fake.keys.get(toks.android)!.max_budget).toBeCloseTo(0.15 * 40 * 3, 10);
+
+    const u = (await admin("GET", `/admin/user?q=${uid}`)).json() as Record<string, unknown>;
+    expect(u.override_pools).toEqual({ mult: 40, slow_mode: true, auto_oss: false });
+    expect((u.pools_usd as { all: number }).all).toBeCloseTo(6.0, 10);
+
+    const clear = await admin("POST", "/admin/user/update", { uid, clear_pools: true });
+    expect(clear.statusCode).toBe(200);
+    expect(fake.keys.get(toks.android)!.max_budget).toBeCloseTo(0.15 * 23, 10);
+    expect((await plansRepo.getOverride(db, uid))?.pools ?? null).toBeNull();
+  });
+
+  it("user/update validation: unknown plan, negative money, bad pools fields, missing uid", async () => {
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ uid: "vu1", tier: "99x" }, "unknown plan"],
+      [{ uid: "vu2", daily_usd: -1 }, "daily_usd must be >= 0"],
+      [{ uid: "vu3", monthly_cap_usd: -0.5 }, "monthly_cap_usd must be >= 0"],
+      [{ uid: "vu4", pools: { oss_usd: -1 } }, "unknown override field 'oss_usd'"],
+      [{ uid: "vu5", pools: { bogus: 1 } }, "unknown override field 'bogus'"],
+      [{ uid: "vu6", pools: { mult: -1 } }, "mult must be between 0 and 100000"],
+      [{ uid: "vu7", pools: { slow_mode: "yes" } }, "slow_mode must be true or false"],
+      [{ tier: "pro" }, "uid required"],
+    ];
+    for (const [payload, message] of cases) {
+      const res = await admin("POST", "/admin/user/update", payload);
+      expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+      expect(res.json()).toEqual({ detail: message });
+    }
+  });
+
+  it("custom monthly backstop drives the LiteLLM user budget (free plan, 30d)", async () => {
+    const uid = testUid("cap");
+    await userWithKeys(uid);
+    const res = await admin("POST", "/admin/set-tier", { uid, monthly_cap_usd: 25 });
+    expect(res.statusCode).toBe(200);
+    expect((await plansRepo.getOverride(db, uid))?.monthlyCapUsd).toBe("25.0");
+    expect(await redis.get(`user:${uid}:monthlyCapUsd`)).toBe("25.0");
+    expect(fake.users.get(uid)!.max_budget).toBe(25);
+  });
+
+  // ------------------------------------------------------------- reset-window
+
+  it("reset-window (one user): counters cleared, clocks restarted, /usage resets_at moved", async () => {
+    const uid = testUid("rw");
+    const { toks, old } = await prime(uid);
+
+    const before = (await getUsage(uid)) as {
+      resets_at: string;
+      remaining_fraction: number;
+    };
+    expect(await redis.get(`usagecache:${uid}`)).not.toBeNull();
+
+    const res = await admin("POST", "/admin/reset-window", { uid });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      ok: true,
+      reset: 2,
+      detail: { mode: "sync", users: 1, keys: 2, errors: 0 },
+    });
+
+    for (const t of Object.values(toks)) {
+      expect(fake.keys.get(t)!.spend).toBe(0);
+      const upd = fake.posts("/key/update").filter((p) => p.key === t).pop()!;
+      expect(upd.spend).toBe(0);
+      expect(upd.budget_duration).toBe("24h"); // clock restarted
+      expect(upd.rpm_limit).toBe(240); // slow mode lifted
+    }
+    expect(fake.users.get(uid)!.spend).toBe(0); // paid: user budget = window budget
+    expect(await redis.get(`pool:${uid}:spend`)).toBeNull();
+    expect(await redis.hgetall(`pool:${uid}:auto`)).toEqual({});
+    expect(Number(await redis.get(`pool:${uid}:start`))).toBeGreaterThan(old + 4 * 3600);
+    expect(await redis.hget("pools:slow", uid)).toBeNull();
+    expect(await redis.get(`usagecache:${uid}`)).toBeNull(); // cache dropped
+
+    const after = (await getUsage(uid)) as {
+      resets_at: string;
+      remaining_fraction: number;
+      pools: Array<{ slow_mode: boolean }>;
+    };
+    expect(after.resets_at > before.resets_at).toBe(true);
+    expect(after.remaining_fraction).toBe(1);
+    expect(after.pools.every((p) => !p.slow_mode)).toBe(true);
+
+    const entry = (await auditEntries()).find((e) => e.action === "reset-window")!;
+    expect(entry.target).toBe(uid);
+  });
+
+  it("reset-window on a free user keeps the monthly backstop unless reset_month_free", async () => {
+    const uid = testUid("rwf");
+    await prime(uid, "free");
+
+    await admin("POST", "/admin/reset-window", { uid });
+    expect(fake.users.get(uid)!.spend).toBe(4);
+    // the free user's budget clock (30d) was NOT restarted
+    expect(fake.posts("/user/update").every((u) => !("budget_duration" in u))).toBe(true);
+
+    await admin("POST", "/admin/reset-window", { uid, reset_month_free: true });
+    expect(fake.users.get(uid)!.spend).toBe(0);
+    const withDuration = fake.posts("/user/update").filter((u) => "budget_duration" in u);
+    expect(withDuration).toHaveLength(1);
+  });
+
+  it("reset-usage (legacy) also zeroes the monthly backstop", async () => {
+    const uid = testUid("rul");
+    await prime(uid, "free");
+    const res = await admin("POST", "/admin/reset-usage", { uid });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, reset: 2 });
+    expect(fake.users.get(uid)!.spend).toBe(0);
+  });
+
+  // ---------------------------------------------------------------- ban/unban
+
+  it("ban blocks both keys + Redis flag + Postgres bannedAt + audit before/after; unban reverses", async () => {
+    const uid = testUid("ban");
+    const toks = await userWithKeys(uid);
+
+    const ban = await admin("POST", "/admin/ban", { uid });
+    expect(ban.statusCode).toBe(200);
+    expect(ban.json()).toEqual({ ok: true });
+    expect(await redis.get(`user:${uid}:banned`)).toBe("admin");
+    for (const t of Object.values(toks)) {
+      expect(fake.keys.get(t)!.blocked).toBe(true);
+      expect(fake.calls.some((c) => c.method === "POST" && c.path === "/key/block" && c.body.key === t)).toBe(true);
+    }
+    const rows = (await db.$client`
+      SELECT banned_at IS NOT NULL AS banned, banned_reason FROM users WHERE uid = ${uid}`) as {
+      banned: boolean;
+      banned_reason: string | null;
+    }[];
+    expect(rows[0]).toEqual({ banned: true, banned_reason: "admin" });
+
+    const entry = (await auditEntries()).find((e) => e.action === "ban")!;
+    expect(entry.target).toEqual({ uid, ip: null });
+    expect((entry.before as Record<string, unknown>).banned).toBeNull();
+    expect((entry.after as Record<string, unknown>).banned).toBe("admin");
+
+    const unban = await admin("POST", "/admin/unban", { uid });
+    expect(unban.statusCode).toBe(200);
+    expect(await redis.get(`user:${uid}:banned`)).toBeNull();
+    for (const t of Object.values(toks)) expect(fake.keys.get(t)!.blocked).toBe(false);
+    expect(fake.calls.some((c) => c.method === "POST" && c.path === "/key/unblock")).toBe(true);
+    const after = (await db.$client`
+      SELECT banned_at IS NOT NULL AS banned FROM users WHERE uid = ${uid}`) as { banned: boolean }[];
+    expect(after[0]!.banned).toBe(false);
+  });
+
+  it("IP ban: 30-day SETEX, unban deletes", async () => {
+    const ban = await admin("POST", "/admin/ban", { ip: "203.0.113.9" });
+    expect(ban.statusCode).toBe(200);
+    expect(await redis.get("ban:ip:203.0.113.9")).toBe("admin");
+    const ttl = await redis.ttl("ban:ip:203.0.113.9");
+    expect(ttl).toBeGreaterThan(29 * 24 * 3600 - 60);
+    expect(ttl).toBeLessThanOrEqual(30 * 24 * 3600);
+
+    await admin("POST", "/admin/unban", { ip: "203.0.113.9" });
+    expect(await redis.get("ban:ip:203.0.113.9")).toBeNull();
+  });
+
+  // -------------------------------------------------------------- user lookup
+
+  it("lookup by uid or email shows allowance, app view and per-model usage", async () => {
+    const uid = testUid("look");
+    await usersRepo.ensure(db, uid, "u@example.com");
+    await redis.set(`email:u@example.com`, uid);
+    const toks = await userWithKeys(uid, "7x");
+    standardModels(fake);
+
+    const appBody = (await getUsage(uid)) as Record<string, unknown>;
+    fake.addLog(toks.web, "prov/deepseek-v4.1-flash", { group: "auto", spend: 0.3, agoMin: 0 });
+
+    const res = await admin("GET", `/admin/user?q=${encodeURIComponent("U@Example.com")}`);
+    expect(res.statusCode).toBe(200);
+    const u = res.json() as Record<string, unknown>;
+    expect(u.uid).toBe(uid);
+    expect((u.plan as { id: string }).id).toBe("pro");
+    expect(u.tier).toBe("7x");
+    expect(u.email).toBe("u@example.com");
+    const all = (u.pool_state_usd as { all: { spent: number; remaining: number } }).all;
+    expect(all.spent).toBeCloseTo(0.3, 10);
+    expect(all.remaining).toBeCloseTo(0.15 * 23 - 0.3, 10);
+    expect(
+      ((u.today as { by_model: Record<string, { via_auto: number }> }).by_model[
+        "deepseek-v4.1-flash"
+      ] ?? {}).via_auto,
+    ).toBe(1);
+    expect(((u.app_view as { pools: Array<{ class: string }> }).pools).map((p) => p.class)).toEqual(["all"]);
+    expect(Object.keys(u.app_view as Record<string, unknown>).sort()).toEqual(
+      Object.keys(appBody).sort(),
+    );
+    expect(Array.isArray(u.keys)).toBe(true);
+
+    const ghost = await admin("GET", "/admin/user?q=ghost");
+    expect(ghost.statusCode).toBe(404);
+    expect(ghost.json()).toEqual({ detail: "user not found" });
+  });
+
+  // -------------------------------------------------------------------- models
+
+  it("GET /admin/models: prices + per-message/image estimates", async () => {
+    const res = await admin("GET", "/admin/models");
+    expect(res.statusCode).toBe(200);
+    const models = (res.json() as { models: Array<Record<string, unknown>> }).models;
+    const m = new Map(models.map((x) => [x.id, x]));
+    expect(m.get("glm-5.3-flash")!.est_unit_cost_usd).toBeCloseTo(2e-7 * 2000 + 8e-7 * 600, 20);
+    expect(m.get("ovid-image")!.est_unit_cost_usd).toBe(0.04);
+    expect(m.get("mystery")!.est_unit_cost_usd).toBeNull();
+    expect((m.get("auto")!.members as string[]).length).toBeGreaterThan(0);
+    expect("class" in m.get("glm-5.3-flash")!).toBe(false);
+    expect(models.map((x) => x.id)).toEqual([...models.map((x) => x.id)].sort());
+  });
+
+  // --------------------------------------------------------------------- audit
+
+  it("audit list is newest-first and the JSONL file mirrors it oldest-first", async () => {
+    const uid = testUid("aud");
+    await userWithKeys(uid);
+    const fileBefore = readFileSync(join(stateDir, "admin-audit.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l !== "").length;
+
+    await admin("POST", "/admin/settings", { free_daily_usd: 3 });
+    await admin("POST", "/admin/set-tier", { uid, tier: "7x" });
+    await admin("POST", "/admin/ban", { uid });
+    await admin("POST", "/admin/reset-window", { uid });
+
+    const entries = await auditEntries();
+    expect(entries.slice(0, 4).map((e) => e.action)).toEqual([
+      "reset-window",
+      "ban",
+      "set-user",
+      "settings",
+    ]);
+    const s = entries.find((e) => e.action === "settings")!;
+    expect((s.before as Record<string, unknown>).free_daily_usd).toBe(0.15);
+    expect((s.after as Record<string, unknown>).free_daily_usd).toBe(3);
+    const t = entries.find((e) => e.action === "set-user")!;
+    expect((t.before as Record<string, unknown>).plan).toBe("free");
+    expect((t.after as Record<string, unknown>).plan).toBe("pro");
+    expect((t.after as Record<string, unknown>).tier).toBe("7x");
+
+    const lines = readFileSync(join(stateDir, "admin-audit.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l !== "");
+    expect(lines.length - fileBefore).toBe(4);
+    const lineActions = lines
+      .slice(fileBefore)
+      .map((l) => (JSON.parse(l) as { action: string }).action);
+    expect(lineActions).toEqual(["settings", "set-user", "ban", "reset-window"]);
+
+    // limit is honored and clamped
+    expect((await auditEntries(1)).length).toBe(1);
+    expect((await auditEntries(-5)).length).toBe(1);
+
+    // restore the settings change made here
+    await admin("POST", "/admin/settings", { free_daily_usd: 0.15 });
+  });
+
+  // -------------------------------------------------------------------- sweep
+
+  it("POST /admin/sweep runs the slow-mode sweep now", async () => {
+    const uid = testUid("swp");
+    await userWithKeys(uid);
+    // an already-expired slow entry: the sweep lifts it and pushes rate limits
+    await redis.hset("pools:slow", uid, String(FIXED_NOW.getTime() / 1000 - 60));
+    const res = await admin("POST", "/admin/sweep");
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ checked: 0, lifted: 1 });
+    expect(await redis.hget("pools:slow", uid)).toBeNull();
+  });
+
+  // ------------------------------------------------------------------- export
+
+  it("GET /admin/export: settings + every user's state", async () => {
+    const uid = testUid("exp");
+    await usersRepo.ensure(db, uid, "export@example.com");
+    await redis.set(`user:${uid}:tier`, "3x");
+    await db.$client`UPDATE users SET tier = 'starter' WHERE uid = ${uid}`;
+    await plansRepo.saveOverride(db, uid, { pools: { mult: 4 } });
+
+    const res = await admin("GET", "/admin/export");
+    expect(res.statusCode).toBe(200);
+    const exp = res.json() as {
+      exported_at: string;
+      settings: { plans: Array<{ id: string }> };
+      users: Record<string, Record<string, unknown>>;
+    };
+    expect(exp.exported_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    expect(exp.settings.plans[0]!.id).toBe("free");
+    expect(exp.users[uid]).toMatchObject({
+      tier: "3x",
+      plan: "starter",
+      email: "export@example.com",
+      pools_override: { mult: 4 },
+    });
+  });
+
+  // ------------------------------------------------------------------- console
+
+  it("GET /admin and /admin/ui serve the console: text/html, no-store, frame-ancestors 'none', nosniff", async () => {
+    for (const path of ["/admin", "/admin/ui"]) {
+      const res = await adminApp.inject({ method: "GET", url: path });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["content-type"]).toContain("text/html");
+      expect(res.headers["cache-control"]).toBe("no-store");
+      expect(res.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+      expect(res.headers["x-content-type-options"]).toBe("nosniff");
+      const html = res.body;
+      for (const needle of [
+        "Plans",
+        "Model prices",
+        "Auto-oss members",
+        "auto uses auto-oss",
+        "Slow-mode rpm",
+        "Reset window now",
+        "Reset window for ALL users now",
+        "Clear custom plan",
+        "Clear custom free limit",
+        "Models as the app sees them",
+        "Audit log",
+        "monthly backstop",
+      ]) {
+        expect(html, needle).toContain(needle);
+      }
+      for (const gone of ["5 / 10 / 20", "Model classes", "frontier", "oss pool", "auto_oss_group"]) {
+        expect(html, gone).not.toContain(gone);
+      }
+    }
+    // the console page itself needs no key (it is a client of this API)
+    const anon = await adminApp.inject({ method: "GET", url: "/admin" });
+    expect(anon.statusCode).toBe(200);
+  });
+
+  it("the console HTML is byte-stable across serves", async () => {
+    const a = await adminApp.inject({ method: "GET", url: "/admin" });
+    const b = await adminApp.inject({ method: "GET", url: "/admin/ui" });
+    expect(a.body).toBe(b.body);
+  });
+});
