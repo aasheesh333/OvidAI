@@ -24,6 +24,9 @@ const healthyGate = {
   healthStatus: "ok" as const,
   workerAlive: true,
   targetProblems: [] as string[],
+  // A real staging pidfile yields a pid; null is the unreadable case, which
+  // has its own rejection test below.
+  workerPid: 4242,
 };
 
 describe("evaluateStagingTarget", () => {
@@ -60,6 +63,12 @@ describe("evaluateStagingTarget", () => {
 describe("evaluateWorkerKillGate", () => {
   it("passes with a gated run in flight, worker alive, and a staging target", () => {
     expect(evaluateWorkerKillGate(healthyGate).ok).toBe(true);
+  });
+
+  it("rejects an unreadable staging pidfile — no proven kill target", () => {
+    const result = evaluateWorkerKillGate({ ...healthyGate, workerPid: null });
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("pidfile");
   });
 
   it("rejects a run that has not started", () => {
