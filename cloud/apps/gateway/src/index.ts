@@ -3,6 +3,7 @@ export * from "./auth.js";
 export * from "./tickets.js";
 export * from "./app.js";
 export * from "./keys.js";
+export * from "./wsPty.js";
 
 import { initializeApp } from "firebase-admin/app";
 import { Redis } from "ioredis";
@@ -15,6 +16,7 @@ import { createFirebaseVerifier, createTestVerifier } from "./auth.js";
 import { loadGatewayEnv } from "./env.js";
 import { createHttpMintProvisioner, createMintRedisKeyProvider } from "./keys.js";
 import { createTicketStore } from "./tickets.js";
+import { createRedisPtyBridge } from "./wsPty.js";
 
 /**
  * Composition root — intentionally untested-thin (Task 10's e2e exercises the
@@ -51,6 +53,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       // Session event log shares the queue Redis; the worker (Task 9) appends
       // to the same instance, so gateway replay/live sees every event.
       events: createRedisEventLog(redisQ),
+      // Terminal-over-WS bridge (Task 13): ctl/out pub-sub + the pty registry
+      // all live on the same queue Redis the worker PSUBSCRIBEs.
+      pty: createRedisPtyBridge(redisQ),
     },
     { logger: true },
   );

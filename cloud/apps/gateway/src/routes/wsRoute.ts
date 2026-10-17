@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import type { GatewayDeps } from "../app.js";
+import type { WsDeps } from "../ws.js";
 import { handleWsConnection, type WsConnectionOptions } from "../ws.js";
 
 /** Contract path — deliberately NOT under the /cloud/v1 REST prefix. */
@@ -13,7 +13,7 @@ export const WS_PATH = "/cloud/ws";
  */
 export function registerWsRoute(
   app: FastifyInstance,
-  deps: GatewayDeps,
+  deps: WsDeps,
   opts: WsConnectionOptions = {},
 ): void {
   app.get(WS_PATH, { websocket: true }, (socket, request) => {

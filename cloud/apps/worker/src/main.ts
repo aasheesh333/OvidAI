@@ -15,6 +15,7 @@ import {
 import type { KeyProvider } from "@ovid/shared";
 import { createOpenAiTransport } from "./liteLlm.js";
 import { createAgentRunProcessor } from "./runProcessor.js";
+import { startWorkerPtyBridge } from "./ptyBridge.js";
 import { createToolRegistry } from "./tools/registry.js";
 import { sweepStaleRuns } from "./staleRuns.js";
 
@@ -150,6 +151,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   });
   await manager.recover(); // orphan env cgroups from a crashed run die now
 
+  // P2 Task 13: the terminal-over-WS worker bridge. Started AFTER recovery —
+  // a pty ctl can only be served once the manager chain is ready; its stop()
+  // runs BEFORE manager.close() in shutdown() (the manager's env teardown
+  // kills every live pty leaf; the bridge itself never kills ptys).
+  const stopPtyBridge = await startWorkerPtyBridge({ sandbox: manager, redis: redisQ });
+
   const processor = createAgentRunProcessor({
     db,
     events,
@@ -200,9 +207,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   const shutdown = (): Promise<void> => {
     shuttingDown ??= (async () => {
       clearInterval(sweeper);
+      // P2 Task 13 pin: the pty bridge stops FIRST (no new ctl mid-teardown),
+      // then the sandbox manager — manager.close() kills every live pty leaf,
+      // and each pty's onExit publishes its `exit` + HDELs its registry key.
+      await stopPtyBridge();
       // P2 Task 12 pin: manager.close() BEFORE the drain — sandbox envs (their
-      // cgroup trees, live leaves and admission slots) tear down first; Task 13
-      // will slot the pty-bridge stop in front of this same line.
+      // cgroup trees, live leaves and admission slots) tear down first.
       await manager.close();
       // Drains in-flight jobs and stops fetching new ones (force=false).
       await worker.close();

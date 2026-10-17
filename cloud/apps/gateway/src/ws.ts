@@ -1,9 +1,11 @@
+import { randomUUID } from "node:crypto";
 import type { RawData, WebSocket } from "ws";
 import { sessions, type Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
-import { wsClientMsg, type SessionEvent, type WsServerMsg } from "@ovid/shared";
+import { wsClientMsg, type PtyOutMsg, type SessionEvent, type WsClientMsg, type WsServerMsg } from "@ovid/shared";
 import { isUuid } from "./routes/http.js";
 import type { TicketStore } from "./tickets.js";
+import { PTY_OPEN_TIMEOUT_MS, PTY_REPLY_TIMEOUT_MS, PtyBridgeError, type PtyBridge } from "./wsPty.js";
 
 /**
  * The thin client's live event channel: one multiplexed WS connection carries
@@ -16,12 +18,22 @@ import type { TicketStore } from "./tickets.js";
  * buffered, and the flush (subscribed → replay → buffer → pass-through) is
  * fully synchronous, deduping by stream-id seq. Nothing can be lost between
  * the two reads and nothing can be delivered twice.
+ *
+ * Task 13 adds the terminal ops (pty_*): pty_open/attach wire a PtyBridge
+ * session into this connection's ptySubs; every frame a bridge produces is
+ * forwarded as pty_output/pty_exit. Ownership discipline: pty_open goes
+ * through sessions.get; pty_attach and control ops from connections that did
+ * not open/attach the pty go through the bridge's registry lookup. PTYS
+ * SURVIVE socket close — 'close' only DETACHES the output subscriptions (an
+ * explicit pty_close or a worker shutdown kills them).
  */
 
 export interface WsDeps {
   tickets: TicketStore;
   events: EventLog;
   db: Db;
+  /** Terminal-over-WS bridge (Task 13); main wires createRedisPtyBridge(redisQ). */
+  pty: PtyBridge;
 }
 
 export interface WsConnectionOptions {
@@ -87,6 +99,15 @@ interface Subscription {
   lastSentSeq: string | null;
 }
 
+/**
+ * One terminal attached on this connection. `detach` only quits the bridge's
+ * pty:out subscription — the PTY ITSELF SURVIVES (reconnect re-attaches; only
+ * explicit pty_close or a worker shutdown kills it).
+ */
+interface PtyEntry {
+  detach(): Promise<void>;
+}
+
 export async function handleWsConnection(
   socket: WebSocket,
   url: URL,
@@ -106,6 +127,7 @@ export async function handleWsConnection(
   // readyState re-check after verify backs it up (everything from there to
   // the drain is synchronous, so no new window opens).
   const subs = new Map<string, Subscription>();
+  const ptySubs = new Map<string, PtyEntry>();
   let closed = false;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
 
@@ -113,10 +135,15 @@ export async function handleWsConnection(
     if (heartbeat !== null) clearInterval(heartbeat);
     const all = [...subs.values()];
     subs.clear();
+    const ptyAll = [...ptySubs.values()];
+    ptySubs.clear();
     // EVERY subscription must be torn down: each holds a dedicated redis
     // pub/sub connection (Task 4 duplicates the client), so a leak here is a
     // leaked connection per session per reconnect.
     await Promise.all(all.map((sub) => sub.unsubscribe().catch(() => {})));
+    // Terminal subs DETACH ONLY (ptys survive — never an implicit pty_close;
+    // the reconnect's pty_attach picks the same pty back up).
+    await Promise.all(ptyAll.map((p) => p.detach().catch(() => {})));
   };
   socket.on("close", () => {
     closed = true;
@@ -293,6 +320,164 @@ export async function handleWsConnection(
     await sub.unsubscribe().catch(() => {});
   }
 
+  // ---- Terminal ops (Task 13) ----------------------------------------------
+
+  /** PtyBridgeError → error frame with the code; the connection SURVIVES. */
+  function ptyError(err: unknown, ptyId: string): void {
+    if (err instanceof PtyBridgeError) {
+      send(socket, { op: "error", code: err.code, message: err.message, ptyId });
+      return;
+    }
+    send(socket, { op: "error", code: "internal", message: "Internal error.", ptyId });
+  }
+
+  /**
+   * Drops a terminal sub (pty_exit seen, or replaced): stops forwarding and
+   * detaches the bridge's pty:out subscription. The pty itself is untouched.
+   */
+  function dropPty(ptyId: string, entry: PtyEntry): void {
+    if (ptySubs.get(ptyId) !== entry) return; // already dropped or replaced
+    ptySubs.delete(ptyId);
+    void entry.detach().catch(() => {});
+  }
+
+  /** The bridge's live stream for one attached pty, forwarded as ws frames. */
+  function forwardPty(ptyId: string, entry: PtyEntry): (m: PtyOutMsg) => void {
+    return (m) => {
+      if (ptySubs.get(ptyId) !== entry) return; // dropped or replaced: ignore
+      if (m.type === "output") {
+        send(socket, { op: "pty_output", ptyId, data: m.data, offset: m.offset });
+        return;
+      }
+      send(socket, { op: "pty_exit", ptyId, exitCode: m.exitCode });
+      dropPty(ptyId, entry); // the sub dies with the pty; the registry is gone
+    };
+  }
+
+  /**
+   * Registers `entry`, awaits the bridge attach, and on success arms the real
+   * detach + sends the ack + snapshot frames. On any failure the entry is
+   * removed and an error frame goes out — the connection survives.
+   */
+  async function armPty(
+    entry: PtyEntry,
+    ptyId: string,
+    attach: () => Promise<{ truncated: boolean; endOffset: number; detach(): Promise<void>; chunks: { offset: number; data: string }[] }>,
+    ack: (res: { truncated: boolean }) => void,
+  ): Promise<void> {
+    ptySubs.set(ptyId, entry); // pre-registered: the bridge's first live frames find it
+    let res;
+    try {
+      res = await attach();
+    } catch (err) {
+      if (ptySubs.get(ptyId) === entry) ptySubs.delete(ptyId);
+      ptyError(err, ptyId);
+      return;
+    }
+    if (closed || ptySubs.get(ptyId) !== entry) {
+      // Socket died (or the sub was replaced) mid-setup: don't leak the
+      // bridge's freshly created pty:out subscription.
+      await res.detach().catch(() => {});
+      return;
+    }
+    entry.detach = res.detach;
+    ack(res);
+    // Snapshot chunks go out as pty_output frames in snapshot order; the
+    // bridge delivers its buffered live tail only after this continuation.
+    for (const c of res.chunks) {
+      send(socket, { op: "pty_output", ptyId, data: c.data, offset: c.offset });
+    }
+  }
+
+  async function handlePtyOpen(msg: Extract<WsClientMsg, { op: "pty_open" }>): Promise<void> {
+    // Ownership FIRST, before any bridge work — sessions.get is ownership-
+    // scoped (null on unknown id AND wrong owner; the uuid shape guard keeps
+    // client garbage away from the id column).
+    const owned = isUuid(msg.sessionId) ? await sessions.get(deps.db, msg.sessionId, uid) : null;
+    if (owned === null) {
+      send(socket, {
+        op: "error",
+        code: "forbidden",
+        message: "Session not found.",
+        sessionId: msg.sessionId,
+      });
+      return;
+    }
+    const ptyId = randomUUID();
+    const entry: PtyEntry = { detach: async () => {} };
+    try {
+      await deps.pty.open(
+        ptyId,
+        { userId: uid, sessionId: msg.sessionId, cols: msg.cols, rows: msg.rows },
+        PTY_OPEN_TIMEOUT_MS,
+      );
+    } catch (err) {
+      ptyError(err, ptyId);
+      return;
+    }
+    await armPty(
+      entry,
+      ptyId,
+      () => deps.pty.attach(ptyId, null, forwardPty(ptyId, entry), PTY_REPLY_TIMEOUT_MS),
+      () => send(socket, { op: "pty_opened", ptyId, sessionId: msg.sessionId }),
+    );
+  }
+
+  async function handlePtyAttach(msg: Extract<WsClientMsg, { op: "pty_attach" }>): Promise<void> {
+    // Registry ownership: userId must match this connection's principal.
+    const meta = await deps.pty.lookup(msg.ptyId);
+    if (meta === null || meta.userId !== uid) {
+      send(socket, {
+        op: "error",
+        code: "forbidden",
+        message: "Terminal not found.",
+        ptyId: msg.ptyId,
+      });
+      return;
+    }
+    const entry: PtyEntry = { detach: async () => {} };
+    await armPty(
+      entry,
+      msg.ptyId,
+      () =>
+        deps.pty.attach(
+          msg.ptyId,
+          msg.lastOffset ?? null,
+          forwardPty(msg.ptyId, entry),
+          PTY_REPLY_TIMEOUT_MS,
+        ),
+      (res) => send(socket, { op: "pty_attached", ptyId: msg.ptyId, truncated: res.truncated }),
+    );
+  }
+
+  async function handlePtyCtl(
+    ptyId: string,
+    msg:
+      | { type: "input"; data: string }
+      | { type: "resize"; cols: number; rows: number }
+      | { type: "close" },
+  ): Promise<void> {
+    // Allowed without a lookup when THIS connection opened/attached the pty…
+    if (!ptySubs.has(ptyId)) {
+      // …else the registry ownership check decides.
+      const meta = await deps.pty.lookup(ptyId);
+      if (meta === null || meta.userId !== uid) {
+        send(socket, {
+          op: "error",
+          code: "forbidden",
+          message: "Terminal not found.",
+          ptyId,
+        });
+        return;
+      }
+    }
+    try {
+      await deps.pty.send(ptyId, msg);
+    } catch (err) {
+      ptyError(err, ptyId);
+    }
+  }
+
   async function processFrame(raw: string): Promise<void> {
     // Defense in depth for the chained-queue path: a frame that was still
     // waiting its turn when the socket died must not start db/redis work.
@@ -318,6 +503,21 @@ export async function handleWsConnection(
         return;
       case "unsubscribe":
         await handleUnsubscribe(msg.sessionId);
+        return;
+      case "pty_open":
+        await handlePtyOpen(msg);
+        return;
+      case "pty_attach":
+        await handlePtyAttach(msg);
+        return;
+      case "pty_input":
+        await handlePtyCtl(msg.ptyId, { type: "input", data: msg.data });
+        return;
+      case "pty_resize":
+        await handlePtyCtl(msg.ptyId, { type: "resize", cols: msg.cols, rows: msg.rows });
+        return;
+      case "pty_close":
+        await handlePtyCtl(msg.ptyId, { type: "close" });
         return;
     }
   }

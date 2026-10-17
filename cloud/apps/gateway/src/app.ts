@@ -15,6 +15,8 @@ import { registerMessageRoutes } from "./routes/messages.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerWsRoute } from "./routes/wsRoute.js";
 import type { TicketStore } from "./tickets.js";
+import type { WsDeps } from "./ws.js";
+import { PtyBridgeError, type PtyBridge } from "./wsPty.js";
 
 export interface GatewayDeps {
   db: Db;
@@ -25,6 +27,14 @@ export interface GatewayDeps {
   mint: MintProvisioner;
   /** Session event log (Task 4) — the WS channel's replay + live source. */
   events: EventLog;
+  /**
+   * Terminal-over-WS bridge (Task 13). main() always wires
+   * createRedisPtyBridge(redisQ). The field is OPTIONAL only so the P1
+   * compositions (spine e2e + P1 suites) stay source-compatible: when absent,
+   * the WS channel answers every pty frame with an `internal` error frame
+   * instead of crashing — the fallback is loud, never a silent no-op.
+   */
+  pty?: PtyBridge;
   /**
    * Reserved for time-sensitive logic (Task 8 WS heartbeats, TTL math); the
    * REST routes deliberately use DB time (repos) so pagination and ordering
@@ -121,8 +131,29 @@ export function buildGateway(
   // maxPayload caps every inbound frame BEFORE any handler sees it (I2).
   app.register(async (scope) => {
     await scope.register(websocket, { options: { maxPayload: WS_MAX_PAYLOAD_BYTES } });
-    registerWsRoute(scope, deps);
+    // WsDeps.pty is required at the handler boundary; a gateway composed
+    // without a bridge (pre-P2 test compositions) gets the loud fallback
+    // below instead of a type hole. main() always wires the real bridge.
+    const wsDeps: WsDeps = {
+      db: deps.db,
+      tickets: deps.tickets,
+      events: deps.events,
+      pty: deps.pty ?? unavailablePtyBridge(),
+    };
+    registerWsRoute(scope, wsDeps);
   });
 
   return app;
+}
+
+/** Never-wired bridge fallback: every pty frame fails loudly with `internal`. */
+function unavailablePtyBridge(): PtyBridge {
+  const reject = (): Promise<never> =>
+    Promise.reject(new PtyBridgeError("internal", "Terminal bridge not configured."));
+  return {
+    open: reject,
+    attach: reject,
+    send: async () => {},
+    lookup: async () => null,
+  };
 }
