@@ -28,6 +28,8 @@
     "@ovid/queue": "workspace:*",
     "@ovid/sandbox": "workspace:*",
     "@ovid/shared": "workspace:*",
+    "@ovid/storage": "workspace:*",
+    "fastify": "^5.12.7",
     "ioredis": "^5.11.1",
     "zod": "^3.25.76"
   }

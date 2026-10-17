@@ -34,10 +34,13 @@ import {
   type SandboxHandle,
   type SandboxManager,
 } from "@ovid/sandbox";
+import type { SandboxPort } from "@ovid/agent-core";
 import type { KeyProvider, SessionEvent } from "@ovid/shared";
 import { createToolRegistry } from "./tools/registry.js";
+import type { ToolRegistry } from "./tools/registry.js";
 import { SYSTEM_PROMPT_V1, TOOL_EVENT_CONTENT_CAP } from "./tools/systemPrompt.js";
 import type { ModelToolSpec } from "./tools/types.js";
+import type { AgentTool } from "./tools/types.js";
 import {
   createOpenAiTransport,
   TerminalModelError,
@@ -47,6 +50,7 @@ import {
   type ToolCall,
 } from "./liteLlm.js";
 import { createAgentRunProcessor, type RunDeps } from "./runProcessor.js";
+import { createFullAgentRunProcessor, type FullRunDeps } from "./runProcessor.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL;
@@ -1281,6 +1285,495 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         expect(body.model).toBe("ovid-default-model");
         expect(body.stream).toBe(true);
         expect(body.messages.at(-1)).toEqual({ role: "user", content: "integration prompt" });
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // P3 Task 16 — the engine behind the P2-compat contract.
+    //
+    // The compat path swaps P2's interim loop for the agent-core engine but
+    // keeps P2's wire contract EXACTLY (see the appended cases): payload keys
+    // are normalized by the worker's compat sink (args stripped from
+    // tool_started, ok stripped from tool_completed, model_transient_exhausted
+    // carries no message, run_cancelled is the P2 run_failed/cancelled pair).
+    // -----------------------------------------------------------------------
+
+    it("P3 compat: a fake P2 registry joins through agentToolAdapter — exact P2 payloads, role:tool row, system prompt V1", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox();
+      const seen: Array<{ input: unknown; callKey: string | undefined }> = [];
+      const fake: AgentTool = {
+        name: "fake_echo",
+        description: "Echo the text back.",
+        parameters: {
+          type: "object",
+          properties: { text: { type: "string" } },
+          required: ["text"],
+        },
+        async execute(input, ctx) {
+          seen.push({ input, callKey: ctx.callKey });
+          return { content: `echo:${(input as { text: string }).text}`, isError: false };
+        },
+      };
+      // A hand-built P2 registry (the seam Task 9 adapts), NOT createToolRegistry:
+      // the point is that any landed P2 roster joins the canonical seam.
+      const tools: ToolRegistry = {
+        tools: [fake],
+        get: (name) => (name === "fake_echo" ? fake : undefined),
+        specs: () => [
+          {
+            type: "function" as const,
+            function: {
+              name: fake.name,
+              description: fake.description,
+              parameters: fake.parameters,
+            },
+          },
+        ],
+      };
+      const { transport, calls } = stubTransport([
+        {
+          kind: "ok",
+          deltas: [],
+          toolCalls: [{ id: "c1", name: "fake_echo", arguments: JSON.stringify({ text: "hi" }) }],
+        },
+        { kind: "ok", deltas: ["done"] },
+      ]);
+
+      await createAgentRunProcessor(
+        makeDeps(transport, { sandbox: sbx.manager, tools }),
+      )(jobOf(seeded));
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual([
+        "run_started",
+        "tool_started",
+        "tool_completed",
+        "message_delta",
+        "message_completed",
+        "run_completed",
+      ]);
+      // EXACT P2 spellings: no `args`, no `ok` (the compat sink strips them).
+      expect(evts[1]!.payload).toEqual({
+        runId: seeded.runId,
+        callId: "c1",
+        name: "fake_echo",
+        input: { text: "hi" },
+      });
+      expect(evts[2]!.payload).toEqual({
+        runId: seeded.runId,
+        callId: "c1",
+        name: "fake_echo",
+        isError: false,
+        content: "echo:hi",
+        truncated: false,
+      });
+
+      // The adapted tool received the canonical ctx callKey.
+      expect(seen).toEqual([{ input: { text: "hi" }, callKey: `${seeded.runId}:c1` }]);
+
+      // The system row is P2's SYSTEM_PROMPT_V1, byte-for-byte; the tool row
+      // joins the next request.
+      expect(calls).toHaveLength(2);
+      expect(calls[0]!.messages[0]).toEqual({ role: "system", content: SYSTEM_PROMPT_V1 });
+      expect(calls[1]!.messages).toContainEqual({
+        role: "tool",
+        toolCallId: "c1",
+        content: "echo:hi",
+      });
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed", attempts: 2 });
+      expect(await readMirror(seeded.sessionId)).toEqual(evts);
+      rmWs(sbx.workspaceDir);
+    });
+
+    it("P3 compat: run_cancelled maps onto P2's run_failed {code:cancelled} with the event sequence unchanged", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox();
+      const transport: ModelTransport = {
+        async stream(_req, h) {
+          h.onDelta("first ");
+          await new Promise((r) => setTimeout(r, 25));
+          await runs.requestCancel(db, seeded.runId, seeded.uid);
+          h.onDelta("second");
+          await new Promise((r) => setTimeout(r, 25));
+          return { finishReason: "stop", toolCalls: [] };
+        },
+      };
+
+      await createAgentRunProcessor(
+        makeDeps(transport, {
+          sandbox: sbx.manager,
+          tools: createToolRegistry(),
+          cancelCheckIntervalMs: 0,
+        }),
+      )(jobOf(seeded));
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual([
+        "run_started",
+        "message_delta",
+        "message_delta",
+        "run_failed",
+      ]);
+      expect(evts[3]!.payload).toEqual({ code: "cancelled", message: "Stopped by user." });
+      expect(await runRow(seeded.runId)).toMatchObject({
+        status: "cancelled",
+        lastError: "Stopped by user.",
+      });
+      expect(await readMirror(seeded.sessionId)).toEqual(evts);
+      rmWs(sbx.workspaceDir);
+    });
+
+    // -----------------------------------------------------------------------
+    // P3 Task 16 — the full processor (createFullAgentRunProcessor).
+    //
+    // Real agent-core engine over: the REAL openai SSE transport against a
+    // local mock, a fake SandboxPort, the Postgres state store and the real
+    // redis approval bridge (closed by processor.close()).
+    // -----------------------------------------------------------------------
+
+    /** A fake SandboxPort recording exec requests (callKey included). */
+    function makeFakePort(execResult: { exitCode: number; stdout: string; stderr: string } = {
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    }): { port: SandboxPort; execs: Array<{ cmd: string; callKey?: string }> } {
+      const execs: Array<{ cmd: string; callKey?: string }> = [];
+      const port: SandboxPort = {
+        async exec(_userId, o) {
+          execs.push({ cmd: o.cmd, callKey: o.callKey });
+          return execResult;
+        },
+        async killCall() {},
+        async readFile() {
+          return "";
+        },
+        async writeFile() {},
+        async exists() {
+          return false;
+        },
+        async listDir() {
+          return [];
+        },
+        async jobStart() {
+          return { jobId: "job-1" };
+        },
+        async jobOutput() {
+          return { output: "", running: false, exitCode: 0 };
+        },
+        async jobList() {
+          return [];
+        },
+        async jobKill() {},
+      };
+      return { port, execs };
+    }
+
+    /**
+     * A local [OI]-dialect SSE mock: the Nth POST serves turns[N-1] (the last
+     * turn repeats). Every turn ends with `data: [DONE]`.
+     */
+    async function startTurnSse(
+      turns: Array<Array<Record<string, unknown>>>,
+    ): Promise<{
+      url: string;
+      requests: Array<{ messages: ChatMessage[]; tools?: unknown }>;
+      close: () => Promise<void>;
+    }> {
+      const requests: Array<{ messages: ChatMessage[]; tools?: unknown }> = [];
+      const server = createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on("data", (c: Buffer) => chunks.push(c));
+        req.on("end", () => {
+          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+            messages: ChatMessage[];
+            tools?: unknown;
+          };
+          requests.push({ messages: body.messages, tools: body.tools });
+          const turn = turns[Math.min(requests.length - 1, turns.length - 1)]!;
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          for (const event of turn) res.write(`data: ${JSON.stringify(event)}\n\n`);
+          res.end("data: [DONE]\n\n");
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      return {
+        url,
+        requests,
+        close: async () => {
+          server.closeAllConnections();
+          await new Promise<void>((resolve) => server.close(() => resolve()));
+        },
+      };
+    }
+
+    function makeFullDeps(
+      litellmBaseUrl: string,
+      port: SandboxPort,
+      overrides: Partial<FullRunDeps> = {},
+    ): FullRunDeps {
+      return {
+        db,
+        events,
+        keys: stubKeys("sk-full-test"),
+        redisQ,
+        sandbox: port,
+        github: null,
+        litellmBaseUrl,
+        defaultModel: "full-default-model",
+        anthropicBaseUrl: "https://anthropic.invalid",
+        // The SSE mock is on loopback; the production guard would (correctly)
+        // refuse it. Tests pass the plain fetch explicitly (T5-I1 pattern).
+        egress: fetch,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        ...overrides,
+      };
+    }
+
+    const toolCallTurn = (id: string, name: string, args: Record<string, unknown>): Array<Record<string, unknown>> => [
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id,
+                  function: { name, arguments: JSON.stringify(args) },
+                },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+      },
+      { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+    ];
+
+    const textTurn = (text: string): Array<Record<string, unknown>> => [
+      { choices: [{ delta: { content: text }, finish_reason: null }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ];
+
+    it("full processor: run_shell round → sandbox.exec got the command + callKey → final text turn completes", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort({ exitCode: 0, stdout: "hi\n", stderr: "" });
+      const sse = await startTurnSse([
+        toolCallTurn("call_1", "run_shell", { command: "echo hi" }),
+        textTurn("done"),
+      ]);
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual([
+        "run_started",
+        "tool_started",
+        "tool_completed",
+        "message_delta",
+        "message_completed",
+        "run_completed",
+      ]);
+      // P3 spellings ride alongside P2's through this task.
+      expect(evts[1]!.payload).toMatchObject({
+        runId: seeded.runId,
+        callId: "call_1",
+        name: "run_shell",
+        input: { command: "echo hi" },
+        args: { command: "echo hi" },
+      });
+      expect(evts[2]!.payload).toMatchObject({
+        runId: seeded.runId,
+        callId: "call_1",
+        name: "run_shell",
+        isError: false,
+        ok: true,
+        content: "hi\n\n[exit 0]",
+        truncated: false,
+      });
+      // The dispatch threaded the canonical callKey down to the sandbox.
+      expect(sbx.execs).toEqual([{ cmd: "echo hi", callKey: `${seeded.runId}:call_1` }]);
+      // A real system prompt went out on the wire.
+      expect(sse.requests[0]!.messages[0]!.role).toBe("system");
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+      expect(await readMirror(seeded.sessionId)).toEqual(evts);
+    });
+
+    it("full processor: unattended approval timeout → approval_resolved{unattended_timeout}, DENIED tool result, run CONTINUES", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort();
+      const sse = await startTurnSse([
+        toolCallTurn("call_d", "run_shell", { command: "rm -rf /tmp/ovid-unattended" }),
+        textTurn("understood"),
+      ]);
+      const processor = createFullAgentRunProcessor(
+        makeFullDeps(sse.url, sbx.port, { approvalTimeoutMs: 500 }),
+      );
+      try {
+        await processor({
+          data: {
+            runId: seeded.runId,
+            sessionId: seeded.sessionId,
+            userId: seeded.uid,
+            prompt: seeded.prompt,
+            unattended: true,
+          },
+        });
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toContain("approval_requested");
+      const resolved = evts.find((e) => e.type === "approval_resolved")!;
+      expect(resolved.payload).toMatchObject({
+        approvalId: expect.any(String),
+        decision: "deny",
+        reason: "unattended_timeout",
+      });
+      const completed = evts.find((e) => e.type === "tool_completed")!;
+      expect(completed.payload).toMatchObject({ isError: true, content: "DENIED by user" });
+      // Denied BEFORE dispatch: the sandbox never saw the command.
+      expect(sbx.execs).toEqual([]);
+      // spec §8: reported, never crashed — the run finishes normally.
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+    });
+
+    it("full processor: mode:'safe' feeds modePolicy — write_file denied outright, no approval card", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort();
+      const sse = await startTurnSse([
+        toolCallTurn("call_w", "write_file", { path: "x.txt", content: "x" }),
+        textTurn("ok"),
+      ]);
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      try {
+        await processor({
+          data: {
+            runId: seeded.runId,
+            sessionId: seeded.sessionId,
+            userId: seeded.uid,
+            prompt: seeded.prompt,
+            mode: "safe",
+          },
+        });
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      const evts = await readEvents(seeded.sessionId);
+      const completed = evts.find((e) => e.type === "tool_completed")!;
+      expect(completed.payload).toMatchObject({ name: "write_file", isError: true });
+      expect(String(completed.payload.content)).toContain("READ-ONLY MODE");
+      expect(evts.some((e) => e.type === "approval_requested")).toBe(false);
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+    });
+
+    // -------------------------------------------------------------------------
+    // Task 11: ensureWarm run hook (workspace hydration before tools run)
+    // -------------------------------------------------------------------------
+
+    describe("ensureWarm hook", () => {
+      it("ensureWarm resolves → the run proceeds unchanged", async () => {
+        const seeded = await seedRun();
+        const { transport, calls } = stubTransport([
+          { kind: "ok", deltas: ["hydrated ", "run"] },
+        ]);
+        let callsToEnsureWarm = 0;
+
+        await createAgentRunProcessor(
+          makeDeps(transport, {
+            ensureWarm: async (sessionId, userId) => {
+              callsToEnsureWarm += 1;
+              expect(sessionId).toBe(seeded.sessionId);
+              expect(userId).toBe(seeded.uid);
+            },
+          }),
+        )(jobOf(seeded));
+
+        expect(callsToEnsureWarm).toBe(1);
+        expect(calls).toHaveLength(1);
+        const evts = await readEvents(seeded.sessionId);
+        expect(types(evts)).toContain("run_completed");
+        expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+      });
+
+      it("ensureWarm rejects → one run_failed{hydrate_failed}, run failed, transport NEVER called", async () => {
+        const seeded = await seedRun();
+        const { transport, calls } = stubTransport([{ kind: "ok", deltas: ["never"] }]);
+
+        await createAgentRunProcessor(
+          makeDeps(transport, {
+            ensureWarm: async () => {
+              throw new Error("workspace did not hydrate");
+            },
+          }),
+        )(jobOf(seeded));
+
+        const evts = await readEvents(seeded.sessionId);
+        expect(types(evts)).toEqual(["run_failed"]);
+        expect(evts[0]!.payload).toMatchObject({
+          runId: seeded.runId,
+          code: "hydrate_failed",
+          message: "workspace did not hydrate",
+        });
+        expect(await readMirror(seeded.sessionId)).toEqual(evts);
+        expect(calls).toHaveLength(0);
+        expect(await runRow(seeded.runId)).toMatchObject({
+          status: "failed",
+          lastError: "hydrate_failed",
+        });
+      });
+
+      it("ensureWarm undefined → v0 behavior identical (backward-compat pin)", async () => {
+        const seeded = await seedRun();
+        const { transport, calls } = stubTransport([{ kind: "ok", deltas: ["same as v0"] }]);
+
+        await createAgentRunProcessor(makeDeps(transport))(jobOf(seeded));
+
+        expect(calls).toHaveLength(1);
+        const evts = await readEvents(seeded.sessionId);
+        expect(types(evts)).toEqual([
+          "run_started",
+          "message_delta",
+          "message_completed",
+          "run_completed",
+        ]);
+        expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+      });
+
+      it("activity.bump is called after the claim and after the run finishes", async () => {
+        const seeded = await seedRun();
+        const { transport } = stubTransport([{ kind: "ok", deltas: ["ok"] }]);
+        let bumps = 0;
+        const tracker = {
+          async bump(): Promise<void> {
+            bumps += 1;
+          },
+          async read(): Promise<number | null> {
+            return null;
+          },
+          async readMany(): Promise<Map<string, number>> {
+            return new Map();
+          },
+        };
+
+        await createAgentRunProcessor(
+          makeDeps(transport, { activity: tracker }),
+        )(jobOf(seeded));
+
+        expect(bumps).toBe(2);
+        expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
       });
     });
   },

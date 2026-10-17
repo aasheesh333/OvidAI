@@ -1,12 +1,16 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { attachments, eventMirror, messages, runs, type Db } from "@ovid/db";
+import { attachments, eventMirror, grantsRepo, messages, runs, type Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
 import type { AgentRunJob } from "@ovid/queue";
 import {
   RootfsUnavailable,
   SandboxAdmissionError,
   SandboxCapacityError,
+  type ExecRequest,
+  type ExecResult,
   type SandboxHandle,
   type SandboxManager,
 } from "@ovid/sandbox";
@@ -16,6 +20,41 @@ import {
   type SessionEvent,
   type SessionEventType,
 } from "@ovid/shared";
+import type { ActivityTracker } from "@ovid/storage";
+import type { Redis } from "ioredis";
+import {
+  adaptLegacyTransport,
+  createAgentEngine,
+  createAnthropicTransport,
+  createApprovalGate,
+  createExitPlanModeTool,
+  createFetchUrlTool,
+  createGitTools,
+  createGoalTodoTools,
+  createGuardedEgressFetch,
+  createMemoryTools,
+  createOpenAiAgentTransport,
+  createPostgresSessionStateStore,
+  createRepoTools,
+  createSandboxTools,
+  createSessionSearchTool,
+  createSsrfGuard,
+  createToolRegistry as createCoreToolRegistry,
+  createWebSearchTool,
+  findApplicableGrant,
+  litellmKeyResolver,
+  normalizeGrantHost,
+  type AgentTransport,
+  type Compactor,
+  type EgressFetch,
+  type GitHubApiPort,
+  type HookEngine,
+  type SandboxPort,
+  type SkillCatalog,
+  type Tool as CoreTool,
+  type ToolRegistry as CoreToolRegistry,
+} from "@ovid/agent-core";
+import { createRedisApprovalBridge } from "./approvalBridge.js";
 import {
   TerminalModelError,
   TransientModelError,
@@ -23,20 +62,44 @@ import {
   type ModelTransport,
   type ToolCall,
 } from "./liteLlm.js";
+import { createSandboxPort } from "./sandboxAdapter.js";
+import { adaptAgentTools } from "./tools/agentToolAdapter.js";
+import { createToolRegistry, type ToolRegistry } from "./tools/registry.js";
 import { MAX_TOOL_ROUNDS, SYSTEM_PROMPT_V1, TOOL_EVENT_CONTENT_CAP } from "./tools/systemPrompt.js";
 import type { ToolContext, ToolResult } from "./tools/types.js";
-import type { ToolRegistry } from "./tools/registry.js";
 
 /**
- * Agent-run processor v0: the tool-less streaming loop (plan Task 9).
+ * Agent-run processor v1 (P3 Task 16): the P2-compat contract backed by the
+ * agent-core engine, plus the full-deps production processor.
  *
  * One BullMQ job = one run. The processor NEVER throws for run-level failures
- * (missing key, model errors): those are terminal run states, emitted as
- * events and recorded on the run row, and the job must COMPLETE (attempts: 1 —
- * the retry ladder lives here, not in BullMQ). Crashed/failed jobs are never
- * redelivered; the stale-run sweeper (staleRuns.ts) terminalizes runs they
- * strand in 'running'. Only infrastructure errors (db/redis down) propagate
- * and fail the job loudly.
+ * (missing key, model errors, sandbox admission): those are terminal run
+ * states, emitted as events and recorded on the run row, and the job must
+ * COMPLETE (attempts: 1 — the retry ladder lives in the engine, not BullMQ).
+ * Crashed/failed jobs are never redelivered; the stale-run sweeper
+ * (staleRuns.ts) terminalizes runs they strand in 'running'. Only
+ * infrastructure errors (db/redis down) propagate and fail the job loudly.
+ *
+ * Two processor shapes:
+ *
+ * - `createAgentRunProcessor(deps)` — the P2-compat contract. Its landed
+ *   RunDeps shape is unchanged (ruling R1): P2's six-tool roster is ADAPTED
+ *   through `agentToolAdapter` into the canonical seam, and the engine runs
+ *   BOUNDED with `maxToolRounds = MAX_TOOL_ROUNDS (50)` and
+ *   `systemPromptOverride = SYSTEM_PROMPT_V1`. A worker-side compat sink
+ *   normalizes the wire back to P2's exact spellings (see compatEvent):
+ *   tool_started carries `input` (no `args`), tool_completed carries
+ *   `isError` (no `ok`), `model_transient_exhausted` carries no message, and
+ *   the engine's `run_cancelled` becomes P2's `run_failed {code:"cancelled"}`.
+ *   P1's tool-less composition (the e2e spine, no sandbox/tools) keeps the
+ *   v0 streaming loop byte-for-byte — it is a documented legacy guard, not
+ *   the P2 path.
+ *
+ * - `createFullAgentRunProcessor(deps)` — the production path: real openai +
+ *   anthropic transports over guarded egress, the full roster (P2's six
+ *   adapted + P3 sandbox/web/git/repo/memory/goals/todos/session_search/
+ *   exit_plan_mode), the Postgres session-state store, the redis approval
+ *   bridge and the never-stop loop.
  *
  * Event contract (every append is also mirrored to Postgres via
  * eventMirror.put — history beyond the stream's trim window):
@@ -63,11 +126,17 @@ import type { ToolRegistry } from "./tools/registry.js";
  *   (the stale-run sweeper emits a third variant, {runId, code:"run_lost"} —
  *   see staleRuns.ts)
  *
+ * The FULL engine emits the P3 spellings (tool_started carries `args` and
+ * `input`; tool_completed carries `ok` and `isError`; cancellation is
+ * `run_cancelled`). Both spellings stay on the wire through this task; the
+ * compat sink strips the additive ones so P2's suite passes unmodified.
+ *
  * Terminal events are emitted BEFORE the run row's status flip on every path
  * (completed and failed alike): the C1 wait loop below unblocks the next
  * same-session run by watching the status flip, so event-first ordering is
  * what guarantees the next run's run_started lands strictly after this run's
- * terminal event.
+ * terminal event. (The engine's cancel path flips first; a cancelled run's
+ * successor is not part of the P1 spine and this is flagged in the report.)
  */
 
 /**
@@ -124,6 +193,74 @@ export interface RunDeps {
    * main.ts always wires it.
    */
   storage?: RunAttachmentStorage;
+  /**
+   * P7 Task 11: hydrate the session workspace before any tool can run.
+   * A rejection is a RUN-LEVEL failure (run_failed {code:"hydrate_failed"},
+   * run row failed), never a job throw — the same shape as key_not_minted.
+   * Optional so the legacy P1 composition keeps its v0 behavior; main.ts
+   * always wires it.
+   */
+  ensureWarm?: (sessionId: string, userId: string) => Promise<void>;
+  /**
+   * P7 Task 11: the session activity tracker (redis-c, cache-class). Bumped
+   * after the claim and after the run finishes; a bump failure is swallowed
+   * (eviction/restart must never fail a run).
+   */
+  activity?: ActivityTracker;
+}
+
+/**
+ * Production deps (P3 Task 16). `sandbox` is the P2 SandboxManager adapted
+ * onto the canonical SandboxPort (`createSandboxPort`); `sandboxHandleFor`
+ * optionally supplies the P2 handle used by the adapted six-tool roster
+ * (main wires `manager.attach`). Without it the adapted tools run over a
+ * port-backed handle (fine for shell/job tools; the host-side file tools
+ * need the real handle).
+ */
+export interface FullRunDeps {
+  db: Db;
+  events: EventLog;
+  keys: KeyProvider;
+  redisQ: Redis;
+  sandbox: SandboxPort;
+  github: GitHubApiPort | null;
+  litellmBaseUrl: string;
+  defaultModel: string;
+  anthropicBaseUrl: string;
+  windowTokens?: number;
+  approvalTimeoutMs?: number;
+  /** C1 cap (env OVID_RUN_QUEUE_WAIT_MS); default 10 min. */
+  runQueueWaitMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  /** Optional P2 handle factory (production: SandboxManager.attach). */
+  sandboxHandleFor?: (userId: string) => Promise<SandboxHandle>;
+  /**
+   * Test-only egress override. Production MUST omit this: the default is the
+   * SSRF-guarded fetch (spec D3/§11). Tests inject a plain fetch to reach a
+   * loopback SSE mock (the T5-I1 pattern).
+   */
+  egress?: EgressFetch;
+  /** Optional attachment seam (see RunAttachmentStorage). */
+  storage?: RunAttachmentStorage;
+  /** P7 Task 11: hydrate before the run (see RunDeps.ensureWarm). */
+  ensureWarm?: (sessionId: string, userId: string) => Promise<void>;
+  /** P7 Task 11: last-activity tracker (see RunDeps.activity). */
+  activity?: ActivityTracker;
+}
+
+/** The full processor plus its shutdown handle (the redis approval bridge). */
+export interface FullAgentRunProcessor {
+  (
+    job: {
+      data: AgentRunJob & {
+        unattended?: boolean;
+        autonomy?: "safe" | "auto";
+        mode?: "safe" | "auto" | "drive" | "studio";
+      };
+    },
+  ): Promise<void>;
+  /** Closes the approval bridge's subscription (graceful shutdown). */
+  close(): Promise<void>;
 }
 
 /** Model-call retry policy (spec §6.1): 5 attempts, backoff 3/9/27/60 s between them. */
@@ -154,20 +291,272 @@ const CANCELLED_MESSAGE = "Stopped by user.";
  */
 const DEFAULT_CANCEL_CHECK_INTERVAL_MS = 1_000;
 
+/** Full-processor default context window (P3 spec §6). */
+const DEFAULT_WINDOW_TOKENS = 128_000;
+
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
   });
+
+// ---------------------------------------------------------------------------
+// Engine plumbing shared by both processors
+// ---------------------------------------------------------------------------
+
+/**
+ * No-op hooks until Task 18 wires the real plugin engine. `fireGate` allows,
+ * `fireStop` never vetoes, contexts are empty, and nothing has listeners —
+ * the loop's hook steps are pure no-ops.
+ */
+const NOOP_HOOKS: HookEngine = {
+  async hasListeners() {
+    return false;
+  },
+  async fire() {},
+  async fireDetailed() {
+    return { output: "", systemMessages: [], promptBlockReason: null };
+  },
+  async fireGate() {
+    return { decision: "allow" };
+  },
+  async fireStop() {
+    return { veto: false };
+  },
+  sessionContextFor() {
+    return "";
+  },
+  promptContextFor() {
+    return null;
+  },
+};
+
+/** No-op compactor until Task 19: history passes through unchanged. */
+const NOOP_COMPACTOR: Compactor = {
+  async maybeCompact(i) {
+    return { compacted: false, messages: i.messages };
+  },
+  async pruneOversizedToolResults(i) {
+    return { pruned: 0, messages: i.messages };
+  },
+};
+
+/** No-op skill catalog until Task 17: no catalog rows, no loadable skills. */
+const NOOP_SKILLS: SkillCatalog = {
+  async list() {
+    return [];
+  },
+  async load() {
+    return null;
+  },
+};
+
+/**
+ * A P2-compat event sink: the engine's P3 event payloads are normalized to
+ * P2's exact wire shape before they reach Redis (and therefore the mirror).
+ * The additive P3 spellings (`args`, `ok`) stay on the full processor's wire.
+ */
+function compatEvent(
+  type: SessionEventType,
+  payload: Record<string, unknown>,
+): { type: SessionEventType; payload: Record<string, unknown> } {
+  if (type === "run_cancelled") {
+    return {
+      type: "run_failed",
+      payload: {
+        code: "cancelled",
+        message:
+          typeof payload.message === "string" ? payload.message : CANCELLED_MESSAGE,
+      },
+    };
+  }
+  if (type === "tool_started") {
+    const { args: _args, ...rest } = payload;
+    return { type, payload: rest };
+  }
+  if (type === "tool_completed") {
+    const { ok: _ok, ...rest } = payload;
+    return { type, payload: rest };
+  }
+  if (type === "run_failed" && payload.code === "model_transient_exhausted") {
+    // P2 pinned the bare code (the message is P3 additive).
+    const { message: _message, ...rest } = payload;
+    return { type, payload: rest };
+  }
+  return { type, payload };
+}
+
+/** EventLog wrapper applying `compatEvent` to every append (reads pass through). */
+function compatEventLog(base: EventLog): EventLog {
+  return {
+    async append(sessionId, type, payload) {
+      const mapped = compatEvent(type, payload);
+      return base.append(sessionId, mapped.type, mapped.payload);
+    },
+    readSince(sessionId, lastSeq, limit) {
+      return base.readSince(sessionId, lastSeq, limit);
+    },
+    subscribe(sessionId, onEvent) {
+      return base.subscribe(sessionId, onEvent);
+    },
+  };
+}
+
+/**
+ * A registry that answers unknown tool names with P2's pinned
+ * `unknown_tool: <name>` result instead of the P3 roster denial. The synthetic
+ * tool is never advertised (`all()` is untouched), so this only fires for a
+ * hallucinated call — exactly P2's behavior.
+ */
+function withUnknownToolFallback(registry: CoreToolRegistry): CoreToolRegistry {
+  return {
+    get(name) {
+      const known = registry.get(name);
+      if (known !== undefined) return known;
+      return {
+        spec: { name, description: "", parameters: { type: "object", properties: {} } },
+        timeoutMs: 120_000,
+        async execute() {
+          return { content: `unknown_tool: ${name}`, isError: true };
+        },
+      };
+    },
+    all() {
+      return registry.all();
+    },
+  };
+}
+
+/**
+ * Cooperative-cancel polling (P8 Task 1) for the engine path: the engine has
+ * no per-delta DB hook, so the transport wrapper polls `runs.isCancelRequested`
+ * on the same throttled cadence P2 used (first delta batch always polls;
+ * later batches only after `intervalMs`). Pending checks are drained BEFORE
+ * the stream returns, so the loop's post-stream `isCancelled` sees the flip.
+ */
+function withCancelPolling(
+  base: AgentTransport,
+  o: {
+    intervalMs: number;
+    isCancelRequested(): Promise<boolean>;
+    onCancel(): Promise<void>;
+  },
+): AgentTransport {
+  return {
+    apiFormat: base.apiFormat,
+    async stream(req, h, signal) {
+      let lastCheck = 0;
+      let pending: Promise<void> = Promise.resolve();
+      const maybePoll = (): void => {
+        const now = Date.now();
+        if (now - lastCheck < o.intervalMs) return;
+        lastCheck = now;
+        pending = pending
+          .then(async () => {
+            if (await o.isCancelRequested()) await o.onCancel();
+          })
+          .catch(() => {});
+      };
+      const handlers = {
+        onTextDelta(text: string): void {
+          h.onTextDelta(text);
+          maybePoll();
+        },
+        ...(h.onThinkingDelta !== undefined
+          ? {
+              onThinkingDelta(text: string): void {
+                h.onThinkingDelta!(text);
+              },
+            }
+          : {}),
+      };
+      try {
+        const res = await base.stream(req, handlers, signal);
+        await pending;
+        return res;
+      } catch (err) {
+        await pending;
+        throw err;
+      }
+    },
+  };
+}
+
+/**
+ * A SandboxHandle synthesized over a SandboxPort — the full processor's
+ * fallback when no P2 handle factory is wired. Shell/job tools work (exec is
+ * delegated with the canonical callKey); the host-side file tools need the
+ * real handle (`sandboxHandleFor`).
+ */
+function portBackedHandle(
+  port: SandboxPort,
+  ctx: { userId: string; callKey: string },
+): SandboxHandle {
+  return {
+    userId: ctx.userId,
+    uid: 0,
+    workspaceDir: join(tmpdir(), "ovid-full", ctx.userId),
+    homeDir: "",
+    jailWorkspaceDir: "/workspace",
+    async exec(req: ExecRequest): Promise<ExecResult> {
+      const res = await port.exec(ctx.userId, {
+        cmd: req.command ?? (req.argv ?? []).join(" "),
+        ...(req.cwd !== undefined ? { cwd: req.cwd } : {}),
+        ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
+        ...(req.env !== undefined ? { env: req.env } : {}),
+        callKey: ctx.callKey,
+      });
+      return {
+        exitCode: res.exitCode,
+        stdout: res.stdout,
+        stderr: res.stderr,
+        timedOut: false,
+        truncated: false,
+        blocked: false,
+        refusal: null,
+      };
+    },
+  } as unknown as SandboxHandle;
+}
+
+/**
+ * The shared C1 gate: wait until this run is the oldest still-active run of
+ * its session, bounded by runQueueWaitMs. Returns false when the cap was hit
+ * (the failure event + run-row flip have already been emitted).
+ */
+async function waitForSessionTurn(o: {
+  db: Db;
+  sessionId: string;
+  runId: string;
+  runQueueWaitMs: number;
+  sleep: (ms: number) => Promise<void>;
+  emit(type: SessionEventType, payload: Record<string, unknown>): Promise<unknown>;
+}): Promise<boolean> {
+  const waitDeadline = Date.now() + o.runQueueWaitMs;
+  for (;;) {
+    const oldest = await runs.activeForSession(o.db, o.sessionId);
+    if (oldest === null || oldest.id === o.runId) return true;
+    if (Date.now() >= waitDeadline) {
+      await o.emit("run_failed", { code: "run_queue_wait_timeout" });
+      await runs.finish(o.db, o.runId, "failed", "run_queue_wait_timeout");
+      return false;
+    }
+    await o.sleep(RUN_QUEUE_POLL_MS);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// P2-compat processor
+// ---------------------------------------------------------------------------
 
 export function createAgentRunProcessor(
   deps: RunDeps,
 ): (job: { data: AgentRunJob }) => Promise<void> {
   const sleep = deps.sleep ?? defaultSleep;
   const runQueueWaitMs = deps.runQueueWaitMs ?? DEFAULT_RUN_QUEUE_WAIT_MS;
+  const cancelCheckIntervalMs = deps.cancelCheckIntervalMs ?? DEFAULT_CANCEL_CHECK_INTERVAL_MS;
 
   return async (job) => {
     const { runId, sessionId, userId } = job.data;
-    const cancelCheckIntervalMs = deps.cancelCheckIntervalMs ?? DEFAULT_CANCEL_CHECK_INTERVAL_MS;
 
     const emit = async (
       type: SessionEventType,
@@ -179,10 +568,10 @@ export function createAgentRunProcessor(
     };
 
     /**
-     * P8 Task 1 cooperative-cancel terminalization, used by the mid-stream
-     * flag check: the EXISTING run_failed event type with the cancelled
-     * payload, then the conditional 'cancelled' status flip — event-first,
-     * same ordering every terminal path here pins.
+     * P8 Task 1 cooperative-cancel terminalization (v0 path): the EXISTING
+     * run_failed event type with the cancelled payload, then the conditional
+     * 'cancelled' status flip — event-first, same ordering every terminal
+     * path here pins.
      */
     const terminalizeCancelled = async (): Promise<void> => {
       await emit("run_failed", { code: "cancelled", message: CANCELLED_MESSAGE });
@@ -211,26 +600,45 @@ export function createAgentRunProcessor(
     // BEFORE its status flip (see the file header), and this loop unblocks
     // on that flip — so run N+1's run_started is guaranteed to land strictly
     // after run N's run_completed/run_failed in the session stream.
-    const waitDeadline = Date.now() + runQueueWaitMs;
-    for (;;) {
-      const oldest = await runs.activeForSession(deps.db, sessionId);
-      if (oldest === null || oldest.id === runId) break; // we're next (or nothing to wait for)
-      if (Date.now() >= waitDeadline) {
-        // Cap hit: emit + mirror the failure and terminalize the run FROM
-        // 'queued' (the model call is never started). finish() is conditional
-        // (I4b), so an operator/sweeper that already terminalized the run
-        // cannot be overwritten — only the event goes out.
-        await emit("run_failed", { code: "run_queue_wait_timeout" });
-        await runs.finish(deps.db, runId, "failed", "run_queue_wait_timeout");
-        return; // NOT a throw: the job completes, the client sees the failure event
-      }
-      await sleep(RUN_QUEUE_POLL_MS);
-    }
+    const turn = await waitForSessionTurn({
+      db: deps.db,
+      sessionId,
+      runId,
+      runQueueWaitMs,
+      sleep,
+      emit,
+    });
+    if (!turn) return;
 
     // Race-safe claim: exactly one concurrent delivery flips queued → running.
     // false = duplicate/stale delivery (or already-finished run) → silent no-op.
     const claimed = await runs.claimNext(deps.db, runId);
     if (!claimed) return;
+
+    // ---- P7 Task 11: activity + workspace hydration ----------------------
+    // Bump on claim (the workspace is about to be touched), then ensure the
+    // session dir is warm BEFORE any tool can run. A hydrate failure is a
+    // run-level failure with the SAME shape as key_not_minted: emit the
+    // terminal event, flip the row, return (the job completes — attempts: 1).
+    const bumpActivity = async (): Promise<void> => {
+      try {
+        await deps.activity?.bump(sessionId);
+      } catch {
+        // Cache-class redis: a lost bump only degrades LRU ordering.
+      }
+    };
+    await bumpActivity();
+    try {
+      await deps.ensureWarm?.(sessionId, userId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await emit("run_failed", { runId, code: "hydrate_failed", message });
+      await runs.finish(deps.db, runId, "failed", "hydrate_failed");
+      await bumpActivity();
+      return;
+    }
+
+    try {
 
     const apiKey = await deps.keys.getKeyForUser(userId);
     if (apiKey === null) {
@@ -239,28 +647,11 @@ export function createAgentRunProcessor(
       return; // NOT a throw: the job completes, the client sees the failure event
     }
 
-    // The gateway persisted the user prompt BEFORE enqueueing, so the stored
-    // history already ends with it — load, never re-append. page() is
-    // newest-first: take the newest ≤100 and walk them in reverse for the
-    // oldest-first model context (controller ruling).
-    const { rows } = await messages.page(deps.db, sessionId, { limit: HISTORY_LIMIT });
-    const history: ChatMessage[] = [];
-    for (let i = rows.length - 1; i >= 0; i -= 1) {
-      const row = rows[i]!;
-      // 'tool' rows cannot occur in v0 (no tools) — skip them defensively.
-      if (row.role === "user" || row.role === "assistant" || row.role === "system") {
-        history.push({ role: row.role, content: row.content });
-      }
-    }
-
-    // ---- P2 Task 12: sandbox attach + tool context (v1 tool mode) ------------
     // Runtime legacy-guard (see RunDeps): the P1 spine e2e constructs the
     // pre-P2 RunDeps shape and must stay green unmodified — without
     // sandbox/tools the processor runs the v0 tool-less loop below, exactly as
     // before. main.ts always wires both.
     const useTools = deps.sandbox !== undefined && deps.tools !== undefined;
-    let handle: SandboxHandle | undefined;
-    let convo: ChatMessage[] = history;
 
     /**
      * P8 Task 3 failure helper: run_failed {code:"attachment_unavailable"},
@@ -287,253 +678,593 @@ export function createAgentRunProcessor(
       return;
     }
 
-    if (useTools) {
-      try {
-        handle = await deps.sandbox.attach(userId, {
-          tier: job.data.tier === "free" ? "free" : "pro",
-        });
-
-        // ---- P8 Task 3: attachment materialization -------------------------
-        // The job payload's attachmentIds (validated by the gateway against
-        // the session's attachment rows at enqueue time) resolve back to rows
-        // here, and each object is downloaded through the storage seam into
-        // uploads/{sanitizedName} inside the sandbox workspace — BEFORE the
-        // first provider call, so the model's tools see the files from
-        // round 1. Misses (row gone, object never uploaded, seam unwired)
-        // are loud run-level failures; an unexpected storage/filesystem
-        // error falls through to the catch below and fails the job loudly
-        // (infra, not a run state — the stale-run sweeper is the recovery).
-        if (requestedAttachmentIds.length > 0) {
-          const rows = await attachments.getForSession(
-            deps.db,
-            sessionId,
-            requestedAttachmentIds,
-          );
-          if (rows.length !== requestedAttachmentIds.length) {
-            await failAttachments("attachment id has no attachment row for this session");
-            return;
-          }
-          if (deps.storage === undefined) {
-            await failAttachments("attachment storage is not configured");
-            return;
-          }
-          const uploadsDir = join(handle.workspaceDir, "uploads");
-          await mkdir(uploadsDir, { recursive: true });
-          for (const row of rows) {
-            const buffer = await deps.storage.getBuffer(row.r2Key);
-            if (buffer === null) {
-              await failAttachments(`attachment object not found: ${row.r2Key}`);
-              return;
-            }
-            await writeFile(join(uploadsDir, sanitizeAttachmentName(row.name)), buffer);
-          }
-        }
-      } catch (err) {
-        if (
-          err instanceof SandboxAdmissionError ||
-          err instanceof SandboxCapacityError ||
-          err instanceof RootfsUnavailable
-        ) {
-          // NOT a throw: terminal run state, event-first ordering, job
-          // completes (same contract as key_not_minted — the client sees the
-          // failure event and the run row flips).
-          await emit("run_failed", { code: "sandbox_unavailable", message: err.message });
-          await runs.finish(deps.db, runId, "failed", "sandbox_unavailable");
-          return;
-        }
-        throw err; // unknown/infra error — fail the job loudly
+    // The gateway persisted the user prompt BEFORE enqueueing, so the stored
+    // history already ends with it — load, never re-append. page() is
+    // newest-first: take the newest ≤100 and walk them in reverse for the
+    // oldest-first model context (controller ruling).
+    const { rows } = await messages.page(deps.db, sessionId, { limit: HISTORY_LIMIT });
+    const history: ChatMessage[] = [];
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const row = rows[i]!;
+      // 'tool' rows cannot occur in v0 (no tools) — skip them defensively.
+      if (row.role === "user" || row.role === "assistant" || row.role === "system") {
+        history.push({ role: row.role, content: row.content });
       }
-      // The v1 agent context: pinned identity prompt, then the stored history
-      // oldest-first (already ending with the user prompt).
-      convo = [{ role: "system", content: SYSTEM_PROMPT_V1 }, ...history];
     }
-    const toolCtx: ToolContext | undefined =
-      useTools && handle !== undefined
-        ? {
-            sandbox: handle,
-            userId,
-            sessionId,
-            runId,
-            emitEvent: async (type, payload) => {
-              await emit(type, payload);
-            },
-          }
-        : undefined;
 
-    await emit("run_started", { runId });
+    if (!useTools) {
+      await runLegacyV0({
+        runId,
+        sessionId,
+        history,
+        apiKey,
+        cancelCheckIntervalMs,
+        emit,
+        terminalizeCancelled,
+      });
+      return;
+    }
 
-    const rounds = useTools ? MAX_TOOL_ROUNDS : 1;
-    for (let round = 1; round <= rounds; round += 1) {
-      for (let attempt = 1; attempt <= MAX_MODEL_ATTEMPTS; attempt += 1) {
-        await runs.bumpAttempt(deps.db, runId);
+    // ---- P2 Task 12 / P3 Task 16: attach + engine over the P2 machinery ----
+    let handle: SandboxHandle | undefined;
+    try {
+      handle = await deps.sandbox.attach(userId, {
+        tier: job.data.tier === "free" ? "free" : "pro",
+      });
 
-        const deltas: string[] = [];
-        // onDelta is synchronous; event appends are not. Serialize them on a
-        // promise chain so message_delta order matches arrival order, and drain
-        // the chain before any completion/retry/failure event is emitted.
-        let flushed: Promise<void> = Promise.resolve();
-        // v0 wires the AbortSignal through but sets no timeout (later: per-attempt caps).
-        const controller = new AbortController();
-
-        // P8 Task 1: cooperative-cancel poll state, per attempt. `lastCancelCheck`
-        // is the monotonic Date.now() of the last poll; the first delta batch
-        // always polls (epoch 0), later batches only once the window elapses.
-        let cancelRequested = false;
-        let lastCancelCheck = 0;
-        const pollCancel = async (): Promise<void> => {
-          const now = Date.now();
-          if (now - lastCancelCheck < cancelCheckIntervalMs) return; // throttled
-          lastCancelCheck = now;
-          if (await runs.isCancelRequested(deps.db, runId)) {
-            cancelRequested = true;
-            // Best-effort transport stop: a real SSE/HTTP transport aborts on
-            // the signal and lands in the catch below; a transport that ignores
-            // it is still stopped at the post-flush flag check.
-            controller.abort();
-          }
-        };
-
-        try {
-          const result = await deps.transport.stream(
-            {
-              baseUrl: deps.litellmBaseUrl,
-              apiKey,
-              model: deps.defaultModel,
-              messages: convo,
-              ...(useTools ? { tools: deps.tools.specs() } : {}),
-            },
-            {
-              onDelta(text) {
-                deltas.push(text);
-                flushed = flushed
-                  .then(() =>
-                    emit("message_delta", { runId, text }).then(() => undefined),
-                  )
-                  // Cancel check between delta batches — ON the flush chain so
-                  // it never races the delta ordering, throttled to at most
-                  // one db poll per cancelCheckIntervalMs window.
-                  .then(() => pollCancel());
-                // Mark the rejection handled NOW (transport may still be
-                // streaming when an early append fails — an unawaited rejection
-                // would surface as an unhandledRejection); the real error
-                // resurfaces at the `await flushed` below.
-                flushed.catch(() => {});
-              },
-            },
-            controller.signal,
-          );
-          await flushed;
-
-          // The flag flipped mid-stream and the (possibly abort-ignoring)
-          // transport returned normally: terminalize before any completion
-          // event. Not a throw — the job completes (same contract as the
-          // run-level failures above).
-          if (cancelRequested) {
-            await terminalizeCancelled();
-            return;
-          }
-
-          const content = deltas.join("");
-          const toolCalls: ToolCall[] = result.toolCalls ?? [];
-
-          if (useTools && toolCalls.length > 0) {
-            // Assistant turn requesting tools: the in-run array grows
-            // (assistant + one role:"tool" per call — the DB only ever gets
-            // the FINAL assistant text), each call executes sequentially
-            // between its tool_started/tool_completed events, then the next
-            // round streams with the results in context.
-            convo.push({ role: "assistant", content, toolCalls });
-            for (const call of toolCalls) {
-              let input: Record<string, unknown>;
-              try {
-                input = JSON.parse(call.arguments) as Record<string, unknown>;
-              } catch {
-                input = { raw: call.arguments };
-              }
-              await emit("tool_started", {
-                runId,
-                callId: call.id,
-                name: call.name,
-                input,
-              });
-              const tool = deps.tools.get(call.name);
-              const toolResult: ToolResult =
-                tool === undefined
-                  ? { content: `unknown_tool: ${call.name}`, isError: true }
-                  : await tool.execute(input, toolCtx!);
-              convo.push({ role: "tool", toolCallId: call.id, content: toolResult.content });
-              await emit("tool_completed", {
-                runId,
-                callId: call.id,
-                name: call.name,
-                isError: toolResult.isError,
-                content: toolResult.content.slice(0, TOOL_EVENT_CONTENT_CAP),
-                truncated: toolResult.content.length > TOOL_EVENT_CONTENT_CAP,
-              });
-            }
-            break; // → next round with the tool results in context
-          }
-
-          // v0 completion path (unchanged): persist the assistant text,
-          // message_completed, run_completed.
-          const assistant = await messages.append(deps.db, {
-            sessionId,
-            role: "assistant",
-            content,
-          });
-          await emit("message_completed", { messageId: assistant.id, content });
-          // Terminal event BEFORE the status flip (see file header): the next
-          // same-session run (C1 wait loop) unblocks on the flip, so this order
-          // is what pins run N+1's run_started strictly after run_completed.
-          await emit("run_completed", { runId });
-          await runs.finish(deps.db, runId, "completed");
+      // ---- P8 Task 3: attachment materialization -------------------------
+      // The job payload's attachmentIds (validated by the gateway against
+      // the session's attachment rows at enqueue time) resolve back to rows
+      // here, and each object is downloaded through the storage seam into
+      // uploads/{sanitizedName} inside the sandbox workspace — BEFORE the
+      // first provider call, so the model's tools see the files from
+      // round 1. Misses (row gone, object never uploaded, seam unwired)
+      // are loud run-level failures; an unexpected storage/filesystem
+      // error falls through to the catch below and fails the job loudly
+      // (infra, not a run state — the stale-run sweeper is the recovery).
+      if (requestedAttachmentIds.length > 0) {
+        const rows = await attachments.getForSession(
+          deps.db,
+          sessionId,
+          requestedAttachmentIds,
+        );
+        if (rows.length !== requestedAttachmentIds.length) {
+          await failAttachments("attachment id has no attachment row for this session");
           return;
-        } catch (err) {
-          // Keep ordering: pending deltas of the failed attempt settle (or are
-          // abandoned) before the retry/failure event goes out.
-          await flushed.catch(() => {});
-
-          // P8 Task 1: an abort raised BY the cancel poll (the real transport
-          // throws on the aborted signal) is a terminal cancel, never a
-          // transient/terminal model error or an infra failure.
-          if (cancelRequested) {
-            await terminalizeCancelled();
+        }
+        if (deps.storage === undefined) {
+          await failAttachments("attachment storage is not configured");
+          return;
+        }
+        const uploadsDir = join(handle.workspaceDir, "uploads");
+        await mkdir(uploadsDir, { recursive: true });
+        for (const row of rows) {
+          const buffer = await deps.storage.getBuffer(row.r2Key);
+          if (buffer === null) {
+            await failAttachments(`attachment object not found: ${row.r2Key}`);
             return;
           }
+          await writeFile(join(uploadsDir, sanitizeAttachmentName(row.name)), buffer);
+        }
+      }
+    } catch (err) {
+      if (
+        err instanceof SandboxAdmissionError ||
+        err instanceof SandboxCapacityError ||
+        err instanceof RootfsUnavailable
+      ) {
+        // NOT a throw: terminal run state, event-first ordering, job
+        // completes (same contract as key_not_minted — the client sees the
+        // failure event and the run row flips).
+        await emit("run_failed", { code: "sandbox_unavailable", message: err.message });
+        await runs.finish(deps.db, runId, "failed", "sandbox_unavailable");
+        return;
+      }
+      throw err; // unknown/infra error — fail the job loudly
+    }
 
-          if (err instanceof TransientModelError) {
-            if (attempt >= MAX_MODEL_ATTEMPTS) {
-              await emit("run_failed", { code: "model_transient_exhausted" });
-              await runs.finish(deps.db, runId, "failed", err.message);
-              return;
-            }
-            const nextBackoffMs = RETRY_BACKOFF_MS[attempt - 1]!;
-            await emit("run_started_retry", { attempt: attempt + 1, nextBackoffMs });
-            await sleep(nextBackoffMs);
-            continue;
-          }
+    const attached = handle;
 
-          if (err instanceof TerminalModelError) {
-            await emit("run_failed", { code: "model_terminal", message: err.message });
+    /**
+     * The P2-compat sink: every engine append is normalized to P2's exact
+     * spelling before it reaches Redis (and the mirror).
+     */
+    const compatEvents = compatEventLog(deps.events);
+    const compatEmit = async (
+      type: SessionEventType,
+      payload: Record<string, unknown>,
+    ): Promise<void> => {
+      const event = await compatEvents.append(sessionId, type, payload);
+      await eventMirror.put(deps.db, event);
+    };
+
+    // The engine's openai leg is P2's legacy transport adapted onto the
+    // canonical seam; the anthropic leg is never selected (the LiteLLM
+    // resolver always yields kind "litellm").
+    const legacy = adaptLegacyTransport(deps.transport);
+
+    // Cancel polling needs the live engine; the engine needs the transport.
+    let engine: ReturnType<typeof createAgentEngine> | undefined;
+    const polled = withCancelPolling(legacy, {
+      intervalMs: cancelCheckIntervalMs,
+      isCancelRequested: () => runs.isCancelRequested(deps.db, runId),
+      onCancel: async () => {
+        await engine?.cancel(sessionId);
+      },
+    });
+
+    engine = createAgentEngine({
+      db: deps.db,
+      events: compatEvents,
+      // The engine replaces this with its per-session sink; the field is part
+      // of the pinned LoopDeps shape.
+      sink: { async emit() {} },
+      state: createPostgresSessionStateStore(deps.db),
+      keys: litellmKeyResolver({
+        keys: deps.keys,
+        baseUrl: deps.litellmBaseUrl,
+        defaultModel: deps.defaultModel,
+      }),
+      transports: { openai: polled, anthropic: legacy },
+      litellmBaseUrl: deps.litellmBaseUrl,
+      defaultModel: deps.defaultModel,
+      registry: withUnknownToolFallback(
+        createCoreToolRegistry(
+          adaptAgentTools(deps.tools.tools, {
+            sandbox: attached,
+            emitEvent: (type, payload) => compatEmit(type, payload),
+          }),
+        ),
+      ),
+      // P2 had no approval cards; the compat engine must never block.
+      approvals: {
+        async approve() {
+          return "allow";
+        },
+      },
+      hooks: NOOP_HOOKS,
+      compactor: NOOP_COMPACTOR,
+      skills: NOOP_SKILLS,
+      // Non-null so the sandbox-backed P2 roster is advertised. Spill is
+      // disabled: P2's caps stay byte-for-byte (the P2 suite pins them).
+      sandbox: createSandboxPort(deps.sandbox),
+      windowTokens: DEFAULT_WINDOW_TOKENS,
+      maxToolRounds: MAX_TOOL_ROUNDS,
+      systemPromptOverride: SYSTEM_PROMPT_V1,
+      spillToolResults: false,
+      allowUnrosteredTools: true,
+      ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
+    });
+
+    await engine.run({
+      runId,
+      sessionId,
+      userId,
+      prompt: job.data.prompt,
+      ...(job.data.tier !== undefined ? { tier: job.data.tier } : {}),
+      ...(job.data.attachmentIds !== undefined
+        ? { attachmentIds: job.data.attachmentIds }
+        : {}),
+    });
+    } finally {
+      // "after finish": every terminal path above has already flipped the
+      // row; the bump records the session as recently used for the LRU.
+      await bumpActivity();
+    }
+  };
+
+  /**
+   * The v0 tool-less streaming loop (P1), retained ONLY for the legacy
+   * composition the e2e spine pins. The P2 tool path above runs the engine.
+   */
+  async function runLegacyV0(o: {
+    runId: string;
+    sessionId: string;
+    history: ChatMessage[];
+    apiKey: string;
+    cancelCheckIntervalMs: number;
+    emit(type: SessionEventType, payload: Record<string, unknown>): Promise<SessionEvent>;
+    terminalizeCancelled(): Promise<void>;
+  }): Promise<void> {
+    const { runId, sessionId } = o;
+    await o.emit("run_started", { runId });
+
+    for (let attempt = 1; attempt <= MAX_MODEL_ATTEMPTS; attempt += 1) {
+      await runs.bumpAttempt(deps.db, runId);
+
+      const deltas: string[] = [];
+      // onDelta is synchronous; event appends are not. Serialize them on a
+      // promise chain so message_delta order matches arrival order, and drain
+      // the chain before any completion/retry/failure event is emitted.
+      let flushed: Promise<void> = Promise.resolve();
+      // v0 wires the AbortSignal through but sets no timeout (later: per-attempt caps).
+      const controller = new AbortController();
+
+      // P8 Task 1: cooperative-cancel poll state, per attempt. `lastCancelCheck`
+      // is the monotonic Date.now() of the last poll; the first delta batch
+      // always polls (epoch 0), later batches only once the window elapses.
+      let cancelRequested = false;
+      let lastCancelCheck = 0;
+      const pollCancel = async (): Promise<void> => {
+        const now = Date.now();
+        if (now - lastCancelCheck < o.cancelCheckIntervalMs) return; // throttled
+        lastCancelCheck = now;
+        if (await runs.isCancelRequested(deps.db, runId)) {
+          cancelRequested = true;
+          // Best-effort transport stop: a real SSE/HTTP transport aborts on
+          // the signal and lands in the catch below; a transport that ignores
+          // it is still stopped at the post-flush flag check.
+          controller.abort();
+        }
+      };
+
+      try {
+        const result = await deps.transport.stream(
+          {
+            baseUrl: deps.litellmBaseUrl,
+            apiKey: o.apiKey,
+            model: deps.defaultModel,
+            messages: o.history,
+          },
+          {
+            onDelta(text) {
+              deltas.push(text);
+              flushed = flushed
+                .then(() => o.emit("message_delta", { runId, text }).then(() => undefined))
+                // Cancel check between delta batches — ON the flush chain so
+                // it never races the delta ordering, throttled to at most
+                // one db poll per cancelCheckIntervalMs window.
+                .then(() => pollCancel());
+              // Mark the rejection handled NOW (transport may still be
+              // streaming when an early append fails — an unawaited rejection
+              // would surface as an unhandledRejection); the real error
+              // resurfaces at the `await flushed` below.
+              flushed.catch(() => {});
+            },
+          },
+          controller.signal,
+        );
+        await flushed;
+
+        // The flag flipped mid-stream and the (possibly abort-ignoring)
+        // transport returned normally: terminalize before any completion
+        // event. Not a throw — the job completes (same contract as the
+        // run-level failures above).
+        if (cancelRequested) {
+          await o.terminalizeCancelled();
+          return;
+        }
+
+        const content = deltas.join("");
+
+        // v0 completion path (unchanged): persist the assistant text,
+        // message_completed, run_completed.
+        const assistant = await messages.append(deps.db, {
+          sessionId,
+          role: "assistant",
+          content,
+        });
+        await o.emit("message_completed", { messageId: assistant.id, content });
+        // Terminal event BEFORE the status flip (see file header): the next
+        // same-session run (C1 wait loop) unblocks on the flip, so this order
+        // is what pins run N+1's run_started strictly after run_completed.
+        await o.emit("run_completed", { runId });
+        await runs.finish(deps.db, runId, "completed");
+        return;
+      } catch (err) {
+        // Keep ordering: pending deltas of the failed attempt settle (or are
+        // abandoned) before the retry/failure event goes out.
+        await flushed.catch(() => {});
+
+        // P8 Task 1: an abort raised BY the cancel poll (the real transport
+        // throws on the aborted signal) is a terminal cancel, never a
+        // transient/terminal model error or an infra failure.
+        if (cancelRequested) {
+          await o.terminalizeCancelled();
+          return;
+        }
+
+        if (err instanceof TransientModelError) {
+          if (attempt >= MAX_MODEL_ATTEMPTS) {
+            await o.emit("run_failed", { code: "model_transient_exhausted" });
             await runs.finish(deps.db, runId, "failed", err.message);
             return;
           }
-
-          // Unknown/infra error (db or redis down, consumer bug): fail the job
-          // loudly. With attempts:1 the job stays FAILED — BullMQ never
-          // redelivers it (failed ≠ stalled; stalled handling with attempts:1
-          // also fails rather than redelivers), and claimNext claims 'queued'
-          // rows only, so even a redelivery would no-op. Recovery is the
-          // stale-run sweeper's job (staleRuns.ts): it terminalizes runs
-          // stranded in 'running' with run_failed {code:"run_lost"}.
-          throw err;
+          const nextBackoffMs = RETRY_BACKOFF_MS[attempt - 1]!;
+          await o.emit("run_started_retry", { attempt: attempt + 1, nextBackoffMs });
+          await sleep(nextBackoffMs);
+          continue;
         }
+
+        if (err instanceof TerminalModelError) {
+          await o.emit("run_failed", { code: "model_terminal", message: err.message });
+          await runs.finish(deps.db, runId, "failed", err.message);
+          return;
+        }
+
+        // Unknown/infra error (db or redis down, consumer bug): fail the job
+        // loudly. With attempts:1 the job stays FAILED — BullMQ never
+        // redelivers it (failed ≠ stalled; stalled handling with attempts:1
+        // also fails rather than redelivers), and claimNext claims 'queued'
+        // rows only, so even a redelivery would no-op. Recovery is the
+        // stale-run sweeper's job (staleRuns.ts): it terminalizes runs
+        // stranded in 'running' with run_failed {code:"run_lost"}.
+        throw err;
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Full production processor
+// ---------------------------------------------------------------------------
+
+export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProcessor {
+  const sleep = deps.sleep ?? defaultSleep;
+  const windowTokens = deps.windowTokens ?? DEFAULT_WINDOW_TOKENS;
+
+  const state = createPostgresSessionStateStore(deps.db);
+
+  const sinkFor = (sessionId: string) => ({
+    async emit(type: SessionEventType, payload: Record<string, unknown>): Promise<void> {
+      const event = await deps.events.append(sessionId, type, payload);
+      await eventMirror.put(deps.db, event);
+    },
+  });
+
+  const bridge = createRedisApprovalBridge({
+    redisQ: deps.redisQ,
+    events: deps.events,
+    db: deps.db,
+  });
+
+  const approvals = createApprovalGate({
+    db: deps.db,
+    bridge,
+    sinkFactory: sinkFor,
+    // The ONLY place the timeout override enters: env is parsed by main.ts
+    // into FullRunDeps; the gate never reads env itself.
+    ...(deps.approvalTimeoutMs !== undefined
+      ? { timeoutMs: deps.approvalTimeoutMs }
+      : {}),
+  });
+
+  // Guarded egress for EVERY provider/tool call (spec D3/§11). No raw fetch.
+  const guard = createSsrfGuard();
+
+  /**
+   * Per-hop host-GRANT re-check (T12 carry, T10 review): the guarded egress
+   * re-runs the SSRF check on every redirect hop but not the caller's grant,
+   * so a granted site could bounce to a public host the user never approved.
+   * The egress is shared, so the active tool context rides AsyncLocalStorage
+   * (set by `withGrantHop` around each web-tool execution).
+   */
+  const toolContext = new AsyncLocalStorage<{ userId: string; sessionId: string }>();
+  const grantHop = async (url: URL): Promise<void> => {
+    const ctx = toolContext.getStore();
+    if (ctx === undefined) return;
+    const rows = await grantsRepo.listForSession(deps.db, ctx.userId, ctx.sessionId);
+    const grants = rows.map((r) => ({
+      kind: r.kind === "path" ? ("path" as const) : ("host" as const),
+      pattern: r.pattern,
+      decision: r.decision === "deny" ? ("deny" as const) : r.decision === "allow" ? ("allow" as const) : ("always" as const),
+    }));
+    const applicable = findApplicableGrant(grants, "host", normalizeGrantHost(url.hostname));
+    if (applicable === null || applicable.decision === "deny") {
+      throw new Error(`redirect host "${url.hostname}" is not granted for this session`);
+    }
+  };
+
+  const providerEgress: EgressFetch = deps.egress ?? createGuardedEgressFetch(guard);
+  const toolEgress: EgressFetch =
+    deps.egress ?? createGuardedEgressFetch(guard, fetch, 5, grantHop);
+
+  const withGrantHop = (tool: CoreTool): CoreTool => ({
+    ...tool,
+    execute: (args, ctx) =>
+      toolContext.run({ userId: ctx.userId, sessionId: ctx.sessionId }, () =>
+        tool.execute(args, ctx),
+      ),
+  });
+
+  const keys = litellmKeyResolver({
+    keys: deps.keys,
+    baseUrl: deps.litellmBaseUrl,
+    defaultModel: deps.defaultModel,
+  });
+
+  // Deployment feature flags (M-3): the roster never advertises a family the
+  // composition cannot honor. Memory tools are always wired today (the
+  // sandbox-backed store exists); repo tools exist only with a GitHub port.
+  const memoryEnabled = true;
+  const githubConnected = deps.github !== null;
+
+  const workerRegistry = createToolRegistry();
+  const p2Tools = adaptAgentTools(workerRegistry.tools, {
+    sandboxFor: async (ctx) =>
+      deps.sandboxHandleFor !== undefined
+        ? deps.sandboxHandleFor(ctx.userId)
+        : portBackedHandle(deps.sandbox, ctx),
+    emitEvent: async () => {},
+    emitEventFor: (ctx) => (type, payload) => sinkFor(ctx.sessionId).emit(type, payload),
+  });
+
+  const coreTools = [
+    ...p2Tools,
+    ...createSandboxTools({ sandbox: deps.sandbox }),
+    withGrantHop(
+      createFetchUrlTool({
+        egress: toolEgress,
+        guard,
+        approvals,
+        sandbox: deps.sandbox,
+      }),
+    ),
+    withGrantHop(createWebSearchTool({ egress: toolEgress })),
+    ...createGitTools({ sandbox: deps.sandbox, approvals, github: deps.github }),
+    ...createRepoTools({ github: deps.github }),
+    ...(memoryEnabled ? createMemoryTools({ sandbox: deps.sandbox }) : []),
+    ...createGoalTodoTools({ state, sinkFactory: sinkFor }),
+    createSessionSearchTool({ db: deps.db }),
+    createExitPlanModeTool({ state, approvals }),
+  ];
+  const registry = createCoreToolRegistry(coreTools);
+
+  const openai = createOpenAiAgentTransport(providerEgress);
+  const anthropic = createAnthropicTransport(providerEgress);
+
+  const processor = (async (job: {
+    data: AgentRunJob & {
+      unattended?: boolean;
+      autonomy?: "safe" | "auto";
+      mode?: "safe" | "auto" | "drive" | "studio";
+    };
+  }): Promise<void> => {
+    const { runId, sessionId, userId } = job.data;
+
+    // ---- C1: the identical single-active-run-per-session contract --------
+    const turn = await waitForSessionTurn({
+      db: deps.db,
+      sessionId,
+      runId,
+      runQueueWaitMs: deps.runQueueWaitMs ?? DEFAULT_RUN_QUEUE_WAIT_MS,
+      sleep,
+      emit: (type, payload) => sinkFor(sessionId).emit(type, payload),
+    });
+    if (!turn) return;
+
+    const claimed = await runs.claimNext(deps.db, runId);
+    if (!claimed) return;
+
+    // ---- P7 Task 11: activity + workspace hydration ----------------------
+    // Identical contract to the compat path: bump on claim, hydrate before
+    // any tool touches the workspace, and turn a hydrate rejection into a
+    // run-level hydrate_failed (never a job throw).
+    const bumpActivity = async (): Promise<void> => {
+      try {
+        await deps.activity?.bump(sessionId);
+      } catch {
+        // Cache-class redis: a lost bump only degrades LRU ordering.
+      }
+    };
+    await bumpActivity();
+    try {
+      await deps.ensureWarm?.(sessionId, userId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await sinkFor(sessionId).emit("run_failed", {
+        runId,
+        code: "hydrate_failed",
+        message,
+      });
+      await runs.finish(deps.db, runId, "failed", "hydrate_failed");
+      await bumpActivity();
+      return;
+    }
+
+    try {
+
+    // ---- attachments (never-silent) --------------------------------------
+    // The compat path materializes into the attached workspace; the full
+    // path needs a storage seam AND a P2 handle (host workspace). Without
+    // both the run fails loudly instead of silently dropping the files.
+    const requestedAttachmentIds = [...new Set(job.data.attachmentIds ?? [])];
+    if (requestedAttachmentIds.length > 0) {
+      const sink = sinkFor(sessionId);
+      const fail = async (message: string): Promise<void> => {
+        await sink.emit("run_failed", { code: "attachment_unavailable", message });
+        await runs.finish(deps.db, runId, "failed", "attachment_unavailable");
+      };
+      if (deps.storage === undefined) {
+        await fail("attachment storage is not configured");
+        return;
+      }
+      if (deps.sandboxHandleFor === undefined) {
+        await fail("attachment materialization requires a sandbox handle");
+        return;
+      }
+      const rows = await attachments.getForSession(
+        deps.db,
+        sessionId,
+        requestedAttachmentIds,
+      );
+      if (rows.length !== requestedAttachmentIds.length) {
+        await fail("attachment id has no attachment row for this session");
+        return;
+      }
+      const handle = await deps.sandboxHandleFor(userId);
+      const uploadsDir = join(handle.workspaceDir, "uploads");
+      await mkdir(uploadsDir, { recursive: true });
+      for (const row of rows) {
+        const buffer = await deps.storage.getBuffer(row.r2Key);
+        if (buffer === null) {
+          await fail(`attachment object not found: ${row.r2Key}`);
+          return;
+        }
+        await writeFile(join(uploadsDir, sanitizeAttachmentName(row.name)), buffer);
       }
     }
 
-    // Only reachable in the tool loop: every round 1..MAX_TOOL_ROUNDS came
-    // back requesting tools. Terminal failure, event-first ordering.
-    await emit("run_failed", { code: "tool_rounds_exhausted" });
-    await runs.finish(deps.db, runId, "failed", "tool_rounds_exhausted");
+    // ---- mode feeding (ruling R4): job.mode ?? state.mode ?? "auto" ------
+    const sessionState = await state.get(sessionId);
+    const mode = job.data.mode ?? sessionState.mode ?? "auto";
+
+    // Cancel polling needs the live engine; build it per run (the engine is
+    // cheap; the per-run binding is what keeps `cancel(sessionId)` pointed at
+    // THIS run's token).
+    let engine: ReturnType<typeof createAgentEngine> | undefined;
+    const wrap = (base: AgentTransport): AgentTransport =>
+      withCancelPolling(base, {
+        intervalMs: DEFAULT_CANCEL_CHECK_INTERVAL_MS,
+        isCancelRequested: () => runs.isCancelRequested(deps.db, runId),
+        onCancel: async () => {
+          await engine?.cancel(sessionId);
+        },
+      });
+
+    engine = createAgentEngine({
+      db: deps.db,
+      events: deps.events,
+      // The engine replaces this with its per-session sink; the field is part
+      // of the pinned LoopDeps shape.
+      sink: { async emit() {} },
+      state,
+      keys,
+      transports: { openai: wrap(openai), anthropic: wrap(anthropic) },
+      litellmBaseUrl: deps.litellmBaseUrl,
+      defaultModel: deps.defaultModel,
+      registry,
+      approvals,
+      hooks: NOOP_HOOKS,
+      compactor: NOOP_COMPACTOR,
+      skills: NOOP_SKILLS,
+      sandbox: deps.sandbox,
+      windowTokens,
+      memoryEnabled,
+      githubConnected,
+      ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
+    });
+
+    await engine.run({
+      runId,
+      sessionId,
+      userId,
+      prompt: job.data.prompt,
+      ...(job.data.tier !== undefined ? { tier: job.data.tier } : {}),
+      ...(job.data.attachmentIds !== undefined
+        ? { attachmentIds: job.data.attachmentIds }
+        : {}),
+      unattended: job.data.unattended ?? false,
+      ...(job.data.autonomy !== undefined ? { autonomy: job.data.autonomy } : {}),
+      mode,
+    });
+    } finally {
+      await bumpActivity();
+    }
+  }) as FullAgentRunProcessor;
+
+  processor.close = async (): Promise<void> => {
+    await bridge.close();
   };
+  return processor;
 }

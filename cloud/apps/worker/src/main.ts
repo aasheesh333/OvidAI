@@ -1,8 +1,34 @@
 import { pathToFileURL } from "node:url";
 import { Redis } from "ioredis";
-import { createDb, users } from "@ovid/db";
+import { createDb, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, runs as runsRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
 import { createRedisEventLog } from "@ovid/events";
-import { createAgentRunsWorker } from "@ovid/queue";
+import {
+  createAgentRunsWorker,
+  createHibernateWorker,
+  createHydrateWorker,
+  createQueues,
+  hibernateJobSchema,
+  hydrateJobSchema,
+} from "@ovid/queue";
+import {
+  awaitWarm,
+  createActivityTracker,
+  createNoopSandboxEviction,
+  createStorage,
+  diskAlertFractionFromEnv,
+  hibernateWorkspace,
+  hydrateWorkspace,
+  loadStorageEnv,
+  maxWarmBytesFromEnv,
+  reconcileStuckHibernations,
+  STUCK_STATE_MS,
+  SWEEP_INTERVAL_MS,
+  sweepWorkspaces,
+  type HibernateDeps,
+  type HydrateDeps,
+  type WarmConfig,
+  type WarmDeps,
+} from "@ovid/storage";
 import {
   createCgroupManager,
   createRootmapLauncher,
@@ -12,12 +38,19 @@ import {
   resolveRootfs,
   selectQuotaBackend,
 } from "@ovid/sandbox";
+import {
+  createGuardedEgressFetch,
+  createSsrfGuard,
+  type EgressFetch,
+  type GitHubApiPort,
+} from "@ovid/agent-core";
 import type { KeyProvider } from "@ovid/shared";
-import { createOpenAiTransport } from "./liteLlm.js";
-import { createAgentRunProcessor } from "./runProcessor.js";
+import { createFullAgentRunProcessor } from "./runProcessor.js";
+import { buildFileService } from "./fileService.js";
 import { startWorkerPtyBridge } from "./ptyBridge.js";
-import { createToolRegistry } from "./tools/registry.js";
+import { createSandboxPort } from "./sandboxAdapter.js";
 import { sweepStaleRuns } from "./staleRuns.js";
+import { createStuckHibernationScan, createStuckHydrationScan } from "./storageScans.js";
 
 export interface WorkerEnv {
   nodeEnv: string;
@@ -26,8 +59,22 @@ export interface WorkerEnv {
   redisMintUrl: string;
   litellmBaseUrl: string;
   defaultModel: string;
+  anthropicBaseUrl: string;
+  windowTokens: number;
+  approvalTimeoutMs: number;
+  githubToken: string | null;
   runStaleMs: number;
   runQueueWaitMs: number;
+  /** P7 Task 11: shared secret for the internal file service. */
+  internalToken: string;
+  /** P7 Task 11: container-internal file-service port. */
+  workerFilePort: number;
+  /** P7 Task 11: ensureWarm timeout (hydrate job + poll). */
+  hydrateTimeoutMs: number;
+  /** P7 Task 11: inline read cap; larger/binary files redirect to an artifact. */
+  inlineMaxBytes: number;
+  /** P7 Task 10: the ONE warm-disk knob pair. */
+  warmConfig: WarmConfig;
 }
 
 /** A 'running' run older than this is considered stranded (sweeper threshold). */
@@ -39,6 +86,14 @@ const STALE_SWEEP_INTERVAL_MS = 60_000;
  * (OVID_RUN_QUEUE_WAIT_MS); mirrors the processor's DEFAULT_RUN_QUEUE_WAIT_MS.
  */
 const DEFAULT_RUN_QUEUE_WAIT_MS = 600_000;
+/** P3 Task 16 defaults. */
+const DEFAULT_ANTHROPIC_BASE = "https://api.anthropic.com";
+const DEFAULT_WINDOW_TOKENS = 128_000;
+const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
+/** P7 Task 11 defaults. */
+const DEFAULT_WORKER_FILE_PORT = 8091;
+const DEFAULT_HYDRATE_TIMEOUT_MS = 60_000;
+const DEFAULT_INLINE_MAX_BYTES = 1024 * 1024;
 
 /**
  * Validate the worker environment — same production-safety mindset as the
@@ -84,6 +139,54 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
     runQueueWaitMs = parsed;
   }
 
+  // P3 Task 16: optional positive-integer knobs, same fail-loud discipline.
+  const positiveInt = (name: string, fallback: number): number => {
+    const rawValue = raw[name];
+    if (rawValue === undefined || rawValue.trim() === "") return fallback;
+    const parsed = Number(rawValue.trim());
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      throw new Error(`${name} must be a positive integer, got: ${rawValue}`);
+    }
+    return parsed;
+  };
+
+  const anthropicBaseUrl =
+    raw.OVID_ANTHROPIC_BASE?.trim() !== undefined &&
+    raw.OVID_ANTHROPIC_BASE!.trim() !== ""
+      ? raw.OVID_ANTHROPIC_BASE!.trim()
+      : DEFAULT_ANTHROPIC_BASE;
+  const githubToken = raw.GITHUB_API_TOKEN?.trim();
+  const windowTokens = positiveInt("OVID_WINDOW_TOKENS", DEFAULT_WINDOW_TOKENS);
+  const approvalTimeoutMs = positiveInt(
+    "OVID_APPROVAL_TIMEOUT_MS",
+    DEFAULT_APPROVAL_TIMEOUT_MS,
+  );
+
+  // P7 Task 11: the file service is internal-only but still token-gated; a
+  // worker booted without the shared secret would either be unreachable or,
+  // worse, open — refuse to start. The port/timeout knobs follow the same
+  // positive-integer discipline as the rest of this loader.
+  const internalToken = required("OVID_INTERNAL_TOKEN");
+  const workerFilePort = positiveInt(
+    "OVID_WORKER_FILE_PORT",
+    DEFAULT_WORKER_FILE_PORT,
+  );
+  const hydrateTimeoutMs = positiveInt(
+    "OVID_HYDRATE_TIMEOUT_MS",
+    DEFAULT_HYDRATE_TIMEOUT_MS,
+  );
+  const inlineMaxBytes = positiveInt(
+    "OVID_INLINE_MAX_BYTES",
+    DEFAULT_INLINE_MAX_BYTES,
+  );
+
+  // P7 Task 10: the warm-cache knobs (maxWarmBytesFromEnv /
+  // diskAlertFractionFromEnv throw on malformed values, naming the var).
+  const warmConfig: WarmConfig = {
+    maxWarmBytes: maxWarmBytesFromEnv(raw),
+    diskAlertFraction: diskAlertFractionFromEnv(raw),
+  };
+
   return {
     nodeEnv: raw.NODE_ENV?.trim() || "development",
     databaseUrl: required("DATABASE_URL"),
@@ -91,8 +194,17 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
     redisMintUrl: required("REDIS_MINT_URL"),
     litellmBaseUrl: required("OVID_LITELLM_BASE"),
     defaultModel: required("OVID_DEFAULT_MODEL"),
+    anthropicBaseUrl,
+    windowTokens,
+    approvalTimeoutMs,
+    githubToken: githubToken !== undefined && githubToken !== "" ? githubToken : null,
     runStaleMs,
     runQueueWaitMs,
+    internalToken,
+    workerFilePort,
+    hydrateTimeoutMs,
+    inlineMaxBytes,
+    warmConfig,
   };
 }
 
@@ -106,6 +218,52 @@ export function createMintRedisKeyProvider(redisMint: Redis): KeyProvider {
   return {
     getKeyForUser(uid) {
       return redisMint.get(`user:${uid}:key`);
+    },
+  };
+}
+
+/**
+ * The GitHub REST port (P3 Task 16): `repo_tree`'s backing. The token is the
+ * deployment's single GITHUB_API_TOKEN (P4 owns per-user OAuth); the port is
+ * null when the env var is absent, so the roster never advertises repo_tree
+ * without a credential. Egress is the SSRF-guarded fetch — never raw fetch.
+ */
+export function createGitHubApiPort(deps: {
+  token: string;
+  egress: EgressFetch;
+}): GitHubApiPort {
+  return {
+    async getTree(_userId, o) {
+      const ref = o.ref !== undefined && o.ref !== "" ? o.ref : "HEAD";
+      const url =
+        `https://api.github.com/repos/${encodeURIComponent(o.owner)}/` +
+        `${encodeURIComponent(o.repo)}/git/trees/${encodeURIComponent(ref)}` +
+        "?recursive=1";
+      const res = await deps.egress(url, {
+        headers: {
+          authorization: `Bearer ${deps.token}`,
+          accept: "application/vnd.github+json",
+          "user-agent": "OvidCloud/1.0",
+        },
+      });
+      if (!res.ok) {
+        const body = (await res.text().catch(() => "")).trim().slice(0, 200);
+        throw new Error(`GitHub HTTP ${res.status}${body === "" ? "" : `: ${body}`}`);
+      }
+      const parsed = (await res.json()) as {
+        tree?: Array<{ path?: unknown; type?: unknown; size?: unknown }>;
+      };
+      const entries: Array<{ path: string; type: "blob" | "tree"; size?: number }> = [];
+      for (const e of parsed.tree ?? []) {
+        if (typeof e.path !== "string") continue;
+        const type = e.type === "tree" ? "tree" : "blob";
+        entries.push({
+          path: e.path,
+          type,
+          ...(typeof e.size === "number" ? { size: e.size } : {}),
+        });
+      }
+      return entries;
     },
   };
 }
@@ -125,6 +283,27 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   const redisQ = new Redis(cfg.redisQUrl);
   const redisMint = new Redis(cfg.redisMintUrl);
   const events = createRedisEventLog(redisQ);
+
+  // ---- P7 Task 11/10: storage, activity cache and the storage queues. ----
+  // Storage selection fails loud (production may not use the fs backend).
+  const storage = createStorage(loadStorageEnv(env));
+  // Activity keys are cache-class (spec §10 redis-c). REDIS_C_URL is optional:
+  // when absent we share redis-q and say so once — eviction fails safe (the
+  // sweeper falls back to file_manifests.updated_at).
+  const redisCUrl = env.REDIS_C_URL?.trim();
+  const redisC =
+    redisCUrl !== undefined && redisCUrl !== ""
+      ? new Redis(redisCUrl)
+      : redisQ;
+  if (redisC === redisQ) {
+    console.warn(
+      "[worker] REDIS_C_URL is not set — activity keys share REDIS_Q_URL " +
+        "(cache-class fallback; spec §10 redis-c is preferred in production)",
+    );
+  }
+  const activity = createActivityTracker(redisC);
+  // Connection OPTIONS OBJECT (Task 7 lesson): a bare URL string hangs.
+  const queues = createQueues({ url: cfg.redisQUrl });
 
   // ---- P2 Task 12: the SandboxManager chain (pinned composition order). ----
   // Every step fails LOUDLY at boot: a worker without a rootfs must never run
@@ -157,21 +336,121 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   // kills every live pty leaf; the bridge itself never kills ptys).
   const stopPtyBridge = await startWorkerPtyBridge({ sandbox: manager, redis: redisQ });
 
-  const processor = createAgentRunProcessor({
+  // ---- P7 Task 8/9/10: state-hydrator engines + internal file service. ----
+  // workspacesRoot is P2's resolved root (OVID_WORKSPACES_ROOT,
+  // /workspaces/users by default): P7 MUST use the same root or the engines
+  // and the SandboxManager would disagree about where a session lives.
+  const workspacesRoot = sandboxConfig.workspacesRoot;
+  const hibernateDeps: HibernateDeps = {
+    db,
+    events,
+    storage,
+    workspacesRoot,
+    // TODO(P2): replace the noop seam with the real SandboxManager-backed
+    // eviction once P2 exposes it (contract 1). The engine itself is done.
+    sandbox: createNoopSandboxEviction((msg) => console.warn(`[worker] ${msg}`)),
+    activity,
+    fileManifests: fileManifestsRepo,
+    workspaceObjects: workspaceObjectsRepo,
+    runs: runsRepo,
+    eventMirror: eventMirrorRepo,
+    stuckHibernationScan: createStuckHibernationScan(),
+  };
+  const hydrateDeps: HydrateDeps = {
+    db,
+    events,
+    storage,
+    workspacesRoot,
+    activity,
+    fileManifests: fileManifestsRepo,
+    eventMirror: eventMirrorRepo,
+  };
+  const warmDeps: WarmDeps = {
+    ...hibernateDeps,
+    // The spread above narrows fileManifests to T8's mirror; T10's LRU needs
+    // the real repo's extra methods (upsertWarm/listWarmForLru/markColdRetry).
+    fileManifests: fileManifestsRepo,
+    queues: { hibernate: queues.hibernate },
+    stuckHydrationScan: createStuckHydrationScan(),
+  };
+
+  // Validate the wire payload with the queue schema before the engine sees it
+  // (a malformed job must fail loudly, not half-hibernate a workspace).
+  const hibernateWorker = createHibernateWorker({ url: cfg.redisQUrl }, async (job) =>
+    hibernateWorkspace(hibernateDeps, hibernateJobSchema.parse(job.data)),
+  );
+  hibernateWorker.on("error", (err) => {
+    console.error("[worker] hibernate worker error", err);
+  });
+  const hydrateWorker = createHydrateWorker({ url: cfg.redisQUrl }, async (job) =>
+    hydrateWorkspace(hydrateDeps, hydrateJobSchema.parse(job.data)),
+  );
+  hydrateWorker.on("error", (err) => {
+    console.error("[worker] hydrate worker error", err);
+  });
+
+  // Internal HTTP: container network only (never a host-published port).
+  const fileService = buildFileService({
+    db,
+    events,
+    storage,
+    workspacesRoot,
+    activity,
+    internalToken: cfg.internalToken,
+    inlineMaxBytes: cfg.inlineMaxBytes,
+    port: cfg.workerFilePort,
+    host: "0.0.0.0",
+    fileManifests: fileManifestsRepo,
+    eventMirror: eventMirrorRepo,
+    workspaceObjects: workspaceObjectsRepo,
+  });
+  await fileService.listen({ port: cfg.workerFilePort, host: "0.0.0.0" });
+  console.log(`[worker] internal file service listening on :${cfg.workerFilePort}`);
+
+  // P7 Task 11: the run hook — hydrate before any tool touches the
+  // workspace. T9-review I3: pass the repo so awaitWarm does not need the
+  // raw `$client.unsafe` path.
+  const ensureWarm = async (sessionId: string, userId: string): Promise<void> => {
+    await awaitWarm(
+      db,
+      queues.hydrate,
+      { sessionId, userId },
+      {
+        reason: "run",
+        timeoutMs: cfg.hydrateTimeoutMs,
+        fileManifests: fileManifestsRepo,
+      },
+    );
+  };
+
+
+  // P3 Task 16: the production processor is the FULL engine. Egress is the
+  // SSRF-guarded fetch at every construction site (T5-I1 / M-4): model
+  // transports and the GitHub REST port alike. No raw-fetch default remains
+  // in the worker's production path.
+  const egress = createGuardedEgressFetch(createSsrfGuard());
+  const github =
+    cfg.githubToken !== null
+      ? createGitHubApiPort({ token: cfg.githubToken, egress })
+      : null;
+  const processor = createFullAgentRunProcessor({
     db,
     events,
     keys: createMintRedisKeyProvider(redisMint),
-    // T15 fix-round M-4: this is the P2-COMPAT path (bounded mode) and the
-    // legacy shim's documented raw-`fetch` default is still in force here.
-    // Task 16's full-engine construction site MUST pass
-    // createGuardedEgressFetch(...) — createOpenAiAgentTransport no longer
-    // accepts an unguarded default (T5-I1).
-    transport: createOpenAiTransport(),
+    redisQ,
+    // P2's manager adapted onto the canonical SandboxPort (Task 9).
+    sandbox: createSandboxPort(manager),
+    // The P2 six-tool roster adapts through the real per-user handle.
+    sandboxHandleFor: (userId) => manager.attach(userId),
+    github,
     litellmBaseUrl: cfg.litellmBaseUrl,
     defaultModel: cfg.defaultModel,
+    anthropicBaseUrl: cfg.anthropicBaseUrl,
+    windowTokens: cfg.windowTokens,
+    approvalTimeoutMs: cfg.approvalTimeoutMs,
     runQueueWaitMs: cfg.runQueueWaitMs,
-    sandbox: manager,
-    tools: createToolRegistry(),
+    ensureWarm,
+    activity,
   });
 
   // Connection OPTIONS OBJECT — a bare URL string silently spreads into
@@ -208,10 +487,52 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   }, STALE_SWEEP_INTERVAL_MS);
   sweeper.unref();
 
+  // P7 Task 10/11: crash recovery FIRST (hibernating rows whose dir is gone
+  // get closed cold; a present dir is reset warm), then the warm sweeper in
+  // the EXACT stale-run interval shape: once at boot ("boot" label), every
+  // 30 s after ("interval"), errors logged never fatal, .unref() so the
+  // process can exit, cleared in shutdown().
+  try {
+    const reconciled = await reconcileStuckHibernations(hibernateDeps, {
+      stuckAfterMs: STUCK_STATE_MS,
+    });
+    if (reconciled.resetToWarm > 0 || reconciled.closedToCold > 0) {
+      console.log(
+        `[worker] stuck-hibernation reconcile (boot): ${reconciled.resetToWarm} reset warm, ` +
+          `${reconciled.closedToCold} closed cold`,
+      );
+    }
+  } catch (err) {
+    console.error("[worker] stuck-hibernation reconcile (boot) failed", err);
+  }
+  const sweepWarm = async (label: string): Promise<void> => {
+    try {
+      const result = await sweepWorkspaces(warmDeps, cfg.warmConfig);
+      if (
+        result.registered > 0 ||
+        result.enqueuedIdle > 0 ||
+        result.enqueuedPressure > 0
+      ) {
+        console.log(
+          `[worker] warm sweep (${label}): registered ${result.registered}, ` +
+            `idle ${result.enqueuedIdle}, pressure ${result.enqueuedPressure}`,
+        );
+      }
+    } catch (err) {
+      console.error(`[worker] warm sweep (${label}) failed`, err);
+    }
+  };
+  await sweepWarm("boot");
+  const warmSweeper = setInterval(() => {
+    void sweepWarm("interval");
+  }, SWEEP_INTERVAL_MS);
+  warmSweeper.unref();
+
   let shuttingDown: Promise<void> | null = null;
   const shutdown = (): Promise<void> => {
     shuttingDown ??= (async () => {
       clearInterval(sweeper);
+      clearInterval(warmSweeper);
       // P2 Task 13 pin: the pty bridge stops FIRST (no new ctl mid-teardown),
       // then the sandbox manager — manager.close() kills every live pty leaf,
       // and each pty's onExit publishes its `exit` + HDELs its registry key.
@@ -221,6 +542,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       await manager.close();
       // Drains in-flight jobs and stops fetching new ones (force=false).
       await worker.close();
+      // P7 Task 11: stop storage consumers before their producer queues.
+      await hibernateWorker.close();
+      await hydrateWorker.close();
+      await fileService.close();
+      await queues.agentRuns.close();
+      await queues.hibernate.close();
+      await queues.hydrate.close();
+      // Reap the approval bridge's subscription (pending asks fail closed).
+      await processor.close();
+      if (redisC !== redisQ) redisC.disconnect();
       redisQ.disconnect();
       redisMint.disconnect();
       await db.$client.end({ timeout: 5 });
