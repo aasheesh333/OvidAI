@@ -6,10 +6,11 @@
  * pool, so a refused scheme/SSRF target never creates a context.
  *
  * Notification discipline: tools that mutate session-visible state (open,
- * navigate, back/forward/reload, tab ops) publish state exactly once, after
- * the operation succeeded. When they create the session themselves they
- * suppress `ensureSession`'s creation notification so the published state
- * carries the post-navigation URL/title rather than the blank initial page.
+ * navigate, back/forward/reload, tab ops, resize) publish state exactly once,
+ * after the operation succeeded. They pass a notify-suppressed deps clone into
+ * `ensureSession`/`withSession`, so the creation path never publishes on its
+ * own — the post-operation publish is the single owner even when the tool just
+ * created the session.
  */
 
 import type { Page } from "playwright-core";
@@ -96,7 +97,8 @@ function historySpec(
     parameters: { type: "object", properties: {} },
     inputSchema: z.object({}),
     async execute(_input, ctx, deps) {
-      return withSession(deps, ctx, async (_session, page) => {
+      // Suppress the creation notify: this tool publishes once after success.
+      return withSession({ ...deps, notifyState: undefined }, ctx, async (_session, page) => {
         const result = await run(page);
         if (noHistory && result === null) {
           return { content: `${TOOL_ERROR_PREFIX}no history entry` };
@@ -240,7 +242,8 @@ function navigationSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
     async execute(input, ctx) {
       const width = Math.min(3840, Math.max(320, Math.round(input.width)));
       const height = Math.min(2160, Math.max(240, Math.round(input.height)));
-      return withSession(deps, ctx, async (_session, page) => {
+      // Suppress the creation notify: this tool publishes once after success.
+      return withSession({ ...deps, notifyState: undefined }, ctx, async (_session, page) => {
         // The screencast's maxWidth/maxHeight stay at cfg values: a resize
         // changes the page's layout viewport, not the cast's downscale bound.
         await page.setViewportSize({ width, height });

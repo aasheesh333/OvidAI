@@ -65,6 +65,8 @@ export interface BrowserToolsDeps {
   workspaceDir(userId: string, sessionId: string): Promise<string>;
   /** Engine → bridge.publishState hook (Task 14). */
   notifyState?(sessionId: string): void;
+  /** Diagnostic sink for swallowed release-time persistence failures (Task 12). */
+  log?(msg: string, err?: unknown): void;
   now?(): number;
   /**
    * Test seam for the download byte ceiling (Task 13). Production omits it;

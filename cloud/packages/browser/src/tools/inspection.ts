@@ -178,7 +178,10 @@ function inspectionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
         text: z.string().optional(),
         selector: z.string().optional(),
         state: z.enum(["visible", "hidden", "text"]).optional(),
-        timeoutMs: z.number().int().nonnegative().optional(),
+        // Non-positive values are accepted but clamped to the default below:
+        // Playwright treats `timeout: 0` as "disable the timeout", which would
+        // hang the tool (and the run awaiting it) forever.
+        timeoutMs: z.number().int().optional(),
       })
       .refine((value) => value.text !== undefined || value.selector !== undefined, {
         message: "provide text or selector",
@@ -188,7 +191,13 @@ function inspectionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       const text: string = input.text ?? "";
       const state: "visible" | "hidden" | "text" =
         input.state ?? (selector !== undefined && input.text === undefined ? "visible" : "text");
-      const timeout = Math.min(30_000, Math.max(0, input.timeoutMs ?? 10_000));
+      const requested = input.timeoutMs;
+      // NEVER pass 0/negative through: Playwright's 0 disables the timeout.
+      // Non-positive ⇒ the 10 s default; otherwise clamp to the 30 s cap.
+      const timeout =
+        requested === undefined || requested <= 0
+          ? 10_000
+          : Math.min(30_000, Math.max(1, Math.round(requested)));
 
       return withSession(deps, ctx, async (_session, page) => {
         try {

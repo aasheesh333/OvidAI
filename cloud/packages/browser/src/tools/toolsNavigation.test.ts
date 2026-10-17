@@ -18,7 +18,8 @@ import {
   type BrowserSessionRegistry,
 } from "../sessions.js";
 import { releaseSession } from "../sessionOps.js";
-import type { StorageState, StorageStatePersistence } from "../stateStore.js";
+import type { StorageStatePersistence } from "../stateStore.js";
+import type { StorageState } from "../storageState.js";
 import { startTestPageServer, type TestPageServer } from "../test/testServer.js";
 import { BROWSER_TOOL_NAMES, createBrowserTools } from "./definitions.js";
 import { TOOL_ERROR_PREFIX, type BrowserToolContext, type BrowserToolDef, type BrowserToolsDeps } from "./types.js";
@@ -51,6 +52,7 @@ describe.skipIf(!chromiumExecutableExists())("browser tools I", () => {
   let tools: Map<string, BrowserToolDef>;
   let wsRoot: string;
   let notify: ReturnType<typeof vi.fn>;
+  let log: ReturnType<typeof vi.fn>;
   let flush: ReturnType<typeof vi.fn>;
   let restore: ReturnType<typeof vi.fn>;
 
@@ -68,6 +70,7 @@ describe.skipIf(!chromiumExecutableExists())("browser tools I", () => {
     pool = createBrowserPool(cfg);
     registry = createBrowserSessionRegistry();
     notify = vi.fn();
+    log = vi.fn();
     flush = vi.fn(async () => {});
     restore = vi.fn(async () => null);
     const persistence = { flush, restore } as unknown as StorageStatePersistence;
@@ -78,6 +81,7 @@ describe.skipIf(!chromiumExecutableExists())("browser tools I", () => {
       cfg,
       workspaceDir: async () => wsRoot,
       notifyState: notify,
+      log,
     };
     tools = new Map(createBrowserTools(deps).map((t) => [t.name, t]));
   });
@@ -205,6 +209,22 @@ describe.skipIf(!chromiumExecutableExists())("browser tools I", () => {
     expect(result.content).toBe("timeout");
   });
 
+  it(
+    "browser_wait_for timeoutMs:0 is clamped to the 10s default (never an infinite wait)",
+    async () => {
+      await exec("browser_open", { url: server.url("/click") });
+      const started = Date.now();
+      const result = await exec("browser_wait_for", { text: "nope", timeoutMs: 0 });
+      const elapsed = Date.now() - started;
+      expect(result.content).toBe("timeout");
+      // Playwright's `timeout: 0` DISABLES the timeout — the clamp must keep
+      // this bounded (default 10 s) instead of hanging the run forever.
+      expect(elapsed).toBeGreaterThanOrEqual(9_000);
+      expect(elapsed).toBeLessThan(15_000);
+    },
+    20_000,
+  );
+
   it("browser_screenshot writes a workspace-relative jpeg artifact", async () => {
     await exec("browser_open", { url: server.url("/click") });
     const result = await exec("browser_screenshot", {});
@@ -228,6 +248,14 @@ describe.skipIf(!chromiumExecutableExists())("browser tools I", () => {
     const result = await exec("browser_resize", { width: 10_000, height: 10 });
     expect(result.content).toBe("viewport 3840x240");
     expect(deps.registry.activePage("s1")!.viewportSize()).toEqual({ width: 3840, height: 240 });
+  });
+
+  it("a mutating tool that CREATES the session publishes exactly once", async () => {
+    // browser_resize creates the session itself: the creation notify must be
+    // suppressed so the post-success publish is the single owner.
+    const result = await exec("browser_resize", { width: 800, height: 600 });
+    expect(result.content).toBe("viewport 800x600");
+    expect(notify).toHaveBeenCalledTimes(1);
   });
 
   // -------------------------------------------------------------------------
@@ -302,6 +330,20 @@ describe.skipIf(!chromiumExecutableExists())("browser tools I", () => {
   it("releaseSession on an unknown session is a no-op", async () => {
     await expect(releaseSession(deps, "missing")).resolves.toBeUndefined();
     expect(flush).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it("releaseSession logs a flush failure but still releases the context", async () => {
+    await exec("browser_open", { url: server.url("/setcookie") });
+    flush.mockRejectedValueOnce(new Error("disk full"));
+
+    await releaseSession(deps, "s1");
+
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(String(log.mock.calls[0][0])).toContain("failed to capture/flush browser state");
+    expect(pool.liveCount()).toBe(0);
+    expect(registry.get("s1")).toBeNull();
+    expect(notify).toHaveBeenCalledWith("s1");
   });
 
   it("ensureSession restores persisted cookies into the new context", async () => {

@@ -34,6 +34,16 @@ export interface SessionOps {
   persistence: StorageStatePersistence | null;
   cfg: BrowserEngineConfig;
   notifyState?(sessionId: string): void;
+  /**
+   * Diagnostic sink for swallowed release-time capture/flush failures.
+   * Defaults to `console.warn` (mirroring `stateStore.restore`'s log) so auth
+   * persistence problems are never completely invisible.
+   */
+  log?(msg: string, err?: unknown): void;
+}
+
+function defaultLog(msg: string, err?: unknown): void {
+  console.warn(`[sessionOps] ${msg}`, err ?? "");
 }
 
 /**
@@ -41,6 +51,15 @@ export interface SessionOps {
  * does not exist yet must share ONE acquire/open: the pool would hand back the
  * same handle, but a second `registry.open` would re-instrument the page and
  * wipe the buffers.
+ *
+ * OWNERSHIP NOTE: the shared promise closes over the FIRST caller's `ops`
+ * (including its `notifyState`), so a concurrent caller that suppressed its
+ * own creation notification (state-mutating tools pass `notifyState:
+ * undefined`) still observes the first caller's publish. That is intentional:
+ * `bridge.publishState` is idempotent, and every publish is an accurate
+ * snapshot at that moment; the mutation-owning tool publishes again after its
+ * operation succeeds. Do not treat the creation notify as "belonging" to a
+ * particular caller.
  */
 const opening = new Map<string, Promise<SessionBrowser>>();
 
@@ -92,8 +111,9 @@ export async function ensureSession(ops: SessionOps, ctx: BrowserToolContext): P
  * Capture the session's storageState, flush it through persistence, then let
  * the pool close the context. Idempotent: an unknown session is a no-op.
  *
- * Capture/flush failures are swallowed: a crashed page must never keep a live
- * context (or a pool slot) alive. Release always runs.
+ * Capture/flush failures are swallowed (a crashed page must never keep a live
+ * context or a pool slot alive) but logged: auth-persistence failures are
+ * otherwise invisible.
  */
 export async function releaseSession(ops: SessionOps, sessionId: string): Promise<void> {
   const session = ops.registry.get(sessionId);
@@ -102,8 +122,12 @@ export async function releaseSession(ops: SessionOps, sessionId: string): Promis
   try {
     const captured = (await session.handle.context.storageState()) as StorageState;
     if (ops.persistence) await ops.persistence.flush(session.userId, captured);
-  } catch {
+  } catch (err) {
     // Corrupt/dead context: fresh start next time, but still release below.
+    (ops.log ?? defaultLog)(
+      `failed to capture/flush browser state for session ${JSON.stringify(sessionId)} — releasing anyway`,
+      err,
+    );
   }
 
   ops.registry.close(sessionId);
