@@ -21,3 +21,4 @@ export * from "./native/github.js";
 export * from "./native/filesystem.js";
 export * from "./native/fetch.js";
 export * from "./native/memory.js";
+export * from "./configParse.js";
