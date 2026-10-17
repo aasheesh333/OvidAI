@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    // Same rationale as apps/e2e: @ovid/db's declarations pull drizzle-orm
+    // declarations referencing optional peer deps that fail whole-program lib
+    // checking. skipLibCheck only skips .d.ts files; our sources stay checked.
+    "skipLibCheck": true
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
+}
