@@ -19,3 +19,8 @@ allowBuilds:
   # protobufjs's postinstall only prints a version-scheme advisory when a
   # dependent mis-pins it; nothing functional, so it stays explicitly denied.
   protobufjs: false
+  # node-pty (Task 9 PTY sessions) compiles its unix conpty shim from source
+  # via node-gyp at install time — the npm tarball carries no prebuilds.
+  # Needs make/g++/python3 on the build host (a build prerequisite, not a
+  # runtime one: the built .node lands in node_modules).
+  node-pty: true

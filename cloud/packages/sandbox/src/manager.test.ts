@@ -448,6 +448,31 @@ describe("workspaceDir(userId, sessionId) — the G1 / P6-Q2 seam", () => {
   });
 });
 
+describe("workspaceDir quota tier — Task 8 review F1 carry", () => {
+  it("a pro attach is never downgraded by a later workspaceDir call", async () => {
+    const fx = await freshFixture();
+    await fx.manager.attach("u1", { tier: "pro" });
+    await fx.manager.workspaceDir("u1", "sess-1");
+    // The seam re-asserts the PROJECT limit on the same XFS project as the
+    // workspace; the last recorded bytes for that project must stay the PRO
+    // limit (2048×2^20), NOT the free-tier 500×2^20 that silently capped the
+    // user's live quota before this fix.
+    const wsCalls = fx.quota.calls.filter(([, pid]) => pid === workspaceProjectId(200001));
+    expect(wsCalls.length).toBeGreaterThanOrEqual(2);
+    const last = wsCalls[wsCalls.length - 1];
+    expect(last[2]).toBe(2_147_483_648);
+  });
+
+  it("the recorded tier survives destroy — a cold env's project is not downgraded either", async () => {
+    const fx = await freshFixture();
+    const h = await fx.manager.attach("u1", { tier: "pro" });
+    await h.destroy();
+    await fx.manager.workspaceDir("u1", "sess-1");
+    const wsCalls = fx.quota.calls.filter(([, pid]) => pid === workspaceProjectId(200001));
+    expect(wsCalls[wsCalls.length - 1][2]).toBe(2_147_483_648);
+  });
+});
+
 describe("close()", () => {
   it("destroys every attached sandbox", async () => {
     const fx = await freshFixture();

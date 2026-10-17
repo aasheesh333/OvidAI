@@ -1,9 +1,22 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { SandboxConfig } from "./config.js";
+import { BASE_JAIL_ENV } from "./invocation.js";
+// Type-only import: erased at compile time (the VALUE import below is what
+// cjs-module-lexer cannot link — see createRequire note).
+import type { IPty } from "node-pty";
+
+// node-pty is a native CJS module: a static ESM named VALUE import does not
+// link at runtime (cjs-module-lexer cannot see its exports), so it is
+// required synchronously here. The require resolves the built pty.node
+// through pnpm's isolated node_modules (node-pty is a direct dependency).
+const requireNodePty = createRequire(import.meta.url);
+type NodePtyModule = typeof import("node-pty");
+const nodePty = requireNodePty("node-pty") as NodePtyModule;
 
 /**
  * The child_process subset execOnce (Task 7) and the Task 9 pty/job adapters
@@ -129,10 +142,68 @@ export function createSetuidLauncher(config: Pick<SandboxConfig, "launcherPath">
       return adapt(child);
     },
 
-    spawnPty() {
-      // node-pty is a Task 9 dependency; the seam is defined here so the
-      // launcher contract is complete for Tasks 8/9/13.
-      throw new Error("spawnPty is implemented in Task 9 (node-pty bridge)");
+    spawnPty(
+      bwrapArgv: string[],
+      opts: {
+        uid: number;
+        gid: number;
+        cgroupProcsFile: string;
+        cwd: string;
+        cols: number;
+        rows: number;
+      },
+    ): PtyChildLike {
+      // Same launcher contract as spawn (NUL-separated argv scratch file,
+      // self-attach to the cgroup leaf inside sandbox-enter.sh), but the
+      // child runs on a pty master so the jailed payload gets a controlling
+      // terminal. The pty's TERM matches BASE_JAIL_ENV — one source of truth
+      // for the payload's terminal type.
+      const scratch = mkdtempSync(join(tmpdir(), "ovid-enter-"));
+      const argvFile = join(scratch, "argv");
+      let child: IPty;
+      try {
+        writeFileSync(argvFile, bwrapArgv.join("\0") + "\0", { mode: 0o600 });
+        child = nodePty.spawn(
+          "bash",
+          [
+            config.launcherPath,
+            opts.cgroupProcsFile,
+            String(opts.uid),
+            String(opts.gid),
+            argvFile,
+          ],
+          {
+            name: BASE_JAIL_ENV.TERM,
+            cols: opts.cols,
+            rows: opts.rows,
+            cwd: opts.cwd,
+            // Minimal host env for bash/setpriv/bwrap resolution; the jail
+            // payload environment is --clearenv'd and rebuilt by bwrap itself.
+            env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin" },
+          },
+        );
+      } catch (err) {
+        // Sync prep failure must not leak the scratch dir (M-1 reasoning).
+        rmSync(scratch, { recursive: true, force: true });
+        throw err;
+      }
+      const cleanup = () => rmSync(scratch, { recursive: true, force: true });
+      child.onExit(() => cleanup());
+      return {
+        pid: child.pid,
+        cols: child.cols,
+        rows: child.rows,
+        write: (data) => child.write(data),
+        kill: (signal) => {
+          child.kill(signal);
+          return true;
+        },
+        resize: (cols, rows) => child.resize(cols, rows),
+        onData: (listener) => child.onData(listener),
+        onExit: (listener) => child.onExit(listener),
+        pause: () => child.pause(),
+        resume: () => child.resume(),
+      };
     },
   };
 }

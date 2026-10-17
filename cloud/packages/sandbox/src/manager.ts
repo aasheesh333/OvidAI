@@ -4,24 +4,45 @@ import type { CgroupManager } from "./cgroups.js";
 import type { SandboxConfig } from "./config.js";
 import { renderEtcBundle, renderHomeDotfiles, writeEnvFiles } from "./etcFiles.js";
 import { execOnce, makeJailContext } from "./exec.js";
+import {
+  createJobRegistry,
+  spawnLongRunning,
+  type JobRegistry,
+  type SpawnedProcess,
+} from "./jobs.js";
 import { JAIL_WORKSPACE } from "./invocation.js";
 import type { JailLauncher } from "./launcher.js";
+import {
+  createPtySession,
+  type PtyHandlers,
+  type PtyRequest,
+  type PtySession,
+} from "./pty.js";
 import { cacheProjectId, workspaceProjectId, type QuotaBackend } from "./quota.js";
 import type { ResolvedRootfs } from "./rootfs.js";
-import type { ExecRequest, ExecResult } from "./types.js";
+import type { ExecRequest, ExecResult, JailContext } from "./types.js";
 
 /**
  * SandboxManager (P2 Task 8): lifecycle, FIFO admission beyond
  * maxActiveSandboxes, per-user XFS/noop quotas, boot recovery, and the
  * workspaceDir(userId, sessionId) seam.
+ *
+ * Task 9: handles grow createPty/getPty/jobs/spawnProcess (PTY sessions and
+ * background jobs under the env, leaves killed FIRST on destroy) and the
+ * workspaceDir seam's quota application is tier-aware (Task 8 review F1:
+ * re-asserting the free-tier limit on a pro user's project silently
+ * downgraded their live quota).
  */
 
 const MB = 1024 * 1024;
 const GB = 1024 * 1024 * 1024;
 
+/** Workspace quota tier label: "free" or anything-else-is-"pro" (attach rule). */
+type WorkspaceTier = "free" | "pro";
+
 /**
- * One live sandbox environment. Task 9 grows this with createPty/getPty/
- * jobs/spawnProcess (the handle is the env those leaves hang under).
+ * One live sandbox environment. Task 9 grew this with createPty/getPty/
+ * jobs/spawnProcess — the handle is the env those leaves hang under.
  */
 export interface SandboxHandle {
   readonly userId: string;
@@ -32,10 +53,20 @@ export interface SandboxHandle {
   readonly homeDir: string;
   readonly jailWorkspaceDir: string;
   exec(req: ExecRequest): Promise<ExecResult>;
+  /** Task 9: interactive PTY session under a pty-{id} leaf of this env. */
+  createPty(req: PtyRequest, handlers: PtyHandlers): Promise<PtySession>;
+  getPty(ptyId: string): PtySession | undefined;
+  /** Background jobs under job-{id} leaves of this env. */
+  readonly jobs: JobRegistry;
   /**
-   * Kill all live leaves (ptys/jobs from Task 9), kill+rmdir the env cgroup,
-   * deregister, release the admission slot. Workspace DATA persists — purge
-   * is P9 account deletion.
+   * Task 9 (gap G3): long-lived jailed process with PIPES — the P5
+   * SandboxSpawner stdio-MCP backing (pipes only, never a pty).
+   */
+  spawnProcess(req: { argv: string[]; cwd?: string; env?: Record<string, string> }): Promise<SpawnedProcess>;
+  /**
+   * Kill all live leaves (ptys/jobs/spawned processes) FIRST, kill+rmdir the
+   * env cgroup, deregister, release the admission slot. Workspace DATA
+   * persists — purge is P9 account deletion.
    */
   destroy(): Promise<void>;
 }
@@ -115,6 +146,10 @@ export interface SandboxManagerDeps {
 
 interface ManagedHandle extends SandboxHandle {
   readonly createdAt: Date;
+  /** Task 8 review F1 carry: the tier this env's workspace quota was applied with. */
+  readonly tier: WorkspaceTier;
+  /** Task 9: kill every live leaf of this env (ptys/jobs/spawned) — FIRST. */
+  killLeaves(): Promise<void>;
 }
 
 interface Waiter {
@@ -168,6 +203,12 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   const inFlight = new Map<string, Promise<SandboxHandle>>();
   /** user → uid, so destroy→attach and workspaceDir→attach reuse the uid (the prod allocator is idempotent; this makes the manager so too). */
   const uidByUser = new Map<string, number>();
+  /**
+   * uid → the workspace-quota tier last applied by an attach (Task 8 review
+   * F1 carry). Survives destroy so a COLD env's project limit is not silently
+   * downgraded by the workspaceDir seam either.
+   */
+  const tierByUid = new Map<number, WorkspaceTier>();
   /** FIFO admission queue beyond maxActiveSandboxes. */
   const queue: Waiter[] = [];
   let slotsInUse = 0;
@@ -219,7 +260,14 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     const handle = handles.get(userId);
     if (handle === undefined) return;
     handles.delete(userId);
-    // Task 9 grows this: kill live leaves (ptys/jobs) FIRST, before the env.
+    // Task 9: kill live leaves (ptys/jobs/spawned) FIRST, before the env —
+    // each leaf's tree gets its own cgroup.kill, then the env follows.
+    try {
+      await handle.killLeaves();
+    } catch (err) {
+      // allSettled inside; this is a belt so teardown never wedges admission
+      console.error(`sandbox destroy: leaf teardown failed for ${userId}:`, err);
+    }
     const env = cgroups.envPath(handle.uid);
     try {
       await cgroups.kill(env); // tree-kill + rmdir
@@ -280,9 +328,15 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       // Quotas: workspace tier-scoped, package cache fixed (byte math pinned:
       // MB × 2^20). Tier: free → workspaceQuotaMb, anything else →
       // proWorkspaceQuotaMb.
-      const quotaMb = tier === "free" ? config.workspaceQuotaMb : config.proWorkspaceQuotaMb;
+      const tierLabel: WorkspaceTier = tier === "free" ? "free" : "pro";
+      const quotaMb = tierLabel === "free" ? config.workspaceQuotaMb : config.proWorkspaceQuotaMb;
       await quota.applyQuota(workspaceDir, workspaceProjectId(uid), quotaMb * MB);
       await quota.applyQuota(cacheDir, cacheProjectId(uid), config.storeQuotaMb * MB);
+      // Task 8 review F1 carry: record the tier the workspace quota project
+      // was last applied with, so the workspaceDir seam re-asserts the SAME
+      // (or higher) limit instead of silently downgrading a pro user's live
+      // project to the free-tier bytes.
+      tierByUid.set(uid, tierLabel);
 
       // Private /etc + home dotfiles (rewritten on re-warm — data dirs above
       // are never touched by this).
@@ -306,6 +360,12 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         homeDir,
         etcDir,
       });
+
+      // -- Task 9 leaf registries (ptys / jobs / spawned processes) ---------
+      const ptys = new Map<string, PtySession>();
+      let jobRegistry: JobRegistry | undefined;
+      const spawnedProcs = new Set<SpawnedProcess>();
+
       const handle: ManagedHandle = {
         userId,
         uid,
@@ -313,8 +373,43 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
         homeDir,
         jailWorkspaceDir: JAIL_WORKSPACE,
         exec: (req: ExecRequest) => execOnce(ctx, req),
+        createPty: async (req: PtyRequest, handlers: PtyHandlers) => {
+          const session = await createPtySession(ctx, req, handlers);
+          ptys.set(session.id, session);
+          // A dead session is no longer a live leaf — stop tracking it.
+          void session.exit.then(() => {
+            ptys.delete(session.id);
+          });
+          return session;
+        },
+        getPty: (ptyId: string) => ptys.get(ptyId),
+        get jobs(): JobRegistry {
+          if (jobRegistry === undefined) jobRegistry = createJobRegistry(ctx);
+          return jobRegistry;
+        },
+        spawnProcess: async (req: { argv: string[]; cwd?: string; env?: Record<string, string> }) => {
+          const proc = await spawnLongRunning(ctx, req);
+          spawnedProcs.add(proc);
+          proc.onExit(() => {
+            spawnedProcs.delete(proc);
+          });
+          return proc;
+        },
+        killLeaves: async () => {
+          // Live leaves die FIRST (before the env kill in destroyUser), each
+          // as its own cgroup tree-kill. allSettled: one wedged leaf must
+          // never wedge the env teardown after it.
+          const kills: Promise<unknown>[] = [];
+          for (const session of ptys.values()) kills.push(session.kill());
+          if (jobRegistry !== undefined) kills.push(jobRegistry.killAll());
+          for (const proc of spawnedProcs) kills.push(proc.kill());
+          await Promise.allSettled(kills);
+          ptys.clear();
+          spawnedProcs.clear();
+        },
         destroy: () => destroyUser(userId),
         createdAt: clock(),
+        tier: tierLabel,
       };
       handles.set(userId, handle);
       return handle;
@@ -355,10 +450,19 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     await chown(dir, uid, uid);
     // Per-USER workspace quota project (ruling P6-Q2): the sessions subtree
     // shares the user's project id — its usage counts against the same
-    // quota as the agent workspace; there is no session-scoped quota. The
-    // free-tier byte value re-asserts the project limit (XFS limits are
-    // per-project; a later pro attach raises it on the same project).
-    await quota.applyQuota(dir, workspaceProjectId(uid), config.workspaceQuotaMb * MB);
+    // quota as the agent workspace; there is no session-scoped quota.
+    //
+    // Task 8 review F1 carry: the re-asserted limit is TIER-AWARE. XFS
+    // project limits are per-project, and this is the same project the
+    // workspace quota was applied to, so re-asserting the free-tier bytes
+    // here would silently DOWNGRADE a pro user's live quota. We re-assert
+    // the tier the manager last applied at attach (free for a uid this
+    // process has never attached — attach() re-asserts the user's real tier
+    // on warm-up, and a stale tier only ever errs toward the recorded one
+    // until then).
+    const tier = tierByUid.get(uid) ?? "free";
+    const quotaMb = tier === "free" ? config.workspaceQuotaMb : config.proWorkspaceQuotaMb;
+    await quota.applyQuota(dir, workspaceProjectId(uid), quotaMb * MB);
     return dir;
   }
 
