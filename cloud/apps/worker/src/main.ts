@@ -50,7 +50,7 @@ import { buildFileService } from "./fileService.js";
 import { startWorkerPtyBridge } from "./ptyBridge.js";
 import { createSandboxPort } from "./sandboxAdapter.js";
 import { sweepStaleRuns } from "./staleRuns.js";
-import { createStuckHibernationScan, createStuckHydrationScan } from "./storageScans.js";
+import { createColdRowScan, createStuckHibernationScan, createStuckHydrationScan } from "./storageScans.js";
 
 export interface WorkerEnv {
   nodeEnv: string;
@@ -372,6 +372,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     fileManifests: fileManifestsRepo,
     queues: { hibernate: queues.hibernate },
     stuckHydrationScan: createStuckHydrationScan(),
+    // T10-review carry (T8-F1): the bounded cold-row scan is what finds a
+    // post-markCold residue dir the (already evicted) seam cannot see.
+    coldRowScan: createColdRowScan(),
   };
 
   // Validate the wire payload with the queue schema before the engine sees it
