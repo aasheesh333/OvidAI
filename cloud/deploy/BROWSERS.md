@@ -176,11 +176,57 @@ unrepresentative. Never raise the alarm threshold to make a run pass.
 
 ## (d) SSRF / egress decision
 
-**Browser processes run as the worker user.** Chromium launches with
-`--no-sandbox` because the nested chromium-sandbox userns is unavailable
-to an unprivileged container/worker uid (the pinned `chromiumArgs`:
-`--no-sandbox --disable-dev-shm-usage --disable-gpu`). The compensating
-controls are:
+**Browser processes run as a dedicated uid, never as the worker uid.** The
+worker runs as root (the systemd unit's `User=root`) because it needs
+cgroup/setuid/nftables privileges; it drops every Chromium and Lightpanda
+process to `OVID_BROWSER_EGRESS_UID` (recommended **230000**, outside the
+sandbox jail block 200000–209999 production / 220000–229999 staging). The
+nftables rules key on exactly that uid, so the filter matches real browser
+traffic.
+
+How the drop is applied (`cloud/packages/browser/src/uidDrop.ts`):
+
+- **Lightpanda** — `child_process.spawn(..., { uid, gid, env })` for both
+  `serve` and one-shot `fetch`.
+- **Chromium** — Playwright 1.64.1 has **no uid/gid launch option**: its
+  `LaunchOptions` exposes none, and its internal `launchProcess` spawns the
+  browser with only `{ detached, env, cwd, shell, stdio }`. The engine
+  therefore writes a root-owned 0755 shim at boot and passes it as
+  Playwright's `executablePath`. The shim chowns Playwright's root-created
+  `--user-data-dir` to the browser uid, then `exec`s
+  `setpriv --reuid=<uid> --regid=<uid> --clear-groups <chromium>`. Every
+  Chromium child (zygote, renderers, crashpad) inherits the uid.
+- The engine creates a per-engine runtime tree (`HOME`, `TMPDIR`, `XDG_*`,
+  downloads), chowns it to the uid, and passes it in the browser
+  environment. The shim itself stays root-owned 0755, so the browser uid
+  can traverse but not rewrite the launch mechanism.
+
+**Configuration and fail-closed rules** (`packages/browser/src/config.ts`,
+`uidDrop.ts`):
+
+- `OVID_BROWSER_EGRESS_UID` accepts a single uid (`230000`) or a range
+  (`230000-230099`); the engine uses the **first** uid and the renderer keys
+  the whole range. It must be `>= 100000` and must **not** overlap the
+  sandbox block (`OVID_SANDBOX_UID_BASE` / `OVID_SANDBOX_UID_MAX`).
+- `OVID_BROWSER_UID_DROP` is `auto` (default), `required`, or `disabled`.
+  `disabled` is a dev/test escape hatch and is **refused when
+  `NODE_ENV=production`**. In production a dedicated uid is **required**:
+  the worker refuses to boot rather than silently run browsers as root.
+- Boot fails loudly (there is no root fallback) when the worker is not
+  root, the uid is below 100000, the uid overlaps the sandbox block,
+  `setpriv` is missing, Chromium is missing/non-executable, or the uid-drop
+  probe (`/bin/true` spawned as the uid + `chromium --version` through the
+  shim) fails.
+- The Chromium install root must be traversable and the binary executable
+  by the browser uid — production installs under `/opt/ovid-browsers`, never
+  under `/root`. Workspace files passed to `browser_upload` must likewise be
+  readable by the browser uid (normal workspace modes 0644/0755 are fine;
+  do not create agent files 0600 if uploads must reach the browser).
+
+Chromium launches with `--no-sandbox` because the nested chromium-sandbox
+userns is unavailable to an unprivileged container/worker uid (the pinned
+`chromiumArgs`: `--no-sandbox --disable-dev-shm-usage --disable-gpu`). The
+compensating controls are:
 
 1. **App-level guard on every navigation/fetch/download** —
    `assertPublicHost` / `navigableUrlReason` (`cloud/packages/browser/src/url.ts`)
@@ -188,21 +234,27 @@ controls are:
    IPv4-embedded IPv6, and the VPS's own public IP (`OVID_PUBLIC_IP`) —
    Dart `isAllowedBrowserUrl` parity.
 2. **The nftables requirement below** (ruleset owned by P2 —
-   `deploy/net/install-nft.sh`; handed to P2 as a requirement, not authored
-   here).
+   `deploy/net/install-nft.sh`; rendered by
+   `cloud/packages/sandbox/src/renderNftCli.ts`).
 
-**Requirement for P2's ruleset:** for the worker uid
-(`OVID_BROWSER_EGRESS_UID` — coordinate the value with P2's uid plan), drop
-rules mirroring the app guard's FULL block list:
+**Requirement for P2's ruleset:** set `OVID_BROWSER_EGRESS_UID` to the same
+dedicated uid the engine applies (a range is fine — the engine uses its
+first uid), then render/install with `deploy/net/install-nft.sh`. The
+renderer emits, keyed on that uid/range, drop rules mirroring the app
+guard's FULL block list:
 
 ```bash
 # v4
-nft add rule inet ovid_egress output meta skuid <uid> ip daddr \
+nft add rule inet ovid_sandbox output meta skuid <uid> ip daddr \
   { 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, <OVID_PUBLIC_IP> } counter drop
 # v6
-nft add rule inet ovid_egress output meta skuid <uid> ip6 daddr \
+nft add rule inet ovid_sandbox output meta skuid <uid> ip6 daddr \
   { ::1, fe80::/10, fc00::/7, fec0::/10, ff00::/8, 2002::/16, 64:ff9b::/96 } counter drop
 ```
+
+These rules are now effective: the browser processes actually run as
+`<uid>`. Before this fix they were inert (the worker uid was 0 and the
+renderer refuses anything below 100000).
 
 **Parity with `assertPublicHost`:** the v4 set matches the app guard's
 RFC1918 + CGNAT + link-local ranges, and the v6 set matches it range for

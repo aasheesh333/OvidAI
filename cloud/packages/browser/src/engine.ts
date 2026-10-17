@@ -55,6 +55,7 @@ import type { StorageStatePersistence } from "./stateStore.js";
 import type { StorageState } from "./storageState.js";
 import { createBrowserTools } from "./tools/definitions.js";
 import type { BrowserToolDef } from "./tools/types.js";
+import { prepareBrowserUidDrop, type BrowserUidDrop } from "./uidDrop.js";
 import { createSsrfGuardedFetch } from "./url.js";
 
 export interface BrowserEngineDeps {
@@ -71,6 +72,12 @@ export interface BrowserEngineDeps {
    * explicitly so the engine and the SandboxManager agree on the layout.
    */
   workspaceDir?(userId: string, sessionId: string): Promise<string>;
+  /**
+   * Test seam: default prepareBrowserUidDrop(cfg). Runs at boot so a
+   * configured browser uid that cannot be applied (non-root worker, missing
+   * setpriv, unusable Chromium) fails loudly instead of falling back to root.
+   */
+  prepareUidDrop?(cfg: BrowserEngineConfig): Promise<BrowserUidDrop | null>;
   now?(): number;
   log?(msg: string, err?: unknown): void;
 }
@@ -111,6 +118,17 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     });
 
   // -------------------------------------------------------------------------
+  // Dedicated browser uid — prepare BEFORE any process can be spawned. A
+  // failure here rejects engine construction (worker boot), never a silent
+  // root fallback.
+  // -------------------------------------------------------------------------
+
+  const uidDrop =
+    deps.prepareUidDrop !== undefined
+      ? await deps.prepareUidDrop(cfg)
+      : await prepareBrowserUidDrop(cfg);
+
+  // -------------------------------------------------------------------------
   // Core services (Tasks 4-13)
   // -------------------------------------------------------------------------
 
@@ -121,6 +139,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   // the screencast bookkeeping declared below.
   const pool = createBrowserPool(cfg, {
     now,
+    uidDrop,
     onIdleEvict: (sessionId: string, context: BrowserContext) => onPoolIdleEvict(sessionId, context),
   });
 
@@ -136,7 +155,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   });
 
   const lightpanda: LightpandaPool | null = lightpandaAvailable(cfg.lightpandaBin)
-    ? createLightpandaPool(cfg.lightpandaBin as string, cfg)
+    ? createLightpandaPool(cfg.lightpandaBin as string, cfg, { uidDrop })
     : null;
 
   const research = createResearchBrowser({
@@ -514,6 +533,8 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       await bridge.close();
       await research.close();
       await pool.close();
+      // Every browser process is gone now; remove the uid-drop runtime tree.
+      await uidDrop?.cleanup();
     })();
     return closePromise;
   }

@@ -8,9 +8,11 @@ import {
   chromiumExecutableExists,
   createBrowserPool,
   type BrowserPool,
+  type ChromiumLaunchOptions,
 } from "./pool.js";
 import type { StorageState } from "./storageState.js";
 import { startTestPageServer, type TestPageServer } from "./test/testServer.js";
+import type { BrowserUidDrop } from "./uidDrop.js";
 
 // Real-browser tests: every one is gated on the playwright-core registry
 // having a chromium executable (PLAYWRIGHT_BROWSERS_PATH override proves the
@@ -67,6 +69,52 @@ describe.skipIf(!chromiumExecutableExists())("BrowserPool", () => {
     expect(pool.liveCount()).toBe(1);
     expect(pool.tier1Count()).toBe(0);
     expect(pool.stats()).toEqual({ browserAlive: true, live: 1, tier1: 0, queued: 0 });
+  });
+
+  it("without a dedicated uid the launch options carry no uid-drop wiring (dev default)", async () => {
+    const cfg = makeCfg();
+    let captured: ChromiumLaunchOptions | undefined;
+    const pool = makePool(cfg, {
+      launch: async (options) => {
+        captured = options;
+        return chromium.launch({ headless: true, args: cfg.chromiumArgs });
+      },
+    });
+    await pool.acquireLive("s1");
+    expect(captured).toBeDefined();
+    expect(captured!.executablePath).toBeUndefined();
+    expect(captured!.env).toBeUndefined();
+    expect(captured!.downloadsPath).toBeUndefined();
+  });
+
+  it("wires the prepared uid-drop shim into chromium.launch (executablePath/env/downloadsPath)", async () => {
+    const cfg = makeCfg({ egressUid: 230_000, sandboxUidRange: [200_000, 209_999] });
+    const uidDrop: BrowserUidDrop = {
+      uid: 230_000,
+      gid: 230_000,
+      wrapperPath: "/tmp/ovid-test-chromium-uid-shim.sh",
+      downloadsDir: "/tmp/ovid-test-downloads",
+      env: { ...process.env, HOME: "/tmp/ovid-test-home" },
+      cleanup: async () => {},
+    };
+    let captured: ChromiumLaunchOptions | undefined;
+    const pool = makePool(cfg, {
+      uidDrop,
+      launch: async (options) => {
+        captured = options;
+        // The seam asserts the wiring, then launches a normal browser so the
+        // rest of the pool lifecycle is exercised end to end.
+        return chromium.launch({ headless: true, args: cfg.chromiumArgs });
+      },
+    });
+    const handle = await pool.acquireLive("s1");
+    await handle.page.goto(server.url("/"));
+    expect(await handle.page.title()).toBe("Static article");
+    expect(captured).toBeDefined();
+    expect(captured!.executablePath).toBe(uidDrop.wrapperPath);
+    expect(captured!.env).toBe(uidDrop.env);
+    expect(captured!.downloadsPath).toBe(uidDrop.downloadsDir);
+    expect(captured!.args).toEqual(cfg.chromiumArgs);
   });
 
   it("re-acquiring the same sessionId returns the SAME handle object (touch, no new context)", async () => {

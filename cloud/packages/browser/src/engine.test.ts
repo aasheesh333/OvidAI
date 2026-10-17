@@ -457,3 +457,47 @@ describe.skipIf(!GATED)("BrowserEngine facade (real redis + chromium, harness pl
     expect(rig.flush).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Dedicated-uid boot contract (ungated — no redis/chromium needed)
+// ---------------------------------------------------------------------------
+
+describe("BrowserEngine uid-drop boot contract", () => {
+  const uidCfg = () => makeCfg({ egressUid: 230_000, sandboxUidRange: [200_000, 209_999] });
+
+  it("rejects construction when uid-drop preparation fails (fail loudly at boot)", async () => {
+    await expect(
+      createBrowserEngine({
+        cfg: uidCfg(),
+        redisFactory: () => {
+          throw new Error("redis must not be touched during boot");
+        },
+        persistence: null,
+        prepareUidDrop: async () => {
+          throw new Error("uid drop unavailable");
+        },
+      }),
+    ).rejects.toThrow("uid drop unavailable");
+  });
+
+  it("cleans up the prepared uid-drop runtime on close()", async () => {
+    const cleanup = vi.fn(async () => {});
+    const engine = await createBrowserEngine({
+      cfg: uidCfg(),
+      redisFactory: () => {
+        throw new Error("redis must not be touched");
+      },
+      persistence: null,
+      prepareUidDrop: async () => ({
+        uid: 230_000,
+        gid: 230_000,
+        wrapperPath: "/tmp/ovid-test-shim.sh",
+        downloadsDir: "/tmp/ovid-test-downloads",
+        env: { ...process.env },
+        cleanup,
+      }),
+    });
+    await engine.close();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+});

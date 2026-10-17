@@ -21,11 +21,12 @@
  * §1.4); `lightpandaAvailable` is the gate every consumer must check.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { accessSync, constants, existsSync } from "node:fs";
 import { chromium } from "playwright-core";
 
 import type { BrowserEngineConfig } from "./config.js";
+import type { BrowserUidDrop } from "./uidDrop.js";
 
 export class LightpandaError extends Error {
   constructor(message: string) {
@@ -87,10 +88,27 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 export function createLightpandaPool(
   binPath: string,
   cfg: BrowserEngineConfig,
-  opts: { spawnImpl?: typeof spawn; now?: () => number } = {},
+  opts: {
+    spawnImpl?: typeof spawn;
+    now?: () => number;
+    /** Dedicated browser uid; null/undefined ⇒ spawn with the worker's credentials. */
+    uidDrop?: BrowserUidDrop | null;
+  } = {},
 ): LightpandaPool {
   const doSpawn = opts.spawnImpl ?? spawn;
   const now = opts.now ?? Date.now;
+  const uidDrop = opts.uidDrop ?? null;
+
+  /** Every lightpanda child gets the same credentials + writable HOME/TMPDIR. */
+  function spawnOptions(): SpawnOptions {
+    const options: SpawnOptions = { stdio: ["ignore", "pipe", "pipe"] };
+    if (uidDrop !== null) {
+      options.uid = uidDrop.uid;
+      options.gid = uidDrop.gid;
+      options.env = uidDrop.env;
+    }
+    return options;
+  }
 
   interface HeldProc {
     lease: LightpandaLease;
@@ -196,9 +214,11 @@ export function createLightpandaPool(
   async function spawnLease(slot: number, timeoutMs: number): Promise<LightpandaLease> {
     const port = LIGHTPANDA_PORT_BASE + slot;
     const cdpUrl = `http://127.0.0.1:${port}`;
-    const child = doSpawn(binPath, ["serve", "--host", "127.0.0.1", "--port", String(port)], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = doSpawn(
+      binPath,
+      ["serve", "--host", "127.0.0.1", "--port", String(port)],
+      spawnOptions(),
+    );
     // Claim the slot synchronously so pump() can never double-admit.
     held.set(slot, { lease: { slot, cdpUrl, pid: child.pid ?? -1 }, child });
     allProcs.add(child);
@@ -340,9 +360,7 @@ export function createLightpandaPool(
   ): Promise<{ markdown: string; title: string | null; finalUrl: string }> {
     if (closed) return Promise.reject(new LightpandaError("The Lightpanda pool is closed."));
     return new Promise((resolve, reject) => {
-      const child = doSpawn(binPath, ["fetch", "--dump", "markdown", url], {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      const child = doSpawn(binPath, ["fetch", "--dump", "markdown", url], spawnOptions());
       allProcs.add(child);
       const chunks: Buffer[] = [];
       let total = 0;

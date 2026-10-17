@@ -25,8 +25,12 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 
 import type { BrowserEngineConfig } from "./config.js";
 import type { StorageState } from "./storageState.js";
+import { prepareBrowserUidDrop, type BrowserUidDrop } from "./uidDrop.js";
 
 export type PoolClass = "live" | "tier1";
+
+/** The options Playwright's chromium.launch accepts (1.64.1). */
+export type ChromiumLaunchOptions = NonNullable<Parameters<typeof chromium.launch>[0]>;
 
 export interface LiveContextHandle {
   sessionId: string;
@@ -56,8 +60,18 @@ export interface BrowserPoolOptions {
   onIdleEvict?(sessionId: string, context: BrowserContext): Promise<void>;
   /** Per-waiter queue timeout, default 30_000. */
   queueTimeoutMs?: number;
-  /** Test seam; default chromium.launch({ headless: true, args: cfg.chromiumArgs }). */
-  launch?(): Promise<Browser>;
+  /**
+   * Test seam; default `chromium.launch(options)`. The options include the
+   * uid-drop shim (executablePath/env/downloadsPath) when a dedicated browser
+   * uid is configured, so a seam can assert the wiring.
+   */
+  launch?(options?: ChromiumLaunchOptions): Promise<Browser>;
+  /**
+   * Prepared uid-drop runtime. `undefined` ⇒ prepare lazily when
+   * `cfg.egressUid` is set (the engine prepares eagerly at boot and passes
+   * the same object here); `null` ⇒ no drop.
+   */
+  uidDrop?: BrowserUidDrop | null;
   now?(): number;
   /** Background evictIdle interval, default 30_000 (unref'd); 0 disables. */
   sweepIntervalMs?: number;
@@ -136,11 +150,47 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
   // Browser lifecycle
   // -------------------------------------------------------------------------
 
+  /**
+   * Resolve the uid-drop runtime once. The engine prepares it eagerly (so a
+   * misconfigured uid fails at boot); a direct pool user gets the same
+   * fail-loud preparation on first launch. There is never a root fallback.
+   */
+  let uidDropResolved: BrowserUidDrop | null | undefined;
+  let ownsUidDrop = false;
+  async function resolveUidDrop(): Promise<BrowserUidDrop | null> {
+    if (uidDropResolved !== undefined) return uidDropResolved;
+    if (opts.uidDrop !== undefined) {
+      uidDropResolved = opts.uidDrop;
+      return uidDropResolved;
+    }
+    if ((cfg.egressUid ?? null) === null) {
+      uidDropResolved = null;
+      return null;
+    }
+    uidDropResolved = await prepareBrowserUidDrop(cfg);
+    ownsUidDrop = true;
+    return uidDropResolved;
+  }
+
   function ensureBrowser(): Promise<Browser> {
     if (browserAlive && browser) return Promise.resolve(browser);
     if (launching) return launching;
     launching = (async () => {
-      const b = opts.launch ? await opts.launch() : await chromium.launch({ headless: true, args: cfg.chromiumArgs });
+      const uidDrop = await resolveUidDrop();
+      const launchOptions: ChromiumLaunchOptions = {
+        headless: true,
+        args: cfg.chromiumArgs,
+      };
+      if (uidDrop !== null) {
+        // Playwright has no uid/gid option — the generated setpriv shim is
+        // the executablePath; env/downloadsPath point at uid-owned dirs.
+        launchOptions.executablePath = uidDrop.wrapperPath;
+        launchOptions.env = uidDrop.env;
+        launchOptions.downloadsPath = uidDrop.downloadsDir;
+      }
+      const b = opts.launch
+        ? await opts.launch(launchOptions)
+        : await chromium.launch(launchOptions);
       // playwright's event is "disconnected" — fired both on external close()
       // and on crash/process death.
       b.on("disconnected", onDisconnect);
@@ -393,6 +443,9 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
           // already dead — disconnect already cleared the pool state
         }
       }
+      // Only a pool that prepared the runtime owns its cleanup; the engine
+      // passes a prepared runtime and cleans it after every pool is closed.
+      if (ownsUidDrop && uidDropResolved) await uidDropResolved.cleanup();
     })();
     return closePromise;
   }

@@ -246,6 +246,16 @@ describe("parseBrowserEgressUid", () => {
       );
     }
   });
+
+  it("refuses uids below 100000 (the system/user range) — including the worker uid 0", () => {
+    for (const bad of ["0", "1", "99999", "99999-100000", "0-230000"]) {
+      expect(() => parseBrowserEgressUid(bad), `input ${bad}`).toThrow(
+        /OVID_BROWSER_EGRESS_UID/,
+      );
+    }
+    // The floor itself is valid.
+    expect(parseBrowserEgressUid("100000")).toEqual([100_000, 100_000]);
+  });
 });
 
 describe("isValidV6Cidr (M1: strict — loose input must fail at render time, not load time)", () => {
@@ -427,5 +437,19 @@ describe("renderCli — env contract (gap G4: rules key on the CONFIGURED range)
     const msg = (err as Error).message;
     expect(msg).toContain("205000");
     expect(msg).toContain("200000");
+  });
+
+  it("staging sandbox block (220000-229999) also rejects overlap; 230000 stays distinct", () => {
+    const staging = {
+      OVID_PUBLIC_IP: "203.0.113.7",
+      OVID_SANDBOX_UID_BASE: "220000",
+      OVID_SANDBOX_UID_MAX: "229999",
+    };
+    expect(() =>
+      renderCli({ ...staging, OVID_BROWSER_EGRESS_UID: "225000" }),
+    ).toThrow(/overlaps the sandbox uidRange/);
+    const rs = renderCli({ ...staging, OVID_BROWSER_EGRESS_UID: "230000" });
+    expect(rs).toContain("meta skuid 230000-230000 ip daddr @blocked_v4 counter drop");
+    expect(rs).not.toContain("skuid 225000");
   });
 });

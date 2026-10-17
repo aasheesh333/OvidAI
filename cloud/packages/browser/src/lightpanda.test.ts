@@ -13,7 +13,9 @@
  * state cannot leak between leases because no process ever survives one.
  */
 
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import type { BrowserEngineConfig } from "./config.js";
@@ -24,8 +26,122 @@ import {
   type LightpandaPool,
 } from "./lightpanda.js";
 import { startTestPageServer, type TestPageServer } from "./test/testServer.js";
+import type { BrowserUidDrop } from "./uidDrop.js";
 
 const BIN = process.env.OVID_LIGHTPANDA_BIN ?? null;
+
+function makeCfg(overrides: Partial<BrowserEngineConfig> = {}): BrowserEngineConfig {
+  return {
+    maxLiveBrowsers: 2,
+    tier1FallbackContexts: 1,
+    idleEvictMs: 500,
+    maxTier1Processes: 2,
+    tier1TimeoutMs: 20_000,
+    maxActiveScreencasts: 3,
+    screencastLoadMax: 6.0,
+    screencast: { width: 400, height: 300, quality: 60, everyNthFrame: 2, maxFramesInFlight: 2 },
+    stateDir: null,
+    lightpandaBin: BIN,
+    allowHosts: ["127.0.0.1", "localhost"],
+    ownPublicIp: null,
+    chromiumArgs: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+    ...overrides,
+  };
+}
+
+/** Minimal ChildProcess stand-in for spawn-option pins (no real binary). */
+function fakeChild(exitCode: number | null): ChildProcess {
+  const child = new EventEmitter() as unknown as ChildProcess & EventEmitter;
+  Object.assign(child, {
+    pid: 4_242,
+    exitCode,
+    signalCode: null,
+    stdout: new EventEmitter(),
+    stderr: new EventEmitter(),
+    kill: () => true,
+  });
+  return child;
+}
+
+interface SpawnCall {
+  args: readonly string[];
+  options: SpawnOptions;
+}
+
+/** Capture spawn options without spawning anything. */
+function capturingSpawn(
+  calls: SpawnCall[],
+  child: ChildProcess,
+  after?: () => void,
+): typeof spawn {
+  return ((command: string, args: readonly string[], options: SpawnOptions) => {
+    calls.push({ args, options });
+    if (after !== undefined) setImmediate(after);
+    return child;
+  }) as unknown as typeof spawn;
+}
+
+const UID_DROP: BrowserUidDrop = {
+  uid: 230_000,
+  gid: 230_000,
+  wrapperPath: "/tmp/ovid-test-chromium-uid-shim.sh",
+  downloadsDir: "/tmp/ovid-test-downloads",
+  env: { ...process.env, HOME: "/tmp/ovid-test-browser-home" },
+  cleanup: async () => {},
+};
+
+describe("LightpandaPool uid drop (spawn-option pins, no binary)", () => {
+  it("passes uid/gid/env to the serve spawn", async () => {
+    const calls: SpawnCall[] = [];
+    // exitCode 1 makes waitForCdp fail immediately (no CDP connect attempt);
+    // killAndReap resolves because the child is already exited.
+    const pool = createLightpandaPool("/bin/false", makeCfg(), {
+      spawnImpl: capturingSpawn(calls, fakeChild(1)),
+      uidDrop: UID_DROP,
+    });
+    await expect(pool.acquire(500)).rejects.toThrow(/serve failed to become CDP-ready/);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].options.uid).toBe(230_000);
+    expect(calls[0].options.gid).toBe(230_000);
+    expect(calls[0].options.env).toBe(UID_DROP.env);
+    await pool.close();
+  });
+
+  it("passes uid/gid/env to the one-shot fetch spawn", async () => {
+    const calls: SpawnCall[] = [];
+    const child = fakeChild(null);
+    const pool = createLightpandaPool("/bin/false", makeCfg(), {
+      spawnImpl: capturingSpawn(calls, child, () => {
+        child.stdout!.emit("data", Buffer.from("markdown body"));
+        child.emit("close", 0, null);
+      }),
+      uidDrop: UID_DROP,
+    });
+    const out = await pool.oneShotMarkdown("https://example.test/", 2_000);
+    expect(out.markdown).toBe("markdown body");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toEqual(["fetch", "--dump", "markdown", "https://example.test/"]);
+    expect(calls[0].options.uid).toBe(230_000);
+    expect(calls[0].options.gid).toBe(230_000);
+    expect(calls[0].options.env).toBe(UID_DROP.env);
+    await pool.close();
+  });
+
+  it("omits uid/gid/env when no dedicated uid is configured (dev/test default)", async () => {
+    const calls: SpawnCall[] = [];
+    const child = fakeChild(null);
+    const pool = createLightpandaPool("/bin/false", makeCfg(), {
+      spawnImpl: capturingSpawn(calls, child, () => {
+        child.emit("close", 0, null);
+      }),
+    });
+    await pool.oneShotMarkdown("https://example.test/", 2_000);
+    expect(calls[0].options.uid).toBeUndefined();
+    expect(calls[0].options.gid).toBeUndefined();
+    expect(calls[0].options.env).toBeUndefined();
+    await pool.close();
+  });
+});
 
 describe.skipIf(!lightpandaAvailable(BIN))("LightpandaPool (real lightpanda, host-gated)", () => {
   let server: TestPageServer;
@@ -38,25 +154,6 @@ describe.skipIf(!lightpandaAvailable(BIN))("LightpandaPool (real lightpanda, hos
   afterAll(async () => {
     await server.close();
   });
-
-  function makeCfg(overrides: Partial<BrowserEngineConfig> = {}): BrowserEngineConfig {
-    return {
-      maxLiveBrowsers: 2,
-      tier1FallbackContexts: 1,
-      idleEvictMs: 500,
-      maxTier1Processes: 2,
-      tier1TimeoutMs: 20_000,
-      maxActiveScreencasts: 3,
-      screencastLoadMax: 6.0,
-      screencast: { width: 400, height: 300, quality: 60, everyNthFrame: 2, maxFramesInFlight: 2 },
-      stateDir: null,
-      lightpandaBin: BIN,
-      allowHosts: ["127.0.0.1", "localhost"],
-      ownPublicIp: null,
-      chromiumArgs: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-      ...overrides,
-    };
-  }
 
   function makePool(cfg: BrowserEngineConfig): LightpandaPool {
     const pool = createLightpandaPool(BIN!, cfg);

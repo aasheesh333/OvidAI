@@ -1,0 +1,314 @@
+/**
+ * Dedicated-uid drop for browser processes (P6 egress backstop).
+ *
+ * The nftables renderer keys the browser egress rules on
+ * `OVID_BROWSER_EGRESS_UID`. For those rules to match anything, the browser
+ * processes themselves must run as that uid — the worker runs as root, so it
+ * can drop them:
+ *
+ *  - Lightpanda: `child_process.spawn(..., { uid, gid, env })` directly
+ *    (see lightpanda.ts).
+ *  - Chromium: Playwright 1.64.1 exposes NO uid/gid launch option. Its
+ *    `LaunchOptions` has none, and its internal `launchProcess` spawns the
+ *    browser with `{ detached, env, cwd, shell, stdio }` only. The honest
+ *    mechanism is therefore a tiny generated `setpriv` shim used as
+ *    Playwright's `executablePath`:
+ *
+ *      1. Playwright creates a root-owned 0700 profile dir and passes
+ *         `--user-data-dir=<path>` to the shim;
+ *      2. the shim (still root) chowns that dir to the browser uid;
+ *      3. `exec setpriv --reuid=<uid> --regid=<gid> --clear-groups <chrome>`
+ *         replaces the shim, so every Chromium child (zygote, renderers,
+ *         crashpad) inherits the dedicated uid.
+ *
+ * The runtime dirs (HOME/TMPDIR/XDG/downloads) are created root-owned and
+ * chowned to the uid; the shim itself stays root-owned 0755 so the browser
+ * uid can traverse — but not rewrite — the launch mechanism.
+ *
+ * Fail-loud contract: `prepareBrowserUidDrop` runs at engine boot. A
+ * configured uid with a non-root worker, a missing setpriv, a
+ * missing/non-executable Chromium, or a failed probe throws
+ * `BrowserUidDropError`. There is no fallback to root.
+ */
+
+import { spawn } from "node:child_process";
+import type { SpawnOptions } from "node:child_process";
+import { accessSync, constants } from "node:fs";
+import { chmod, chown, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { chromium } from "playwright-core";
+
+import type { BrowserEngineConfig } from "./config.js";
+import { UID_FLOOR } from "./config.js";
+
+export class BrowserUidDropError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BrowserUidDropError";
+  }
+}
+
+/** The prepared drop mechanism handed to the Chromium and Lightpanda spawns. */
+export interface BrowserUidDrop {
+  readonly uid: number;
+  readonly gid: number;
+  /** Root-owned 0755 shim used as Playwright's executablePath. */
+  readonly wrapperPath: string;
+  /** Directory Chromium may write downloads into. */
+  readonly downloadsDir: string;
+  /** Environment for browser children: HOME/TMPDIR/XDG point at uid-owned dirs. */
+  readonly env: NodeJS.ProcessEnv;
+  /** Remove the per-engine runtime tree. Idempotent; never throws. */
+  cleanup(): Promise<void>;
+}
+
+export interface PrepareUidDropOptions {
+  /** Test seam: default process.getuid(). */
+  getuid?(): number;
+  /** Test seam: use this directory instead of a fresh mkdtemp tree. */
+  runtimeRoot?: string;
+  /** Test seam: default /usr/bin/setpriv (then PATH-adjacent candidates). */
+  setprivPath?: string;
+  /** Test seam: default chromium.executablePath(). */
+  chromiumPath?: string;
+  /** Skip the live probes (tests that only inspect the generated shim). */
+  preflight?: boolean;
+}
+
+const SETPRIV_CANDIDATES = [
+  "/usr/bin/setpriv",
+  "/bin/setpriv",
+  "/usr/sbin/setpriv",
+  "/sbin/setpriv",
+];
+
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function resolveSetpriv(explicit: string | undefined): string {
+  const candidates = explicit === undefined ? SETPRIV_CANDIDATES : [explicit];
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // try the next candidate
+    }
+  }
+  throw new BrowserUidDropError(
+    `OVID_BROWSER_EGRESS_UID is set but setpriv was not found (${candidates.join(", ")}) — ` +
+      "install util-linux or set OVID_BROWSER_UID_DROP=disabled outside production",
+  );
+}
+
+function resolveChromium(explicit: string | undefined): string {
+  let path: string;
+  try {
+    path = explicit ?? chromium.executablePath();
+  } catch (err) {
+    throw new BrowserUidDropError(
+      `OVID_BROWSER_EGRESS_UID is set but the Chromium executable cannot be resolved: ${errMessage(err)}`,
+    );
+  }
+  try {
+    accessSync(path, constants.X_OK);
+  } catch {
+    throw new BrowserUidDropError(
+      `OVID_BROWSER_EGRESS_UID is set but Chromium is missing or not executable at ${path}`,
+    );
+  }
+  return path;
+}
+
+/** POSIX single-quote escaping — paths may contain spaces or quotes. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function renderUidWrapperScript(
+  uid: number,
+  gid: number,
+  setprivPath: string,
+  chromiumPath: string,
+): string {
+  return [
+    "#!/bin/sh",
+    "# Generated by @ovid/browser at boot — do not edit.",
+    "# Drops the browser process tree to the dedicated browser uid before exec.",
+    "set -eu",
+    `uid=${shellQuote(String(uid))}`,
+    `gid=${shellQuote(String(gid))}`,
+    `real=${shellQuote(chromiumPath)}`,
+    "data_dir=''",
+    "prev=''",
+    'for arg in "$@"; do',
+    '  case "$arg" in',
+    '    --user-data-dir=*) data_dir="${arg#--user-data-dir=}" ;;',
+    '  esac',
+    '  if [ "$prev" = "--user-data-dir" ]; then data_dir="$arg"; fi',
+    '  prev="$arg"',
+    'done',
+    'if [ -n "$data_dir" ] && [ -d "$data_dir" ]; then',
+    '  chown -R "$uid:$gid" "$data_dir"',
+    'fi',
+    `exec ${shellQuote(setprivPath)} --reuid="$uid" --regid="$gid" --clear-groups "$real" "$@"`,
+    "",
+  ].join("\n");
+}
+
+/** Run a command to completion; any spawn error / non-zero exit throws. */
+function runChecked(
+  command: string,
+  args: string[],
+  options: SpawnOptions,
+  what: string,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let stderr = "";
+    let settled = false;
+    const child = spawn(command, args, { ...options, stdio: ["ignore", "ignore", "pipe"] });
+    const finish = (err?: Error): void => {
+      if (settled) return;
+      settled = true;
+      if (err === undefined) resolve();
+      else reject(err);
+    };
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (stderr.length < 4_096) stderr += chunk.toString("utf8");
+    });
+    child.once("error", (err: Error) => {
+      finish(
+        new BrowserUidDropError(
+          `${what} failed: ${errMessage(err)} — OVID_BROWSER_EGRESS_UID cannot be applied (no fallback to root)`,
+        ),
+      );
+    });
+    child.once("exit", (code, signal) => {
+      if (code === 0) {
+        finish();
+        return;
+      }
+      finish(
+        new BrowserUidDropError(
+          `${what} exited with code ${code} (signal ${signal ?? "none"})` +
+            (stderr !== "" ? `: ${stderr.slice(-512)}` : ""),
+        ),
+      );
+    });
+  });
+}
+
+/**
+ * Resolve the dedicated browser uid and prepare everything the browser
+ * children need. Returns null when no uid is configured (dev/test); in
+ * production the config loader has already refused that case.
+ */
+export async function prepareBrowserUidDrop(
+  cfg: BrowserEngineConfig,
+  opts: PrepareUidDropOptions = {},
+): Promise<BrowserUidDrop | null> {
+  const uid = cfg.egressUid ?? null;
+  if (uid === null) return null;
+
+  const sandbox = cfg.sandboxUidRange ?? [200_000, 209_999];
+  if (!Number.isInteger(uid) || uid < UID_FLOOR) {
+    throw new BrowserUidDropError(
+      `OVID_BROWSER_EGRESS_UID must be an integer >= ${UID_FLOOR}, got ${uid}`,
+    );
+  }
+  if (uid >= sandbox[0] && uid <= sandbox[1]) {
+    throw new BrowserUidDropError(
+      `OVID_BROWSER_EGRESS_UID ${uid} is inside the sandbox uid block [${sandbox[0]}, ${sandbox[1]}] — the browser must use a distinct uid keyspace`,
+    );
+  }
+
+  const getuid = opts.getuid ?? (() => process.getuid?.() ?? -1);
+  if (getuid() !== 0) {
+    throw new BrowserUidDropError(
+      `OVID_BROWSER_EGRESS_UID=${uid} is set but the worker is running as uid ${getuid()} — ` +
+        "dropping browser processes to a dedicated uid requires root. " +
+        "Run the worker as root, or set OVID_BROWSER_UID_DROP=disabled in non-production dev/test only.",
+    );
+  }
+
+  const setprivPath = resolveSetpriv(opts.setprivPath);
+  const chromiumPath = resolveChromium(opts.chromiumPath);
+
+  const runtimeRoot =
+    opts.runtimeRoot ?? (await mkdtemp(join(tmpdir(), "ovid-browser-uid-")));
+  const ownsRoot = opts.runtimeRoot === undefined;
+  // The shim is executed by root; the tree must be traversable by the
+  // browser uid but the shim itself must not be writable by it.
+  await mkdir(runtimeRoot, { recursive: true, mode: 0o755 });
+  await chmod(runtimeRoot, 0o755);
+
+  const homeDir = join(runtimeRoot, "home");
+  const tmpDir = join(runtimeRoot, "tmp");
+  const downloadsDir = join(runtimeRoot, "downloads");
+  const uidDirs = [
+    homeDir,
+    join(homeDir, ".cache"),
+    join(homeDir, ".config"),
+    join(homeDir, ".local"),
+    join(homeDir, ".local", "share"),
+    tmpDir,
+    downloadsDir,
+  ];
+  for (const dir of uidDirs) await mkdir(dir, { recursive: true, mode: 0o700 });
+  for (const dir of uidDirs) await chown(dir, uid, uid);
+
+  const wrapperPath = join(runtimeRoot, "chromium-uid-shim.sh");
+  await writeFile(wrapperPath, renderUidWrapperScript(uid, uid, setprivPath, chromiumPath), {
+    mode: 0o755,
+  });
+  await chmod(wrapperPath, 0o755);
+  await chown(wrapperPath, 0, 0);
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: homeDir,
+    TMPDIR: tmpDir,
+    XDG_CACHE_HOME: join(homeDir, ".cache"),
+    XDG_CONFIG_HOME: join(homeDir, ".config"),
+    XDG_DATA_HOME: join(homeDir, ".local", "share"),
+  };
+
+  if (opts.preflight !== false) {
+    // 1. Prove Node can actually drop to the uid on this host (EPERM/EACCES
+    //    here must stop the boot — never continue as root). /bin/true is
+    //    world-executable and does not depend on where node lives.
+    await runChecked(
+      "/bin/true",
+      [],
+      { uid, gid: uid, env },
+      `uid-drop probe (spawn /bin/true as uid ${uid})`,
+    );
+    // 2. Prove the shim itself can exec Chromium as the uid: setpriv present,
+    //    binary traversable/executable, no missing shared library.
+    await runChecked(
+      wrapperPath,
+      ["--version"],
+      { env },
+      `Chromium uid shim probe (${chromiumPath} --version as uid ${uid})`,
+    );
+  }
+
+  let cleaned = false;
+  return {
+    uid,
+    gid: uid,
+    wrapperPath,
+    downloadsDir,
+    env,
+    async cleanup(): Promise<void> {
+      if (cleaned || !ownsRoot) return;
+      cleaned = true;
+      await rm(runtimeRoot, { recursive: true, force: true }).catch(() => {
+        // shutdown cleanup is best-effort — never fail close()
+      });
+    },
+  };
+}

@@ -15,4 +15,5 @@ export * from "./tools/definitions.js";
 export * from "./tools/interaction.js";
 export * from "./tools/transfers.js";
 export * from "./tools/types.js";
+export * from "./uidDrop.js";
 export * from "./url.js";
