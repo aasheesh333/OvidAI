@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    // @ovid/db's declarations pull in drizzle-orm's optional peer types (gel,
+    // mysql2, …); skipLibCheck keeps whole-program lib checking from failing
+    // on those. Our sources stay fully checked.
+    "skipLibCheck": true
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
+}

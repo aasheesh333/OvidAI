@@ -15,6 +15,8 @@ import { authHook, type Verifier } from "./auth.js";
 import { registerArtifactRoutes } from "./routes/artifacts.js";
 import { registerAttachmentRoutes } from "./routes/attachments.js";
 import type { AttachmentPresigner } from "./routes/attachments.js";
+import { registerByokRoutes } from "./routes/byok.js";
+import type { ByokRouteOverrides } from "./routes/byok.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerImportRoutes } from "./routes/import.js";
 import { registerMcpCatalogRoutes } from "./routes/mcpCatalog.js";
@@ -151,6 +153,12 @@ export interface GatewayDeps {
    * reason; absent → the oauth routes answer a loud 503 `unavailable`.
    */
   oauth?: OAuthFlow;
+  /**
+   * P9 Task 11: BYOK probe seams (fetch + DNS). The composition root never
+   * sets these; route tests inject stubs so the provider probe performs no
+   * network I/O. OPTIONAL for the same composition-compat reason.
+   */
+  byok?: ByokRouteOverrides;
 }
 
 export interface BuildGatewayOptions {
@@ -255,6 +263,13 @@ export function buildGateway(
       registerMcpOauthRoutes(scope, deps);
       registerPluginRoutes(scope, deps);
       registerSystemResponseRoutes(scope, deps);
+
+      // P9 Task 11: BYOK escrow CRUD + the SSRF-guarded provider probe.
+      registerByokRoutes(scope, {
+        db: deps.db,
+        crypto: deps.crypto,
+        ...deps.byok,
+      });
     },
     { prefix: API_PREFIX },
   );

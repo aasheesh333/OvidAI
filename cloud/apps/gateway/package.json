@@ -25,6 +25,7 @@
   "dependencies": {
     "@fastify/websocket": "^11.3.4",
     "@ovid/db": "workspace:*",
+    "@ovid/escrow": "workspace:*",
     "@ovid/events": "workspace:*",
     "@ovid/mcp": "workspace:*",
     "@ovid/queue": "workspace:*",
