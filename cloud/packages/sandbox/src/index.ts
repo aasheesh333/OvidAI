@@ -6,6 +6,8 @@ export * from "./exec.js";
 export * from "./hostGate.js";
 export * from "./invocation.js";
 export * from "./launcher.js";
+export * from "./manager.js";
 export * from "./policy.js";
+export * from "./quota.js";
 export * from "./rootfs.js";
 export * from "./types.js";

@@ -143,16 +143,17 @@ export function createCgroupManager(
         await fsp.rmdir(path);
       } catch (err) {
         if (!isErrnoException(err) || err.code !== "ENOTEMPTY") throw err;
-        // tmpdir-rooted tests only: on an ordinary filesystem the inert
-        // cgroup.kill/cgroup.procs files block rmdir. cgroupfs never returns
-        // ENOTEMPTY (its interface files are not removable entries; a busy
-        // cgroup yields EBUSY instead), so this branch is dead code in
-        // production. Tidy up only when those files are the sole content —
-        // anything else is a real error and rethrows.
-        const entries = await fsp.readdir(path);
-        const inert = entries.every((e) => e === "cgroup.kill" || e === "cgroup.procs");
-        if (!inert) throw err;
-        for (const e of entries) await fsp.unlink(join(path, e)).catch(() => {});
+        // tmpdir-rooted tests only: on an ordinary filesystem the interface
+        // files (cgroup.kill, memory.max, cpu.max, … — pure simulation
+        // artifacts, including the env caps the Task 8 manager tears down on
+        // destroy) block rmdir. cgroupfs never returns ENOTEMPTY (its
+        // interface files are not removable entries; a busy cgroup yields
+        // EBUSY instead), so this branch is dead code in production. Unlink
+        // every regular file and retry; child cgroup DIRECTORIES still
+        // rethrow — those are a real error.
+        const entries = await fsp.readdir(path, { withFileTypes: true });
+        if (entries.some((e) => e.isDirectory())) throw err;
+        for (const e of entries) await fsp.unlink(join(path, e.name)).catch(() => {});
         await fsp.rmdir(path);
       }
     },
