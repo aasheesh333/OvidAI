@@ -49,6 +49,7 @@ export const BLOCKED_COMMAND_CORPUS: BlockedCorpusEntry[] = [
   { command: ":(){ :|:& };:", expect: "layer1" },
   // Review Focus #1 evasions.
   { command: "bash -c 'gradle build'", expect: "layer1" },
+  { command: "bash -c 'gcc x.c'", expect: "layer1" },
   { command: "sh -c \"gcc x.c\"", expect: "layer1" },
   { command: "CC=gcc make", expect: "layer1" },
   { command: "echo hi | gcc -x c -", expect: "layer1" },
