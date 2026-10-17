@@ -30,10 +30,14 @@ import {
 import { registerMcpServerRoutes } from "./routes/mcpServers.js";
 import { registerMessageRoutes } from "./routes/messages.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
+import { registerReportsRoutes } from "./routes/reports.js";
+import type { ReportsConfig } from "./routes/reports.js";
 import { registerRunRoutes } from "./routes/runs.js";
 import { registerScheduleRoutes } from "./routes/schedules.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerSystemResponseRoutes } from "./routes/systemResponses.js";
+import { registerSharesRoutes } from "./shares/routes.js";
+import type { SharesConfig } from "./shares/routes.js";
 import { registerWorkspaceRoutes } from "./routes/workspace.js";
 import { registerWsRoute } from "./routes/wsRoute.js";
 import type { TicketStore } from "./tickets.js";
@@ -171,6 +175,19 @@ export interface GatewayDeps {
    * network I/O. OPTIONAL for the same composition-compat reason.
    */
   byok?: ByokRouteOverrides;
+  /**
+   * P9 Task 16: LEGACY public share routes at the gateway ROOT (POST/GET
+   * /shares, /shares/:token, /s/*, /.well-known/assetlinks.json) — Caddy
+   * proxies those exact paths here. Absent → the routes are not registered
+   * (Python: create is unavailable without OVID_SHARE_BASE_URL). main()
+   * wires `{ baseUrl: env.OVID_SHARE_BASE_URL }`.
+   */
+  shares?: SharesConfig;
+  /**
+   * P9 Task 16: LEGACY `POST /v1/reports` at the gateway ROOT. main() always
+   * wires it; Task 15's lifecycle.access slots into `admission`.
+   */
+  reports?: ReportsConfig;
   /**
    * P9 Task 15: the account deletion lifecycle. Registered at the gateway
    * ROOT (legacy `/account/*` paths, outside `/cloud/v1`) with its own
@@ -328,6 +345,24 @@ export function buildGateway(
     };
     registerWsRoute(scope, wsDeps);
   });
+
+  // P9 Task 16: LEGACY public paths registered at the ROOT (outside the
+  // /cloud/v1 prefix) so Caddy can proxy them verbatim. Both are no-ops when
+  // the composition does not opt in.
+  if (deps.shares !== undefined) {
+    registerSharesRoutes(app, {
+      db: deps.db,
+      verifier: deps.verifier,
+      ...deps.shares,
+    });
+  }
+  if (deps.reports !== undefined) {
+    registerReportsRoutes(app, {
+      db: deps.db,
+      verifier: deps.verifier,
+      ...deps.reports,
+    });
+  }
 
   return app;
 }

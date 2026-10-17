@@ -45,6 +45,10 @@ import { createSystemHub } from "./systemChannel.js";
  */
 export async function main(env: NodeJS.ProcessEnv = process.env): Promise<FastifyInstance> {
   const cfg = loadGatewayEnv(env);
+  // P9 Task 16: OVID_SHARE_BASE_URL is the ONLY source of receipt/viewer
+  // URLs (never Host headers). It stays out of loadGatewayEnv deliberately —
+  // the Python share router is unavailable without it, not misconfigured.
+  const shareBaseUrl = env.OVID_SHARE_BASE_URL?.trim() ?? "";
 
   const db = createDb(cfg.databaseUrl);
   // createQueues takes a connection OPTIONS OBJECT — a bare URL string would
@@ -76,6 +80,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       .filter((value) => value !== ""),
   );
   let account: AccountRouteDeps | undefined;
+  let accountAdmission:
+    | (<T>(principal: { uid: string; authTime: number; signInProvider?: string }, fn: (uid: string) => Promise<T>) => Promise<T>)
+    | undefined;
   if (firebaseApp !== null && accountAppIds.size > 0) {
     const admin = createFirebaseAdmin(firebaseApp, accountAppIds);
     const deletionStore = createPostgresDeletionStore(db);
@@ -107,6 +114,21 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       lifecycle,
       verify: (token, attestation, opts) => admin.verify(token, attestation, opts),
     };
+    // Task 16's shares/reports admission seam: hold the UID lock and reject
+    // every non-active/non-cancelled state. `access` only accepts ordinary
+    // (non-password) identities, matching Python's admission rule.
+    accountAdmission = (principal, fn) =>
+      lifecycle.access(
+        {
+          uid: principal.uid,
+          auth_time: principal.authTime,
+          // Pass the verified provider through unchanged: Python's
+          // `identity()` rejects a missing/unknown provider (403) rather than
+          // inventing one, and `password` is not an ordinary identity.
+          firebase: { sign_in_provider: principal.signInProvider },
+        },
+        fn,
+      );
     if ((env.OVID_LITELLM_MASTER_KEY?.trim() ?? "") === "") {
       console.warn(
         "[gateway] account cleanup has no OVID_LITELLM_MASTER_KEY — key block/delete will fail and retry",
@@ -219,6 +241,20 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       putMaxBytes: cfg.putMaxBytes,
       presignTtlSeconds: cfg.presignTtlSeconds,
       hydrateWaitMs: cfg.hydrateWaitMs,
+      // P9 Task 16: legacy public paths. Shares are unavailable without the
+      // configured deployment origin (Python parity); reports always mount.
+      // Android package/cert env is read per request inside the share routes.
+      // P9 Task 15: both carry the deletion-fence admission seam when the
+      // lifecycle is configured.
+      ...(shareBaseUrl !== ""
+        ? {
+            shares: {
+              baseUrl: shareBaseUrl,
+              ...(accountAdmission !== undefined ? { admission: accountAdmission } : {}),
+            },
+          }
+        : {}),
+      reports: accountAdmission !== undefined ? { admission: accountAdmission } : {},
       ...(account !== undefined ? { account } : {}),
     },
     { logger: true },
