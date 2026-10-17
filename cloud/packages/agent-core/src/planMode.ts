@@ -1,0 +1,123 @@
+// Plan-mode policy (port of lib/core/plan_mode.dart — the static policy part).
+//
+// Plan mode is DEFAULT-DENY: anything not on the allowlist — including any
+// tool added in future, every plugin/MCP contribution — is refused by the
+// dispatch gate AND withheld from the model-visible roster. The two
+// enforcement points (Task 15's gate and roster.ts's computeToolRoster)
+// read these same sets, so they can never disagree.
+//
+// The model follows opencode's `plan` agent: the shell stays ALLOWED (a
+// command's effect cannot be decided from its name) and read-only intent is
+// carried by the briefing (systemPrompt.ts planBriefing, Task 7); tools whose
+// IDENTITY is mutating (`file_write`, `fs_edit`, `commit`, `run_code`,
+// `device_*`, plugin/MCP classes) are hard-gated.
+//
+// The prompt briefing (promptSection/promptSectionFor) is NOT re-ported here:
+// Task 7's systemPrompt.ts already owns the plan section splice.
+
+/// Tools that may run while planning. EXACT port of Dart's
+/// `PlanModePolicy.allowedTools` — member for member; do not "improve" it here
+/// without re-porting (it is the contract). DEFAULT-DENY: anything else is
+/// refused by the gate and withheld from the roster.
+export const PLAN_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
+  // ── reading the workspace ────────────────────────────────────────
+  "file_read",
+  "fs_view",
+  "fs_glob",
+  "fs_grep",
+  "view",
+  "read_attachment",
+  "read_image",
+  // ── reading repo state (GitHub API + local git) ──────────────────
+  "repo_read",
+  "repo_tree",
+  "git_status",
+  "git_log",
+  "git_diff",
+  // ── inspecting the workspace with the shell (opencode parity) ────
+  // opencode's plan agent leaves `bash` ALLOWED and denies only `edit`;
+  // read-only intent is carried by the briefing, not by the gate.
+  "run_shell",
+  // ── research ─────────────────────────────────────────────────────
+  "fetch_url",
+  "web_search",
+  "memory_search",
+  "memory_read",
+  "session_search",
+  "session_read",
+  // ── reading the browser WITHOUT driving it ───────────────────────
+  "browser_read",
+  "browser_list_tabs",
+  "browser_find",
+  "browser_wait_for",
+  "browser_snapshot",
+  "browser_outline",
+  // Screenshot is in the READ group deliberately: it captures pixels and
+  // stages them as a vision message — nothing is written to disk and no page
+  // state changes (unlike browser_click/type, which DRIVE the page).
+  "browser_screenshot",
+  // ── reading background state ─────────────────────────────────────
+  "job_list",
+  "job_output",
+  "get_goal",
+  "schedule_list",
+  "catalog_get_provider",
+  "catalog_list_mcp",
+  "catalog_list_models",
+  "catalog_list_plugins",
+  "catalog_list_providers",
+  // ── planning itself ──────────────────────────────────────────────
+  // todo_write is the plan artifact: session-local UI state that never
+  // touches disk, repo or network.
+  "todo_write",
+  "ask_user_question",
+  "exit_plan_mode",
+  "list_agents",
+  "report",
+  "skill",
+]);
+
+/// The harness itself — orchestration and session bookkeeping — stays
+/// available in every mode/preset (and therefore also survives the
+/// plan-mode projection and the !memoryEnabled drop, per the revised plan
+/// text: `memoryEnabled:false` drops memory_search but KEEPS memory_save).
+/// EXACT port of Dart's `PlanModePolicy.harnessTools`; presets re-export it
+/// as their always-allowed set.
+export const HARNESS_TOOLS: ReadonlySet<string> = new Set([
+  "dispatch_agent",
+  "report",
+  "update_goal",
+  "get_goal",
+  "create_goal",
+  "memory_save",
+]);
+
+/// Identity-mutating / third-party tool classes: hard gate in plan mode,
+/// never resolved by prompt text. (Cloud drops `device_*` outright in every
+/// mode — D5, no Control mode — so the `device_` prefix here is belt and
+/// braces for the plan projection.)
+export const PLAN_HARD_DENIED_PREFIXES = ["device_", "plugin_", "mcp__"] as const;
+
+/// P2's read-only tool spellings (ruling R1: P2's landed roster — run_shell,
+/// read_file, write_file, edit_file, glob_files, grep_files — joins the
+/// canonical seam alongside P3's tools). The read-only trio is admitted in
+/// plan mode next to its P3 counterparts so a planning model sees both
+/// spellings; the write/spellings are NOT (they mutate).
+export const PLAN_ALIAS_TOOLS: ReadonlySet<string> = new Set([
+  "read_file",
+  "glob_files",
+  "grep_files",
+]);
+
+/// The set the plan-mode projection keeps: allowlist ∪ harness ∪ the P2
+/// read-only aliases. (Dart's module defines rosterTools = allowed ∪ harness;
+/// the cloud plan text keeps that union — the harness is orchestration, not a
+/// capability being gated — and adds R1's aliases.)
+export function planRosterAdmits(name: string): boolean {
+  if (PLAN_HARD_DENIED_PREFIXES.some((p) => name.startsWith(p))) return false;
+  return (
+    PLAN_ALLOWED_TOOLS.has(name) ||
+    PLAN_ALIAS_TOOLS.has(name) ||
+    HARNESS_TOOLS.has(name)
+  );
+}
