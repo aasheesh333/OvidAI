@@ -98,10 +98,13 @@ export const attachmentDtoSchema: z.ZodType<AttachmentDto> = z.object({
  * join it under uploads/ without further checks.
  *
  * NOTE (kept in sync deliberately): these are the same rules as
- * @ovid/storage's sanitizeArtifactName. The duplication exists because the
- * gateway and worker must sanitize identically but do not (yet) depend on
- * @ovid/storage; when either gains that dependency, the storage helper becomes
- * the single source and this one is retired.
+ * @ovid/storage's sanitizeArtifactName — EXCEPT the empty-input fallback
+ * token: "attachment" here vs "artifact" there. The difference is deliberate
+ * (each helper names its own domain's fallback) and must SURVIVE the
+ * LOCKFILE-WAVE retirement of this copy: when @ovid/storage becomes the
+ * single source, keep this function's "attachment" fallback (a wrapper, not a
+ * deletion) — otherwise every previously-served uploads/ path with the
+ * "attachment" token would silently rename at materialization time.
  */
 export function sanitizeAttachmentName(name: string): string {
   let out = name.replace(/[^A-Za-z0-9._-]+/g, "_");

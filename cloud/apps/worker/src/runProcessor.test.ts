@@ -1121,6 +1121,34 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       rmWs(sbx2.workspaceDir);
     });
 
+    it("v0 tool-less path (no sandbox wired) with attachmentIds → loud run_failed{attachment_unavailable}, model never called (never-silent invariant)", async () => {
+      const seeded = await seedRun();
+      const a1 = await seedAttachment(seeded.sessionId, seeded.uid, "x.txt");
+      const { transport, calls } = stubTransport([{ kind: "ok", deltas: ["never"] }]);
+
+      // Pre-P2 composition: NO sandbox/tools — the legacy v0 loop. Attachments
+      // need a workspace, so this must fail loudly, never silently drop them.
+      await createAgentRunProcessor(makeDeps(transport))({
+        data: {
+          runId: seeded.runId,
+          sessionId: seeded.sessionId,
+          userId: seeded.uid,
+          prompt: seeded.prompt,
+          attachmentIds: [a1.id],
+        },
+      });
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual(["run_failed"]);
+      expect(evts[0]!.payload).toMatchObject({ code: "attachment_unavailable" });
+      expect(await readMirror(seeded.sessionId)).toEqual(evts);
+      expect(calls).toHaveLength(0);
+      expect(await runRow(seeded.runId)).toMatchObject({
+        status: "failed",
+        lastError: "attachment_unavailable",
+      });
+    });
+
     // -------------------------------------------------------------------------
     // Integration-ish: the processor behind a REAL BullMQ worker + REAL queues
     // ({url} connection-object form pinned by Task 7) consuming a job added via

@@ -261,17 +261,33 @@ export function createAgentRunProcessor(
     const useTools = deps.sandbox !== undefined && deps.tools !== undefined;
     let handle: SandboxHandle | undefined;
     let convo: ChatMessage[] = history;
+
+    /**
+     * P8 Task 3 failure helper: run_failed {code:"attachment_unavailable"},
+     * then the conditional 'failed' flip — event-first, same as every
+     * terminal path here. A job that asked for attachments the processor
+     * cannot materialize must NEVER silently skip them.
+     */
+    const failAttachments = async (message: string): Promise<void> => {
+      await emit("run_failed", { code: "attachment_unavailable", message });
+      await runs.finish(deps.db, runId, "failed", "attachment_unavailable");
+    };
+
+    // P8 Task 3: deduped attachment ids the message was sent with (the
+    // gateway validated every id at enqueue time). Empty/absent = no work.
+    const requestedAttachmentIds = [...new Set(job.data.attachmentIds ?? [])];
+
+    // v0 tool-less path (legacy P1 spine composition — no sandbox/tools):
+    // there is no workspace to materialize into, so attachments CANNOT be
+    // honored. Loud failure, never a silent drop (never-silent invariant);
+    // production always wires the sandbox, so this only guards miscomposed
+    // harnesses. Emit AFTER the C1 wait/claim so the run row exists.
+    if (!useTools && requestedAttachmentIds.length > 0) {
+      await failAttachments("attachments require a sandbox workspace (tool mode disabled)");
+      return;
+    }
+
     if (useTools) {
-      /**
-       * P8 Task 3 failure helper: run_failed {code:"attachment_unavailable"},
-       * then the conditional 'failed' flip — event-first, same as every
-       * terminal path here. A job that asked for attachments the processor
-       * cannot materialize must NEVER silently skip them.
-       */
-      const failAttachments = async (message: string): Promise<void> => {
-        await emit("run_failed", { code: "attachment_unavailable", message });
-        await runs.finish(deps.db, runId, "failed", "attachment_unavailable");
-      };
       try {
         handle = await deps.sandbox.attach(userId, {
           tier: job.data.tier === "free" ? "free" : "pro",
@@ -287,7 +303,6 @@ export function createAgentRunProcessor(
         // are loud run-level failures; an unexpected storage/filesystem
         // error falls through to the catch below and fails the job loudly
         // (infra, not a run state — the stale-run sweeper is the recovery).
-        const requestedAttachmentIds = [...new Set(job.data.attachmentIds ?? [])];
         if (requestedAttachmentIds.length > 0) {
           const rows = await attachments.getForSession(
             deps.db,
