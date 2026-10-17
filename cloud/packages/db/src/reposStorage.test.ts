@@ -270,6 +270,35 @@ describe.skipIf(!TEST_DATABASE_URL)("storage repos against real postgres", () =>
     expect((await fileManifests.get(db, s.id))!.workspaceBytes).toBeNull();
   });
 
+  it("markColdRetry restores cold ONLY from the hydrating claim (T6 carry)", async () => {
+    const uid = await seedUser();
+    const s = await sessions.create(db, uid, "w4d");
+    await fileManifests.upsertWarm(db, { sessionId: s.id, userId: uid, workspaceBytes: 10 });
+    await fileManifests.markCold(db, {
+      sessionId: s.id,
+      generation: 1,
+      archiveKey: `users/${uid}/workspaces/${s.id}.tar.zst`,
+      archiveBytes: 500,
+      archiveSha256: SHA_A,
+      entryCount: 2,
+      uiTree: uiTreeFixture(),
+    });
+
+    // A failed hydrate flips the row back so BullMQ's next attempt can claim it.
+    expect(await fileManifests.beginHydration(db, s.id)).toBe(true);
+    await fileManifests.markColdRetry(db, s.id);
+    expect((await fileManifests.get(db, s.id))!.state).toBe("cold");
+
+    // The state re-check: a warm row is never stomped back to cold.
+    await fileManifests.markWarm(db, { sessionId: s.id, workspaceBytes: 42 });
+    await fileManifests.markColdRetry(db, s.id);
+    expect((await fileManifests.get(db, s.id))!.state).toBe("warm");
+    expect((await fileManifests.get(db, s.id))!.workspaceBytes).toBe(42);
+
+    // Unknown session is a silent no-op.
+    await fileManifests.markColdRetry(db, newId());
+  });
+
   it("listWarmForLru returns only warm rows, oldest updated_at first", async () => {
     const uid = await seedUser();
     const sids: string[] = [];

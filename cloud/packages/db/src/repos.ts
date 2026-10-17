@@ -1268,6 +1268,25 @@ export const fileManifests = {
   },
 
   /**
+   * Failure restore for a hydrate attempt: hydrating → cold, and ONLY from
+   * hydrating (the state re-check is the race guard — a concurrent transition
+   * that already moved the row is never stomped). The T6 carry; the wiring
+   * layer injects this into hydrateWorkspace's structural repo mirror.
+   */
+  async markColdRetry(db: Db, sessionId: string): Promise<void> {
+    await db
+      .update(fileManifestsTable)
+      .set({ state: "cold", updatedAt: new Date() })
+      .where(
+        and(
+          eq(fileManifestsTable.sessionId, sessionId),
+          eq(fileManifestsTable.state, "hydrating"),
+        ),
+      )
+      .returning({ sessionId: fileManifestsTable.sessionId });
+  },
+
+  /**
    * Eviction-candidate scan for the warm-cap LRU: every warm row, oldest
    * updated_at first (least-recently-refreshed = first to hibernate), capped
    * at one sweeper batch.
