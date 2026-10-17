@@ -27,6 +27,7 @@
     "@ovid/db": "workspace:*",
     "@ovid/events": "workspace:*",
     "@ovid/gateway": "workspace:*",
+    "@ovid/mcp": "workspace:*",
     "@ovid/queue": "workspace:*",
     "@ovid/sandbox": "workspace:*",
     "@ovid/shared": "workspace:*",

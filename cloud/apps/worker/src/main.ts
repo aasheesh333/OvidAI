@@ -55,8 +55,10 @@ import {
 import type { KeyProvider } from "@ovid/shared";
 import { createFullAgentRunProcessor } from "./runProcessor.js";
 import { buildFileService } from "./fileService.js";
+import { createMcpRuntime } from "./mcpRuntime.js";
 import { startWorkerPtyBridge } from "./ptyBridge.js";
 import { createSandboxPort } from "./sandboxAdapter.js";
+import { createSandboxSeam } from "./sandboxSeam.js";
 import { sweepStaleRuns } from "./staleRuns.js";
 import { createColdRowScan, createStuckHibernationScan, createStuckHydrationScan } from "./storageScans.js";
 
@@ -361,6 +363,40 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   });
   await manager.recover(); // orphan env cgroups from a crashed run die now
 
+  // P3 Task 16: the production processor is the FULL engine. Egress is the
+  // SSRF-guarded fetch at every construction site (T5-I1 / M-4): model
+  // transports and the GitHub REST port alike. No raw-fetch default remains
+  // in the worker's production path. Hoisted above the MCP runtime so the
+  // curated fetch/REST/GitHub handlers share the SAME guarded egress.
+  const egress = createGuardedEgressFetch(createSsrfGuard());
+
+  // ---- P5 Task 16: the MCP runtime (router + catalog + installer). --------
+  // The sandbox seam is the ONLY P2 → @ovid/mcp adaptation point; passing the
+  // already-composed manager keeps one cgroup/rootfs boot per worker. The
+  // runtime is optional only when OVID_MASTER_KEY is absent (it cannot seal
+  // MCP credentials without it); production sets the key (deploy env).
+  const mcpSandbox = createSandboxSeam({
+    manager,
+    tierFor: async (userId) =>
+      (await users.getTier(db, userId)) === "free" ? "free" : "pro",
+  });
+  const mcpRuntime =
+    cfg.masterKey === null
+      ? null
+      : createMcpRuntime({
+          db,
+          redisQ,
+          masterKey: cfg.masterKey,
+          sandbox: mcpSandbox,
+          fetchImpl: egress,
+        });
+  if (mcpRuntime === null) {
+    console.warn(
+      "[worker] OVID_MASTER_KEY is not set — MCP servers/plugins are disabled " +
+        "(curated fetch/REST tools are unavailable in this process)",
+    );
+  }
+
   // P2 Task 13: the terminal-over-WS worker bridge. Started AFTER recovery —
   // a pty ctl can only be served once the manager chain is ready; its stop()
   // runs BEFORE manager.close() in shutdown() (the manager's env teardown
@@ -483,11 +519,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   };
 
 
-  // P3 Task 16: the production processor is the FULL engine. Egress is the
-  // SSRF-guarded fetch at every construction site (T5-I1 / M-4): model
-  // transports and the GitHub REST port alike. No raw-fetch default remains
-  // in the worker's production path.
-  const egress = createGuardedEgressFetch(createSsrfGuard());
+  // P3 Task 16: the production processor is the FULL engine. Egress (the
+  // SSRF-guarded fetch) was hoisted above so the MCP runtime shares it.
   const github =
     cfg.githubToken !== null
       ? createGitHubApiPort({ token: cfg.githubToken, egress })
@@ -602,6 +635,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       // then the sandbox manager — manager.close() kills every live pty leaf,
       // and each pty's onExit publishes its `exit` + HDELs its registry key.
       await stopPtyBridge();
+      // P5 Task 16: stop the MCP router (closes live MCP clients and the
+      // system bus; pending approvals deny) BEFORE the sandbox manager kills
+      // the jailed stdio processes they ride on.
+      await mcpRuntime?.shutdown();
       // P2 Task 12 pin: manager.close() BEFORE the drain — sandbox envs (their
       // cgroup trees, live leaves and admission slots) tear down first.
       await manager.close();

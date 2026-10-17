@@ -26,6 +26,7 @@
     "@ovid/browser": "workspace:*",
     "@ovid/db": "workspace:*",
     "@ovid/events": "workspace:*",
+    "@ovid/mcp": "workspace:*",
     "@ovid/queue": "workspace:*",
     "@ovid/sandbox": "workspace:*",
     "@ovid/shared": "workspace:*",

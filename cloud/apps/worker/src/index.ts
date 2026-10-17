@@ -7,10 +7,29 @@
 export * from "./approvalBridge.js";
 export * from "./fileService.js";
 export * from "./liteLlm.js";
+export * from "./mcpRuntime.js";
+// mcpTools exports its own `ToolResult` (the canonical P5 seam with optional
+// artifacts); the worker barrel already re-exports P2's `ToolResult` from
+// tools/types.ts. Re-export the P5 one under an explicit alias instead of
+// colliding on the star.
+export {
+  CATALOG_AGENT_TOOLS,
+  createCatalogTools,
+  createMcpToolProvider,
+  parsePluginSource,
+  type CatalogToolDeps,
+  type McpAgentTool,
+  type McpToolContext,
+  type McpToolProvider,
+  type PluginInstallQueue,
+  type ToolResult as McpToolResult,
+} from "./mcpTools.js";
 export * from "./notify.js";
 export * from "./ptyBridge.js";
 export * from "./runProcessor.js";
 export * from "./sandboxAdapter.js";
+export * from "./sandboxSeam.js";
+export * from "./schedulerSettle.js";
 export * from "./schedulerTick.js";
 export * from "./staleRuns.js";
 export * from "./tools/agentToolAdapter.js";
