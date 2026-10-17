@@ -1,0 +1,23 @@
+# Ovid sandbox egress filter — loads the rendered nftables ruleset that keeps
+# sandbox uids (and, once P6 activates it, the browser-engine uid) away from
+# internal/metadata endpoints and this host's own public IP (Task 11).
+#
+# The ruleset is rendered by cloud/deploy/net/install-nft.sh into
+# /opt/ovid-cloud/nft/ovid-sandbox.nft (OVID_PUBLIC_IP + the configured uid
+# range); it is reload-safe by design (declare-then-delete guard), so
+# ExecStart is idempotent and `systemctl restart` re-applies a re-rendered
+# file cleanly. Install: DEPLOY.md §11 (owner-run, Task 16).
+[Unit]
+Description=Ovid — sandbox egress filter (nftables table inet ovid_sandbox)
+Documentation=file:/opt/ovid-cloud/repo/cloud/deploy/net/install-nft.sh
+# The worker must never run before its sandbox egress filter is in place.
+Before=ovid-worker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /opt/ovid-cloud/nft/ovid-sandbox.nft
+ExecStop=/usr/sbin/nft delete table inet ovid_sandbox
+
+[Install]
+WantedBy=multi-user.target
