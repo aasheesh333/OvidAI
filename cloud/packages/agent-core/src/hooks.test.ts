@@ -1230,6 +1230,30 @@ describe("fix round 1 — post_tool result contract (I3/I7)", () => {
     expect(result.updatedToolOutput).toBe(JSON.stringify({ replaced: true }));
   });
 
+  it("scrubs payload secrets interpolated into a post_tool block reason", async () => {
+    const fs = fakeSandbox();
+    fs.setHandler(() =>
+      ok(
+        JSON.stringify({
+          decision: "block",
+          reason: "command failed: sk-payload-secret",
+        }),
+      ),
+    );
+    const { engine } = makeEngine(fs, [
+      def({ event: "post_tool", command: "guard" }),
+    ]);
+
+    const result = await engine.fireDetailed("post_tool", "s1", {
+      tool: "run_shell",
+      result: "out",
+      ok: false,
+      api_key: "sk-payload-secret",
+    });
+    expect(result.blockReasons).toEqual(["command failed: [REDACTED]"]);
+    expect(JSON.stringify(result)).not.toContain("sk-payload-secret");
+  });
+
   it("does not leak a JSON envelope into output for non-context events", async () => {
     const fs = fakeSandbox();
     fs.setHandler(() =>
@@ -1283,6 +1307,30 @@ describe("fix round 1 — E2BIG stdin path (I4)", () => {
     expect(cmd).toContain(`< '/workspace/${write.path}'`);
     expect(cmd).not.toContain("printf");
     expect(fs.execCalls[0]!.o.env!.OVID_HOOK_STDIN_FILE).toBe(`/workspace/${write.path}`);
+    // The temp file is removed in the same shell invocation (payload hygiene).
+    expect(cmd).toContain(`rm -f '/workspace/${write.path}'`);
+  });
+
+  it("guards on UTF-8 BYTES, not UTF-16 code units", async () => {
+    const fs = fakeSandbox();
+    const { engine } = makeEngine(fs, [
+      def({ event: "pre_tool", matcher: "Bash", command: "guard" }),
+    ]);
+    // ~45k CJK chars ≈ 135k UTF-8 bytes: under the limit in .length, over in
+    // bytes — the old char guard would take printf and die E2BIG (fail open).
+    const content = "あ".repeat(45_193);
+    expect(content.length).toBeLessThan(HOOK_ARGV_PAYLOAD_LIMIT);
+    expect(Buffer.byteLength(content, "utf8")).toBeGreaterThan(HOOK_ARGV_PAYLOAD_LIMIT);
+
+    await engine.fireGate("s1", {
+      tool: "run_shell",
+      args: { command: content },
+    });
+
+    expect(fs.writes).toHaveLength(1);
+    expect(fs.execCalls[0]!.o.cmd).not.toContain("printf");
+    expect(fs.execCalls[0]!.o.cmd).toContain("< '/workspace/");
+    expect(fs.execCalls[0]!.o.env!.OVID_HOOK_STDIN_FILE).toBeDefined();
   });
 
   it("keeps the argv path for a payload below the limit", async () => {

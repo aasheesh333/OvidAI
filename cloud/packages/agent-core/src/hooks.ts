@@ -821,16 +821,27 @@ export function buildPostToolPayload(o: {
   };
 }
 
+/** UTF-8 byte length (argv limits are bytes, not UTF-16 code units). */
+export function hookPayloadBytes(stdinJson: string): number {
+  return Buffer.byteLength(stdinJson, "utf8");
+}
+
 /**
  * SandboxPort.exec has no stdin pipe, so the payload is piped with printf.
  * Single-quote escaping is POSIX-safe and byte-exact; the fake SandboxPort in
  * tests decodes the same wrapper. (`json.load(sys.stdin)` parity.)
  *
- * E2BIG guard: Linux MAX_ARG_STRLEN is 128 KiB per argv element, and the
- * environment competes for the same budget. A larger payload is written to
+ * E2BIG guard: Linux MAX_ARG_STRLEN is 128 KiB of UTF-8 BYTES per argv
+ * element, and the environment competes for the same budget. The guard is
+ * therefore BYTE-based: a CJK/emoji payload can be well under the limit in
+ * JS string units yet far over it in bytes. A larger payload is written to
  * `stdinFile` (workspace-relative, jail-absolute here) and redirected, so a
  * large `file_write`/`tool_response` can never make a pre_tool gate silently
  * fail open.
+ *
+ * The redirect path assumes `workspace` IS the jail mount point (P2
+ * JAIL_WORKSPACE, default /workspace): SandboxPort file methods take
+ * workspace-relative paths while exec runs with jail-absolute ones.
  */
 export function wrapHookCommand(
   command: string,
@@ -838,10 +849,16 @@ export function wrapHookCommand(
   o: { stdinFile?: string } = {},
 ): string {
   if (
-    stdinJson.length > HOOK_ARGV_PAYLOAD_LIMIT &&
+    hookPayloadBytes(stdinJson) > HOOK_ARGV_PAYLOAD_LIMIT &&
     o.stdinFile !== undefined
   ) {
-    return `( ${command}\n) < '${o.stdinFile}'`;
+    // Feed stdin from the file, then remove it in the same shell invocation so
+    // the payload (which may contain secrets) does not linger in the jail. A
+    // timeout kill can still strand it — the file is per-call and inert.
+    return (
+      `( ${command}\n) < '${o.stdinFile}'; ` +
+      `__ovid_hook_rc=$?; rm -f '${o.stdinFile}'; exit $__ovid_hook_rc`
+    );
   }
   const quoted = `'${stdinJson.replace(/'/g, `'\\''`)}'`;
   return `printf '%s' ${quoted} | ( ${command}\n)`;
@@ -1182,12 +1199,15 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
     });
     const userId = userIdFor(sessionId);
     const callKey = `hook:${sessionId}:${definition.id}:${(callSeq += 1)}`;
-    // E2BIG guard: a >96 KiB payload cannot ride in one argv element, so it is
-    // written into the session jail and fed through a stdin redirect. Failing
-    // to write the file is a runtime failure (fail-open, retryable) — it must
-    // never become a silent hook skip with the gate half-run.
+    // E2BIG guard (BYTE-based): a >96 KiB UTF-8 payload cannot ride in one
+    // argv element, so it is written into the session jail and fed through a
+    // stdin redirect. Failing to write the file is a runtime failure
+    // (fail-open, retryable) — it must never become a silent hook skip with
+    // the gate half-run. `workspace` must be the jail mount point because the
+    // file path is workspace-relative for writeFile and jail-absolute for the
+    // shell redirect.
     let stdinFile: string | undefined;
-    if (stdinJson.length > HOOK_ARGV_PAYLOAD_LIMIT) {
+    if (hookPayloadBytes(stdinJson) > HOOK_ARGV_PAYLOAD_LIMIT) {
       const relPath = `.dsh/tmp/hook-stdin-${callSeq}.json`;
       try {
         await deps.sandbox.writeFile(userId, relPath, stdinJson);
@@ -1368,7 +1388,10 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
         );
         if (verdict?.decision === "block") {
           promptBlocks.push(
-            verdict.reason ?? `blocked by prompt hook (${definition.pluginId})`,
+            scrubText(
+              verdict.reason ?? `blocked by prompt hook (${definition.pluginId})`,
+              knownSecretsFor(payload),
+            ),
           );
         }
         continue;
@@ -1428,8 +1451,14 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
       if (published !== "") hookOutputs.push(published);
       if (event === "post_tool") {
         if (contract.decision === "block") {
+          // Publication copy: the reason may interpolate a payload secret
+          // (e.g. the failing command echoed back) — scrub it like every
+          // other published field. The DECISION itself stays raw.
           blockReasons.push(
-            contract.reason ?? "blocked by a PostToolUse hook",
+            scrubText(
+              contract.reason ?? "blocked by a PostToolUse hook",
+              known,
+            ),
           );
         }
         if (contract.additionalContext !== null) {
