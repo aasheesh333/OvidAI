@@ -358,15 +358,16 @@ async function discover(
 export function createSkillCatalog(deps: {
   sandbox: SandboxPort;
   /**
-   * Owner of the sandbox workspace. The Task-1 `SkillCatalog` interface
-   * carries only a sessionId (the skill tool's ctx has the userId, the
-   * catalog API does not), so callers construct the catalog per user and
-   * pass it here; a user-bound SandboxPort wrapper may omit it.
+   * Owner of the sandbox workspace. REQUIRED, and must be the RUN's real
+   * userId: the Task-1 `SkillCatalog` interface carries only a sessionId (the
+   * skill tool's ctx has the userId, the catalog API does not), so the worker
+   * constructs the catalog (and the skill tool) PER RUN. A missing/empty
+   * userId would silently scan an empty workspace — the type makes that a
+   * compile error instead.
    */
-  userId?: string;
+  userId: string;
 }): SkillCatalog {
-  const { sandbox } = deps;
-  const userId = deps.userId ?? "";
+  const { sandbox, userId } = deps;
   return {
     async list(sessionId: string): Promise<SkillSummary[]> {
       void sessionId;

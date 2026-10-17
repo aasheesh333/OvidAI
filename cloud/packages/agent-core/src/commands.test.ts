@@ -19,7 +19,7 @@ import {
   createMemoryStateStore,
   type SkillCatalog,
 } from "./ports.js";
-import { createSkillTool } from "./tools/skills.js";
+import { createSkillActivation, createSkillTool } from "./tools/skills.js";
 import type { SessionMode, ToolContext } from "./types.js";
 
 function fakeCatalog(
@@ -310,6 +310,29 @@ describe("createCommandRunner", () => {
     expect(await run("s1", "/unknowncmd x")).toBeNull();
   });
 
+  it("falls through to parseSkillInvocation for names outside the command grammar", async () => {
+    // I1: Dart's composer tries CommandService.parse first, then
+    // parseSkillInvocation, which accepts ANY non-whitespace token.
+    const { run } = setup({
+      skills: [
+        { name: "Tip", content: "TIP BODY", userInvocable: true },
+        { name: "my.skill", content: "DOTTED BODY", userInvocable: true },
+      ],
+    });
+    expect((await run("s1", "/Tip now"))?.prompt).toBe(
+      "<skill_content>\nTIP BODY\n</skill_content>\n\nUser instruction: now",
+    );
+    expect((await run("s1", "/my.skill two words"))?.prompt).toBe(
+      "<skill_content>\nDOTTED BODY\n</skill_content>\n\nUser instruction: two words",
+    );
+  });
+
+  it("an unknown non-grammar name still → null", async () => {
+    const { run } = setup();
+    expect(await run("s1", "/Nope x")).toBeNull();
+    expect(await run("s1", "/my.missing")).toBeNull();
+  });
+
   it("non-command input → null", async () => {
     const { run } = setup();
     expect(await run("s1", "just text")).toBeNull();
@@ -375,8 +398,7 @@ describe("skill activation persistence (R4)", () => {
     ]);
     const tool = createSkillTool({
       catalog,
-      onActivate: (sessionId, scopes) =>
-        state.patch(sessionId, { activeSkillScopes: scopes }),
+      onActivate: createSkillActivation(state),
     });
     await tool.execute({ name: "locked" }, ctx("s1"));
     expect((await state.get("s1")).activeSkillScopes).toEqual([

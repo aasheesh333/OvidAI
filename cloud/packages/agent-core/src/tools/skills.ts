@@ -26,7 +26,7 @@
 //   • Ambiguous-alias resolution cannot arise in the single-root cloud
 //     catalog (bundle-beats-flat + first-wins), so that branch is deleted.
 
-import type { SkillCatalog } from "../ports.js";
+import type { SessionStateStore, SkillCatalog } from "../ports.js";
 import { substituteCommandArguments } from "../commands.js";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
 import { skillAllowedTools } from "../skillsLoader.js";
@@ -34,11 +34,37 @@ import { skillAllowedTools } from "../skillsLoader.js";
 /** Default tool timeout (Dart `_toolTimeoutFor`: 2 min for everything else). */
 const SKILL_TOOL_TIMEOUT_MS = 120_000;
 
+/**
+ * The runner's DEFAULT `onActivate` for `createSkillTool`: persist the loaded
+ * skill's scope in the session state (ruling R4), which is the single source
+ * the roster reads on the NEXT turn.
+ *
+ * WIRING (T16, per run — the registry has no userId at construction time):
+ *
+ *   const catalog = createSkillCatalog({ sandbox, userId });   // userId required
+ *   const skill = createSkillTool({
+ *     catalog,
+ *     onActivate: createSkillActivation(state),
+ *   });
+ *   registry = [...tools, skill];                              // the "skill" tool
+ *
+ * `scopes` may be `[]` (a skill with no allowed-tools): the patch then CLEARS
+ * a previously active scope, Dart parity.
+ */
+export function createSkillActivation(
+  state: SessionStateStore,
+): (sessionId: string, scopes: string[]) => Promise<void> {
+  return (sessionId, scopes) =>
+    state.patch(sessionId, { activeSkillScopes: scopes });
+}
+
 export function createSkillTool(deps: {
   catalog: SkillCatalog;
   /**
    * Persist the newly loaded skill's scope. `[]` means "no restriction" and
    * MUST be written (loading an unrestricted skill clears a prior scope).
+   * Wire `createSkillActivation(state)` here — see its doc for the exact
+   * per-run registration.
    */
   onActivate(sessionId: string, scopes: string[]): Promise<void>;
 }): Tool {

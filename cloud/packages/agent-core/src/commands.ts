@@ -165,6 +165,27 @@ const TODO_MARKS: Readonly<Record<string, string>> = {
 };
 
 /**
+ * Parse a composer skill invocation (Dart `parseSkillInvocation`,
+ * skills.dart:885–893): slash at byte 0, then ANY non-whitespace token as the
+ * skill name — no `[a-z0-9_-]+` restriction (so `/Tip` and `/my.skill` work).
+ * Args are the raw remainder, trimmed. Null when the line is not a slash
+ * invocation or the token is empty.
+ *
+ * This is the fall-through the composer uses when `parseSlashCommand` misses
+ * (Dart: `CommandService.execute` first, then `parseSkillInvocation`).
+ */
+export function parseSkillInvocation(
+  input: string,
+): { token: string; args: string } | null {
+  if (!input.startsWith("/")) return null;
+  const body = input.slice(1);
+  const boundary = body.search(/\s/);
+  const token = (boundary < 0 ? body : body.slice(0, boundary)).trim();
+  if (token === "") return null;
+  return { token, args: boundary < 0 ? "" : body.slice(boundary).trim() };
+}
+
+/**
  * Build the server-side command runner. The seeded set is:
  *   /plan on|off|<message>   — preset toggle → pendingPlanMode
  *   /permission <mode>       — state.patch({mode})
@@ -175,9 +196,40 @@ const TODO_MARKS: Readonly<Record<string, string>> = {
  * Everything else → null.
  */
 export function createCommandRunner(deps: CommandDeps): CommandRunner {
+  /** Dart composer skill path: rewrite the prompt with the skill body. */
+  const invokeSkill = async (
+    sessionId: string,
+    token: string,
+    args: string,
+  ): Promise<CommandResult | null> => {
+    const summaries = await deps.skills.list(sessionId);
+    const match = summaries.find(
+      (s) => s.userInvocable && s.name.toLowerCase() === token.toLowerCase(),
+    );
+    if (match === undefined) return null;
+    const skill = await deps.skills.load(match.name, sessionId);
+    if (skill === null) return null;
+    const content = substituteCommandArguments(skill.content, args);
+    const trailer = commandArgumentTrailer(
+      skill.content,
+      args,
+      "User instruction",
+    );
+    return {
+      prompt: `<skill_content>\n${content}\n</skill_content>${trailer}`,
+      clearInput: true,
+    };
+  };
+
   return async (sessionId, input) => {
     const parsed = parseSlashCommand(input);
-    if (parsed === null) return null;
+    if (parsed === null) {
+      // Dart composer fall-through: a token that fails the command grammar
+      // may still name a user-invocable skill (`/Tip`, `/my.skill`).
+      const invocation = parseSkillInvocation(input);
+      if (invocation === null) return null;
+      return invokeSkill(sessionId, invocation.token, invocation.args);
+    }
     const { name, args } = parsed;
 
     switch (name) {
@@ -266,23 +318,15 @@ export function createCommandRunner(deps: CommandDeps): CommandRunner {
         // User-invocable skill: `/<skill-name> [args]` rewrites the prompt
         // with the skill body (Dart composer `parseSkillInvocation` path).
         // Built-ins win over same-named skills (the switch above).
-        const summaries = await deps.skills.list(sessionId);
-        const match = summaries.find(
-          (s) => s.userInvocable && s.name.toLowerCase() === name.toLowerCase(),
-        );
-        if (match === undefined) return null;
-        const skill = await deps.skills.load(match.name, sessionId);
-        if (skill === null) return null;
-        const content = substituteCommandArguments(skill.content, args);
-        const trailer = commandArgumentTrailer(
-          skill.content,
-          args,
-          "User instruction",
-        );
-        return {
-          prompt: `<skill_content>\n${content}\n</skill_content>${trailer}`,
-          clearInput: true,
-        };
+        const direct = await invokeSkill(sessionId, name, args);
+        if (direct !== null) return direct;
+        // Dart composer fall-through: when the parsed command is unknown,
+        // the FULL line is retried as a skill invocation. This matters for
+        // `/my.skill`, where the command grammar matches only the `my`
+        // prefix — parseSkillInvocation then yields `my.skill`.
+        const invocation = parseSkillInvocation(input);
+        if (invocation === null || invocation.token === name) return null;
+        return invokeSkill(sessionId, invocation.token, invocation.args);
       }
     }
   };

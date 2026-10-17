@@ -146,7 +146,7 @@ describe("createSkillCatalog discovery", () => {
       ".dsh/skills/bundle/SKILL.md": "---\nname: bundle-skill\n---\nBUNDLE",
       ".dsh/skills/flat.md": "---\nname: flat-skill\n---\nFLAT",
     });
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     const list = await catalog.list("s1");
     expect(list.map((s) => s.name).sort()).toEqual(["bundle-skill", "flat-skill"]);
   });
@@ -156,7 +156,7 @@ describe("createSkillCatalog discovery", () => {
       ".dsh/skills/review/SKILL.md": "Review the changed files.",
       ".dsh/skills/notes.md": "Some notes.",
     });
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     const list = await catalog.list("s1");
     expect(list.map((s) => s.name).sort()).toEqual(["notes", "review"]);
     expect((await catalog.load("review", "s1"))?.content).toBe(
@@ -175,7 +175,7 @@ describe("createSkillCatalog discovery", () => {
       ".dsh/skills/SECURITY.md": "---\nname: security-doc\n---\nSECURITY",
       ".dsh/skills/custom-skill.md": "---\nname: custom-skill\n---\nCUSTOM",
     });
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     expect((await catalog.list("s1")).map((s) => s.name)).toEqual([
       "custom-skill",
     ]);
@@ -185,7 +185,7 @@ describe("createSkillCatalog discovery", () => {
     const { sandbox } = fakeSandbox({
       ".dsh/skills/notes/README.md": "---\nname: nested-note\n---\nNESTED",
     });
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     expect((await catalog.list("s1")).map((s) => s.name)).toEqual([
       "nested-note",
     ]);
@@ -199,7 +199,7 @@ describe("createSkillCatalog discovery", () => {
       ".dsh/skills/persona/AGENT.md": "---\nname: persona-agent\n---\nAGENT",
       ".dsh/skills/bundle/SKILL.md": "---\nname: bundle-skill\n---\nBUNDLE",
     });
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     expect((await catalog.list("s1")).map((s) => s.name)).toEqual([
       "bundle-skill",
     ]);
@@ -210,7 +210,7 @@ describe("createSkillCatalog discovery", () => {
       ".dsh/skills/review/SKILL.md": "---\nname: review\n---\nBUNDLE CONTENT",
       ".dsh/skills/review.md": "---\nname: review\n---\nFLAT CONTENT",
     });
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     const list = await catalog.list("s1");
     expect(list).toHaveLength(1);
     expect((await catalog.load("review", "s1"))?.content).toBe("BUNDLE CONTENT");
@@ -221,7 +221,7 @@ describe("createSkillCatalog discovery", () => {
       ".dsh/skills/review/SKILL.md": "---\nname: review\n---\nONE",
       ".dsh/skills/other/review/SKILL.md": "---\nname: review\n---\nTWO",
     });
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     expect(await catalog.list("s1")).toHaveLength(1);
     expect((await catalog.load("review", "s1"))?.content).toBe("ONE");
   });
@@ -230,7 +230,7 @@ describe("createSkillCatalog discovery", () => {
     const { sandbox } = fakeSandbox({
       ".dsh/skills/empty/SKILL.md": "---\nname: empty\n---\n   \n",
     });
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     expect(await catalog.list("s1")).toEqual([]);
   });
 
@@ -238,7 +238,7 @@ describe("createSkillCatalog discovery", () => {
     const { sandbox } = fakeSandbox({
       ".dsh/skills/tip/SKILL.md": "---\nname: Tip\n---\nTIP",
     });
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     expect((await catalog.load("tip", "s1"))?.name).toBe("Tip");
   });
 
@@ -247,7 +247,7 @@ describe("createSkillCatalog discovery", () => {
       ".dsh/skills/tip/SKILL.md":
         "---\nname: tip\ndescription: A tip\n---\n\nVERSION ONE\n",
     });
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     expect((await catalog.load("tip", "s1"))?.content).toContain("VERSION ONE");
 
     files.set(
@@ -265,7 +265,7 @@ describe("frontmatter flags + allowed-tools", () => {
         "---\nname: hidden\ndisable-model-invocation: true\n---\nHIDDEN",
       ".dsh/skills/visible/SKILL.md": "---\nname: visible\n---\nVISIBLE",
     });
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     const byName = new Map((await catalog.list("s1")).map((s) => [s.name, s]));
     expect(byName.get("hidden")?.modelInvocable).toBe(false);
     expect(byName.get("visible")?.modelInvocable).toBe(true);
@@ -277,7 +277,7 @@ describe("frontmatter flags + allowed-tools", () => {
         "---\nname: manual\nuser-invocable: false\n---\nMANUAL",
       ".dsh/skills/open/SKILL.md": "---\nname: open\n---\nOPEN",
     });
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     const byName = new Map((await catalog.list("s1")).map((s) => [s.name, s]));
     expect(byName.get("manual")?.userInvocable).toBe(false);
     expect(byName.get("open")?.userInvocable).toBe(true);
@@ -290,7 +290,7 @@ describe("frontmatter flags + allowed-tools", () => {
       ".dsh/skills/b/SKILL.md":
         "---\nname: b\nallowed-tools: [run_shell, file_read]\n---\nB",
     });
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     expect((await catalog.load("a", "s1"))?.allowedTools).toEqual([
       "Bash",
       "Edit",
@@ -324,7 +324,7 @@ describe("frontmatter flags + allowed-tools", () => {
 describe("skill tool", () => {
   function setup(initial: Record<string, string>) {
     const { sandbox } = fakeSandbox(initial);
-    const catalog = createSkillCatalog({ sandbox });
+    const catalog = createSkillCatalog({ sandbox, userId: "u1" });
     const state = createMemoryStateStore();
     const activations: Array<{ sessionId: string; scopes: string[] }> = [];
     const tool = createSkillTool({
