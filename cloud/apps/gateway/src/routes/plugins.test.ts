@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { plugins, users, type Db } from "@ovid/db";
 import type { QueueServices, PluginInstallJob } from "@ovid/queue";
@@ -7,6 +7,7 @@ import {
   pluginDtoSchema,
   pluginInstallResponseSchema,
   type PluginDto,
+  type PluginSourceInput,
 } from "@ovid/shared";
 import { buildGateway } from "../app.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
@@ -19,6 +20,77 @@ import {
   stubTickets,
   stubVerifier,
 } from "../test/stubs.js";
+
+/**
+ * The install route derives the canonical id by STAGING the source and
+ * adapting its manifest (the installer re-derives the same id). Tests must
+ * never hit the network, so `createSourceResolver` is replaced with a stub
+ * that writes a minimal manifest; the real `adaptPlugin` still runs. Paste
+ * sources use the REAL resolver (no egress) so the gateway covers the
+ * paste→manifest→canonical-id path end to end.
+ */
+vi.mock("@ovid/mcp", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@ovid/mcp")>();
+  const actualResolver = actual.createSourceResolver;
+  return {
+    ...actual,
+    createSourceResolver: () => ({
+      async resolve(input: PluginSourceInput) {
+        if (input.kind === "paste") {
+          // Real paste resolution (local files only): proves the emitted
+          // manifest adapts instead of failing as invalid_source.
+          return actualResolver().resolve(input);
+        }
+        if (input.kind === "github" && input.owner === "missing") {
+          throw new Error("GitHub tree request failed (404)");
+        }
+        const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+        const { tmpdir } = await import("node:os");
+        const { join } = await import("node:path");
+        const dir = await mkdtemp(join(tmpdir(), "ovid-gateway-plugin-"));
+
+        let author = "mcp";
+        let name = "plugin";
+        switch (input.kind) {
+          case "github":
+            author = input.owner;
+            name = input.repo;
+            // A source whose manifest identity deliberately differs from the
+            // owner/repo heuristic the old route used.
+            if (input.repo === "canonical-mismatch") {
+              author = "Acme Corp";
+              name = "Real Plugin";
+            }
+            break;
+          case "npm": {
+            const [scope, unscoped] = input.package.split("/");
+            if (scope!.startsWith("@") && unscoped !== undefined) {
+              author = scope!.slice(1);
+              name = unscoped;
+            } else {
+              name = input.package;
+            }
+            break;
+          }
+          case "zip":
+            author = "zip";
+            name = "plugin";
+            break;
+        }
+
+        await writeFile(join(dir, "plugin.json"), JSON.stringify({ name, author }), "utf8");
+        return {
+          stagingDir: dir,
+          bytes: 0,
+          provenance: { kind: input.kind },
+          discard: async () => {
+            await rm(dir, { recursive: true, force: true });
+          },
+        };
+      },
+    }),
+  };
+});
 
 // Plugin routes (P5 Task 15): tier gate at request time, queued-row + job
 // enqueue against the plugin-installs queue (fake queue, real priority rule),
@@ -163,6 +235,60 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway plugin routes (real postgres)", ()
     });
     expect(one.statusCode).toBe(200);
     expect(pluginDtoSchema.parse(one.json()).id).toBe(answer.installId);
+  });
+
+  it("derives the enqueued id from the adapted manifest, not the source shape", async () => {
+    const uid = testUid("plg-canon");
+    await seedTier(uid, "pro");
+    // The stub's manifest says "Acme Corp"/"Real Plugin"; the old heuristic
+    // would have enqueued "acme/canonical-mismatch" and the installer would
+    // refuse it with plugin_id_mismatch.
+    const source = {
+      kind: "github" as const,
+      owner: "acme",
+      repo: "canonical-mismatch",
+    };
+    const res = await install(uid, source);
+    expect(res.statusCode).toBe(202);
+
+    const add = adds.at(-1)!;
+    expect(add.data.pluginId).toBe("acme-corp/real-plugin");
+    const rows = (await db.$client.unsafe(
+      "SELECT plugin_id FROM plugins WHERE user_id = $1",
+      [uid],
+    )) as { plugin_id: string }[];
+    expect(rows.map((row) => row.plugin_id)).toEqual(["acme-corp/real-plugin"]);
+  });
+
+  it("paste source resolves to its canonical mcp/<label> id and enqueues", async () => {
+    const uid = testUid("plg-paste");
+    await seedTier(uid, "pro");
+    const source = {
+      kind: "paste" as const,
+      label: "My Tools",
+      config: JSON.stringify({ mcpServers: { x: { command: "npx", args: ["x-mcp"] } } }),
+    };
+    const res = await install(uid, source);
+    expect(res.statusCode).toBe(202);
+    expect(adds.at(-1)!.data.pluginId).toBe("mcp/my-tools");
+  });
+
+  it("unresolvable source → 400 invalid_source; enqueues nothing and writes no row", async () => {
+    const uid = testUid("plg-unres");
+    await seedTier(uid, "pro");
+    const before = adds.length;
+    const res = await install(uid, { kind: "github", owner: "missing", repo: "nope" });
+    expect(res.statusCode).toBe(400);
+    const body = res.json() as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("invalid_source");
+    expect(body.error.message).toContain("could not be resolved");
+
+    expect(adds.length).toBe(before); // no job
+    const rows = (await db.$client.unsafe(
+      "SELECT id FROM plugins WHERE user_id = $1",
+      [uid],
+    )) as { id: string }[];
+    expect(rows).toEqual([]); // no queued row either
   });
 
   it("DELETE enqueues uninstall; a pro-downgraded FREE user gets priority 2 (tier read at request time)", async () => {

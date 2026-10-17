@@ -1,7 +1,12 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { newId, plugins as pluginsRepo, users, type PluginRow } from "@ovid/db";
-import { PRO_REQUIRED_MESSAGE } from "@ovid/mcp";
+import {
+  adaptPlugin,
+  createSourceResolver,
+  PRO_REQUIRED_MESSAGE,
+  type SourceResolver,
+} from "@ovid/mcp";
 import {
   PLUGIN_INSTALL_JOB_NAME,
   type PluginInstallJob,
@@ -45,42 +50,41 @@ const configBodySchema = z
 
 const PLUGIN_NOT_FOUND = "Plugin not found.";
 
-/** Task 13's canonical segment slug (lowercase [a-z0-9._-]). */
-function slug(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+/**
+ * Resolver used to stage a source ONCE at enqueue so the row/job carry the
+ * same canonical `publisher/name` the Task-14 installer re-derives from the
+ * manifest. A source heuristic (owner/repo, package slug, `paste/<label>`)
+ * produced ids the installer refuses with `plugin_id_mismatch`.
+ *
+ * Lazily constructed so importing this module stays side-effect free; the
+ * resolver reads GITHUB_API_TOKEN from the environment on first use.
+ */
+let sourceResolver: Pick<SourceResolver, "resolve"> | undefined;
+
+function pluginSourceResolver(): Pick<SourceResolver, "resolve"> {
+  sourceResolver ??= createSourceResolver();
+  return sourceResolver;
 }
 
 /**
- * Best-effort canonical plugin id from the source (the installer re-derives
- * the authoritative id from the manifest). Mirrors the worker's catalog-tool
- * enqueue rule so both entry points agree.
+ * Derive the canonical plugin id the SAME way the installer will: stage the
+ * source with the runtime resolver and adapt its manifest. Mirrors the
+ * worker's catalog-tool enqueue path (mcpTools.ts `canonicalPluginId`).
+ *
+ * The staging tree is discarded immediately — this call only reads identity;
+ * the install transaction resolves the source again.
  */
-function pluginIdFor(source: PluginSourceInput): string {
-  switch (source.kind) {
-    case "github":
-      return `${slug(source.owner)}/${slug(source.repo)}`;
-    case "npm":
-      return source.package
-        .split("/")
-        .map(slug)
-        .join("/");
-    case "zip": {
-      let host = "zip";
-      let base = "plugin";
-      try {
-        const url = new URL(source.url);
-        host = slug(url.hostname) || "zip";
-        base = url.pathname.split("/").filter((p) => p !== "").pop() ?? "plugin";
-      } catch {
-        // Shape-only schema validation: fall back to a stable placeholder.
-      }
-      return `${host}/${slug(base.replace(/\.zip$/i, "")) || "plugin"}`;
-    }
-    case "paste":
-      return `paste/${slug(source.label)}`;
+async function canonicalPluginId(
+  resolver: Pick<SourceResolver, "resolve">,
+  source: PluginSourceInput,
+): Promise<string> {
+  const resolved = await resolver.resolve(source);
+  try {
+    return (await adaptPlugin(resolved.stagingDir)).pluginId;
+  } finally {
+    await resolved.discard().catch(() => {
+      // discard is idempotent/best-effort; identity was already read.
+    });
   }
 }
 
@@ -186,7 +190,23 @@ export function registerPluginRoutes(app: FastifyInstance, deps: GatewayDeps): v
     }
 
     const source = parsed.data.source;
-    const pluginId = pluginIdFor(source);
+
+    // Canonical id from the MANIFEST (never a source heuristic): the
+    // installer re-derives identity from the same manifest and refuses a
+    // mismatch (`plugin_id_mismatch`). An unresolvable/adapt-failing source
+    // is a 400 and enqueues NOTHING — no row, no job.
+    let pluginId: string;
+    try {
+      pluginId = await canonicalPluginId(pluginSourceResolver(), source);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return sendError(
+        reply,
+        400,
+        "invalid_source",
+        `The plugin source could not be resolved: ${reason}`,
+      );
+    }
     if (pluginId === "" || pluginId === "/" || pluginId.split("/").some((s) => s === "")) {
       return sendError(reply, 400, "invalid_source", "The plugin source has no usable identity.");
     }

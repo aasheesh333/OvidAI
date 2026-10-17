@@ -79,6 +79,15 @@ export interface SourceResolver {
   ): Promise<ResolvedSource>;
 }
 
+/**
+ * Publisher for a pasted/generic MCP config. `adaptPlugin` requires a
+ * non-empty publisher (a bare `plugin.json` without `author` is an
+ * `invalid_source`), and the Dart original's GenericMcpAdapter namespaces
+ * these definitions as `mcp/<sourceId>` — mirror that here so a paste
+ * resolves to the same canonical identity on every platform.
+ */
+export const PASTE_PLUGIN_PUBLISHER = "mcp";
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -577,7 +586,14 @@ export function createSourceResolver(deps: SourceResolverDeps = {}): SourceResol
     }
     const mcpJson = JSON.stringify({ mcpServers: servers }, null, 2);
     const pluginJson = JSON.stringify(
-      { name: input.label, mcpServers: servers },
+      {
+        name: input.label,
+        // adaptPlugin rejects a manifest without a publisher. Pasted configs
+        // carry no author of their own, so use the documented generic-MCP
+        // publisher (Dart GenericMcpAdapter parity: `mcp/<sourceId>`).
+        author: PASTE_PLUGIN_PUBLISHER,
+        mcpServers: servers,
+      },
       null,
       2,
     );

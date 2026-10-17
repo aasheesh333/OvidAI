@@ -10,10 +10,12 @@ import { createGuardedFetch, type GuardedFetch } from "../ssrf.js";
 import { buildTar, buildZip } from "./__fixtures__/builders.js";
 import { pluginSourceInputSchema as sharedSchema } from "@ovid/shared";
 import { pluginSourceInputSchema } from "./input.js";
+import { adaptPlugin } from "./manifest.js";
 import {
   MAX_METADATA_BYTES,
   MAX_PASTE_BYTES,
   MAX_PAYLOAD_BYTES,
+  PASTE_PLUGIN_PUBLISHER,
   PluginSourceError,
   createSourceResolver,
 } from "./sources.js";
@@ -510,6 +512,33 @@ describe("createSourceResolver — paste", () => {
     expect(resolved.provenance).toEqual({ kind: "paste" });
     expect(resolved.bytes).toBe(Buffer.byteLength(config, "utf8"));
     await resolved.discard();
+  });
+
+  it("emits an adapt-able manifest with the canonical mcp/<label> id", async () => {
+    const config = JSON.stringify({
+      mcpServers: { fetch: { command: "npx", args: ["fetch-mcp"] } },
+    });
+
+    const resolved = await createSourceResolver({ stagingRoot }).resolve({
+      kind: "paste",
+      label: "Demo Tools",
+      config,
+    });
+
+    try {
+      const pluginJson = JSON.parse(
+        await readFile(join(resolved.stagingDir, "plugin.json"), "utf8"),
+      ) as Record<string, unknown>;
+      expect(pluginJson.author).toBe(PASTE_PLUGIN_PUBLISHER);
+
+      // The enqueue path calls adaptPlugin on exactly this tree; without a
+      // publisher it failed as invalid_source before any job could enqueue.
+      const manifest = await adaptPlugin(resolved.stagingDir);
+      expect(manifest.pluginId).toBe("mcp/demo-tools");
+      expect(manifest.mcpServers.map((server) => server.name)).toEqual(["fetch"]);
+    } finally {
+      await resolved.discard();
+    }
   });
 
   it("accepts Codex TOML paste input", async () => {
