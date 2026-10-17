@@ -2,6 +2,11 @@ export * from "./env.js";
 export * from "./litellmAdmin.js";
 export * from "./alerts.js";
 export * from "./app.js";
+// Task 4: settings authority (Postgres) + the Redis db2 projection + the
+// ovid_plans math port shared with the (unmodified) Python pools hook.
+export * from "./planMath.js";
+export * from "./settings.js";
+export * from "./projection.js";
 
 import { Redis } from "ioredis";
 import type { FastifyInstance } from "fastify";
