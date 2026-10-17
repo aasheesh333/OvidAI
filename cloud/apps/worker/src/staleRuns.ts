@@ -47,14 +47,14 @@ export async function sweepStaleRuns(
     // Claim-then-emit (P10 Task 2): the conditional UPDATE is the race guard.
     // A concurrent sweep that listed the same row loses here and emits
     // nothing, so `run_failed` appears exactly once.
-    const claimed = await runs.finish(
-      deps.db,
-      run.id,
-      "failed",
-      "run_lost: stale sweep",
-    );
+    // The canonical code, NOT a decorated one (final review M3): settle's
+    // `classifyRunFailure` matches exact codes, so `"run_lost: stale sweep"`
+    // classified a crashed scheduler-fired occurrence as TERMINAL and the
+    // retry ladder never armed. The detail stays in the log.
+    const claimed = await runs.finish(deps.db, run.id, "failed", "run_lost");
     if (!claimed) continue;
     swept += 1;
+    console.warn("[staleRuns] swept run", { runId: run.id, detail: "run_lost: stale sweep" });
     const event = await deps.events.append(run.sessionId, "run_failed", {
       runId: run.id,
       code: "run_lost",

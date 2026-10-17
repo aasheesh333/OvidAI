@@ -103,13 +103,12 @@ and `R2-PROVISIONING.md`).
 - Sandbox uid block: `200000–209999` production (`220000–229999` staging).
   Env cgroups live at
   `/sys/fs/cgroup/ovid-sandboxes.slice/ovid-worker.service/sandbox-<uid>`.
-- The P10 chaos suite is on disk (`cloud/apps/load/src/chaos/scenarios/`):
-  Task-6 (`redis-q-restart`, `gateway-restart`, `postgres-restart`) and
-  Task-7 (`worker-kill`, `disk-pressure`, `clock-skew`, landed in `212aa82`).
-  `cloud/scripts/acceptance.sh` (Task 14) is also on disk (landed in
-  `a28d737`). Run one scenario with
-  `node cloud/apps/load/dist/chaosCli.js --scenario <name>`; they require the
-  staging composition.
+- The P10 chaos suite's Task-6 scenarios (`redis-q-restart`,
+  `gateway-restart`, `postgres-restart`) are on disk
+  (`cloud/apps/load/src/chaos/`); the Task-7 scenarios (`worker-kill`,
+  `disk-pressure`, `clock-skew`) and `cloud/scripts/acceptance.sh` (Task 14)
+  have **not landed** on this branch. Where a playbook would cite a missing
+  scenario, it cites the shipped test or mechanism instead and says so.
 
 ### 0.3 Common prelude
 
@@ -190,9 +189,7 @@ revision; any env edit that preceded the loop.
 drain) is pinned in `cloud/apps/worker/src/main.ts`; the stale-run recovery
 that rescues runs stranded by a crash is `cloud/apps/worker/src/staleRuns.ts`
 and its real-Postgres/real-Redis test `staleRuns.test.ts`. The P10
-`worker-kill` chaos scenario
-(`cloud/apps/load/src/chaos/scenarios/workerKill.ts`, landed in `212aa82`)
-exercises this crash path on staging.
+`worker-kill` chaos scenario has not landed on this branch.
 
 ---
 
@@ -672,8 +669,7 @@ need an owner decision.
 
 ## I-9. Browser pool exhaustion / memory alarm
 
-**Symptom.** Browser tools fail with `BrowserPoolBusyError` — "The browser
-pool is full … queued and timed out" or "The browser process died — retry";
+**Symptom.** Browser tools fail with admission timeouts / `browser_busy`;
 screencasts pause (`screencast:false` or ladder step-down); worker RSS near
 its 4 G unit cap; the P6 bench exits 1 with `VERDICT: REGRESSION — peak
 exceeds the planned-peak alarm`.
@@ -685,6 +681,7 @@ systemctl show ovid-worker -p MemoryCurrent,MemoryMax
 # Unit cap is 4294967296 (4 G); the browser pool's share is ~2 G.
 
 # Chromium/Lightpanda process tree under the worker
+WPID=$(systemctl show -p MainPID --value ovid-worker)
 ps -eo pid,ppid,rss,cmd --forest | grep -A20 -E "chromium|lightpanda" | head -40
 
 journalctl -u ovid-worker -n 100 --no-pager | grep -iE 'browser|screencast|lightpanda|EADDRINUSE'
@@ -729,8 +726,7 @@ the 4→3 lever permanently.
 
 **Evidence.** `cloud/deploy/BROWSERS.md` §(c) (bench output and budget math),
 §(g) (shutdown order, idle eviction); `cloud/scripts/browser-memory-bench.mjs`
-(alarm 1300 MB, exit codes); `cloud/packages/browser/src/pool.ts:47,262`
-(`BrowserPoolBusyError` — full/queue-timeout and process-death messages).
+(alarm 1300 MB, exit codes).
 
 ---
 
@@ -946,8 +942,6 @@ env files first and validate before restart.
 | Android upload/signing key | owner secret store | HARDENING C #2 (Play App Signing / upload-key rotation). Not a server secret. |
 | `OVID_MASTER_KEY` (64 hex) | `/opt/ovid-cloud/.env` + `/opt/ovid-cloud/worker.env` | Envelope KEK for BYOK (`byok_keys`) **and** browser storageState (`KEK = sha256(OVID_MASTER_KEY)`). Rotating it makes existing BYOK rows undecryptable and browser logins unreadable. Procedure: stop gateway+worker, generate `openssl rand -hex 32`, update BOTH files, restart; users must re-enter BYOK keys; browser state starts fresh (loud log, never a crash). High effort — schedule, do not improvise. |
 | `OVID_INTERNAL_TOKEN` | both env files | Gateway↔worker file service. Update both, restart gateway+worker; brief 401s on file reads. |
-| `OVID_INTERNAL_API_SECRET` (≥32 bytes) | `/opt/ovid-cloud/.env` (gateway + mint profile) **and** `/opt/ovid-cloud/worker.env` | HMAC-SHA256 for the internal mint API (gateway/worker → mint). All three holders must carry the **same** value: gateway `cloud/apps/gateway/src/env.ts:167`, worker `cloud/apps/worker/src/main.ts:269`, mint `cloud/apps/mint/src/env.ts:255`. A mismatch makes key minting fail with 401/409 `key_not_minted` and unattended runs lose their key. Generate `openssl rand -hex 32`, update all three files, then restart worker+gateway+mint together; verify with a real send and an unattended run. |
-| `OVID_ADMIN_MASTER_KEY` | `/opt/ovid-cloud/.env` (mint profile) | Bearer token for mint's `/admin` console (`cloud/apps/mint/src/adminRoutes.ts:47,79`; required at `cloud/apps/mint/src/env.ts:254`). Rotating it invalidates admin clients only — no user data or provider keys are re-encrypted. Update `.env`, restart mint, update the admin client's stored token; verify `/admin` with the new key and 401 with the old. |
 | `REDIS_Q_PASSWORD` | `/opt/ovid-cloud/.env` (compose) + `worker.env` (host) | Recreate `redis-q` with the new password and restart gateway/worker. Queue data survives (AOF volume); expect a short write outage. |
 | `REDIS_C_PASSWORD` | both env files | Recreate `redis-c`; cache loss is safe. |
 | R2 Access Key ID / Secret | both env files | Cloudflare R2 token (Object Read & Write on `ovid-cloud` only). Update both, restart gateway+worker, run `verify-r2.mjs` + `r2.live` suite. |
@@ -966,37 +960,9 @@ cp /opt/ovid-cloud/worker.env "/opt/ovid-cloud/worker.env.bak-$(date -u +%Y%m%dT
 sudo chmod 600 /opt/ovid-cloud/.env /opt/ovid-cloud/worker.env
 # 3. Validate the compose view before applying
 cd /opt/ovid-cloud/repo/cloud/deploy && docker compose -p ovid-cloud config -q
-# 4. Restart ONLY the consumers named in the table [OWNER]
-ROTATED="${ROTATED:?set ROTATED to the secret key name being rotated}"
-case "$ROTATED" in
-  OVID_MASTER_KEY|OVID_INTERNAL_TOKEN|REDIS_Q_PASSWORD|REDIS_C_PASSWORD|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY)
-    sudo systemctl restart ovid-worker
-    docker compose -p ovid-cloud up -d gateway
-    ;;
-  OVID_INTERNAL_API_SECRET)
-    sudo systemctl restart ovid-worker
-    docker compose -p ovid-cloud up -d gateway
-    docker compose -p ovid-cloud --profile mint up -d mint   # only if TS mint is active
-    ;;
-  OVID_ADMIN_MASTER_KEY)
-    docker compose -p ovid-cloud --profile mint up -d mint   # only if TS mint is active
-    ;;
-  LITELLM_MASTER_KEY|LITELLM_SALT_KEY)
-    docker compose -p ovid-gateway up -d litellm
-    ;;
-  POSTGRES_PASSWORD|DATABASE_URL)
-    sudo systemctl restart ovid-worker
-    docker compose -p ovid-cloud up -d gateway
-    # plus every live-stack consumer of that role (see the table row)
-    ;;
-  FIREBASE_PROJECT_ID|OVID_APPCHECK_APPS)
-    echo "no server restart: ship a coordinated client release" >&2
-    ;;
-  *)
-    echo "no restart recipe for $ROTATED — follow the table's row" >&2
-    exit 1
-    ;;
-esac
+# 4. Restart only the consumers named in the table [OWNER]
+sudo systemctl restart ovid-worker
+docker compose -p ovid-cloud up -d gateway
 # 5. Record: secret, date, operator, verification evidence (never the value)
 ```
 
@@ -1049,14 +1015,11 @@ docker exec ovid-cloud-redis-q-1 redis-cli --no-auth-warning -a "$REDIS_Q_PASSWO
   `sudo systemctl restart ovid-worker`.
 - No manual SQL is needed. If you must terminalize a row by hand, do it only
   as a last resort and with a dump first **[OWNER]** — the supported path
-  claims the row with the conditional `runs.finish(...)` **first**, then
-  appends `run_failed {code:"run_lost"}` to the stream and mirrors it; a raw
-  `UPDATE` skips both the claim and the events.
-- **One worker per host.** The shipped sweeper is list-then-claim (bounded to
-  100 rows per pass): `runs.finish` is a conditional `status='running'`
-  transition, so only the winner appends/mirrors and two concurrent sweeps
-  emit **exactly one** event per run. The one-worker rule exists for browser
-  ports 9400–9407 and cgroup ownership, not to prevent double emission.
+  emits `run_failed {code:"run_lost"}` to the stream **and** the mirror
+  before `runs.finish`, which a raw `UPDATE` would skip.
+- **One worker per host.** The shipped sweeper is list-then-terminalize
+  (bounded to 100 rows), not claim-based; two workers racing the same rows
+  could double-emit. That is why the one-worker rule is hard.
 
 **Verify.**
 
@@ -1083,8 +1046,7 @@ the terminal event via replay.
 test `staleRuns.test.ts`; the boot+60 s interval wiring in
 `cloud/apps/worker/src/main.ts`; BullMQ `attempts: 1` ruling in
 `cloud/packages/queue/src/queues.ts`. The P10 `worker-kill` chaos scenario
-(`cloud/apps/load/src/chaos/scenarios/workerKill.ts`, landed in `212aa82`)
-covers this recovery path on staging.
+has not landed on this branch.
 
 ---
 
@@ -1163,25 +1125,19 @@ lost-enqueue window, `FOR UPDATE` idempotence, retryable codes
 
 ## O-1. Quarterly backup/restore drill
 
-**Symptom.** The quarterly drill is due (also run it after the first
-timer-produced backup, or whenever a backup's restorability is in doubt).
-Prove a backup restores, not just that it was written. Full procedure:
+**Goal.** Prove a backup restores, not just that it was written. Run after
+the first timer-produced backup, then quarterly. Full procedure:
 `cloud/deploy/backup/README.md` → "Restore to a FOREIGN postgres (drill /
 disaster recovery)".
 
-**Diagnose (read-only).** Confirm a current backup exists and the archive is
-intact:
+**Steps.**
 
 ```bash
-# 1. A current backup exists and is intact (zstd -t only reads)
+# 1. A current backup exists and is intact
 TS="${TS:?set TS to a backup timestamp from: ls -1t /opt/ovid-backups/pg | head -3}"
 ls -1t /opt/ovid-backups/pg | head -3
 zstd -t "/opt/ovid-backups/pg/$TS/"*.dump.zst
-```
 
-**Act.**
-
-```bash
 # 2. Scratch restore target (loopback only; never the live port).
 #    NOTE: 5434 is the cloud postgres proxy once the stack is activated —
 #    use 5435 for the drill. (The 2026-10-16 pre-activation drill used 5434.)
@@ -1193,11 +1149,7 @@ docker exec ovid-restore-drill psql -U postgres -d postgres -q \
   -c 'CREATE ROLE litellm LOGIN;'
 zstd -dc "/opt/ovid-backups/pg/$TS/litellm.dump.zst" | \
   docker exec -i ovid-restore-drill psql -U postgres -d postgres -v ON_ERROR_STOP=1 -q
-```
 
-**Verify.**
-
-```bash
 # 4. Prove schema + data
 docker exec ovid-restore-drill psql -U postgres -d postgres -Atc \
   "SELECT count(*) FROM pg_tables WHERE schemaname='public'"       # expect > 0
@@ -1223,43 +1175,22 @@ had been running at all.
 
 ## O-2. Dependency updates
 
-**Symptom.** A scheduled update window, a security advisory, or `pnpm audit`
-failing on high/critical.
+**Goal.** Update workspace dependencies deliberately, with a build/test gate
+and no lockfile surprises in a docs-only lane. The lockfile is
+`cloud/pnpm-lock.yaml`; never hand-edit it, and never commit it from an
+unrelated task.
 
-**Diagnose (read-only).** Review what is outdated and read the changelogs
-before changing anything:
-
-```bash
-cd /opt/ovid-cloud/repo/cloud
-pnpm outdated
-git status --short pnpm-lock.yaml   # clean before you start
-```
-
-**Act.** `pnpm up` rewrites the production checkout's dependency tree, so it
-is **[OWNER]**. Prefer a separate checkout/worktree; run it here only with the
-owner in the channel.
+**Steps.**
 
 ```bash
 cd /opt/ovid-cloud/repo/cloud
 
-# 1. [OWNER] Review/choose updates deliberately (interactive)
+# 1. Review what is outdated (interactive; choose updates deliberately)
 pnpm up --interactive
 
 # 2. Reinstall exactly what the lockfile now records
 pnpm install --frozen-lockfile
-```
 
-**Rules.** One dependency family per commit; the lockfile is
-`cloud/pnpm-lock.yaml` — never hand-edit it, and never commit it from an
-unrelated task. Read the changelog for `bullmq`, `ioredis`, `postgres`,
-`fastify`, `playwright-core` (the playwright pin is exact `1.64.1` and a bump
-must re-run the screencast probe test — `BROWSERS.md` §(a)); never update
-`pnpm`/Node without re-running the rootfs smoke (**O-3**); never bump
-LiteLLM's image here (see **O-4**).
-
-**Verify.** All of the following must pass:
-
-```bash
 # 3. Security gate (fail on high/critical)
 pnpm audit --prod --audit-level high
 
@@ -1281,35 +1212,30 @@ for d in apps/* packages/*; do
 done
 ```
 
-**Acceptance smoke.** `cloud/scripts/acceptance.sh` is on disk (landed in
-`a28d737`): run `bash cloud/scripts/acceptance.sh --quick` before committing
-(`--quick` skips gates 5–7, the load/chaos/canary gates) and the full script
-before a release. Also run one staging smoke (`cloud/scripts/staging.sh up` →
-`live-check`) when the change touches runtime code.
+**Acceptance smoke.** When `cloud/scripts/acceptance.sh` lands (P10 Task
+14), run `bash cloud/scripts/acceptance.sh --quick` before committing and
+the full script before a release. Until then, the build/test/typecheck
+sequence above is the gate; do not cite a script that is not on disk.
 
-**Post-mortem hook.** Which dependency families changed, the lockfile diff
-size, which gate failed, and whether the change was reverted or rolled
-forward.
+**Rules.** One dependency family per commit; read the changelog for
+`bullmq`, `ioredis`, `postgres`, `fastify`, `playwright-core` (the
+playwright pin is exact `1.64.1` and a bump must re-run the screencast probe
+test — `BROWSERS.md` §(a)); never update `pnpm`/Node without re-running the
+rootfs smoke (**O-3**); never bump LiteLLM's image here (see **O-4**).
+
+**Verify.** Clean install from a fresh checkout, `pnpm -r build`, `pnpm -r
+test`, and one staging smoke (`cloud/scripts/staging.sh up` →
+`live-check`) when the change touches runtime code.
 
 ---
 
 ## O-3. Rootfs rebuild + pin
 
-**Symptom.** The monthly rebuild is due, a CVE affects the pinned toolchain
-(`cloud/deploy/rootfs/versions.env`), or a session reports
-`RootfsUnavailable`. Rebuild, then activate atomically and keep two
-revisions.
+**Goal.** Rebuild the sandbox rootfs monthly or when a CVE hits the pinned
+toolchain (`cloud/deploy/rootfs/versions.env`), then activate atomically and
+keep two revisions.
 
-**Diagnose (read-only).** Confirm the active revision and the pins you are
-about to rebuild:
-
-```bash
-readlink /opt/ovid-rootfs/current
-ls -1d /opt/ovid-rootfs/ubuntu-noble-min-*
-cat /opt/ovid-cloud/repo/cloud/deploy/rootfs/versions.env
-```
-
-**Act.** The pipeline is shipped; `build.sh` is docker-only and safe to run.
+**Pipeline (shipped; `build.sh` is docker-only and safe to run).**
 
 ```bash
 cd /opt/ovid-cloud/repo/cloud/deploy/rootfs
@@ -1330,6 +1256,10 @@ REVISION=3 bash build.sh
 sudo bash install.sh
 # Gate: "smoke-jail: OK (… node …, pnpm …, uv …)" and the gcc shim refusing
 # with exit 126.
+
+# 3. Gates
+readlink /opt/ovid-rootfs/current                 # ubuntu-noble-min-YYYYMMDD-r3
+ls -1d /opt/ovid-rootfs/ubuntu-noble-min-*        # exactly 2 revisions
 ```
 
 **Rollback (instant, no rebuild).**
@@ -1347,21 +1277,9 @@ scratch). `install.sh` refuses to install over an existing revision
 directory; bump `REVISION`. Host-gated suites must point `OVID_ROOTFS` at
 `/opt/ovid-rootfs/current`.
 
-**Verify.**
-
-```bash
-# 3. Gates
-readlink /opt/ovid-rootfs/current                 # ubuntu-noble-min-YYYYMMDD-r3
-ls -1d /opt/ovid-rootfs/ubuntu-noble-min-*        # exactly 2 revisions
-```
-
-`smoke-jail.sh` green (run by `install.sh`); a real session executes
+**Verify.** `smoke-jail.sh` green; `readlink`; a real session executes
 `node -e`, `python3 -V`, `pnpm -v`, `uv -V`, `git --version`; the gcc shim
 still refuses.
-
-**Post-mortem hook.** If the build/install/smoke fails: which pin or tool,
-the builder commit, whether two revisions remain, and whether the worker was
-restarted after the symlink flip.
 
 **Evidence.** `cloud/deploy/rootfs/{build.sh,install.sh,smoke-jail.sh}`,
 `versions.env`, DEPLOY.md §11 step 2, HARDENING H7. Current artifact:
@@ -1371,30 +1289,24 @@ restarted after the symlink flip.
 
 ## O-4. LiteLLM image pin / upgrade
 
-**Symptom.** LiteLLM runs `main-latest` (unpinned), an upstream security
-release needs a digest bump, or a recent pull changed behavior. Keep it on a
-pinned digest and upgrade deliberately. This playbook points at
-`HARDENING.md` item G; it does not duplicate it.
+**Goal.** Keep LiteLLM on a pinned digest and upgrade deliberately. This
+playbook points at `HARDENING.md` item G; it does not duplicate it.
 
-**Diagnose (read-only).** Capture what is running now and compare it with the
-compose pin:
+**Pin (owner, brief downtime).**
 
 ```bash
 cd /opt/ovid-gateway
+# 1. Capture the digest of what is running NOW
 docker inspect ghcr.io/berriai/litellm:main-latest --format '{{index .RepoDigests 0}}'
-docker inspect ovid-gateway-litellm-1 --format '{{.Image}}'
-```
-
-**Act — pin (owner, brief downtime).**
-
-```bash
-cd /opt/ovid-gateway
-# 1. Timestamped backup
+# 2. Timestamped backup
 cp docker-compose.yml "docker-compose.yml.bak-pin-$(date -u +%Y%m%dT%H%M%SZ)"
-# 2. Edit image: to ghcr.io/berriai/litellm@sha256:<digest>
-# 3. Validate + apply
+# 3. Edit image: to ghcr.io/berriai/litellm@sha256:<digest>
+# 4. Validate + apply
 docker compose -p ovid-gateway config -q
 docker compose -p ovid-gateway up -d litellm
+# 5. Verify identical bits + routes
+docker inspect ovid-gateway-litellm-1 --format '{{.Image}}'
+curl -sf http://127.0.0.1:4000/health/liveliness && echo ' LIVE'
 ```
 
 **Upgrade (deliberate).** `docker pull ghcr.io/berriai/litellm:main-latest`
@@ -1413,31 +1325,16 @@ docker compose -p ovid-gateway config -q    # must be silent before up
 docker compose -p ovid-gateway up -d litellm
 ```
 
-**Verify.**
-
-```bash
-docker inspect ovid-gateway-litellm-1 --format '{{.Image}}'
-curl -sf http://127.0.0.1:4000/health/liveliness && echo ' LIVE'
-# Then smoke a real chat completion / one agent run.
-```
-
-**Post-mortem hook.** Upstream vs local; digest before/after; whether a pull
-changed the digest; provider-status and migration state.
-
 **Evidence.** `cloud/deploy/HARDENING.md` G (full rationale and commands).
 
 ---
 
 ## O-5. Monitoring install / self-test
 
-**Symptom.** `@ovid/watch` is not installed or its timer is not firing, or
-the alert path has never been proven end to end. The on-box layer is
-`@ovid/watch`; the install, verification gate, and edge-behavior drill live
-in `cloud/deploy/monitoring/MONITORING.md`. The external layer (UptimeRobot)
-is `HARDENING.md` item F. Keep both: an on-box watcher cannot report a dead
-box.
-
-**Diagnose (read-only).**
+The on-box layer is `@ovid/watch`; the install, verification gate, and
+edge-behavior drill live in `cloud/deploy/monitoring/MONITORING.md`. The
+external layer (UptimeRobot) is `HARDENING.md` item F. Keep both: an on-box
+watcher cannot report a dead box.
 
 ```bash
 systemctl list-timers ovid-cloud-watch.timer          # NEXT <= 60 s
@@ -1445,21 +1342,8 @@ journalctl -u ovid-cloud-watch.service -n 20 --no-pager
 # expected: "[watch] pass: 6 checks, 0 alerts, 0 recoveries"
 ```
 
-**Act.** Install the unit/timer per **MONITORING.md** install steps, then
-prove the sink. `--self-test` sends one real alert; run it only with owner
-approval:
-
-```bash
-sudo /usr/bin/node /opt/ovid-cloud/repo/cloud/apps/watch/dist/main.js --self-test   # [OWNER]
-```
-
-**Verify.** `list-timers` shows the next run within 60 s; the journal shows
-the six-check pass line above; the self-test alert was received on the real
-sink (owner confirmation, recorded in MONITORING.md's install log).
-
-**Post-mortem hook.** If an alert did not arrive: which layer failed (on-box
-timer, check, or edge), the delivery credential (Telegram/webhook), and the
-timer's last successful pass.
+`--self-test` sends one real alert; run it only with owner approval and
+confirm receipt (**MONITORING.md** install step 3).
 
 ---
 
@@ -1518,5 +1402,6 @@ every `docker exec ovid-cloud-*`, `systemctl * ovid-worker`, cgroup reads,
 `nft list table inet ovid_sandbox`, `/workspaces` checks, the R2 live probe,
 and the rootfs smoke. Their syntax follows the shipped scripts/units and
 the commands already proven in DEPLOY.md / BROWSERS.md / R2-PROVISIONING.md.
-The Task-6 and Task-7 chaos scenarios and `acceptance.sh` are on disk but
-were not run here (the chaos scenarios require the staging composition).
+The Task-6 chaos scenarios are on disk but were not run (they require the
+staging composition); the Task-7 scenarios and `acceptance.sh` are not on
+this branch yet.

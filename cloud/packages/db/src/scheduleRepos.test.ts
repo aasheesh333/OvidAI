@@ -76,6 +76,30 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
     return run.id;
   }
 
+  /** Claim with the pinned routing context the production caller supplies. */
+  const claim = (
+    schedule: ScheduleRow,
+    runId: string,
+    opts: { scheduledFor?: Date; ranLate?: boolean } = {},
+  ) =>
+    scheduleRuns.claim(db, {
+      scheduleId: schedule.id,
+      scheduledFor: opts.scheduledFor ?? DUE,
+      runId,
+      ranLate: opts.ranLate ?? false,
+      sessionId: schedule.sessionId,
+      triggerKind: schedule.trigger.kind,
+    });
+
+  /** recordSkip with the same pinned routing context. */
+  const skip = (schedule: ScheduleRow, scheduledFor: Date = DUE) =>
+    scheduleRuns.recordSkip(db, {
+      scheduleId: schedule.id,
+      scheduledFor,
+      sessionId: schedule.sessionId,
+      triggerKind: schedule.trigger.kind,
+    });
+
   // -------------------------------------------------------------------------
 
   it("claim is the ledger: first claim wins with status running, the duplicate returns null", async () => {
@@ -84,12 +108,7 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
     const schedule = await seedSchedule(uid, session.id);
     const runId = await seedRun(session.id);
 
-    const first = await scheduleRuns.claim(db, {
-      scheduleId: schedule.id,
-      scheduledFor: DUE,
-      runId,
-      ranLate: false,
-    });
+    const first = await claim(schedule, runId);
     expect(first).not.toBeNull();
     expect(first!.status).toBe("running");
     expect(first!.runId).toBe(runId);
@@ -97,13 +116,10 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
     expect(first!.ranLate).toBe(false);
     expect(first!.startedAt).toBeInstanceOf(Date);
     expect(first!.finishedAt).toBeNull();
+    expect(first!.sessionId).toBe(session.id);
+    expect(first!.triggerKind).toBe("every");
 
-    const second = await scheduleRuns.claim(db, {
-      scheduleId: schedule.id,
-      scheduledFor: DUE,
-      runId: await seedRun(session.id),
-      ranLate: true,
-    });
+    const second = await claim(schedule, await seedRun(session.id), { ranLate: true });
     expect(second).toBeNull();
 
     const rows = await db
@@ -133,6 +149,8 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
           scheduledFor: DUE,
           runId,
           ranLate: false,
+          sessionId: schedule.sessionId,
+          triggerKind: schedule.trigger.kind,
         });
       });
 
@@ -162,21 +180,11 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
     const retryFuture = await seedSchedule(uid, session.id, { nextRunAt: null });
 
     const retryRun = await seedRun(session.id);
-    const claimed = await scheduleRuns.claim(db, {
-      scheduleId: retryDue.id,
-      scheduledFor: DUE,
-      runId: retryRun,
-      ranLate: false,
-    });
+    const claimed = await claim(retryDue, retryRun);
     await scheduleRuns.scheduleRetry(db, claimed!.id, new Date(NOW.getTime() - 60_000));
 
     const retryRunFuture = await seedRun(session.id);
-    const claimedFuture = await scheduleRuns.claim(db, {
-      scheduleId: retryFuture.id,
-      scheduledFor: DUE,
-      runId: retryRunFuture,
-      ranLate: false,
-    });
+    const claimedFuture = await claim(retryFuture, retryRunFuture);
     await scheduleRuns.scheduleRetry(db, claimedFuture!.id, LATER);
 
     const found = await schedules.claimDue(db, NOW, 100);
@@ -193,12 +201,7 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
     const session = await seedSession(uid);
     const schedule = await seedSchedule(uid, session.id);
     const runId = await seedRun(session.id);
-    const row = await scheduleRuns.claim(db, {
-      scheduleId: schedule.id,
-      scheduledFor: DUE,
-      runId,
-      ranLate: false,
-    });
+    const row = await claim(schedule, runId);
 
     // A running row is not retryable.
     expect(await scheduleRuns.claimRetry(db, row!.id, await seedRun(session.id))).toBeNull();
@@ -234,12 +237,7 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
     const sDone = await seedSchedule(uid, session.id, { title: "Done" });
     const runDone = await seedRun(session.id, "running");
     await runs.finish(db, runDone, "completed");
-    const done = await scheduleRuns.claim(db, {
-      scheduleId: sDone.id,
-      scheduledFor: DUE,
-      runId: runDone,
-      ranLate: true,
-    });
+    const done = await claim(sDone, runDone, { ranLate: true });
     await db
       .update(scheduleRunsTable)
       .set({ startedAt: new Date(NOW.getTime() - 120_000) })
@@ -247,12 +245,7 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
 
     const sLive = await seedSchedule(uid, session.id, { title: "Live" });
     const runLive = await seedRun(session.id, "running");
-    const live = await scheduleRuns.claim(db, {
-      scheduleId: sLive.id,
-      scheduledFor: DUE,
-      runId: runLive,
-      ranLate: false,
-    });
+    const live = await claim(sLive, runLive);
     await db
       .update(scheduleRunsTable)
       .set({ startedAt: new Date(NOW.getTime() - 120_000) })
@@ -261,24 +254,14 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
     // Orphans: the enqueue was lost, so run_id stays NULL (claim first with a
     // real run, then null it — the crash-remnant shape settle must recover).
     const sOrphan = await seedSchedule(uid, session.id, { title: "Orphan" });
-    const orphan = await scheduleRuns.claim(db, {
-      scheduleId: sOrphan.id,
-      scheduledFor: DUE,
-      runId: await seedRun(session.id),
-      ranLate: false,
-    });
+    const orphan = await claim(sOrphan, await seedRun(session.id));
     await db
       .update(scheduleRunsTable)
       .set({ runId: null, startedAt: new Date(NOW.getTime() - 120_000) })
       .where(eq(scheduleRunsTable.id, orphan!.id));
 
     const sFreshOrphan = await seedSchedule(uid, session.id, { title: "Fresh orphan" });
-    const fresh = await scheduleRuns.claim(db, {
-      scheduleId: sFreshOrphan.id,
-      scheduledFor: DUE,
-      runId: await seedRun(session.id),
-      ranLate: false,
-    });
+    const fresh = await claim(sFreshOrphan, await seedRun(session.id));
     await db
       .update(scheduleRunsTable)
       .set({ runId: null, startedAt: new Date(NOW.getTime() - 1_000) })
@@ -298,8 +281,9 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
     expect(settled.scheduleStatus).toBe("pending");
     expect(settled.scheduleTitle).toBe("Done");
     expect(settled.scheduleUserId).toBe(uid);
-    expect(settled.scheduleSessionId).toBe(session.id);
-    expect(settled.scheduleTrigger).toEqual({ kind: "every", seconds: 300 });
+    // Pinned at claim time (final review M1) — not the joined schedule row.
+    expect(settled.sessionId).toBe(session.id);
+    expect(settled.triggerKind).toBe("every");
     expect(settled.scheduleMaxRetries).toBe(0);
 
     const orphanRow = rows.find((r) => r.id === orphan!.id)!;
@@ -408,12 +392,7 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
     const uid = await seedUser();
     const session = await seedSession(uid);
     const schedule = await seedSchedule(uid, session.id);
-    const row = await scheduleRuns.claim(db, {
-      scheduleId: schedule.id,
-      scheduledFor: DUE,
-      runId: await seedRun(session.id),
-      ranLate: false,
-    });
+    const row = await claim(schedule, await seedRun(session.id));
 
     await scheduleRuns.appendAutoDenied(db, row!.id, {
       toolName: "shell",
@@ -457,11 +436,8 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
 
     const ids: string[] = [];
     for (let i = 0; i < 3; i++) {
-      const claimed: ScheduleRunRow | null = await scheduleRuns.claim(db, {
-        scheduleId: schedule.id,
+      const claimed: ScheduleRunRow | null = await claim(schedule, await seedRun(session.id), {
         scheduledFor: new Date(DUE.getTime() + i * 300_000),
-        runId: await seedRun(session.id),
-        ranLate: false,
       });
       ids.push(claimed!.id);
     }
@@ -483,12 +459,7 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
     const session = await seedSession(uid);
     const schedule = await seedSchedule(uid, session.id);
     const runId = await seedRun(session.id);
-    const claimed = await scheduleRuns.claim(db, {
-      scheduleId: schedule.id,
-      scheduledFor: DUE,
-      runId,
-      ranLate: false,
-    });
+    const claimed = await claim(schedule, runId);
 
     expect((await scheduleRuns.getByRunId(db, runId))!.id).toBe(claimed!.id);
     expect(await scheduleRuns.getByRunId(db, newId())).toBeNull();
@@ -499,16 +470,13 @@ describe.skipIf(!TEST_DATABASE_URL)("schedule repos against real postgres", () =
     const session = await seedSession(uid);
     const schedule = await seedSchedule(uid, session.id);
 
-    const first = await scheduleRuns.recordSkip(db, {
-      scheduleId: schedule.id,
-      scheduledFor: DUE,
-    });
+    const first = await skip(schedule);
     expect(first).not.toBeNull();
     expect(first!.status).toBe("skipped");
     expect(first!.runId).toBeNull();
+    expect(first!.sessionId).toBe(session.id);
+    expect(first!.triggerKind).toBe("every");
 
-    expect(
-      await scheduleRuns.recordSkip(db, { scheduleId: schedule.id, scheduledFor: DUE }),
-    ).toBeNull();
+    expect(await skip(schedule)).toBeNull();
   });
 });

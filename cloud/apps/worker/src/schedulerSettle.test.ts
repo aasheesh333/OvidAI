@@ -9,6 +9,7 @@ import {
   runs,
   scheduleRuns,
   schedules,
+  sessions,
   users,
   type Db,
   type ScheduleRow,
@@ -17,6 +18,7 @@ import {
 import { createRedisEventLog, type EventLog, type SystemBus } from "@ovid/events";
 import type { SessionEvent, SystemEvent } from "@ovid/shared";
 import type { Notifier } from "./notify.js";
+import { sweepStaleRuns } from "./staleRuns.js";
 import {
   SCHEDULE_ENQUEUE_LOST_MS,
   RETRYABLE_RUN_CODES,
@@ -323,6 +325,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         scheduledFor: new Date(opts.scheduledFor),
         runId: run.id,
         ranLate: opts.ranLate ?? false,
+        sessionId: schedule.sessionId,
+        triggerKind: schedule.trigger.kind,
       });
       expect(claimed).not.toBeNull();
       if (opts.finishRun !== undefined) {
@@ -900,6 +904,183 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(published.filter((p) => p.event.type === "schedule_run_succeeded")).toHaveLength(1);
       const srs = await scheduleRunsFor(sched.id);
       expect(srs[0]!.status).toBe("succeeded");
+    });
+
+    it("(k) M3: a crashed-mid-run occurrence swept by the real stale sweeper retries (canonical run_lost)", async () => {
+      const T0 = BASE;
+      const T = T0 + 600_000;
+      const sched = await seedSchedule(
+        { kind: "at", at: iso(T0 + 300_000) },
+        { at: T0, maxRetries: 2 },
+      );
+      await schedules.update(db, sched.id, { nextRunAt: null });
+      const seeded = await seedOccurrence(sched, {
+        scheduledFor: T0 + 300_000,
+        runStatus: "running",
+      });
+      // The production crash shape: the run started, the worker died.
+      await db.$client.unsafe(
+        "UPDATE runs SET status = 'running', started_at = $2 WHERE id = $1",
+        [seeded.runId, iso(T - 600_000)],
+      );
+
+      // The REAL sweeper (not a hand-written last_error) supplies the exact
+      // DB value settle classifies.
+      expect(
+        await sweepStaleRuns({ db, events, clock: () => new Date(T) }, { staleAfterMs: 300_000 }),
+      ).toBe(1);
+      const runRows = (await db.$client.unsafe("SELECT last_error FROM runs WHERE id = $1", [
+        seeded.runId,
+      ])) as Array<{ last_error: string | null }>;
+      expect(runRows[0]!.last_error).toBe("run_lost");
+
+      const { system, published } = stubSystem();
+      const { notifier } = stubNotifier();
+      expect(await settleScheduleRuns(makeDeps(T + 1_000, { system, notifier }))).toBe(1);
+
+      // Red-before-green: with the old decorated `"run_lost: stale sweep"`
+      // the classifier saw a terminal code and the ladder never armed.
+      const srs = await scheduleRunsFor(sched.id);
+      expect(srs[0]).toMatchObject({ status: "retry_scheduled", attempt: 2 });
+      expect(srs[0]!.retryAt!.toISOString()).toBe(iso(T + 1_000 + 30_000));
+      const failedEv = published.find((p) => p.event.type === "schedule_run_failed")!;
+      expect(failedEv.event.payload).toMatchObject({ code: "run_lost", willRetry: true });
+    });
+
+    it("(l) M1: a session/trigger rebind mid-run does not misroute settle's reporting", async () => {
+      const T0 = BASE;
+      const T = T0 + 600_000;
+      const sched = await seedSchedule({ kind: "at", at: iso(T0 + 300_000) }, { at: T0 });
+      await schedules.update(db, sched.id, { nextRunAt: null });
+      const seeded = await seedOccurrence(sched, {
+        scheduledFor: T0 + 300_000,
+        finishRun: "completed",
+        assistant: "Report ready",
+      });
+
+      // The user rebinds the schedule to another session AND makes it
+      // recurring while the run is in flight. Settle must still report into
+      // the session the run executed in and treat the occurrence as a
+      // one-off (the trigger kind pinned at claim time).
+      const rebound = await sessions.create(db, sched.userId, "rebound");
+      createdSessionIds.push(rebound.id);
+      await schedules.update(db, sched.id, {
+        sessionId: rebound.id,
+        trigger: { kind: "every", seconds: 300 },
+      });
+
+      const { system, published } = stubSystem();
+      const { notifier, succeeded } = stubNotifier();
+      expect(await settleScheduleRuns(makeDeps(T, { system, notifier }))).toBe(1);
+
+      // Summary read from the PINNED session (A), not the rebound one (B).
+      expect(published[0]!.event.type).toBe("schedule_run_succeeded");
+      expect(published[0]!.event.payload).toMatchObject({
+        scheduleRunId: seeded.scheduleRunId,
+        summary: "Report ready",
+        scheduleCompleted: true,
+      });
+      expect(succeeded).toEqual([
+        {
+          userId: sched.userId,
+          scheduleId: sched.id,
+          sessionId: sched.sessionId, // A — where the run actually happened
+          title: "Report",
+          summary: "Report ready",
+        },
+      ]);
+      // The note lands on A; B stays untouched.
+      expect(
+        appended.some(
+          (e) =>
+            e.sessionId === sched.sessionId &&
+            e.type === "system_note" &&
+            e.payload.scheduleRunId === seeded.scheduleRunId,
+        ),
+      ).toBe(true);
+      expect(appended.some((e) => e.sessionId === rebound.id)).toBe(false);
+      expect(await messagesFor(rebound.id)).toHaveLength(0);
+
+      // Pinned trigger kind: the occurrence was a one-off, so it completes
+      // even though the live schedule now says `every`.
+      const after = await scheduleRow(sched.id);
+      expect(after!.status).toBe("completed");
+      expect(after!.nextRunAt).toBeNull();
+    });
+
+    it("(m) M2: cancel/pause mid-run is not overwritten by settle (one-off success)", async () => {
+      const T0 = BASE;
+      const T = T0 + 600_000;
+
+      // (1) cancelled one-off: stays cancelled, result still recorded.
+      const cancelled = await seedSchedule({ kind: "at", at: iso(T0 + 300_000) }, { at: T0 });
+      await schedules.update(db, cancelled.id, { nextRunAt: null });
+      await seedOccurrence(cancelled, {
+        scheduledFor: T0 + 300_000,
+        finishRun: "completed",
+        assistant: "Report ready",
+      });
+      await schedules.update(db, cancelled.id, { status: "cancelled" });
+
+      // (2) paused one-off: stays paused (user reason kept).
+      const paused = await seedSchedule({ kind: "at", at: iso(T0 + 600_000) }, { at: T0 });
+      await schedules.update(db, paused.id, { nextRunAt: null });
+      await seedOccurrence(paused, {
+        scheduledFor: T0 + 600_000,
+        finishRun: "completed",
+        assistant: "Report ready",
+      });
+      await schedules.update(db, paused.id, { status: "paused", pausedReason: "user" });
+
+      const { system, published } = stubSystem();
+      const { notifier, succeeded } = stubNotifier();
+      expect(await settleScheduleRuns(makeDeps(T, { system, notifier }))).toBe(2);
+
+      const afterCancelled = await scheduleRow(cancelled.id);
+      expect(afterCancelled!.status).toBe("cancelled");
+      expect(afterCancelled!.lastResult!.status).toBe("succeeded");
+
+      const afterPaused = await scheduleRow(paused.id);
+      expect(afterPaused!.status).toBe("paused");
+      expect(afterPaused!.pausedReason).toBe("user");
+      expect(afterPaused!.lastResult!.status).toBe("succeeded");
+
+      // The occurrences themselves settled and notified.
+      expect(await scheduleRunsFor(cancelled.id)).toMatchObject([{ status: "succeeded" }]);
+      expect(await scheduleRunsFor(paused.id)).toMatchObject([{ status: "succeeded" }]);
+      expect(succeeded).toHaveLength(2);
+      // `scheduleCompleted` reflects the ACTUAL transition: neither schedule
+      // completed, so both events say false.
+      expect(
+        published
+          .filter((p) => p.event.type === "schedule_run_succeeded")
+          .map((p) => p.event.payload.scheduleCompleted),
+      ).toEqual([false, false]);
+    });
+
+    it("(n) M2: a cancelled recurring schedule is not re-paused by a final failure", async () => {
+      const T0 = BASE;
+      const T = T0 + 600_000;
+      const sched = await seedSchedule({ kind: "every", seconds: 300 }, { at: T0 });
+      await seedOccurrence(sched, {
+        scheduledFor: T0 + 300_000,
+        finishRun: "failed",
+        runError: "key_not_minted",
+      });
+      await schedules.update(db, sched.id, { status: "cancelled" });
+
+      const { system, published } = stubSystem();
+      const { notifier, failed } = stubNotifier();
+      expect(await settleScheduleRuns(makeDeps(T, { system, notifier }))).toBe(1);
+
+      const after = await scheduleRow(sched.id);
+      expect(after!.status).toBe("cancelled");
+      expect(after!.pausedReason).toBeNull();
+      expect(after!.lastResult!.status).toBe("failed");
+      // The failure is still reported (lastResult + push), but no bogus
+      // `paused` event claims a transition that did not happen.
+      expect(failed).toHaveLength(1);
+      expect(published.map((p) => p.event.type)).toEqual(["schedule_run_failed"]);
     });
   },
 );

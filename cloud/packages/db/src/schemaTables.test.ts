@@ -101,6 +101,8 @@ describe.skipIf(!TEST_DATABASE_URL)("scheduler schema against real postgres", ()
         id: newId(),
         scheduleId: schedule.id,
         scheduledFor: SCHEDULED_FOR,
+        sessionId: schedule.sessionId,
+        triggerKind: "every",
         status: "running",
         startedAt: SCHEDULED_FOR,
       })
@@ -122,6 +124,8 @@ describe.skipIf(!TEST_DATABASE_URL)("scheduler schema against real postgres", ()
         id: newId(),
         scheduleId: schedule.id,
         scheduledFor: SCHEDULED_FOR,
+        sessionId: schedule.sessionId,
+        triggerKind: "every",
         status: "running",
       });
     } catch (err) {
@@ -207,11 +211,20 @@ describe.skipIf(!TEST_DATABASE_URL)("scheduler schema against real postgres", ()
     const schedule = await seedSchedule(uid);
 
     await db.insert(scheduleRuns).values([
-      { id: newId(), scheduleId: schedule.id, scheduledFor: SCHEDULED_FOR, status: "succeeded" },
+      {
+        id: newId(),
+        scheduleId: schedule.id,
+        scheduledFor: SCHEDULED_FOR,
+        sessionId: schedule.sessionId,
+        triggerKind: "every",
+        status: "succeeded",
+      },
       {
         id: newId(),
         scheduleId: schedule.id,
         scheduledFor: new Date(SCHEDULED_FOR.getTime() + 300_000),
+        sessionId: schedule.sessionId,
+        triggerKind: "every",
         status: "succeeded",
       },
     ]);

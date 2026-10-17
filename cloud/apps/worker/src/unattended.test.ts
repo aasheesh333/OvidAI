@@ -100,6 +100,8 @@ describe.skipIf(!TEST_DATABASE_URL)("createUnattendedApprovalHook (real postgres
       scheduledFor: new Date(1_700_000_000_000),
       runId,
       ranLate: false,
+      sessionId,
+      triggerKind: "at",
     });
     expect(claimed).not.toBeNull();
 

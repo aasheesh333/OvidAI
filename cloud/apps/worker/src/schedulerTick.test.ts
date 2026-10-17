@@ -134,7 +134,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
     /** Fresh user + dedicated session + schedule via the domain service. */
     async function seedSchedule(
       trigger: ScheduleTrigger,
-      opts: { at: number; title?: string; description?: string; maxRetries?: number },
+      opts: {
+        at: number;
+        title?: string;
+        description?: string;
+        maxRetries?: number;
+        autonomy?: "safe" | "auto";
+      },
     ): Promise<ScheduleRow> {
       const userId = uid("w8u");
       // createSchedule only users.ensure's on the cron tier gate — the FK on
@@ -146,6 +152,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         description: opts.description ?? "check inbox",
         trigger,
         maxRetries: opts.maxRetries,
+        autonomy: opts.autonomy,
         clock: () => new Date(opts.at),
       });
       createdScheduleIds.push(row.id);
@@ -213,6 +220,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
         sessionId: sched.sessionId,
         userId: sched.userId,
         prompt: "[schedule: Morning] check inbox",
+        // H1: the schedule's autonomy reaches the run as a mode — `safe` is
+        // the only read-only gate on the run path.
+        autonomy: "safe",
+        mode: "safe",
         schedule: { scheduleId: sched.id, scheduleRunId: srs[0]!.id, autonomy: "safe" },
       });
       expect(agentAdds[0]!.opts.jobId).toBe(srs[0]!.runId);
@@ -417,6 +428,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
         scheduledFor: new Date(T0 + 600_000),
         runId: firstRun,
         ranLate: false,
+        sessionId: sched.sessionId,
+        triggerKind: "at",
       });
       expect(claimed).not.toBeNull();
       await runs.finish(db, firstRun, "failed", "model_transient_exhausted");
@@ -531,6 +544,35 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(settlePasses).toBe(settled); // stop() ended it
       expect(settled).toBeGreaterThanOrEqual(2);
       expect(settled).toBeLessThan(100); // 5 ms interval, ~100 ms window: sanity bound
+    });
+
+    it("(k) H1: schedule autonomy is projected onto the run mode (safe → read-only; auto → explicit opt-in)", async () => {
+      const T0 = BASE;
+      const safe = await seedSchedule({ kind: "every", seconds: 300 }, { at: T0 });
+      const auto = await seedSchedule(
+        { kind: "every", seconds: 300 },
+        { at: T0, autonomy: "auto" },
+      );
+      const { queues, adds } = stubQueues();
+      const { system } = stubSystem();
+
+      const report = await runSchedulerTick(makeDeps(T0 + 300_000, { queues, system }));
+      expect(report.fired).toBe(2);
+
+      const agentAdds = adds.filter((a) => a.queue === "agentRuns");
+      const dataFor = (scheduleId: string): Record<string, unknown> => {
+        const add = agentAdds.find(
+          (a) => (a.data as { schedule: { scheduleId: string } }).schedule.scheduleId === scheduleId,
+        );
+        expect(add).toBeDefined();
+        return add!.data as Record<string, unknown>;
+      };
+
+      // Load-bearing H1 pin: delete the mode projection in schedulerTick's
+      // enqueue and this assertion fails (the job then inherits the session's
+      // `auto` mode and a `safe` schedule can mutate).
+      expect(dataFor(safe.id)).toMatchObject({ autonomy: "safe", mode: "safe" });
+      expect(dataFor(auto.id)).toMatchObject({ autonomy: "auto", mode: "auto" });
     });
   },
 );

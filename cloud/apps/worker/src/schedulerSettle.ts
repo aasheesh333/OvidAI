@@ -202,7 +202,9 @@ async function settleSucceeded(
   row: SettleableRunRow,
   now: Date,
 ): Promise<boolean> {
-  const oneOff = row.scheduleTrigger.kind === "at";
+  // Pinned at claim time (final review M1): a mid-run session/trigger rebind
+  // must not change where this occurrence's result is reported.
+  const oneOff = row.triggerKind === "at";
   const outcome = await deps.db.transaction(async (tx) => {
     if (!(await claimSettleTransition(tx, row.id))) return null;
     const tdb = tx as unknown as Db;
@@ -212,7 +214,7 @@ async function settleSucceeded(
     // Summary = the run's answer: the newest session message when it is an
     // assistant message (the run processor wrote it before finishing the
     // run), else null (no answer to quote).
-    const { rows: newest } = await messages.page(tdb, row.scheduleSessionId, { limit: 1 });
+    const { rows: newest } = await messages.page(tdb, row.sessionId, { limit: 1 });
     const summary =
       newest.length > 0 && newest[0].role === "assistant" ? newest[0].content : null;
 
@@ -224,16 +226,24 @@ async function settleSucceeded(
         finishedAt: now.toISOString(),
         ranLate: row.ranLate,
       },
-      // A one-off is done; a recurring schedule just keeps ticking.
-      ...(oneOff ? { status: "completed", nextRunAt: null } : {}),
     });
-    return { summary };
+    // A one-off is done; a recurring schedule just keeps ticking. The status
+    // transition is conditional on the schedule still being `pending`
+    // (final review M2): a user cancel/pause mid-run wins.
+    let scheduleCompleted = false;
+    if (oneOff) {
+      scheduleCompleted = await schedules.transitionFromPending(tdb, row.scheduleId, {
+        status: "completed",
+        clearNextRunAt: true,
+      });
+    }
+    return { summary, scheduleCompleted };
   });
   if (outcome === null) return false; // lost the idempotence race
 
   // Transcript note (the assistant message itself was already written by the
   // run processor — this only marks the occurrence boundary).
-  await emit(deps, row.scheduleSessionId, "system_note", {
+  await emit(deps, row.sessionId, "system_note", {
     scheduleId: row.scheduleId,
     scheduleRunId: row.id,
     status: "succeeded",
@@ -246,7 +256,7 @@ async function settleSucceeded(
       scheduleRunId: row.id,
       scheduledFor: row.scheduledFor.toISOString(),
       summary: outcome.summary,
-      scheduleCompleted: oneOff,
+      scheduleCompleted: outcome.scheduleCompleted,
       autoDeniedApprovals: row.autoDenied.length,
     },
   });
@@ -254,7 +264,7 @@ async function settleSucceeded(
     deps.notifier.notifyScheduleSucceeded({
       userId: row.scheduleUserId,
       scheduleId: row.scheduleId,
-      sessionId: row.scheduleSessionId,
+      sessionId: row.sessionId,
       title: row.scheduleTitle,
       summary: outcome.summary,
     }),
@@ -306,9 +316,10 @@ async function settleFinalFailure(
   now: Date,
   verdict: FailureVerdict,
 ): Promise<boolean> {
-  const oneOff = row.scheduleTrigger.kind === "at";
-  const won = await deps.db.transaction(async (tx) => {
-    if (!(await claimSettleTransition(tx, row.id))) return false;
+  // Pinned at claim time (final review M1) — see settleSucceeded.
+  const oneOff = row.triggerKind === "at";
+  const outcome = await deps.db.transaction(async (tx) => {
+    if (!(await claimSettleTransition(tx, row.id))) return null;
     const tdb = tx as unknown as Db;
 
     await scheduleRuns.finish(tdb, row.id, "failed", verdict.code);
@@ -320,24 +331,30 @@ async function settleFinalFailure(
         finishedAt: now.toISOString(),
         ranLate: row.ranLate,
       },
-      // A failed one-off is terminal; a recurring schedule that exhausted its
-      // retries pauses for review (spec §8) — never silently keeps firing.
-      ...(oneOff
-        ? { status: "failed" }
-        : { status: "paused", pausedReason: "retries_exhausted" }),
     });
+    // A failed one-off is terminal; a recurring schedule that exhausted its
+    // retries pauses for review (spec §8) — never silently keeps firing.
+    // Both transitions are conditional on the schedule still being `pending`
+    // (final review M2): a user cancel/pause mid-run wins.
+    const transitioned = await schedules.transitionFromPending(
+      tdb,
+      row.scheduleId,
+      oneOff
+        ? { status: "failed" }
+        : { status: "paused", pausedReason: "retries_exhausted" },
+    );
     // The transcript row the user reads in the session (the note below is
     // the live-stream marker; this is the durable message).
     await messages.append(tdb, {
-      sessionId: row.scheduleSessionId,
+      sessionId: row.sessionId,
       role: "system",
       content: `Scheduled task failed: ${verdict.message ?? verdict.code}`,
     });
-    return true;
+    return { transitioned };
   });
-  if (!won) return false;
+  if (outcome === null) return false;
 
-  await emit(deps, row.scheduleSessionId, "system_note", {
+  await emit(deps, row.sessionId, "system_note", {
     scheduleId: row.scheduleId,
     scheduleRunId: row.id,
     status: "failed",
@@ -357,7 +374,7 @@ async function settleFinalFailure(
       autoDeniedApprovals: row.autoDenied.length,
     },
   });
-  if (!oneOff) {
+  if (!oneOff && outcome.transitioned) {
     await deps.system.publish(row.scheduleUserId, {
       type: "schedule_run_paused",
       scheduleId: row.scheduleId,
@@ -370,7 +387,7 @@ async function settleFinalFailure(
     deps.notifier.notifyScheduleFailed({
       userId: row.scheduleUserId,
       scheduleId: row.scheduleId,
-      sessionId: row.scheduleSessionId,
+      sessionId: row.sessionId,
       title: row.scheduleTitle,
       code: verdict.code,
       error: verdict.message,

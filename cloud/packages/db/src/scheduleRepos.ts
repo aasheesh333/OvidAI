@@ -235,12 +235,48 @@ export const schedules = {
       .returning();
     return row ?? null;
   },
+
+  /**
+   * Settle's schedule-level transition, CONDITIONAL on the schedule still
+   * being `pending` (final review M2). A user cancel or pause between fire
+   * and settle wins: the occurrence's `lastResult` is still recorded by the
+   * caller, but the schedule is never resurrected into `completed`/`failed`
+   * (or re-paused with a different reason) over that intent. Returns whether
+   * the transition applied.
+   */
+  async transitionFromPending(
+    db: DbOrTx,
+    scheduleId: string,
+    to: {
+      status: "completed" | "failed" | "paused";
+      pausedReason?: string;
+      clearNextRunAt?: boolean;
+    },
+  ): Promise<boolean> {
+    const [row] = await q(db)
+      .update(schedulesTable)
+      .set({
+        status: to.status,
+        ...(to.pausedReason !== undefined ? { pausedReason: to.pausedReason } : {}),
+        ...(to.clearNextRunAt === true ? { nextRunAt: null } : {}),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(schedulesTable.id, scheduleId), eq(schedulesTable.status, "pending")),
+      )
+      .returning({ id: schedulesTable.id });
+    return row !== undefined;
+  },
 };
 
 /**
  * One settleable occurrence plus the run/schedule context settle needs.
  * `schedule*` fields come from the joined schedule; `runStatus`/`runError`
  * are null for a lost-enqueue orphan (run_id null or the run row missing).
+ *
+ * The occurrence's OWN `sessionId`/`triggerKind` are the pinned columns on
+ * schedule_runs (final review M1) — settle must use those, never the live
+ * schedule row, for transcript/summary/push routing and the one-off decision.
  */
 export interface SettleableRunRow extends ScheduleRunRow {
   runStatus: string | null;
@@ -248,8 +284,6 @@ export interface SettleableRunRow extends ScheduleRunRow {
   scheduleStatus: string;
   scheduleTitle: string;
   scheduleUserId: string;
-  scheduleSessionId: string;
-  scheduleTrigger: ScheduleTrigger;
   scheduleMaxRetries: number;
 }
 
@@ -258,10 +292,21 @@ export const scheduleRuns = {
    * Claim an occurrence: INSERT … ON CONFLICT (schedule_id, scheduled_for)
    * DO NOTHING RETURNING. The first caller wins; null = another claimer owns
    * this occurrence (the ledger race).
+   *
+   * `sessionId`/`triggerKind` are REQUIRED: the caller pins the routing
+   * context the occurrence executes with (final review M1), so a later
+   * session rebind cannot misroute settle's reporting.
    */
   async claim(
     db: DbOrTx,
-    input: { scheduleId: string; scheduledFor: Date; runId: string; ranLate: boolean },
+    input: {
+      scheduleId: string;
+      scheduledFor: Date;
+      runId: string;
+      ranLate: boolean;
+      sessionId: string;
+      triggerKind: ScheduleTrigger["kind"];
+    },
   ): Promise<ScheduleRunRow | null> {
     const [row] = await q(db)
       .insert(scheduleRunsTable)
@@ -269,6 +314,8 @@ export const scheduleRuns = {
         id: newId(),
         scheduleId: input.scheduleId,
         scheduledFor: input.scheduledFor,
+        sessionId: input.sessionId,
+        triggerKind: input.triggerKind,
         runId: input.runId,
         status: "running",
         ranLate: input.ranLate,
@@ -284,7 +331,12 @@ export const scheduleRuns = {
   /** Record a skipped (missed-beyond-policy) occurrence under the same ledger. */
   async recordSkip(
     db: DbOrTx,
-    input: { scheduleId: string; scheduledFor: Date },
+    input: {
+      scheduleId: string;
+      scheduledFor: Date;
+      sessionId: string;
+      triggerKind: ScheduleTrigger["kind"];
+    },
   ): Promise<ScheduleRunRow | null> {
     const [row] = await q(db)
       .insert(scheduleRunsTable)
@@ -292,6 +344,8 @@ export const scheduleRuns = {
         id: newId(),
         scheduleId: input.scheduleId,
         scheduledFor: input.scheduledFor,
+        sessionId: input.sessionId,
+        triggerKind: input.triggerKind,
         status: "skipped",
       })
       .onConflictDoNothing({
@@ -325,15 +379,28 @@ export const scheduleRuns = {
   /**
    * Atomically turn a due retry into the running occurrence bound to the new
    * run. Conditional on status='retry_scheduled' — null = lost the race.
+   *
+   * `context` re-pins the occurrence's routing context for the retry run: the
+   * retry is a NEW run created against the schedule's current binding, so the
+   * occurrence must follow it (final review M1). Omitted = keep the pin.
    */
   async claimRetry(
     db: DbOrTx,
     scheduleRunId: string,
     runId: string,
+    context?: { sessionId: string; triggerKind: ScheduleTrigger["kind"] },
   ): Promise<ScheduleRunRow | null> {
     const [row] = await q(db)
       .update(scheduleRunsTable)
-      .set({ status: "running", runId, startedAt: new Date(), retryAt: null })
+      .set({
+        status: "running",
+        runId,
+        startedAt: new Date(),
+        retryAt: null,
+        ...(context !== undefined
+          ? { sessionId: context.sessionId, triggerKind: context.triggerKind }
+          : {}),
+      })
       .where(
         and(
           eq(scheduleRunsTable.id, scheduleRunId),
@@ -432,8 +499,6 @@ export const scheduleRuns = {
         scheduleStatus: schedulesTable.status,
         scheduleTitle: schedulesTable.title,
         scheduleUserId: schedulesTable.userId,
-        scheduleSessionId: schedulesTable.sessionId,
-        scheduleTrigger: schedulesTable.trigger,
         scheduleMaxRetries: schedulesTable.maxRetries,
       })
       .from(scheduleRunsTable)

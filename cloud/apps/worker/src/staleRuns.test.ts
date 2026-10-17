@@ -142,7 +142,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(await readMirror(stale.sessionId)).toEqual(evts);
       expect(await runRow(stale.runId)).toEqual({
         status: "failed",
-        lastError: "run_lost: stale sweep",
+        lastError: "run_lost",
       });
 
       // Idempotent: the next sweep finds nothing (the row is terminal now).
@@ -205,7 +205,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(await readMirror(stale.sessionId)).toEqual(evts);
       expect(await runRow(stale.runId)).toEqual({
         status: "failed",
-        lastError: "run_lost: stale sweep",
+        lastError: "run_lost",
       });
     });
 

@@ -777,6 +777,13 @@ export const scheduleRuns = pgTable(
       .references(() => schedules.id, { onDelete: "cascade" }),
     // The occurrence this row claims — half of the idempotency key.
     scheduledFor: timestamptz("scheduled_for").notNull(),
+    // P4 final review M1: the routing context is PINNED at claim time. Settle
+    // must report into the session (and apply the trigger semantics) the run
+    // actually executed with, even if the schedule was rebound mid-run.
+    // No FK: sessions have no DELETE route today (L3); a plain snapshot keeps
+    // the occurrence readable even if one is added later.
+    sessionId: char("session_id", { length: 36 }).notNull(),
+    triggerKind: text("trigger_kind").notNull().$type<ScheduleTrigger["kind"]>(),
     runId: char("run_id", { length: 36 }).references(() => runs.id),
     status: text("status").notNull().$type<ScheduleRunStatus>(),
     attempt: integer("attempt").notNull().default(1),

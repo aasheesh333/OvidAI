@@ -117,6 +117,15 @@ export async function fireScheduleOccurrence(
           sessionId: row.sessionId,
           userId: row.userId,
           prompt,
+          // H1 (final review): autonomy is the schedule's permission profile
+          // and MUST reach the run as a mode. `mode` is the only read-only
+          // gate on the run path (agent-core roster.modePolicy); without this
+          // projection a `safe` schedule silently inherited the session's
+          // mode — `auto` (default) mutated, `drive` ran with no prompts at
+          // all. `safe` = read-only; `auto` = the explicit mutation opt-in
+          // (spec §8), never widened by a `drive` session binding.
+          autonomy: row.autonomy as "safe" | "auto",
+          mode: row.autonomy === "safe" ? "safe" : "auto",
           schedule: {
             scheduleId: row.id,
             scheduleRunId,
@@ -173,7 +182,10 @@ export async function fireScheduleOccurrence(
           sessionId: row.sessionId,
           promptMessageId: message.id,
         });
-        const claimed = await scheduleRuns.claimRetry(tdb, retry.id, run.id);
+        const claimed = await scheduleRuns.claimRetry(tdb, retry.id, run.id, {
+          sessionId: row.sessionId,
+          triggerKind: row.trigger.kind,
+        });
         if (claimed === null) throw CLAIM_LOST; // lost the retry race: rollback
         postCommit = () => enqueue(row, run.id, claimed!.id, prompt);
         return "retry_fired";
@@ -205,6 +217,8 @@ export async function fireScheduleOccurrence(
           scheduledFor: due,
           runId: run.id,
           ranLate,
+          sessionId: row.sessionId,
+          triggerKind: row.trigger.kind,
         });
         if (claimed === null) throw CLAIM_LOST; // ledger race: rollback message+run
 
@@ -240,7 +254,12 @@ export async function fireScheduleOccurrence(
       }
 
       if (decision === "skipToNext") {
-        const skipped = await scheduleRuns.recordSkip(tdb, { scheduleId, scheduledFor: due });
+        const skipped = await scheduleRuns.recordSkip(tdb, {
+          scheduleId,
+          scheduledFor: due,
+          sessionId: row.sessionId,
+          triggerKind: row.trigger.kind,
+        });
         if (skipped === null) throw CLAIM_LOST; // someone else ledgered this occurrence
         const next = nextSlotAfterMissed(row.trigger, due, now);
         await schedules.update(tdb, scheduleId, { nextRunAt: next });

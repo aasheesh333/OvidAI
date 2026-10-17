@@ -19,6 +19,7 @@ import {
   wsServerMsg,
   type ApiError,
   type KeyProvider,
+  type KeyResolver,
   type InternalMintProvisioner,
   type ScheduleDto,
   type SystemEvent,
@@ -294,6 +295,17 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
     const keys: KeyProvider = {
       getKeyForUser: async (userId) => (keylessUsers.has(userId) ? null : "test-key"),
     };
+    // P9 Task 9 key seam: the run processor resolves through KeyResolver, not
+    // the legacy KeyProvider (the gateway still takes `keys` above). Without
+    // this the worker fails every job with "deps.keys.resolveForRun is not a
+    // function" before the scheduler flows can assert anything.
+    const runKeys: KeyResolver = {
+      async resolveForRun(userId) {
+        return keylessUsers.has(userId)
+          ? null
+          : { kind: "litellm", key: "test-key", baseUrl: "" };
+      },
+    };
     const mint: InternalMintProvisioner = {
       ensureKeyForUid: async () => ({ key: "test-key", tier: "free", baseUrl: "" }),
     };
@@ -347,7 +359,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       const processor = createAgentRunProcessor({
         db,
         events,
-        keys,
+        keys: runKeys,
         transport: createOpenAiTransport(),
         litellmBaseUrl: sse.baseUrl,
         defaultModel: "e2e-model",
@@ -545,6 +557,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         title: string;
         description: string;
         trigger: Record<string, unknown>;
+        autonomy?: "safe" | "auto";
         maxRetries?: number;
       },
     ): Promise<ScheduleDto> {
@@ -1108,6 +1121,10 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         title: "Approval needed",
         description: "run a shell command",
         trigger: { kind: "at", at: at.toISOString() },
+        // H1 (final review): `safe` is read-only and denies a mutating
+        // run_shell BEFORE the approval gate. The approval seam needs the
+        // explicit mutation opt-in.
+        autonomy: "auto",
       });
 
       // Capture the EXACT job the scheduler enqueues (no consumer here).
@@ -1132,6 +1149,10 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(captured).toHaveLength(1);
       const job = captured[0]!;
       expect(job.schedule).toMatchObject({ scheduleId: dto.id });
+      // H1: autonomy auto is projected onto the run mode (the explicit
+      // mutation opt-in); a `safe` schedule would enqueue `mode: "safe"` and
+      // the read-only gate would deny run_shell before this approval path.
+      expect(job.mode).toBe("auto");
       // The enqueue payload does NOT carry `unattended` — derivation is the
       // processor's job (job.data.schedule !== undefined).
       expect(job.unattended).toBeUndefined();
@@ -1180,7 +1201,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       const processor = createFullAgentRunProcessor({
         db,
         events,
-        keys: { getKeyForUser: async () => "test-key" },
+        keys: runKeys,
         redisQ: redis,
         sandbox: fakeSandbox,
         github: null,
