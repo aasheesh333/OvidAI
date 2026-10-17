@@ -57,8 +57,10 @@ usage: staging.sh <command> [options]
   worker-start [--env K=V ...]     start the host staging worker (root is
                                    required for bwrap/cgroups)
   worker-stop [graceful|kill]      stop the host staging worker
-  pressure-mount | pressure-unmount
-                                   reserved for P10 Task 7
+  pressure-mount [MB] | pressure-unmount
+                                   P10 Task 7: mount/remove a loopback ext4
+                                   fixture at /mnt/ovid-pressure (default
+                                   256MB; never fills the host disk)
   live-check [--baseline <file> | --write-baseline <file>]
                                    read-only live-stack health/StartedAt
                                    snapshot or unchanged assertion
@@ -701,11 +703,94 @@ cmd_mock_stop() {
 }
 
 cmd_pressure_mount() {
-  die "pressure-mount is implemented by P10 Task 7 — refusing to mount anything in Task 1"
+  # P10 Task 7: a 256 MB loopback ext4 fixture. It is the ONLY disk this
+  # script may fill; the host root, /opt, /workspaces* and every prod path are
+  # untouched. Fixed paths are deliberate: pressure-unmount never removes an
+  # arbitrary directory.
+  local mb="${1:-256}"
+  local mount_dir="/mnt/ovid-pressure"
+  local image="/var/tmp/ovid-pressure.img"
+
+  [[ "${EUID:-$(id -u)}" -eq 0 ]] \
+    || die "pressure-mount requires root (loop mount)"
+  [[ "$mb" =~ ^[0-9]+$ ]] || die "pressure-mount: size must be integer MB (got '$mb')"
+  (( mb >= 64 && mb <= 1024 )) \
+    || die "pressure-mount: size must be between 64 and 1024 MB (got ${mb})"
+  command -v mkfs.ext4 >/dev/null \
+    || die "pressure-mount: mkfs.ext4 not found (apt install e2fsprogs)"
+  command -v mount >/dev/null || die "pressure-mount: mount not found"
+  command -v mountpoint >/dev/null || die "pressure-mount: mountpoint not found (util-linux)"
+  command -v losetup >/dev/null || die "pressure-mount: losetup not found (util-linux)"
+
+  if mountpoint -q "$mount_dir"; then
+    log "pressure fixture already mounted at $mount_dir"
+    printf '%s\n' "$mount_dir"
+    return 0
+  fi
+
+  # Never overwrite an existing non-empty directory with a mount.
+  if [[ -d "$mount_dir" ]] && [[ -n "$(ls -A "$mount_dir" 2>/dev/null)" ]]; then
+    die "pressure-mount: $mount_dir is non-empty and not a mount — refusing to shadow it"
+  fi
+
+  mkdir -p "$mount_dir"
+  rm -f -- "$image"
+  log "creating ${mb}MB loopback ext4 at $image (host root untouched beyond this file)"
+  dd if=/dev/zero of="$image" bs=1M count="$mb" status=none \
+    || die "pressure-mount: dd failed"
+  mkfs.ext4 -q -F "$image" || {
+    rm -f -- "$image"
+    die "pressure-mount: mkfs.ext4 failed"
+  }
+
+  if ! mount -o loop,rw,nodev,nosuid,noexec "$image" "$mount_dir"; then
+    rm -f -- "$image"
+    die "pressure-mount: mount failed (loop devices may be unavailable in this container)"
+  fi
+
+  # Prove it is a separate filesystem before anything writes into it.
+  local mount_dev root_dev
+  mount_dev="$(stat -c %d "$mount_dir")"
+  root_dev="$(stat -c %d /)"
+  if [[ "$mount_dev" == "$root_dev" ]]; then
+    umount "$mount_dir" 2>/dev/null || true
+    rm -f -- "$image"
+    die "pressure-mount: $mount_dir is not a separate filesystem — refusing to fill the host"
+  fi
+
+  log "pressure fixture mounted at $mount_dir ($(df -Pm "$mount_dir" | awk 'NR==2 {print $4}')MB free)"
+  printf '%s\n' "$mount_dir"
 }
 
 cmd_pressure_unmount() {
-  die "pressure-unmount is implemented by P10 Task 7 — refusing to unmount anything in Task 1"
+  local mount_dir="/mnt/ovid-pressure"
+  local image="/var/tmp/ovid-pressure.img"
+
+  [[ "${EUID:-$(id -u)}" -eq 0 ]] \
+    || die "pressure-unmount requires root"
+  command -v mountpoint >/dev/null \
+    || die "pressure-unmount: mountpoint not found (util-linux)"
+
+  if mountpoint -q "$mount_dir"; then
+    # Only unmount OUR fixture: the loop device's backing file must be the
+    # fixed image (findmnt/losetup, with a /proc/mounts fallback for SOURCE).
+    local source_dev backing=""
+    source_dev="$(findmnt -n -o SOURCE --target "$mount_dir" 2>/dev/null || true)"
+    if [[ -z "$source_dev" ]]; then
+      source_dev="$(awk -v m="$mount_dir" '$2 == m {print $1}' /proc/mounts)"
+    fi
+    if [[ "$source_dev" == /dev/loop* ]]; then
+      backing="$(losetup -n -O BACK-FILE "$source_dev" 2>/dev/null || true)"
+    fi
+    [[ "$backing" == "$image" ]] \
+      || die "pressure-unmount: $mount_dir (source ${source_dev:-unknown}, backing ${backing:-unknown}) is not our $image — refusing to unmount a foreign mount"
+    log "unmounting $mount_dir"
+    umount "$mount_dir" || die "pressure-unmount: umount failed"
+  fi
+
+  rm -f -- "$image"
+  rmdir "$mount_dir" 2>/dev/null || true
+  log "pressure fixture removed ($image, $mount_dir)"
 }
 
 cmd_live_check() {
