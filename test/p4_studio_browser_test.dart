@@ -30,11 +30,11 @@ void main() {
     expect(src.contains("static const _defaultBrowserUrl = 'https://www.google.com'"), isTrue);
   });
 
-  test('the workspace folder picker lives only in Studio and Studio-mode composer', () {
-    final studio = File('lib/ui/studio_screen.dart').readAsStringSync();
-    expect(studio.contains('getDirectoryPath'), isTrue);
-    // Non-chat/non-studio screens must not open a directory picker.
+  test('the on-device workspace folder picker is gone (remote Studio)', () {
+    // P8 Task 15 removed the local git/working-folder UI: the server owns
+    // the workspace. No Studio surface may open a device directory picker.
     for (final f in [
+      'lib/ui/studio_screen.dart',
       'lib/ui/sidebar.dart',
       'lib/ui/shell.dart',
     ]) {

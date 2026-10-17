@@ -309,7 +309,7 @@ extension _SettingsStateIntegration on AppState {
             // draft back after its file is gone.
             AgentService.I.clearStudioStateForReset();
             await ComposerDraftStore.I.clearAll();
-            // Studio editor drafts and RepoCache uncommitted drafts share
+            // Studio editor drafts and legacy uncommitted drafts share
             // the same app-private record directory.
             await StudioDraftStore.I.deleteAll('');
           },

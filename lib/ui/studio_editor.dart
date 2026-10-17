@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -7,8 +6,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
-import '../core/agent_service.dart';
-import '../core/repo_cache.dart';
+import '../core/cloud/studio_remote_client.dart';
 import '../core/state.dart';
 import '../core/studio_drafts.dart';
 import '../core/theme.dart';
@@ -46,7 +44,13 @@ const double kStudioTabAccent = 2;
 
 /// The open-file tab strip.
 class StudioEditorTabs extends StatelessWidget {
-  const StudioEditorTabs({super.key});
+  const StudioEditorTabs({super.key, this.sessionId});
+
+  /// Test seam / explicit binding. Production callers pass the active server
+  /// session id; null falls back to [AppState].
+  final String? sessionId;
+
+  String get _sid => sessionId ?? AppState.I.activeSession?.id ?? '';
 
   Future<void> _askNewFile(BuildContext context) async {
     final ctrl = TextEditingController();
@@ -83,7 +87,7 @@ class StudioEditorTabs extends StatelessWidget {
     );
     ctrl.dispose();
     if (ok == null || ok.isEmpty) return;
-    AgentService.I.newStudioFile(ok);
+    StudioRemoteClient.I.newStudioFile(_sid, ok);
   }
 
   @override
@@ -91,7 +95,7 @@ class StudioEditorTabs extends StatelessWidget {
     // Only tab-list / active-tab changes rebuild the strip, not every agent
     // notification.
     return ValueListenableBuilder<StudioTabsState>(
-      valueListenable: AgentService.I.studioTabs,
+      valueListenable: StudioRemoteClient.I.tabsFor(_sid),
       builder: (context, studio, _) {
         final tabs = studio.openFiles;
         final active = studio.activePath;
@@ -120,7 +124,7 @@ class StudioEditorTabs extends StatelessWidget {
                                 context,
                                 p,
                                 p == active,
-                                AgentService.I.isStudioFileDirty(p),
+                                StudioRemoteClient.I.isStudioFileDirty(_sid, p),
                               ),
                           ],
                         ),
@@ -143,7 +147,7 @@ class StudioEditorTabs extends StatelessWidget {
   Widget _tab(BuildContext context, String path, bool selected, bool dirty) {
     final name = path.split('/').last;
     return StudioTapTarget(
-      onTap: () => AgentService.I.selectStudioFile(path),
+      onTap: () => StudioRemoteClient.I.selectStudioFile(_sid, path),
       label: '$name, tab${dirty ? ', unsaved changes' : ''}'
           '${selected ? ', active' : ''}',
       selected: selected,
@@ -188,7 +192,7 @@ class StudioEditorTabs extends StatelessWidget {
               icon: Icons.close,
               tooltip: 'Close tab $name',
               iconSize: 14,
-              onPressed: () => closeStudioTab(context, path),
+              onPressed: () => closeStudioTab(context, path, sessionId: _sid),
             ),
           ],
         ),
@@ -241,10 +245,12 @@ Future<StudioUnsavedChoice> showStudioUnsavedDialog(
 }
 
 /// Closes a tab, asking first when it holds an unsaved draft (F-071).
-Future<void> closeStudioTab(BuildContext context, String path) async {
-  final agent = AgentService.I;
-  if (!agent.isStudioFileDirty(path)) {
-    agent.closeStudioFile(path);
+Future<void> closeStudioTab(BuildContext context, String path,
+    {String? sessionId}) async {
+  final sid = sessionId ?? AppState.I.activeSession?.id ?? '';
+  final remote = StudioRemoteClient.I;
+  if (!remote.isStudioFileDirty(sid, path)) {
+    remote.closeStudioFile(sid, path);
     return;
   }
   final choice = await showStudioUnsavedDialog(
@@ -256,11 +262,11 @@ Future<void> closeStudioTab(BuildContext context, String path) async {
     case StudioUnsavedChoice.cancel:
       return;
     case StudioUnsavedChoice.discard:
-      agent.discardStudioDraft(path);
-      agent.closeStudioFile(path);
+      remote.discardStudioDraft(sid, path);
+      remote.closeStudioFile(sid, path);
     case StudioUnsavedChoice.save:
-      final text = agent.fileBuffer[path];
-      if (text == null || agent.studioConflictFor(path) != null) {
+      final text = remote.fileBuffer(sid)[path];
+      if (text == null || remote.conflicts(sid)[path] != null) {
         if (context.mounted) {
           showStudioToast(
             context,
@@ -271,14 +277,14 @@ Future<void> closeStudioTab(BuildContext context, String path) async {
         return;
       }
       try {
-        await agent.saveStudioFile(path, text);
+        await remote.saveStudioFile(sid, path);
       } catch (error) {
         if (context.mounted) {
           showStudioToast(context, StudioFailure.of(error).message, error: true);
         }
         return;
       }
-      agent.closeStudioFile(path);
+      remote.closeStudioFile(sid, path);
   }
 }
 
@@ -301,7 +307,10 @@ class _NoTabsHint extends StatelessWidget {
 
 /// The active file's editor: path header, find bar, and the code field.
 class StudioEditor extends StatefulWidget {
-  const StudioEditor({super.key});
+  const StudioEditor({super.key, this.sessionId});
+
+  /// Explicit server-session binding (tests); null falls back to [AppState].
+  final String? sessionId;
 
   @override
   State<StudioEditor> createState() => _StudioEditorState();
@@ -317,6 +326,9 @@ class _EditorPosition {
 typedef _BufferKey = (Map<String, String>, String);
 
 class _StudioEditorState extends State<StudioEditor> {
+  String get _sid => widget.sessionId ?? AppState.I.activeSession?.id ?? '';
+  StudioRemoteClient get _remote => StudioRemoteClient.I;
+
   /// One controller per open file, so a tab switch preserves that file's text,
   /// caret and scroll position instead of re-deriving them from the buffer.
   ///
@@ -339,14 +351,12 @@ class _StudioEditorState extends State<StudioEditor> {
   String? _boundPath;
   bool get _dirty {
     final key = _boundKey;
-    return key != null &&
-        AgentService.I.isStudioFileDirty(key.$2, buffer: key.$1);
+    return key != null && _remote.isStudioFileDirty(_sid, key.$2);
   }
 
   bool get _conflict {
     final key = _boundKey;
-    return key != null &&
-        AgentService.I.studioConflictFor(key.$2, buffer: key.$1) != null;
+    return key != null && _remote.conflicts(_sid)[key.$2] != null;
   }
 
   bool _applyingExternal = false;
@@ -365,28 +375,18 @@ class _StudioEditorState extends State<StudioEditor> {
   List<Object?>? _bindInputs;
 
   List<Object?> _currentBindInputs(StudioTabsState studio) {
-    final cache = RepoCache.I;
-    final session = AppState.I.activeSession;
     final path = studio.activePath;
     return [
       studio,
-      path == null ? null : cache.files[path],
-      cache.boundSessionId,
-      cache.workspaceFolder,
-      cache.repoFull,
-      cache.defaultBranch,
-      session?.id,
-      session?.workspaceFolder,
-      session?.repo,
-      session?.branch,
+      path == null ? null : _remote.fileBuffer(_sid)[path],
+      _sid,
     ];
   }
 
   @override
   void initState() {
     super.initState();
-    AgentService.I.studioTabs.addListener(_onServiceChanged);
-    RepoCache.I.addListener(_onServiceChanged);
+    _remote.tabsFor(_sid).addListener(_onServiceChanged);
     AppState.I.addListener(_onServiceChanged);
     _findCtrl.addListener(_onQueryChanged);
     _bind(notify: false);
@@ -395,8 +395,7 @@ class _StudioEditorState extends State<StudioEditor> {
 
   @override
   void dispose() {
-    AgentService.I.studioTabs.removeListener(_onServiceChanged);
-    RepoCache.I.removeListener(_onServiceChanged);
+    _remote.tabsFor(_sid).removeListener(_onServiceChanged);
     AppState.I.removeListener(_onServiceChanged);
     _findCtrl.removeListener(_onQueryChanged);
     for (final entry in _buffers.entries) {
@@ -429,7 +428,7 @@ class _StudioEditorState extends State<StudioEditor> {
     if (!mounted) return;
     // May publish a studioTabs change (and re-enter here) for a session
     // switch that only notified AppState; the input check below dedupes.
-    final studio = AgentService.I.syncStudioTabs();
+    final studio = _remote.tabsState(_sid);
     final inputs = _currentBindInputs(studio);
     if (_bindInputs != null && listEquals(inputs, _bindInputs)) return;
     _bind(notify: true);
@@ -441,7 +440,7 @@ class _StudioEditorState extends State<StudioEditor> {
     final ctrl = _buffers[key];
     if (ctrl != null && !_applyingExternal && key.$1[key.$2] != ctrl.text) {
       _edits[key] = (_edits[key] ?? 0) + 1;
-      AgentService.I.updateStudioDraft(key.$1, key.$2, ctrl.text);
+      _remote.updateStudioDraft(_sid, key.$2, ctrl.text);
     }
     if (_findOpen) _recomputeMatches();
     _refresh();
@@ -449,7 +448,7 @@ class _StudioEditorState extends State<StudioEditor> {
 
   /// True when [key] is shown as an editable text field.
   bool _editable(_BufferKey key) {
-    if (AgentService.I.studioGuardFor(key.$2) != null) return false;
+    if (_remote.guardFor(_sid, key.$2) != null) return false;
     final text = key.$1[key.$2] ?? '';
     if (looksBinaryText(text)) return false;
     return text.length <= kStudioViewerThreshold || _editAnyway.contains(key);
@@ -459,13 +458,14 @@ class _StudioEditorState extends State<StudioEditor> {
   /// bucket (F-077). A closed tab that still holds a draft keeps its
   /// controller so caret and undo come back with it.
   void _prune() {
-    final a = AgentService.I;
-    final open = a.studioOpenFiles.toSet();
+    final buffer = _remote.fileBuffer(_sid);
+    final open = _remote.openFiles(_sid).toSet();
     final stale = [
       for (final key in _buffers.keys)
-        if (!identical(key.$1, a.fileBuffer) ||
-            !(open.contains(key.$2) || a.isStudioFileDirty(key.$2)) ||
-            a.studioGuardFor(key.$2) != null)
+        if (!identical(key.$1, buffer) ||
+            !(open.contains(key.$2) ||
+                _remote.isStudioFileDirty(_sid, key.$2)) ||
+            _remote.guardFor(_sid, key.$2) != null)
           key,
     ];
     if (stale.isEmpty) return;
@@ -489,14 +489,13 @@ class _StudioEditorState extends State<StudioEditor> {
     SchedulerBinding.instance.ensureVisualUpdate();
   }
 
-  /// Re-points the editor at [AgentService.activeFilePath].
+  /// Re-points the editor at the active remote file.
   ///
   /// Never called from `build` — that was the source of the "controller mutated
   /// during build" and "caret dumped at EOF" pair of bugs.
   void _bind({required bool notify}) {
-    final studio = AgentService.I.studioTabs.value;
+    final studio = _remote.tabsState(_sid);
     _bindInputs = _currentBindInputs(studio);
-    final a = AgentService.I;
     final path = studio.activePath;
     _prune();
 
@@ -511,31 +510,29 @@ class _StudioEditorState extends State<StudioEditor> {
     final switched = _boundKey != key;
     _boundPath = path;
     _boundKey = key;
-    if (a.studioGuardFor(path) != null) {
+    if (_remote.guardFor(_sid, path) != null) {
       if (notify) _refresh();
       return;
     }
 
-    final initial = a.fileBuffer[path] ?? RepoCache.I.files[path] ?? '';
-    a.ensureStudioBaseline(key.$1, path, initial);
+    final initial = _remote.fileBuffer(_sid)[path] ?? '';
+    _remote.ensureStudioBaseline(_sid, path, initial);
     final ctrl = _bufferFor(key, initial);
-    final cache = RepoCache.I;
-    final session = AppState.I.activeSession;
-    if (cache.boundSessionId == session?.id &&
-        cache.workspaceFolder == session?.workspaceFolder &&
-        (session?.repo == null || cache.repoFull == session?.repo) &&
-        (session?.branch == null || cache.defaultBranch == session?.branch)) {
-      final cached = cache.files[path];
-      if (cached != _cacheContents[key]) {
-        _cacheContents[key] = cached;
-        if (cached != null && cached != ctrl.text) {
-          // Repo sync or an agent write: the bucket keeps a draft and
-          // records a conflict; a clean buffer takes the new content.
-          a.applyExternalStudioContent(key.$1, path, cached);
+    final cached = _remote.fileBuffer(_sid)[path];
+    if (cached != _cacheContents[key]) {
+      _cacheContents[key] = cached;
+      if (cached != null && cached != ctrl.text) {
+        // The remote bucket changed under a clean buffer (server-side agent
+        // write or a conflict resolution): adopt it. A dirty buffer keeps
+        // its draft and renders the conflict bar instead.
+        if (!_dirty) {
+          final previous = ctrl.selection.isValid ? ctrl.selection.start : 0;
+          _applyText(ctrl, cached, math.min(previous, cached.length));
+          _edits[key] = (_edits[key] ?? 0) + 1;
         }
       }
     }
-    final conflict = a.studioConflictFor(path, buffer: key.$1);
+    final conflict = studio.conflicts[path];
     if (conflict != _seenConflicts[key]) {
       // A save admitted before this conflict must not publish.
       _seenConflicts[key] = conflict;
@@ -571,9 +568,8 @@ class _StudioEditorState extends State<StudioEditor> {
     _bufferListeners[key] = listener;
     _undoControllers[key] = UndoHistoryController()..addListener(_onUndoChanged);
     _buffers[key] = ctrl;
-    _cacheContents[key] = RepoCache.I.files[key.$2];
-    _seenConflicts[key] =
-        AgentService.I.studioConflictFor(key.$2, buffer: key.$1);
+    _cacheContents[key] = _remote.fileBuffer(_sid)[key.$2];
+    _seenConflicts[key] = _remote.tabsState(_sid).conflicts[key.$2];
     return ctrl;
   }
 
@@ -675,40 +671,12 @@ class _StudioEditorState extends State<StudioEditor> {
     final key = _boundKey;
     final ctrl = _ctrl;
     if (path == null || ctrl == null || key == null || _conflict) return;
-    final text = ctrl.text;
     final edit = _edits[key];
-    final binding = RepoCache.I.bindingGeneration;
     try {
-      // Freeze ownership before resolving the root. Disk write and publication
-      // then share one turn; an obsolete resolver cannot target another owner.
-      final session = AppState.I.activeSession;
-      if (session == null || !identical(key.$1, AgentService.I.fileBuffer)) return;
-      final pinned = session.workspaceFolder;
-      final root = pinned != null && Directory(pinned).existsSync()
-          ? Directory(pinned)
-          : await AppState.I.workspaceDirForSession(session.sandboxId ?? session.id);
-      if (!mounted || binding != RepoCache.I.bindingGeneration ||
-          key != _boundKey || edit != _edits[key] ||
-          _conflict || ctrl.text != text ||
-          !identical(key.$1, AgentService.I.fileBuffer)) {
-        return;
-      }
-      final safe = AgentService.containedPath(root, path);
-      if (safe == null) throw StateError('Path escapes workspace or uses a symlink: $path');
-      final file = File(safe);
-      file.parent.createSync(recursive: true);
-      if (AgentService.containedPath(root, path) != safe) throw StateError('Workspace path changed while saving');
-      file.writeAsStringSync(text);
-      final cache = RepoCache.I;
-      if (binding == cache.bindingGeneration &&
-          (cache.boundSessionId == null || cache.boundSessionId == session.id) &&
-          (session.repo == null || cache.repoFull == session.repo) &&
-          (session.branch == null || cache.defaultBranch == session.branch) &&
-          (cache.workspaceFolder == null || cache.workspaceFolder == session.workspaceFolder) &&
-          (cache.repoFull != null || cache.files.containsKey(path))) {
-        cache.write(path, text);
-        cache.didSaveWorkspaceFile(path, text);
-      }
+      // The PUT carries the sha256 baseline captured at open time. A 409
+      // records the conflict in the remote bucket, which renders the
+      // resolution bar above.
+      await _remote.saveStudioFile(_sid, path);
     } catch (error) {
       if (mounted) {
         showStudioToast(context, StudioFailure.of(error).message, error: true);
@@ -716,10 +684,7 @@ class _StudioEditorState extends State<StudioEditor> {
       return;
     }
     if (!mounted) return;
-    if (binding != RepoCache.I.bindingGeneration || key != _boundKey || edit != _edits[key]) return;
-    // The bytes on disk are now [text]: that is the new baseline. A newer
-    // keystroke (edit changed) returned above and stays a draft.
-    AgentService.I.markStudioFileSaved(key.$1, path, text);
+    if (key != _boundKey || edit != _edits[key]) return;
     showStudioToast(context, 'Saved ${path.split('/').last} to the workspace');
   }
 
@@ -802,7 +767,7 @@ class _StudioEditorState extends State<StudioEditor> {
   /// Placeholder for a file that is not edited as text.
   Widget _placeholder(_BufferKey key) {
     final path = key.$2;
-    final guard = AgentService.I.studioGuardFor(path);
+    final guard = _remote.guardFor(_sid, path);
     final text = key.$1[path] ?? '';
     if (guard?.kind == StudioFileGuardKind.tooLarge) {
       return _TooLargeView(path: path, bytes: guard!.bytes);
@@ -831,7 +796,7 @@ class _StudioEditorState extends State<StudioEditor> {
         final key = _boundKey!;
         _edits[key] = (_edits[key] ?? 0) + 1;
         _seenConflicts[key] = null;
-        AgentService.I.resolveStudioConflict(key.$1, key.$2, keepDraft: true);
+        _remote.resolveStudioConflict(_sid, key.$2, keepDraft: true);
       }, child: const Text('Keep draft')),
       TextButton(onPressed: () {
         final key = _boundKey!;
@@ -839,7 +804,7 @@ class _StudioEditorState extends State<StudioEditor> {
         _seenConflicts[key] = null;
         // The bucket swaps the buffer; _bind applies it to the controller
         // with the caret clamped.
-        AgentService.I.resolveStudioConflict(key.$1, key.$2, keepDraft: false);
+        _remote.resolveStudioConflict(_sid, key.$2, keepDraft: false);
       }, child: const Text('Use external')),
     ],
   );
@@ -847,9 +812,10 @@ class _StudioEditorState extends State<StudioEditor> {
   Widget _header(String path, TextEditingController? ctrl) {
     final pos = ctrl == null ? null : _positionOf(ctrl);
     final conflict = _conflict;
-    final guard = AgentService.I.studioGuardFor(path);
+    final guard = _remote.guardFor(_sid, path);
     final binary = guard?.binary == true ||
-        (ctrl == null && looksBinaryText(AgentService.I.fileBuffer[path] ?? ''));
+        (ctrl == null &&
+            looksBinaryText(_remote.fileBuffer(_sid)[path] ?? ''));
     final name = path.split('/').last;
     final dir = path.contains('/')
         ? path.substring(0, path.lastIndexOf('/'))

@@ -26,12 +26,9 @@ import 'state.dart';
 import 'usage_attempt.dart';
 import 'usage_attempt_recorder.dart';
 import 'grant_store.dart';
-import 'global_repo_registry.dart';
 import 'distribution.dart';
 import 'webview_pool.dart';
 import 'github_service.dart';
-import 'repo_cache.dart';
-import 'studio_drafts.dart';
 import 'mcp_service.dart';
 import 'mcp_catalog_tools.dart';
 import 'session_ledger.dart';
@@ -54,7 +51,6 @@ import 'plugin_registry.dart';
 import 'tool_usage_store.dart';
 import 'plugin_runtime.dart';
 import 'plugin_source_resolver.dart';
-import 'pty_service.dart';
 import 'skills.dart';
 import 'commands.dart';
 import 'compaction/compaction_checkpoint.dart';
@@ -69,6 +65,7 @@ import 'image_studio.dart';
 import 'image_task.dart';
 import 'ovid_cloud_service.dart';
 import 'cloud/agent_surface.dart';
+import 'cloud/studio_remote_client.dart';
 
 /// A persistent browser tab — owns its WebView controller lazily so the
 /// page state survives across BrowserScreen open/close cycles.
@@ -162,56 +159,6 @@ class BrowserTab {
     : desktopMode = desktopMode ?? AppState.I.browserDesktopMode;
 }
 
-/// Snapshot of the active session's Studio tabs (see
-/// [AgentService.studioTabs]). Buffers compare by identity: a changed map or
-/// content string means something rewrote them.
-@immutable
-class StudioTabsState {
-  const StudioTabsState({
-    required this.openFiles,
-    required this.activePath,
-    required this.buffer,
-    required this.activeContent,
-    this.dirtyPaths = const [],
-    this.conflicts = const {},
-    this.guardedPaths = const [],
-  });
-
-  final List<String> openFiles;
-  final String? activePath;
-  final Map<String, String> buffer;
-  final String? activeContent;
-
-  /// Unsaved drafts, pending external-content conflicts and placeholder
-  /// (binary / too large) paths of the bucket. Part of the snapshot so the
-  /// tab strip's dirty dots and the editor's conflict / placeholder views
-  /// refresh when only the draft state changed.
-  final List<String> dirtyPaths;
-  final Map<String, String> conflicts;
-  final List<String> guardedPaths;
-
-  @override
-  bool operator ==(Object other) =>
-      other is StudioTabsState &&
-      other.activePath == activePath &&
-      identical(other.buffer, buffer) &&
-      identical(other.activeContent, activeContent) &&
-      listEquals(other.openFiles, openFiles) &&
-      listEquals(other.dirtyPaths, dirtyPaths) &&
-      mapEquals(other.conflicts, conflicts) &&
-      listEquals(other.guardedPaths, guardedPaths);
-
-  @override
-  int get hashCode => Object.hash(
-    activePath,
-    identityHashCode(buffer),
-    identityHashCode(activeContent),
-    Object.hashAll(openFiles),
-    Object.hashAll(dirtyPaths),
-    Object.hashAll(conflicts.keys),
-    Object.hashAll(guardedPaths),
-  );
-}
 
 /// Narrow browser listenable (see [AgentService.browserTabsListenable]).
 /// Re-checks a small signature of the browser state on each [AgentService]
@@ -988,41 +935,6 @@ class SessionEvent {
   }) : timestamp = timestamp ?? DateTime.now();
 }
 
-/// Per-session Studio state — open tabs, editor buffers, active path.
-/// Keyed by ChatSession.sandboxId inside AgentService so each chat session
-/// has its own Studio view (Ovid-style workspace isolation).
-class _SessionStudio {
-  _SessionStudio(this.key);
-
-  /// Bucket identity (session, repo, branch, folder) — also names the
-  /// persisted draft record.
-  final String key;
-  final Map<String, String> fileBuffer = {};
-  final List<String> openFiles = [];
-  String? activeFilePath;
-
-  /// Last content known to be saved (disk or working copy) per path. The
-  /// dirty set, baselines and pending conflicts live HERE, not in the editor
-  /// widget, so popping Studio, collapsing the file panel or tapping the
-  /// file in the tree can no longer turn an unsaved draft into "SAVED"
-  /// (screen review 06 §4 / F-071).
-  final Map<String, String> baselines = {};
-
-  /// Paths whose [fileBuffer] entry is an unsaved draft.
-  final Set<String> dirty = {};
-
-  /// External content (agent write, disk change) that arrived while the
-  /// path held a draft. The draft stays in [fileBuffer].
-  final Map<String, String> conflicts = {};
-
-  /// Paths opened as a placeholder instead of text (binary / too large).
-  final Map<String, StudioFileGuard> guards = {};
-
-  /// Last mtime (ms) we synced each open file from disk — powers live
-  /// follow: shell commands (sed/mv/git checkout) that change open files
-  /// get picked up and the editor re-renders.
-  final Map<String, int> syncedMtime = {};
-}
 
 /// A queued message removed by [AgentService.takeQueuedMessages].
 typedef QueuedMessageSnapshot = ({
@@ -1135,7 +1047,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
     // Run state also changes on paths that only refresh AppState; keep the
     // per-session busy notifiers in step with those too.
     AppState.I.addListener(_syncBusyNotifiers);
-    AppState.I.addListener(_syncStudioTabs);
     // 3. Hooks fired inside a subagent carry its identity (Claude Code
     //    `agent_id` / `agent_type`, main-session `session_id`).
     HookService.agentIdentityResolver = _hookAgentIdentity;
@@ -1895,9 +1806,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
     for (final r in _runs.values.toList()) {
       _cancelBucket(r);
     }
-    // PR46: any live PTY shells must die too — they're long-lived by
-    // design, which makes them a panic-stop leak without this.
-    unawaited(PtyPool.I.discardAll());
     notifyListeners();
   }
 
@@ -2132,11 +2040,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
     if (runKey.isNotEmpty) {
       try {
         UtilityCancellationBridge.I.signalStop(runKey);
-      } catch (e) {
-        Diag.swallow('agent_service', e);
-      }
-      try {
-        PtyPool.I.discardFor(runKey);
       } catch (e) {
         Diag.swallow('agent_service', e);
       }
@@ -4808,311 +4711,54 @@ if (!window.__ovidBlankHooked) {
     // No-op: see bindWebView.
   }
 
-  // ── PER-SESSION STUDIO STATE ──────────────────────────────────────────
-  // Each chat session owns its own Studio buffers (open-file tabs, editor
-  // content, active path). Session A's files never leak into session B —
-  // the AI's view is scoped to the active session's workspace. The old
-  // global `fileBuffer`/`studioOpenFiles`/`activeFilePath` were the source
-  // of the "same input in new session" bug.
-
-  /// Studio state bucket keyed by session.sandboxId (== session.id).
-  final Map<String, _SessionStudio> _studios = {};
-
-  _SessionStudio _studioFor(String key) => _studios.putIfAbsent(key, () {
-    final studio = _SessionStudio(key);
-    unawaited(_restoreStudioDrafts(studio));
-    return studio;
-  });
-
-  /// Current session's studio.
-  ///
-  /// Inside a run this resolves to the RUNNING session (carried in the run
-  /// Zone), not whatever chat the user happens to be looking at — a
-  /// background run's file reads/writes used to land in the foreground
-  /// session's Studio tabs. Outside a run it falls back to the active
-  /// session, and to a throwaway bucket before persistence loads.
-  _SessionStudio get _studio {
-    final s = _runSession;
-    final sid = s?.sandboxId ?? s?.id ?? '__none__';
-    return _studioFor(
-      jsonEncode([sid, s?.repo, s?.branch, s?.workspaceFolder]),
-    );
-  }
-
-  /// Studio live buffers (path → content) — scoped to the ACTIVE session.
-  Map<String, String> get fileBuffer => _studio.fileBuffer;
-  String? get activeFilePath => _studio.activeFilePath;
-  set activeFilePath(String? v) => _studio.activeFilePath = v;
-
-  /// Global repo (owner/name) — the last one the user connected in Studio.
-  String? repoFull; // e.g. "aasheesh333/Ovid"
-
-  /// Global branch — the last one the user selected in Studio. The repo
-  /// binding is the pair `(repo, branch)`; a null global falls through to the
-  /// persisted `lastBranch` (default `main`).
+  /// Global repo (owner/name) — legacy per-session selection retained for the
+  /// surviving chat surfaces; local git/Studio state moved to
+  /// StudioRemoteClient (P8 Task 15). Dies with AgentService in Task 19.
+  String? repoFull;
   String? branch;
 
-  /// Repo for the ACTIVE session — per-session Studio repos.  Falls back
-  /// to the global [repoFull] when the session never picked one, so old
-  /// sessions keep working exactly as before (as-is).
   String? get sessionRepoFull =>
       AppState.I.getRepoForSession(_runSession?.id ?? '', fallback: repoFull);
 
-  /// Set the repo for the ACTIVE session (Studio pick) — also updates the
-  /// global default so future sessions inherit the latest choice.
   set sessionRepoFull(String? v) {
     final key = _runSession?.id ?? '';
     if (key.isNotEmpty && v != null) {
       AppState.I.setRepoForSession(key, v);
     }
-    repoFull = v; // global default for new sessions
+    repoFull = v;
   }
 
-  /// Branch for the ACTIVE session — the second half of the repo binding.
-  /// Falls back to the global [branch] when the session never picked one.
   String get sessionBranch =>
       AppState.I.getBranchForSession(_runSession?.id ?? '', fallback: branch);
 
-  /// Set the branch for the ACTIVE session (Studio pick) — also updates the
-  /// global default so future sessions inherit the latest choice.
   set sessionBranch(String? v) {
     final value = (v == null || v.isEmpty) ? 'main' : v;
     final key = _runSession?.id ?? '';
     if (key.isNotEmpty) {
       AppState.I.setBranchForSession(key, value);
     }
-    branch = value; // global default for new sessions
+    branch = value;
   }
 
-  /// Open-file tab list — scoped to the ACTIVE session.
-  List<String> get studioOpenFiles => _studio.openFiles;
-
-  ValueNotifier<StudioTabsState>? _studioTabs;
-
-  /// The Studio tab strip / editor view of the active session: open tabs,
-  /// active path, the buffer map and the active buffer's content. Notifies
-  /// only when one of those changes, so Studio widgets no longer rebuild on
-  /// every [AgentService] notification. Always computed for the UI's
-  /// session, even when a background run triggers the notification.
-  ValueListenable<StudioTabsState> get studioTabs =>
-      _studioTabs ??= ValueNotifier<StudioTabsState>(_computeStudioTabs());
-
-  StudioTabsState _computeStudioTabs() => Zone.root.run(() {
-    final studio = _studio;
-    final active = studio.activeFilePath;
-    return StudioTabsState(
-      openFiles: List<String>.unmodifiable(studio.openFiles),
-      activePath: active,
-      buffer: studio.fileBuffer,
-      activeContent: active == null ? null : studio.fileBuffer[active],
-      dirtyPaths: List<String>.unmodifiable(
-        studio.dirty.where(studio.fileBuffer.containsKey).toList()..sort(),
-      ),
-      conflicts: studio.conflicts.isEmpty
-          ? const {}
-          : Map<String, String>.unmodifiable(studio.conflicts),
-      guardedPaths: studio.guards.isEmpty
-          ? const []
-          : List<String>.unmodifiable(studio.guards.keys.toList()..sort()),
-    );
-  });
-
-  void _syncStudioTabs() {
-    final notifier = _studioTabs;
-    if (notifier == null) return;
-    final next = _computeStudioTabs();
-    if (next != notifier.value) notifier.value = next;
-  }
-
-  /// Re-reads the Studio state now (publishing a change to [studioTabs]
-  /// listeners) and returns it. For callers reacting to a non-agent
-  /// notification, e.g. a session switch in [AppState].
-  StudioTabsState syncStudioTabs() {
-    final notifier = _studioTabs;
-    if (notifier == null) return studioTabs.value;
-    _syncStudioTabs();
-    return notifier.value;
-  }
-
-  bool get _ownsRepoCache =>
-      (RepoCache.I.boundSessionId == null ||
-          RepoCache.I.boundSessionId == _runSession?.id) &&
-      (_runSession?.repo == null ||
-          RepoCache.I.repoFull == _runSession?.repo) &&
-      (_runSession?.branch == null ||
-          RepoCache.I.defaultBranch == _runSession?.branch) &&
-      (RepoCache.I.workspaceFolder == null ||
-          RepoCache.I.workspaceFolder == _runSession?.workspaceFolder);
-
-  String? _readSessionRepoFile(String path) =>
-      _ownsRepoCache ? RepoCache.I.read(path) : null;
-
-  /// Re-bind the repo cache to the ACTIVE session's Studio repo/branch.
-  ///
-  /// Studio state is per session, so switching chats (or a restart-time
-  /// repo/branch backfill) must re-point the cache; otherwise Studio keeps
-  /// showing the previous session's files — the visible half of the
-  /// "sessions bleed into each other" bug.
-  Future<void> refreshStudioBindingForActiveSession() async {
-    final sessionId = _currentRunKey();
-    final repo = sessionRepoFull;
-    final folder = AppState.I.activeSession?.workspaceFolder;
-    if (sessionId.isEmpty ||
-        ((repo == null || repo.isEmpty) && folder == null)) {
-      return;
-    }
-    if (RepoCache.I.isReady &&
-        RepoCache.I.repoFull == repo &&
-        RepoCache.I.defaultBranch == sessionBranch &&
-        RepoCache.I.workspaceFolder == folder &&
-        RepoCache.I.boundSessionId == sessionId) {
-      return;
-    }
-    final token = GitHubService.I.token;
-    if ((token == null || token.isEmpty) && folder == null) return;
-    try {
-      RepoCache.I.bind(
-        repo ?? '',
-        token ?? '',
-        branch: sessionBranch,
-        sessionId: sessionId,
-        workspaceFolder: folder,
-      );
-      if (folder != null) await RepoCache.I.sync();
-      notifyListeners();
-    } catch (error) {
-      debugPrint('refreshStudioBindingForActiveSession failed: $error');
-    }
-  }
-
-  void openStudioFile(String path, String content) {
-    final st = _studio;
-    // A tree tap or an agent write must never clobber an unsaved draft: a
-    // clean path takes the new content, a dirty one keeps the draft and
-    // records a conflict when the content really differs from its baseline.
-    final guard = studioGuardForContent(content);
-    if (guard != null && !_isStudioDirty(st, path)) {
-      _setStudioPlaceholder(st, path, guard);
-    } else {
-      _applyExternalStudioContent(st, path, content);
-      st.guards.remove(path);
-    }
-    if (!st.openFiles.contains(path)) st.openFiles.add(path);
-    st.activeFilePath = path;
-    // Track disk sync point so a later shell-edit diff sees this as
-    // the known state (host files only — repo: paths skip mtime checks).
-    _touchSyncedMtime(path);
-    notifyListeners();
-  }
-
-  /// Persist an editor save through the same cache/disk path as agent edits.
-  final _studioFileOperations = Expando<Map<String, Object>>();
-
-  Future<void> saveStudioFile(String path, String content) async {
-    final st = _studio;
-    final session = _runSession;
-    final binding = RepoCache.I.bindingGeneration;
-    final before = st.fileBuffer[path];
-    final wasOpen = st.openFiles.contains(path);
-    final active = st.activeFilePath;
-    final operations = _studioFileOperations[st] ??= {};
-    final operation = operations[path] = Object();
-    final repoOwns =
-        _ownsRepoCache &&
-        (RepoCache.I.files.containsKey(path) || RepoCache.I.repoFull != null);
-    final cacheBefore = RepoCache.I.files[path];
-    final work = await _sessionWorkDir();
-    if (!identical(st, _studio) ||
-        !identical(session, _runSession) ||
-        binding != RepoCache.I.bindingGeneration ||
-        operations[path] != operation ||
-        st.fileBuffer[path] != before ||
-        (wasOpen && !st.openFiles.contains(path)) ||
-        (repoOwns && RepoCache.I.files[path] != cacheBefore)) {
-      throw StateError('Studio save superseded by an edit or workspace change');
-    }
-    final safe = _workspaceFilePath(work, path);
-    if (safe == null) {
-      throw StateError('Path escapes workspace or uses a symlink: $path');
-    }
-    final file = File(safe);
-    file.parent.createSync(recursive: true);
-    if (_workspaceFilePath(work, path) != safe) {
-      throw StateError('Workspace path changed while saving: $path');
-    }
-    file.writeAsStringSync(content);
-    st.fileBuffer[path] = content;
-    st.baselines[path] = content;
-    st.dirty.remove(path);
-    st.conflicts.remove(path);
-    _scheduleStudioDraftPersist(st);
-    if (!st.openFiles.contains(path)) st.openFiles.add(path);
-    // A background save must not steal selection from a newer tab choice.
-    if (st.activeFilePath == active) st.activeFilePath = path;
-    if (repoOwns) {
-      RepoCache.I.write(path, content);
-      RepoCache.I.didSaveWorkspaceFile(path, content);
-    }
-    notifyListeners();
-  }
-
-  /// Open [path] in the ACTIVE session's Studio, reading it from the repo
-  /// cache or the session workspace. Used by chat surfaces (produced-file
+  /// Opens [path] in the remote Studio. Used by chat surfaces (produced-file
   /// chips, inline file references) where only the path is known.
   Future<bool> openWorkspaceFileInStudio(String path) async {
-    final cleanPath = path.startsWith('./')
+    final sid = AppState.I.activeSession?.id;
+    if (sid == null || sid.isEmpty) return false;
+    final clean = path.startsWith('./')
         ? path.substring(2)
-        : (path.startsWith('/') ? path.replaceFirst(RegExp(r'^/+'), '') : path);
-    final repo = _readSessionRepoFile(path) ?? _readSessionRepoFile(cleanPath);
-    if (repo != null) {
-      openStudioFile(cleanPath, repo);
-      return true;
-    }
+        : (path.startsWith('/')
+            ? path.replaceFirst(RegExp(r'^/+'), '')
+            : path);
     try {
-      final r1 = await _resolveFsPath(path);
-      final r2 = r1.path != null ? r1 : await _resolveFsPath(cleanPath);
-      final host = r2.path;
-      if (host != null && host.startsWith('repo:')) {
-        final rel = host.substring('repo:'.length);
-        final content = RepoCache.I.read(rel);
-        if (content != null) {
-          openStudioFile(rel, content);
-          return true;
-        }
-      }
-      if (host != null && !host.startsWith('repo:')) {
-        final f = File(host);
-        if (f.existsSync()) {
-          try {
-            openStudioFile(cleanPath, await f.readAsString());
-            return true;
-          } catch (_) {
-            openStudioPlaceholder(cleanPath, const StudioFileGuard.binary());
-            return true;
-          }
-        }
-      }
-      final direct = File(path);
-      if (direct.existsSync()) {
-        try {
-          openStudioFile(path.split('/').last, await direct.readAsString());
-          return true;
-        } catch (_) {
-          openStudioPlaceholder(
-            path.split('/').last,
-            const StudioFileGuard.binary(),
-          );
-          return true;
-        }
-      }
-      return false;
+      await StudioRemoteClient.I.openStudioFile(sid, clean);
+      return true;
     } catch (_) {
       return false;
     }
   }
 
   /// Resolve a produced path to its HOST directory (for "Show in folder").
-  /// Returns null when the file is not on this device's disk.
   Future<String?> hostDirOf(String path) async {
     try {
       final host = (await _resolveFsPath(path)).path;
@@ -5123,440 +4769,11 @@ if (!window.__ovidBlankHooked) {
     }
   }
 
-  void _touchSyncedMtime(String path) async {
-    try {
-      final host = (await _resolveFsPath(path)).path;
-      if (host == null || host.startsWith('repo:')) return;
-      final f = File(host);
-      if (f.existsSync()) {
-        _studio.syncedMtime[path] = f.lastModifiedSync().millisecondsSinceEpoch;
-      }
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-  }
-
-  /// Live file follow (P9): after shell commands, check every open tab's
-  /// workspace file for on-disk changes (sed/awk/git checkout/npm codegen)
-  /// and refresh the studio buffer + editor when they changed. Called
-  /// opportunistically after run_shell/job_output — cheap (stat only).
-  Future<void> syncOpenFilesFromDisk() async {
-    final st = _studio;
-    if (st.openFiles.isEmpty) return;
-    final session = _runSession;
-    final binding = RepoCache.I.bindingGeneration;
-    final before = Map<String, String>.of(st.fileBuffer);
-    final operations = _studioFileOperations[st] ??= {};
-    final admitted = {
-      for (final path in st.openFiles) path: operations[path] = Object(),
-    };
-    bool owns(String path) =>
-        identical(st, _studio) &&
-        identical(session, _runSession) &&
-        binding == RepoCache.I.bindingGeneration &&
-        operations[path] == admitted[path] &&
-        st.openFiles.contains(path) &&
-        st.fileBuffer[path] == before[path];
-    var changed = false;
-    for (final path in admitted.keys) {
-      try {
-        if (!owns(path)) continue;
-        final host = (await _resolveFsPath(path)).path;
-        if (!owns(path)) continue;
-        if (host == null || host.startsWith('repo:')) continue;
-        final f = File(host);
-        if (!f.existsSync()) continue;
-        final mtime = f.lastModifiedSync().millisecondsSinceEpoch;
-        if ((st.syncedMtime[path] ?? -1) >= mtime) continue;
-        // Size guard: don't slurp huge binaries into the editor.
-        if (f.lengthSync() > 2 * 1024 * 1024) continue;
-        final content = await f.readAsString();
-        if (!owns(path) ||
-            f.lastModifiedSync().millisecondsSinceEpoch != mtime) {
-          continue;
-        }
-        st.syncedMtime[path] = mtime;
-        if (content != st.fileBuffer[path]) {
-          _applyExternalStudioContent(st, path, content);
-          changed = true;
-          _emit('file', 'live-reloaded $path (changed on disk)');
-        }
-      } catch (e) {
-        Diag.swallow('agent_service', e);
-      }
-    }
-    if (changed) notifyListeners();
-  }
-
-  void newStudioFile(String path) {
-    openStudioFile(path, '');
-    // If the repo is synced, mark it created so commit() picks it up.
-    RepoCache.I.create(path, '');
-    notifyListeners();
-  }
-
-  void closeStudioFile(String path) {
-    final st = _studio;
-    st.openFiles.remove(path);
-    if (st.activeFilePath == path) {
-      st.activeFilePath = st.openFiles.isEmpty ? null : st.openFiles.last;
-    }
-    notifyListeners();
-  }
-
-  void selectStudioFile(String path) {
-    if (!_studio.openFiles.contains(path)) return;
-    _studio.activeFilePath = path;
-    notifyListeners();
-  }
-
-  // ── Studio drafts (screen review 06 §4, F-071/F-075/F-076) ──────────────
-
-  /// Simulates process death for Studio: every in-memory bucket is dropped,
-  /// so the next access restores from the draft store.
-  @visibleForTesting
-  void debugForgetStudioStateForTest() => _studios.clear();
-
-  /// Delete all data: forget every in-memory Studio bucket (open tabs,
-  /// buffers, unsaved drafts), so nothing re-persists a draft after the
-  /// draft store was wiped.
-  void clearStudioStateForReset() {
-    _studios.clear();
-    notifyListeners();
-  }
+  /// Delete all data: forget every in-memory Studio bucket.
+  void clearStudioStateForReset() => StudioRemoteClient.I.clearAll();
 
   /// True when no Studio bucket holds an unsaved draft.
-  bool get studioDraftsEmpty =>
-      _studios.values.every((st) => !st.dirty.any(st.fileBuffer.containsKey));
-
-  /// Bring [path]'s existing buffer (e.g. an unsaved draft of a closed tab)
-  /// back as the active tab without touching its content.
-  void focusStudioFile(String path) {
-    final st = _studio;
-    if (!st.fileBuffer.containsKey(path)) return;
-    if (!st.openFiles.contains(path)) st.openFiles.add(path);
-    st.activeFilePath = path;
-    notifyListeners();
-  }
-
-  /// A placeholder guard for [content] that must not open as editable text:
-  /// binary bytes, or more than [kStudioEditHardCap] characters.
-  static StudioFileGuard? studioGuardForContent(String content) {
-    if (content.length > kStudioEditHardCap) {
-      return StudioFileGuard.tooLarge(content.length);
-    }
-    if (looksBinaryText(content)) {
-      return StudioFileGuard.binary(bytes: content.length);
-    }
-    return null;
-  }
-
-  bool _isStudioDirty(_SessionStudio st, String path) =>
-      st.dirty.contains(path) && st.fileBuffer.containsKey(path);
-
-  _SessionStudio? _studioOwning(Map<String, String> buffer) {
-    for (final st in _studios.values) {
-      if (identical(st.fileBuffer, buffer)) return st;
-    }
-    return null;
-  }
-
-  void _setStudioPlaceholder(
-    _SessionStudio st,
-    String path,
-    StudioFileGuard guard,
-  ) {
-    st.fileBuffer[path] = '';
-    st.baselines[path] = '';
-    st.dirty.remove(path);
-    st.conflicts.remove(path);
-    st.guards[path] = guard;
-  }
-
-  /// New content for [path] from outside the editor (tree open, agent write,
-  /// disk follow, repo sync). Never replaces a draft.
-  void _applyExternalStudioContent(
-    _SessionStudio st,
-    String path,
-    String content,
-  ) {
-    if (!st.fileBuffer.containsKey(path)) {
-      // A buffer that was dropped takes its draft state with it.
-      st.dirty.remove(path);
-      st.conflicts.remove(path);
-      st.baselines.remove(path);
-    }
-    if (_isStudioDirty(st, path)) {
-      if (content == st.fileBuffer[path]) {
-        // The outside world caught up with the draft: nothing is unsaved.
-        st.baselines[path] = content;
-        st.dirty.remove(path);
-        st.conflicts.remove(path);
-        _scheduleStudioDraftPersist(st);
-      } else if (content != st.baselines[path]) {
-        st.conflicts[path] = content;
-      }
-      return;
-    }
-    st.fileBuffer[path] = content;
-    st.baselines[path] = content;
-    st.conflicts.remove(path);
-  }
-
-  /// Apply repo-cache content seen by the editor for the bucket owning
-  /// [buffer]. Silent: the caller re-renders itself.
-  void applyExternalStudioContent(
-    Map<String, String> buffer,
-    String path,
-    String content,
-  ) {
-    final st = _studioOwning(buffer);
-    if (st != null) _applyExternalStudioContent(st, path, content);
-  }
-
-  /// Open [path] as a non-editable placeholder (binary, too large). An
-  /// unsaved draft for the path is kept instead.
-  void openStudioPlaceholder(String path, StudioFileGuard guard) {
-    final st = _studio;
-    if (!_isStudioDirty(st, path)) _setStudioPlaceholder(st, path, guard);
-    if (!st.openFiles.contains(path)) st.openFiles.add(path);
-    st.activeFilePath = path;
-    notifyListeners();
-  }
-
-  /// Placeholder guard for [path] in the active bucket, if any.
-  StudioFileGuard? studioGuardFor(String path) => _studio.guards[path];
-
-  /// True when [path] holds an unsaved draft in the bucket owning [buffer]
-  /// (the active bucket when omitted).
-  bool isStudioFileDirty(String path, {Map<String, String>? buffer}) {
-    final st = buffer == null ? _studio : _studioOwning(buffer);
-    return st != null && _isStudioDirty(st, path);
-  }
-
-  /// Unsaved paths of the active bucket, in tab order first.
-  List<String> get dirtyStudioFiles {
-    final st = _studio;
-    final dirty = [
-      for (final path in st.dirty)
-        if (st.fileBuffer.containsKey(path)) path,
-    ];
-    dirty.sort((a, b) {
-      final ia = st.openFiles.indexOf(a), ib = st.openFiles.indexOf(b);
-      return (ia < 0 ? 1 << 30 : ia).compareTo(ib < 0 ? 1 << 30 : ib);
-    });
-    return dirty;
-  }
-
-  /// Cheap check for listeners that run on every notification.
-  bool get hasDirtyStudioBuffers {
-    final st = _studio;
-    return st.dirty.any(st.fileBuffer.containsKey);
-  }
-
-  /// External content waiting on a draft for [path], if any.
-  String? studioConflictFor(String path, {Map<String, String>? buffer}) {
-    final st = buffer == null ? _studio : _studioOwning(buffer);
-    return st?.conflicts[path];
-  }
-
-  /// Record [content] as the saved state of [path] when nothing is known yet
-  /// (a buffer that was filled without [openStudioFile]).
-  void ensureStudioBaseline(
-    Map<String, String> buffer,
-    String path,
-    String content,
-  ) {
-    final st = _studioOwning(buffer);
-    if (st == null || st.baselines.containsKey(path)) return;
-    if (!_isStudioDirty(st, path)) st.baselines[path] = content;
-  }
-
-  /// The editor's keystroke path: [text] becomes the draft for [path] in the
-  /// bucket owning [buffer]. Notifies only when the dirty state flips.
-  void updateStudioDraft(Map<String, String> buffer, String path, String text) {
-    final st = _studioOwning(buffer);
-    if (st == null) {
-      buffer[path] = text;
-      return;
-    }
-    final was = _isStudioDirty(st, path);
-    st.fileBuffer[path] = text;
-    final baseline = st.baselines[path];
-    final dirty =
-        st.conflicts.containsKey(path) || baseline == null || baseline != text;
-    if (dirty) {
-      st.dirty.add(path);
-    } else {
-      st.dirty.remove(path);
-    }
-    _scheduleStudioDraftPersist(st);
-    if (was != dirty) notifyListeners();
-  }
-
-  /// The editor wrote [text] for [path] to disk.
-  void markStudioFileSaved(
-    Map<String, String> buffer,
-    String path,
-    String text,
-  ) {
-    final st = _studioOwning(buffer);
-    if (st == null) return;
-    st.baselines[path] = text;
-    if (st.fileBuffer[path] == text) {
-      st.dirty.remove(path);
-      st.conflicts.remove(path);
-    }
-    _scheduleStudioDraftPersist(st);
-    notifyListeners();
-  }
-
-  /// Settle a conflict: keep the draft (the external content becomes the
-  /// new baseline) or take the external content (draft discarded).
-  void resolveStudioConflict(
-    Map<String, String> buffer,
-    String path, {
-    required bool keepDraft,
-  }) {
-    final st = _studioOwning(buffer);
-    final external = st?.conflicts.remove(path);
-    if (st == null || external == null) return;
-    st.baselines[path] = external;
-    if (keepDraft) {
-      if (st.fileBuffer[path] == external) st.dirty.remove(path);
-    } else {
-      st.fileBuffer[path] = external;
-      st.dirty.remove(path);
-    }
-    _scheduleStudioDraftPersist(st);
-    notifyListeners();
-  }
-
-  /// Throw away the draft for [path] in the active bucket: the buffer goes
-  /// back to the last saved content.
-  void discardStudioDraft(String path) {
-    final st = _studio;
-    _discardStudioDraft(st, path);
-    _scheduleStudioDraftPersist(st);
-    unawaited(StudioDraftStore.I.flush());
-    notifyListeners();
-  }
-
-  void _discardStudioDraft(_SessionStudio st, String path) {
-    final baseline = st.baselines[path];
-    final external = st.conflicts.remove(path);
-    final saved = external ?? baseline;
-    if (saved != null) {
-      st.fileBuffer[path] = saved;
-      st.baselines[path] = saved;
-    }
-    st.dirty.remove(path);
-  }
-
-  /// Discard every draft of the active bucket (Studio "Discard" on leave).
-  void discardAllStudioDrafts() {
-    final st = _studio;
-    for (final path in st.dirty.toList()) {
-      _discardStudioDraft(st, path);
-    }
-    _scheduleStudioDraftPersist(st);
-    unawaited(StudioDraftStore.I.flush());
-    notifyListeners();
-  }
-
-  /// Save every draft of the active bucket to the workspace. Returns the
-  /// paths that could not be saved (conflicts, write errors).
-  Future<List<String>> saveAllStudioDrafts() async {
-    final failed = <String>[];
-    for (final path in dirtyStudioFiles) {
-      final st = _studio;
-      final text = st.fileBuffer[path];
-      if (text == null || st.conflicts.containsKey(path)) {
-        failed.add(path);
-        continue;
-      }
-      try {
-        await saveStudioFile(path, text);
-      } catch (error, stack) {
-        Diag.swallow('agent_service.saveAllStudioDrafts', error, stack);
-        failed.add(path);
-      }
-    }
-    return failed;
-  }
-
-  void _scheduleStudioDraftPersist(_SessionStudio st) {
-    StudioDraftStore.I.schedule(
-      StudioDraftStore.recordName('editor', st.key),
-      () {
-        final files = <String, Object?>{
-          for (final path in st.dirty)
-            if (st.fileBuffer.containsKey(path))
-              path: {
-                'draft': st.fileBuffer[path],
-                'baseline': st.baselines[path],
-              },
-        };
-        if (files.isEmpty) return (data: null);
-        return (
-          data: {
-            'v': 1,
-            'key': st.key,
-            'files': files,
-            'open': List<String>.of(st.openFiles),
-            'active': st.activeFilePath,
-          },
-        );
-      },
-    );
-  }
-
-  /// Bring back drafts persisted for [st] by an earlier process.
-  Future<void> _restoreStudioDrafts(_SessionStudio st) async {
-    if (!StudioDraftStore.I.enabled) return;
-    final record = await StudioDraftStore.I.read(
-      StudioDraftStore.recordName('editor', st.key),
-    );
-    if (record == null || record['key'] != st.key) return;
-    final files = record['files'];
-    if (files is! Map) return;
-    var restored = false;
-    for (final entry in files.entries) {
-      final path = entry.key;
-      final value = entry.value;
-      if (path is! String || value is! Map) continue;
-      final draft = value['draft'];
-      final baseline = value['baseline'];
-      if (draft is! String) continue;
-      if (_isStudioDirty(st, path)) continue;
-      final current = st.fileBuffer.containsKey(path)
-          ? st.baselines[path]
-          : null;
-      st.fileBuffer[path] = draft;
-      if (baseline is String) {
-        st.baselines[path] = baseline;
-        // The file changed on disk since the draft was written.
-        if (current != null && current != baseline && current != draft) {
-          st.conflicts[path] = current;
-        }
-      } else {
-        st.baselines.remove(path);
-      }
-      st.guards.remove(path);
-      st.dirty.add(path);
-      if (!st.openFiles.contains(path)) st.openFiles.add(path);
-      restored = true;
-    }
-    if (!restored) return;
-    final active = record['active'];
-    if (st.activeFilePath == null &&
-        active is String &&
-        st.openFiles.contains(active)) {
-      st.activeFilePath = active;
-    }
-    st.activeFilePath ??= st.openFiles.isEmpty ? null : st.openFiles.first;
-    notifyListeners();
-  }
+  bool get studioDraftsEmpty => StudioRemoteClient.I.noDrafts;
 
   /// Per-session sandbox workspace (host dir). AI shell/code commands run
   /// with this as `cwd` bound to /work inside the jail.
@@ -5841,9 +5058,7 @@ user which one instead of assuming this one.''';
   /// THE one write path for workspace files (C7). Every tool that writes
   /// content to a path — `file_write`, `fs_edit create/str_replace/insert` —
   /// goes through here so disk and repo cache can never diverge:
-  ///   • a path the repo owns (exists in RepoCache or repo is bound) is
-  ///     written to RepoCache AND mirrored to the session workspace on disk;
-  ///   • a workspace-only path is written to disk;
+  ///   • the session workspace on disk is the one write target;
   ///   • `run_shell cat` after `file_write` therefore sees the same bytes.
   /// Returns a short human status line.
   Future<String> _writeWorkspaceFile(
@@ -5855,15 +5070,6 @@ user which one instead of assuming this one.''';
     // replayable diff metadata parity) — a create has no before (whole
     // file shows as + lines).
     final before = _readFileBefore(path);
-    final repoOwns =
-        _ownsRepoCache &&
-        (RepoCache.I.files.containsKey(path) || RepoCache.I.repoFull != null);
-    if (repoOwns) {
-      RepoCache.I.write(path, content);
-      openStudioFile(path, content);
-    }
-    // Always mirror to disk so shell/fs tools and the produced-files lane
-    // see the same content — even for repo paths (workspace is the cwd).
     await _mirrorToDisk(path, content);
     _recordProduced(path, content.length);
     _emit('file', '$toolLabel $path');
@@ -5876,15 +5082,10 @@ user which one instead of assuming this one.''';
         ..toolState = 'running'; // _toolFinish flips to ok with the result
       AppState.I.refresh();
     }
-    return repoOwns
-        ? 'written ✓ · $path · ${content.length} chars '
-              '(workspace + repo cache — commit() to push)'
-        : 'written ✓ · $path · ${content.length} chars';
+    return 'written ✓ · $path · ${content.length} chars';
   }
 
-  /// Write [content] to the session-workspace mirror of [path] (best
-  /// effort — an uncontainable path, e.g. an absolute repo-only path, is
-  /// skipped silently; the repo cache stays the source for those).
+  /// Write [content] to the session-workspace mirror of [path].
   Future<void> _mirrorToDisk(String path, String content) async {
     final work = await _sessionWorkDir();
     final safe = _workspaceFilePath(work, path);
@@ -5897,16 +5098,12 @@ user which one instead of assuming this one.''';
       throw StateError('Workspace path changed while saving: $path');
     }
     f.writeAsStringSync(content);
-    if (_ownsRepoCache) RepoCache.I.didSaveWorkspaceFile(path, content);
   }
 
-  /// Read the CURRENT on-disk/repo content of [path] (pre-edit "before"),
-  /// or null when it does not exist yet (a create).
+  /// Read the CURRENT on-disk content of [path] (pre-edit "before"), or null
+  /// when it does not exist yet (a create).
   String? _readFileBefore(String path) {
     try {
-      if (_ownsRepoCache && RepoCache.I.files.containsKey(path)) {
-        return _readSessionRepoFile(path);
-      }
       final work = _runSession == null ? null : _workspaceRootMaybe();
       if (work != null) {
         final safe = _workspaceFilePath(work, path);
@@ -6297,7 +5494,6 @@ user which one instead of assuming this one.''';
   @override
   void notifyListeners() {
     _syncBusyNotifiers();
-    _syncStudioTabs();
     super.notifyListeners();
     browserTabsListenable._check();
   }
@@ -11321,7 +10517,6 @@ user which one instead of assuming this one.''';
         Diag.swallow('agent_service', e);
       }
     }
-    text ??= _readSessionRepoFile('AGENTS.md');
     if (text == null || text.trim().isEmpty) return '';
     final body = text.length > cap ? '${text.substring(0, cap)}…\n' : text;
     return 'WORKSPACE INSTRUCTIONS (AGENTS.md — follow unless the user overrides):\n$body';
@@ -13104,37 +12299,6 @@ ${await _agentsMdBlock()}
     ChatSession session, {
     bool includeTools = true,
   }) => _callLlm(p, msgs, session, includeTools: includeTools);
-
-  /// Test seam: overrides the [GlobalRepoRegistry] the git_clone tool
-  /// routes GitHub URLs through (Issue 3). Null in production — the real
-  /// singleton is used.
-  @visibleForTesting
-  static GlobalRepoRegistry? registryOverrideForTest;
-
-  /// Extract `owner/repo` from a GitHub repo URL, or null when [url] is not
-  /// a github.com repo URL. Accepts `https://github.com/owner/repo(.git)`
-  /// and scp-like `git@github.com:owner/repo(.git)` forms.
-  @visibleForTesting
-  static String? githubRepoFullForTest(String url) => _githubRepoFull(url);
-
-  static String? _githubRepoFull(String url) {
-    final u = url.trim();
-    final String path;
-    final scp = RegExp(r'^[\w.+-]+@github\.com:([^/]+/.+)$').firstMatch(u);
-    if (scp != null) {
-      path = scp.group(1)!;
-    } else {
-      final uri = Uri.tryParse(u);
-      if (uri == null || uri.host.toLowerCase() != 'github.com') return null;
-      path = uri.path;
-    }
-    final segs = path.split('/').where((s) => s.isNotEmpty).toList();
-    if (segs.length != 2) return null;
-    var repo = segs[1];
-    if (repo.endsWith('.git')) repo = repo.substring(0, repo.length - 4);
-    if (segs[0].isEmpty || repo.isEmpty) return null;
-    return '${segs[0]}/$repo';
-  }
 
   /// Test seam: overrides the retry backoff so a retry test never sleeps.
   @visibleForTesting
@@ -17056,53 +16220,15 @@ ${await _agentsMdBlock()}
           return 'snapshot failed: $e';
         }
 
-      // ─── production-grade repo tools ─────────────────────────────────────────
+      // ─── repo tools (cloud-owned) ────────────────────────────────────────────
 
       case 'repo_sync':
-        if (sessionRepoFull == null) return 'no repo connected';
-        _emit('think', 'syncing repo $sessionRepoFull …');
-        try {
-          // bind cache
-          RepoCache.I.bind(
-            sessionRepoFull!,
-            GitHubService.I.token!,
-            branch: sessionBranch,
-            sessionId: _runSession?.id,
-            workspaceFolder: _runSession?.workspaceFolder,
-          );
-          final report = await RepoCache.I.sync(
-            onLine: (l) => _emit('shellOut', l),
-          );
-          notifyListeners();
-          // HONEST SYNC RESULT (audit 2026-09-25): "N files ready in workspace"
-          // was FALSE whenever the Trees API reported a truncated tree, the
-          // 400-file cap bit, or per-file fetches failed — and every one of
-          // those used to be swallowed. The model then reasoned confidently
-          // about a repo it had only partly seen ("this file doesn't exist").
-          // Report the real shape and say explicitly that absence proves
-          // nothing on a partial copy.
-          final n = RepoCache.I.files.length;
-          if (report.partial) {
-            return 'repo synced with GAPS · $n files in workspace — '
-                '${report.summary}\n'
-                'This copy is PARTIAL, so a file you cannot see may still '
-                'exist upstream: never conclude that something is absent. '
-                'Call repo_tree to see what did arrive.';
-          }
-          return 'repo synced · $n files ready in workspace. '
-              'call repo_tree to explore.';
-        } catch (e) {
-          return 'sync failed: $e';
-        }
+        return 'repo sync runs in Ovid Cloud. The server workspace is already '
+            'synced; use file_read/fs_glob against it.';
 
       case 'repo_tree':
-        final paths = _ownsRepoCache ? RepoCache.I.treePaths : <String>[];
-        if (paths.isEmpty) {
-          return 'workspace empty. call repo_sync first.';
-        }
-        final tree = paths.take(120).join('\n');
-        _emit('file', 'tree · ${paths.length} paths');
-        return 'TREE (${paths.length} files, showing 120):\n$tree';
+        return 'repo_tree runs in Ovid Cloud. Use fs_glob (pattern "**") to '
+            'explore the server workspace.';
 
       case 'file_read':
         final path = args['path'] as String;
@@ -17116,7 +16242,7 @@ ${await _agentsMdBlock()}
         // Strict permission model: an absolute host path outside the
         // workspace prompts up front; a denial returns the structured
         // message DIRECTLY — it must never enter the content pipeline
-        // below (no openStudioFile caching, no windowing as file content).
+        // below (no windowing as file content).
         String? gatedHost;
         if (path.startsWith('/')) {
           final resolved = await _resolveFsPath(path, gateTool: 'file_read');
@@ -17125,24 +16251,21 @@ ${await _agentsMdBlock()}
           }
           gatedHost = resolved.path;
         }
-        final c =
-            _readSessionRepoFile(path) ??
-            await () async {
-              // Host workspace fallback: sandbox files are readable even
-              // when no GitHub repo is synced (mirrors fs_edit view).
-              final host = gatedHost ?? (await _resolveFsPath(path)).path;
-              if (host == null || host.startsWith('repo:')) return null;
-              try {
-                return await File(host).readAsString();
-              } catch (_) {
-                return null;
-              }
-            }();
+        final c = await () async {
+          // Host workspace fallback: sandbox files are readable even
+          // when no GitHub repo is synced (mirrors fs_edit view).
+          final host = gatedHost ?? (await _resolveFsPath(path)).path;
+          if (host == null || host.startsWith('repo:')) return null;
+          try {
+            return await File(host).readAsString();
+          } catch (_) {
+            return null;
+          }
+        }();
         if (c == null) return 'file not found: $path';
         final rs = _runSession;
         final sid = rs?.sandboxId ?? rs?.id ?? 'default';
         _readPathsFor(sid).add(path);
-        openStudioFile(path, c);
         _emit('file', 'read $path');
         return _windowedLines(path, c, offset: offset, limit: limit);
 
@@ -17241,167 +16364,12 @@ ${await _agentsMdBlock()}
         return await _writeWorkspaceFile(path, content, toolLabel: 'edited');
 
       case 'commit':
-        final message = (args['message'] ?? 'Ovid agent update') as String;
-        if (!_ownsRepoCache) {
-          return 'repo binding changed. call repo_sync first.';
-        }
-        // An unbound, empty session has no remote identity to reconcile.
-        // Bound sessions still recover durable intents even without drafts.
-        if (RepoCache.I.repoFull == null && !RepoCache.I.hasPending) {
-          return 'no pending changes';
-        }
-        // Recovery is read-only and must run even after restart without drafts.
-        try {
-          final recovered = await RepoCache.I.reconcilePending();
-          if (recovered != null) {
-            return 'confirmed prior atomic commit ${RepoCache.I.lastCommit?.commitSha} ($recovered files); no new mutation';
-          }
-        } catch (e) {
-          return 'commit reconciliation required: $e';
-        }
-        if (!RepoCache.I.hasPending) return 'no pending changes';
-        final CommitApproval approval;
-        try {
-          approval = await RepoCache.I.prepareCommit(message);
-        } catch (e) {
-          return 'commit preview failed: $e';
-        }
-        final ok = await _maybeApprove(
-          'commit',
-          message,
-          'PUSH TO GITHUB\n${approval.repo}\nBranch: ${approval.branch}\n'
-              'Base: ${approval.baseCommit}\nMessage: ${approval.message}\n'
-              'Selected paths: ${approval.paths.join(', ')}\n${approval.diff}',
-        );
-        if (!ok) return 'DENIED by user';
-        _emit('file', 'committing ${RepoCache.I.dirtyCount} files…');
-        try {
-          final n = await RepoCache.I.commitApproved(approval);
-          // Report confirmed publication only. Legacy mode metadata remains
-          // readable, but RepoCache never starts a per-file fallback.
-          final info = RepoCache.I.lastCommit;
-          final perFile = info?.mode == CommitMode.perFile;
-          _emit(
-            'file',
-            perFile ? 'pushed ✓ $n files (as $n commits)' : 'pushed ✓ $n files',
-          );
-          notifyListeners();
-          if (perFile) {
-            return 'committed $n files ✓ — but NOTE: the atomic commit failed, '
-                'so this fell back to $n SEPARATE commits on '
-                '${info?.branch ?? sessionBranch}. The content '
-                'is pushed; the history is not one clean commit.';
-          }
-          final sha = info?.commitSha;
-          return 'committed $n files ✓ as a single atomic commit'
-              '${sha == null || sha.isEmpty ? '' : ' (${sha.substring(0, sha.length.clamp(0, 7))})'}.';
-        } catch (e) {
-          // Includes stale approval, upstream rejection and durable unknown
-          // outcomes; none authorizes a fresh publication retry.
-          return 'commit failed: $e';
-        }
+        // No local repo cache exists in the thin client; the cloud workspace
+        // owns git. Keep the historical "nothing pending" answer so the plan
+        // gate's post-refusal handler probe still reaches a harmless handler.
+        return 'no pending changes';
 
       case 'git_clone':
-        final url = (args['url'] as String? ?? '').trim();
-        if (url.isEmpty) return 'git_clone needs a repository "url".';
-        final dest = (args['path'] as String? ?? '').trim();
-        final branch = (args['branch'] as String? ?? '').trim();
-        // Refuse suspicious branch names early — a clean error beats a
-        // confusing git failure (the argv form below already prevents any
-        // shell injection).
-        if (branch.contains(RegExp(r'\s')) || branch.contains('..')) {
-          return 'git_clone: refusing suspicious branch name "$branch".';
-        }
-        // Strict permission model: a clone source outside the host
-        // allowlist prompts Allow / Deny / Always allow in General/Studio.
-        final cloneHost = () {
-          final scp = RegExp(r'^[\w.+-]+@([^:/]+):').firstMatch(url);
-          if (scp != null) return scp.group(1)!;
-          return Uri.tryParse(url)?.host ?? '';
-        }();
-        if (!await _checkHostGrant(cloneHost, tool: 'git_clone')) {
-          return 'DENIED by user';
-        }
-        final okClone = await _maybeApprove(
-          'git_clone',
-          url,
-          'Clone repository into the session workspace:\n'
-              '$url'
-              '${branch.isEmpty ? '' : '\nBranch/tag: $branch'}'
-              '${dest.isEmpty ? '' : '\nDestination: $dest'}',
-        );
-        if (!okClone) return 'DENIED by user';
-        // Issue 3: GitHub clones in Studio mode are clone-once through
-        // GlobalRepoRegistry — a raw per-session clone here would re-clone
-        // the same repo for every new session. Non-GitHub URLs, explicit
-        // `path` destinations, and non-Studio modes keep the raw clone
-        // below (general mode keeps isolated per-session workspaces).
-        final githubRepo = _githubRepoFull(url);
-        // CLONE-ONCE (2026-09-24): route through the shared registry whenever
-        // this URL is the session's CONNECTED repo — not only in Studio mode.
-        // `newSession()` never sets a mode and ChatSession defaults to `auto`,
-        // so the old `mode == AgentMode.studio` condition sent every freshly
-        // created chat session down the raw per-session clone path: the same
-        // repo cloned again into `ws_<id>`, once per session. That is the
-        // reported "agent clones again and again for every new session".
-        final connectedRepo = (sessionRepoFull ?? '').trim();
-        final isConnectedRepo =
-            githubRepo != null &&
-            connectedRepo.isNotEmpty &&
-            connectedRepo.toLowerCase() == githubRepo.toLowerCase();
-        if (githubRepo != null &&
-            dest.isEmpty &&
-            (mode == AgentMode.studio || isConnectedRepo)) {
-          final cloneBranch = branch.isNotEmpty
-              ? branch
-              : (sessionBranch.isNotEmpty ? sessionBranch : 'main');
-          _emit('shell', 'registry clone $githubRepo@$cloneBranch');
-          try {
-            final registry =
-                registryOverrideForTest ?? await GlobalRepoRegistry.instance();
-            final selected = _runSession?.workspaceFolder;
-            final sharedPath =
-                selected != null &&
-                    GlobalRepoRegistry.checkoutMatches(
-                      selected,
-                      githubRepo,
-                      cloneBranch,
-                    )
-                ? selected
-                : await registry.ensureCloned(githubRepo, cloneBranch);
-            final sid =
-                _runSession?.sandboxId ?? _runSession?.id ?? _currentRunKey();
-            if (sid.isNotEmpty) {
-              await registry.bindSession(
-                sid,
-                githubRepo,
-                cloneBranch,
-                sharedPath,
-              );
-            }
-            // ONE workspace authority. The registry binding and the pinned
-            // workspaceFolder used to be set by different code paths: the
-            // Studio UI set both, the agent set only the binding — and
-            // `_sessionWorkDir` prefers the PINNED folder while the Studio
-            // terminal prefers the BINDING. So after an agent clone the agent's
-            // cwd and the terminal's cwd could point at different directories.
-            final runSid = _runSession?.id;
-            if (runSid != null && runSid.isNotEmpty) {
-              AppState.I.setSessionWorkspaceFolder(
-                sharedPath,
-                sessionId: runSid,
-              );
-              AppState.I.setRepoForSession(runSid, githubRepo);
-              AppState.I.setBranchForSession(runSid, cloneBranch);
-            }
-            return 'cloned $url ✓\nshared registry: $sharedPath';
-          } catch (e) {
-            return 'git clone failed: $e';
-          }
-        }
-        // P8 Task 13: the raw per-session clone needed the on-device git
-        // from the sandbox. The registry path above still works when the
-        // repo is already cloned.
         return 'git clone is not available on-device in this build. '
             'Ovid Cloud clones repositories in the server workspace.';
 
@@ -17446,7 +16414,6 @@ ${await _agentsMdBlock()}
         for (final l in const LineSplitter().convert(pullOut.trim())) {
           _emit('shellOut', l);
         }
-        unawaited(syncOpenFilesFromDisk());
         return pullOut.trim().isEmpty ? 'already up to date ✓' : pullOut.trim();
 
       case 'git_status':
@@ -17482,16 +16449,12 @@ ${await _agentsMdBlock()}
       case 'preview':
         _emit('think', 'rendering preview…');
         try {
-          // Repo cache first (synced GitHub project)…
-          var path = await RepoCache.I.exportPreview('');
-          // …fall back to the session workspace (agent-built project,
-          // e.g. run_shell wrote index.html in /work) — this is the path
-          // that used to leak com.termux URLs and ERR_ACCESS_DENIED.
-          path ??= await _resolveLocalWebTarget('index.html') != null
-              ? await _exportPreviewFromHost(
-                  (await _resolveLocalWebTarget('index.html'))!,
-                )
-              : null;
+          // The local repo cache is gone (P8 Task 15); preview comes from the
+          // session workspace (agent-built project, e.g. run_shell wrote
+          // index.html in /work).
+          final target = await _resolveLocalWebTarget('index.html');
+          final String? path =
+              target != null ? await _exportPreviewFromHost(target) : null;
           if (path == null) {
             return 'no index.html found in workspace — create the web '
                 'files first (file_write or run_shell), then call preview.';
@@ -17796,10 +16759,9 @@ ${await _agentsMdBlock()}
     final sid = rs?.id ?? AppState.I.activeSession?.id;
     final m = mode;
     final workDir = await _sessionWorkDir();
-    // Studio bound workspace: the real session→repo binding from
-    // GlobalRepoRegistry (the workspaces worker's registry). Null when
-    // unbound — falls back to the session workspace, the same confinement
-    // General mode uses.
+    // Studio bound workspace: the session workspace directory. The local
+    // repo registry is gone (P8 Task 15); the cloud workspace owns the
+    // server-side checkout.
     var root = workDir.path;
     if (m != AgentMode.studio && m != AgentMode.drive) {
       // One authoritative root per mode. Control is jailed to the session
@@ -19432,12 +18394,6 @@ ${await _agentsMdBlock()}
     String rel, {
     String? gateTool,
   }) async {
-    // Repo cache hit?
-    if (RepoCache.I.workspaceFolder == null &&
-        RepoCache.I.boundSessionId == _runSession?.id &&
-        RepoCache.I.files.containsKey(rel)) {
-      return (path: 'repo:$rel', denied: false);
-    }
     // Absolute host path: resolve only when it exists; agent tools route
     // through the grant gate, everything else keeps the existence check.
     if (rel.startsWith('/')) {
@@ -19849,29 +18805,6 @@ ${await _agentsMdBlock()}
         'FS_NOT_OBSERVED: read "$path" first (file_read or fs_edit view), '
         'then edit it.';
 
-    final repoContent = _readSessionRepoFile(path);
-    if (repoContent != null) {
-      if (!_readPathsFor(sid).contains(path)) return notObserved();
-      final String updated;
-      try {
-        updated = transform(repoContent);
-      } on StructuredEditException catch (e) {
-        return refused(e);
-      }
-      final ok = await _maybeApprove(tool, path, describe(repoContent, updated));
-      if (!ok) return 'DENIED by user';
-      if (!(_permissionDispatchCtx?.accountCurrent ?? true)) {
-        return 'Cancelled: session account changed.';
-      }
-      RepoCache.I.write(path, updated);
-      openStudioFile(path, updated);
-      await _mirrorToDisk(path, updated);
-      _recordProduced(path, updated.length);
-      _emit('file', 'edited $path');
-      _attachDiffCard(path, repoContent, updated);
-      return 'edited $path ✓ ($tool: $doneLabel)';
-    }
-
     final resolved = await _resolveFsPath(path, gateTool: tool);
     if (resolved.denied) return _accessDeniedMessage([path], noun: 'path');
     final host = resolved.path;
@@ -19916,11 +18849,6 @@ ${await _agentsMdBlock()}
     }
     hf.writeAsStringSync(updated);
     _fsMarkObserved(path, hf);
-    if (_ownsRepoCache && RepoCache.I.repoFull != null) {
-      RepoCache.I.write(path, updated);
-      RepoCache.I.didSaveWorkspaceFile(path, updated);
-      openStudioFile(path, updated);
-    }
     _recordProduced(path, updated.length);
     _emit('file', 'edited $path');
     _attachDiffCard(path, content, updated);
@@ -19935,13 +18863,6 @@ ${await _agentsMdBlock()}
 
     switch (cmd) {
       case 'view':
-        // Repo file?
-        final repoContent = _readSessionRepoFile(path);
-        if (repoContent != null) {
-          _readPathsFor(sid).add(path);
-          _emit('file', 'view $path');
-          return _numberedLines(repoContent, 6000);
-        }
         // Host file? Strict permission model: an absolute path outside the
         // workspace prompts (Allow / Deny / Always allow) instead of
         // resolving silently; a denial surfaces as ACCESS_DENIED.
@@ -19960,9 +18881,6 @@ ${await _agentsMdBlock()}
 
       case 'create':
         final content = args['file_text'] as String? ?? '';
-        if (_ownsRepoCache && RepoCache.I.files.containsKey(path)) {
-          return 'file already exists: $path — use str_replace to edit it';
-        }
         // Strict permission model: a path outside the workspace root
         // prompts Allow / Deny / Always allow in General/Studio instead of
         // a hard refusal; an existing grant lets the create proceed.
@@ -19992,31 +18910,6 @@ ${await _agentsMdBlock()}
         if (!_readPathsFor(sid).contains(path)) {
           return 'FS_NOT_OBSERVED: read "$path" first (file_read or '
               'fs_edit view), then edit it.';
-        }
-        // Repo file?
-        final repoContent = _readSessionRepoFile(path);
-        if (repoContent != null) {
-          final count = _countOccurrences(repoContent, oldStr);
-          if (count == 0) return 'old_str not found in $path';
-          if (count > 1) {
-            return 'old_str matches $count times in $path — make it more '
-                'unique (add surrounding context).';
-          }
-          final updated = repoContent.replaceFirst(oldStr, newStr);
-          final ok = await _maybeApprove(
-            'fs_edit str_replace',
-            path,
-            'EDIT $path:\nold: ${oldStr.length} chars → new: ${newStr.length} chars',
-          );
-          if (!ok) return 'DENIED by user';
-          RepoCache.I.write(path, updated);
-          openStudioFile(path, updated);
-          // C7: repo edits mirror to disk too (shell cat sees the change).
-          await _mirrorToDisk(path, updated);
-          _recordProduced(path, updated.length);
-          _emit('file', 'edited $path');
-          _attachDiffCard(path, repoContent, updated);
-          return 'edited $path ✓ (str_replace)';
         }
         // Host file?
         final editResolved = await _resolveFsPath(path, gateTool: 'fs_edit');
@@ -20049,13 +18942,6 @@ ${await _agentsMdBlock()}
         final updatedHost = content.replaceFirst(oldStr, newStr);
         File(host).writeAsStringSync(updatedHost);
         _fsMarkObserved(path, hf); // re-stamp after our own write
-        // C7: workspace edits also land in the repo cache when the repo
-        // is bound, so commit() can push them.
-        if (_ownsRepoCache && RepoCache.I.repoFull != null) {
-          RepoCache.I.write(path, updatedHost);
-          RepoCache.I.didSaveWorkspaceFile(path, updatedHost);
-          openStudioFile(path, updatedHost);
-        }
         _recordProduced(path, updatedHost.length);
         _emit('file', 'edited $path');
         _attachDiffCard(path, content, updatedHost);
@@ -20069,15 +18955,12 @@ ${await _agentsMdBlock()}
           return 'FS_NOT_OBSERVED: read "$path" first (file_read or '
               'fs_edit view), then edit it.';
         }
-        final repoContent = _readSessionRepoFile(path);
         final insertResolved = await _resolveFsPath(path, gateTool: 'fs_edit');
         if (insertResolved.denied) {
           return _accessDeniedMessage([path], noun: 'path');
         }
         final host = insertResolved.path;
-        final raw =
-            repoContent ??
-            (host != null ? await File(host).readAsString() : null);
+        final raw = host != null ? await File(host).readAsString() : null;
         if (raw == null) return 'file not found: $path';
         final lines = raw.split('\n');
         if (insertLine < 0 || insertLine > lines.length) {
@@ -20091,19 +18974,8 @@ ${await _agentsMdBlock()}
           'INSERT at line $insertLine in $path:\n$newStr',
         );
         if (!ok) return 'DENIED by user';
-        if (repoContent != null) {
-          RepoCache.I.write(path, updated);
-          openStudioFile(path, updated);
-          // C7: repo insert mirrors to disk too.
-          await _mirrorToDisk(path, updated);
-        } else if (host != null) {
+        if (host != null) {
           File(host).writeAsStringSync(updated);
-          // C7: workspace insert lands in the repo cache when bound.
-          if (_ownsRepoCache && RepoCache.I.repoFull != null) {
-            RepoCache.I.write(path, updated);
-            RepoCache.I.didSaveWorkspaceFile(path, updated);
-            openStudioFile(path, updated);
-          }
         }
         _emit('file', 'edited $path');
         _attachDiffCard(path, raw, updated);
@@ -20164,10 +19036,9 @@ ${await _agentsMdBlock()}
       return 'read_image: "$path" is not a raster image '
           '(supported: png/jpg/webp/gif/bmp)';
     }
-    final repoText = RepoCache.I.read(path);
-    List<int>? bytes = repoText != null ? utf8.encode(repoText) : null;
-    var source = 'repo';
-    if (bytes == null) {
+    List<int>? bytes;
+    var source = 'workspace';
+    {
       final work = await _sessionWorkDir();
       final host = await resolveBrowserUploadPathForTest(work, path);
       if (host == null) {
@@ -20421,16 +19292,7 @@ ${await _agentsMdBlock()}
     final seen = <String>{};
     final hits = <({String rel, int mtime})>[];
 
-    // Search repo cache (fast, in-memory).
-    if (basePath == null || basePath.isEmpty || basePath == '.') {
-      for (final p in _ownsRepoCache ? RepoCache.I.treePaths : <String>[]) {
-        if (!re.hasMatch(p)) continue;
-        if (!seen.add(p)) continue;
-        hits.add((rel: p, mtime: 0));
-        if (hits.length >= cap) break;
-      }
-    }
-    // Search host filesystem under session workdir.
+    // Search the session workspace (the local repo cache is gone).
     // Strict permission model: an outside-workspace base prompts (Allow /
     // Deny / Always allow) instead of the old hard refusal.
     final work = await _sessionWorkDir();
@@ -20503,24 +19365,7 @@ ${await _agentsMdBlock()}
     const maxFileBytes = 2 * 1024 * 1024;
     var skippedLarge = 0;
 
-    // Search repo cache.
-    if (basePath == null || basePath.isEmpty || basePath == '.') {
-      for (final entry
-          in _ownsRepoCache
-              ? RepoCache.I.files.entries
-              : <MapEntry<String, String>>[]) {
-        if (matches >= maxMatches) break;
-        if (includeRe != null && !includeRe.hasMatch(entry.key)) continue;
-        final lines = entry.value.split('\n');
-        for (var i = 0; i < lines.length && matches < maxMatches; i++) {
-          if (re.hasMatch(lines[i])) {
-            matches++;
-            _appendGrepMatch(results, entry.key, lines, i, ctxLines);
-          }
-        }
-      }
-    }
-    // Search host filesystem.
+    // Search the session workspace (the local repo cache is gone).
     // Strict permission model: an outside-workspace base prompts (Allow /
     // Deny / Always allow) instead of the old hard refusal.
     final work = await _sessionWorkDir();
@@ -23943,8 +22788,6 @@ ${await _agentsMdBlock()}
     final lines = (args['lines'] as num?)?.toInt() ?? 30;
     final job = _jobs[id];
     if (job == null) return 'Job #$id not found.';
-    // Live file follow: watchers/builders may have rewritten open tabs.
-    unawaited(syncOpenFilesFromDisk());
     final out = job.output.toString().trim();
     if (out.isEmpty) return 'Job #$id has no output yet.';
     final allLines = const LineSplitter().convert(out);

@@ -582,7 +582,7 @@ const defaultAllowedHosts = <String>{'localhost', '127.0.0.1', '::1'};
 /// Resolves the filesystem root the strict permission model enforces for a
 /// session: General mode pins the session workspace. Studio mode's bound
 /// repo folder is resolved by the CALLER (AgentService._resolveGrantedPath)
-/// via GlobalRepoRegistry — an async lookup that cannot live in this
+/// via the (removed) local repo registry — an async lookup that cannot live in this
 /// pure-Dart helper — falling back to the session workspace when unbound,
 /// which is exactly what this function returns.
 String permissionWorkspaceRoot({

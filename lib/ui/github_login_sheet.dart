@@ -327,8 +327,8 @@ class _GithubLoginSheetState extends State<GithubLoginSheet>
         const SizedBox(height: 4),
         Text(
           GitHubService.I.login != null
-              ? '@${GitHubService.I.login} — repos ready in Studio'
-              : 'Your repos are now accessible.',
+              ? '@${GitHubService.I.login} — connected for this session'
+              : 'Your GitHub account is connected for this session.',
           style: AetherType.bodyMuted,
         ),
         const SizedBox(height: 16),

@@ -103,9 +103,9 @@ class StudioPaneViewport extends StatelessWidget {
   );
 }
 
-/// Pulls the `done / total` pair out of a [RepoCache.sync] progress line.
+/// Pulls the `done / total` pair out of a sync progress line.
 ///
-/// `RepoCache.sync` reports `synced 25 / 400 files` every 25 files; Studio
+/// The old sync reported `synced 25 / 400 files` every 25 files; Studio
 /// never passed the callback, so a multi-minute serial fetch of up to 400
 /// files showed only an 11px spinner. Returns null for lines that carry no
 /// progress (tree fetch, the final "repo synced ✓" line).

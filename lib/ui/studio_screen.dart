@@ -1,19 +1,15 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 
-import '../core/theme.dart';
-import '../core/distribution.dart';
-import '../core/state.dart';
-import '../core/github_service.dart';
-import '../core/global_repo_registry.dart';
 import '../core/agent_service.dart';
-import '../core/repo_cache.dart';
+import '../core/cloud/studio_files.dart';
+import '../core/cloud/studio_remote_client.dart';
+import '../core/github_service.dart';
+import '../core/state.dart';
 import '../core/studio_drafts.dart';
+import '../core/theme.dart';
 import 'github_login_sheet.dart';
 import 'studio_editor.dart';
 import 'studio_errors.dart';
@@ -27,16 +23,7 @@ import 'widgets/aether_primitives.dart';
 export 'studio_editor.dart' show StudioEditor, StudioEditorTabs;
 export 'studio_file_tree.dart' show StudioFileTree;
 export 'studio_terminal_tabs.dart'
-    show
-        StudioTerminalTabs,
-        studioPtySpawnerOverrideForTest,
-        studioTerminalStopKey;
-
-/// Test seam: overrides the device directory picker for the Studio
-/// working-folder affordance so host widget tests can drive "change folder"
-/// without a platform channel. Production is null (real FilePicker).
-@visibleForTesting
-String? studioFolderPickOverrideForTest;
+    show StudioTerminalTabs, studioTerminalStopKey;
 
 /// Test seam: overrides the GitHub login prompt so host widget tests can
 /// assert the Studio auth gate without starting a real device flow.
@@ -44,96 +31,14 @@ String? studioFolderPickOverrideForTest;
 @visibleForTesting
 void Function(BuildContext context)? studioLoginPromptOverrideForTest;
 
-/// Test seam: overrides the branch list for the Studio branch picker so host
-/// widget tests can drive "change branch" without a real GitHub request.
-/// Production is null (the real [GitHubService.listBranches]).
-@visibleForTesting
-Future<List<String>> Function(String owner, String repo)?
-studioListBranchesOverrideForTest;
-
-/// Test seam: overrides the repo re-sync so host widget tests can exercise
-/// the binding flow without network. Production is null (RepoCache.sync).
-@visibleForTesting
-Future<void> Function()? studioRepoSyncOverrideForTest;
-
-/// Test seam: the [SyncReport] an overridden sync "returned", so a test can
-/// drive the partial-sync banner. Production ignores it.
-@visibleForTesting
-SyncReport? studioRepoSyncReportOverrideForTest;
-
-@visibleForTesting
-GlobalRepoRegistry? studioRegistryOverrideForTest;
-
-/// Test seams for the repo picker's paged list and name search.
-@visibleForTesting
-Future<List<Map<String, dynamic>>> Function({int page})?
-studioListReposOverrideForTest;
-@visibleForTesting
-Future<List<Map<String, dynamic>>> Function(
-  String query, {
-  Iterable<String> owners,
-})?
-studioSearchReposOverrideForTest;
-
-/// The picker search field (test seam).
-@visibleForTesting
-const Key studioPickerSearchKey = ValueKey('studio-picker-search');
-
-/// Test seam: same as [studioRepoSyncOverrideForTest] but receives the
-/// progress sink, so a test can assert that Studio surfaces [RepoCache.sync]'s
-/// `onLine` callback instead of dropping it. The plain override wins when both
-/// are set, which keeps every existing test working untouched.
-@visibleForTesting
-Future<void> Function(void Function(String line) onLine)?
-studioRepoSyncProgressOverrideForTest;
-
-/// Branch to bind when a repo is picked: the repo's `default_branch`, else
-/// `main`. Prevents carrying the previous repo's branch onto the new repo.
-@visibleForTesting
-String branchForPickedRepo(Map<String, dynamic>? repo) {
-  final branch = (repo?['default_branch'] as String?)?.trim();
-  return (branch == null || branch.isEmpty) ? 'main' : branch;
-}
-
-/// Placeholder for a repository payload that carries no usable name.
-const String studioUnnamedRepoLabel = '(unnamed repository)';
-
-/// The `owner/repo` identity of a GitHub repo payload, or null when the
-/// payload has none.
+/// Studio — remote coding workspace: the P7 file tree/editor over the cloud
+/// workspace API plus the P2 terminal channel.
 ///
-/// The picker used to render `full_name` with a `name` fallback — which shows
-/// the literal string "null" for a nameless repo — and then its `onTap` cast
-/// `full_name` to a non-null String anyway, contradicting its own guard and
-/// crashing on tap (2026-09-30 audit). One function now decides, and a null
-/// result means "listed, not pickable".
-String? repoFullNameOf(Map<String, dynamic> repo) {
-  final full = repo['full_name'];
-  if (full is String && full.trim().isNotEmpty) return full.trim();
-  final owner = repo['owner'];
-  final name = repo['name'];
-  if (owner is Map &&
-      owner['login'] is String &&
-      name is String &&
-      name.trim().isNotEmpty) {
-    return '${owner['login']}/${name.trim()}';
-  }
-  if (name is String && name.trim().isNotEmpty) return name.trim();
-  return null;
-}
-
-/// Studio — coding harness (DeepSeek-web style): file explorer bound to the
-/// user's connected GitHub repo, real editable editor with per-session
-/// buffers, agent-visible tabs, and a live Ubuntu sandbox terminal.
-///
-/// The user never sees OS or infra details. Connection state is a labelled,
-/// differently-shaped badge in the app bar (signed in / checking / signed
-/// out); repo plumbing failures are translated by [StudioFailure] into one
-/// human sentence, with the raw text demoted to a secondary line.
-///
-/// The layout is breakpoint-driven ([StudioMetrics]): below 840dp the file
-/// tree stops being docked, below 600dp it becomes an overlay and the app bar
-/// folds secondary actions into a menu, and on a short viewport the terminal
-/// collapses rather than squeezing the editor below a usable height.
+/// Local git UI (branch chips, sync progress, commit staging, credential env)
+/// is GONE: the server owns the workspace and the git tools. The layout is
+/// breakpoint-driven ([StudioMetrics]): below 840dp the file tree stops being
+/// docked, below 600dp it becomes an overlay, and on a short viewport the
+/// terminal collapses rather than squeezing the editor below a usable height.
 class StudioScreen extends StatefulWidget {
   /// Set when Studio is opened by a setup flow. [_handleInitialAuth] then
   /// fires the one-time GitHub login prompt from its own branch instead of
@@ -149,24 +54,6 @@ class _StudioScreenState extends State<StudioScreen> {
   /// default", so rotating a phone to tablet width re-docks the tree instead
   /// of fighting the user's last decision on the old geometry.
   bool? _showFilesOverride;
-  bool _syncing = false;
-  bool _resyncRequested = false;
-  bool _committing = false;
-  bool _handledInitialAuth = false;
-
-  /// Human message for a failed sync; [_syncErrorDetail] keeps the raw text.
-  String? _syncError;
-  String? _syncErrorDetail;
-
-  /// The last sync's report when it was PARTIAL (file cap, truncated tree,
-  /// failed fetches, deadline). A partial copy must never look complete.
-  SyncReport? _partialReport;
-  String? _cloneStatus;
-  String? _workspaceKey;
-
-  /// Live sync progress: a human line plus the parsed 0..1 fraction.
-  String? _syncProgress;
-  double? _syncFraction;
 
   /// User drags. Null means "use the breakpoint default"; every read goes
   /// back through [StudioMetrics.clampTreeWidth] / [clampTerminalHeight] so a
@@ -175,49 +62,45 @@ class _StudioScreenState extends State<StudioScreen> {
   double? _terminalHeightOverride;
   bool? _terminalCollapsedOverride;
 
-  /// The repo bar and the app bar read `AgentService.sessionRepoFull` /
-  /// `sessionBranch`, which resolve through [AppState]. Without subscribing,
-  /// an external repo, branch or session change left the bar showing the
-  /// previous binding until something else happened to rebuild the screen.
-  late final Listenable _sessionSignals =
-      Listenable.merge([AppState.I, GitHubService.I, RepoCache.I]);
+  bool _refreshing = false;
+  bool _handledInitialAuth = false;
+  String _sessionId = '';
 
   /// Whether the active Studio bucket holds unsaved editor drafts. Kept in
   /// its own notifier so the guard does not rebuild the screen per token.
   final ValueNotifier<bool> _hasDrafts = ValueNotifier(false);
   bool _leaving = false;
 
-  void _syncDraftFlag() =>
-      _hasDrafts.value = AgentService.I.studioTabs.value.dirtyPaths.isNotEmpty;
+  String get _sid => _sessionId;
+  StudioRemoteClient get _remote => StudioRemoteClient.I;
 
-  String? get _repo => AgentService.I.sessionRepoFull;
-  String get _branch => AgentService.I.sessionBranch;
+  late final Listenable _sessionSignals =
+      Listenable.merge([AppState.I, GitHubService.I, _remote, _hasDrafts]);
+
+  void _syncDraftFlag() =>
+      _hasDrafts.value = _remote.dirtyFiles(_sid).isNotEmpty;
 
   @override
   void initState() {
     super.initState();
-    final s = AppState.I.activeSession;
-    _workspaceKey = '${s?.id}|${s?.repo}|${s?.branch}|${s?.workspaceFolder}';
+    _sessionId = AppState.I.activeSession?.id ?? '';
     GitHubService.I.addListener(_handleInitialAuth);
     AppState.I.addListener(_onWorkspaceChanged);
-    AgentService.I.studioTabs.addListener(_syncDraftFlag);
+    _remote.tabsFor(_sid).addListener(_syncDraftFlag);
     _syncDraftFlag();
-    // Opening Studio is an explicit "try again now". The automatic restore
-    // backoff runs out after ~2.5 minutes and nothing re-arms it, so a
-    // secure-storage hiccup longer than that left this screen signed out for the
-    // rest of the process. A UI-initiated retry restarts the window.
     unawaited(GitHubService.I.retryRestoreFromUi());
-    WidgetsBinding.instance.addPostFrameCallback((_) => _handleInitialAuth());
-    if (s?.workspaceFolder != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _autoSync(); });
-    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _handleInitialAuth();
+      _refreshTree();
+    });
   }
 
   @override
   void dispose() {
     GitHubService.I.removeListener(_handleInitialAuth);
     AppState.I.removeListener(_onWorkspaceChanged);
-    AgentService.I.studioTabs.removeListener(_syncDraftFlag);
+    _remote.tabsFor(_sid).removeListener(_syncDraftFlag);
     _hasDrafts.dispose();
     // Leaving Studio is a good moment to make sure drafts are on disk.
     unawaited(StudioDraftStore.I.flush());
@@ -227,8 +110,7 @@ class _StudioScreenState extends State<StudioScreen> {
   /// Back with unsaved drafts: Save all / Discard / Cancel (F-071).
   Future<void> _confirmLeave() async {
     if (_leaving) return;
-    final agent = AgentService.I;
-    final dirty = agent.dirtyStudioFiles;
+    final dirty = _remote.dirtyFiles(_sid);
     if (dirty.isEmpty) {
       Navigator.of(context).pop();
       return;
@@ -246,9 +128,9 @@ class _StudioScreenState extends State<StudioScreen> {
         case StudioUnsavedChoice.cancel:
           return;
         case StudioUnsavedChoice.discard:
-          agent.discardAllStudioDrafts();
+          _remote.discardAllStudioDrafts(_sid);
         case StudioUnsavedChoice.save:
-          final failed = await agent.saveAllStudioDrafts();
+          final failed = await _remote.saveAllStudioDrafts(_sid);
           if (!mounted) return;
           if (failed.isNotEmpty) {
             showStudioToast(
@@ -267,25 +149,19 @@ class _StudioScreenState extends State<StudioScreen> {
   }
 
   void _onWorkspaceChanged() {
-    final s = AppState.I.activeSession;
-    final key = '${s?.id}|${s?.repo}|${s?.branch}|${s?.workspaceFolder}';
-    if (_workspaceKey == key) return;
-    _workspaceKey = key;
-    if (_cloneStatus != null) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _cloneStatus == null) _autoSync();
-    });
+    final next = AppState.I.activeSession?.id ?? '';
+    if (next == _sessionId) return;
+    _remote.tabsFor(_sid).removeListener(_syncDraftFlag);
+    setState(() => _sessionId = next);
+    _remote.tabsFor(_sid).addListener(_syncDraftFlag);
+    _syncDraftFlag();
+    unawaited(_refreshTree());
   }
 
   void _handleInitialAuth() {
     final github = GitHubService.I;
     if (!mounted || _handledInitialAuth) return;
     if (widget.postInstallGithubPrompt) {
-      // Opened by the Studio first-open install flow: the install screen
-      // replaced itself with Studio, so the GitHub prompt fires here
-      // (once) instead of the regular path below — no double popup.
-      // Don't consume the one-shot while the restore is still settling;
-      // the GitHubService listener re-fires after initialize() finishes.
       if (github.isInitializing) return;
       _handledInitialAuth = true;
       if (!github.isLoggedIn) {
@@ -294,538 +170,32 @@ class _StudioScreenState extends State<StudioScreen> {
       return;
     }
     if (github.isLoggedIn) {
-      // The token is assigned before the profile fetch, so during a restore
-      // that will 401 `isLoggedIn` is momentarily true. Only settle once
-      // initialization has finished; otherwise that transient state consumes
-      // the one prompt and a later signed-out settle never re-prompts.
-      if (github.isInitializing) return;
-      // ...and only settle once the profile has actually LOADED. A restored
-      // token is assigned before its profile fetch, so a fetch that fails
-      // leaves `isLoggedIn` true while `login` is still null. Latching on that
-      // unconfirmed state consumes the one-shot, and if the token then turns
-      // out to be dead (a confirmed 401 signs out later) the signed-out settle
-      // could never re-prompt — Studio would sit showing a connected account it
-      // cannot use. The profile retry (_scheduleProfileRetry) notifies once the
-      // profile loads, and the latch happens then.
-      if (github.login == null) return;
+      if (github.isInitializing || github.login == null) return;
       _handledInitialAuth = true;
-      // Re-sync when the cache is empty OR belongs to another session — the
-      // singleton RepoCache would otherwise show session A's working copy to
-      // session B (cross-session bleed).
-      if (_repo != null &&
-          (!RepoCache.I.isReady ||
-              RepoCache.I.boundSessionId != AppState.I.activeSession?.id)) {
-        _autoSync();
-      }
       return;
     }
     if (github.isInitializing) return;
-    // A FAILED storage read is not a sign-out: the token is still on disk and
-    // retryRestoreIfNotLoggedIn() may recover it seconds later. Latching here
-    // would show "sign in" over a session that is about to come back — and then
-    // never offer it again once it does.
+    // A failed storage read is not a sign-out; retryRestoreFromUi() may
+    // recover it seconds later.
     if (github.restoreFailed) return;
     _handledInitialAuth = true;
     (studioLoginPromptOverrideForTest ?? showGithubLoginSheet)(context);
   }
 
-  /// The one sync path. Production wires [RepoCache.sync]'s `onLine` progress
-  /// callback, which Studio used to drop — a serial fetch of up to 400 files
-  /// could run for minutes behind an 11px spinner.
-  Future<SyncReport?> _runSync(void Function(String) onLine) async {
-    final legacy = studioRepoSyncOverrideForTest;
-    if (legacy != null) {
-      await legacy();
-      return studioRepoSyncReportOverrideForTest;
-    }
-    final progress = studioRepoSyncProgressOverrideForTest;
-    if (progress != null) {
-      await progress(onLine);
-      return studioRepoSyncReportOverrideForTest;
-    }
-    return RepoCache.I.sync(onLine: onLine);
-  }
-
-  void _onSyncLine(String line) {
+  /// Refreshes the P7 workspace tree (the <100 ms manifest path).
+  Future<void> _refreshTree() async {
+    if (_sid.isEmpty || _refreshing) return;
+    setState(() => _refreshing = true);
+    final snapshot = await _remote.syncStudioTabs(_sid);
     if (!mounted) return;
-    final counts = parseSyncCounts(line);
-    setState(() {
-      _syncFraction = parseSyncFraction(line);
-      _syncProgress = counts == null
-          ? 'Syncing…'
-          : 'Syncing files · ${counts.done} / ${counts.total}';
-    });
-  }
-
-  Future<bool> _autoSync() async {
-    final repo = _repo;
-    final session = AppState.I.activeSession;
-    final folder = session?.workspaceFolder;
-    if (_syncing) {
-      _resyncRequested = true;
-      return false;
-    }
-    if (repo == null && folder == null) return false;
-    setState(() {
-      _syncing = true;
-      _syncError = null;
-      _syncErrorDetail = null;
-      _partialReport = null;
-      _syncProgress = 'Syncing…';
-      _syncFraction = null;
-    });
-    StudioFailure? failure;
-    SyncReport? report;
-    int? binding;
-    int? syncOperation;
-    final workspaceKey = _workspaceKey;
-    try {
-      RepoCache.I.bind(
-        repo ?? '',
-        GitHubService.I.token ?? '',
-        branch: AgentService.I.sessionBranch,
-        sessionId: AppState.I.activeSession?.id,
-        workspaceFolder: folder,
-      );
-      binding = RepoCache.I.bindingGeneration;
-      final syncing = _runSync((line) {
-        if (binding == RepoCache.I.bindingGeneration && workspaceKey == _workspaceKey &&
-            (syncOperation == null || syncOperation == RepoCache.I.syncOperation)) {
-          _onSyncLine(line);
-        }
-      });
-      syncOperation = RepoCache.I.syncOperation;
-      report = await syncing;
-    } catch (e) {
-      failure = StudioFailure.of(e);
-    }
-    if (!mounted) return false;
-    var succeeded = failure == null;
-    setState(() {
-      _syncing = false;
-      _syncProgress = null;
-      _syncFraction = null;
-    });
-    if (failure != null) succeeded = false;
-    if (failure == null && report != null && report.partial &&
-        binding == RepoCache.I.bindingGeneration &&
-        workspaceKey == _workspaceKey) {
-      setState(() => _partialReport = report);
-    }
-    if (failure != null && binding == RepoCache.I.bindingGeneration &&
-        syncOperation == RepoCache.I.syncOperation && workspaceKey == _workspaceKey) {
-      // A missing branch/ref must surface, not be swallowed — and the previous
-      // repo's files must not linger under the new binding.
-      RepoCache.I.clearWorkingCopy();
-      setState(() {
-        _syncError = failure!.message;
-        _syncErrorDetail = failure.detail;
-      });
-      succeeded = false;
-      showStudioToast(context, failure.message, error: true);
-    }
-    if (_resyncRequested) {
-      _resyncRequested = false;
-      succeeded = await _autoSync();
-    }
-    return succeeded;
-  }
-
-  /// After a repo+branch is picked, ask where this chat's working copy
-  /// should live. Two REAL options — both run a real `git clone`
-  /// the first time (with `-b <branch>`):
-  ///   1. "Session clone" — clone once into Ovid's shared repo storage
-  ///      ([GlobalRepoRegistry.ensureCloned]); a new session picking an
-  ///      already-cloned repo+branch hits the registry and reuses the SAME
-  ///      folder, no re-clone.
-  ///   2. "Local folder clone" — the user picks a device folder; the repo
-  ///      is cloned into a sanitized subfolder there.
-  /// Either way the session is bound to the working copy. Skipped when the
-  /// session already has a binding or a pinned folder; dismissing the
-  /// dialog keeps the default session-sandbox workspace.
-  Future<bool> _offerCloneTarget(ChatSession s, String repo, String branch) async {
-    if (!mounted) return false;
-    final sid = s.sandboxId ?? s.id;
-    // Private repos need the OAuth token at clone time.
-    GlobalRepoRegistry.gitTokenProvider ??= () => GitHubService.I.token;
-    // SECURITY: hand the registry a secret-free auth env (a host-scoped
-    // `store` helper naming a 0600 file) instead of letting it interpolate
-    // the token into GIT_CONFIG_VALUE_0.
-    // P8 Task 13: the on-device sandbox git is gone. The registry keeps its
-    // default host runner; Studio is stubbed on the thin client.
-    GlobalRepoRegistry.gitCredentialEnvProvider ??=
-        () => const <String, String>{};
-    final reg = await GlobalRepoRegistry.instance();
-    if (!mounted) return false;
-    // Already working in the clone for THIS repo+branch? Then there is nothing
-    // to offer.
-    //
-    // CLONE-ONCE (2026-09-24): this used to bail out whenever a folder existed
-    // at all. A new session inherits the previous repo's clone path, so picking
-    // repo B skipped the clone entirely and the session kept reading and writing
-    // inside repo A's folder while the repo bar and the API view showed B.
-    final existing = s.workspaceFolder;
-    final bound = reg.boundWorkspaceFor(sid);
-    final current =
-        (existing != null && existing.isNotEmpty ? existing : null) ?? bound;
-    if (current != null && GlobalRepoRegistry.checkoutMatches(current, repo, branch)) {
-      await reg.bindSession(sid, repo, branch, current);
-      AppState.I.setSessionWorkspaceFolder(current, sessionId: s.id);
-      return true;
-    }
-    final choice = await showStudioSheet<String>(
-      context,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          StudioSheetHeader(
-            title: 'Where should "$repo" live?',
-            subtitle: 'The agent runs shell commands and writes files inside '
-                'this working copy for this chat.',
-          ),
-          StudioSheetTile(
-            icon: Icons.inventory_2_outlined,
-            iconColor: Aether.accent,
-            title: 'Session clone',
-            subtitle: 'Clone once into Ovid storage — reused by future sessions',
-            onTap: () => Navigator.pop(context, 'session'),
-          ),
-          StudioSheetTile(
-            icon: Icons.folder_open_outlined,
-            title: 'Local folder clone',
-            subtitle: 'Pick a device folder; the repo is cloned into a subfolder',
-            onTap: () => Navigator.pop(context, 'local'),
-          ),
-          const SizedBox(height: 10),
-        ],
-      ),
-    );
-    if (!mounted || choice == null) return false;
-    if (choice == 'session') {
-      return _cloneIntoRegistry(reg, sid, repo, branch);
-    } else {
-      return _cloneIntoPickedFolder(reg, sid, repo, branch);
-    }
-  }
-
-  /// The previous checkout (and its local work) is retained on either outcome.
-  Future<void> _rebindCloneToBranch(ChatSession s, String repo, String branch) async {
-    final sid = s.sandboxId ?? s.id;
-    final reg = studioRegistryOverrideForTest ?? await GlobalRepoRegistry.instance();
-    final current = s.workspaceFolder ?? reg.boundWorkspaceFor(sid);
-    if (current != null) {
-      final String path;
-      if (reg.isSharedWorkspace(current)) {
-        path = await reg.ensureCloned(repo, branch);
-      } else {
-        path = '${Directory(current).parent.path}/${GlobalRepoRegistry.folderNameFor(repo, branch)}';
-        await reg.cloneRepo(repo, branch, path);
-      }
-      await reg.bindSession(sid, repo, branch, path);
-      AppState.I.setSessionWorkspaceFolder(path, sessionId: s.id);
-    }
-    await reg.rememberBranch(repo, branch);
-  }
-
-  Future<bool> _cloneIntoRegistry(
-    GlobalRepoRegistry reg,
-    String sid,
-    String repo,
-    String branch,
-  ) async {
-    setState(() => _cloneStatus = 'Cloning $repo@$branch …');
-    try {
-      final path = await reg.ensureCloned(repo, branch);
-      await reg.bindSession(sid, repo, branch, path);
-      final session = AppState.I.sessions.where((s) => (s.sandboxId ?? s.id) == sid).firstOrNull;
-      if (session == null) return false;
-      AppState.I.setSessionWorkspaceFolder(path, sessionId: session.id);
-      _toast('Working copy: ${path.split('/').last}');
-      return true;
-    } catch (e) {
-      _fail(e, 'Clone failed');
-      return false;
-    } finally {
-      if (mounted) setState(() => _cloneStatus = null);
-    }
-  }
-
-  /// "Local folder clone": the user picks a device folder; the repo is
-  /// really cloned (with `git clone -b <branch>`) into a sanitized
-  /// subfolder there, and the session workspace is bound to that subfolder.
-  Future<bool> _cloneIntoPickedFolder(
-    GlobalRepoRegistry reg,
-    String sid,
-    String repo,
-    String branch,
-  ) async {
-    final dir = await _pickWritableFolder(
-      dialogTitle: 'Pick a folder to clone $repo into',
-    );
-    if (!mounted || dir == null) return false;
-    final dest = '$dir/${GlobalRepoRegistry.folderNameFor(repo, branch)}';
-    setState(() => _cloneStatus = 'Cloning $repo@$branch …');
-    try {
-      await reg.cloneRepo(repo, branch, dest);
-      await reg.bindSession(sid, repo, branch, dest);
-      final session = AppState.I.sessions.where((s) => (s.sandboxId ?? s.id) == sid).firstOrNull;
-      if (session == null) return false;
-      AppState.I.setSessionWorkspaceFolder(dest, sessionId: session.id);
-      _toast('Working copy: ${dest.split('/').last}');
-      return true;
-    } catch (e) {
-      _fail(e, 'Clone failed');
-      return false;
-    } finally {
-      if (mounted) setState(() => _cloneStatus = null);
-    }
-  }
-
-  /// Studio affordance (opened from the app-bar folder button): change or
-  /// clear the ACTIVE session's pinned working folder. Folder selection
-  /// lives only in Studio — the composer chip just opens Studio.
-  Future<void> _manageWorkspaceFolder() async {
-    final s = AppState.I.activeSession;
-    if (!mounted || s == null) return;
-    final current = s.workspaceFolder;
-    final hasFolder = current != null && current.isNotEmpty;
-    final choice = await showStudioSheet<String>(
-      context,
-      child: SingleChildScrollView(child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          StudioSheetHeader(
-            title: 'Working folder',
-            subtitle: hasFolder ? current : 'Session sandbox (no pinned folder)',
-          ),
-          StudioSheetTile(
-            icon: Icons.drive_file_move_outline,
-            iconColor: Aether.accent,
-            title: 'Change folder',
-            onTap: () => Navigator.pop(context, 'pick'),
-          ),
-          StudioSheetTile(
-            icon: Icons.inventory_2_outlined,
-            title: 'Use session sandbox',
-            onTap: () => Navigator.pop(context, 'sandbox'),
-          ),
-          const SizedBox(height: 10),
-        ],
-      )),
-    );
-    if (!mounted || choice == null) return;
-    if (choice == 'sandbox') {
-      await (await GlobalRepoRegistry.instance()).unbindSession(s.sandboxId ?? s.id);
-      AppState.I.setSessionWorkspaceFolder(null, sessionId: s.id);
-      _toast('Working in the session sandbox.');
-      return;
-    }
-    await _pickAndPinFolder(dialogTitle: 'Pick working folder');
-  }
-
-  /// Picks a directory and pins it as the active session's working folder.
-  Future<void> _pickAndPinFolder({required String dialogTitle}) async {
-    final session = AppState.I.activeSession;
-    final path = await _pickWritableFolder(dialogTitle: dialogTitle);
-    if (!mounted || path == null || session == null) return;
-    await (await GlobalRepoRegistry.instance()).unbindSession(session.sandboxId ?? session.id);
-    AppState.I.setSessionWorkspaceFolder(path, sessionId: session.id);
-    final synced = await _autoSync();
-    if (synced) _toast('Working folder: ${path.split('/').last}');
-  }
-
-  /// The one folder-pick path: device picker (or the test seam), existence
-  /// check, and writability probe with an explanatory toast. This was copy-pasted verbatim into
-  /// `_cloneIntoPickedFolder` and `_pickAndPinFolder`.
-  ///
-  /// Returns null when the user cancelled or the folder is unusable — in the
-  /// unusable case the reason has already been toasted.
-  Future<String?> _pickWritableFolder({required String dialogTitle}) async {
-    String? path;
-    try {
-      path = studioFolderPickOverrideForTest ??
-          await FilePicker.platform.getDirectoryPath(dialogTitle: dialogTitle);
-    } catch (e) {
-      if (mounted) _fail(e, null);
-      return null;
-    }
-    if (!mounted || path == null) return null;
-    if (!Directory(path).existsSync()) {
-      _toast('That folder is not accessible.');
-      return null;
-    }
-    // No All Files Access (MANAGE_EXTERNAL_STORAGE) escalation: Play allows
-    // it only for file-manager/backup/antivirus apps.
-    final writable = _probeWritable(path);
-    if (!mounted) return null;
-    if (!writable) {
-      _toast(
-        'Ovid can\'t write to that folder. Pick a folder inside Ovid\'s '
-        'storage, or clone into the session sandbox.',
-      );
-      return null;
-    }
-    return path;
-  }
-
-  bool _probeWritable(String path) {
-    try {
-      final probe = File('$path/.ovid_probe');
-      probe.writeAsStringSync('ok');
-      probe.deleteSync();
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  void _toast(String msg) {
-    if (!mounted) return;
-    showStudioToast(context, msg);
-  }
-
-  /// One error path: a human headline for the user, the raw text only as a
-  /// secondary line. [prefix] is prepended when the action needs naming.
-  void _fail(Object error, String? prefix) {
-    if (!mounted) return;
-    final f = StudioFailure.of(error);
-    showStudioToast(
-      context,
-      prefix == null ? f.message : '$prefix. ${f.message}',
-      detail: f.detail,
-      error: true,
-    );
-  }
-
-  Future<void> _pickRepo() async {
-    final session = AppState.I.activeSession;
-    if (session == null) return;
-    if (!GitHubService.I.isLoggedIn) {
-      _showGithubRequired();
-      return;
-    }
-    try {
-      final repos = <Map<String, dynamic>>[];
-      if (!mounted) return;
-      final picked = await showStudioSheet<String>(
+    setState(() => _refreshing = false);
+    if (snapshot == null && _remote.treeError(_sid) != null) {
+      showStudioToast(
         context,
-        scrollable: true,
-        child: FractionallySizedBox(
-          heightFactor: 0.85,
-          child: StudioRepoSheet(
-            pageLoader: (page) async {
-              final next = await (studioListReposOverrideForTest ??
-                  GitHubService.I.listRepos)(page: page);
-              repos.addAll(next);
-              return next;
-            },
-            search: (query) async {
-              final owners = {
-                for (final r in repos) ?repoFullNameOf(r)?.split('/').first,
-              };
-              final hits = await (studioSearchReposOverrideForTest ??
-                  GitHubService.I.searchRepos)(query, owners: owners);
-              repos.addAll(hits);
-              return hits;
-            },
-          ),
-        ),
+        'Could not load the workspace tree',
+        detail: _remote.treeError(_sid),
+        error: true,
       );
-      if (picked == null) return;
-      final pickedRepo = repos.firstWhere(
-        (r) => repoFullNameOf(r) == picked,
-        orElse: () => const <String, dynamic>{},
-      );
-      // A new repo starts on its own default branch — never the previous
-      // repo's branch, whose ref may not exist (tree fetch would 404).
-      // Honour the branch the user chose for THIS repo before, instead of
-      // resetting to the repository default on every re-pick.
-      final reg2 = await GlobalRepoRegistry.instance();
-      final branch = reg2.branchFor(picked) ?? branchForPickedRepo(pickedRepo);
-      // Freshly picked repo+branch → offer a real working copy: a
-      // clone-once session clone, or a clone into a picked device folder.
-      // A new session picking an already-cloned repo+branch hits the
-      // registry and reuses the SAME folder (no re-clone).
-      if (!await _offerCloneTarget(session, picked, branch)) return;
-      AppState.I.setRepoForSession(session.id, picked);
-      AppState.I.setBranchForSession(session.id, branch);
-      await reg2.rememberBranch(picked, branch);
-      await _autoSync();
-    } catch (e) {
-      _fail(e, null);
-    }
-  }
-
-  /// Change the branch half of the `(repo, branch)` binding, then re-sync so
-  /// reads/commits target the chosen ref.
-  Future<void> _pickBranch() async {
-    final session = AppState.I.activeSession;
-    final repo = _repo;
-    if (repo == null || session == null) return;
-    if (!GitHubService.I.isLoggedIn) {
-      await _showGithubRequired();
-      return;
-    }
-    final parts = repo.split('/');
-    if (parts.length != 2 || parts.any((p) => p.isEmpty)) return;
-    try {
-      final lister =
-          studioListBranchesOverrideForTest ?? GitHubService.I.listBranches;
-      if (!mounted) return;
-      final current = AgentService.I.sessionBranch;
-      final picked = await showStudioSheet<String>(
-        context,
-        child: StudioBranchSheet(
-          current: current,
-          loader: () => lister(parts[0], parts[1]),
-        ),
-      );
-      if (picked != null && picked != current) {
-        setState(() => _cloneStatus = 'Switching to $picked …');
-        await _rebindCloneToBranch(session, repo, picked);
-        AppState.I.setBranchForSession(session.id, picked);
-        await _autoSync();
-      }
-    } catch (e) {
-      _fail(e, 'Branch switch failed');
-    } finally {
-      if (mounted) setState(() => _cloneStatus = null);
-    }
-  }
-
-  Future<void> _showGithubRequired() async {
-    if (!mounted) return;
-    final action = await showDialog<String>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Connect GitHub'),
-        content: const Text(
-          'You need to be signed in to choose a repository branch. '
-          'Try restoring your saved sign-in or connect GitHub again.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, 'retry'),
-            child: const Text('Try again'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, 'signin'),
-            child: const Text('Sign in'),
-          ),
-        ],
-      ),
-    );
-    if (!mounted) return;
-    if (action == 'retry') {
-      await GitHubService.I.retryRestoreFromUi();
-      if (!mounted) return;
-      if (!GitHubService.I.isLoggedIn) {
-        showStudioToast(context, 'GitHub sign-in could not be restored.', error: true);
-      }
-    } else if (action == 'signin') {
-      (studioLoginPromptOverrideForTest ?? showGithubLoginSheet)(context);
     }
   }
 
@@ -836,55 +206,12 @@ class _StudioScreenState extends State<StudioScreen> {
   bool _treeDefaultFor(BuildContext context) =>
       MediaQuery.sizeOf(context).width >= StudioMetrics.wideBreakpoint;
 
-  void _onOverflowAction(String action) {
-    switch (action) {
-      case 'folder':
-        _manageWorkspaceFolder();
-      case 'sync':
-        _autoSync();
-      case 'commit':
-        _commitPending();
-    }
-  }
-
-  Future<void> _commitPending() async {
-    if (_committing) return;
-    setState(() => _committing = true);
-    try {
-      // Full-screen route, not an AlertDialog: a review of many files (or a
-      // lockfile) needs the whole screen, a lazy list and room for the IME.
-      final count = await Navigator.of(context).push<int>(
-        MaterialPageRoute(
-          fullscreenDialog: true,
-          builder: (_) => const StudioCommitDialog(),
-        ),
-      );
-      if (!mounted || count == null) return;
-      final mode = RepoCache.I.lastCommit?.mode == CommitMode.atomic
-          ? 'one atomic commit'
-          : 'separate commits';
-      showStudioToast(
-        context,
-        count == 0 ? 'No changes to commit' : 'Committed $count file(s) · $mode',
-      );
-    } catch (e) {
-      if (mounted) showStudioToast(context, StudioFailure.of(e).message, error: true);
-    } finally {
-      if (mounted) setState(() => _committing = false);
-    }
-  }
-
-  @override
   @override
   Widget build(BuildContext context) {
-    // P8 Task 13: the on-device sandbox that backed Studio was removed.
-    // Until the remote Studio client lands (Task 15) the thin channel shows
-    // a stub instead of a broken workspace.
-    if (Distribution.cloudStudio) return const _StudioMovesToCloud();
+    if (_sid.isEmpty) return const _NoSessionStudio();
     return AnimatedBuilder(
       animation: _sessionSignals,
       builder: (context, _) {
-        final repo = _repo;
         final compactActions =
             MediaQuery.sizeOf(context).width < StudioMetrics.mediumBreakpoint;
         // On a compact width the tree is an overlay, so Android's back gesture
@@ -905,73 +232,55 @@ class _StudioScreenState extends State<StudioScreen> {
             child: child!,
           ),
           child: Scaffold(
-          backgroundColor: Aether.bg,
-          appBar: _appBar(repo, compactActions),
-          body: SafeArea(
-            child: StudioPaneViewport(
-              // Keep the tab strip, a real editor viewport and terminal chrome
-              // reachable even under a long approval or the software keyboard.
-              minContentHeight: 122 + math.max(1.0,
-                  MediaQuery.textScalerOf(context).scale(1.0)) *
-                  (kStudioTapTarget + (_terminalCollapsedOverride == false
-                      ? StudioMetrics.collapsedBarHeight + StudioMetrics.commandRowHeight
-                      : StudioMetrics.collapsedBarHeight)),
-              chrome: [
-                _RepoBar(
-                  repo: repo,
-                  branch: _branch,
-                  onPick: _pickRepo,
-                  onPickBranch: _pickBranch,
-                  syncing: _syncing,
-                ),
-                // The approval banner mirrors AgentService.pendingApproval for
-                // the active session. Rendered as an AetherCard-warn so a
-                // run-blocking approval is impossible to miss — Approve resolves
-                // the gate, Decline rejects it. Both actions tick off the
-                // approval contract in agent_service.dart via approve().
-                _ApprovalBanner(
-                  onDecision: (a, ok) {
-                    // Bound to the request the banner rendered: a stale tap
-                    // must never resolve the NEXT pending approval.
-                    if (!AgentService.I.approveRequest(a, ok)) return;
-                    if (!ok) {
-                      showStudioToast(context, 'Declined ${a.tool}');
-                    }
-                  },
-                ),
-                if (_syncError != null)
-                  _SyncErrorBanner(
-                    message: _syncError!,
-                    detail: _syncErrorDetail,
-                    onRetry: _syncing ? null : _autoSync,
-                    onDismiss: () => setState(() {
-                      _syncError = null;
-                      _syncErrorDetail = null;
-                    }),
+            backgroundColor: Aether.bg,
+            appBar: _appBar(compactActions),
+            body: SafeArea(
+              child: StudioPaneViewport(
+                // Keep the tab strip, a real editor viewport and terminal chrome
+                // reachable even under a long approval or the software keyboard.
+                minContentHeight: 122 +
+                    math.max(1.0, MediaQuery.textScalerOf(context).scale(1.0)) *
+                        (kStudioTapTarget +
+                            (_terminalCollapsedOverride == false
+                                ? StudioMetrics.collapsedBarHeight +
+                                    StudioMetrics.commandRowHeight
+                                : StudioMetrics.collapsedBarHeight)),
+                chrome: [
+                  _WorkspaceBar(
+                    snapshot: _remote.snapshotFor(_sid),
+                    loading: _remote.treeLoading(_sid),
+                    onRefresh: _refreshing ? null : _refreshTree,
                   ),
-                if (_partialReport != null && _syncError == null)
-                  _SyncPartialBanner(
-                    report: _partialReport!,
-                    onRetry: _syncing ? null : _autoSync,
-                    onDismiss: () => setState(() => _partialReport = null),
+                  // A run-blocking approval is impossible to miss — Approve
+                  // resolves the gate, Decline rejects it.
+                  _ApprovalBanner(
+                    onDecision: (a, ok) {
+                      // Bound to the request the banner rendered: a stale tap
+                      // must never resolve the NEXT pending approval.
+                      if (!AgentService.I.approveRequest(a, ok)) return;
+                      if (!ok) {
+                        showStudioToast(context, 'Declined ${a.tool}');
+                      }
+                    },
                   ),
-                if (_cloneStatus != null) _StatusBanner(_cloneStatus!),
-                if (_syncing)
-                  _SyncProgressBanner(
-                    label: _syncProgress ?? 'Syncing…',
-                    fraction: _syncFraction,
-                  ),
-              ],
-              child: LayoutBuilder(builder: _workspace),
+                  if (_remote.treeError(_sid) != null)
+                    _TreeErrorBanner(
+                      detail: _remote.treeError(_sid),
+                      onRetry: _refreshing ? null : _refreshTree,
+                    ),
+                  if (_refreshing)
+                    const _StatusBanner('Loading cloud workspace…'),
+                ],
+                child: LayoutBuilder(builder: _workspace),
+              ),
             ),
-          ),
           ),
         );
       },
     );
   }
 
-  PreferredSizeWidget _appBar(String? repo, bool compactActions) {
+  PreferredSizeWidget _appBar(bool compactActions) {
     final showFiles = _showFilesOverride ?? _treeDefaultFor(context);
     return AppBar(
       leading: const BackButton(),
@@ -986,90 +295,19 @@ class _StudioScreenState extends State<StudioScreen> {
         ),
       ),
       actions: [
-        // Working-folder control: the only place to change/clear a pinned
-        // folder (the chat chip just opens Studio). Folded into the overflow
-        // menu below 600dp so back + title + account never collide.
         StudioIconButton(
           icon: showFiles ? Icons.folder_open : Icons.folder_outlined,
           tooltip: 'Toggle files',
           onPressed: _toggleFiles,
         ),
-        if (!compactActions)
-          StudioIconButton(
-            icon: Icons.drive_file_move_outline,
-            tooltip: 'Working folder',
-            onPressed: _manageWorkspaceFolder,
-          ),
-        // Sync button — pull latest repo into workspace (real).
-        if (!compactActions && repo != null)
-          StudioIconButton(
-            icon: Icons.sync_rounded,
-            tooltip: 'Sync repo',
-            iconSize: 18,
-            color: Aether.accent,
-            onPressed: _syncing ? null : _autoSync,
-          ),
-        if (!compactActions && repo != null)
-          StudioIconButton(
-            icon: Icons.cloud_upload_outlined,
-            tooltip: _committing
-                ? 'Committing changes'
-                : 'Commit ${RepoCache.I.dirtyCount} pending file(s)',
-            iconSize: 18,
-            color: Aether.warn,
-            onPressed: _committing ? null : _commitPending,
-          ),
-        if (compactActions)
-          PopupMenuButton<String>(
-            tooltip: 'More Studio actions',
-            onSelected: _onOverflowAction,
-            position: PopupMenuPosition.under,
-            itemBuilder: (_) => [
-              const PopupMenuItem(
-                value: 'folder',
-                child: _OverflowRow(
-                  icon: Icons.drive_file_move_outline,
-                  label: 'Working folder',
-                ),
-              ),
-               if (repo != null)
-                 PopupMenuItem(
-                  value: 'sync',
-                  enabled: !_syncing,
-                  child: _OverflowRow(
-                    icon: Icons.sync_rounded,
-                    label: _syncing ? 'Syncing…' : 'Sync repo',
-                   ),
-                 ),
-               if (repo != null)
-                 PopupMenuItem(
-                   value: 'commit',
-                   enabled: !_committing,
-                   child: _OverflowRow(
-                     icon: Icons.cloud_upload_outlined,
-                     label: _committing
-                         ? 'Committing…'
-                         : 'Commit ${RepoCache.I.dirtyCount} file(s)',
-                   ),
-                 ),
-            ],
-            child: SizedBox(
-              width: kStudioTapTarget,
-              height: kStudioTapTarget,
-              child: Center(
-                child: Icon(
-                  Icons.more_vert,
-                  size: 20,
-                  color: Aether.textMuted,
-                ),
-              ),
-            ),
-          ),
-        // ── GitHub account chip + sign out ──
-        _AccountChip(
-          compact: compactActions,
-          onCommitFirst: repo != null && !_committing ? _commitPending : null,
+        StudioIconButton(
+          icon: Icons.sync_rounded,
+          tooltip: 'Refresh workspace',
+          iconSize: 18,
+          color: Aether.accent,
+          onPressed: _refreshing ? null : _refreshTree,
         ),
+        _AccountChip(compact: compactActions),
         const _AuthBadge(),
         const SizedBox(width: 4),
       ],
@@ -1077,7 +315,7 @@ class _StudioScreenState extends State<StudioScreen> {
   }
 
   /// The tree/editor/terminal split for the height that is actually left
-  /// after the app bar, repo bar and any banners.
+  /// after the app bar, workspace bar and any banners.
   Widget _workspace(BuildContext context, BoxConstraints c) {
     final m = StudioMetrics.of(
       c,
@@ -1091,24 +329,21 @@ class _StudioScreenState extends State<StudioScreen> {
     // An explicit collapse wins; otherwise a viewport too short for both
     // panes collapses the terminal instead of squeezing the editor.
     final collapsed = _terminalCollapsedOverride ?? !m.terminalFits;
-    // The collapsed bar is the terminal's header strip, whose height is
-    // `44dp * text scale` — a flat 44dp would clip it at a large OS font size.
     final requestedTerminalHeight = collapsed
         ? StudioMetrics.collapsedBarHeight * m.textScale
         : m.resolveTerminalHeight(
             _terminalHeightOverride ?? m.terminalHeight,
             regionHeight: c.maxHeight,
           );
-    // A terminal dragged to its maximum still leaves the editor's tab strip
-    // and a scrollable content viewport. The outer viewport supplies this room
-    // when a short screen cannot hold both panes.
-    final terminalHeight = math.min(requestedTerminalHeight,
-        math.max(0.0, c.maxHeight - (kStudioTapTarget * m.textScale + 122)));
+    final terminalHeight = math.min(
+        requestedTerminalHeight,
+        math.max(
+            0.0, c.maxHeight - (kStudioTapTarget * m.textScale + 122)));
 
     final editor = Column(
-      children: const [
-        StudioEditorTabs(),
-        Expanded(child: StudioEditor()),
+      children: [
+        StudioEditorTabs(sessionId: _sid),
+        Expanded(child: StudioEditor(sessionId: _sid)),
       ],
     );
 
@@ -1118,7 +353,7 @@ class _StudioScreenState extends State<StudioScreen> {
           SizedBox(
             key: studioTreePaneKey,
             width: dockedWidth,
-            child: const StudioFileTree(),
+            child: StudioFileTree(sessionId: _sid),
           ),
           StudioPaneDivider(
             key: studioTreeDividerKey,
@@ -1169,7 +404,7 @@ class _StudioScreenState extends State<StudioScreen> {
                       container: true,
                       child: SizedBox(
                         key: studioTreePaneKey,
-                        child: const StudioFileTree(),
+                        child: StudioFileTree(sessionId: _sid),
                       ),
                     ),
                   ),
@@ -1181,6 +416,7 @@ class _StudioScreenState extends State<StudioScreen> {
           key: studioTerminalPaneKey,
           height: terminalHeight,
           child: StudioTerminalTabs(
+            sessionId: _sid,
             collapsed: collapsed,
             onToggleCollapse: () => setState(
               () => _terminalCollapsedOverride = !collapsed,
@@ -1200,433 +436,21 @@ class _StudioScreenState extends State<StudioScreen> {
   }
 }
 
-/// Selection and message stay editable, but each edit discards the review.
-/// HTTP injection exercises the real RepoCache approval/publication contract.
-class StudioCommitDialog extends StatefulWidget {
-  const StudioCommitDialog({super.key, this.client});
-  final http.Client? client;
-  @override
-  State<StudioCommitDialog> createState() => _StudioCommitDialogState();
-}
-
-class _StudioCommitDialogState extends State<StudioCommitDialog> {
-  final _message = TextEditingController(text: 'Update files from Ovid Studio');
-  late final List<String> _paths = RepoCache.I.pendingPaths.toList();
-  late final Set<String> _selected = _paths.toSet();
-  CommitApproval? _approval;
-  List<FileDiff>? _diffs;
-  String? _error;
-  String? _errorDetail;
-
-  /// Set when GitHub did not confirm a publication: the intended commit SHA
-  /// the user can copy and check (CommitFailureKind.unknown).
-  String? _unknownSha;
-  bool _busy = false;
-  int _revision = 0;
-  final Set<String> _collapsed = {};
-  final Set<String> _showFull = {};
-  bool _showErrorDetail = false;
-
-  /// Rendered diff lines per file before "Show full diff" (large lockfiles
-  /// and minified bundles must not lay out megabytes of text).
-  static const int maxRenderedLinesPerFile = 400;
-
-  /// A single rendered diff line is clipped to this many characters.
-  static const int maxRenderedLineChars = 400;
-
-  @override
-  void initState() {
-    super.initState();
-    _message.addListener(_invalidate);
-    RepoCache.I.addListener(_cacheChanged);
-  }
-
-  void _invalidate() {
-    if (!mounted) return;
-    setState(() { _revision++; _approval = null; _diffs = null; });
-  }
-
-  void _setError(Object e) {
-    final f = StudioFailure.of(e);
-    _error = e is StateError && '$e'.contains('No unresolved commit intent')
-        ? 'There is no interrupted commit to check.'
-        : f.message;
-    _errorDetail = f.detail == _error ? null : f.detail;
-    _showErrorDetail = false;
-    _unknownSha = e is CommitFailure && e.kind == CommitFailureKind.unknown
-        ? e.intendedSha
-        : _unknownSha;
-  }
-
-  void _clearError() {
-    _error = null;
-    _errorDetail = null;
-  }
-
-  void _setApproval(CommitApproval approval) {
-    _approval = approval;
-    _diffs = null;
-    final revision = _revision;
-    approval.fileDiffsAsync().then((diffs) {
-      if (mounted && identical(_approval, approval) && revision == _revision) {
-        setState(() => _diffs = diffs);
-      }
-    }, onError: (Object e) {
-      if (mounted && identical(_approval, approval)) {
-        setState(() => _setError(e));
-      }
-    });
-  }
-
-  void _cacheChanged() {
-    final previousSelection = Set.of(_selected);
-    final pending = RepoCache.I.pendingPaths;
-    for (final path in pending) {
-      if (!_paths.contains(path)) { _paths.add(path); _selected.add(path); }
-    }
-    _paths.removeWhere((path) => !pending.contains(path));
-    _selected.removeWhere((path) => !pending.contains(path));
-    if (previousSelection.length != _selected.length || !previousSelection.containsAll(_selected)) {
-      _invalidate();
-      return;
-    }
-    if (_approval == null) { _invalidate(); return; }
-    try {
-      // In-memory revision check only: re-reading every approved file on each
-      // RepoCache notify blocked the UI isolate while the agent wrote files.
-      // Byte-level validation runs again in commitApproved before publishing.
-      RepoCache.I.validateApprovalRevision(_approval!);
-    } catch (e) {
-      _invalidate();
-      setState(() => _setError(e));
-    }
-  }
-
-  Future<void> _review() async {
-    final revision = _revision;
-    setState(() { _busy = true; _clearError(); _approval = null; _diffs = null; });
-    try {
-      final approval = await RepoCache.I.prepareCommit(_message.text,
-          paths: _selected, client: widget.client);
-      if (mounted && revision == _revision) setState(() => _setApproval(approval));
-    } catch (e) {
-      if (mounted) setState(() => _setError(e));
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _publish() async {
-    final approval = _approval;
-    if (approval == null) return;
-    setState(() { _busy = true; _clearError(); });
-    try {
-      final count = await RepoCache.I.commitApproved(approval, client: widget.client);
-      if (mounted) Navigator.of(context).pop(count);
-    } catch (e) {
-      if (mounted) setState(() { _setError(e); _approval = null; _diffs = null; });
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _reconcile() async {
-    setState(() { _busy = true; _clearError(); });
-    try {
-      final count = await RepoCache.I.reconcilePending(client: widget.client);
-      if (!mounted) return;
-      if (count != null) {
-        Navigator.of(context).pop(count);
-      } else {
-        setState(() {
-          _unknownSha = null;
-          _error = 'There is no interrupted commit to check.';
-        });
-      }
-    } catch (e) {
-      if (mounted) setState(() => _setError(e));
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _stageMissingDeletion() async {
-    var path = '';
-    String? error;
-    // Capture the binding: typing in this dialog must not target a new session.
-    final cache = RepoCache.I;
-    final binding = cache.bindingGeneration;
-    await showDialog<void>(context: context, builder: (dialogContext) => StatefulBuilder(
-      builder: (context, update) => AlertDialog(
-        scrollable: true,
-        title: const Text('Stage missing file deletion'),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Text('Stages deletion from the repository at commit review. The checkout path must already be missing. This action does not delete any disk file.'),
-          TextField(onChanged: (value) => path = value,
-              decoration: const InputDecoration(labelText: 'Repository-relative path')),
-          if (error != null) Text(error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-        ]),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Cancel')),
-          FilledButton(onPressed: () {
-            try {
-              if (binding != cache.bindingGeneration) {
-                throw StateError('Repository binding changed; reopen staging');
-              }
-              cache.stageDeletion(path);
-              Navigator.of(dialogContext).pop();
-            } catch (e) { update(() => error = '$e'); }
-          }, child: const Text('Stage deletion')),
-        ],
-      ),
-    ));
-  }
-
-  @override
-  void dispose() {
-    RepoCache.I.removeListener(_cacheChanged);
-    _message.removeListener(_invalidate);
-    _message.dispose();
-    super.dispose();
-  }
-
-  Color _diffColor(String line) {
-    if (line.startsWith('@@')) return Aether.accent;
-    if (line.startsWith('+')) return Aether.successLight;
-    if (line.startsWith('-')) return Aether.danger;
-    return Aether.textMuted;
-  }
-
-  Widget _diffLine(String line) {
-    final shown = line.length > maxRenderedLineChars
-        ? '${line.substring(0, maxRenderedLineChars)}… (${line.length - maxRenderedLineChars} more characters)'
-        : line;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Text(
-        shown,
-        softWrap: true,
-        style: TextStyle(
-          fontFamily: Aether.mono,
-          fontFamilyFallback: kStudioMonoFallback,
-          fontSize: kStudioMinFontSize,
-          height: 1.45,
-          color: _diffColor(line),
-        ),
-      ),
-    );
-  }
-
-  /// The review body as lazily-built rows: only what is on screen is laid
-  /// out, so a large diff cannot jank or exhaust memory.
-  List<WidgetBuilder> _rows(CommitApproval? approval) {
-    final rows = <WidgetBuilder>[
-      (_) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-        child: Text('${RepoCache.I.repoFull} · ${RepoCache.I.defaultBranch}',
-            style: AetherType.bodyMuted),
-      ),
-      for (final path in _paths)
-        (_) => CheckboxListTile(
-          title: Text(path), value: _selected.contains(path),
-          subtitle: Text(RepoCache.I.isStagedDeletion(path)
-              ? 'Staged deletion · disk unchanged'
-              : RepoCache.I.stagedMode(path) == null
-              ? 'Content · review exact diff'
-              : 'Staged Git mode ${RepoCache.I.stagedMode(path)}'),
-          secondary: StudioStagingMenu(path: path, enabled: !_busy),
-          onChanged: _busy ? null : (value) {
-            _invalidate();
-            setState(() { if (value == true) { _selected.add(path); } else { _selected.remove(path); } });
-          },
-        ),
-      if (RepoCache.I.workspaceFolder != null)
-        (_) => Align(
-          alignment: Alignment.centerLeft,
-          child: TextButton(onPressed: _busy ? null : _stageMissingDeletion,
-              child: const Text('Stage missing file deletion')),
-        ),
-      (_) => const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        child: Text('Staging does not change disk files or permissions.'),
-      ),
-    ];
-    if (approval != null) {
-      final base = approval.baseCommit;
-      rows.add((_) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-        child: SelectableText(
-          'Repository: ${approval.repo}\nBranch: ${approval.branch}\n'
-          'Base: ${base.length > 7 ? base.substring(0, 7) : base}\n'
-          'Message: ${approval.message}\n'
-          'Selected paths:\n${approval.paths.map((p) => '  $p').join('\n')}',
-        ),
-      ));
-      final diffs = _diffs;
-      if (diffs == null) {
-        rows.add((_) => const Padding(
-          padding: EdgeInsets.all(16),
-          child: Text('Preparing diff…'),
-        ));
-      } else {
-        for (final f in diffs) {
-          final collapsed = _collapsed.contains(f.path);
-          rows.add((_) => InkWell(
-            onTap: () => setState(() {
-              if (!_collapsed.remove(f.path)) _collapsed.add(f.path);
-            }),
-            child: Container(
-              color: Aether.surfaceAlt,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(children: [
-                Icon(collapsed ? Icons.chevron_right : Icons.expand_more, size: 18),
-                const SizedBox(width: 6),
-                Expanded(child: Text(f.path, style: const TextStyle(fontWeight: FontWeight.w600))),
-                Text('+${f.added} −${f.removed}', style: AetherType.caption),
-              ]),
-            ),
-          ));
-          if (collapsed) continue;
-          final body = [...f.header.skip(1), ...f.lines];
-          final full = _showFull.contains(f.path);
-          final shown = full || body.length <= maxRenderedLinesPerFile
-              ? body.length
-              : maxRenderedLinesPerFile;
-          for (var i = 0; i < shown; i++) {
-            final line = body[i];
-            rows.add((_) => _diffLine(line));
-          }
-          if (shown < body.length) {
-            rows.add((_) => Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton(
-                onPressed: () => setState(() => _showFull.add(f.path)),
-                child: Text('Show full diff (${body.length - shown} more lines)'),
-              ),
-            ));
-          }
-        }
-      }
-    }
-    if (_error != null) {
-      rows.add((context) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-          if (_unknownSha != null) ...[
-            const SizedBox(height: 6),
-            SelectableText('Intended commit: $_unknownSha',
-                style: TextStyle(fontFamily: Aether.mono,
-                    fontFamilyFallback: kStudioMonoFallback, fontSize: 12)),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                onPressed: _busy ? null : _reconcile,
-                icon: const Icon(Icons.fact_check_outlined, size: 18),
-                label: const Text('Check status'),
-              ),
-            ),
-          ],
-          if (_errorDetail != null && _errorDetail!.isNotEmpty) ...[
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton(
-                onPressed: () => setState(() => _showErrorDetail = !_showErrorDetail),
-                child: Text(_showErrorDetail ? 'Hide details' : 'Details'),
-              ),
-            ),
-            if (_showErrorDetail)
-              Text(_errorDetail!, style: TextStyle(fontSize: kStudioMinFontSize,
-                  color: Aether.textFaint)),
-          ],
-        ]),
-      ));
-    }
-    return rows;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final approval = _approval;
-    final rows = _rows(approval);
-    return PopScope(canPop: !_busy, child: Scaffold(
-      appBar: AppBar(
-        automaticallyImplyLeading: false,
-        title: const Text('Review commit'),
-      ),
-      body: SelectionArea(
-        child: ListView.builder(
-          itemCount: rows.length,
-          itemBuilder: (context, i) => rows[i](context),
-        ),
-      ),
-      // The message and the primary action stay pinned above the keyboard.
-      bottomNavigationBar: SafeArea(
-        child: Padding(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.viewInsetsOf(context).bottom,
-          ),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            if (_busy) const LinearProgressIndicator(minHeight: 2),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-              child: TextField(controller: _message, enabled: !_busy,
-                  decoration: const InputDecoration(labelText: 'Commit message')),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
-              child: Wrap(
-                alignment: WrapAlignment.end,
-                spacing: 4,
-                children: [
-                  TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
-                  TextButton(onPressed: _busy ? null : _reconcile, child: const Text('Reconcile pending commit')),
-                  if (approval == null)
-                    FilledButton(onPressed: _busy || _selected.isEmpty || _message.text.trim().isEmpty ? null : _review, child: const Text('Review changes'))
-                  else
-                    FilledButton(onPressed: _busy ? null : _publish, child: const Text('Approve and commit')),
-                ],
-              ),
-            ),
-          ]),
-        ),
-      ),
-    ));
-  }
-}
-
-class _OverflowRow extends StatelessWidget {
-  const _OverflowRow({required this.icon, required this.label});
-  final IconData icon;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, size: 17, color: Aether.textMuted),
-        const SizedBox(width: 10),
-        Expanded(child: Text(label, style: const TextStyle(fontSize: 13.5))),
-      ],
-    );
-  }
-}
-
-class _StudioMovesToCloud extends StatelessWidget {
-  const _StudioMovesToCloud();
+class _NoSessionStudio extends StatelessWidget {
+  const _NoSessionStudio();
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Aether.bg,
       appBar: AppBar(title: const Text('Studio')),
-      body: const Center(
+      body: Center(
         child: Padding(
-          padding: EdgeInsets.all(24),
+          padding: const EdgeInsets.all(24),
           child: Text(
-            'Studio moves to the cloud in this build.',
+            'Open a chat to use Studio.',
             textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 15),
+            style: TextStyle(fontSize: 15, color: Aether.textMuted),
           ),
         ),
       ),
@@ -1634,28 +458,27 @@ class _StudioMovesToCloud extends StatelessWidget {
   }
 }
 
-class _RepoBar extends StatelessWidget {
-  final String? repo;
-  final String? branch;
-  final VoidCallback onPick;
-  final VoidCallback onPickBranch;
-  final bool syncing;
-  const _RepoBar({
-    required this.repo,
-    required this.branch,
-    required this.onPick,
-    required this.onPickBranch,
-    required this.syncing,
+/// The cloud workspace identity bar (replaces the deleted local repo bar).
+class _WorkspaceBar extends StatelessWidget {
+  const _WorkspaceBar({
+    required this.snapshot,
+    required this.loading,
+    required this.onRefresh,
   });
+
+  final StudioTreeSnapshot? snapshot;
+  final bool loading;
+  final VoidCallback? onRefresh;
 
   @override
   Widget build(BuildContext context) {
-    final connected = repo != null && repo!.isNotEmpty;
     final scale = MediaQuery.textScalerOf(context).scale(1.0);
+    final state = snapshot?.state ?? (loading ? 'hydrating' : 'unknown');
+    final label = snapshot == null
+        ? (loading ? 'Loading workspace…' : 'Cloud workspace')
+        : 'Cloud workspace · $state · ${snapshot!.fileCount} files';
     return Semantics(
-      label: connected
-          ? 'Connected to $repo, branch $branch'
-          : 'No repository connected',
+      label: label,
       container: true,
       child: Container(
         key: studioRepoBarKey,
@@ -1665,152 +488,59 @@ class _RepoBar extends StatelessWidget {
           color: Aether.surface,
           border: Border(bottom: BorderSide(color: Aether.hairline)),
         ),
-        child: LayoutBuilder(
-          builder: (context, c) {
-            // The GITHUB tag is decoration; it is the first thing to go so the
-            // repo name and the two real controls survive a narrow viewport at
-            // a large OS text scale.
-            final roomy = c.maxWidth >= 520;
-            return Row(
-              children: [
-                Icon(Icons.hub_outlined, size: 16, color: Aether.textMuted),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    connected ? repo! : 'Connect a repo',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                      color: connected ? Aether.text : Aether.textFaint,
-                    ),
-                  ),
+        child: Row(
+          children: [
+            Icon(Icons.cloud_outlined, size: 16, color: Aether.textMuted),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: Aether.text,
                 ),
-                if (connected && roomy) ...[
-                  const SizedBox(width: 6),
-                  Tag('GITHUB', color: Aether.textMuted),
-                ],
-                if (connected && branch != null && branch!.isNotEmpty)
-                  Flexible(
-                    child: _BarButton(
-                      tooltip: 'Change branch',
-                      icon: Icons.call_split,
-                      label: branch!,
-                      onTap: onPickBranch,
-                    ),
-                  ),
-                if (syncing) ...[
-                  const SizedBox(width: 6),
-                  Semantics(
-                    liveRegion: true,
-                    label: 'Syncing',
-                    child: SizedBox(
-                      width: 13,
-                      height: 13,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 1.5,
-                        color: Aether.accent,
-                      ),
-                    ),
-                  ),
-                ],
-                _BarButton(
-                  tooltip:
-                      connected ? 'Change repository' : 'Connect a repository',
-                  label: connected ? 'Change' : 'Connect',
-                  onTap: onPick,
-                  accent: true,
-                ),
-              ],
-            );
-          },
+              ),
+            ),
+            if (snapshot != null)
+              Tag(
+                snapshot!.source == 'manifest' ? 'MANIFEST' : 'LIVE',
+                color: Aether.textMuted,
+              ),
+            StudioIconButton(
+              icon: Icons.refresh,
+              tooltip: 'Refresh workspace',
+              iconSize: 18,
+              onPressed: onRefresh,
+            ),
+          ],
         ),
       ),
     );
   }
 }
 
-/// A repo-bar text button that still meets the 44dp tap-target invariant.
-class _BarButton extends StatelessWidget {
-  const _BarButton({
-    required this.label,
-    required this.onTap,
-    required this.tooltip,
-    this.icon,
-    this.accent = false,
-  });
+/// Workspace tree failure: a human sentence, with the raw text demoted to a
+/// secondary line and a real 44dp retry.
+class _TreeErrorBanner extends StatelessWidget {
+  const _TreeErrorBanner({required this.detail, required this.onRetry});
 
-  final String label;
-  final VoidCallback onTap;
-  final String tooltip;
-  final IconData? icon;
-  final bool accent;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = accent ? Aether.accent : Aether.textMuted;
-    return Tooltip(
-      message: tooltip,
-      child: Semantics(
-        button: true,
-        label: tooltip,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            minWidth: kStudioTapTarget,
-            minHeight: kStudioTapTarget,
-          ),
-          child: TextButton.icon(
-            style: TextButton.styleFrom(
-              minimumSize: const Size(kStudioTapTarget, kStudioTapTarget),
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              foregroundColor: color,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            onPressed: onTap,
-            icon: icon == null
-                ? const SizedBox.shrink()
-                : Icon(icon, size: 14),
-            label: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 12),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Sync failure: a human sentence, with the raw text demoted to a secondary
-/// line and a retry that is a real 44dp target.
-class _SyncErrorBanner extends StatelessWidget {
-  const _SyncErrorBanner({
-    required this.message,
-    required this.detail,
-    required this.onRetry,
-    required this.onDismiss,
-  });
-
-  final String message;
   final String? detail;
   final VoidCallback? onRetry;
-  final VoidCallback onDismiss;
 
   @override
   Widget build(BuildContext context) {
     return Semantics(
       liveRegion: true,
-      label: 'Sync failed. $message',
+      label: 'Could not load the workspace tree.',
       container: true,
       child: Container(
         width: double.infinity,
         color: Aether.warn.withValues(alpha: 0.12),
         padding: const EdgeInsets.only(left: 12, right: 2, top: 2, bottom: 2),
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Icon(Icons.cloud_off_outlined, size: 16, color: Aether.warn),
             const SizedBox(width: 8),
@@ -1821,7 +551,7 @@ class _SyncErrorBanner extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      message,
+                      'Could not load the workspace tree',
                       style: TextStyle(
                         fontSize: 12.5,
                         fontWeight: FontWeight.w600,
@@ -1830,7 +560,7 @@ class _SyncErrorBanner extends StatelessWidget {
                     ),
                     if (detail != null && detail!.isNotEmpty)
                       Text(
-                        detail!,
+                        StudioFailure.of(StateError(detail!)).message,
                         style: TextStyle(
                           fontSize: kStudioMinFontSize,
                           color: Aether.textFaint,
@@ -1842,167 +572,9 @@ class _SyncErrorBanner extends StatelessWidget {
             ),
             StudioIconButton(
               icon: Icons.refresh,
-              tooltip: 'Retry sync',
+              tooltip: 'Retry',
               iconSize: 18,
               onPressed: onRetry,
-            ),
-            StudioIconButton(
-              icon: Icons.close,
-              tooltip: 'Dismiss',
-              iconSize: 16,
-              onPressed: onDismiss,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Files the last sync could not load, counted from a [SyncReport].
-@visibleForTesting
-int syncReportMissingCount(SyncReport r) =>
-    r.droppedByCap + r.failedPaths.length + r.unattemptedPaths.length;
-
-/// Amber "N files not loaded — Retry" banner for a PARTIAL sync: the
-/// working copy is not the whole repository and must not look like it.
-class _SyncPartialBanner extends StatelessWidget {
-  const _SyncPartialBanner({
-    required this.report,
-    required this.onRetry,
-    required this.onDismiss,
-  });
-
-  final SyncReport report;
-  final VoidCallback? onRetry;
-  final VoidCallback onDismiss;
-
-  @override
-  Widget build(BuildContext context) {
-    final missing = syncReportMissingCount(report);
-    final message = missing > 0
-        ? '$missing file${missing == 1 ? '' : 's'} not loaded'
-        : 'Some files were not loaded';
-    final detail = report.issues.join(' · ');
-    return Semantics(
-      liveRegion: true,
-      container: true,
-      label: 'Sync incomplete. $message. $detail',
-      child: Container(
-        width: double.infinity,
-        color: Aether.warnLight.withValues(alpha: 0.12),
-        padding: const EdgeInsets.only(left: 12, right: 2, top: 2, bottom: 2),
-        child: Row(
-          children: [
-            Icon(Icons.warning_amber_rounded, size: 16, color: Aether.warnLight),
-            const SizedBox(width: 8),
-            Expanded(
-              child: ExcludeSemantics(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 6),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        message,
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w600,
-                          color: Aether.warnLight,
-                        ),
-                      ),
-                      if (detail.isNotEmpty)
-                        Text(
-                          detail,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: kStudioMinFontSize,
-                            color: Aether.textFaint,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            StudioIconButton(
-              icon: Icons.refresh,
-              tooltip: 'Retry sync',
-              iconSize: 18,
-              onPressed: onRetry,
-            ),
-            StudioIconButton(
-              icon: Icons.close,
-              tooltip: 'Dismiss',
-              iconSize: 16,
-              onPressed: onDismiss,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Live sync progress. Replaces "an 11px spinner for several minutes".
-class _SyncProgressBanner extends StatelessWidget {
-  const _SyncProgressBanner({required this.label, required this.fraction});
-
-  final String label;
-  final double? fraction;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      liveRegion: true,
-      label: label,
-      container: true,
-      child: Container(
-        width: double.infinity,
-        color: Aether.accent.withValues(alpha: 0.10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 7, 12, 7),
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 13,
-                    height: 13,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 1.5,
-                      color: Aether.accent,
-                    ),
-                  ),
-                  const SizedBox(width: 9),
-                  Expanded(
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 12, color: Aether.text),
-                    ),
-                  ),
-                  if (fraction != null)
-                    Text(
-                      '${(fraction! * 100).round()}%',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontFamily: Aether.mono,
-                        fontFamilyFallback: kStudioMonoFallback,
-                        color: Aether.textMuted,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            LinearProgressIndicator(
-              value: fraction,
-              minHeight: 2,
-              backgroundColor: Colors.transparent,
-              color: Aether.accent,
             ),
           ],
         ),
@@ -2064,13 +636,7 @@ class _AuthBadge extends StatelessWidget {
       builder: (context, _) {
         final gh = GitHubService.I;
         final loggedIn = gh.isLoggedIn;
-        // A storage read that FAILED, or a restore still in flight, is
-        // not a sign-out — the token is on disk and a retry may recover
-        // it seconds later. Showing red here told the user they had been
-        // logged out when the app merely could not read the key yet,
-        // which is exactly the "Studio keeps logging me out" report.
-        final unknown =
-            !loggedIn && (gh.restoreFailed || gh.isInitializing);
+        final unknown = !loggedIn && (gh.restoreFailed || gh.isInitializing);
 
         final IconData icon;
         final Color color;
@@ -2106,373 +672,12 @@ class _AuthBadge extends StatelessWidget {
   }
 }
 
-/// The repository picker sheet. Public so the null-tolerance of the payload
-/// can be tested without a network round-trip.
-class StudioRepoSheet extends StatelessWidget {
-  const StudioRepoSheet({
-    this.repos,
-    this.loader,
-    this.pageLoader,
-    this.search,
-    this.pageSize = GitHubService.repoPageSize,
-    super.key,
-  }) : assert(repos != null || loader != null || pageLoader != null);
-
-  final List<Map<String, dynamic>>? repos;
-  final Future<List<Map<String, dynamic>>> Function()? loader;
-
-  /// Pages through the user's repos as they scroll (preferred over [loader]).
-  final Future<List<Map<String, dynamic>>> Function(int page)? pageLoader;
-
-  /// Server-side name search for repos not loaded yet.
-  final Future<List<Map<String, dynamic>>> Function(String query)? search;
-  final int pageSize;
-
-  @override
-  Widget build(BuildContext context) {
-    if (repos != null) return _repoList(context, repos!);
-    return _AsyncPickerSheet<Map<String, dynamic>>(
-      title: 'Your repositories',
-      loader: loader,
-      pageLoader: pageLoader,
-      pageSize: pageSize,
-      emptyMessage: 'No repositories are available for this account.',
-      itemBuilder: (context, repo) => _RepoTile(repo: repo),
-      searchTextOf: (repo) => repoFullNameOf(repo) ?? '',
-      remoteSearch: search,
-      keyOf: repoFullNameOf,
-    );
-  }
-
-  Widget _repoList(BuildContext context, List<Map<String, dynamic>> values) {
-    return ListView(
-      shrinkWrap: true,
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      children: [
-        const StudioSheetHeader(title: 'Your repositories'),
-        for (final r in values) _RepoTile(repo: r),
-        const SizedBox(height: 10),
-      ],
-    );
-  }
-}
-
-class _RepoTile extends StatelessWidget {
-  const _RepoTile({required this.repo});
-  final Map<String, dynamic> repo;
-
-  @override
-  Widget build(BuildContext context) {
-    final full = repoFullNameOf(repo);
-    return StudioSheetTile(
-      icon: Icons.bookmark_border,
-      // A payload with no usable name is listed but not pickable — it used to
-      // render as the literal string "null" and crash on tap.
-      title: full ?? studioUnnamedRepoLabel,
-      subtitle:
-          '${repo['language'] ?? '—'} · ⭐ ${repo['stargazers_count'] ?? 0}',
-      onTap: full == null ? null : () => Navigator.pop(context, full),
-    );
-  }
-}
-
-/// The branch picker sheet.
-class StudioBranchSheet extends StatelessWidget {
-  const StudioBranchSheet({
-    this.branches,
-    required this.current,
-    this.loader,
-    super.key,
-  }) : assert(branches != null || loader != null);
-
-  final List<String>? branches;
-  final String current;
-  final Future<List<String>> Function()? loader;
-
-  @override
-  Widget build(BuildContext context) {
-    if (branches == null) {
-      return _AsyncPickerSheet<String>(
-        title: 'Branches',
-        loader: loader!,
-        emptyMessage: 'No branches were returned for this repository.',
-        itemBuilder: (context, branch) => _BranchTile(
-          branch: branch,
-          current: current,
-        ),
-      );
-    }
-    return ListView(
-      shrinkWrap: true,
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      children: [
-        const StudioSheetHeader(title: 'Branches'),
-        for (final b in branches!)
-          StudioSheetTile(
-            icon: b == current ? Icons.radio_button_checked : Icons.call_split,
-            iconColor: b == current ? Aether.accent : Aether.textMuted,
-            title: b,
-            selected: b == current,
-            onTap: () => Navigator.pop(context, b),
-          ),
-        const SizedBox(height: 10),
-      ],
-    );
-  }
-}
-
-class _BranchTile extends StatelessWidget {
-  const _BranchTile({required this.branch, required this.current});
-  final String branch;
-  final String current;
-
-  @override
-  Widget build(BuildContext context) {
-    return StudioSheetTile(
-      icon: branch == current ? Icons.radio_button_checked : Icons.call_split,
-      iconColor: branch == current ? Aether.accent : Aether.textMuted,
-      title: branch,
-      selected: branch == current,
-      onTap: () => Navigator.pop(context, branch),
-    );
-  }
-}
-
-class _AsyncPickerSheet<T> extends StatefulWidget {
-  const _AsyncPickerSheet({
-    required this.title,
-    required this.emptyMessage,
-    required this.itemBuilder,
-    this.loader,
-    this.pageLoader,
-    this.pageSize = 100,
-    this.searchTextOf,
-    this.remoteSearch,
-    this.keyOf,
-  }) : assert(loader != null || pageLoader != null);
-
-  final String title;
-
-  /// Loads the whole list at once (branches).
-  final Future<List<T>> Function()? loader;
-
-  /// Loads one 1-based page; a page shorter than [pageSize] is the last one.
-  /// Further pages load as the user scrolls near the end.
-  final Future<List<T>> Function(int page)? pageLoader;
-  final int pageSize;
-  final String emptyMessage;
-  final Widget Function(BuildContext context, T value) itemBuilder;
-
-  /// Enables the search field: filters loaded values by this text.
-  final String Function(T value)? searchTextOf;
-
-  /// Optional server-side search for values pagination has not reached.
-  final Future<List<T>> Function(String query)? remoteSearch;
-
-  /// Identity used to merge remote search hits with loaded values.
-  final Object? Function(T value)? keyOf;
-
-  @override
-  State<_AsyncPickerSheet<T>> createState() => _AsyncPickerSheetState<T>();
-}
-
-class _AsyncPickerSheetState<T> extends State<_AsyncPickerSheet<T>> {
-  List<T>? _values;
-  Object? _error;
-  bool _loading = false;
-  int _page = 0;
-  bool _hasMore = false;
-  final _scroll = ScrollController();
-  final _search = TextEditingController();
-  String _query = '';
-  Timer? _searchDebounce;
-  List<T> _remote = const [];
-  bool _searchingRemote = false;
-  int _searchSeq = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _scroll.addListener(_maybeLoadMore);
-    _load();
-  }
-
-  @override
-  void dispose() {
-    _searchDebounce?.cancel();
-    _scroll.dispose();
-    _search.dispose();
-    super.dispose();
-  }
-
-  void _maybeLoadMore() {
-    if (!_hasMore || _loading || !_scroll.hasClients) return;
-    if (_scroll.position.extentAfter < 400) unawaited(_load(more: true));
-  }
-
-  Future<void> _load({bool more = false}) async {
-    if (_loading) return;
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final pageLoader = widget.pageLoader;
-      if (pageLoader != null) {
-        final next = more ? _page + 1 : 1;
-        final page = await pageLoader(next);
-        if (!mounted) return;
-        setState(() {
-          _page = next;
-          _values = [if (more) ...?_values, ...page];
-          _hasMore = page.length >= widget.pageSize;
-        });
-      } else {
-        final values = await widget.loader!();
-        if (mounted) setState(() => _values = values);
-      }
-    } catch (e) {
-      if (mounted) setState(() => _error = e);
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-    // A short first page may not fill the viewport: keep paging.
-    if (mounted) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _maybeLoadMore();
-      });
-    }
-  }
-
-  void _onQueryChanged(String q) {
-    setState(() {
-      _query = q.trim().toLowerCase();
-      _remote = const [];
-    });
-    _searchDebounce?.cancel();
-    final remote = widget.remoteSearch;
-    if (remote == null || _query.length < 2) return;
-    _searchDebounce = Timer(const Duration(milliseconds: 400), () async {
-      final seq = ++_searchSeq;
-      setState(() => _searchingRemote = true);
-      try {
-        final hits = await remote(q.trim());
-        if (!mounted || seq != _searchSeq) return;
-        setState(() => _remote = hits);
-      } catch (_) {
-        // Local filtering still works; the remote search is best-effort.
-      } finally {
-        if (mounted && seq == _searchSeq) {
-          setState(() => _searchingRemote = false);
-        }
-      }
-    });
-  }
-
-  List<T> _visible(List<T> values) {
-    final textOf = widget.searchTextOf;
-    if (textOf == null || _query.isEmpty) return values;
-    final local = [
-      for (final v in values)
-        if (textOf(v).toLowerCase().contains(_query)) v,
-    ];
-    if (_remote.isEmpty) return local;
-    final keyOf = widget.keyOf ?? (T v) => v;
-    final seen = {for (final v in local) keyOf(v)};
-    return [
-      ...local,
-      for (final v in _remote)
-        if (seen.add(keyOf(v))) v,
-    ];
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final values = _values;
-    final visible = values == null ? null : _visible(values);
-    final Widget body;
-    if (_loading && values == null) {
-      body = const Padding(
-        padding: EdgeInsets.all(28),
-        child: Center(child: CircularProgressIndicator()),
-      );
-    } else if (_error != null && values == null) {
-      body = Padding(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(StudioFailure.of(_error!).message),
-            const SizedBox(height: 10),
-            OutlinedButton.icon(
-              onPressed: _loading ? null : _load,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Retry'),
-            ),
-          ],
-        ),
-      );
-    } else if (visible == null || visible.isEmpty) {
-      body = Padding(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
-        child: Text(
-          _query.isNotEmpty
-              ? (_searchingRemote
-                    ? 'Searching…'
-                    : 'Nothing matches "${_search.text.trim()}".')
-              : widget.emptyMessage,
-        ),
-      );
-    } else {
-      final footer = _loading || _searchingRemote;
-      // Lazy: only visible tiles are built (users with hundreds of repos).
-      body = ListView.builder(
-        controller: _scroll,
-        padding: const EdgeInsets.only(bottom: 10),
-        itemCount: visible.length + (footer ? 1 : 0),
-        itemBuilder: (context, i) => i == visible.length
-            ? const LinearProgressIndicator(minHeight: 2)
-            : widget.itemBuilder(context, visible[i]),
-      );
-    }
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const SizedBox(height: 8),
-        StudioSheetHeader(title: widget.title),
-        if (widget.searchTextOf != null)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: TextField(
-              key: studioPickerSearchKey,
-              controller: _search,
-              onChanged: _onQueryChanged,
-              autocorrect: false,
-              textInputAction: TextInputAction.search,
-              decoration: const InputDecoration(
-                isDense: true,
-                prefixIcon: Icon(Icons.search, size: 18),
-                hintText: 'Search',
-              ),
-            ),
-          ),
-        Flexible(child: body),
-      ],
-    );
-  }
-}
-
 /// ── GitHub account chip with avatar, login name, and sign-out menu ──
 class _AccountChip extends StatelessWidget {
-  const _AccountChip({required this.compact, this.onCommitFirst});
-
-  /// Opens the commit flow; offered when sign-out would discard edits.
-  final VoidCallback? onCommitFirst;
+  const _AccountChip({required this.compact});
 
   /// Below 600dp the chip drops its login text and chevron: the app bar has
-  /// back + title + tree toggle + overflow + auth badge to fit as well.
+  /// back + title + tree toggle + refresh + auth badge to fit as well.
   final bool compact;
 
   @override
@@ -2489,9 +694,7 @@ class _AccountChip extends StatelessWidget {
           padding: EdgeInsets.zero,
           position: PopupMenuPosition.under,
           onSelected: (v) {
-            if (v == 'signout') {
-              _confirmSignOut(context, gh);
-            }
+            if (v == 'signout') _confirmSignOut(context, gh);
           },
           itemBuilder: (_) => [
             PopupMenuItem(
@@ -2530,7 +733,7 @@ class _AccountChip extends StatelessWidget {
               child: Row(
                 children: [
                   Icon(Icons.logout, size: 16, color: Aether.danger),
-                  SizedBox(width: 8),
+                  const SizedBox(width: 8),
                   Text(
                     'Sign out',
                     style: TextStyle(fontSize: 12.5, color: Aether.danger),
@@ -2583,9 +786,6 @@ class _AccountChip extends StatelessWidget {
   }
 
   void _confirmSignOut(BuildContext context, GitHubService gh) {
-    // Sign-out unbinds the repo cache, which drops every uncommitted edit
-    // (in API mode they exist nowhere else). Say so first (F-073).
-    final uncommitted = RepoCache.I.uncommittedCount;
     showDialog(
       context: context,
       builder: (d) => AlertDialog(
@@ -2593,34 +793,19 @@ class _AccountChip extends StatelessWidget {
           'Sign out of GitHub?',
           style: TextStyle(fontSize: 15),
         ),
-        content: Text(
-          uncommitted > 0
-              ? 'You have $uncommitted uncommitted file(s). Commit them first '
-                  'or they will be discarded. Your GitHub access token is '
-                  'removed from this device only.'
-              : 'The repo connection will be cleared. Your GitHub access token '
-                  'is removed from this device only.',
-          style: const TextStyle(fontSize: 12.5),
+        content: const Text(
+          'The repo connection will be cleared. Your GitHub access token is '
+          'removed from this device only.',
+          style: TextStyle(fontSize: 12.5),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(d),
             child: const Text('Cancel'),
           ),
-          if (uncommitted > 0 && onCommitFirst != null)
-            TextButton(
-              onPressed: () {
-                Navigator.pop(d);
-                onCommitFirst!();
-              },
-              child: const Text('Commit first'),
-            ),
           TextButton(
             onPressed: () async {
               Navigator.pop(d);
-              if (uncommitted > 0) {
-                await RepoCache.I.discardPersistedDrafts();
-              }
               try {
                 await gh.signOut();
               } catch (e) {
@@ -2633,10 +818,7 @@ class _AccountChip extends StatelessWidget {
                 );
               }
             },
-            child: Text(
-              uncommitted > 0 ? 'Discard and sign out' : 'Sign out',
-              style: TextStyle(color: Aether.danger),
-            ),
+            child: Text('Sign out', style: TextStyle(color: Aether.danger)),
           ),
         ],
       ),
@@ -2673,8 +855,6 @@ class _Avatar extends StatelessWidget {
         width: size,
         height: size,
         fit: BoxFit.cover,
-        // Avatars are drawn at `size` logical px; decoding the full upload is
-        // pure waste (MEMORY, 2026-09-24).
         cacheWidth: Aether.imageCacheWidth(context, logicalWidth: size),
         errorBuilder: (_, _, _) => Container(
           width: size,
@@ -2693,11 +873,7 @@ class _Avatar extends StatelessWidget {
 
 /// Approval banner shown above the Studio workspace whenever the active
 /// session has a pending agent approval. Rendered as an [AetherCard] warn
-/// surface so a run-blocking gate stands out from informational banners
-/// (status/sync/clone progress). Approve resolves the pending gate via
-/// [AgentService.approve]; Decline rejects it. Questions and plan reviews
-/// are the agent's own structured sheets — this banner only surfaces plain
-/// tool approvals (summary + detail) so the Studio surface stays uncluttered.
+/// surface so a run-blocking gate stands out from informational banners.
 class _ApprovalBanner extends StatelessWidget {
   const _ApprovalBanner({required this.onDecision});
 
@@ -2709,9 +885,6 @@ class _ApprovalBanner extends StatelessWidget {
       animation: AgentService.I,
       builder: (context, _) {
         final a = AgentService.I.pendingApproval;
-        // Structured questions and plan reviews have their own dedicated UI
-        // (ask_user_question sheet, plan review card). The Studio banner is
-        // only for plain tool-approval prompts.
         if (a == null || a.questions != null || a.planBody != null) {
           return const SizedBox.shrink();
         }
@@ -2758,9 +931,6 @@ class _ApprovalBanner extends StatelessWidget {
                         borderRadius: BorderRadius.circular(8),
                         border: Border.all(color: Aether.hairline),
                       ),
-                      // Capped so a long write_file body cannot push the
-                      // editor off screen, but scrollable so nothing being
-                      // approved is hidden.
                       constraints: const BoxConstraints(maxHeight: 160),
                       child: Scrollbar(
                         child: SingleChildScrollView(
@@ -2785,21 +955,23 @@ class _ApprovalBanner extends StatelessWidget {
                     runSpacing: 8,
                     children: [
                       SizedBox(
-                        width: 140 * math.max(1.0,
-                            MediaQuery.textScalerOf(context).scale(1.0)),
+                        width: 140 *
+                            math.max(1.0,
+                                MediaQuery.textScalerOf(context).scale(1.0)),
                         child: AetherGhostButton(
-                        label: 'Decline',
-                        icon: Icons.block,
-                        onPressed: () => onDecision(a, false),
+                          label: 'Decline',
+                          icon: Icons.block,
+                          onPressed: () => onDecision(a, false),
                         ),
                       ),
                       SizedBox(
-                        width: 140 * math.max(1.0,
-                            MediaQuery.textScalerOf(context).scale(1.0)),
+                        width: 140 *
+                            math.max(1.0,
+                                MediaQuery.textScalerOf(context).scale(1.0)),
                         child: AetherPrimaryButton(
-                        label: 'Approve',
-                        icon: Icons.check,
-                        onPressed: () => onDecision(a, true),
+                          label: 'Approve',
+                          icon: Icons.check,
+                          onPressed: () => onDecision(a, true),
                         ),
                       ),
                     ],

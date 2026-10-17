@@ -1,27 +1,21 @@
 import 'package:flutter/material.dart';
 
-import '../core/agent_service.dart';
-import '../core/repo_cache.dart';
-import '../core/studio_drafts.dart';
+import '../core/cloud/studio_files.dart';
+import '../core/cloud/studio_remote_client.dart';
+import '../core/state.dart';
 import '../core/theme.dart';
 import 'studio_errors.dart';
 import 'studio_layout.dart';
 import 'widgets/aether_primitives.dart';
 
 // ── Studio file tree ────────────────────────────────────────────────────────
-// Extracted from studio_screen.dart and rewritten (2026-09-30 audit).
+// The explorer now binds to the P7 workspace manifest (StudioRemoteClient)
+// instead of the deleted local repo cache. Widget chrome survives; only the
+// data binding and the removed staging menu changed.
 //
-// Two bugs lived in the old tree:
-//  * directories were guessed as "the next sorted path starts with `p/`", so
-//    a directory whose children were all dropped by RepoCache's skip-list
-//    rendered as a *file*, and tapping it opened an empty editor buffer that
-//    was indistinguishable from a genuinely empty file;
-//  * `_openUnknownFile` swallowed every fetch failure into `openStudioFile(p,
-//    '')`, which is exactly that indistinguishable blank buffer.
-//
-// Directories are now derived from the path set itself (a node is a directory
-// iff some path lives under it), and an unreachable file becomes a visible,
-// labelled error row that retries on tap.
+// Directories are derived from the server's nested FileNode tree (the built
+// `GET …/workspace/tree` response), so an empty directory is still a
+// directory and a failed fetch is a visible, retryable row.
 
 /// One row of the tree.
 class StudioTreeNode {
@@ -120,13 +114,49 @@ List<StudioTreeNode> buildStudioTree(
   return out;
 }
 
+/// Flattens the server's nested manifest tree into rows. Unlike
+/// [buildStudioTree] this keeps empty directories and directory rollups from a
+/// pruned manifest.
+List<StudioTreeNode> flattenStudioTree(
+  FileNode? root,
+  Set<String> expandedDirs,
+) {
+  if (root == null) return const <StudioTreeNode>[];
+  final out = <StudioTreeNode>[];
+  void walk(FileNode node, int depth) {
+    final children = [...node.children];
+    children.sort((a, b) {
+      if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
+      final byName = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      return byName != 0 ? byName : a.path.compareTo(b.path);
+    });
+    for (final child in children) {
+      out.add(StudioTreeNode(
+        path: child.path,
+        name: child.name.isEmpty ? _leaf(child.path) : child.name,
+        isDirectory: child.isDir,
+        depth: depth,
+      ));
+      if (child.isDir && expandedDirs.contains(child.path)) {
+        walk(child, depth + 1);
+      }
+    }
+  }
+
+  walk(root, 0);
+  return out;
+}
+
 /// [buildStudioTree] call counter for rebuild-scope tests (debug builds only).
 @visibleForTesting
 int debugStudioTreeBuilds = 0;
 
-/// The repository file explorer bound to [RepoCache].
+/// The cloud workspace file explorer bound to [StudioRemoteClient].
 class StudioFileTree extends StatefulWidget {
-  const StudioFileTree({super.key});
+  const StudioFileTree({super.key, this.sessionId});
+
+  /// Explicit server-session binding (tests); null falls back to [AppState].
+  final String? sessionId;
 
   @override
   State<StudioFileTree> createState() => _StudioFileTreeState();
@@ -136,172 +166,69 @@ class _StudioFileTreeState extends State<StudioFileTree> {
   final Set<String> _expanded = <String>{};
   final Set<String> _failed = <String>{};
   final Set<String> _loading = <String>{};
-  int _generation = RepoCache.I.bindingGeneration;
 
-  // Tree memo. Rebuilding the row list walks every path (2,000+ in a real
-  // repo), so it reruns only when the cache notified (a tree/working-copy
-  // change) or the expanded set changed — not on agent notifications.
-  int _cacheRevision = 0;
-  int _expandedRevision = 0;
   Object? _treeKey;
   List<StudioTreeNode> _tree = const [];
 
-  List<StudioTreeNode> _nodes(RepoCache cache) {
-    final key = (
-      _cacheRevision,
-      _expandedRevision,
-      cache.treePaths.length,
-      cache.files.length,
-    );
-    if (key == _treeKey) return _tree;
-    // Union of the tree and the live working copy: an agent-written file
-    // that was never in the git tree still has to be reachable.
-    final paths = <String>{...cache.treePaths, ...cache.files.keys, ...cache.pendingPaths};
-    _treeKey = key;
-    return _tree = buildStudioTree(paths, _expanded);
+  String get _sid => widget.sessionId ?? AppState.I.activeSession?.id ?? '';
+  StudioRemoteClient get _remote => StudioRemoteClient.I;
+
+  List<StudioTreeNode> _nodes() {
+    final snapshot = _remote.snapshotFor(_sid);
+    if (identical(snapshot, _treeKey)) return _tree;
+    _treeKey = snapshot;
+    return _tree = flattenStudioTree(snapshot?.root, _expanded);
   }
 
   @override
   void initState() {
     super.initState();
-    RepoCache.I.addListener(_bindingChanged);
-  }
-
-  void _bindingChanged() {
-    _cacheRevision++;
-    if (_generation == RepoCache.I.bindingGeneration) return;
-    _generation = RepoCache.I.bindingGeneration;
-    _expanded.clear();
-    _expandedRevision++;
-    _failed.clear();
-    _loading.clear();
-  }
-
-  @override
-  void dispose() {
-    RepoCache.I.removeListener(_bindingChanged);
-    super.dispose();
+    // Opening the tree is the explicit refresh: the manifest is the <100 ms
+    // SLA path on the server.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _remote.syncStudioTabs(_sid);
+    });
   }
 
   /// Opens a file, or toggles a directory.
-  ///
-  /// A miss in the in-memory working copy falls back to a real fetch. Only a
-  /// `null` result — never an exception — means "unavailable"; an empty string
-  /// is a real, empty file and opens normally.
   Future<void> _activate(StudioTreeNode node) async {
     if (node.isDirectory) {
       setState(() {
         if (!_expanded.remove(node.path)) _expanded.add(node.path);
-        _expandedRevision++;
       });
       return;
     }
-    final cache = RepoCache.I;
-    final generation = cache.bindingGeneration;
-    final buffers = AgentService.I.fileBuffer;
-    if (AgentService.I.isStudioFileDirty(node.path)) {
-      // An unsaved draft wins over disk bytes: just bring its tab forward.
-      AgentService.I.focusStudioFile(node.path);
-      return;
-    }
-    if (cache.workspaceFolder != null) {
-      // Workspace mode reads from disk: stat + read off the UI thread with a
-      // hard cap, never `readAsBytesSync` on a tap (F-076).
-      setState(() {
-        _loading.add(node.path);
-        _failed.remove(node.path);
-      });
-      final read = await cache.readForEditor(node.path);
-      if (!mounted || generation != cache.bindingGeneration ||
-          !identical(buffers, AgentService.I.fileBuffer)) {
-        return;
-      }
-      setState(() => _loading.remove(node.path));
-      if (read.tooLarge) {
-        AgentService.I.openStudioPlaceholder(
-            node.path, StudioFileGuard.tooLarge(read.size));
-        return;
-      }
-      if (read.binary) {
-        AgentService.I.openStudioPlaceholder(
-            node.path, StudioFileGuard.binary(bytes: read.size));
-        return;
-      }
-      final content = read.content;
-      if (content == null) {
-        setState(() => _failed.add(node.path));
-        showStudioToast(
-          context,
-          'Could not open ${node.name}',
-          detail: 'The file could not be read from the working folder.',
-          error: true,
-        );
-        return;
-      }
-      AgentService.I.openStudioFile(node.path, content);
-      return;
-    }
-    final cached = cache.files[node.path];
-    if (cached != null) {
-      if (_failed.contains(node.path)) setState(() => _failed.remove(node.path));
-      AgentService.I.openStudioFile(node.path, cached);
+    if (_loading.contains(node.path)) return;
+    if (_remote.isStudioFileDirty(_sid, node.path)) {
+      // An unsaved draft wins over the server bytes: bring its tab forward.
+      _remote.focusStudioFile(_sid, node.path);
       return;
     }
     setState(() {
       _loading.add(node.path);
       _failed.remove(node.path);
     });
-    FetchResult result;
     try {
-      result = await cache.fetchFileResult(node.path);
+      await _remote.openStudioFile(_sid, node.path);
+      if (mounted) setState(() => _loading.remove(node.path));
     } catch (error) {
-      if (!mounted || generation != cache.bindingGeneration ||
-          !identical(buffers, AgentService.I.fileBuffer)) {
-        return;
-      }
-      setState(() { _loading.remove(node.path); _failed.add(node.path); });
+      if (!mounted) return;
+      setState(() {
+        _loading.remove(node.path);
+        _failed.add(node.path);
+      });
       showStudioToast(context, StudioFailure.of(error).message, error: true);
-      return;
     }
-    final content = result.content;
-    if (!mounted || generation != cache.bindingGeneration ||
-        !identical(buffers, AgentService.I.fileBuffer)) {
-      return;
-    }
-    setState(() => _loading.remove(node.path));
-    if (content == null) {
-      setState(() => _failed.add(node.path));
-      final failure = switch (result.failure) {
-        FetchFailure.noToken => const StudioFailure('Sign in to GitHub before opening this file.', ''),
-        FetchFailure.unauthorized => const StudioFailure('GitHub rejected the saved login. Sign in again and retry.', ''),
-        FetchFailure.forbidden => const StudioFailure('You do not have permission to read this repository file.', ''),
-        FetchFailure.notFound => const StudioFailure('GitHub could not find this file on the selected branch.', ''),
-        FetchFailure.timeout => const StudioFailure('GitHub took too long to return this file. Retry when online.', ''),
-        FetchFailure.server => const StudioFailure('GitHub is temporarily unavailable. Retry in a moment.', ''),
-        FetchFailure.network => const StudioFailure('The file could not be reached. Check the network and retry.', ''),
-        _ => const StudioFailure('That file could not be loaded from the repository.', ''),
-      };
-      showStudioToast(
-        context,
-        'Could not open ${node.name}',
-        detail: failure.detail.isEmpty ? failure.message : failure.detail,
-        error: true,
-      );
-      return;
-    }
-    AgentService.I.openStudioFile(node.path, content);
   }
 
   @override
   Widget build(BuildContext context) {
-    // The agent side only matters for the active-file highlight, so listen
-    // to the narrow Studio tabs state rather than all of AgentService.
     return AnimatedBuilder(
-      animation: Listenable.merge([RepoCache.I, AgentService.I.studioTabs]),
+      animation: Listenable.merge([_remote, _remote.tabsFor(_sid)]),
       builder: (context, _) {
-        final cache = RepoCache.I;
-        final nodes = _nodes(cache);
-        final active = AgentService.I.studioTabs.value.activePath;
+        final nodes = _nodes();
+        final active = _remote.activeFilePath(_sid);
+        final snapshot = _remote.snapshotFor(_sid);
 
         return Container(
           decoration: BoxDecoration(
@@ -315,17 +242,26 @@ class _StudioFileTreeState extends State<StudioFileTree> {
                 child: Divider(height: 1, thickness: 1, color: Aether.hairline),
               ),
               if (nodes.isEmpty)
-                const SliverToBoxAdapter(child: _TreeEmpty())
+                SliverToBoxAdapter(
+                  child: _TreeEmpty(
+                    loading: _remote.treeLoading(_sid),
+                    error: _remote.treeError(_sid),
+                    onRetry: () => _remote.syncStudioTabs(_sid),
+                  ),
+                )
               else
                 SliverList.builder(
                   itemCount: nodes.length,
-                  itemBuilder: (_, i) => _row(nodes[i], active, cache),
+                  itemBuilder: (_, i) => _row(nodes[i], active),
                 ),
               SliverToBoxAdapter(
                 child: _TreeFooter(
-                  ready: cache.isReady,
-                  count: cache.files.length,
-                  report: cache.lastSyncReport,
+                  state: snapshot?.state ?? 'unknown',
+                  ready: snapshot != null,
+                  count: snapshot?.fileCount ?? 0,
+                  truncated: snapshot?.truncated ?? false,
+                  loading: _remote.treeLoading(_sid),
+                  onRefresh: () => _remote.syncStudioTabs(_sid),
                 ),
               ),
             ],
@@ -335,7 +271,7 @@ class _StudioFileTreeState extends State<StudioFileTree> {
     );
   }
 
-  Widget _row(StudioTreeNode node, String? active, RepoCache cache) {
+  Widget _row(StudioTreeNode node, String? active) {
     final selected = !node.isDirectory && active == node.path;
     final failed = _failed.contains(node.path);
     final loading = _loading.contains(node.path);
@@ -437,8 +373,8 @@ class _FileTreeRowState extends State<_FileTreeRow> {
           duration: const Duration(milliseconds: 110),
           curve: Curves.easeOut,
           color: background,
-          // Deep directory nesting must still leave room for the filename and
-          // staging action. The full path remains available through a tooltip.
+          // Deep directory nesting must still leave room for the filename.
+          // The full path remains available through a tooltip.
           padding: EdgeInsets.only(
               left: indent.clamp(8.0, (constraints.maxWidth * 0.25).clamp(8.0, 80.0)),
               right: 8),
@@ -473,63 +409,12 @@ class _FileTreeRowState extends State<_FileTreeRow> {
                   size: 15,
                   color: Aether.textFaint,
                 ),
-              if (!node.isDirectory)
-                StudioStagingMenu(path: node.path),
             ],
           ),
         )),
       ),
     );
   }
-}
-
-/// Shared by the actual explorer and commit selection. These actions stage Git
-/// metadata only; checkout deletion requires a path already removed on disk.
-class StudioStagingMenu extends StatefulWidget {
-  const StudioStagingMenu({super.key, required this.path, this.enabled = true});
-  final String path;
-  final bool enabled;
-
-  @override
-  State<StudioStagingMenu> createState() => _StudioStagingMenuState();
-}
-
-class _StudioStagingMenuState extends State<StudioStagingMenu> {
-  int? _openedBinding;
-  String? _openedPath;
-  @override
-  Widget build(BuildContext context) => PopupMenuButton<String>(
-    tooltip: 'Stage ${widget.path}',
-    enabled: widget.enabled,
-    icon: const Icon(Icons.more_vert, size: 18),
-    onOpened: () {
-      _openedBinding = RepoCache.I.bindingGeneration;
-      _openedPath = widget.path;
-    },
-    onSelected: (operation) {
-      final path = _openedPath!;
-      try {
-        if (_openedBinding != RepoCache.I.bindingGeneration) {
-          throw StateError('Repository binding changed; reopen staging');
-        }
-        if (operation == 'delete') {
-          RepoCache.I.stageDeletion(path);
-        } else {
-          RepoCache.I.stageMode(path, operation);
-        }
-        showStudioToast(context, 'Staged $path',
-            detail: 'Git ${operation == 'delete' ? 'deletion' : 'mode $operation'} staged. No disk files or permissions changed.');
-      } catch (e) {
-        showStudioToast(context, 'Could not stage $path', detail: '$e', error: true);
-      }
-    },
-    itemBuilder: (_) => [
-      const PopupMenuItem(value: '100755', child: Text('Stage executable (100755)')),
-      const PopupMenuItem(value: '100644', child: Text('Stage regular (100644)')),
-      PopupMenuItem(value: 'delete', child: Text(RepoCache.I.workspaceFolder == null
-          ? 'Stage deletion' : 'Stage deletion (already missing)')),
-    ],
-  );
 }
 
 class _TreeHeader extends StatelessWidget {
@@ -560,21 +445,56 @@ class _TreeHeader extends StatelessWidget {
 }
 
 class _TreeEmpty extends StatelessWidget {
-  const _TreeEmpty();
+  const _TreeEmpty({
+    required this.loading,
+    required this.error,
+    required this.onRetry,
+  });
+
+  final bool loading;
+  final String? error;
+  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) {
+    if (loading) {
+      return const Padding(
+        padding: EdgeInsets.all(20),
+        child: Center(
+          child: SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
+    }
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(14),
-        child: Text(
-          'Connect a repo —\nfiles appear here live.',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 12.5,
-            height: 1.6,
-            color: Aether.textFaint,
-          ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              error == null
+                  ? 'No files yet —\nthe cloud workspace appears here.'
+                  : 'Could not load the workspace tree.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 12.5,
+                height: 1.6,
+                color: Aether.textFaint,
+              ),
+            ),
+            if (error != null) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: onRetry,
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text('Retry'),
+              ),
+            ],
+          ],
         ),
       ),
     );
@@ -582,30 +502,27 @@ class _TreeEmpty extends StatelessWidget {
 }
 
 class _TreeFooter extends StatelessWidget {
-  const _TreeFooter({required this.ready, required this.count, this.report});
+  const _TreeFooter({
+    required this.state,
+    required this.ready,
+    required this.count,
+    required this.truncated,
+    required this.loading,
+    required this.onRefresh,
+  });
 
+  final String state;
   final bool ready;
   final int count;
-
-  /// The last sync's report: a partial sync must not read "Synced".
-  final SyncReport? report;
+  final bool truncated;
+  final bool loading;
+  final VoidCallback onRefresh;
 
   @override
   Widget build(BuildContext context) {
-    final r = report;
-    final partial = r != null && r.partial;
-    final missing = r == null
-        ? 0
-        : r.droppedByCap + r.failedPaths.length + r.unattemptedPaths.length;
-    final text = !ready && r == null
-        ? 'Not connected'
-        : partial
-        ? (missing > 0
-              ? 'Partial · $count files loaded, $missing not loaded'
-              : 'Partial · $count files loaded')
-        : r?.localWorkspace == true
-        ? 'Local folder · $count files'
-        : 'Synced · $count files';
+    final text = !ready
+        ? (loading ? 'Loading workspace…' : 'Not connected')
+        : '$state · $count files${truncated ? ' · pruned' : ''}';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
@@ -617,17 +534,17 @@ class _TreeFooter extends StatelessWidget {
         child: Row(
           children: [
             Icon(
-              partial
-                  ? Icons.warning_amber_rounded
-                  : ready
+              state == 'warm'
                   ? Icons.cloud_done_outlined
-                  : Icons.cloud_off_outlined,
+                  : state == 'hydrating'
+                      ? Icons.hourglass_top_rounded
+                      : Icons.cloud_off_outlined,
               size: 15,
-              color: partial
-                  ? Aether.warn
-                  : ready
+              color: state == 'warm'
                   ? Aether.success
-                  : Aether.textFaint,
+                  : state == 'hydrating'
+                      ? Aether.warn
+                      : Aether.textFaint,
             ),
             const SizedBox(width: 7),
             Expanded(
@@ -635,6 +552,12 @@ class _TreeFooter extends StatelessWidget {
                 text,
                 style: TextStyle(fontSize: 12, color: Aether.textMuted),
               ),
+            ),
+            StudioIconButton(
+              icon: Icons.refresh,
+              tooltip: 'Refresh workspace',
+              iconSize: 16,
+              onPressed: loading ? null : onRefresh,
             ),
           ],
         ),

@@ -1,11 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'github_http_error.dart';
-import 'repo_cache.dart';
-import 'secure_store.dart';
 
 class GitHubDeviceAuthorization {
   final String deviceCode;
@@ -32,31 +30,15 @@ class GitHubAuthException implements Exception {
   String toString() => message;
 }
 
-/// GitHub Device Flow authentication — real implementation (RFC 8628).
+/// GitHub Device Flow authentication (RFC 8628) — thin client.
 ///
-/// Flow:
-///   1. POST https://github.com/login/device/code  → user_code + verification_uri
-///   2. User opens github.com/login/device and enters the code
-///   3. Poll POST /login/oauth/access_token until authorized
-///   4. Use token for API calls + git push/pull from Studio
-///
-/// No refresh token exists in this flow: GitHub's OAuth App device flow
-/// returns only `access_token` in the token response (no `refresh_token` /
-/// `expires_in` — those belong to GitHub Apps with expiring user tokens,
-/// not this OAuth App), and the token does not expire unless the user
-/// revokes it. So there is nothing to persist and no
-/// `grant_type=refresh_token` exchange to attempt on 401 — the
-/// confirm-before-wipe + background-retry path below is the whole story.
-/// The outcome of a stored-token read: the value, plus whether exhausting the
-/// retries meant the storage THREW (unknown) or the key was genuinely absent
-/// (signed out). Those two facts need different handling and used to be
-/// collapsed into `null`.
-class TokenReadResult {
-  const TokenReadResult(this.token, {required this.failed});
-  final String? token;
-  final bool failed;
-}
-
+/// P8 Task 15 reconciliation: the plan pinned a SERVER-PROXIED GitHub OAuth
+/// endpoint (spec §11) owned by P7, but the built gateway ships no such route.
+/// The device flow therefore still runs directly against GitHub, with one
+/// material change: **the access token is memory-only**. It is never written
+/// to secure storage, SharedPreferences or any local file. The server-side
+/// GitHub integration (MCP `GITHUB_TOKEN` secret, agent git tools) remains the
+/// long-term owner; this client is only the interactive sign-in surface.
 class GitHubService extends ChangeNotifier {
   GitHubService._();
   static final GitHubService I = GitHubService._();
@@ -66,421 +48,64 @@ class GitHubService extends ChangeNotifier {
   static const _deviceCodeUrl = 'https://github.com/login/device/code';
   static const _tokenUrl = 'https://github.com/login/oauth/access_token';
   static const _apiBase = 'https://api.github.com';
-  static const _tokenStorageKey = 'ovid_github_token';
-  static final _secureStorage = ovidSecureStorage();
-  static const _requestTimeout = Duration(seconds: 20);
 
   String? _token;
   Map<String, dynamic>? _user;
   int _authGeneration = 0;
-  Future<void> _tokenWrite = Future<void>.value();
-  /// False until [initialize] actually starts, which sets it true and clears
-  /// it in its own `finally`.
-  ///
-  /// It used to DEFAULT to true, on the assumption that `initialize` always
-  /// runs at startup. But `github.initialize` is a non-`localState` task, and
-  /// StartupCoordinator marks a still-queued one `skipped` once the readiness
-  /// deadline passes — so nothing ever cleared the flag. That wedged GitHub
-  /// login for the whole process, and not just by hiding state:
-  /// `_handleInitialAuth` early-returns while `isInitializing`, and
-  /// `retryRestoreFromUi()` (fired from Studio's initState) restores the token
-  /// WITHOUT touching this flag. So even a fully successful background
-  /// restore left the screen gated off, with no recovery but killing the app.
-  ///
-  /// "Not initializing yet" is the honest initial state: the worst case is a
-  /// brief logged-out flash before the restore lands, never a lockout.
   bool _isInitializing = false;
-  Timer? _profileRetryTimer;
-
-  /// Delay before retrying a profile fetch that failed transiently. Exposed so
-  /// tests can drive the background retry without waiting.
-  @visibleForTesting
-  Duration profileRetryDelay = const Duration(seconds: 30);
 
   bool get isLoggedIn => _token != null;
   bool get isInitializing => _isInitializing;
+
+  /// Always false now: there is no stored credential to fail reading. Kept so
+  /// the Studio auth badge keeps its "checking" branch (and so a future
+  /// server-proxied session can reuse it).
+  bool restoreFailed = false;
+
   String? get login => _user?['login'] as String?;
   String? get avatarUrl => _user?['avatar_url'] as String?;
   String? get name => _user?['name'] as String?;
+
+  /// The in-memory token. NOT persisted; a process restart signs the user out.
   String? get token => _token;
 
-  /// Single write point for the auth token.
-  void _setToken(String? value) {
-    _token = value;
-  }
-
-  /// Sign out — clear token + profile, disconnect repo cache.
-  Future<void> signOut() async {
-    _authGeneration++;
-    _isInitializing = false;
-    _cancelProfileRetry();
-    _setToken(null);
-    _user = null;
-    RepoCache.I.unbind();
+  /// Test seam: seeds the in-memory token without a device flow.
+  @visibleForTesting
+  void setTokenForTest(String? token) {
+    _token = token;
+    if (token == null) _user = null;
     notifyListeners();
-    await _persistToken(null);
   }
 
-  @override
-  void dispose() {
-    _cancelProfileRetry();
-    super.dispose();
+  /// No-op state reset (boot stage compatibility).
+  Future<void> initialize({http.Client? client}) async {
+    _isInitializing = false;
+    notifyListeners();
   }
 
-  void _cancelProfileRetry() {
-    _profileRetryTimer?.cancel();
-    _profileRetryTimer = null;
-  }
-
-  /// Reads the stored auth token, retrying up to 3 times with a short
-  /// backoff. Cold starts right after the process was killed can hit
-  /// Keystore / EncryptedSharedPreferences hiccups that surface as
-  /// transient read failures — without the retry the app concludes "no
-  /// login" and the user lands signed out on every process death. After
-  /// the attempts are exhausted the read is treated as absent, exactly as
-  /// a clean miss would be.
-  /// One read attempt's outcome. Returned per-call rather than through the
-  /// shared [lastReadFailedForTest] static, because concurrent callers used to
-  /// clobber each other's signal: a successful read from `initialize()` reset the
-  /// flag while a resume-triggered retry was mid-flight, so the retry concluded
-  /// "no token stored" instead of "the read failed", skipped its own retry, and
-  /// Studio sat signed out for the whole launch.
-  static Future<TokenReadResult> readTokenResult(
-    Future<String?> Function() read,
-  ) async {
-    for (var attempt = 0; attempt < 3; attempt++) {
-      if (attempt > 0) {
-        await Future<void>.delayed(Duration(milliseconds: 100 * attempt));
-      }
-      try {
-        return TokenReadResult(await read(), failed: false);
-      } catch (_) {
-        // Transient secure-storage failure — back off and try again.
-      }
-    }
-    return const TokenReadResult(null, failed: true);
-  }
-
-  @visibleForTesting
-  static Future<String?> readTokenWithRetriesForTest(
-    Future<String?> Function() read,
-  ) async {
-    final r = await readTokenResult(read);
-    lastReadFailedForTest = r.failed;
-    return r.token;
-  }
-
-  /// True when the most recent [readTokenWithRetriesForTest] exhausted its
-  /// attempts by THROWING rather than by reading an empty key. Mirrored onto the
-  /// instance as [restoreFailed].
-  @visibleForTesting
-  static bool lastReadFailedForTest = false;
-
-  /// The login state is UNKNOWN because secure storage could not be read, not
-  /// because the user is signed out. The UI must not latch a "please sign in"
-  /// prompt on this, and [retryRestoreIfNotLoggedIn] keeps trying.
-  bool restoreFailed = false;
-
-  /// Test seam: true while a background profile retry is armed.
-  @visibleForTesting
-  bool get hasProfileRetryScheduledForTest => _profileRetryTimer != null;
-
-  Timer? _restoreRetryTimer;
-  int _restoreRetryIndex = 0;
-
-  /// Backoff for re-reading secure storage after a FAILED read. A read that
-  /// fails during cold-start contention usually succeeds seconds later; without
-  /// a retry the app reported "signed out" for the whole launch while the token
-  /// sat intact on disk — which is exactly the intermittent "Studio logs me out
-  /// after reopening Ovid" report.
-  static const _restoreRetryDelays = [
-    Duration(seconds: 5),
-    Duration(seconds: 30),
-    Duration(minutes: 2),
-  ];
-
-  void _scheduleRestoreRetry(int generation) {
-    _restoreRetryTimer?.cancel();
-    if (_restoreRetryIndex >= _restoreRetryDelays.length) return;
-    final delay = _restoreRetryDelays[_restoreRetryIndex++];
-    _restoreRetryTimer = Timer(delay, () {
-      if (generation != _authGeneration || isLoggedIn) return;
-      unawaited(retryRestoreIfNotLoggedIn());
-    });
-  }
-
-  /// Re-read the stored token after a restore FAILURE (not after finding no
-  /// token). Invoked by the backoff timer and on app resume.
-  ///
-  /// A successful retry restores the login without any user action. A failed one
-  /// keeps [restoreFailed] true and re-arms the backoff, so the UI can decline
-  /// to latch a "please sign in" prompt on a state that may still resolve.
-  /// A UI-initiated restore (opening Studio, returning to the app).
-  ///
-  /// Restarts the automatic backoff first: the 5s/30s/2min window is only ~2.5
-  /// minutes long, and once it is exhausted nothing re-arms it. A secure-storage
-  /// hiccup lasting longer than that — cold-start contention, an OS update — left
-  /// Studio signed out for the rest of the process with no way to recover short
-  /// of a full app kill. An explicit retry should always get a fresh window.
+  /// No-op: there is no persisted credential to restore. Opening Studio is
+  /// still an explicit retry point, so the profile (if any) is refreshed.
   Future<void> retryRestoreFromUi() async {
-    _restoreRetryIndex = 0;
-    // Bracket the restore with `_isInitializing` so `_handleInitialAuth`'s
-    // existing guard DEFERS instead of latching a signed-out prompt. Studio's
-    // initState fires this AND a post-frame `_handleInitialAuth()`, and the
-    // secure-storage read is async (up to ~300ms of retries) — so without this
-    // the post-frame call observed "signed out, not initializing, not failed"
-    // and opened the non-dismissible login sheet OVER a token that was about to
-    // restore. That is the exact wedge this method exists to prevent, and it
-    // left the user with no recovery but killing the app.
-    //
-    // Assigned synchronously (this runs from initState, during build) but
-    // deliberately WITHOUT notifying here: a synchronous notify could make a
-    // listener call setState mid-build. The flag is cleared in `finally`, so a
-    // completed restore never leaves the login UI gated.
+    if (!isLoggedIn) return;
     _isInitializing = true;
+    notifyListeners();
     try {
-      await retryRestoreIfNotLoggedIn();
+      await fetchUser();
+    } catch (_) {
+      // Profile is cosmetic; the in-memory token remains authoritative.
     } finally {
       _isInitializing = false;
       notifyListeners();
     }
   }
 
-  Future<void> retryRestoreIfNotLoggedIn() async {
-    if (isLoggedIn) {
-      restoreFailed = false;
-      return;
-    }
-    final generation = _authGeneration;
-    final read = await readTokenResult(
-      () => _secureStorage.read(key: _tokenStorageKey),
-    );
-    if (generation != _authGeneration) return;
-    final token = read.token;
-    if (token == null || token.isEmpty) {
-      restoreFailed = read.failed;
-      if (restoreFailed) _scheduleRestoreRetry(generation);
-      return;
-    }
-    restoreFailed = false;
-    _restoreRetryIndex = 0;
-    _setToken(token);
+  /// Sign out — clear the in-memory token + profile.
+  Future<void> signOut() async {
+    _authGeneration++;
+    _isInitializing = false;
+    _token = null;
+    _user = null;
     notifyListeners();
-    // The profile is cosmetic; loading it must never put the restored token at
-    // risk, so failures are swallowed rather than treated as a suspect token.
-    try {
-      final user = await _fetchUser(token, http.Client());
-      if (generation == _authGeneration) {
-        _user = user;
-        notifyListeners();
-      }
-    } catch (_) {
-      if (generation == _authGeneration) _scheduleProfileRetry(generation, null);
-    }
-  }
-
-  Future<void> initialize({http.Client? client}) async {
-    final generation = ++_authGeneration;
-    _cancelProfileRetry();
-    _isInitializing = true;
-    notifyListeners();
-    final c = client ?? http.Client();
-    final ownsClient = client == null;
-    try {
-      final read = await readTokenResult(
-        () => _secureStorage.read(key: _tokenStorageKey),
-      );
-      if (generation != _authGeneration) return;
-      final token = read.token;
-      if (token == null || token.isEmpty) {
-        // "No token stored" and "storage could not be read" are DIFFERENT
-        // facts. Only the second is retryable, and it must never be presented
-        // to the user as a sign-out. Read per-call, not from the shared static:
-        // a concurrent retry used to reset that flag mid-flight and this caller
-        // would then conclude "signed out" and skip its own retry.
-        restoreFailed = read.failed;
-        if (restoreFailed) {
-          _isInitializing = false;
-          notifyListeners();
-          _scheduleRestoreRetry(generation);
-        }
-        return;
-      }
-      restoreFailed = false;
-      _restoreRetryIndex = 0;
-      // The stored token is trusted immediately so `isLoggedIn` is true across
-      // restarts; the profile is loaded (and retried) separately.
-      _setToken(token);
-      notifyListeners();
-      final user = await _fetchUser(token, c);
-      if (generation != _authGeneration) return;
-      _user = user;
-      notifyListeners();
-    } on GitHubAuthException catch (error) {
-      if (generation != _authGeneration) return;
-      if (error.code == 'invalid_token') {
-        // A 401 alone is NEVER proof the token died — a proxy, WAF or edge
-        // error page can 401 a request the token would have passed. Confirm
-        // GitHub's own `Bad credentials` JSON before even thinking about
-        // deleting the stored token. (`token` is not safely readable here —
-        // the throw may predate its assignment — but `_token` is only set
-        // when a real stored token existed, so it is the right suspect.)
-        final suspect = _token;
-        if (suspect != null && suspect.isNotEmpty) {
-          await _handleSuspectToken(
-            generation,
-            suspect,
-            confirmationClient: c,
-            retryClient: client,
-          );
-        }
-      } else {
-        _scheduleProfileRetry(generation, client);
-      }
-    } catch (_) {
-      // Transient network/decoding failures keep the token; retry in the
-      // background rather than signing the user out.
-      if (generation == _authGeneration) {
-        _scheduleProfileRetry(generation, client);
-      }
-    } finally {
-      if (ownsClient) c.close();
-      if (generation == _authGeneration) {
-        _isInitializing = false;
-        notifyListeners();
-      }
-    }
-  }
-
-  /// Retries a transient profile failure without ever clearing the stored
-  /// token. Only a CONFIRMED bad-credentials 401 (see [_handleSuspectToken])
-  /// signs the user out -- a lone 401 just re-arms this retry.
-  void _scheduleProfileRetry(int generation, http.Client? client) {
-    final token = _token;
-    if (token == null) return;
-    _cancelProfileRetry();
-    _profileRetryTimer = Timer(profileRetryDelay, () async {
-      _profileRetryTimer = null;
-      if (generation != _authGeneration || _token != token) return;
-      final c = client ?? http.Client();
-      final ownsClient = client == null;
-      try {
-        final user = await _fetchUser(token, c);
-        if (generation != _authGeneration || _token != token) return;
-        _user = user;
-        notifyListeners();
-      } on GitHubAuthException catch (error) {
-        if (generation == _authGeneration && error.code == 'invalid_token') {
-          // Even the retry's 401 can be an edge/proxy artifact -- confirm
-          // before deleting; inconclusive keeps the token and re-arms.
-          // The confirmation uses this attempt's client `c`; the re-armed
-          // retry uses the ORIGINAL `client` (possibly null) so it never
-          // reuses `c` after this block's finally closes it.
-          await _handleSuspectToken(
-            generation,
-            token,
-            confirmationClient: c,
-            retryClient: client,
-          );
-        }
-      } catch (_) {
-        // Still authenticated-but-unknown; keep the token.
-      } finally {
-        if (ownsClient) c.close();
-      }
-    });
-  }
-
-  /// Handles a profile fetch that came back 401: the token is deleted only
-  /// when a second, dedicated fetch confirms GitHub's own JSON
-  /// `Bad credentials` response. Anything inconclusive (proxy/WAF 401s,
-  /// HTML error pages, timeouts, offline) KEEPS the token and falls back
-  /// to the background retry instead of signing the user out.
-  ///
-  /// [confirmationClient] performs the second-chance check; [retryClient]
-  /// is the client the re-armed retry should use (null = create+own one).
-  /// They are separate because callers often own+close the confirmation
-  /// client in a `finally` -- handing it to the retry would make the retry
-  /// reuse a closed client.
-  Future<void> _handleSuspectToken(
-    int generation,
-    String token, {
-    required http.Client confirmationClient,
-    required http.Client? retryClient,
-  }) async {
-    if (generation != _authGeneration) return;
-    final confirmed = await _confirmTokenInvalid(token, confirmationClient);
-    if (generation != _authGeneration) return;
-    if (confirmed) {
-      _setToken(null);
-      _user = null;
-      notifyListeners();
-      await _persistToken(null);
-    } else {
-      // Not confirmed dead -- keep the token; the profile retry re-checks
-      // in the background without touching the stored secret.
-      _scheduleProfileRetry(generation, retryClient);
-    }
-  }
-
-  /// Second-chance check that the stored token is REALLY dead: issues one
-  /// more `GET /user` and returns true only when the response is 401 with
-  /// GitHub's JSON `{"message": "Bad credentials", ...}` body. Returns
-  /// false (inconclusive -- keep the token) for any other status, any
-  /// non-JSON or differently-worded body, and any transport failure.
-  Future<bool> _confirmTokenInvalid(String token, http.Client client) async {
-    try {
-      final res = await client
-          .get(
-            Uri.parse('$_apiBase/user'),
-            headers: {
-              'Authorization': 'Bearer $token',
-              'Accept': 'application/vnd.github+json',
-            },
-          )
-          .timeout(const Duration(seconds: 20));
-      if (res.statusCode != 401) return false;
-      try {
-        final body = jsonDecode(res.body);
-        if (body is Map<String, dynamic>) {
-          final message = (body['message'] as String?) ?? '';
-          return message.toLowerCase().contains('bad credentials');
-        }
-      } catch (_) {
-        return false;
-      }
-      return false;
-    } catch (_) {
-      // The confirmation fetch itself failed -- inconclusive, keep token.
-      return false;
-    }
-  }
-
-  /// Persist (or clear) the token. Writes are serialized on [_tokenWrite] so
-  /// the last queued operation always wins.
-  ///
-  /// LOGIN-LOSS FIX (2026-09-24): this used to re-check [generation] *inside*
-  /// the queued closure — skipping the write, and then DELETING the token it had
-  /// just written, whenever a concurrent `initialize()` had bumped the
-  /// generation while the write sat in the queue. A successful device-flow
-  /// sign-in therefore survived only for that process lifetime: logged in now,
-  /// logged out after the next restart, with nothing on screen to explain it.
-  ///
-  /// A newly issued token is the newest fact about the account, so it is always
-  /// written. Staleness is already gated at the call site by `ensureCurrent()`
-  /// before this is reached, and a queued `signOut()` clear always runs AFTER
-  /// the write it supersedes, so ordering — not a generation re-check — is what
-  /// keeps a sign-out from being undone.
-  Future<void> _persistToken(String? token, {int? generation}) {
-    final write = _tokenWrite.then((_) async {
-      if (token == null || token.isEmpty) {
-        await _secureStorage.delete(key: _tokenStorageKey);
-      } else {
-        await _secureStorage.write(key: _tokenStorageKey, value: token);
-      }
-    });
-    _tokenWrite = write.then<void>((_) {}, onError: (_) {});
-    return write;
   }
 
   /// -------------------------------------------------------------------------
@@ -547,7 +172,7 @@ class GitHubService extends ChangeNotifier {
   }
 
   /// -------------------------------------------------------------------------
-  /// STEP 2 — poll for the access token until user authorizes.
+  /// STEP 2 — poll for the access token until the user authorizes.
   /// Handles slow_down + expired_token per spec.
   /// -------------------------------------------------------------------------
   Future<String> pollForToken({
@@ -647,9 +272,8 @@ class GitHubService extends ChangeNotifier {
         if (accessToken is String && accessToken.isNotEmpty) {
           final user = await _fetchUser(accessToken, c);
           ensureCurrent();
-          await _persistToken(accessToken, generation: generation);
-          ensureCurrent();
-          _setToken(accessToken);
+          // Memory only — never persisted client-side.
+          _token = accessToken;
           _user = user;
           notifyListeners();
           return accessToken;
@@ -733,7 +357,7 @@ class GitHubService extends ChangeNotifier {
     if (res.statusCode == 401) {
       throw const GitHubAuthException(
         'invalid_token',
-        'The stored GitHub authorization is no longer valid.',
+        'The GitHub authorization is no longer valid.',
       );
     }
     if (res.statusCode != 200) {
@@ -743,219 +367,5 @@ class GitHubService extends ChangeNotifier {
       );
     }
     return jsonDecode(res.body) as Map<String, dynamic>;
-  }
-
-  String _requireToken() {
-    final token = _token;
-    if (token == null || token.isEmpty) {
-      throw const GitHubAuthException(
-        'not_authenticated',
-        'Connect GitHub before accessing repositories.',
-      );
-    }
-    return token;
-  }
-
-  /// Repos per page for [listRepos] (GitHub's maximum).
-  static const int repoPageSize = 100;
-
-  /// One page of repos the user can access — owned, collaborator AND
-  /// organization-member repos — most recently updated first. The picker
-  /// pages through these (it used to fetch only the first 30, so anyone with
-  /// more repos, i.e. every org member, could not pick older/org repos).
-  Future<List<Map<String, dynamic>>> listRepos({
-    int limit = repoPageSize,
-    int page = 1,
-    http.Client? client,
-  }) async {
-    final token = _requireToken();
-    final c = client ?? http.Client();
-    try {
-      final res = await c
-          .get(
-            Uri.parse(
-              '$_apiBase/user/repos?per_page=$limit&page=$page&sort=updated'
-              '&affiliation=owner,collaborator,organization_member',
-            ),
-            headers: {
-              'Authorization': 'Bearer $token',
-              'Accept': 'application/vnd.github+json',
-            },
-          )
-          .timeout(_requestTimeout);
-      if (res.statusCode != 200) {
-        throw GitHubHttpException.fromResponse('repos fetch', res);
-      }
-      return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
-    } finally {
-      if (client == null) c.close();
-    }
-  }
-
-  /// Searches repositories by name among the user's own account and the
-  /// given [owners] (orgs/users seen in the user's repo list), for repos
-  /// that pagination has not reached yet.
-  Future<List<Map<String, dynamic>>> searchRepos(
-    String query, {
-    Iterable<String> owners = const [],
-    http.Client? client,
-  }) async {
-    final token = _requireToken();
-    final q = query.trim();
-    if (q.isEmpty) return const [];
-    final scopes = <String>{
-      if (login != null && login!.isNotEmpty) 'user:$login',
-      for (final o in owners)
-        if (o.isNotEmpty && o != login) 'user:$o',
-    };
-    final c = client ?? http.Client();
-    try {
-      final uri = Uri.parse('$_apiBase/search/repositories').replace(
-        queryParameters: {
-          'q': '$q in:name fork:true ${scopes.join(' ')}'.trim(),
-          'per_page': '50',
-        },
-      );
-      final res = await c
-          .get(
-            uri,
-            headers: {
-              'Authorization': 'Bearer $token',
-              'Accept': 'application/vnd.github+json',
-            },
-          )
-          .timeout(_requestTimeout);
-      if (res.statusCode != 200) {
-        throw GitHubHttpException.fromResponse('repo search', res);
-      }
-      final body = jsonDecode(res.body);
-      final items = body is Map ? body['items'] : null;
-      return items is List
-          ? items.whereType<Map<String, dynamic>>().toList()
-          : const [];
-    } finally {
-      if (client == null) c.close();
-    }
-  }
-
-  /// Percent-encodes each path segment for GitHub API URLs (repo names and
-  /// file paths with spaces or special chars broke requests when interpolated
-  /// raw). Slashes are preserved as separators.
-  static String _encodeApiPath(String p) =>
-      p.split('/').map(Uri.encodeComponent).join('/');
-
-  /// List branch names of a repo (Studio branch picker).
-  ///
-  /// Capped at GitHub's maximum 100 branches per page; pagination is not
-  /// followed, so repos with more branches expose only the first page.
-  Future<List<String>> listBranches(
-    String owner,
-    String repo, {
-    http.Client? client,
-  }) async {
-    final token = _requireToken();
-    final c = client ?? http.Client();
-    try {
-      final res = await c
-          .get(
-            Uri.parse(
-              '$_apiBase/repos/${Uri.encodeComponent(owner)}/${Uri.encodeComponent(repo)}/branches?per_page=100',
-            ),
-            headers: {
-              'Authorization': 'Bearer $token',
-              'Accept': 'application/vnd.github+json',
-            },
-          )
-          .timeout(_requestTimeout);
-      if (res.statusCode != 200) {
-        throw GitHubHttpException.fromResponse('branches fetch', res);
-      }
-      return (jsonDecode(res.body) as List)
-          .map((e) => (e as Map<String, dynamic>)['name'] as String?)
-          .whereType<String>()
-          .where((name) => name.isNotEmpty)
-          .toList();
-    } finally {
-      if (client == null) c.close();
-    }
-  }
-
-  /// List files of a repo at a branch/path (Studio file tree).
-  /// Single file -> returns [{name, content, sha, type:'file'}]
-  /// Directory  -> returns [{name, path, type:'dir'|'file'}, ...]
-  Future<List<Map<String, dynamic>>> listRepoContent({
-    required String owner,
-    required String repo,
-    String path = '',
-    String? branch,
-    http.Client? client,
-  }) async {
-    final token = _requireToken();
-    final uri = Uri.parse(
-      '$_apiBase/repos/${Uri.encodeComponent(owner)}/${Uri.encodeComponent(repo)}/contents/${_encodeApiPath(path)}'
-      '${branch == null || branch.isEmpty ? '' : '?ref=${Uri.encodeQueryComponent(branch)}'}',
-    );
-    final c = client ?? http.Client();
-    try {
-      final res = await c
-          .get(
-            uri,
-            headers: {
-              'Authorization': 'Bearer $token',
-              'Accept': 'application/vnd.github+json',
-            },
-          )
-          .timeout(_requestTimeout);
-      if (res.statusCode != 200) {
-        throw GitHubHttpException.fromResponse('content fetch', res);
-      }
-      final body = jsonDecode(res.body);
-      if (body is List) return body.cast<Map<String, dynamic>>();
-      return [body as Map<String, dynamic>]; // single file object
-    } finally {
-      if (client == null) c.close();
-    }
-  }
-
-  /// Create or update a file (commit) in the repo.
-  Future<bool> writeFile({
-    required String repoFull, // "owner/repo"
-    required String path,
-    required String content,
-    required String message,
-    String? sha, // null means create, else update
-    String branch = 'main',
-    http.Client? client,
-  }) async {
-    final token = _requireToken();
-    final parts = repoFull.split('/');
-    if (parts.length != 2 || parts.any((part) => part.isEmpty)) {
-      throw ArgumentError.value(repoFull, 'repoFull', 'Expected owner/repo');
-    }
-    final uri = Uri.parse(
-      '$_apiBase/repos/${Uri.encodeComponent(parts[0])}/${Uri.encodeComponent(parts[1])}/contents/${_encodeApiPath(path)}',
-    );
-    final c = client ?? http.Client();
-    try {
-      final res = await c
-          .put(
-            uri,
-            headers: {
-              'Authorization': 'Bearer $token',
-              'Accept': 'application/vnd.github+json',
-              'Content-Type': 'application/json',
-            },
-            body: jsonEncode({
-              'message': message,
-              'content': base64Encode(utf8.encode(content)),
-              'branch': branch,
-              'sha': ?sha,
-            }),
-          )
-          .timeout(_requestTimeout);
-      return res.statusCode == 200 || res.statusCode == 201;
-    } finally {
-      if (client == null) c.close();
-    }
   }
 }

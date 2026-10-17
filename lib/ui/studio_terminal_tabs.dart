@@ -1,38 +1,39 @@
-import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../core/cloud/cloud_ws.dart';
+import '../core/cloud/studio_pty.dart';
 import '../core/state.dart';
-import '../core/studio_terminal.dart';
 import '../core/theme.dart';
-import 'studio_errors.dart';
 import 'studio_layout.dart';
 import 'widgets/aether_primitives.dart';
 
-/// Test seam: replaces the Studio terminal spawner so host widget tests can
-/// drive a real host shell. Production spawns the platform shell directly.
-///
-/// Re-exported from `studio_screen.dart` so existing tests keep importing it
-/// from there.
+/// Test seam: replaces the cloud pty channel factory so host widget tests can
+/// drive a channel without a live multiplexer. Production is null (the real
+/// [CloudPtyChannel] over `WsMultiplexer.I`).
 @visibleForTesting
-Future<Process> Function()? studioPtySpawnerOverrideForTest;
+CloudPtyChannel Function(String sessionId, String tabId)?
+    studioPtyChannelFactoryOverrideForTest;
 
-/// The terminal's Stop button (shown while a command runs).
+/// The terminal's Stop button (sends Ctrl-C / 0x03).
 const Key studioTerminalStopKey = ValueKey('studio-terminal-stop');
 
-// ── Multi-terminal (P8) — N independent persistent shells ─────────────
-// Each terminal keeps its own scrollback + busy state and its own
-// persistent pipe shell (StudioShellSession), so `cd`/exports survive
-// across commands. Tabs at the top with add/close icons (VS Code style).
-// Shells are owner-scoped in PtyPool so agent Stop never kills them.
+// ── Multi-terminal — N independent cloud PTYs ─────────────────────────────
+// Each terminal keeps its own scrollback and its own P2 pty channel, so
+// `cd`/exports survive across commands. Tabs at the top with add/close icons
+// (VS Code style). The server owns the process; this is a thin byte channel.
 class StudioTerminalTabs extends StatefulWidget {
   const StudioTerminalTabs({
     super.key,
+    this.sessionId,
     this.collapsed = false,
     this.onToggleCollapse,
     this.onResizeDrag,
   });
+
+  /// Explicit server-session binding (tests); null falls back to [AppState].
+  final String? sessionId;
 
   /// When true only the header strip is drawn — the pane is collapsed to
   /// give the editor the room back on short viewports.
@@ -53,6 +54,8 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
   final List<_TerminalSession> _terms = [];
   int _active = 0;
 
+  String get _sid => widget.sessionId ?? AppState.I.activeSession?.id ?? '';
+
   @override
   void initState() {
     super.initState();
@@ -60,8 +63,12 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
   }
 
   void _addTerminal() {
+    final index = _terms.length;
     setState(() {
-      _terms.add(_TerminalSession());
+      _terms.add(_TerminalSession(
+        sessionId: _sid,
+        tabId: 'tab-$index-${DateTime.now().microsecondsSinceEpoch}',
+      ));
       _active = _terms.length - 1;
     });
   }
@@ -72,7 +79,10 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
     setState(() {
       _terms.removeAt(i);
       if (_terms.isEmpty) {
-        _terms.add(_TerminalSession());
+        _terms.add(_TerminalSession(
+          sessionId: _sid,
+          tabId: 'tab-0-${DateTime.now().microsecondsSinceEpoch}',
+        ));
         _active = 0;
       } else if (_active >= _terms.length) {
         _active = _terms.length - 1;
@@ -108,21 +118,17 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
   }
 
   /// Terminal tab strip. Doubles as the resize handle, so the 44dp touch
-  /// target is doing real work instead of eating vertical space twice. The
-  /// tab selector itself renders through [AetherSegmentedControl]; per-tab
-  /// close is a dedicated action for the active tab (so the segmented control
-  /// stays uniform and keyboard-accessible).
+  /// target is doing real work instead of eating vertical space twice.
   Widget _strip(BuildContext context) {
     final scale = MediaQuery.textScalerOf(context).scale(1.0);
-    // Build segmented options from the live shell list — a busy terminal gets
-    // a sync icon, idle gets a chevron. Labels stay short ("bash N") so a
-    // handful of terminals fit without wrapping on compact widths.
     final options = <({int value, String label, IconData? icon})>[
       for (var i = 0; i < _terms.length; i++)
         (
           value: i,
           label: 'bash ${i + 1}',
-          icon: _terms[i].shell.busy ? Icons.sync : Icons.chevron_right,
+          icon: _terms[i].channel.closed
+              ? Icons.chevron_right
+              : Icons.sync,
         ),
     ];
     final strip = Material(
@@ -135,36 +141,33 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
             : (d) => widget.onResizeDrag!(d.delta.dy),
         child: Container(
           key: studioTerminalHandleKey,
-          // Tight at exactly the 44dp tap-target budget: any border or
-          // vertical padding here comes out of the buttons' height (a
-          // Container counts a bottom border as padding).
           height: math.max(kStudioTapTarget, kStudioTapTarget * scale),
           padding: const EdgeInsets.symmetric(horizontal: 10),
           child: LayoutBuilder(builder: (context, constraints) => Row(
             children: [
               if (constraints.maxWidth >= 560 * math.max(1.0, scale)) ...[
-              Icon(Icons.terminal, size: 14, color: Aether.textMuted),
-              const SizedBox(width: 8),
-              Semantics(
-                header: true,
-                child: Text(
-                  'TERMINALS',
-                  style: AetherType.label.copyWith(
-                    letterSpacing: 1.2,
-                    color: Aether.textFaint,
+                Icon(Icons.terminal, size: 14, color: Aether.textMuted),
+                const SizedBox(width: 8),
+                Semantics(
+                  header: true,
+                  child: Text(
+                    'TERMINALS',
+                    style: AetherType.label.copyWith(
+                      letterSpacing: 1.2,
+                      color: Aether.textFaint,
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 12),
+                const SizedBox(width: 12),
               ],
               Expanded(
                 child: SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
                   child: AnimatedBuilder(
-                    // Rebuild the segmented control whenever any shell's busy
+                    // Rebuild the segmented control whenever any channel's
                     // state flips so the per-option icon stays in sync.
                     animation: Listenable.merge(
-                      [for (final t in _terms) t.shell],
+                      [for (final t in _terms) t.channel],
                     ),
                     builder: (_, _) {
                       return AetherSegmentedControl<int>(
@@ -176,10 +179,6 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
                   ),
                 ),
               ),
-              // Close the currently active terminal (the segmented control is
-              // uniform; close is a separate action on the active tab so it is
-              // reachable with a single tap without hunting through per-pill
-              // controls).
               if (_terms.isNotEmpty)
                 StudioIconButton(
                   icon: Icons.close,
@@ -219,21 +218,26 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
   }
 }
 
-/// One terminal's mutable UI state. Each tab owns a stable [tabId] and the
-/// persistent shell it is bound to (created lazily on first command).
+/// One terminal's mutable UI state: a stable tab id and its cloud channel.
 class _TerminalSession {
-  _TerminalSession() {
-    tabId = 'tab-${_seq++}';
-    shell = StudioShellSession(tabId: tabId);
+  _TerminalSession({required String sessionId, required this.tabId}) {
+    final override = studioPtyChannelFactoryOverrideForTest;
+    channel = override != null
+        ? override(sessionId, tabId)
+        : CloudPtyChannel(
+            sessionId: sessionId,
+            tabId: tabId,
+            ws: WsMultiplexer.I,
+          );
   }
-  static int _seq = 0;
-  late final String tabId;
-  late final StudioShellSession shell;
+
+  final String tabId;
+  late final CloudPtyChannel channel;
   final input = TextEditingController();
   final scroll = ScrollController();
 
   void dispose() {
-    shell.dispose();
+    channel.dispose();
     input.dispose();
     scroll.dispose();
   }
@@ -251,25 +255,25 @@ class _TerminalPaneState extends State<_TerminalPane> {
   @override
   void initState() {
     super.initState();
-    widget.term.shell.addListener(_onShellChanged);
+    widget.term.channel.addListener(_onChannelChanged);
   }
 
   @override
   void didUpdateWidget(_TerminalPane oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.term, widget.term)) {
-      oldWidget.term.shell.removeListener(_onShellChanged);
-      widget.term.shell.addListener(_onShellChanged);
+      oldWidget.term.channel.removeListener(_onChannelChanged);
+      widget.term.channel.addListener(_onChannelChanged);
     }
   }
 
   @override
   void dispose() {
-    widget.term.shell.removeListener(_onShellChanged);
+    widget.term.channel.removeListener(_onChannelChanged);
     super.dispose();
   }
 
-  void _onShellChanged() => _scrollToBottom(widget.term);
+  void _onChannelChanged() => _scrollToBottom(widget.term);
 
   void _scrollToBottom(_TerminalSession t) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -277,141 +281,73 @@ class _TerminalPaneState extends State<_TerminalPane> {
       final pos = t.scroll.position;
       // Follow-mode: only auto-scroll when the user is already near the
       // bottom — scrolling up to read earlier output must not be yanked
-      // back down by every new line of command output.
+      // back down by every new chunk.
       if (pos.maxScrollExtent - pos.pixels > 48) return;
       t.scroll.jumpTo(pos.maxScrollExtent);
     });
   }
 
-  Future<void> _run(String cmd) async {
+  void _run(String cmd) {
     final t = widget.term;
-    final shell = t.shell;
-    if (shell.busy) {
-      // While a command runs, the field feeds its stdin (y/N prompts,
-      // `read`, a REPL). The one-shot fallback has no stdin: keep the text.
-      if (shell.sendStdin(cmd)) {
-        t.input.clear();
-        _scrollToBottom(t);
-      }
-      return;
-    }
-    final c = cmd.trim();
-    if (c.isEmpty) return;
-    final incomplete = StudioShellSession.incompleteReason(c);
-    if (incomplete != null) {
-      shell.addOutput('\$ $c');
-      shell.addOutput('⚠ $incomplete');
-      _scrollToBottom(t);
-      return;
-    }
+    final c = cmd.trimRight();
+    if (c.trim().isEmpty) return;
     t.input.clear();
-    shell.begin(c);
+    t.channel.writeln(c);
     _scrollToBottom(t);
-
-    final sessionId = AppState.I.activeSession?.sandboxId ?? 'default';
-    // Persistent per-tab shell: state (`cd`, exports) survives commands and
-    // output streams in as it happens. Falls back to the one-shot exec when
-    // the sandbox is unavailable.
-    final override = studioPtySpawnerOverrideForTest;
-    try {
-      final workDir = await AppState.I.workspaceDirForSession(sessionId);
-      final platformShell = Platform.isAndroid ? '/system/bin/sh' : 'bash';
-      final spawner =
-          override ??
-          () async {
-            return Process.start(
-              platformShell,
-              const [],
-              workingDirectory: workDir.path,
-            );
-          };
-      if (await shell.runPersistent(
-        c,
-        sid: sessionId,
-        spawner: spawner,
-        workspace: workDir.path,
-      )) {
-        return;
-      }
-    } catch (_) {
-      // Fall through to the one-shot exec fallback.
-    }
-
-    try {
-      final workDir = await AppState.I.workspaceDirForSession(sessionId);
-      final platformShell = Platform.isAndroid ? '/system/bin/sh' : 'bash';
-      final result = await Process.run(
-        platformShell,
-        ['-c', c],
-        workingDirectory: workDir.path,
-      );
-      final out = '${result.stdout}${result.stderr}';
-      for (final line in out.split('\n')) {
-        if (line.isNotEmpty) shell.addOutput(line);
-      }
-      if (out.trim().isEmpty) shell.addOutput('(no output)');
-    } catch (e) {
-      // Terminal output is a developer surface, but a raw Dart exception is
-      // still noise: keep the first line, which is the actionable part.
-      shell.addOutput('⚠ ${StudioFailure.of(e).detail}');
-    } finally {
-      shell.finish();
-    }
   }
 
   @override
   Widget build(BuildContext context) {
     final t = widget.term;
     return AnimatedBuilder(
-      animation: t.shell,
+      animation: t.channel,
       builder: (_, _) {
-        final s = t.shell;
+        final channel = t.channel;
+        final text = channel.text;
         return Column(
           children: [
             Expanded(
               child: Semantics(
                 label: 'Terminal output',
                 container: true,
-                child: ListView.builder(
-                  controller: t.scroll,
-                  padding: const EdgeInsets.all(12),
-                  itemCount: s.history.length + (s.busy ? 1 : 0),
-                  itemBuilder: (_, i) {
-                    if (i == s.history.length) {
-                      return Padding(
-                        padding: EdgeInsets.only(top: 2),
-                        child: SizedBox(
-                          width: 13,
-                          height: 13,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 1.5,
-                            color: Aether.accent,
-                          ),
+                child: SelectionArea(
+                  child: SingleChildScrollView(
+                    controller: t.scroll,
+                    padding: const EdgeInsets.all(12),
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: Text(
+                        text.isEmpty
+                            ? 'Cloud terminal — commands run in the Ovid '
+                                'workspace.\n'
+                            : text,
+                        style: TextStyle(
+                          fontFamily: Aether.mono,
+                          fontFamilyFallback: kStudioMonoFallback,
+                          fontSize: kStudioMinFontSize,
+                          height: 1.6,
+                          color: text.isEmpty
+                              ? Aether.textFaint
+                              : Aether.textMuted,
                         ),
-                      );
-                    }
-                    final l = s.history[i];
-                    return SelectableText(
-                      l,
-                      style: TextStyle(
-                        fontFamily: Aether.mono,
-                        fontFamilyFallback: kStudioMonoFallback,
-                        fontSize: kStudioMinFontSize,
-                        height: 1.6,
-                        color: l.startsWith('\$')
-                            ? Aether.accent
-                            : l.startsWith('⚠')
-                            ? Aether.danger
-                            : l.endsWith('✓') || l.startsWith('✓')
-                            ? Aether.success
-                            : Aether.textMuted,
                       ),
-                    );
-                  },
+                    ),
+                  ),
                 ),
               ),
             ),
-            // Real command input — runs natively in the sandbox.
+            if (channel.error != null)
+              Container(
+                width: double.infinity,
+                color: Aether.danger.withValues(alpha: 0.10),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                child: Text(
+                  'Terminal error: ${channel.error!.message}',
+                  style: TextStyle(fontSize: 12, color: Aether.danger),
+                ),
+              ),
+            // Real command input — bytes go to the server-side PTY.
             Container(
               padding: const EdgeInsets.fromLTRB(12, 2, 4, 6),
               decoration: BoxDecoration(
@@ -435,10 +371,8 @@ class _TerminalPaneState extends State<_TerminalPane> {
                       ),
                       decoration: InputDecoration(
                         isDense: true,
-                        hintText: s.busy
-                            ? (s.acceptsStdin
-                                  ? 'stdin for running command…'
-                                  : 'command running…')
+                        hintText: channel.closed
+                            ? 'terminal closed'
                             : 'bash \$ …',
                         hintStyle: TextStyle(
                           fontFamily: Aether.mono,
@@ -457,32 +391,26 @@ class _TerminalPaneState extends State<_TerminalPane> {
                       ),
                       textInputAction: TextInputAction.send,
                       onSubmitted: _run,
-                      // Never `enabled: false` while busy: a disabled field
-                      // ignores pointers and swallows the input, so the
-                      // running command could not be answered. Busy input
-                      // goes to the command's stdin; the one-shot fallback
-                      // (no stdin) makes the field read-only instead.
-                      readOnly: s.busy && !s.acceptsStdin,
+                      readOnly: channel.closed,
                     ),
                   ),
-                  // Stop sits outside the field's decoration so it is always
-                  // hittable while a command runs (Ctrl-C, then escalation).
-                  if (s.busy)
+                  // Stop sends Ctrl-C (0x03) into the PTY.
+                  if (!channel.closed)
                     StudioIconButton(
                       key: studioTerminalStopKey,
                       icon: Icons.stop_circle_outlined,
                       tooltip: 'Stop command (Ctrl-C)',
                       iconSize: 18,
                       color: Aether.danger,
-                      onPressed: s.acceptsStdin ? s.interrupt : s.cancel,
+                      onPressed: channel.interrupt,
                     ),
-                  // Clear scrollback for THIS terminal.
-                  if (s.history.isNotEmpty)
+                  // Clear the local scrollback for THIS terminal.
+                  if (text.isNotEmpty)
                     StudioIconButton(
                       icon: Icons.delete_outline,
                       tooltip: 'Clear terminal output',
                       iconSize: 16,
-                      onPressed: () => setState(s.history.clear),
+                      onPressed: channel.clearScrollback,
                     ),
                 ],
               ),

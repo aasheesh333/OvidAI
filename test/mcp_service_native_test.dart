@@ -274,9 +274,10 @@ void main() {
       });
       McpService.I.httpClientForTest = mockClient;
 
-      // Save token in GitHubService (mocked via secure storage)
-      FlutterSecureStorage.setMockInitialValues({'ovid_github_token': 'gho_secret_test_token'});
-      await GitHubService.I.initialize();
+      // Save the token in GitHubService. P8 Task 15 made the token
+      // memory-only, so seed it through the test seam instead of secure
+      // storage.
+      GitHubService.I.setTokenForTest('gho_secret_test_token');
       expect(GitHubService.I.isLoggedIn, isTrue);
 
       final outcomeAuth = await McpService.I.connectOutcome(

@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
-import 'agent_service.dart';
 import 'session_browser_profiles.dart';
 import 'state.dart';
 
@@ -124,9 +123,6 @@ class SessionDataSharing extends ChangeNotifier {
         await app.persistSessions();
         app.refresh();
       }
-      // The active session's Studio view may still point at a cache bound to
-      // another session — rebind so the shared repo is actually visible.
-      await AgentService.I.refreshStudioBindingForActiveSession();
     } catch (error) {
       debugPrint('shareStudioOnRestart failed: $error');
     }

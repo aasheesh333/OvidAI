@@ -150,6 +150,13 @@ class CloudRestClient {
     return _decode(await _authed('PATCH', _uri(path), body));
   }
 
+  /// PUT with a JSON body. Added for the Studio workspace file write
+  /// (`PUT /sessions/:id/workspace/file`); every non-2xx answer maps to
+  /// [CloudApiException] exactly like the other verbs.
+  Future<Map<String, dynamic>> putJson(String path, {Object? body}) async {
+    return _decode(await _authed('PUT', _uri(path), body));
+  }
+
   /// Sends with auth headers; on a 401, refreshes the ID token (force) and
   /// retries exactly once — a stale cached token self-heals, a real
   /// unauthenticated failure still surfaces.

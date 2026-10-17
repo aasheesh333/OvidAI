@@ -290,15 +290,20 @@ void main() {
       }
 
       expect(find.text('GitHub connected'), findsOneWidget);
-      expect(find.text('@octocat — repos ready in Studio'), findsOneWidget);
+      expect(
+        find.text('@octocat — connected for this session'),
+        findsOneWidget,
+      );
 
       await tester.tap(find.text('Continue'));
       await frames(tester);
       expect(find.byType(GithubLoginSheet), findsNothing);
       expect(GitHubService.I.token, 'tok');
+      // P8 Task 15: the GitHub token is memory-only — never persisted
+      // client-side.
       expect(
         await const FlutterSecureStorage().read(key: 'ovid_github_token'),
-        'tok',
+        isNull,
       );
       await tester.runAsync(() => GitHubService.I.signOut());
     });
