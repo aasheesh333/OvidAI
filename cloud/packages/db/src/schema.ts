@@ -12,6 +12,7 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import type { UiManifest, WorkspaceState } from "@ovid/shared";
 
 // All timestamptz columns use precision 3 (milliseconds): JS Dates are ms-precision,
 // so stored values round-trip losslessly — which the keyset cursor in sessions.list
@@ -549,3 +550,83 @@ export const pluginGrants = pgTable(
   },
   (t) => [uniqueIndex("plugin_grants_user_plugin_id_idx").on(t.userId, t.pluginId)],
 );
+
+// ---------------------------------------------------------------------------
+// P7 Task 6: workspace state-hydrator persistence.
+//
+// file_manifests is the per-session state machine row (warm → hibernating →
+// cold → hydrating → warm) plus the manifest-first tree the gateway serves
+// for cold/hydrating sessions (the <100 ms SLA path — zero worker calls).
+// workspace_objects is the R2 object index (ledger) for archives, their
+// manifest sidecars, and registered artifacts.
+//
+// sha256 columns hold lowercase hex, compared by exact string match ONLY —
+// never re-hashed or arithmetic'd (Global Constraints exact-arithmetic rule);
+// every bytes-typed value is a JS safe integer, asserted at the repo boundary.
+// ---------------------------------------------------------------------------
+
+// One row per session that has ever been warm (the P10 sweeper registers
+// never-hibernated sessions via upsertWarm). generation increments per
+// hibernate cycle; archive_* columns are null until the first hibernate.
+// workspaceBytes is the last du of the warm dir (LRU accounting), cleared
+// when cold. state follows WorkspaceState exactly.
+export const fileManifests = pgTable(
+  "file_manifests",
+  {
+    sessionId: char("session_id", { length: 36 })
+      .primaryKey()
+      .references(() => sessions.id),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid),
+    generation: integer("generation").notNull().default(0),
+    state: text("state").notNull().$type<WorkspaceState>(),
+    // Pruned UI tree the gateway serves while cold/hydrating; starts as the
+    // EMPTY tree literal (repos.fileManifests.upsertWarm) and is replaced by
+    // the packer's uiTree at every markCold.
+    uiTree: jsonb("ui_tree").notNull().$type<UiManifest>(),
+    archiveKey: text("archive_key"),
+    archiveBytes: bigint("archive_bytes", { mode: "number" }),
+    archiveSha256: text("archive_sha256"), // 64-char lowercase hex
+    entryCount: integer("entry_count"),
+    workspaceBytes: bigint("workspace_bytes", { mode: "number" }),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("file_manifests_user_id_idx").on(t.userId),
+    index("file_manifests_state_idx").on(t.state),
+  ],
+);
+
+// R2 object ledger. r2Key is globally unique (stable per session for the
+// archive/sidecar pair — upserts bump generation in place); kind separates
+// the three shapes. `sha256` is the digest OF THE STORED OBJECT at that key
+// (the archive's digest on archive rows, the SIDECAR's digest on manifest
+// rows — callers compute both before upload; R2's HEAD never returns one).
+// generation is archives only. status is the soft-delete marker (artifacts).
+export const workspaceObjects = pgTable(
+  "workspace_objects",
+  {
+    id: char("id", { length: 36 }).primaryKey(), // UUIDv7
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid),
+    sessionId: char("session_id", { length: 36 }).references(() => sessions.id),
+    kind: text("kind").notNull(), // "workspace_archive" | "workspace_manifest" | "artifact"
+    r2Key: text("r2_key").notNull().unique(),
+    bytes: bigint("bytes", { mode: "number" }).notNull(),
+    sha256: text("sha256").notNull(), // lowercase hex — exact string comparisons only
+    contentType: text("content_type"),
+    generation: integer("generation"), // archives only
+    status: text("status").notNull().default("active"), // "active" | "deleted"
+    meta: jsonb("meta").$type<Record<string, unknown>>(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("workspace_objects_session_id_idx").on(t.sessionId),
+    index("workspace_objects_user_id_kind_idx").on(t.userId, t.kind),
+  ],
+);
+
+export type FileManifestRow = typeof fileManifests.$inferSelect;
+export type WorkspaceObjectRow = typeof workspaceObjects.$inferSelect;

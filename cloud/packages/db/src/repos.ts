@@ -1,9 +1,10 @@
 import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { uuidv7 } from "uuidv7";
-import type { MessageDto, SessionEvent, SessionEventType } from "@ovid/shared";
+import type { MessageDto, SessionEvent, SessionEventType, UiManifest } from "@ovid/shared";
 import type { Db } from "./client.js";
 import {
   attachments as attachmentsTable,
+  fileManifests as fileManifestsTable,
   messages as messagesTable,
   mcpOauthFlows as mcpOauthFlowsTable,
   mcpOauthTokens as mcpOauthTokensTable,
@@ -14,13 +15,16 @@ import {
   sessions as sessionsTable,
   sessionEventMirror,
   users as usersTable,
+  workspaceObjects as workspaceObjectsTable,
   type AttachmentRow,
+  type FileManifestRow,
   type MessageRow,
   type RunRow,
   type SealedEnvelope,
   type SessionEventMirrorRow,
   type SessionRow,
   type UserRow,
+  type WorkspaceObjectRow,
 } from "./schema.js";
 
 /** Message role union, sourced from the shared wire protocol (do not redefine). */
@@ -1049,5 +1053,388 @@ export const pluginGrants = {
     await db
       .delete(pluginGrantsTable)
       .where(and(eq(pluginGrantsTable.userId, uid), eq(pluginGrantsTable.pluginId, pluginId)));
+  },
+};
+
+// ---------------------------------------------------------------------------
+// fileManifests / workspaceObjects (P7 Task 6 — workspace state-hydrator).
+//
+// fileManifests is the per-session hibernate/hydrate state machine; every
+// transition is ONE conditional UPDATE so concurrent workers can never
+// clobber each other (the same claim discipline as runs.claimNext). All
+// transitions bump updated_at: the sweeper's stuck-row detection (T10) and
+// the warm LRU order both read it as "when this state was entered / last
+// refreshed".
+//
+// workspaceObjects is the R2 object ledger. Digests are supplied by the
+// CALLER (the hibernator computes them from the bytes it just uploaded —
+// R2's HEAD never returns a sha256, the T2 carry); this layer stores the
+// exact strings, never re-derives or compares them numerically.
+// ---------------------------------------------------------------------------
+
+/** Global Constraints exact-arithmetic rule, enforced at the repo boundary. */
+function assertBytes(field: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${field} must be a safe integer >= 0 (got ${String(value)})`);
+  }
+}
+
+/** assertBytes for nullable byte columns (du unknown → null is legal). */
+function assertOptionalBytes(field: string, value: number | null): void {
+  if (value !== null) assertBytes(field, value);
+}
+
+/** The tree a fresh warm row carries until the first markCold replaces it. */
+function emptyUiTree(): UiManifest {
+  return {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    truncated: false,
+    totals: { files: 0, dirs: 0, bytes: 0 },
+    roots: [],
+  };
+}
+
+/** contentType packToStorage puts on workspace archives (keys.ts layout). */
+const ARCHIVE_CONTENT_TYPE = "application/x-ovid-ws+grouped";
+
+export const fileManifests = {
+  /** The session's manifest row, or null (warm-never-registered sessions have no row). */
+  async get(db: Db, sessionId: string): Promise<FileManifestRow | null> {
+    const [row] = await db
+      .select()
+      .from(fileManifestsTable)
+      .where(eq(fileManifestsTable.sessionId, sessionId))
+      .limit(1);
+    return row ?? null;
+  },
+
+  /**
+   * Register/refresh a warm row:
+   *
+   *   INSERT (state 'warm', generation 0, EMPTY uiTree) ON CONFLICT (session_id)
+   *   DO UPDATE SET state='warm', workspace_bytes, updated_at
+   *
+   * The conflict arm NEVER touches generation, the archive_* fields, entryCount
+   * or uiTree — re-warming after a cold cycle must preserve the last hibernate
+   * ledger (a re-hibernate bumps generation in place on it). The sweeper calls
+   * this both to register never-hibernated sessions and to refresh warm du's.
+   */
+  async upsertWarm(
+    db: Db,
+    i: { sessionId: string; userId: string; workspaceBytes: number | null },
+  ): Promise<FileManifestRow> {
+    assertOptionalBytes("workspaceBytes", i.workspaceBytes);
+    const [row] = await db
+      .insert(fileManifestsTable)
+      .values({
+        sessionId: i.sessionId,
+        userId: i.userId,
+        state: "warm",
+        uiTree: emptyUiTree(),
+        workspaceBytes: i.workspaceBytes,
+      })
+      .onConflictDoUpdate({
+        target: fileManifestsTable.sessionId,
+        set: {
+          state: "warm",
+          workspaceBytes: sql`excluded.workspace_bytes`,
+          updatedAt: sql`now()`,
+        },
+      })
+      .returning();
+    return row!;
+  },
+
+  /**
+   * Race-safe hibernate claim:
+   *   UPDATE … SET state='hibernating' WHERE session_id AND state='warm'
+   * Exactly one concurrent caller wins; the loser (already-claimed, cold, or
+   * unknown session) gets false. updated_at is bumped WITH the claim — the
+   * stuck-hibernation reconcile measures "time in this state" from it.
+   */
+  async beginHibernation(db: Db, sessionId: string): Promise<boolean> {
+    const claimed = await db
+      .update(fileManifestsTable)
+      .set({ state: "hibernating", updatedAt: new Date() })
+      .where(
+        and(eq(fileManifestsTable.sessionId, sessionId), eq(fileManifestsTable.state, "warm")),
+      )
+      .returning({ sessionId: fileManifestsTable.sessionId });
+    return claimed.length > 0;
+  },
+
+  /**
+   * Terminal hibernate write — ONE unconditional UPDATE by session id (the
+   * caller holds the beginHibernation claim): state 'cold', the full archive
+   * ledger (generation, key, bytes, sha, entryCount, uiTree) and
+   * workspace_bytes NULLed (the warm dir is gone).
+   */
+  async markCold(
+    db: Db,
+    i: {
+      sessionId: string;
+      generation: number;
+      archiveKey: string;
+      archiveBytes: number;
+      archiveSha256: string;
+      entryCount: number;
+      uiTree: UiManifest;
+    },
+  ): Promise<void> {
+    assertBytes("archiveBytes", i.archiveBytes);
+    await db
+      .update(fileManifestsTable)
+      .set({
+        state: "cold",
+        generation: i.generation,
+        archiveKey: i.archiveKey,
+        archiveBytes: i.archiveBytes,
+        archiveSha256: i.archiveSha256,
+        entryCount: i.entryCount,
+        uiTree: i.uiTree,
+        workspaceBytes: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(fileManifestsTable.sessionId, i.sessionId));
+  },
+
+  /**
+   * Race-safe hydration claim (beginHibernation's mirror): cold → hydrating,
+   * exactly one winner; warm/hibernating/hydrating/unknown → false.
+   */
+  async beginHydration(db: Db, sessionId: string): Promise<boolean> {
+    const claimed = await db
+      .update(fileManifestsTable)
+      .set({ state: "hydrating", updatedAt: new Date() })
+      .where(
+        and(eq(fileManifestsTable.sessionId, sessionId), eq(fileManifestsTable.state, "cold")),
+      )
+      .returning({ sessionId: fileManifestsTable.sessionId });
+    return claimed.length > 0;
+  },
+
+  /**
+   * Terminal hydrate write: state 'warm' + the fresh du. The archive ledger is
+   * deliberately left in place (the R2 objects persist; the next hibernate
+   * bumps generation over them) — only state, workspaceBytes and updated_at
+   * move.
+   */
+  async markWarm(
+    db: Db,
+    i: { sessionId: string; workspaceBytes: number | null },
+  ): Promise<void> {
+    assertOptionalBytes("workspaceBytes", i.workspaceBytes);
+    await db
+      .update(fileManifestsTable)
+      .set({ state: "warm", workspaceBytes: i.workspaceBytes, updatedAt: new Date() })
+      .where(eq(fileManifestsTable.sessionId, i.sessionId));
+  },
+
+  /**
+   * Eviction-candidate scan for the warm-cap LRU: every warm row, oldest
+   * updated_at first (least-recently-refreshed = first to hibernate), capped
+   * at one sweeper batch.
+   */
+  async listWarmForLru(
+    db: Db,
+  ): Promise<
+    Array<{
+      sessionId: string;
+      userId: string;
+      generation: number;
+      workspaceBytes: number | null;
+      updatedAt: Date;
+    }>
+  > {
+    return db
+      .select({
+        sessionId: fileManifestsTable.sessionId,
+        userId: fileManifestsTable.userId,
+        generation: fileManifestsTable.generation,
+        workspaceBytes: fileManifestsTable.workspaceBytes,
+        updatedAt: fileManifestsTable.updatedAt,
+      })
+      .from(fileManifestsTable)
+      .where(eq(fileManifestsTable.state, "warm"))
+      .orderBy(asc(fileManifestsTable.updatedAt))
+      .limit(1000);
+  },
+
+  /** Delete the row (reconcile's workspace_lost path). Idempotent. */
+  async remove(db: Db, sessionId: string): Promise<void> {
+    await db.delete(fileManifestsTable).where(eq(fileManifestsTable.sessionId, sessionId));
+  },
+};
+
+export interface WorkspaceArchivePut {
+  userId: string;
+  sessionId: string;
+  generation: number;
+  /** Stable per session: users/{uid}/workspaces/{sid}.tar.zst */
+  archiveKey: string;
+  /** Stable per session: users/{uid}/workspaces/{sid}.manifest.json */
+  manifestKey: string;
+  /** Archive object size + digest (PackReport.bytes / PackReport.sha256Hex). */
+  bytes: number;
+  sha256: string;
+  entryCount: number;
+  /**
+   * Sidecar object size + digest. The brief pins the manifest row to hold
+   * "sha256 of sidecar bytes, bytes" — the hibernator computes both from the
+   * encodeIndexWire bytes it just uploaded (T2 carry: R2 HEAD never returns
+   * a digest, so the uploader is the only source). NOT the archive's values.
+   */
+  manifestBytes: number;
+  manifestSha256: string;
+}
+
+export const workspaceObjects = {
+  /**
+   * Record a completed hibernate upload: upserts BOTH the archive row
+   * (kind workspace_archive, meta {entryCount, zstdLevel: 9}) and the sidecar
+   * row (kind workspace_manifest, the SIDECAR's own bytes/digest) on
+   * ON CONFLICT (r2_key) — the keys are stable per session, so re-hibernates
+   * bump generation in place and never duplicate rows. createdAt keeps the
+   * first write; status is never touched here.
+   */
+  async putArchive(db: Db, i: WorkspaceArchivePut): Promise<void> {
+    assertBytes("bytes", i.bytes);
+    assertBytes("manifestBytes", i.manifestBytes);
+    const archiveMeta = { entryCount: i.entryCount, zstdLevel: 9 };
+    await db
+      .insert(workspaceObjectsTable)
+      .values({
+        id: newId(),
+        userId: i.userId,
+        sessionId: i.sessionId,
+        kind: "workspace_archive",
+        r2Key: i.archiveKey,
+        bytes: i.bytes,
+        sha256: i.sha256,
+        contentType: ARCHIVE_CONTENT_TYPE,
+        generation: i.generation,
+        meta: archiveMeta,
+      })
+      .onConflictDoUpdate({
+        target: workspaceObjectsTable.r2Key,
+        set: {
+          userId: i.userId,
+          sessionId: i.sessionId,
+          bytes: i.bytes,
+          sha256: i.sha256,
+          contentType: ARCHIVE_CONTENT_TYPE,
+          generation: i.generation,
+          meta: archiveMeta,
+        },
+      });
+    await db
+      .insert(workspaceObjectsTable)
+      .values({
+        id: newId(),
+        userId: i.userId,
+        sessionId: i.sessionId,
+        kind: "workspace_manifest",
+        r2Key: i.manifestKey,
+        bytes: i.manifestBytes,
+        sha256: i.manifestSha256,
+        contentType: "application/json",
+      })
+      .onConflictDoUpdate({
+        target: workspaceObjectsTable.r2Key,
+        set: {
+          userId: i.userId,
+          sessionId: i.sessionId,
+          bytes: i.manifestBytes,
+          sha256: i.manifestSha256,
+          contentType: "application/json",
+        },
+      });
+  },
+
+  /**
+   * Insert an artifact row (the artifacts pipeline's registerArtifact, T9):
+   * id/r2Key are caller-generated (the id IS the keyset cursor), meta carries
+   * the display name. Not an upsert — a duplicate r2Key raises the UNIQUE
+   * violation, which the caller surfaces.
+   */
+  async registerArtifact(
+    db: Db,
+    i: {
+      id: string;
+      userId: string;
+      sessionId: string;
+      r2Key: string;
+      bytes: number;
+      sha256: string;
+      contentType: string;
+      meta: { name: string };
+    },
+  ): Promise<WorkspaceObjectRow> {
+    assertBytes("bytes", i.bytes);
+    const [row] = await db
+      .insert(workspaceObjectsTable)
+      .values({
+        id: i.id,
+        userId: i.userId,
+        sessionId: i.sessionId,
+        kind: "artifact",
+        r2Key: i.r2Key,
+        bytes: i.bytes,
+        sha256: i.sha256,
+        contentType: i.contentType,
+        meta: i.meta,
+      })
+      .returning();
+    return row!;
+  },
+
+  /**
+   * The session's active artifacts, newest-first keyset page by id (UUIDv7 ⇒
+   * id order = insertion order; messages.page convention). `beforeId`
+   * excludes itself; nextCursor is the oldest id on the page. Deleted rows
+   * never list.
+   */
+  async listArtifacts(
+    db: Db,
+    sessionId: string,
+    opts: { limit: number; beforeId?: string | null },
+  ): Promise<{ rows: WorkspaceObjectRow[]; nextCursor: string | null }> {
+    const where = opts.beforeId
+      ? and(
+          eq(workspaceObjectsTable.sessionId, sessionId),
+          eq(workspaceObjectsTable.kind, "artifact"),
+          eq(workspaceObjectsTable.status, "active"),
+          lt(workspaceObjectsTable.id, opts.beforeId),
+        )
+      : and(
+          eq(workspaceObjectsTable.sessionId, sessionId),
+          eq(workspaceObjectsTable.kind, "artifact"),
+          eq(workspaceObjectsTable.status, "active"),
+        );
+    const found = await db
+      .select()
+      .from(workspaceObjectsTable)
+      .where(where)
+      .orderBy(desc(workspaceObjectsTable.id))
+      .limit(opts.limit + 1);
+    const hasMore = found.length > opts.limit;
+    const rows = hasMore ? found.slice(0, opts.limit) : found;
+    const last = rows[rows.length - 1];
+    return { rows, nextCursor: hasMore && last ? last.id : null };
+  },
+
+  /** Ownership-scoped fetch: null on unknown id OR wrong owner (404 rule). */
+  async getArtifact(
+    db: Db,
+    artifactId: string,
+    userId: string,
+  ): Promise<WorkspaceObjectRow | null> {
+    const [row] = await db
+      .select()
+      .from(workspaceObjectsTable)
+      .where(and(eq(workspaceObjectsTable.id, artifactId), eq(workspaceObjectsTable.userId, userId)))
+      .limit(1);
+    return row ?? null;
   },
 };

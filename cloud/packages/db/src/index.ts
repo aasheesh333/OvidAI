@@ -6,9 +6,11 @@ export * from "./moneyRepos.js";
 export * as schema from "./schema.js";
 export type {
   AttachmentRow,
+  FileManifestRow,
   MessageRow,
   RunRow,
   SessionEventMirrorRow,
   SessionRow,
   UserRow,
+  WorkspaceObjectRow,
 } from "./schema.js";
