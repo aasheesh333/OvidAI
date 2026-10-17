@@ -12,6 +12,7 @@
  * Attended runs — a run no schedule_run references — are strict no-ops.
  */
 
+import type { ApprovalTimeoutPolicy } from "@ovid/agent-core";
 import { schedules, scheduleRuns, sessions, type Db } from "@ovid/db";
 
 import type { Notifier } from "./notify.js";
@@ -97,4 +98,26 @@ export function createUnattendedApprovalHook(deps: {
       }
     },
   };
+}
+
+/**
+ * P4 Task 10 — the composition-root wiring of the hook into P3's
+ * `createApprovalGate` seam.
+ *
+ * P3 exports exactly one per-request decision point,
+ * `timeoutPolicy(req, { unattended }) => number`, and it is synchronous. The
+ * hook's push/ledger methods are async and keyed by runId, which the policy
+ * does not receive — so this adapter supplies the half the gate can consume:
+ * unattended requests get the hook's pinned 120 s default-deny; attended
+ * requests keep the env override (or the 120 s default). `undefined` means
+ * "do not install a policy" (the processor is used without the hook, e.g.
+ * P1/P2 tests), preserving the gate's structural attended question/plan rule.
+ */
+export function unattendedTimeoutPolicy(
+  hook: UnattendedApprovalHook | undefined,
+  attendedTimeoutMs: number,
+): ApprovalTimeoutPolicy | undefined {
+  if (hook === undefined) return undefined;
+  return (_req, ctx) =>
+    ctx.unattended ? UNATTENDED_APPROVAL_TIMEOUT_MS : attendedTimeoutMs;
 }

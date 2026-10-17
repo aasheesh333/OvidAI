@@ -22,7 +22,7 @@ import {
   type Db,
 } from "@ovid/db";
 import { createNotifier, type PushMessage, type PushOutcome, type PushSender } from "./notify.js";
-import { createUnattendedApprovalHook } from "./unattended.js";
+import { createUnattendedApprovalHook, unattendedTimeoutPolicy } from "./unattended.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
@@ -136,5 +136,30 @@ describe.skipIf(!TEST_DATABASE_URL)("createUnattendedApprovalHook (real postgres
     expect(row!.autoDenied[0]!.summary).toBe("rm -rf /tmp/x");
     expect(typeof row!.autoDenied[0]!.ts).toBe("string");
     expect(Number.isNaN(Date.parse(row!.autoDenied[0]!.ts))).toBe(false);
+  });
+});
+
+describe("unattendedTimeoutPolicy (P4 Task 10 P3 seam)", () => {
+  const req = {
+    approvalId: "a",
+    kind: "tool" as const,
+    tool: "bash",
+    summary: "Run: echo hi",
+    detail: "",
+    allowAlways: false,
+    pathTargets: [],
+    hostTargets: [],
+  };
+  const hook = {} as Parameters<typeof unattendedTimeoutPolicy>[0];
+
+  it("is undefined without the hook (gate keeps its pre-P4 behavior)", () => {
+    expect(unattendedTimeoutPolicy(undefined, 500)).toBeUndefined();
+  });
+
+  it("unattended → the pinned 120 s default-deny; attended → the env value", () => {
+    const policy = unattendedTimeoutPolicy(hook, 500);
+    expect(policy).toBeDefined();
+    expect(policy!(req, { unattended: true })).toBe(120_000);
+    expect(policy!(req, { unattended: false })).toBe(500);
   });
 });

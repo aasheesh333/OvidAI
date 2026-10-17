@@ -297,6 +297,17 @@ services:
   # the XFS project-quota mount from deploy/workspaces/setup-workspaces.sh
   # (P2, DEPLOY.md §11 step 3); UV_THREADPOOL_SIZE=8 and the P7 storage env
   # live in /opt/ovid-cloud/worker.env (worker.env.example "Storage (P7)").
+  #
+  # ── Scheduler (P4) — FCM credentials, compose-worker VARIANT ────────────
+  # The landed host systemd worker reads the live Firebase service-account
+  # file DIRECTLY (GOOGLE_APPLICATION_CREDENTIALS in worker.env; DEPLOY.md §3).
+  # If the compose-worker variant is ever restored, it must carry the SAME
+  # read-only bind-mount as the gateway service above (a container cannot see
+  # the host path otherwise):
+  #   volumes:
+  #     - ${FIREBASE_CREDENTIALS_HOST_PATH:-/opt/ovid-gateway/firebase-admin.json}:/etc/ovid/firebase-admin.json:ro
+  # and GOOGLE_APPLICATION_CREDENTIALS=/etc/ovid/firebase-admin.json in its
+  # environment. No scheduler mount is needed for the landed deployment.
 
   # P9 Task 3: the mint REPLACEMENT app — the Node port of server/mint/mint.py
   # (cloud/apps/mint). BUILD-ONLY for now:

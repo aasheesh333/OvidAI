@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { Redis } from "ioredis";
 import { createDb, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, runs as runsRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
-import { createRedisEventLog } from "@ovid/events";
+import { createRedisEventLog, createRedisSystemBus } from "@ovid/events";
 import {
   createBrowserEngine,
   createLocalDiskBrowserStateStore,
@@ -16,6 +16,7 @@ import {
   createHydrateWorker,
   createPluginInstallsWorker,
   createQueues,
+  createScheduleFireWorker,
   hibernateJobSchema,
   hydrateJobSchema,
 } from "@ovid/queue";
@@ -57,12 +58,16 @@ import type { KeyProvider } from "@ovid/shared";
 import { createFullAgentRunProcessor } from "./runProcessor.js";
 import { buildFileService } from "./fileService.js";
 import { createMcpRuntime } from "./mcpRuntime.js";
+import { createNotifier, createFcmPushSender } from "./notify.js";
 import { createPluginInstallProcessor } from "./pluginInstallProcessor.js";
 import { startWorkerPtyBridge } from "./ptyBridge.js";
 import { createSandboxPort } from "./sandboxAdapter.js";
 import { createSandboxSeam } from "./sandboxSeam.js";
+import { createScheduleFireProcessor, resyncScheduleMirror } from "./schedulerMirror.js";
+import { startSchedulerLoop } from "./schedulerTick.js";
 import { sweepStaleRuns } from "./staleRuns.js";
 import { createColdRowScan, createStuckHibernationScan, createStuckHydrationScan } from "./storageScans.js";
+import { createUnattendedApprovalHook } from "./unattended.js";
 
 export interface WorkerEnv {
   nodeEnv: string;
@@ -77,6 +82,8 @@ export interface WorkerEnv {
   githubToken: string | null;
   runStaleMs: number;
   runQueueWaitMs: number;
+  /** P4 Task 10: scheduler pass cadence (env OVID_SCHEDULER_TICK_MS). */
+  schedulerTickMs: number;
   /** P7 Task 11: shared secret for the internal file service. */
   internalToken: string;
   /** P7 Task 11: container-internal file-service port. */
@@ -106,6 +113,8 @@ const STALE_SWEEP_INTERVAL_MS = 60_000;
  * (OVID_RUN_QUEUE_WAIT_MS); mirrors the processor's DEFAULT_RUN_QUEUE_WAIT_MS.
  */
 const DEFAULT_RUN_QUEUE_WAIT_MS = 600_000;
+/** P4 Task 10: the plan-pinned scheduler cadence (Dart: 15 s). */
+const DEFAULT_SCHEDULER_TICK_MS = 15_000;
 /** P3 Task 16 defaults. */
 const DEFAULT_ANTHROPIC_BASE = "https://api.anthropic.com";
 const DEFAULT_WINDOW_TOKENS = 128_000;
@@ -181,6 +190,12 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
     "OVID_APPROVAL_TIMEOUT_MS",
     DEFAULT_APPROVAL_TIMEOUT_MS,
   );
+  // P4 Task 10: scheduler tick cadence — same positive-integer discipline as
+  // OVID_RUN_STALE_MS (a malformed value is a deployment bug, not a default).
+  const schedulerTickMs = positiveInt(
+    "OVID_SCHEDULER_TICK_MS",
+    DEFAULT_SCHEDULER_TICK_MS,
+  );
 
   // P7 Task 11: the file service is internal-only but still token-gated; a
   // worker booted without the shared secret would either be unreachable or,
@@ -241,6 +256,7 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
     githubToken: githubToken !== undefined && githubToken !== "" ? githubToken : null,
     runStaleMs,
     runQueueWaitMs,
+    schedulerTickMs,
     internalToken,
     workerFilePort,
     hydrateTimeoutMs,
@@ -352,6 +368,13 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     { url: cfg.redisQUrl },
     { withPluginInstalls: true },
   );
+
+  // ---- P4 Task 10: the scheduler's system bus + notifier. -----------------
+  // ONE bus instance for the worker's publishes; the gateway's WS system
+  // channel subscribes to the same `user:<uid>:system` channels. The notifier
+  // is best-effort by contract (never throws, never affects bookkeeping).
+  const system = createRedisSystemBus(redisQ);
+  const notifier = createNotifier({ db, push: createFcmPushSender() });
 
   // ---- P2 Task 12: the SandboxManager chain (pinned composition order). ----
   // Every step fails LOUDLY at boot: a worker without a rootfs must never run
@@ -595,7 +618,37 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     runQueueWaitMs: cfg.runQueueWaitMs,
     ensureWarm,
     activity,
+    // P4 Task 10 / T10-review ruling: the P3-T12 timeoutPolicy seam. The hook
+    // pushes the approval card BEFORE the 120 s unattended default-deny fires
+    // and ledgers the auto-denial on the occurrence (Task 7's contract).
+    unattendedApprovalHook: createUnattendedApprovalHook({ db, notifier }),
   });
+
+  // ---- P4 Task 10: the scheduler loop + schedules-mirror consumer. --------
+  // Boot resync FIRST: rebuild the delayed mirror from Postgres (the row is
+  // authoritative) before any tick can run. Deterministic jobIds make a
+  // re-add after a crash a no-op.
+  const mirrored = await resyncScheduleMirror({ db, queues });
+  console.log(`[scheduler] mirror resync: ${mirrored} delayed job(s)`);
+
+  // Settle-then-tick every OVID_SCHEDULER_TICK_MS (overlap-guarded; .unref()).
+  const schedulerLoop = startSchedulerLoop(
+    { db, queues, events, system, notifier },
+    { intervalMs: cfg.schedulerTickMs },
+  );
+  // The mirror consumer shares the production queue key layout (no prefix:
+  // BullMQ's default "bull", matching createQueues above — a deploy contract).
+  const fireWorker = createScheduleFireWorker(
+    { url: cfg.redisQUrl },
+    createScheduleFireProcessor({ db, queues, system }),
+  );
+  fireWorker.on("error", (err) => {
+    console.error("[worker] schedules worker error", err);
+  });
+  // P4-SEAM: Task 13 (agent schedule tools) has not landed yet — its
+  // `createScheduleTools` registration belongs there. The approval
+  // timeoutPolicy half of the P3 seam IS wired above.
+  console.log("[scheduler] P3 tool/approval seam not wired");
 
   // Connection OPTIONS OBJECT — a bare URL string silently spreads into
   // garbage opts and hangs (Task 7 lesson, pinned by its health test).
@@ -677,6 +730,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     shuttingDown ??= (async () => {
       clearInterval(sweeper);
       clearInterval(warmSweeper);
+      // P4 Task 10: stop the scheduler loop and drain the mirror consumer
+      // BEFORE the agent-runs worker drains (a mirror job only enqueues).
+      schedulerLoop.stop();
+      await fireWorker.close();
       // P2 Task 13 pin: the pty bridge stops FIRST (no new ctl mid-teardown),
       // then the sandbox manager — manager.close() kills every live pty leaf,
       // and each pty's onExit publishes its `exit` + HDELs its registry key.
@@ -705,6 +762,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       await queues.agentRuns.close();
       await queues.hibernate.close();
       await queues.hydrate.close();
+      await queues.schedules.close();
       await queues.pluginInstalls?.close();
       // Reap the approval bridge's subscription (pending asks fail closed).
       await processor.close();

@@ -22,6 +22,7 @@ import {
 import type { ActivityTracker } from "@ovid/storage";
 import type { Redis } from "ioredis";
 import {
+  APPROVAL_TIMEOUT_MS,
   adaptLegacyTransport,
   commandPrePass,
   createAgentEngine,
@@ -74,6 +75,7 @@ import {
   type ToolCall,
 } from "./liteLlm.js";
 import { createSandboxPort } from "./sandboxAdapter.js";
+import { unattendedTimeoutPolicy, type UnattendedApprovalHook } from "./unattended.js";
 import { adaptAgentTools } from "./tools/agentToolAdapter.js";
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.js";
 import { MAX_TOOL_ROUNDS, SYSTEM_PROMPT_V1, TOOL_EVENT_CONTENT_CAP } from "./tools/systemPrompt.js";
@@ -266,6 +268,12 @@ export interface FullRunDeps {
   ensureWarm?: (sessionId: string, userId: string) => Promise<void>;
   /** P7 Task 11: last-activity tracker (see RunDeps.activity). */
   activity?: ActivityTracker;
+  /**
+   * P4 Task 10: the unattended-approval seam (Task 7's hook). Production
+   * wires it; its presence installs the P3 `timeoutPolicy` so scheduled runs
+   * get the pinned 120 s default-deny. Absent → the gate's pre-P4 behavior.
+   */
+  unattendedApprovalHook?: UnattendedApprovalHook;
 }
 
 /** The full processor plus its shutdown handle (the redis approval bridge). */
@@ -1103,6 +1111,14 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     db: deps.db,
   });
 
+  // P4 Task 10: the P3-T12 timeout seam. The hook's presence (wired by
+  // main.ts) installs the per-request policy; the gate still owns the
+  // structural attended question/plan rule.
+  const timeoutPolicy = unattendedTimeoutPolicy(
+    deps.unattendedApprovalHook,
+    deps.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS,
+  );
+
   const approvals = createApprovalGate({
     db: deps.db,
     bridge,
@@ -1112,6 +1128,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     ...(deps.approvalTimeoutMs !== undefined
       ? { timeoutMs: deps.approvalTimeoutMs }
       : {}),
+    ...(timeoutPolicy !== undefined ? { timeoutPolicy } : {}),
   });
 
   // Guarded egress for EVERY provider/tool call (spec D3/§11). No raw fetch.
@@ -1480,7 +1497,10 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       ...(job.data.attachmentIds !== undefined
         ? { attachmentIds: job.data.attachmentIds }
         : {}),
-      unattended: job.data.unattended ?? false,
+      // P4 Task 10: a scheduler-fired job carries `schedule`; that run has no
+      // attending user, so it is unattended even though the scheduler's
+      // enqueue payload predates the explicit flag.
+      unattended: job.data.unattended ?? job.data.schedule !== undefined,
       ...(job.data.autonomy !== undefined ? { autonomy: job.data.autonomy } : {}),
       mode,
     });

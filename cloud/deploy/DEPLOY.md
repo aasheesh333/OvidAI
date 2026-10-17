@@ -118,6 +118,15 @@ credentials file inside the container.
 Either way the file is read-only inside the container and never enters the
 repo/image.
 
+**P4 — the host systemd worker also uses this file (FCM).** The worker sends
+scheduled-task result pushes and unattended approval cards through Firebase
+Cloud Messaging, which uses Application Default Credentials. There is no
+container to mount into: `worker.env` sets
+`GOOGLE_APPLICATION_CREDENTIALS=/opt/ovid-gateway/firebase-admin.json`
+(direct host path, same file as the mount/copy decision above; keep the two
+in sync if the copy variant is chosen). Missing/unreadable → pushes fail
+soft and log once; runs, settle, and the API are unaffected.
+
 ## 4. Provision the database (idempotent)
 
 ```bash
@@ -464,6 +473,9 @@ sudo $EDITOR /opt/ovid-cloud/worker.env   # complete every CHANGE_ME:
 #   REDIS_MINT_URL password = REDIS_PASSWORD        (/opt/ovid-gateway/.env)
 #   OVID_DEFAULT_MODEL = a live LiteLLM alias; OVID_SANDBOX_LAUNCH per
 #   MECHANISM.md DECISION; OVID_PUBLIC_IP already set in step 4
+#   GOOGLE_APPLICATION_CREDENTIALS = /opt/ovid-gateway/firebase-admin.json
+#   (P4 FCM pushes; see §3)
+#   OVID_SCHEDULER_TICK_MS optional (default 15000; positive integer)
 sudo chmod 600 /opt/ovid-cloud/worker.env
 
 sudo systemctl enable --now ovid-worker ovid-sandbox-nft
