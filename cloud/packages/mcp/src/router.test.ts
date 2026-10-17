@@ -474,6 +474,76 @@ describe.skipIf(!TEST_DATABASE_URL)("McpRouter", () => {
     expect(spawner.processes[0]!.killed).toBe(true);
   });
 
+  it("downgrade also tears down on listTools and resolveTool (no gated call needed)", async () => {
+    for (const op of ["listTools", "resolveTool"] as const) {
+      const uid = await seedUser("pro");
+      const spawner = new FakeSpawner();
+      const router = makeRouter({ spawner });
+      await addStdioServer(router, uid, `downgrade-${op}`);
+      await router.connectForRun(uid, RUN1);
+      expect(spawner.processes[0]!.killed).toBe(false);
+
+      await setTier(uid, "free");
+      if (op === "listTools") {
+        const listings = await router.listTools(uid, RUN1);
+        expect(listings.some((l) => l.name.startsWith(`mcp__downgrade-${op}__`))).toBe(false);
+        expect(listings.some((l) => l.name === "mcp__fetch__fetch")).toBe(true);
+      } else {
+        expect(await router.resolveTool(uid, toolNameFor(`downgrade-${op}`, "echo"))).toBeNull();
+      }
+      expect(spawner.processes[0]!.killed).toBe(true);
+    }
+  });
+
+  it("a reconnect scheduled before the downgrade does not respawn for a Free user", async () => {
+    const uid = await seedUser("pro");
+    const spawner = new FakeSpawner();
+    const router = makeRouter({ spawner });
+    await addStdioServer(router, uid, "reconnect-downgrade");
+    await router.connectForRun(uid, RUN1);
+
+    spawner.processes[0]!.unexpectedExit(); // schedules the 500ms first attempt
+    await setTier(uid, "free");
+    await sleep(800);
+    expect(spawner.calls).toHaveLength(1); // never respawned
+    expect(spawner.processes[0]!.killed).toBe(true); // and the entry was torn down
+  });
+
+  it("custom names cannot shadow the curated published namespace", async () => {
+    const proUid = await seedUser("pro");
+    const freeUid = await seedUser("free");
+    const fakeFetch = new FakeMcpFetch();
+    const router = makeRouter({ fetchImpl: fakeFetch.impl });
+
+    // Exact curated id.
+    await expect(
+      router.addServer(proUid, {
+        imported: { name: "fetch", transport: "http", url: "https://shadow.test/rpc" },
+      }),
+    ).rejects.toThrow("server_exists");
+    // Sanitized collision ("Fetch!" → mcp__fetch__).
+    await expect(
+      router.addServer(proUid, {
+        imported: { name: "Fetch!", transport: "http", url: "https://shadow.test/rpc" },
+      }),
+    ).rejects.toThrow("server_exists");
+    // Sanitized collision with another custom row.
+    await addHttpServer(router, proUid, "acme");
+    await expect(
+      router.addServer(proUid, {
+        imported: { name: "ACME!", transport: "http", url: "https://acme2.test/rpc" },
+      }),
+    ).rejects.toThrow("server_exists");
+
+    // The curated tool still resolves and runs for BOTH tiers.
+    for (const uid of [proUid, freeUid]) {
+      const resolved = await router.resolveTool(uid, "mcp__fetch__fetch");
+      expect(resolved?.listing.canonicalId).toBe("mcp:curated:fetch/fetch");
+      const result = await router.callTool(uid, "mcp__fetch__fetch", { url: "https://x.test" }, RUN1);
+      expect(result.isError).toBe(false);
+    }
+  });
+
   it("curated works for free users; curated addServer is not tier-gated", async () => {
     const uid = await seedUser("free");
     const fakeFetch = new FakeMcpFetch();
@@ -648,6 +718,30 @@ describe.skipIf(!TEST_DATABASE_URL)("McpRouter", () => {
     expect(spawner.processes[0]!.killed).toBe(true);
   });
 
+  it("resolveTool reuses the run's live stdio process — no double spawn", async () => {
+    const uid = await seedUser("pro");
+    const spawner = new FakeSpawner();
+    const router = makeRouter({ spawner });
+    await addStdioServer(router, uid, "single-spawn");
+    await router.connectForRun(uid, RUN1);
+    expect(spawner.calls).toHaveLength(1);
+
+    // The pinned T16 flow: resolveTool (no runCtx) then callTool. The
+    // resolver must see the live per-run process rather than transient-spawn.
+    const resolved = await router.resolveTool(uid, toolNameFor("single-spawn", "echo"));
+    expect(resolved?.server.id).toBeDefined();
+    expect(spawner.calls).toHaveLength(1);
+
+    const result = await router.callTool(uid, toolNameFor("single-spawn", "echo"), {}, RUN1);
+    expect(result.isError).toBe(false);
+    expect(spawner.calls).toHaveLength(1);
+
+    // With an explicit runCtx the same reuse holds.
+    const again = await router.resolveTool(uid, "echo", RUN1);
+    expect(again?.listing.name).toBe("mcp__single-spawn__echo");
+    expect(spawner.calls).toHaveLength(1);
+  });
+
   it("http client is cached between runs and evicted after idleTtl", async () => {
     const uid = await seedUser("pro");
     let nowMs = 1_000_000;
@@ -762,6 +856,52 @@ describe.skipIf(!TEST_DATABASE_URL)("McpRouter", () => {
     const approved = spawner.processes[0]!.serverResponses.filter((r) => r.id === 900)[1]!;
     expect((approved.result as { content: { text: string } }).content.text).toBe("sampled-answer");
     expect((sampled as { preview: string }).preview).toContain("hello there");
+  });
+
+  it("concurrent sessions keep their own sampler (no per-uid slot mixup)", async () => {
+    const uid = await seedUser("pro");
+    const spawner = new FakeSpawner();
+    spawner.serverRequest = "sampling";
+    const bus = new FakeBus();
+    bus.reply = () => ({ id: "approval", payload: { approved: true } });
+    const router = makeRouter({ spawner, systemBus: bus });
+    await addStdioServer(router, uid, "two-sessions");
+
+    // One shared custom connection; two runs of DIFFERENT sessions call it
+    // concurrently. Each server→client sampling request must be served by the
+    // sampler of the run whose call is on that async chain.
+    await router.connectForRun(uid, RUN1);
+    const runA: RunContext = {
+      sessionId: "session-A",
+      runId: "run-A",
+      sampler: async () => ({
+        role: "assistant",
+        content: { type: "text", text: "sampled-A" },
+      }),
+    };
+    const runB: RunContext = {
+      sessionId: "session-B",
+      runId: "run-B",
+      sampler: async () => ({
+        role: "assistant",
+        content: { type: "text", text: "sampled-B" },
+      }),
+    };
+    const name = toolNameFor("two-sessions", "echo");
+    await Promise.all([
+      router.callTool(uid, name, {}, runA),
+      router.callTool(uid, name, {}, runB),
+    ]);
+
+    await waitFor(
+      () => spawner.processes[0]!.serverResponses.filter((r) => r.id === 900).length === 2,
+      "both sampling responses",
+    );
+    const sampled = spawner.processes[0]!.serverResponses
+      .filter((r) => r.id === 900)
+      .map((r) => (r.result as { content: { text: string } }).content.text)
+      .sort();
+    expect(sampled).toEqual(["sampled-A", "sampled-B"]);
   });
 
   it("elicitation: bus kind mcp_elicitation; accept-response is validated and returned", async () => {

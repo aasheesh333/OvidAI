@@ -28,9 +28,11 @@
  * the wave merger converts it to a real import.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { McpClient } from "./client.js";
 import type { McpClientHooks, McpToolCallResult, McpToolDef } from "./client.js";
 import type { CatalogEntry, CuratedCatalog } from "./catalog.js";
+import { CURATED_IDS } from "./catalog.js";
 import type { ImportedMcp } from "./configParse.js";
 import { createClientRequestHandler } from "./clientRequests.js";
 import type { SamplingRequest, SamplingResult } from "./clientRequests.js";
@@ -137,7 +139,12 @@ export interface McpRouter {
   ): Promise<McpServerSummary>;
   removeServer(uid: string, serverId: string): Promise<void>;
   listTools(uid: string, runCtx?: RunContext): Promise<McpToolListing[]>;
-  resolveTool(uid: string, name: string): Promise<ResolvedTool | null>;
+  /**
+   * The optional `runCtx` is ADDITIVE (T16 threads the active run): with it,
+   * custom stdio servers are enumerated over the run's live process instead
+   * of a transient spawn-and-kill.
+   */
+  resolveTool(uid: string, name: string, runCtx?: RunContext): Promise<ResolvedTool | null>;
   callTool(
     uid: string,
     name: string,
@@ -305,6 +312,11 @@ interface LiveEntry {
   lastUsed: number;
   /** stdio processes belong to the run that spawned them. */
   ownerRunId: string | null;
+  /** The most recent run using this connection — the fallback context for
+   *  SERVER-INITIATED requests that arrive outside any call (SSE/stdio
+   *  callbacks). Per-call requests use the AsyncLocalStorage slot, so two
+   *  concurrent runs never borrow each other's sampler. */
+  activeRun: RunContext | undefined;
   toolDefs: McpToolDef[] | null;
   closing: boolean;
 }
@@ -324,10 +336,23 @@ const DEFAULT_IDLE_TTL_MS = 600_000;
 export function createMcpRouter(deps: McpRouterDeps): McpRouter {
   const entries = new Map<string, LiveEntry>();
   const needsAuth = new Set<string>();
-  /** The active run context per uid: per-uid clients are long-lived, so the
-   *  sampler/workspace/bus they inject must be looked up per call. */
-  const currentRun = new Map<string, RunContext | undefined>();
+  /**
+   * The run context of the CALL currently executing on this async chain. The
+   * worker runs up to 8 jobs concurrently (per-session serialization only), so
+   * a single per-uid slot would let one session's sampling request borrow
+   * another session's sampler/model/API key. AsyncLocalStorage propagates
+   * through the await chains that dispatch a call, including server→client
+   * requests delivered while a response is being read (HTTP/native). A
+   * server-initiated push outside any call falls back to the entry's
+   * `activeRun` (exact for per-run stdio; last-user-wins for shared http/sse).
+   */
+  const runStorage = new AsyncLocalStorage<RunContext>();
   let closed = false;
+
+  /** Run `fn` with `runCtx` as the ambient context (no-op when undefined). */
+  function withRun<T>(runCtx: RunContext | undefined, fn: () => Promise<T>): Promise<T> {
+    return runCtx === undefined ? fn() : runStorage.run(runCtx, fn);
+  }
 
   const maxCustom = deps.maxCustomConnections ?? DEFAULT_MAX_CUSTOM_CONNECTIONS;
   const idleTtl = deps.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
@@ -484,8 +509,8 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
 
   // -- per-call context + client-request wiring ---------------------------
 
-  function callContext(ref: ServerRef): McpCallContext {
-    const runCtx = currentRun.get(ref.uid);
+  function callContext(ref: ServerRef, entry: LiveEntry | undefined): McpCallContext {
+    const runCtx = runStorage.getStore() ?? entry?.activeRun;
     // McpCallContext still carries Task 3's permissive forward-ref
     // placeholders for the Task 4/5/10 surfaces; the real objects are what the
     // handlers consume at runtime, so adapt through the placeholder (the same
@@ -504,6 +529,9 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     ref: ServerRef,
     live: () => LiveEntry | undefined,
   ): McpClientHooks {
+    /** This call's run when inside one; else the connection's last run. */
+    const runCtx = (): RunContext | undefined =>
+      runStorage.getStore() ?? live()?.activeRun;
     const handler = createClientRequestHandler({
       rootsProvider: () => [{ uri: "file:///workspace", name: "workspace" }],
       samplingApprover: async (req: SamplingRequest): Promise<boolean> => {
@@ -518,9 +546,9 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
         return res.payload.approved === true || res.payload.action === "accept";
       },
       sampler: async (req: SamplingRequest): Promise<SamplingResult | null> => {
-        const runCtx = currentRun.get(ref.uid);
-        if (runCtx?.sampler === undefined) return null;
-        return runCtx.sampler(req);
+        const sampler = runCtx()?.sampler;
+        if (sampler === undefined) return null;
+        return sampler(req);
       },
       elicitor: async (req) => {
         const res = await deps.systemBus.request(ref.uid, "mcp_elicitation", {
@@ -598,6 +626,13 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
         // Still the live incarnation for this key? A removeServer/replacement
         // since scheduling means this attempt must do nothing.
         if (entries.get(entry.key) !== entry) return false;
+        // A downgrade must not be resurrected by a crash/drop: re-read the
+        // tier at the reconnect gate too (G9 — no cached tier), and tear the
+        // whole custom set down if it now reads Free.
+        if ((await getTier(entry.uid)) === "free") {
+          await teardownCustom(entry.uid);
+          return false;
+        }
         await entry.client.close().catch(() => {});
         let fresh: LiveEntry;
         try {
@@ -620,7 +655,7 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
   function buildNativeEntry(ref: ServerRef): LiveEntry {
     const catalogEntry = ref.curated!;
     const handler: NativeMcpHandler = catalogEntry.handler;
-    const transport = createNativeTransport(handler, () => callContext(ref));
+    const transport = createNativeTransport(handler, () => callContext(ref, live));
     let live: LiveEntry | undefined;
     const hooks = clientHooks(ref, () => live);
     const client = new McpClient(transport, { hooks });
@@ -635,6 +670,7 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
       reconnector: null,
       lastUsed: nowMs(),
       ownerRunId: null,
+      activeRun: undefined,
       toolDefs: null,
       closing: false,
     };
@@ -726,6 +762,7 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
       reconnector: null,
       lastUsed: nowMs(),
       ownerRunId: transportKind === "stdio" ? ownerRunId : null,
+      activeRun: runStorage.getStore(),
       toolDefs: null,
       closing: false,
     };
@@ -757,12 +794,16 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
           await disposeEntry(existing);
         } else if (existing.client.connected) {
           existing.lastUsed = nowMs();
+          if (runCtx !== undefined) existing.activeRun = runCtx;
           return existing;
         } else {
           await disposeEntry(existing);
         }
       } else if (existing.client.connected) {
-        if (runCtx !== undefined) existing.ownerRunId = runCtx.runId;
+        if (runCtx !== undefined) {
+          existing.ownerRunId = runCtx.runId;
+          existing.activeRun = runCtx;
+        }
         existing.lastUsed = nowMs();
         return existing;
       } else {
@@ -779,6 +820,7 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
       await entry.transport.start();
       await entry.client.initialize();
     }
+    if (runCtx !== undefined) entry.activeRun = runCtx;
     entries.set(key, entry);
     return entry;
   }
@@ -822,10 +864,17 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     runCtx: RunContext | undefined,
     refresh = false,
   ): Promise<McpToolDef[]> {
-    if (ref.curated === null && ref.transport === "stdio" && runCtx === undefined) {
+    // Prefer an ALREADY-LIVE connection (a per-run stdio process spawned by
+    // connectForRun, or a cached http/sse client). Without this, every
+    // resolveTool call would transient-spawn a second jailed process and
+    // T16's resolveTool → callTool flow would spawn twice per tool call.
+    const live = entries.get(entryKey(ref));
+    const reusable = live !== undefined && live.client.connected;
+    if (ref.curated === null && ref.transport === "stdio" && runCtx === undefined && !reusable) {
       return transientStdioDefs(ref);
     }
-    const entry = await ensureLive(ref, runCtx);
+    const entry = reusable ? live : await ensureLive(ref, runCtx);
+    if (reusable && runCtx !== undefined) entry.activeRun = runCtx;
     return listDefs(entry, refresh);
   }
 
@@ -918,6 +967,23 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
 
   // -- server lookup -------------------------------------------------------
 
+  /**
+   * True when a custom row named `name` would publish a prefix that collides
+   * with a curated server or with another custom row. Comparison is on the
+   * SANITIZED form (what the model actually sees), so "Fetch", "fetch!" and
+   * "fetch" are all the same namespace. Curated credential rows are skipped:
+   * they always publish their catalog curatedId, never their row name.
+   */
+  function namespaceTaken(rows: DbServerRow[], name: string): boolean {
+    const safe = safeServerName(name);
+    if (safe === "") return true; // unpublishable name
+    // CURATED_IDS is pure data — no handler is instantiated by this check.
+    if (CURATED_IDS.some((id) => safeServerName(id) === safe)) return true;
+    return rows.some(
+      (r) => r.curatedId === null && safeServerName(r.name) === safe,
+    );
+  }
+
   function findRow(rows: DbServerRow[], serverId: string): DbServerRow | null {
     if (serverId.startsWith("curated:")) {
       const curatedId = serverId.slice("curated:".length);
@@ -966,6 +1032,11 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
       const imported = input.imported;
       validateImported(imported);
       if (rows.some((r) => r.name === imported.name)) throw serverExists();
+      // Reserve the published namespace, not just the exact row name: the
+      // model-facing id is mcp__<safe name>__, so a custom "fetch" would
+      // shadow the curated fetch (and two rows can sanitize to one prefix).
+      // Reject rather than silently namespace: never guess which one wins.
+      if (namespaceTaken(rows, imported.name)) throw serverExists();
 
       const config: Record<string, unknown> = { type: imported.transport };
       if (imported.url !== undefined) config.url = imported.url;
@@ -1089,33 +1160,44 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     },
 
     async listTools(uid: string, runCtx?: RunContext): Promise<McpToolListing[]> {
-      if (runCtx !== undefined) currentRun.set(uid, runCtx);
-      await sweepIdle();
-      const tier = await getTier(uid);
-      const rows = await listRows(uid);
-      const listings: McpToolListing[] = [];
-      for (const ref of candidateRefs(uid, rows, tier)) {
-        try {
-          const defs = await refToolDefs(ref, runCtx, true);
-          for (const def of defs) listings.push(listingFor(ref, def));
-        } catch {
-          // One unreachable server must not hide every other server's tools.
+      return withRun(runCtx, async () => {
+        await sweepIdle();
+        const tier = await getTier(uid);
+        // A downgrade takes effect immediately: no custom connection may
+        // survive (and none may be dialed) once the user is Free.
+        if (tier === "free") await teardownCustom(uid);
+        const rows = await listRows(uid);
+        const listings: McpToolListing[] = [];
+        for (const ref of candidateRefs(uid, rows, tier)) {
+          try {
+            const defs = await refToolDefs(ref, runCtx, true);
+            for (const def of defs) listings.push(listingFor(ref, def));
+          } catch {
+            // One unreachable server must not hide every other server's tools.
+          }
         }
-      }
-      return listings;
+        return listings;
+      });
     },
 
-    async resolveTool(uid: string, name: string): Promise<ResolvedTool | null> {
-      await sweepIdle();
-      const tier = await getTier(uid);
-      const rows = await listRows(uid);
-      const refs = candidateRefs(uid, rows, tier);
-      const resolved = await resolveAmong(refs, name, undefined);
-      if (resolved === null) return null;
-      return {
-        listing: listingFor(resolved.ref, resolved.def),
-        server: summaryFor(resolved.ref),
-      };
+    async resolveTool(
+      uid: string,
+      name: string,
+      runCtx?: RunContext,
+    ): Promise<ResolvedTool | null> {
+      return withRun(runCtx, async () => {
+        await sweepIdle();
+        const tier = await getTier(uid);
+        if (tier === "free") await teardownCustom(uid);
+        const rows = await listRows(uid);
+        const refs = candidateRefs(uid, rows, tier);
+        const resolved = await resolveAmong(refs, name, runCtx);
+        if (resolved === null) return null;
+        return {
+          listing: listingFor(resolved.ref, resolved.def),
+          server: summaryFor(resolved.ref),
+        };
+      });
     },
 
     async callTool(
@@ -1124,53 +1206,59 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
       args: Record<string, unknown>,
       runCtx: RunContext,
     ): Promise<McpToolCallResult> {
-      currentRun.set(uid, runCtx);
-      await sweepIdle();
-      const tier = await getTier(uid);
-      const rows = await listRows(uid);
+      return withRun(runCtx, async () => {
+        await sweepIdle();
+        const tier = await getTier(uid);
+        const rows = await listRows(uid);
 
-      // Gate BEFORE any custom connection is attempted: a Free user (or a
-      // downgraded one) never dials a custom server just to be refused.
-      if (tier === "free" && (await attributeCustom(uid, rows, name)) !== null) {
-        await teardownCustom(uid);
-        throw new ProRequiredError();
-      }
-
-      const refs = candidateRefs(uid, rows, tier);
-      const resolved = await resolveAmong(refs, name, runCtx);
-      if (resolved === null) throw new Error(`unknown MCP tool: ${name}`);
-
-      if (resolved.ref.curated === null) {
-        // Re-read the tier immediately before dispatch: a downgrade that
-        // landed during resolution still refuses this call.
-        if ((await getTier(uid)) === "free") {
+        // Gate BEFORE any custom connection is attempted: a Free user (or a
+        // downgraded one) never dials a custom server just to be refused.
+        // Teardown FIRST, so attributeCustom's live-client scan has nothing to
+        // dial (prefix/canonical attribution needs no connection).
+        if (tier === "free") {
           await teardownCustom(uid);
-          throw new ProRequiredError();
+          if ((await attributeCustom(uid, rows, name)) !== null) {
+            throw new ProRequiredError();
+          }
         }
-      }
 
-      const entry = await ensureLive(resolved.ref, runCtx);
-      entry.lastUsed = nowMs();
-      return entry.client.callTool(resolved.def.name, args);
+        const refs = candidateRefs(uid, rows, tier);
+        const resolved = await resolveAmong(refs, name, runCtx);
+        if (resolved === null) throw new Error(`unknown MCP tool: ${name}`);
+
+        if (resolved.ref.curated === null) {
+          // Re-read the tier immediately before dispatch: a downgrade that
+          // landed during resolution still refuses this call.
+          if ((await getTier(uid)) === "free") {
+            await teardownCustom(uid);
+            throw new ProRequiredError();
+          }
+        }
+
+        const entry = await ensureLive(resolved.ref, runCtx);
+        entry.lastUsed = nowMs();
+        return entry.client.callTool(resolved.def.name, args);
+      });
     },
 
     async connectForRun(uid: string, runCtx: RunContext): Promise<void> {
-      currentRun.set(uid, runCtx);
-      await sweepIdle();
-      const tier = await getTier(uid);
-      const rows = await listRows(uid);
+      return withRun(runCtx, async () => {
+        await sweepIdle();
+        const tier = await getTier(uid);
+        const rows = await listRows(uid);
 
-      // A downgrade takes effect immediately: no Pro connection survives.
-      if (tier === "free") await teardownCustom(uid);
+        // A downgrade takes effect immediately: no Pro connection survives.
+        if (tier === "free") await teardownCustom(uid);
 
-      for (const ref of candidateRefs(uid, rows, tier)) {
-        try {
-          await ensureLive(ref, runCtx);
-        } catch {
-          // Per-server failure (needs_auth, unreachable, bad config) must not
-          // fail the whole run; statusFor reports it.
+        for (const ref of candidateRefs(uid, rows, tier)) {
+          try {
+            await ensureLive(ref, runCtx);
+          } catch {
+            // Per-server failure (needs_auth, unreachable, bad config) must
+            // not fail the whole run; statusFor reports it.
+          }
         }
-      }
+      });
     },
 
     async releaseRun(uid: string, runCtx: RunContext): Promise<void> {
@@ -1182,11 +1270,13 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
           entry.ownerRunId === runCtx.runId
         ) {
           await disposeEntry(entry);
+        } else if (entry.uid === uid && entry.activeRun?.runId === runCtx.runId) {
+          // Drop the run's sampler closure (it may capture the model
+          // transport and API key) as soon as the run is over. Cached
+          // http/sse connections stay, but no longer carry this run.
+          entry.activeRun = undefined;
         }
       }
-      // Drop the run's sampler closure (it may capture the model transport
-      // and API key) as soon as the run is over.
-      if (currentRun.get(uid)?.runId === runCtx.runId) currentRun.delete(uid);
     },
 
     async shutdown(): Promise<void> {
@@ -1210,7 +1300,6 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
       }
       entries.clear();
       needsAuth.clear();
-      currentRun.clear();
     },
   };
 }
