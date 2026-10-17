@@ -26,6 +26,7 @@ import { buildMintApps } from "./app.js";
 import { createAlerter } from "./alerts.js";
 import { loadMintEnv } from "./env.js";
 import { createLiteLlmAdmin } from "./litellmAdmin.js";
+import { createProjection } from "./projection.js";
 import { createMintVerifier } from "./verifier.js";
 
 /**
@@ -58,6 +59,23 @@ export async function main(
     redis.disconnect();
     await db.$client.end({ timeout: 5 });
   });
+
+  // I3: reconcile the Redis db2 projection with the Postgres authority at
+  // boot. A failed admin projection write (Postgres committed, Redis did
+  // not) is repaired here on the next restart. Redis being down must not
+  // prevent the process from starting — the hook will recover when Redis
+  // returns, and the durable state is already correct.
+  try {
+    const report = await createProjection({ db, redis }).resyncAtBoot();
+    console.log(
+      `[mint] projection resync: ${report.rewritten.length} rewritten, ` +
+        `${report.identical} identical, ${report.conflictsResolvedFromPostgres} conflicts resolved`,
+    );
+  } catch (err) {
+    console.log(
+      `[mint] projection resync failed: ${err instanceof Error ? err.name : String(err)}`,
+    );
+  }
 
   await publicApp.listen({ host: cfg.host, port: cfg.publicPort });
   try {

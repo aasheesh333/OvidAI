@@ -82,6 +82,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_MINT_REDIS_URL)("db2 projection", ()
   it("resyncAtBoot counts user keys disagreeing with Postgres and fixes them", async () => {
     const uid = testUid("resync");
     await usersRepo.ensure(db, uid, "resync@example.com");
+    await plansRepo.markProvisioned(db, uid); // I4: resync only touches mint users
     await projection.publishUserState(uid); // clean publish first
 
     // hand-corrupt the user's state (wrong tier + stale dailyUsd)
@@ -103,6 +104,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_MINT_REDIS_URL)("db2 projection", ()
     const expires = Math.floor(Date.now() / 1000) + 3600;
     // raw postgres.js templates bind ISO strings for timestamptz (not Date)
     await db.$client`INSERT INTO users (uid, tier, tier_expires_at) VALUES (${uid}, ${"7x"}, ${new Date(expires * 1000).toISOString()})`;
+    await plansRepo.markProvisioned(db, uid); // I4: resync only touches mint users
     const report = await projection.resyncAtBoot();
     expect(report.rewritten).toContain(`user:${uid}:tier`);
     expect(await redis.get(`user:${uid}:tier`)).toBe("7x");

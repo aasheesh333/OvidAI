@@ -1,3 +1,4 @@
+import { plansRepo } from "@ovid/db";
 import { pyNumStr } from "@ovid/money";
 import { checkNewKeyBreaker } from "./antiAbuse.js";
 import type { MintDeps } from "./app.js";
@@ -191,6 +192,8 @@ export async function litellmMintOrGet(
     await deps.litellm.keyUpdate(update);
     await safeUserBudget(deps, uid, tier);
     await deps.redis.sadd(OVID_UIDS_SET, uid);
+    // I4: mint-provisioned (the durable analogue of Python's ovid:uids).
+    await plansRepo.markProvisioned(deps.db, uid);
     const stored = await deps.redis.get(plainKey);
     if (stored) {
       return stored;
@@ -238,6 +241,7 @@ export async function litellmMintOrGet(
     await deps.redis.set(idKey, data.token ?? key);
     await deps.redis.set(plainKey, key);
     await deps.redis.sadd(OVID_UIDS_SET, uid);
+    await plansRepo.markProvisioned(deps.db, uid);
     await safeUserBudget(deps, uid, tier);
     return key;
   } finally {

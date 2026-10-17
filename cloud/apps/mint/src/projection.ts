@@ -31,7 +31,7 @@ export interface Projection {
   publishSettings(): Promise<void>;
   resyncAtBoot(): Promise<ReconcileReport>;
   publishUserTier(uid: string, tier: string | null, expiresAtEpoch: number | null): Promise<void>;
-  publishUserState(uid: string): Promise<void>;
+  publishUserState(uid: string, opts?: { clearBan?: boolean }): Promise<void>;
   publishModelGroups(names: string[]): Promise<void>;
   importFromRedisOnce(): Promise<{ imported: { users: number; plans: boolean; settings: boolean } }>;
 }
@@ -132,19 +132,37 @@ export function createProjection(deps: { db: Db; redis: Redis }): Projection {
     return writes;
   }
 
-  /** The per-user state keys from the Postgres override + users row. */
+  /**
+   * The per-user state keys from the Postgres override + users row.
+   *
+   * BAN PRESERVATION (I2): when Postgres says "not banned" but Redis already
+   * carries a ban flag this projection did not derive from Postgres (an
+   * "auto" ban written by recordStrike while the DB write was in flight/failed,
+   * or a Redis-only ban imported from the Python install), the key is
+   * deliberately OMITTED instead of written as null. Writing null here is the
+   * bug that let an unrelated /admin/user/update silently unban an auto-banned
+   * account. An explicit admin unban deletes the key itself.
+   */
   function desiredUserStateKeys(
     uid: string,
     row: UserStateRow | null,
     override: { dailyUsd: string | null; monthlyCapUsd: string | null; pools: Record<string, unknown> | null } | null,
+    currentBanned: string | null,
+    clearBan = false,
   ): KeyWrite[] {
     const keys: KeyWrite[] = [
       { key: `user:${uid}:dailyUsd`, value: override?.dailyUsd ?? null },
       { key: `user:${uid}:monthlyCapUsd`, value: override?.monthlyCapUsd ?? null },
       { key: `user:${uid}:pools`, value: override?.pools != null ? JSON.stringify(override.pools) : null },
-      { key: `user:${uid}:banned`, value: row?.banned ? (row.bannedReason ?? "admin") : null },
       { key: `user:${uid}:email`, value: row?.email ?? null },
     ];
+    const banned = row?.banned ? (row.bannedReason ?? "admin") : null;
+    // Preserve a Redis-only ban: Postgres has not derived it (yet), so this
+    // projection must not be the thing that removes it. An explicit admin
+    // unban passes clearBan to override the preservation.
+    if (clearBan || !(banned === null && currentBanned !== null && currentBanned !== "")) {
+      keys.push({ key: `user:${uid}:banned`, value: banned });
+    }
     if (row?.email != null) {
       keys.push({ key: `email:${row.email}`, value: uid });
     }
@@ -164,12 +182,16 @@ export function createProjection(deps: { db: Db; redis: Redis }): Projection {
     await applyKeys(tierKeys(uid, tier, expiresAtEpoch));
   }
 
-  async function publishUserState(uid: string): Promise<void> {
-    const [row, override] = await Promise.all([
+  async function publishUserState(
+    uid: string,
+    opts: { clearBan?: boolean } = {},
+  ): Promise<void> {
+    const [row, override, currentBanned] = await Promise.all([
       readUserRow(uid),
       plansRepo.getOverride(db, uid),
+      redis.get(`user:${uid}:banned`),
     ]);
-    await applyKeys(desiredUserStateKeys(uid, row, override));
+    await applyKeys(desiredUserStateKeys(uid, row, override, currentBanned, opts.clearBan ?? false));
     // email cleared in Postgres → also drop the reverse key it used to point at
     if (row?.email == null) {
       const prev = await redis.get(`user:${uid}:email`);
@@ -202,14 +224,19 @@ export function createProjection(deps: { db: Db; redis: Redis }): Projection {
     }
     await publishSettingsToRedis(redis, s);
 
-    // users — full re-publish of tier + state for every provisioned user,
-    // counting every db2 key that disagreed before Postgres overwrote it
-    const uids = await plansRepo.allUids(db);
+    // users — full re-publish of tier + state for every MINT-PROVISIONED user
+    // (I4: chat-only gateway rows are not mint users), counting every db2 key
+    // that disagreed before Postgres overwrote it
+    const uids = await plansRepo.mintUids(db);
     for (const uid of uids) {
-      const [row, override] = await Promise.all([readUserRow(uid), plansRepo.getOverride(db, uid)]);
+      const [row, override, currentBanned] = await Promise.all([
+        readUserRow(uid),
+        plansRepo.getOverride(db, uid),
+        redis.get(`user:${uid}:banned`),
+      ]);
       const writes = [
         ...tierKeys(uid, row?.tier ?? null, row?.tierExpiresAtEpoch ?? null),
-        ...desiredUserStateKeys(uid, row, override),
+        ...desiredUserStateKeys(uid, row, override, currentBanned),
       ];
       for (const w of writes) {
         const current = await redis.get(w.key);
@@ -310,12 +337,15 @@ export function createProjection(deps: { db: Db; redis: Redis }): Projection {
           : null;
       // bannedAt time is not in Redis — the import moment is the best bound
       const inserted = await db.$client`
-        INSERT INTO users (uid, email, tier, tier_expires_at, banned_at, banned_reason)
+        INSERT INTO users (uid, email, tier, tier_expires_at, banned_at, banned_reason, mint_provisioned)
         VALUES (${uid}, ${email ?? null}, ${tier || "free"}, ${tierExpiresAt},
-                ${banned !== null ? new Date().toISOString() : null}, ${banned ?? null})
+                ${banned !== null ? new Date().toISOString() : null}, ${banned ?? null}, true)
         ON CONFLICT (uid) DO NOTHING
         RETURNING uid`;
       if (inserted.length === 0) {
+        // The row already exists (e.g. the gateway created it for chat): it is
+        // still in ovid:uids, so adopt it into the mint-provisioned set.
+        await plansRepo.markProvisioned(db, uid);
         continue;
       }
       usersImported++;

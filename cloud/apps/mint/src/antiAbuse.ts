@@ -1,6 +1,6 @@
 import type { MintDeps } from "./app.js";
 import { HttpContractError } from "./app.js";
-import { poolUserKeyIds } from "./windows.js";
+import { isoUtc, poolUserKeyIds } from "./windows.js";
 
 /**
  * Port of mint.py's anti-abuse block (mint.py:790-864) — client IP
@@ -91,6 +91,19 @@ export async function recordStrike(deps: MintDeps, uid: string, ip: string): Pro
   }
   if (n >= deps.env.abuse.abuseStrikeLimit) {
     await deps.redis.set(`user:${uid}:banned`, "auto");
+    // DURABLE AUTHORITY (I2): Postgres must carry the ban too, otherwise the
+    // next publishUserState (any admin update/export/audit) reads "not
+    // banned" and deletes the Redis flag, silently unbanning the account.
+    // A DB outage never prevents the Redis ban + key block below.
+    try {
+      await deps.db.$client`
+        INSERT INTO users (uid, banned_at, banned_reason)
+        VALUES (${uid}, ${isoUtc(clockNow(deps))}, 'auto')
+        ON CONFLICT (uid) DO UPDATE
+          SET banned_at = EXCLUDED.banned_at, banned_reason = 'auto'`;
+    } catch (err) {
+      console.log(`[mint] auto-ban persist error: ${errorName(err)}`);
+    }
     // THE FIX: a banned account must stop spending through its cached keys.
     await setKeyBlocked(deps, uid, true);
     await deps.alerter(

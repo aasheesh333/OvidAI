@@ -249,7 +249,7 @@ async function resetUser(){if(!current||!confirm('Restart the window now for '+c
 async function banUser(on){if(!current)return;
  try{show('userActOut',await api('POST',on?'/admin/ban':'/admin/unban',{uid:current.uid}));await lookup();loadAudit()}catch(e){show('userActOut',String(e),true)}}
 async function resetAll(){if(!confirm('Restart the window now for ALL users?'))return;
- try{show('resetStatus',await api('POST','/admin/reset-window',{reset_month_free:$('all_month').checked}));loadAudit();pollReset()}catch(e){show('resetStatus',String(e),true)}}
+ try{show('resetStatus',await api('POST','/admin/reset-window',{all:true,reset_month_free:$('all_month').checked}));loadAudit();pollReset()}catch(e){show('resetStatus',String(e),true)}}
 async function pollReset(){
  try{const s=await api('GET','/admin/reset-status');if(s.state==='never')return;
   show('resetStatus','Last global reset: '+s.state+' · '+s.done+'/'+s.total+' users'+(s.errors?' · '+s.errors+' errors':'')+' · '+(s.at||''));

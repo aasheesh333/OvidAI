@@ -53,6 +53,12 @@ export const users = pgTable("users", {
   // P9 Task 7/8: who banned — "admin" | "auto" (recordStrike's auto-ban bug
   // fix distinguishes the path that must also block the LiteLLM keys).
   bannedReason: text("banned_reason"),
+  // P9 Task 8 fix I4: mint-owned users. The gateway's `users.ensure` creates
+  // a row for EVERY chat user; only rows mint has provisioned (a key was
+  // issued, an admin granted entitlements, or the account was imported from
+  // ovid:uids) are iterated by reapply-all/reset-all/export/resync. Chat-only
+  // rows stay false.
+  mintProvisioned: boolean("mint_provisioned").notNull().default(false),
   createdAt: timestamptz("created_at").notNull().defaultNow(),
 });
 

@@ -9,10 +9,11 @@ import type { MintDeps } from "./app.js";
 import { buildMintApps, HttpContractError } from "./app.js";
 import { requireAdmin } from "./adminRoutes.js";
 import { AUDIT_LIST } from "./adminAudit.js";
+import { isBanned, recordStrike } from "./antiAbuse.js";
 import { loadMintEnv, type MintEnv } from "./env.js";
 import { findPlan } from "./planMath.js";
 import { createLiteLlmAdmin } from "./litellmAdmin.js";
-import { getSettings, publishSettingsToRedis } from "./settings.js";
+import { getSettings, publishSettingsToRedis, storeSettings } from "./settings.js";
 import {
   closeDb,
   closeRedis,
@@ -147,6 +148,9 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     tier: string | null = null,
   ): Promise<{ android: string; web: string }> {
     await usersRepo.ensure(db, uid, null);
+    // A key-issuing mint user is mint-provisioned (I4) — the gateway's
+    // chat-only rows deliberately are not.
+    await plansRepo.markProvisioned(db, uid);
     if (tier !== null && tier !== "free") {
       const s = await getSettings({ db });
       await redis.set(`user:${uid}:tier`, tier);
@@ -198,7 +202,7 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     const uids = [testUid("ra"), testUid("rb"), testUid("rc")];
     for (const u of uids) await prime(u);
 
-    const res = await admin("POST", "/admin/reset-window", {});
+    const res = await admin("POST", "/admin/reset-window", { all: true });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       ok: true,
@@ -224,11 +228,11 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     const uidB = testUid("bgb");
     const a = await prime(uidA);
     const b = await prime(uidB, "free");
-    const total = (await plansRepo.allUids(db)).length;
+    const total = (await plansRepo.mintUids(db)).length;
 
     deps.env.reapplySyncMax = 1;
     try {
-      const res = await admin("POST", "/admin/reset-window", {});
+      const res = await admin("POST", "/admin/reset-window", { all: true });
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({
         ok: true,
@@ -323,7 +327,7 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     const res = await admin("GET", "/admin/settings");
     expect(res.statusCode).toBe(200);
     const body = res.json() as Record<string, unknown>;
-    expect(body.users).toBe((await plansRepo.allUids(db)).length);
+    expect(body.users).toBe((await plansRepo.mintUids(db)).length);
     const settings = body.settings as Record<string, unknown>;
     expect(settings.free_daily_usd).toBe(0.15);
     expect((settings.plans as Array<{ id: string }>)[0]!.id).toBe("free");
@@ -849,6 +853,7 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
   it("GET /admin/export: settings + every user's state", async () => {
     const uid = testUid("exp");
     await usersRepo.ensure(db, uid, "export@example.com");
+    await plansRepo.markProvisioned(db, uid);
     await redis.set(`user:${uid}:tier`, "3x");
     await db.$client`UPDATE users SET tier = 'starter' WHERE uid = ${uid}`;
     await plansRepo.saveOverride(db, uid, { pools: { mult: 4 } });
@@ -910,5 +915,228 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     const a = await adminApp.inject({ method: "GET", url: "/admin" });
     const b = await adminApp.inject({ method: "GET", url: "/admin/ui" });
     expect(a.body).toBe(b.body);
+  });
+
+  // ── Fix round 1 regressions (I1–I5 + cheap minors) ──────────────────────
+
+  it("I1: reset-window rejects a missing/malformed body or blank uid with NO reset side effects", async () => {
+    const uid = testUid("i1");
+    await prime(uid);
+    const spendBefore = await redis.get(`pool:${uid}:spend`);
+    const startBefore = await redis.get(`pool:${uid}:start`);
+
+    const cases: Array<[string, unknown, boolean]> = [
+      // [label, payload, rawJsonString]
+      ["no body", undefined, false],
+      ["JSON null", "null", true],
+      ["JSON scalar", JSON.stringify("str"), true],
+      ["JSON array", [], false],
+      ["empty object", {}, false],
+      ["blank uid", { uid: "   " }, false],
+      ["non-string uid", { uid: 123 }, false],
+      ["non-boolean reset_month_free", { uid, reset_month_free: "yes" }, false],
+    ];
+    for (const [label, payload, rawJson] of cases) {
+      const res = await adminApp.inject({
+        method: "POST",
+        url: "/admin/reset-window",
+        headers: rawJson ? { ...ADMIN, "content-type": "application/json" } : ADMIN,
+        ...(payload === undefined ? {} : { payload: payload as object }),
+      });
+      expect(res.statusCode, label).toBe(400);
+    }
+
+    // NOTHING was reset: counters/window intact, no audit entry.
+    expect(await redis.get(`pool:${uid}:spend`)).toBe(spendBefore);
+    expect(await redis.get(`pool:${uid}:start`)).toBe(startBefore);
+    expect((await auditEntries()).some((e) => e.action === "reset-window")).toBe(false);
+  });
+
+  it("I1: {all:true} is the explicit ALL-users shape; reset_month_free:'false' stays false", async () => {
+    const uid = testUid("i1all");
+    const toks = await userWithKeys(uid, "free");
+    for (const t of Object.values(toks)) fake.keys.get(t)!.spend = 0.5;
+    fake.users.get(uid)!.spend = 4;
+
+    // string "false" must NOT be coerced to true (pydantic semantics)
+    const one = await admin("POST", "/admin/reset-window", {
+      uid,
+      reset_month_free: "false",
+    });
+    expect(one.statusCode).toBe(200);
+    expect(fake.users.get(uid)!.spend).toBe(4); // monthly backstop untouched
+
+    const all = await admin("POST", "/admin/reset-window", { all: true });
+    expect(all.statusCode).toBe(200);
+    expect((all.json() as { detail: { mode: string } }).detail.mode).toBe("sync");
+  });
+
+  it("I2: an auto-ban is durable in Postgres and survives an unrelated admin update; unban clears it", async () => {
+    const uid = testUid("autoban");
+    await userWithKeys(uid);
+    const oldLimit = deps.env.abuse.abuseStrikeLimit;
+    deps.env.abuse.abuseStrikeLimit = 1;
+    try {
+      await recordStrike(deps, uid, "203.0.113.77");
+    } finally {
+      deps.env.abuse.abuseStrikeLimit = oldLimit;
+    }
+    expect(await redis.get(`user:${uid}:banned`)).toBe("auto");
+    const rows = (await db.$client`
+      SELECT banned_at IS NOT NULL AS banned, banned_reason
+      FROM users WHERE uid = ${uid}`) as { banned: boolean; banned_reason: string | null }[];
+    expect(rows[0]).toEqual({ banned: true, banned_reason: "auto" });
+
+    // An unrelated admin update must not DEL the ban (the I2 bug).
+    const update = await admin("POST", "/admin/user/update", { uid, daily_usd: 5 });
+    expect(update.statusCode).toBe(200);
+    expect(await redis.get(`user:${uid}:banned`)).toBe("auto");
+    expect(await isBanned(deps, uid, "unknown")).toBe(true);
+
+    // Export and audit read the ban too.
+    const exp = (await admin("GET", "/admin/export")).json() as {
+      users: Record<string, { banned: string | null }>;
+    };
+    expect(exp.users[uid]!.banned).toBe("auto");
+
+    // An explicit admin unban DOES clear it (clearBan overrides preservation).
+    const unban = await admin("POST", "/admin/unban", { uid });
+    expect(unban.statusCode).toBe(200);
+    expect(await redis.get(`user:${uid}:banned`)).toBeNull();
+    expect(await isBanned(deps, uid, "unknown")).toBe(false);
+  });
+
+  it("I2: a Redis-only auto-ban is preserved by the projection (Postgres write failed)", async () => {
+    const uid = testUid("redisonly");
+    await userWithKeys(uid);
+    // Simulate recordStrike's Redis write succeeding while its Postgres
+    // write failed (the case the projection must not "fix" by deleting).
+    await redis.set(`user:${uid}:banned`, "auto");
+
+    const res = await admin("POST", "/admin/set-tier", { uid, tier: "pro" });
+    expect(res.statusCode).toBe(200);
+    expect(await redis.get(`user:${uid}:banned`)).toBe("auto");
+  });
+
+  it("I3: a Redis projection failure after the Postgres commit is a sanitized 500, logged and audited", async () => {
+    const uid = testUid("projfail");
+    await userWithKeys(uid);
+    const original = await getSettings({ db });
+
+    // A Redis whose writes fail the way a dead connection does; reads and
+    // the audit list still work (so the durable trail is observable).
+    const failingRedis = new Proxy(redis, {
+      get(target, prop) {
+        if (prop === "set" || prop === "hset") {
+          return async () => {
+            throw new Error("Connection is closed.");
+          };
+        }
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const failApps = buildMintApps({ ...deps, redis: failingRedis as Redis });
+    const inject = (method: string, url: string, payload: unknown) =>
+      failApps.adminApp.inject({
+        method: method as "POST",
+        url,
+        headers: ADMIN,
+        payload: payload as object,
+      });
+
+    try {
+      const res = await inject("POST", "/admin/settings", { free_daily_usd: 9 });
+      expect(res.statusCode).toBe(500);
+      // The raw driver message must never reach the wire; the sanitized
+      // degraded-write message is the contract.
+      expect((res.json() as { detail: string }).detail).not.toContain("Connection is closed");
+      expect((res.json() as { detail: string }).detail).toContain("redis projection failed");
+      // Postgres committed (durable authority).
+      expect((await getSettings({ db })).free_daily_usd).toBe(9);
+      // And the change was audited with a degraded marker.
+      const auditRows = (await db.$client`
+        SELECT after FROM mint_audit
+        WHERE action = 'settings'
+          AND after->>'projection_error' IS NOT NULL
+        ORDER BY id DESC LIMIT 1`) as Array<{
+        after: Record<string, unknown>;
+      }>;
+      expect(auditRows[0]!.after.projection_error).toBe("redis projection failed");
+
+      // Same for a per-user update: Postgres committed, sanitized 500.
+      const userRes = await inject("POST", "/admin/user/update", { uid, daily_usd: 2 });
+      expect(userRes.statusCode).toBe(500);
+      expect((userRes.json() as { detail: string }).detail).not.toContain("Connection is closed");
+      const tierRows = (await db.$client`
+        SELECT daily_usd FROM user_plan_overrides WHERE uid = ${uid}`) as Array<{
+        daily_usd: string;
+      }>;
+      expect(tierRows[0]!.daily_usd).toBe("2.0");
+    } finally {
+      await failApps.publicApp.close();
+      await failApps.adminApp.close();
+      await storeSettings({ db, redis }, original);
+    }
+  });
+
+  it("I4: all-users operations only touch mint-provisioned users (chat-only rows excluded)", async () => {
+    const mintUid = testUid("i4mint");
+    const chatUid = testUid("i4chat");
+    await userWithKeys(mintUid);
+    // The gateway's users.ensure creates this row for a chat-only user.
+    await usersRepo.ensure(db, chatUid, "chat-only@example.com");
+
+    expect(await plansRepo.mintUids(db)).toContain(mintUid);
+    expect(await plansRepo.mintUids(db)).not.toContain(chatUid);
+
+    // Count + export exclude the chat-only user.
+    const settings = (await admin("GET", "/admin/settings")).json() as { users: number };
+    expect(settings.users).toBe((await plansRepo.mintUids(db)).length);
+    const exp = (await admin("GET", "/admin/export")).json() as {
+      users: Record<string, unknown>;
+    };
+    expect(exp.users[mintUid]).toBeDefined();
+    expect(exp.users[chatUid]).toBeUndefined();
+
+    // ALL-users reset does not touch a chat-only user's counters.
+    await redis.set(`pool:${mintUid}:spend`, "9");
+    await redis.set(`pool:${chatUid}:spend`, "9");
+    const res = await admin("POST", "/admin/reset-window", { all: true });
+    expect(res.statusCode).toBe(200);
+    expect(await redis.get(`pool:${mintUid}:spend`)).toBeNull();
+    expect(await redis.get(`pool:${chatUid}:spend`)).toBe("9");
+  });
+
+  it("cheap minors: strict coercion, unknown override uid 404, unban never creates a user, prototype settings, no-store", async () => {
+    // M1: a present-but-unparseable number is a 400, not a silent no-op.
+    const uid = testUid("minor");
+    await userWithKeys(uid);
+    const badNum = await admin("POST", "/admin/user/update", { uid, daily_usd: "abc" });
+    expect(badNum.statusCode).toBe(400);
+    expect((badNum.json() as { detail: string }).detail).toBe("daily_usd must be a number");
+
+    // M2: override-only update for an unknown uid is a 404, not an FK 500.
+    const ghost = testUid("ghost");
+    const noUser = await admin("POST", "/admin/user/update", { uid: ghost, daily_usd: 5 });
+    expect(noUser.statusCode).toBe(404);
+    expect((noUser.json() as { detail: string }).detail).toBe("user not found");
+
+    // M3: unban of an unknown uid must not create a users row.
+    const unban = await admin("POST", "/admin/unban", { uid: ghost });
+    expect(unban.statusCode).toBe(200);
+    const ghostRows = (await db.$client`
+      SELECT uid FROM users WHERE uid = ${ghost}`) as Array<{ uid: string }>;
+    expect(ghostRows).toHaveLength(0);
+
+    // M11: prototype keys are not settings.
+    const proto = await admin("POST", "/admin/settings", { toString: 1 });
+    expect(proto.statusCode).toBe(400);
+    expect((proto.json() as { detail: string }).detail).toBe("unknown setting 'toString'");
+
+    // M7: JSON admin responses are never cacheable.
+    const json = await admin("GET", "/admin/settings");
+    expect(json.headers["cache-control"]).toBe("no-store");
+    expect(json.headers["x-content-type-options"]).toBe("nosniff");
   });
 });

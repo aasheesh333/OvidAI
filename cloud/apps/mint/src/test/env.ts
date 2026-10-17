@@ -2,7 +2,37 @@ import { Redis } from "ioredis";
 import { createDb, migrate, type Db } from "@ovid/db";
 
 export const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
-export const TEST_MINT_REDIS_URL = process.env.TEST_MINT_REDIS_URL;
+
+/**
+ * The mint test Redis. `TEST_MINT_REDIS_URL` wins; otherwise fall back to the
+ * repo-wide `TEST_REDIS_URL` and select db9 (I5 — the prescribed command and
+ * CI only exported TEST_REDIS_URL, so every DB-backed mint suite silently
+ * skipped and the run exited 0). The db9 selector is always forced so the
+ * mint suites never flush another lane's database.
+ */
+function withDb9(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.pathname = "/9";
+    return parsed.toString();
+  } catch {
+    // Unparseable URL: leave it to ioredis to report the real error.
+    return url;
+  }
+}
+
+export const TEST_MINT_REDIS_URL = process.env.TEST_MINT_REDIS_URL
+  ? process.env.TEST_MINT_REDIS_URL
+  : process.env.TEST_REDIS_URL
+    ? withDb9(process.env.TEST_REDIS_URL)
+    : undefined;
+
+if (TEST_DATABASE_URL !== undefined && TEST_MINT_REDIS_URL === undefined) {
+  // Loud, not silent: the suites will skip, which used to be a false green.
+  console.warn(
+    "[mint tests] TEST_MINT_REDIS_URL/TEST_REDIS_URL is unset — DB-backed mint suites will SKIP",
+  );
+}
 
 /**
  * Mint-side test env (gateway src/test/db.ts pattern). Two differences from

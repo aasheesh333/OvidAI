@@ -182,6 +182,19 @@ function pyNumOr(raw: string, dflt: number): number {
 }
 
 /**
+ * Postgres committed, but the Redis db2 re-publish failed. The durable state
+ * is authoritative; the caller must surface a degraded projection (and audit
+ * it) rather than pretending the write was rejected. The underlying driver
+ * message is kept as `cause` for the server log only — never the wire.
+ */
+export class ProjectionPublishError extends Error {
+  constructor(readonly cause: unknown) {
+    super("redis projection failed");
+    this.name = "ProjectionPublishError";
+  }
+}
+
+/**
  * Store settings: validateSettings → save Postgres (authority) → publish the
  * db2 projection. usagecache:* is deliberately NOT dropped (the 15 s TTL
  * rides out — the plan's ruling on the brief's open question). Returns the
@@ -208,8 +221,14 @@ export async function storeSettings(deps: { db: Db; redis: Redis }, s: Settings)
     autoOssMembers: validated.auto_oss_members,
   });
 
-  // Redis db2 projection — the hook's config:limits + config:base_daily_usd
-  await publishSettingsToRedis(redis, validated);
+  // Redis db2 projection — the hook's config:limits + config:base_daily_usd.
+  // Postgres is already committed here: a projection failure is a DEGRADED
+  // state, not a rejected write (the caller audits it and asks for a resync).
+  try {
+    await publishSettingsToRedis(redis, validated);
+  } catch (err) {
+    throw new ProjectionPublishError(err);
+  }
   return validated;
 }
 

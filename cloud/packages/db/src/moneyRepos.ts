@@ -167,13 +167,45 @@ export const plansRepo = {
       });
   },
 
-  /** Every provisioned user — the durable replacement for ovid:uids scans. */
+  /**
+   * Every user row, ordered by uid (the shared table — includes gateway
+   * chat-only users). Kept for "has this install ever seen a user?" checks
+   * (first-run seed selection) and generic repo consumers. Admin all-users
+   * operations must use `mintUids` instead (I4).
+   */
   async allUids(db: Db): Promise<string[]> {
     const rows = await db
       .select({ uid: usersTable.uid })
       .from(usersTable)
       .orderBy(asc(usersTable.uid));
     return rows.map((r) => r.uid);
+  },
+
+  /**
+   * Every MINT-PROVISIONED user, ordered by uid — the durable replacement for
+   * the Python `ovid:uids` scans (reapply-all / reset-all / export / boot
+   * resync). The shared `users` table also holds gateway chat-only rows
+   * (`users.ensure` runs on sessions/messages/imports); those must never
+   * trigger LiteLLM calls or leak into the export.
+   */
+  async mintUids(db: Db): Promise<string[]> {
+    const rows = await db
+      .select({ uid: usersTable.uid })
+      .from(usersTable)
+      .where(eq(usersTable.mintProvisioned, true))
+      .orderBy(asc(usersTable.uid));
+    return rows.map((r) => r.uid);
+  },
+
+  /**
+   * Mark a user mint-provisioned (I4). Called when mint issues a key, an
+   * admin grants tier/overrides, or the one-shot import adopts a uid.
+   * Insert-if-absent so mint never has to create a full users row first.
+   */
+  async markProvisioned(db: Db, uid: string): Promise<void> {
+    await db.$client`
+      INSERT INTO users (uid, mint_provisioned) VALUES (${uid}, true)
+      ON CONFLICT (uid) DO UPDATE SET mint_provisioned = true`;
   },
 };
 

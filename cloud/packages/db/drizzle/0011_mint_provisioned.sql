@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "mint_provisioned" boolean DEFAULT false NOT NULL;

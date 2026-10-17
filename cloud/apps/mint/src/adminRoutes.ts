@@ -15,11 +15,17 @@ import {
   findPlan,
   storedTier,
   validateMembers,
+  validateSettings,
   type PlanData,
   type PoolsOverride,
   type Settings,
 } from "./planMath.js";
-import { getSettings, storeSettings, userFreeDaily } from "./settings.js";
+import {
+  ProjectionPublishError,
+  getSettings,
+  storeSettings,
+  userFreeDaily,
+} from "./settings.js";
 import { sweepSlowMode } from "./slowMode.js";
 import { computeUsage, unitCost } from "./usage.js";
 import {
@@ -92,32 +98,67 @@ function requestIp(request: FastifyRequest): string {
   return request.ip || "unknown";
 }
 
-// ── body coercion (pydantic-ish, permissive like AdminAction) ───────────────
+// ── body coercion (strict where a wrong type would change behaviour) ───────
 
 function optStr(v: unknown): string | null {
   return typeof v === "string" ? v : null;
 }
 
-function optNum(v: unknown): number | null {
-  if (typeof v === "number") return v;
-  if (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v))) {
-    return Number(v);
-  }
-  return null;
-}
-
-function bodyObject(request: FastifyRequest): Record<string, unknown> {
+/**
+ * I1: a mutating admin route requires a JSON OBJECT. A missing body, JSON
+ * null, a scalar or an array is a client error — never an implicit "{}".
+ * This is what stops `POST /admin/reset-window` with no body from becoming a
+ * GLOBAL reset (Python's ResetAction required an object and answered 422).
+ */
+function requireBodyObject(request: FastifyRequest): Record<string, unknown> {
   const body = request.body;
   if (typeof body === "object" && body !== null && !Array.isArray(body)) {
     return body as Record<string, unknown>;
   }
-  return {};
+  throw new HttpContractError(400, "request body must be a JSON object");
+}
+
+/**
+ * Pydantic-style bool coercion (M1): a present value must be a boolean or
+ * the strings "true"/"false" — `Boolean("false") === true` is exactly the
+ * bug this replaces. Anything else is a 400, never a silent truthy value.
+ */
+function boolField(
+  body: Record<string, unknown>,
+  name: string,
+  dflt: boolean,
+): boolean {
+  const v = body[name];
+  if (v === undefined || v === null) return dflt;
+  if (typeof v === "boolean") return v;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "true") return true;
+    if (s === "false") return false;
+  }
+  throw new HttpContractError(400, `${name} must be true or false`);
+}
+
+/**
+ * Pydantic-style float coercion (M1): a PRESENT numeric field must parse.
+ * Previously `{"daily_usd":"abc"}` was silently ignored and the route
+ * answered 200 without changing anything.
+ */
+function numField(body: Record<string, unknown>, name: string): number | null {
+  const v = body[name];
+  if (v === undefined || v === null) return null;
+  if (typeof v === "number" && !Number.isNaN(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    if (!Number.isNaN(n)) return n;
+  }
+  throw new HttpContractError(400, `${name} must be a number`);
 }
 
 /** reapply flag: body first (Python's payload.pop), then ?reapply=false. */
 function reapplyFlag(request: FastifyRequest, body: Record<string, unknown>): boolean {
   if (body.reapply !== undefined) {
-    return Boolean(body.reapply);
+    return boolField(body, "reapply", true);
   }
   const q = request.query as Record<string, unknown> | undefined;
   if (q?.reapply !== undefined) {
@@ -165,21 +206,31 @@ export interface AdminUserState {
   banned: string | null;
 }
 
-/** mint.py _user_state — read from the Postgres authority. */
+/** mint.py _user_state — Postgres authority, with a Redis-only ban merged in. */
 async function userState(deps: MintDeps, uid: string): Promise<AdminUserState> {
-  const [s, row, override] = await Promise.all([
+  const [s, row, override, redisBan] = await Promise.all([
     getSettings({ db: deps.db }),
     userRow(deps, uid),
     plansRepo.getOverride(deps.db, uid),
+    deps.redis.get(`user:${uid}:banned`),
   ]);
   const plan = findPlan(s, row?.tier ?? null);
+  // I2: a Redis-only ban (an auto-ban whose Postgres write failed, or a ban
+  // imported from the Python install) is still a ban. Export/audit must not
+  // report it as unbanned just because users.banned_at is NULL.
+  const banned =
+    row?.banned === true
+      ? (row.bannedReason ?? "admin")
+      : redisBan !== null && redisBan !== ""
+        ? redisBan
+        : null;
   return {
     tier: storedTier(plan),
     plan: plan.id,
     daily_usd_override: override?.dailyUsd ?? null,
     monthly_cap_override: override?.monthlyCapUsd ?? null,
     pools_override: override?.pools ?? null,
-    banned: row?.banned ? (row.bannedReason ?? "admin") : null,
+    banned,
   };
 }
 
@@ -292,7 +343,7 @@ export async function reapplyAll(
   deps: MintDeps,
   uids?: string[] | null,
 ): Promise<ReapplyAllResult> {
-  const list = uids ?? (await plansRepo.allUids(deps.db));
+  const list = uids ?? (await plansRepo.mintUids(deps.db));
   const run = (): Promise<RunTotal> =>
     runOverUsers(deps, REAPPLY_STATUS_KEY, list, (uid) => reapplyUser(deps, uid));
   if (uids === undefined && list.length > deps.env.reapplySyncMax) {
@@ -350,7 +401,9 @@ async function applySettings(
   const merged: Record<string, unknown> = { ...before };
   for (const [k, v] of Object.entries(changes)) {
     if (v === null || v === undefined) continue;
-    if (!(k in merged)) {
+    // M11: `in` accepts prototype keys ("toString"/"constructor") and would
+    // silently store them; only an own setting name is valid.
+    if (!Object.hasOwn(merged, k)) {
       throw new HttpContractError(400, `unknown setting '${k}'`);
     }
     merged[k] = v;
@@ -364,12 +417,42 @@ async function applySettings(
     }
     await checkMembersExist(deps, members);
   }
+
+  // Validation errors are CLIENT errors (400). Postgres/projection failures
+  // are infrastructure errors and must never masquerade as a rejected write
+  // (I3) — and never leak the raw driver message to the wire.
+  try {
+    validateSettings(merged as unknown as Settings);
+  } catch (err) {
+    throw new HttpContractError(400, (err as Error).message);
+  }
+
   let after: Settings;
   try {
     // validate → Postgres (authority) → db2 re-publish
     after = await storeSettings({ db: deps.db, redis: deps.redis }, merged as unknown as Settings);
   } catch (err) {
-    throw new HttpContractError(400, (err as Error).message);
+    if (err instanceof ProjectionPublishError) {
+      // Postgres committed. Audit the durable change (with a degraded marker
+      // in the log) and answer a sanitized 500 — the operator must not read
+      // "rejected" and keep enforcing the old value.
+      console.log(
+        `[mint] settings projection failed after postgres commit: ${errorName(err.cause)}`,
+      );
+      const durable = await getSettings({ db: deps.db });
+      await audit(deps, action, {
+        target,
+        before,
+        after: { ...durable, projection_error: "redis projection failed" },
+        ip: requestIp(request),
+      });
+      throw new HttpContractError(
+        500,
+        "settings saved but the redis projection failed; retry or resync",
+      );
+    }
+    console.log(`[mint] settings store failed: ${errorName(err)}`);
+    throw new HttpContractError(500, "could not save settings");
   }
   const result = reapply ? await reapplyAll(deps) : { mode: "skipped" as const };
   await audit(deps, action, { target, before, after, ip: requestIp(request) });
@@ -387,6 +470,15 @@ const CONSOLE_HEADERS: Record<string, string> = {
 };
 
 export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): void {
+  // M7: every admin response (JSON included) is owner data — never cache it.
+  // Defense-in-depth: the listener is loopback-only, but /admin/user and
+  // /admin/export carry PII/usage.
+  adminApp.addHook("onSend", async (_request, reply, payload) => {
+    reply.header("cache-control", "no-store");
+    reply.header("x-content-type-options", "nosniff");
+    return payload;
+  });
+
   function auth(request: FastifyRequest): void {
     requireAdmin(deps.env, headerValue(request.headers.authorization));
   }
@@ -409,7 +501,7 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
     auth(request);
     const [settings, uids, reapplyStatus, resetStatus] = await Promise.all([
       getSettings({ db: deps.db }),
-      plansRepo.allUids(deps.db),
+      plansRepo.mintUids(deps.db),
       deps.redis.get(REAPPLY_STATUS_KEY),
       deps.redis.get(RESET_STATUS_KEY),
     ]);
@@ -426,7 +518,7 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
 
   adminApp.post("/admin/settings", async (request, reply) => {
     auth(request);
-    const body = bodyObject(request);
+    const body = requireBodyObject(request);
     const reapply = reapplyFlag(request, body);
     const changes = { ...body };
     delete changes.reapply;
@@ -445,7 +537,7 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
   /** Add a plan or edit one by id: name, price, enabled, aliases, window, mult, slow, auto-oss. */
   adminApp.post("/admin/plans", async (request, reply) => {
     auth(request);
-    const body = bodyObject(request);
+    const body = requireBodyObject(request);
     const reapply = reapplyFlag(request, body);
     const payload = { ...body };
     delete payload.reapply;
@@ -523,7 +615,7 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
   /** = POST /admin/set-tier (legacy alias on the same handler). */
   async function adminUserUpdate(request: FastifyRequest, reply: FastifyReply): Promise<unknown> {
     auth(request);
-    const body = bodyObject(request);
+    const body = requireBodyObject(request);
     const rawUid = optStr(body.uid);
     if (rawUid === null || rawUid.trim() === "") {
       throw new HttpContractError(400, "uid required");
@@ -533,14 +625,17 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
 
     let plan: PlanData | null = null;
     const tier = optStr(body.tier);
+    if (body.tier !== undefined && body.tier !== null && typeof body.tier !== "string") {
+      throw new HttpContractError(400, "tier must be a string");
+    }
     if (tier !== null && tier !== "") {
       plan = findPlan(settings, tier);
       if (tier !== plan.id && !plan.aliases.includes(tier)) {
         throw new HttpContractError(400, "unknown plan");
       }
     }
-    const dailyUsd = optNum(body.daily_usd);
-    const monthlyCapUsd = optNum(body.monthly_cap_usd);
+    const dailyUsd = numField(body, "daily_usd");
+    const monthlyCapUsd = numField(body, "monthly_cap_usd");
     for (const [name, v] of [
       ["daily_usd", dailyUsd],
       ["monthly_cap_usd", monthlyCapUsd],
@@ -549,41 +644,76 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
         throw new HttpContractError(400, `${name} must be >= 0`);
       }
     }
-    const poolsOverride =
-      body.pools !== undefined && body.pools !== null
-        ? validatePoolOverride(body.pools as Record<string, unknown>)
-        : null;
+    let poolsOverride: PoolsOverride | null = null;
+    if (body.pools !== undefined && body.pools !== null) {
+      if (typeof body.pools !== "object" || Array.isArray(body.pools)) {
+        throw new HttpContractError(400, "pools must be an object");
+      }
+      poolsOverride = validatePoolOverride(body.pools as Record<string, unknown>);
+    }
 
     const before = await userState(deps, uid);
     const projection = createProjection({ db: deps.db, redis: deps.redis });
 
     // Postgres first (authority), then the db2 projection
     if (plan !== null) {
+      // M4: an admin tier grant is not a purchase — a stale purchased expiry
+      // would silently re-expire the admin's grant on the next resync.
       await deps.db.$client`
-        INSERT INTO users (uid, tier) VALUES (${uid}, ${plan.id})
-        ON CONFLICT (uid) DO UPDATE SET tier = EXCLUDED.tier`;
-      await projection.publishUserTier(uid, storedTier(plan), null);
+        INSERT INTO users (uid, tier, tier_expires_at, mint_provisioned)
+        VALUES (${uid}, ${plan.id}, NULL, true)
+        ON CONFLICT (uid) DO UPDATE
+          SET tier = EXCLUDED.tier, tier_expires_at = NULL, mint_provisioned = true`;
     }
     const overrideWrite: { dailyUsd?: string | null; monthlyCapUsd?: string | null; pools?: PoolsOverride | null } = {};
-    if (body.clear_daily_usd === true) {
+    if (boolField(body, "clear_daily_usd", false)) {
       overrideWrite.dailyUsd = null;
     } else if (dailyUsd !== null) {
       overrideWrite.dailyUsd = pyNumStr(dailyUsd);
     }
-    if (body.clear_monthly_cap_usd === true) {
+    if (boolField(body, "clear_monthly_cap_usd", false)) {
       overrideWrite.monthlyCapUsd = null;
     } else if (monthlyCapUsd !== null) {
       overrideWrite.monthlyCapUsd = pyNumStr(monthlyCapUsd);
     }
-    if (body.clear_pools === true) {
+    if (boolField(body, "clear_pools", false)) {
       overrideWrite.pools = null;
     } else if (poolsOverride !== null && Object.keys(poolsOverride).length > 0) {
       overrideWrite.pools = poolsOverride;
     }
     if (Object.keys(overrideWrite).length > 0) {
+      // M2: user_plan_overrides has an FK to users. An override-only update
+      // for an unknown uid is a 404 (Python accepted it, but silently
+      // dropping a typo'd entitlement is worse than an explicit miss).
+      if (plan === null && (await userRow(deps, uid)) === null) {
+        throw new HttpContractError(404, "user not found");
+      }
       await plansRepo.saveOverride(deps.db, uid, overrideWrite);
+      await plansRepo.markProvisioned(deps.db, uid);
     }
-    await projection.publishUserState(uid);
+    try {
+      if (plan !== null) {
+        await projection.publishUserTier(uid, storedTier(plan), null);
+      }
+      await projection.publishUserState(uid);
+    } catch (err) {
+      // I3: the Postgres write already committed. Log the real cause, audit
+      // the durable change and answer a sanitized 500 — never the driver text.
+      console.log(
+        `[mint] user update projection failed after postgres commit: ${errorName(err)}`,
+      );
+      const durable = await userState(deps, uid);
+      await audit(deps, "set-user", {
+        target: uid,
+        before,
+        after: { ...durable, projection_error: "redis projection failed" },
+        ip: requestIp(request),
+      });
+      throw new HttpContractError(
+        500,
+        "user saved but the redis projection failed; retry or resync",
+      );
+    }
 
     const res = await reapplyUser(deps, uid);
     await dropUsageCache(deps, [uid]);
@@ -603,23 +733,46 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
     action: string,
     resetMonthFreeDefault: boolean,
   ): Promise<{ ok: boolean; reset: number; detail: unknown }> {
-    const rawUid = optStr(body.uid);
-    const resetMonthFree =
-      body.reset_month_free === undefined ? resetMonthFreeDefault : Boolean(body.reset_month_free);
+    const resetMonthFree = boolField(body, "reset_month_free", resetMonthFreeDefault);
+
+    // I1: ALL-users is an EXPLICIT request only. A missing/whitespace uid is
+    // a client error, never an implicit global reset. `{all:true}` is the
+    // documented shape (the console sends it).
+    const hasUid = body.uid !== undefined && body.uid !== null;
+    const hasAll = body.all !== undefined && body.all !== null;
+    if (hasUid && hasAll) {
+      throw new HttpContractError(400, "specify either uid or all, not both");
+    }
+    let uid: string | null = null;
+    if (hasUid) {
+      if (typeof body.uid !== "string" || body.uid.trim() === "") {
+        throw new HttpContractError(400, "uid required");
+      }
+      uid = body.uid.trim();
+    }
+    let all = false;
+    if (hasAll) {
+      if (body.all !== true) {
+        throw new HttpContractError(400, "all must be true");
+      }
+      all = true;
+    }
+    if (uid === null && !all) {
+      throw new HttpContractError(400, "uid required (or {all:true} for every user)");
+    }
 
     let detail: { mode: string; users: number; keys?: number; errors?: number };
     let target: string;
-    if (rawUid !== null && rawUid.trim() !== "") {
-      const uid = rawUid.trim();
+    if (uid !== null) {
       const res = await resetWindowUser(deps, uid, { resetMonthFree });
       detail = { mode: "sync", users: 1, keys: res.keys, errors: res.errors };
       target = uid;
     } else {
       // ALL users: inline while small, else background with progress
-      const uids = await plansRepo.allUids(deps.db);
+      const uids = await plansRepo.mintUids(deps.db);
       const run = (): Promise<RunTotal> =>
-        runOverUsers(deps, RESET_STATUS_KEY, uids, (uid) =>
-          resetWindowUser(deps, uid, { resetMonthFree }),
+        runOverUsers(deps, RESET_STATUS_KEY, uids, (u) =>
+          resetWindowUser(deps, u, { resetMonthFree }),
         );
       if (uids.length <= deps.env.reapplySyncMax) {
         detail = { mode: "sync", ...(await run()) };
@@ -643,13 +796,17 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
 
   adminApp.post("/admin/reset-window", async (request, reply) => {
     auth(request);
-    return reply.send(await doReset(request, bodyObject(request), "reset-window", false));
+    return reply.send(
+      await doReset(request, requireBodyObject(request), "reset-window", false),
+    );
   });
 
   /** Legacy name: a window reset that also zeroes the monthly backstop. */
   adminApp.post("/admin/reset-usage", async (request, reply) => {
     auth(request);
-    return reply.send(await doReset(request, bodyObject(request), "reset-usage", true));
+    return reply.send(
+      await doReset(request, requireBodyObject(request), "reset-usage", true),
+    );
   });
 
   adminApp.get("/admin/reset-status", async (request) => {
@@ -659,31 +816,58 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
 
   // ---- bans ----
 
+  /**
+   * The Postgres half of a ban/unban. M3: an UNBAN never inserts a row — a
+   * typo'd uid must not become a durable user that later shows up in
+   * all-users operations. A ban of an unknown uid does insert one (the
+   * durable authority needs a row to carry banned_at).
+   */
   async function setBanned(uid: string, banned: boolean, reason: string): Promise<void> {
-    await deps.db.$client`
-      INSERT INTO users (uid) VALUES (${uid}) ON CONFLICT (uid) DO NOTHING`;
     const nowIso = isoUtc(clockNow(deps));
     if (banned) {
       await deps.db.$client`
-        UPDATE users SET banned_at = ${nowIso}, banned_reason = ${reason} WHERE uid = ${uid}`;
+        INSERT INTO users (uid, banned_at, banned_reason)
+        VALUES (${uid}, ${nowIso}, ${reason})
+        ON CONFLICT (uid) DO UPDATE
+          SET banned_at = EXCLUDED.banned_at, banned_reason = EXCLUDED.banned_reason`;
     } else {
       await deps.db.$client`
         UPDATE users SET banned_at = NULL, banned_reason = NULL WHERE uid = ${uid}`;
     }
-    await createProjection({ db: deps.db, redis: deps.redis }).publishUserState(uid);
+  }
+
+  /**
+   * I3: projection after the Postgres commit. Returns the failure instead of
+   * throwing so the caller can still perform the live-side effect
+   * (setKeyBlocked), audit, and then answer a sanitized 500.
+   */
+  async function projectBan(uid: string, clearBan: boolean): Promise<unknown | null> {
+    try {
+      await createProjection({ db: deps.db, redis: deps.redis }).publishUserState(uid, {
+        clearBan,
+      });
+      return null;
+    } catch (err) {
+      console.log(`[mint] ban projection failed after postgres commit: ${errorName(err)}`);
+      return err;
+    }
   }
 
   adminApp.post("/admin/ban", async (request, reply) => {
     auth(request);
-    const body = bodyObject(request);
+    const body = requireBodyObject(request);
     const rawUid = optStr(body.uid);
     const ip = optStr(body.ip);
     let before: AdminUserState | null = null;
     let after: AdminUserState | null = null;
+    let projectionError: unknown | null = null;
     if (rawUid !== null && rawUid.trim() !== "") {
       const uid = rawUid.trim();
       before = await userState(deps, uid);
       await setBanned(uid, true, "admin");
+      projectionError = await projectBan(uid, false);
+      // The live side effect still runs even if the Redis projection failed:
+      // an inert ban is worse than a degraded one.
       await setKeyBlocked(deps, uid, true);
       after = await userState(deps, uid);
     }
@@ -691,20 +875,30 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
       await deps.redis.setex(`ban:ip:${ip.trim()}`, BAN_IP_TTL_S, "admin");
     }
     await audit(deps, "ban", { target: { uid: rawUid, ip }, before, after, ip: requestIp(request) });
+    if (projectionError !== null) {
+      throw new HttpContractError(
+        500,
+        "ban saved but the redis projection failed; retry or resync",
+      );
+    }
     return reply.send({ ok: true });
   });
 
   adminApp.post("/admin/unban", async (request, reply) => {
     auth(request);
-    const body = bodyObject(request);
+    const body = requireBodyObject(request);
     const rawUid = optStr(body.uid);
     const ip = optStr(body.ip);
     let before: AdminUserState | null = null;
     let after: AdminUserState | null = null;
+    let projectionError: unknown | null = null;
     if (rawUid !== null && rawUid.trim() !== "") {
       const uid = rawUid.trim();
       before = await userState(deps, uid);
       await setBanned(uid, false, "");
+      // clearBan: an explicit admin unban overrides the projection's
+      // Redis-only-ban preservation (I2).
+      projectionError = await projectBan(uid, true);
       await setKeyBlocked(deps, uid, false);
       after = await userState(deps, uid);
     }
@@ -712,6 +906,12 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
       await deps.redis.del(`ban:ip:${ip.trim()}`);
     }
     await audit(deps, "unban", { target: { uid: rawUid, ip }, before, after, ip: requestIp(request) });
+    if (projectionError !== null) {
+      throw new HttpContractError(
+        500,
+        "unban saved but the redis projection failed; retry or resync",
+      );
+    }
     return reply.send({ ok: true });
   });
 
@@ -822,7 +1022,7 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
     auth(request);
     const settings = await getSettings({ db: deps.db });
     const users: Record<string, unknown> = {};
-    for (const uid of await plansRepo.allUids(deps.db)) {
+    for (const uid of await plansRepo.mintUids(deps.db)) {
       const [state, row] = await Promise.all([userState(deps, uid), userRow(deps, uid)]);
       users[uid] = { ...state, email: row?.email ?? null };
     }
@@ -833,8 +1033,8 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
 
   adminApp.post("/admin/set-base-budget", async (request, reply) => {
     auth(request);
-    const body = bodyObject(request);
-    const dailyUsd = optNum(body.daily_usd);
+    const body = requireBodyObject(request);
+    const dailyUsd = numField(body, "daily_usd");
     if (dailyUsd === null || !(dailyUsd >= 0)) {
       throw new HttpContractError(400, "daily_usd must be >= 0");
     }
