@@ -97,6 +97,13 @@ export function createAgentEngine(deps: AgentEngineDeps): AgentEngine {
             unattended: job.unattended ?? false,
             ...(job.autonomy !== undefined ? { autonomy: job.autonomy } : {}),
             ...(job.mode !== undefined ? { mode: job.mode } : {}),
+            // Task 20 child-loop seam: pass-through only (top-level jobs omit).
+            ...(job.isSubagent !== undefined ? { isSubagent: job.isSubagent } : {}),
+            ...(job.depth !== undefined ? { depth: job.depth } : {}),
+            ...(job.subagentBriefing !== undefined
+              ? { subagentBriefing: job.subagentBriefing }
+              : {}),
+            ...(job.roster !== undefined ? { roster: job.roster } : {}),
           },
           { ...deps, sink: sinkFor(job.sessionId) },
           rt,

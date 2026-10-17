@@ -39,7 +39,7 @@ import {
 } from "./guards.js";
 import type { KeyResolver } from "./keys.js";
 import { presetById, type AgentPreset } from "./presets.js";
-import { markCacheBreakpoints } from "./promptCache.js";
+import { canonicalTools, markCacheBreakpoints } from "./promptCache.js";
 import type {
   ApprovalGate,
   Compactor,
@@ -52,7 +52,7 @@ import type {
   TodoItem,
 } from "./ports.js";
 import { sandboxFailureCode } from "./ports.js";
-import { computeToolRoster, isToolPermitted, modePolicy, type RosterContext } from "./roster.js";
+import { computeToolRoster, modePolicy, type RosterContext } from "./roster.js";
 import { resolveRoute, type ResolvedRoute } from "./routing.js";
 import { drainQueuedRuns } from "./steering.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
@@ -69,6 +69,7 @@ import type {
   ToolContext,
   ToolRegistry,
   ToolResult,
+  ToolSpec,
 } from "./types.js";
 
 /** P1's HISTORY_LIMIT (runProcessor.ts:134). */
@@ -94,6 +95,22 @@ export interface AgentRunJob {
   prompt: string;
   tier?: string;
   attachmentIds?: string[];
+  // ── P3 Task 20 (additive child-loop seam) ────────────────────────────────
+  // A subagent run is a normal engine run on a CHILD session; these fields
+  // carry the facts the loop would otherwise read off the (absent) parent.
+  // Top-level callers omit them and the loop keeps its T15 behavior exactly.
+  /** True for a child session (layer 2 roster gate + system-prompt briefing). */
+  isSubagent?: boolean;
+  /** 0-based lineage depth (root = 0). A child runs at parent.depth + 1. */
+  depth?: number;
+  /** The parent's dispatch prompt — the child's system-prompt briefing. */
+  subagentBriefing?: string;
+  /**
+   * The child roster projected by the supervisor (CHILD_DENIED_TOOLS +
+   * subagentToolPolicy). When present the loop advertises AND gates exactly
+   * this set; absent → the normal computeToolRoster projection.
+   */
+  roster?: readonly ToolSpec[];
 }
 
 export interface NormalizedRunJob extends AgentRunJob {
@@ -467,11 +484,15 @@ function presetFor(state: SessionAgentState): AgentPreset | null {
   return presetById(state.presetId);
 }
 
-function rosterContext(state: SessionAgentState, mode: SessionMode): RosterContext {
+function rosterContext(
+  state: SessionAgentState,
+  mode: SessionMode,
+  isSubagent = false,
+): RosterContext {
   return {
     mode,
     planMode: state.planMode,
-    isSubagent: false,
+    isSubagent,
     // The loop cannot know the deployment's feature flags (Task 16 owns the
     // composition): advertise what the registry actually contains. The
     // preset/plan/skill filters still apply.
@@ -668,7 +689,7 @@ export async function runAgentLoop(
       const parts = await buildSystemPrompt({
         mode,
         planMode: state.planMode,
-        isSubagent: false,
+        isSubagent: job.isSubagent ?? false,
         persona: preset?.persona ?? "",
         workspaceFolder: "",
         workspaceTreeSummary: "",
@@ -676,6 +697,9 @@ export async function runAgentLoop(
         memoryContext: "",
         todos: state.todos,
         goal: state.goal,
+        ...(job.subagentBriefing !== undefined
+          ? { subagentBriefing: job.subagentBriefing }
+          : {}),
       });
       // P2-compat mode (systemPromptOverride) keeps the prompt byte-identical
       // to SYSTEM_PROMPT_V1: no volatile block is appended.
@@ -738,7 +762,17 @@ export async function runAgentLoop(
       if (injected.length > 0) msgs.push(...injected);
 
       // ── roster + route (preset pin from state.presetId) ────────────────
-      const roster = computeToolRoster(rosterContext(state, mode), availableSpecs(deps));
+      // A child run carries the supervisor's projected roster (Task 20); the
+      // dispatch gate below uses the SAME set, so "advertised" and "permitted"
+      // still cannot disagree.
+      const roster =
+        job.roster !== undefined
+          ? canonicalTools(job.roster)
+          : computeToolRoster(
+              rosterContext(state, mode, job.isSubagent ?? false),
+              availableSpecs(deps),
+            );
+      const rosterNames = new Set(roster.map((t) => t.name));
       route = await routeFor(state);
       if (route === null) return await failed("key_not_minted");
 
@@ -948,7 +982,7 @@ export async function runAgentLoop(
         }
 
         // Roster/permission gate — the SAME single source as the roster.
-        if (result === null && !isToolPermitted(call.name, rosterContext(state, mode))) {
+        if (result === null && !rosterNames.has(call.name)) {
           result = {
             content: `DENIED: ${call.name} is not available in ${
               state.planMode ? "plan" : mode
@@ -1070,8 +1104,8 @@ export async function runAgentLoop(
             userId,
             mode,
             planMode: state.planMode,
-            isSubagent: false,
-            depth: 0,
+            isSubagent: job.isSubagent ?? false,
+            depth: job.depth ?? 0,
             unattended: job.unattended,
             callKey,
             signal: abortSignal,
