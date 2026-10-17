@@ -119,6 +119,15 @@ export function startTestPageServer(): Promise<TestPageServer> {
   return new Promise((resolve) => {
     const server: Server = createServer((req, res) => {
       const path = (req.url ?? "/").split("?")[0];
+      // /echo-cookies: returns the Cookie request header verbatim (plain
+      // text). Used by the P6 Task 11 lightpanda isolation pin — even
+      // HttpOnly cookies reach this route, so any leak across leases
+      // shows up here.
+      if (path === "/echo-cookies") {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end(req.headers.cookie ?? "");
+        return;
+      }
       // /js/* chunks referenced by the SPA shell: 200 with a tiny body.
       const route = ROUTES[path] ?? (path.startsWith("/js/") ? { body: "//chunk", type: "text/javascript" } : undefined);
       if (!route) {
