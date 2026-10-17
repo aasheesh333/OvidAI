@@ -73,6 +73,7 @@ import { startWorkerPtyBridge } from "./ptyBridge.js";
 import { createSandboxPort } from "./sandboxAdapter.js";
 import { createSandboxSeam } from "./sandboxSeam.js";
 import { createScheduleFireProcessor, resyncScheduleMirror } from "./schedulerMirror.js";
+import { createScheduleTools, toCoreTools } from "./scheduleTools.js";
 import { startSchedulerLoop } from "./schedulerTick.js";
 import { sweepStaleRuns } from "./staleRuns.js";
 import { createColdRowScan, createStuckHibernationScan, createStuckHydrationScan } from "./storageScans.js";
@@ -632,6 +633,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     // pushes the approval card BEFORE the 120 s unattended default-deny fires
     // and ledgers the auto-denial on the occurrence (Task 7's contract).
     unattendedApprovalHook: createUnattendedApprovalHook({ db, notifier }),
+    // P4 Task 13: the agent schedule tools enter P3's roster through the
+    // additive FullRunDeps.extraTools seam (adapted beside P2's six).
+    extraTools: toCoreTools(createScheduleTools({ db, system })),
   });
 
   // ---- P4 Task 10: the scheduler loop + schedules-mirror consumer. --------
@@ -655,10 +659,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   fireWorker.on("error", (err) => {
     console.error("[worker] schedules worker error", err);
   });
-  // P4-SEAM: Task 13 (agent schedule tools) has not landed yet — its
-  // `createScheduleTools` registration belongs there. The approval
-  // timeoutPolicy half of the P3 seam IS wired above.
-  console.log("[scheduler] P3 tool/approval seam not wired");
+  // P4 Task 13: the agent schedule tools are registered with the P3 roster
+  // through FullRunDeps.extraTools above; the approval timeoutPolicy half of
+  // the P3 seam is wired via unattendedApprovalHook.
+  console.log("[scheduler] agent schedule tools registered (4)");
 
   // Connection OPTIONS OBJECT — a bare URL string silently spreads into
   // garbage opts and hangs (Task 7 lesson, pinned by its health test).

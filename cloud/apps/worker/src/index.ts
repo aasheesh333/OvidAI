@@ -32,6 +32,7 @@ export * from "./ptyBridge.js";
 export * from "./runProcessor.js";
 export * from "./sandboxAdapter.js";
 export * from "./sandboxSeam.js";
+export * from "./scheduleTools.js";
 export * from "./schedulerMirror.js";
 export * from "./schedulerSettle.js";
 export * from "./schedulerTick.js";
