@@ -78,6 +78,14 @@ export interface WarmWorkspaceEntry {
 export interface SandboxEviction {
   listWarmWorkspaces(): Promise<WarmWorkspaceEntry[]>;
   evictWorkspace(userId: string, sessionId: string): Promise<void>;
+  /**
+   * False ONLY for the pre-P2 stand-in: its empty list means "the seam is not
+   * wired yet", NOT "no workspace is warm". T10's reconcile uses this to
+   * suppress the destructive "warm row without a seam entry" arm until P2
+   * lands (otherwise the noop's [] would archive every registered row on the
+   * first boot sweep). Absent/true means the list is authoritative.
+   */
+  readonly authoritative?: boolean;
 }
 
 /**
@@ -89,6 +97,8 @@ export interface SandboxEviction {
 export function createNoopSandboxEviction(log?: (msg: string) => void): SandboxEviction {
   let listLogged = false;
   return {
+    // See SandboxEviction.authoritative: [] is "unknown", not "empty".
+    authoritative: false,
     async listWarmWorkspaces(): Promise<WarmWorkspaceEntry[]> {
       if (!listLogged) {
         listLogged = true;
@@ -515,10 +525,12 @@ export async function hibernateWorkspace(
  */
 export async function reconcileStuckHibernations(
   deps: HibernateDeps,
-  opts: { stuckAfterMs: number },
+  opts: { stuckAfterMs: number; now?: Date },
 ): Promise<{ resetToWarm: number; closedToCold: number }> {
   const clock = deps.clock ?? (() => new Date());
-  const cutoff = new Date(clock().getTime() - opts.stuckAfterMs);
+  // T10 sweeps pass an injected clock so every pass uses ONE "now".
+  const nowMs = (opts.now ?? clock()).getTime();
+  const cutoff = new Date(nowMs - opts.stuckAfterMs);
   const rows = await deps.stuckHibernationScan.listStuck(deps.db, cutoff);
 
   let resetToWarm = 0;

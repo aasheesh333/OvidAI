@@ -13,6 +13,8 @@ export * from "./contract.js";
 export * from "./activity.js";
 export * from "./hibernate.js";
 export * from "./hydrate.js";
+export * from "./warmLru.js";
+export * from "./sweeper.js";
 export * from "./artifacts.js";
 export * from "./archive/format.js";
 export * from "./archive/memberStream.js";
