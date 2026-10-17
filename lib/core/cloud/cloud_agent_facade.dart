@@ -22,47 +22,49 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 
 import '../agent_service.dart';
+import '../connection_service.dart';
 import '../state.dart';
 import 'agent_surface.dart';
 import 'cloud_rest.dart';
+import 'cloud_session_store.dart';
 import 'cloud_ws.dart';
 import 'event_projection.dart';
 import 'models.dart';
 
-/// The subset of Task 9's `CloudSessionStore` this facade consumes.
-///
-/// Declared here because Task 8 lands BEFORE Task 9 creates
-/// `cloud_session_store.dart`; the concrete store implements this seam and
-/// Task 9 replaces the constructor's type with the real class. Keeping the
-/// surface minimal means the facade compiles and is testable while dark.
-abstract class CloudSessionStoreSeam {
-  /// The server session id for a local id (null when unmapped).
-  String? serverIdFor(String localSessionId);
-
-  /// True when the client must queue prompts instead of sending them.
-  bool get offline;
-
-  /// Queues [content] for a later FIFO flush.
-  Future<void> enqueue(
-    String sessionId,
-    String content, {
-    List<String> attachmentIds = const [],
-  });
-}
-
 /// AgentService-shaped facade over the cloud REST + WS surface.
-class CloudAgentFacade extends ChangeNotifier implements AgentSurface {
+class CloudAgentFacade extends ChangeNotifier
+    implements AgentSurface, CloudTranscriptSink {
   CloudAgentFacade({
     required CloudRestClient rest,
     required WsMultiplexer ws,
-    required CloudSessionStoreSeam? store,
+    required CloudSessionStore? store,
   })  : _rest = rest, // ignore: prefer_initializing_formals
         _ws = ws, // ignore: prefer_initializing_formals
-        _store = store; // ignore: prefer_initializing_formals
+        _store = store { // ignore: prefer_initializing_formals
+    final s = store;
+    if (s != null) {
+      // Task 9 wiring: the store seeds this facade's projections and the
+      // facade flushes the store's outbox on the offline→online flip.
+      s.transcriptSink = this;
+      _connection = s.connection;
+      _lastOffline = s.offline;
+      _connection!.addListener(_onConnectivityChanged);
+      _ws.addListener(_onConnectivityChanged);
+    } else {
+      _connection = null;
+    }
+  }
 
   final CloudRestClient _rest;
   final WsMultiplexer _ws;
-  final CloudSessionStoreSeam? _store;
+  final CloudSessionStore? _store;
+
+  /// The store's connectivity probe (null when no store is wired).
+  late final ConnectionService? _connection;
+
+  /// Previous combined offline state — the flush trigger is a TRUE→FALSE
+  /// edge across BOTH inputs (connectivity probe + WS link state).
+  bool _lastOffline = false;
 
   static CloudAgentFacade? _instance;
 
@@ -71,7 +73,7 @@ class CloudAgentFacade extends ChangeNotifier implements AgentSurface {
   static CloudAgentFacade get I => _instance ??= CloudAgentFacade(
         rest: CloudRestClient.I,
         ws: WsMultiplexer.I,
-        store: null,
+        store: CloudSessionStore.I,
       );
 
   /// Replaces the singleton — test wiring only.
@@ -146,14 +148,24 @@ class CloudAgentFacade extends ChangeNotifier implements AgentSurface {
       EventTranscriptProjector(projection),
     );
     _sessions[serverId] = state;
+
+    // Task 9 reconciliation (T7 review carry): seed the cached transcript and
+    // the exactly-once cursor BEFORE subscribing, and align the multiplexer's
+    // replay cursor with the cache's high-water mark, so the server replays
+    // only events the cache does not already cover.
+    final store = _store;
+    if (store != null) {
+      final cached = store.cachedTranscriptFor(serverId);
+      if (cached != null && cached.isNotEmpty) {
+        final cursor = store.cachedCursorFor(serverId);
+        projection.seedFromHistory(cached);
+        state.projector.seedCursor(cursor);
+        _ws.seedCursor(serverId, cursor);
+      }
+    }
+
     projection.addListener(() => _onProjectionChanged(serverId, state));
 
-    // Task 9 carry (T7 review round 1): when the store seeds cached history
-    // BEFORE subscribing, it must align the projector's cursor with the
-    // cache's high-water mark. NOTE (review round 1, Minor 1):
-    // `EventTranscriptProjector._lastSeq` is private with no reset/seed API,
-    // so Task 9 cannot honor this carry without ADDING one (e.g.
-    // `seedCursor(String? seq)`) to event_projection.dart.
     state.subscription = _ws.subscribe(serverId).listen(
           (CloudSessionEvent event) {
             if (_disposed) return;
@@ -512,8 +524,13 @@ class CloudAgentFacade extends ChangeNotifier implements AgentSurface {
       ));
       state.projection.notifyListeners();
 
-      state.runState = CloudRunState(runId: response.runId, busy: true);
-      state.queuedBehindActiveRun = queuedBehindActiveRun;
+      // Review carry (T8 round 1): a terminal event for THIS run can arrive
+      // while the POST is in flight. Resurrecting busy after that would
+      // leave the composer showing Stop for a dead run.
+      if (state.terminalSettledRunId != response.runId) {
+        state.runState = CloudRunState(runId: response.runId, busy: true);
+        state.queuedBehindActiveRun = queuedBehindActiveRun;
+      }
       _attachments.remove(id);
       _errors.remove(id);
       _notify();
@@ -921,6 +938,113 @@ class CloudAgentFacade extends ChangeNotifier implements AgentSurface {
   }
 
   // -------------------------------------------------------------------------
+  // Task 9 — store wiring: reconnect flush + transcript seeding
+  // -------------------------------------------------------------------------
+
+  /// Fires for both offline inputs (connectivity probe + WS link state). A
+  /// TRUE→FALSE edge is the reconnect: upload any files that were staged
+  /// while offline, then flush the prompt outbox FIFO.
+  void _onConnectivityChanged() {
+    if (_disposed) return;
+    final store = _store;
+    if (store == null) return;
+    final nowOffline = store.offline;
+    final wasOffline = _lastOffline;
+    _lastOffline = nowOffline;
+    if (wasOffline && !nowOffline) {
+      unawaited(_flushAfterReconnect(store));
+    }
+  }
+
+  /// Offline attachments semantics (Task 9 owns the T8 carry): the bytes
+  /// stayed staged on disk while offline, because an attachment id can only
+  /// be minted by the gateway. On reconnect they are uploaded first and the
+  /// ids are attached to the queued entry; a failure leaves them staged for
+  /// the next flip and the flush still runs (sending the text alone).
+  Future<void> _flushAfterReconnect(CloudSessionStore store) async {
+    if (_disposed) return;
+    for (final entry in store.outboxEntries) {
+      final staged = _attachments[entry.sessionId];
+      if (staged == null || staged.isEmpty) continue;
+      try {
+        final serverId = await store.ensureServerSession(entry.sessionId);
+        final ids = <String>[];
+        for (final attachment in staged) {
+          final upload = await _rest.createAttachment(
+            serverId,
+            name: attachment.name,
+            size: attachment.size,
+          );
+          final bytes = await File(attachment.path).readAsBytes();
+          await _rest.uploadAttachmentBytes(upload, bytes);
+          ids.add(upload.attachmentId);
+        }
+        await store.setAttachmentIds(entry.clientMsgId, ids);
+        _attachments.remove(entry.sessionId);
+      } catch (_) {
+        // Keep them staged; the flush below is still safe.
+      }
+    }
+    await store.flushOutbox();
+    if (!_disposed) _notify();
+  }
+
+  @override
+  void seedTranscript(
+    String serverSessionId,
+    List<Message> messages,
+    String? cursor,
+  ) {
+    if (_disposed) return;
+    final state = _stateFor(serverSessionId);
+    state.projection.seedFromHistory(messages);
+    state.projector.seedCursor(cursor);
+    _ws.seedCursor(serverSessionId, cursor);
+    _notify();
+  }
+
+  @override
+  void prependTranscript(String serverSessionId, List<Message> messages) {
+    if (_disposed || messages.isEmpty) return;
+    final state = _stateFor(serverSessionId);
+    final known = <String>{
+      for (final message in state.projection.messages) message.privateSyncId,
+    };
+    final older = <Message>[
+      for (final message in messages)
+        if (known.add(message.privateSyncId)) message,
+    ];
+    if (older.isEmpty) return;
+    state.projection.messages.insertAll(0, older);
+    state.projection.notifyListeners();
+    _notify();
+  }
+
+  @override
+  void appendSentUserMessage(
+    String serverSessionId,
+    String userMessageId,
+    String content,
+  ) {
+    if (_disposed) return;
+    final state = _stateFor(serverSessionId);
+    // A clientMsgId replay returns the ORIGINAL userMessageId: the row is
+    // already present, so the outbox must not append a second one.
+    if (state.projection.messages
+        .any((m) => m.privateSyncId == userMessageId)) {
+      return;
+    }
+    state.projection.messages.add(Message(
+      role: 'user',
+      kind: MsgKind.text,
+      content: content,
+      privateSyncId: userMessageId,
+    ));
+    state.projection.notifyListeners();
+    _notify();
+  }
+
+  // -------------------------------------------------------------------------
   // Test seams
   // -------------------------------------------------------------------------
 
@@ -970,6 +1094,8 @@ class CloudAgentFacade extends ChangeNotifier implements AgentSurface {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _connection?.removeListener(_onConnectivityChanged);
+    _ws.removeListener(_onConnectivityChanged);
     for (final state in _sessions.values) {
       unawaited(state.subscription?.cancel());
       state.projection.dispose();

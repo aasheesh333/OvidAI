@@ -160,6 +160,24 @@ class TranscriptProjection extends ChangeNotifier {
     _changed = true;
   }
 
+  /// Replaces an ALREADY-PRESENT message (same `privateSyncId`) with the
+  /// server-authoritative [finalized] row and drops the live bubble. P8
+  /// Task 9: a replayed `message_completed` can overlap a REST/cache page
+  /// that already contained the message (the cache high-water-mark window);
+  /// the transcript must never grow a duplicate assistant row.
+  void _replaceExistingMessage(String messageId, Message finalized) {
+    final live = _liveBubble;
+    if (live != null) messages.remove(live);
+    _liveBubble = null;
+    final idx = messages.indexWhere((m) => m.privateSyncId == messageId);
+    if (idx >= 0) {
+      messages[idx] = finalized;
+    } else {
+      messages.add(finalized);
+    }
+    _changed = true;
+  }
+
   void _appendMessage(Message m) {
     messages.add(m);
     _changed = true;
@@ -228,6 +246,17 @@ class EventTranscriptProjector {
   /// O(1) memory. The multiplexer dedupes per-seq upstream; this catches
   /// consumer re-feeds (A, B, A) and same-object double-applies alike.
   String? _lastSeq;
+
+  /// Seeds (or clears, with null) the exactly-once cursor. P8 Task 9 calls
+  /// this with the offline cache's high-water mark BEFORE folding replayed
+  /// events: the seeded transcript already reflects every event at or below
+  /// the mark, so re-feeding one must be a no-op. Without this API the
+  /// private `_lastSeq` survives [TranscriptProjection.seedFromHistory] and
+  /// would either drop uncovered events or duplicate covered ones.
+  void seedCursor(String? seq) => _lastSeq = seq;
+
+  /// The current high-water mark (test/observability seam).
+  String? get cursor => _lastSeq;
 
   /// Folds ONE event. Unknown/fold-table-absent types are ignored (never
   /// throw — forward compatibility for P2/P3 event types). Payload fields
@@ -328,17 +357,25 @@ class EventTranscriptProjector {
         ? null
         : now.difference(startedAt).inMilliseconds;
     if (elapsedMs != null && elapsedMs < 0) elapsedMs = 0;
-    target._replaceLiveBubble(Message(
+    final messageId = _str(payload, 'messageId');
+    final finalized = Message(
       role: 'assistant',
       kind: MsgKind.text,
       // Server content/id authoritative (null messageId falls back to the
       // Message ctor's production id).
       content: _str(payload, 'content') ?? '',
-      privateSyncId: _str(payload, 'messageId'),
+      privateSyncId: messageId,
       thinking: false,
       elapsedMs: elapsedMs,
       time: now,
-    ));
+    );
+    if (messageId != null &&
+        target.messages.any((m) => m.privateSyncId == messageId)) {
+      // Task 9 replay overlap: the seeded cache already holds this message.
+      target._replaceExistingMessage(messageId, finalized);
+    } else {
+      target._replaceLiveBubble(finalized);
+    }
     target._setActiveRunId(null);
   }
 

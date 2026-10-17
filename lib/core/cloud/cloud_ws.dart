@@ -297,6 +297,11 @@ class WsMultiplexer extends ChangeNotifier {
 
   final Map<String, _SessionSub> _subs = <String, _SessionSub>{};
 
+  /// Cursors seeded by Task 9's offline cache BEFORE [subscribe]. Kept
+  /// in-memory so [subscribe] can consult it synchronously (the pref write
+  /// is async); once a subscription exists, its `lastEventId` wins.
+  final Map<String, String?> _seededCursors = <String, String?>{};
+
   /// Decoded server frames NOT consumed by the session-event pipeline
   /// (`pty_*`, `browser_state`, future additive ops) — the Tasks 15/16
   /// channel seam. Broadcast: attach before the frames you care about.
@@ -308,6 +313,36 @@ class WsMultiplexer extends ChangeNotifier {
 
   /// Server frames outside the session-event pipeline (see [_rawFrames]).
   Stream<Map<String, dynamic>> get rawServerFrames => _rawFrames.stream;
+
+  /// The replay cursor currently held for [sessionId]: the live
+  /// subscription's max accepted seq, else a Task 9 seed, else the persisted
+  /// pref. Task 9 records it as the offline cache's high-water mark.
+  Future<String?> cursorFor(String sessionId) async {
+    final sub = _subs[sessionId];
+    if (sub?.lastEventId != null) return sub!.lastEventId;
+    if (_seededCursors.containsKey(sessionId)) {
+      return _seededCursors[sessionId];
+    }
+    try {
+      final prefs = _prefs ??= await SharedPreferences.getInstance();
+      return prefs.getString('$_lastEventKey$sessionId');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Aligns the replay cursor for [sessionId] BEFORE [subscribe] (P8 Task 9,
+  /// the T7 cursor carry): the offline cache's high-water mark is the seq up
+  /// to which the seeded transcript is authoritative, so the server must
+  /// replay everything AFTER it and the projector must drop everything at or
+  /// below it. Idempotent; a later [subscribe] uses the seeded value. When a
+  /// subscription already exists, its next reconnect re-subscribes from
+  /// [seq] (the current socket is not interrupted).
+  void seedCursor(String sessionId, String? seq) {
+    _seededCursors[sessionId] = seq;
+    _subs[sessionId]?.lastEventId = seq;
+    unawaited(_persistSeededCursor(sessionId, seq));
+  }
 
   // -------------------------------------------------------------------------
   // Public surface
@@ -325,7 +360,9 @@ class WsMultiplexer extends ChangeNotifier {
     if (existing != null) return existing.stream;
 
     final sub = _SessionSub(sessionId);
-    sub.lastEventId = _prefs?.getString('$_lastEventKey$sessionId');
+    sub.lastEventId = _seededCursors.containsKey(sessionId)
+        ? _seededCursors[sessionId]
+        : _prefs?.getString('$_lastEventKey$sessionId');
     _subs[sessionId] = sub;
 
     if (_linkState == WsLinkState.online && _socket != null) {
@@ -558,7 +595,8 @@ class WsMultiplexer extends ChangeNotifier {
     // (the gateway's ownership check + subscription cap run per subscribe),
     // then flush any frames buffered mid-connect.
     for (final sub in _subs.values) {
-      sub.lastEventId ??= _prefs?.getString('$_lastEventKey${sub.sessionId}');
+      sub.lastEventId ??= _seededCursors[sub.sessionId] ??
+          _prefs?.getString('$_lastEventKey${sub.sessionId}');
       _send(_subscribeFrame(sub.sessionId, sub.lastEventId));
     }
     final queued = List<Map<String, Object?>>.from(_outboundQueue);
@@ -899,5 +937,21 @@ class WsMultiplexer extends ChangeNotifier {
         debugPrint('cloud ws: cursor persistence failed: $err');
       }
     }());
+  }
+
+  /// Persists a Task 9 seeded cursor. Same best-effort contract as
+  /// [_persistCursor]; `null` clears the pref (a cache with no events).
+  Future<void> _persistSeededCursor(String sessionId, String? seq) async {
+    try {
+      final prefs = _prefs ??= await SharedPreferences.getInstance();
+      final key = '$_lastEventKey$sessionId';
+      if (seq == null) {
+        await prefs.remove(key);
+      } else {
+        await prefs.setString(key, seq);
+      }
+    } catch (err) {
+      debugPrint('cloud ws: seeded cursor persistence failed: $err');
+    }
   }
 }

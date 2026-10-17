@@ -230,6 +230,66 @@ class CloudHealth {
   final CloudHealthChecks checks;
 }
 
+/// One prompt composed while offline, queued for a FIFO flush on reconnect
+/// (P8 Task 9, spec §12). [clientMsgId] is the Task 4 idempotency key: a
+/// replayed flush returns the ORIGINAL run/user message, so the entry is
+/// removed without creating a second run or optimistic row.
+class OutboxEntry {
+  const OutboxEntry({
+    required this.clientMsgId,
+    required this.sessionId,
+    required this.content,
+    this.attachmentIds = const <String>[],
+    required this.createdAt,
+  });
+
+  factory OutboxEntry.fromJson(Map<String, dynamic> j) => OutboxEntry(
+        clientMsgId: j['clientMsgId'] as String? ?? '',
+        sessionId: j['sessionId'] as String? ?? '',
+        content: j['content'] as String? ?? '',
+        attachmentIds: <String>[
+          for (final id in (j['attachmentIds'] as List? ?? const <dynamic>[]))
+            if (id is String && id.isNotEmpty) id,
+        ],
+        createdAt:
+            DateTime.tryParse(j['createdAt'] as String? ?? '') ?? DateTime.now(),
+      );
+
+  final String clientMsgId;
+
+  /// Local session id until [CloudSessionStore.ensureServerSession] maps it;
+  /// the flush resolves it before sending.
+  final String sessionId;
+  final String content;
+
+  /// Attachment ids already uploaded to the gateway. Empty when the files
+  /// were staged while offline (the facade uploads them on reconnect before
+  /// calling `flushOutbox`).
+  final List<String> attachmentIds;
+  final DateTime createdAt;
+
+  OutboxEntry copyWith({
+    String? sessionId,
+    List<String>? attachmentIds,
+  }) =>
+      OutboxEntry(
+        clientMsgId: clientMsgId,
+        sessionId: sessionId ?? this.sessionId,
+        content: content,
+        attachmentIds: attachmentIds ?? this.attachmentIds,
+        createdAt: createdAt,
+      );
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'clientMsgId': clientMsgId,
+        'sessionId': sessionId,
+        'content': content,
+        if (attachmentIds.isNotEmpty) 'attachmentIds': attachmentIds,
+        // The server's zod `.datetime()` wants a Z-terminated stamp.
+        'createdAt': createdAt.toUtc().toIso8601String(),
+      };
+}
+
 /// Client-side run state assembled from WS session events (P8 later tasks
 /// feed it from `run_started` / `run_started_retry` / `run_completed` /
 /// `run_failed`). Tolerant of missing fields — it is a snapshot, not a wire

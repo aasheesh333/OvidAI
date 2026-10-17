@@ -1,0 +1,662 @@
+// P8 Task 9 — CloudSessionStore (reconciliation, offline cache, prompt outbox).
+//
+// Contract anchors:
+//   - POST /sessions                 → SessionDto (create-on-first-send)
+//   - GET  /sessions?limit&cursor    → keyset page of SessionDto
+//   - GET  /sessions/:id/messages    → NEWEST-FIRST page of MessageDto
+//   - POST /sessions/:id/messages    → 202 {runId,userMessageId,status}
+//     (clientMsgId is the Task 4 idempotency key: a replay returns the
+//      ORIGINAL runId/userMessageId and never creates a second run)
+//   - ConnectionService.status / WsMultiplexer.linkState → offline
+//   - SharedPreferences `ovid_cloud_session_ids` (local→server map) and
+//     `ovid_cloud_outbox` (FIFO JSON list) survive process death.
+//   - SessionHistoryRepository is the offline READ CACHE (spec §12).
+//
+// Review Focus #3 (plan): an offline prompt composed before process death
+// MUST still be in the outbox when a NEW store instance is built over the
+// same prefs.
+
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
+import 'package:ovid_ai/core/cloud/cloud_rest.dart';
+import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
+import 'package:ovid_ai/core/cloud/cloud_ws.dart';
+import 'package:ovid_ai/core/cloud/event_projection.dart';
+import 'package:ovid_ai/core/cloud/models.dart';
+import 'package:ovid_ai/core/connection_service.dart';
+import 'package:ovid_ai/core/session_history_store.dart';
+import 'package:ovid_ai/core/state.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+// ---------------------------------------------------------------------------
+// Fake REST — records the wire, returns contract-shaped answers, and models
+// Task 4's clientMsgId replay semantics.
+// ---------------------------------------------------------------------------
+
+class FakeStoreRest extends CloudRestClient {
+  FakeStoreRest()
+      : super(headers: CloudHeaders.forTest(), restBase: 'http://test');
+
+  int createCalls = 0;
+  final List<
+      ({
+        String sessionId,
+        String content,
+        List<String> attachmentIds,
+        String? clientMsgId,
+      })> sent = [];
+  final Map<String, SendMessageResponse> responsesByClientMsgId =
+      <String, SendMessageResponse>{};
+  final Map<String, CloudApiException> sendErrors =
+      <String, CloudApiException>{};
+
+  final List<({String sessionId, String? before, int limit})> pageCalls =
+      <({String sessionId, String? before, int limit})>[];
+  final List<String> sessionCursors = <String>[];
+  List<CloudPage<SessionDto>> sessionPages = const [];
+  Map<String, List<MessageDto>> messagesBySession =
+      const <String, List<MessageDto>>{};
+
+  @override
+  Future<SessionDto> createSession({String? title}) async {
+    createCalls++;
+    final id = 'srv-created-$createCalls';
+    return SessionDto(
+      id: id,
+      title: title,
+      mode: 'auto',
+      createdAt: DateTime.utc(2026, 10, 17),
+      updatedAt: DateTime.utc(2026, 10, 17),
+    );
+  }
+
+  @override
+  Future<CloudPage<SessionDto>> listSessions(
+      {int limit = 50, String? cursor}) async {
+    sessionCursors.add(cursor ?? '');
+    if (sessionPages.isEmpty) {
+      return const CloudPage<SessionDto>(items: [], nextCursor: null);
+    }
+    final index = cursor == null ? 0 : int.parse(cursor);
+    return sessionPages[index];
+  }
+
+  @override
+  Future<CloudPage<MessageDto>> pageMessages(
+    String sessionId, {
+    int limit = 50,
+    String? before,
+  }) async {
+    pageCalls.add((sessionId: sessionId, before: before, limit: limit));
+    return CloudPage<MessageDto>(
+      items: messagesBySession[sessionId] ?? const <MessageDto>[],
+      nextCursor: null,
+    );
+  }
+
+  @override
+  Future<SendMessageResponse> sendMessage(
+    String sessionId,
+    String content, {
+    List<String> attachmentIds = const [],
+    String? clientMsgId,
+  }) async {
+    final error = sendErrors[content];
+    if (error != null) throw error;
+    final key = clientMsgId ?? '';
+    final prior = responsesByClientMsgId[key];
+    if (prior != null) {
+      // Task 4 replay: the original run/user message, no second run row.
+      return prior;
+    }
+    final n = responsesByClientMsgId.length + 1;
+    final response = SendMessageResponse(
+      runId: 'run-$n',
+      userMessageId: 'msg-$n',
+      status: 'queued',
+    );
+    responsesByClientMsgId[key] = response;
+    sent.add((
+      sessionId: sessionId,
+      content: content,
+      attachmentIds: attachmentIds,
+      clientMsgId: clientMsgId,
+    ));
+    return response;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fake socket / sink / harness
+// ---------------------------------------------------------------------------
+
+class _FakeSocket implements CloudSocket {
+  final List<String> sent = <String>[];
+  final StreamController<Object> _frames =
+      StreamController<Object>.broadcast();
+  final StreamController<void> _closed = StreamController<void>.broadcast();
+
+  @override
+  Stream<Object> get frames => _frames.stream;
+
+  @override
+  Stream<void> get closed => _closed.stream;
+
+  @override
+  int? get closeCode => null;
+
+  @override
+  void sendText(String frame) => sent.add(frame);
+
+  @override
+  Future<void> close([int? code, String? reason]) async {
+    if (!_closed.isClosed) await _closed.close();
+  }
+}
+
+class _RecordingSink implements CloudTranscriptSink {
+  List<Message>? seeded;
+  String? seededCursor;
+  final List<List<Message>> prepended = <List<Message>>[];
+  final List<({String sessionId, String userMessageId, String content})>
+      sentUser = <({String sessionId, String userMessageId, String content})>[];
+
+  @override
+  void seedTranscript(
+      String serverSessionId, List<Message> messages, String? cursor) {
+    seeded = messages;
+    seededCursor = cursor;
+  }
+
+  @override
+  void prependTranscript(String serverSessionId, List<Message> messages) {
+    prepended.add(messages);
+  }
+
+  @override
+  void appendSentUserMessage(
+      String serverSessionId, String userMessageId, String content) {
+    sentUser.add((
+      sessionId: serverSessionId,
+      userMessageId: userMessageId,
+      content: content,
+    ));
+  }
+}
+
+class _Harness {
+  _Harness(
+    this.rest,
+    this.prefs,
+    this.connection,
+    this.ws,
+    this.store,
+    this.sockets,
+  );
+
+  final FakeStoreRest rest;
+  final SharedPreferences prefs;
+  final ConnectionService connection;
+  final WsMultiplexer ws;
+  final CloudSessionStore store;
+  final List<_FakeSocket> sockets;
+
+  _FakeSocket get socket => sockets.last;
+}
+
+Future<_Harness> _buildStore({
+  bool online = true,
+  FakeStoreRest? rest,
+  Map<String, String> idMap = const <String, String>{},
+  List<String> knownServerIds = const <String>[],
+  List<OutboxEntry> outbox = const <OutboxEntry>[],
+}) async {
+  final prefs = await SharedPreferences.getInstance();
+  if (idMap.isNotEmpty) {
+    await prefs.setString(CloudSessionStore.idMapKey, jsonEncode(idMap));
+  }
+  if (knownServerIds.isNotEmpty) {
+    await prefs.setString(
+        CloudSessionStore.knownServerIdsKey, jsonEncode(knownServerIds));
+  }
+  if (outbox.isNotEmpty) {
+    await prefs.setString(CloudSessionStore.outboxKey,
+        jsonEncode([for (final entry in outbox) entry.toJson()]));
+  }
+
+  final connection = ConnectionService.forTest(
+    status: online ? ConnectionStatus.online : ConnectionStatus.offline,
+  );
+  final sockets = <_FakeSocket>[];
+  final ws = WsMultiplexer(
+    mintTicket: () async => 'ticket',
+    socketFactory: (Uri url) async {
+      final socket = _FakeSocket();
+      sockets.add(socket);
+      return socket;
+    },
+    prefs: prefs,
+    heartbeatInterval: const Duration(hours: 1),
+    pongTimeout: const Duration(hours: 1),
+    jitterMs: () => 0,
+  );
+  if (online) {
+    await ws.connectIfNeeded();
+    await pumpEventQueue();
+  }
+
+  final fakeRest = rest ?? FakeStoreRest();
+  final store = CloudSessionStore(
+    rest: fakeRest,
+    cache: SessionHistoryRepository.I,
+    prefs: prefs,
+    connection: connection,
+    ws: ws,
+  );
+  await store.ready;
+  return _Harness(fakeRest, prefs, connection, ws, store, sockets);
+}
+
+SessionDto _dto(String id, String? title) => SessionDto(
+      id: id,
+      title: title,
+      mode: 'auto',
+      createdAt: DateTime.utc(2026, 10, 1),
+      updatedAt: DateTime.utc(2026, 10, 17),
+    );
+
+MessageDto _msg(String id, String role, String content, {int minute = 0}) =>
+    MessageDto(
+      id: id,
+      sessionId: 'srv-1',
+      role: role,
+      content: content,
+      createdAt: DateTime.utc(2026, 10, 17, 12, minute),
+    );
+
+CloudSessionEvent _event(String type, Map<String, dynamic> payload,
+        {required String seq}) =>
+    CloudSessionEvent.fromJson(<String, dynamic>{
+      'sessionId': 'srv-1',
+      'seq': seq,
+      'type': type,
+      'payload': payload,
+      'ts': '2026-10-17T12:00:00.000Z',
+    });
+
+void main() {
+  setUp(() async {
+    SharedPreferences.setMockInitialValues(const <String, Object>{});
+    AppState.resetTestInstance();
+    AppState.createForTest();
+  });
+
+  tearDown(() async {
+    AppState.resetTestInstance();
+  });
+
+  group('ensureServerSession', () {
+    test('creates once; the second call returns the mapped id without a POST',
+        () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      final first = await h.store.ensureServerSession('local-1', title: 'Hi');
+      final second = await h.store.ensureServerSession('local-1');
+
+      expect(first, 'srv-created-1');
+      expect(second, first);
+      expect(h.rest.createCalls, 1,
+          reason: 'create-on-first-send must be idempotent');
+      expect(h.store.serverIdFor('local-1'), first);
+
+      // A new process over the same prefs sees the persisted map.
+      final reloaded = CloudSessionStore(
+        rest: h.rest,
+        cache: SessionHistoryRepository.I,
+        prefs: h.prefs,
+        connection: h.connection,
+        ws: h.ws,
+      );
+      await reloaded.ready;
+      expect(reloaded.serverIdFor('local-1'), first);
+      reloaded.dispose();
+    });
+  });
+
+  group('refreshSessions', () {
+    test('pages the server list, creates ChatSessions, and preserves the '
+        'local→server map', () async {
+      final h = await _buildStore(
+        idMap: <String, String>{'local-1': 'srv-2'},
+      );
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      AppState.I.sessions.add(
+        ChatSession(id: 'local-1', title: 'Local', model: 'm'),
+      );
+      h.rest.sessionPages = <CloudPage<SessionDto>>[
+        CloudPage<SessionDto>(
+          items: <SessionDto>[_dto('srv-1', 'One'), _dto('srv-2', 'Server Two')],
+          nextCursor: '1',
+        ),
+        CloudPage<SessionDto>(
+          items: <SessionDto>[_dto('srv-3', 'Three')],
+          nextCursor: null,
+        ),
+      ];
+
+      await h.store.refreshSessions();
+
+      expect(h.rest.sessionCursors, <String>['', '1'],
+          reason: 'both keyset pages must be walked');
+      expect(AppState.I.sessionById('srv-1')?.title, 'One');
+      expect(AppState.I.sessionById('srv-3')?.title, 'Three');
+      // The mapped server session is the LOCAL row, never a duplicate.
+      expect(AppState.I.sessionById('srv-2'), isNull);
+      expect(AppState.I.sessionById('local-1')?.title, 'Server Two');
+      expect(h.store.serverIdFor('local-1'), 'srv-2');
+    });
+  });
+
+  group('loadTranscript', () {
+    test('reverses the newest-first page and writes the offline cache',
+        () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      // The multiplexer's persisted high-water mark (last accepted seq).
+      h.ws.seedCursor('srv-1', '500-0');
+      h.rest.messagesBySession = <String, List<MessageDto>>{
+        'srv-1': <MessageDto>[
+          _msg('m3', 'assistant', 'three', minute: 3),
+          _msg('m2', 'assistant', 'two', minute: 2),
+          _msg('m1', 'user', 'one', minute: 1),
+        ],
+      };
+      final sink = _RecordingSink();
+      h.store.transcriptSink = sink;
+
+      await h.store.loadTranscript('srv-1');
+
+      expect(h.rest.pageCalls.single.before, isNull);
+      expect(
+        [for (final m in h.store.cachedTranscriptFor('srv-1')!) m.content],
+        <String>['one', 'two', 'three'],
+        reason: 'the wire is newest-first; the transcript is oldest-first',
+      );
+      expect(h.store.cachedCursorFor('srv-1'), '500-0');
+      expect(sink.seededCursor, '500-0');
+      expect([for (final m in sink.seeded!) m.content],
+          <String>['one', 'two', 'three']);
+
+      // Durable: the SessionHistoryRepository namespace holds the row.
+      final rows = await SessionHistoryRepository.I.readRows(
+          h.prefs, CloudSessionStore.cacheNamespace);
+      expect(rows, isNotNull);
+      final row = (jsonDecode(rows!.single) as Map<String, dynamic>);
+      expect(row['id'], 'srv-1');
+      expect(row['cursor'], '500-0');
+      expect(
+        [
+          for (final m in (row['messages'] as List))
+            (m as Map<String, dynamic>)['content']
+        ],
+        <String>['one', 'two', 'three'],
+      );
+    });
+  });
+
+  group('offline outbox', () {
+    test('enqueue persists across a new store instance (Review Focus #3)',
+        () async {
+      final h = await _buildStore(online: false);
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      expect(h.store.offline, isTrue);
+      await h.store.enqueue('srv-1', 'composed offline');
+
+      final reloaded = CloudSessionStore(
+        rest: h.rest,
+        cache: SessionHistoryRepository.I,
+        prefs: h.prefs,
+        connection: h.connection,
+        ws: h.ws,
+      );
+      await reloaded.ready;
+      final entries = reloaded.outboxFor('srv-1');
+      expect(entries, hasLength(1));
+      expect(entries.single.content, 'composed offline');
+      expect(entries.single.clientMsgId, matches(RegExp(r'^[0-9a-f]{32}$')));
+      reloaded.dispose();
+    });
+
+    test('flushOutbox sends FIFO with the stored clientMsgIds and removes '
+        'each success', () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      await h.store.enqueue('srv-1', 'first');
+      await h.store.enqueue('srv-1', 'second');
+      final stored = [
+        for (final entry in h.store.outboxFor('srv-1')) entry.clientMsgId
+      ];
+
+      await h.store.flushOutbox();
+
+      expect([for (final call in h.rest.sent) call.content],
+          <String>['first', 'second']);
+      expect([for (final call in h.rest.sent) call.clientMsgId], stored);
+      expect(h.store.outboxFor('srv-1'), isEmpty);
+    });
+
+    test('a 503 stops the flush and keeps the remainder', () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      await h.store.enqueue('srv-1', 'ok');
+      await h.store.enqueue('srv-1', 'down');
+      h.rest.sendErrors['down'] = CloudApiException(
+        status: 503,
+        code: 'unavailable',
+        message: 'Cloud is briefly unavailable.',
+      );
+
+      await h.store.flushOutbox();
+
+      expect([for (final call in h.rest.sent) call.content], <String>['ok']);
+      final remaining = h.store.outboxFor('srv-1');
+      expect(remaining, hasLength(1));
+      expect(remaining.single.content, 'down');
+      expect(h.store.outboxError?.code, 'unavailable');
+    });
+
+    test('402 keeps the prompt (retryable)', () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      await h.store.enqueue('srv-1', 'limited');
+      h.rest.sendErrors['limited'] = CloudApiException(
+        status: 402,
+        code: 'daily_limit_reached',
+        message: 'Daily limit reached.',
+      );
+      await h.store.flushOutbox();
+      expect(h.store.outboxFor('srv-1'), hasLength(1));
+      expect(h.store.outboxError?.code, 'daily_limit_reached');
+    });
+
+    test('409 run_conflict removes the already-sent entry', () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      await h.store.enqueue('srv-1', 'already sent');
+      h.rest.sendErrors['already sent'] = CloudApiException(
+        status: 409,
+        code: 'run_conflict',
+        message: 'Already accepted.',
+      );
+      await h.store.flushOutbox();
+      expect(h.store.outboxFor('srv-1'), isEmpty);
+    });
+  });
+
+  group('replayed flush (Task 4 idempotency)', () {
+    test('a duplicate clientMsgId removes the entry without a second '
+        'optimistic message', () async {
+      const clientMsgId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      final entry = OutboxEntry(
+        clientMsgId: clientMsgId,
+        sessionId: 'srv-1',
+        content: 'hello',
+        createdAt: DateTime.utc(2026, 10, 17),
+      );
+      // The server already accepted this prompt in a previous process: the
+      // replay returns the ORIGINAL runId/userMessageId.
+      final rest = FakeStoreRest()
+        ..responsesByClientMsgId[clientMsgId] = const SendMessageResponse(
+          runId: 'run-original',
+          userMessageId: 'msg-original',
+          status: 'queued',
+        );
+      final h = await _buildStore(
+        rest: rest,
+        knownServerIds: const <String>['srv-1'],
+        // Two copies of the SAME entry: the first flush sent it but the
+        // process died before the removal persisted.
+        outbox: <OutboxEntry>[entry, entry],
+      );
+      addTearDown(h.ws.dispose);
+
+      final facade = CloudAgentFacade(
+        rest: h.rest,
+        ws: h.ws,
+        store: h.store,
+      );
+      addTearDown(facade.dispose);
+
+      await h.store.flushOutbox();
+      await pumpEventQueue();
+
+      expect(h.rest.sent, isEmpty,
+          reason: 'both sends are clientMsgId replays');
+      expect(h.store.outboxFor('srv-1'), isEmpty);
+      final projection = facade.projectionForTest('srv-1');
+      expect(projection, isNotNull);
+      final userRows =
+          projection!.messages.where((m) => m.role == 'user').toList();
+      expect(userRows, hasLength(1),
+          reason: 'the replay must not append a second optimistic row');
+      expect(userRows.single.privateSyncId, 'msg-original');
+    });
+  });
+
+  group('cursor reconciliation (T7 carry)', () {
+    test('seedCursor makes the projector ignore events at/below the cache '
+        'high-water mark', () {
+      final projection = TranscriptProjection();
+      final projector = EventTranscriptProjector(projection);
+      projector.seedCursor('500-0');
+
+      projector.apply(
+          _event('system_note', <String, dynamic>{'message': 'old'}, seq: '400-0'));
+      expect(projection.messages, isEmpty,
+          reason: 'an event already covered by the cache must not re-fold');
+
+      projector.apply(
+          _event('system_note', <String, dynamic>{'message': 'new'}, seq: '600-0'));
+      expect(projection.messages.single.content, 'new');
+    });
+
+    test('the facade seeds the WS subscription cursor from the cache before '
+        'subscribing', () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+
+      h.ws.seedCursor('srv-1', '500-0');
+      h.rest.messagesBySession = <String, List<MessageDto>>{
+        'srv-1': <MessageDto>[_msg('m1', 'user', 'cached', minute: 1)],
+      };
+      await h.store.loadTranscript('srv-1');
+      expect(h.store.cachedCursorFor('srv-1'), '500-0');
+
+      final facade =
+          CloudAgentFacade(rest: h.rest, ws: h.ws, store: h.store);
+      addTearDown(facade.dispose);
+
+      // Triggers _stateFor → seed the projection + WS cursor → subscribe.
+      facade.liveBubbleTicksFor('srv-1');
+      await pumpEventQueue();
+
+      final frames = <Map<String, dynamic>>[
+        for (final raw in h.socket.sent)
+          if (jsonDecode(raw) is Map<String, dynamic>)
+            jsonDecode(raw) as Map<String, dynamic>
+      ];
+      final subscribe = frames.lastWhere(
+        (frame) => frame['op'] == 'subscribe' && frame['sessionId'] == 'srv-1',
+      );
+      expect(subscribe['lastEventId'], '500-0',
+          reason: 'replay must start at the cache high-water mark');
+      expect(facade.projectionForTest('srv-1')!.messages.single.content,
+          'cached');
+    });
+  });
+
+  group('facade wiring', () {
+    test('flushes the outbox on the offline→online flip', () async {
+      final h = await _buildStore(online: false);
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      // A mapped server session keeps the entry flushable without a create.
+      await h.store.ensureServerSession('local-1');
+      await h.store.enqueue('local-1', 'queued offline');
+      expect(h.store.offline, isTrue);
+
+      final facade =
+          CloudAgentFacade(rest: h.rest, ws: h.ws, store: h.store);
+      addTearDown(facade.dispose);
+
+      // Bring the WS up first (still offline: ConnectionService says so).
+      await h.ws.connectIfNeeded();
+      await pumpEventQueue();
+      expect(h.store.offline, isTrue);
+
+      // The connectivity flip is the flush trigger.
+      await h.connection.probe();
+      await pumpEventQueue();
+
+      expect([for (final call in h.rest.sent) call.content],
+          <String>['queued offline']);
+      expect(h.store.outboxFor('local-1'), isEmpty);
+    });
+
+    test('runTask enqueues (and does not POST) while offline', () async {
+      final h = await _buildStore(online: false);
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      final facade =
+          CloudAgentFacade(rest: h.rest, ws: h.ws, store: h.store);
+      addTearDown(facade.dispose);
+
+      await facade.runTask('offline prompt', sessionId: 'srv-1');
+
+      expect(h.rest.sent, isEmpty);
+      expect(h.store.outboxFor('srv-1'), hasLength(1));
+      expect(h.store.outboxFor('srv-1').single.content, 'offline prompt');
+    });
+  });
+}
