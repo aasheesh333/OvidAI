@@ -199,6 +199,55 @@ describe.skipIf(!lightpandaAvailable(BIN))("LightpandaPool (real lightpanda, hos
   );
 
   it(
+    "release reserves the slot until reap completes: a concurrent acquire queues behind FIFO waiters, no process overshoot",
+    async () => {
+      const pool = makePool(makeCfg({ maxTier1Processes: 1 }));
+      const a = await pool.acquire(10_000);
+
+      // C is already queued when A is released.
+      const c = pool.acquire(10_000);
+      let cResolved = false;
+      void c.then(() => {
+        cResolved = true;
+      });
+
+      // Release A WITHOUT awaiting, then issue B in the same tick: B must not
+      // jump the already-queued C, and the slot must stay reserved while A's
+      // process is being killed/reaped (review Important finding).
+      const releaseA = pool.release(a);
+      const b = pool.acquire(10_000);
+      let bResolved = false;
+      void b.then(() => {
+        bResolved = true;
+      });
+
+      // During the kill/reap window: the old process still occupies the slot.
+      expect(pool.running()).toBe(1);
+      expect(cResolved).toBe(false);
+      expect(bResolved).toBe(false);
+
+      await releaseA;
+
+      // FIFO after the reap: C (enqueued first) is admitted, B stays queued.
+      // A replacement process is spawned only now — never while A was alive.
+      const cLease = await c;
+      expect(cResolved).toBe(true);
+      expect(bResolved).toBe(false);
+      expect(pool.running()).toBe(1);
+      // A is fully reaped by the time the replacement serves.
+      expect(await untilReaped(a.pid)).toBe(true);
+
+      await pool.release(cLease);
+      const bLease = await b;
+      expect(bResolved).toBe(true);
+      expect(bLease.slot).toBe(0);
+      await pool.release(bLease);
+      expect(pool.running()).toBe(0);
+    },
+    30_000,
+  );
+
+  it(
     "close() with a live lease kills everything and leaves no stray lightpanda pids",
     async () => {
       const before = lightpandaPids();

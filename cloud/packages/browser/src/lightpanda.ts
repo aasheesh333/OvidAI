@@ -125,11 +125,15 @@ export function createLightpandaPool(
         return;
       }
       let settled = false;
+      // Declared before `finish` so the defensive kill() failure path below
+      // can clear them without hitting the temporal dead zone.
+      let sigkillTimer: ReturnType<typeof setTimeout> | undefined;
+      let boundTimer: ReturnType<typeof setTimeout> | undefined;
       const finish = () => {
         if (settled) return;
         settled = true;
-        clearTimeout(sigkillTimer);
-        clearTimeout(boundTimer);
+        if (sigkillTimer !== undefined) clearTimeout(sigkillTimer);
+        if (boundTimer !== undefined) clearTimeout(boundTimer);
         resolve();
       };
       child.once("exit", finish);
@@ -139,7 +143,7 @@ export function createLightpandaPool(
         finish();
         return;
       }
-      const sigkillTimer = setTimeout(() => {
+      sigkillTimer = setTimeout(() => {
         try {
           child.kill("SIGKILL");
         } catch {
@@ -148,7 +152,7 @@ export function createLightpandaPool(
       }, KILL_GRACE_MS);
       // Absolute bound: even if the exit event were somehow lost, release()
       // must not hang the caller past the reap window.
-      const boundTimer = setTimeout(finish, KILL_GRACE_MS + 1_000);
+      boundTimer = setTimeout(finish, KILL_GRACE_MS + 1_000);
       sigkillTimer.unref?.();
       boundTimer.unref?.();
     });
@@ -211,15 +215,27 @@ export function createLightpandaPool(
     try {
       await waitForCdp(cdpUrl, Math.min(CDP_READY_TIMEOUT_MS, timeoutMs), child);
     } catch (err) {
-      held.delete(slot);
       allProcs.delete(child);
-      await killAndReap(child);
-      pump();
+      // Keep the slot RESERVED through the kill/reap window (same rule as
+      // release): a concurrent acquire must queue, never spawn onto a port
+      // whose old process is still shutting down.
+      try {
+        await killAndReap(child);
+      } finally {
+        if (held.get(slot)?.child === child) held.delete(slot);
+        pump();
+      }
       throw new LightpandaError(
         `lightpanda serve failed to become CDP-ready on ${cdpUrl}: ${errMessage(err)}${stderrTail ? `; stderr: ${stderrTail.slice(-512)}` : ""}`,
       );
     }
-    return held.get(slot)!.lease;
+    const entry = held.get(slot);
+    if (!entry || entry.child !== child) {
+      // close() cleared the pool while CDP was starting; close() already
+      // killed the child. Surface a typed error, never a raw TypeError.
+      throw new LightpandaError("The Lightpanda pool was closed while the serve process was starting.");
+    }
+    return entry.lease;
   }
 
   function pump(): void {
@@ -259,13 +275,27 @@ export function createLightpandaPool(
 
   async function release(lease: LightpandaLease): Promise<void> {
     const entry = held.get(lease.slot);
-    held.delete(lease.slot);
-    if (entry) {
-      allProcs.delete(entry.child);
-      // ALWAYS kill + reap — the process is never reused (hygiene by construction).
-      await killAndReap(entry.child);
+    // Lease identity is (slot, pid), not slot alone: a stale/duplicate
+    // release must never kill a NEWER lease that took the slot later.
+    if (entry !== undefined && entry.lease.pid !== lease.pid) {
+      pump();
+      return;
     }
-    pump();
+    try {
+      if (entry !== undefined) {
+        allProcs.delete(entry.child);
+        // ALWAYS kill + reap — the process is never reused (hygiene by construction).
+        await killAndReap(entry.child);
+      }
+    } finally {
+      // The slot stays RESERVED (still in `held`) for the WHOLE kill/reap
+      // window, so a concurrent acquire() sees the pool full and queues
+      // behind existing FIFO waiters instead of spawning a replacement onto
+      // a port whose old process is still shutting down (EADDRINUSE +
+      // transient process-cap overshoot). Free it only after the reap.
+      if (held.get(lease.slot) === entry) held.delete(lease.slot);
+      pump();
+    }
   }
 
   async function readPage(url: string, timeoutMs: number): Promise<{ html: string; title: string; finalUrl: string }> {
