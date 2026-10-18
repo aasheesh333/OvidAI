@@ -255,6 +255,7 @@ steps or skip a gate.
 | 14 | Browser gated suites + memory bench | Re-prove Lightpanda 1.0.1 and measure the chromium tree on this box before activation. | `[OWNER]` |
 | 15 | Browser egress uid **wiring** | Code fix landed (`469d3f9`): browsers now drop to uid 230000 with no root fallback. Remaining owner work is host state — set the uid in worker.env, re-run `install-nft.sh`, confirm `/opt/ovid-browsers` is traversable by 230000, then verify `ps` + `nft`. See 3.13. | `[OWNER]` |
 | 16 | R0 hardening A / B / C / E / F / G | Hard gate before real users; independent of the P2 order, but E+G batch into the activation window and C runs last. | `[OWNER]` |
+| 17 | Browser per-host consent | NOT blocking activation (browser tools are not yet dispatched), but must be decided BEFORE they are wired: the on-device build required the user to grant each host a page-acting tool touches, and the server has only SSRF/egress control. See 3.15. | `[OWNER]` |
 
 ### 3.1 Gate 0 — quiet tree + lockfile regeneration
 
@@ -578,6 +579,35 @@ duplicate the commands here.
 Gate: all seven R0 boxes checked and their verification lines recorded in
 `HARDENING.md` §"Decision log" (D is already verified). If any of A, B, C, E,
 F or G is unchecked, stop and do not route user traffic.
+
+### 3.15 Gate 17 — browser per-host consent (**decide before browser tools are wired**)
+
+**Not blocking activation today** — the browser tools are defined in
+`@ovid/browser` but are not yet dispatched by `runProcessor`, so the gap below
+cannot be exercised. It becomes live the moment someone wires them in, which
+is why it must be decided before that happens.
+
+The on-device client enforced a USER-CONSENT boundary the server does not have:
+
+- `browser_open`/`browser_navigate` gated the host being navigated TO, but a
+  click, a JS redirect or a `target=_blank` can move the tab elsewhere
+  afterwards. So 15 "page-acting" tools (`browser_read`, `evaluate`, `click`,
+  `type`, `fill`, `screenshot`, `cookies`, `download`, `upload`, …) re-probed
+  the tab's LIVE `location.host` and required the user to have granted THAT
+  host. Without it the model could grant one host and then walk to any other.
+- The server has `guardUrl` → `assertPublicHost` (`packages/browser/src/sessionOps.ts`),
+  which is SSRF/egress control: it refuses non-public addresses and non-http
+  schemes. It knows nothing about which hosts the user approved, and there is
+  no per-host grant concept anywhere in `packages/browser` or
+  `packages/agent-core`. The P6 plan never mentions grants or consent, so this
+  was dropped silently rather than decided.
+
+| Option | What it means | Consequence |
+|---|---|---|
+| **A. Re-implement server-side** | The session records its approved host set; a page-acting tool whose live host is not in it raises an approval through the existing P3 approvals machinery | Restores the on-device guarantee. Costs a per-tool host probe and an approval round-trip on host change. |
+| **B. Accept egress-only** | The tool call itself is the user's consent boundary; nftables + SSRF are the safety net | Simpler and arguably fine now that the browser is server-side and the user watches tool calls. But it IS a reduction from the on-device build — say so in the spec rather than leaving it implicit. |
+
+`Answer: ______` (A / B)
 
 ---
 
