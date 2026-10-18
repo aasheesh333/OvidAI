@@ -5,7 +5,15 @@ on:
     # hoplite/** — agent thread branches: push builds a device-testable APK
     # (signed release when the keystore secret exists, otherwise debug) before
     # review, so fixes can be tested without merging.
-    branches: [main, ci/verified-android-build-20260827, 'hoplite/**', 'harness/**']
+    branches:
+      - main
+      - ci/verified-android-build-20260827
+      - 'hoplite/**'
+      - 'harness/**'
+      # The cloud-migration branch: every push builds a signed release APK +
+      # AAB (the keystore secrets exist) so a device-testable artifact is
+      # always available without merging to main.
+      - 'feat/ovid-cloud'
   pull_request:
     branches: [main, ci/verified-android-build-20260827]
   workflow_dispatch:
