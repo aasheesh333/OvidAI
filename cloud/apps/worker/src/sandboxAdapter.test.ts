@@ -15,7 +15,7 @@ import {
   type SandboxManager,
 } from "@ovid/sandbox";
 
-import { createSandboxPort } from "./sandboxAdapter.js";
+import { createSandboxPort, createStepLimiter } from "./sandboxAdapter.js";
 
 /**
  * Shape test: the adapter wraps P2's REAL SandboxManager (exercised end to end
@@ -318,5 +318,88 @@ describe("createSandboxPort — jobs", () => {
     const m = fakeManager();
     const port = createSandboxPort(m.manager);
     await expect(port.jobOutput("u1", "job-x")).rejects.toThrow(/no such job: job-x/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step limiter (owner directive 2026-10-18): run concurrency and STEP
+// concurrency are different budgets. A run streams tokens for seconds while
+// costing no CPU; the local step is what the box must bound.
+// ---------------------------------------------------------------------------
+
+describe("createStepLimiter", () => {
+  it("never runs more than `max` steps at once, and releases on completion", async () => {
+    const limiter = createStepLimiter(2);
+    let active = 0;
+    let peak = 0;
+    const gate: Array<() => void> = [];
+
+    const task = () =>
+      limiter.run(async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise<void>((resolve) => gate.push(resolve));
+        active -= 1;
+      });
+
+    const all = [task(), task(), task(), task()];
+    // Two are running; two are queued behind them.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(limiter.stats()).toMatchObject({ active: 2, waiting: 2, max: 2 });
+    expect(peak).toBe(2);
+
+    // Release in FIFO order until every task has run.
+    while (gate.length > 0) {
+      gate.shift()!();
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    await Promise.all(all);
+    expect(peak).toBe(2);
+    expect(limiter.stats()).toMatchObject({ active: 0, waiting: 0 });
+  });
+
+  it("releases the permit when the step THROWS (a failed tool cannot leak it)", async () => {
+    const limiter = createStepLimiter(1);
+    await expect(
+      limiter.run(async () => {
+        throw new Error("tool blew up");
+      }),
+    ).rejects.toThrow("tool blew up");
+    expect(limiter.stats()).toMatchObject({ active: 0, waiting: 0 });
+    // The next step still gets in.
+    await expect(limiter.run(async () => "ok")).resolves.toBe("ok");
+  });
+
+  it("rejects a non-positive bound instead of silently running unbounded", () => {
+    expect(() => createStepLimiter(0)).toThrow(/positive integer/);
+    expect(() => createStepLimiter(-1)).toThrow(/positive integer/);
+    expect(() => createStepLimiter(1.5)).toThrow(/positive integer/);
+  });
+
+  it("the port applies the limiter to file steps (one attach at a time at limit 1)", async () => {
+    const limiter = createStepLimiter(1);
+    let attachesInFlight = 0;
+    let peak = 0;
+    const m = fakeManager();
+    // Wrap attach so the test observes how many steps are INSIDE the port.
+    const realAttach = m.manager.attach.bind(m.manager);
+    (m.manager as unknown as { attach: typeof realAttach }).attach = async (...args) => {
+      attachesInFlight += 1;
+      peak = Math.max(peak, attachesInFlight);
+      try {
+        await new Promise((r) => setTimeout(r, 20));
+        return await realAttach(...args);
+      } finally {
+        attachesInFlight -= 1;
+      }
+    };
+
+    const port = createSandboxPort(m.manager, { stepLimit: limiter });
+    await Promise.all([
+      port.exists("u1", "a.txt").catch(() => false),
+      port.exists("u1", "b.txt").catch(() => false),
+    ]);
+    // With one permit the second step cannot enter until the first leaves.
+    expect(peak).toBe(1);
   });
 });

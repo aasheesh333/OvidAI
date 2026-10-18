@@ -71,7 +71,7 @@ import { createMcpRuntime } from "./mcpRuntime.js";
 import { createNotifier, createFcmPushSender } from "./notify.js";
 import { createPluginInstallProcessor } from "./pluginInstallProcessor.js";
 import { startWorkerPtyBridge } from "./ptyBridge.js";
-import { createSandboxPort } from "./sandboxAdapter.js";
+import { createSandboxPort, createStepLimiter } from "./sandboxAdapter.js";
 import { createSandboxSeam } from "./sandboxSeam.js";
 import { createScheduleFireProcessor, resyncScheduleMirror } from "./schedulerMirror.js";
 import { createScheduleTools, toCoreTools } from "./scheduleTools.js";
@@ -431,6 +431,26 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   // half-booted cgroup tree is worse than refusing to start. main() stays
   // composition-root-thin on purpose (P1 convention): Task 14's e2e exercises
   // this wiring end to end.
+  // Run concurrency and STEP concurrency are different budgets (owner
+  // directive 2026-10-18). A run spends most of its life streaming model
+  // tokens — async I/O, no CPU, a couple of MB — so thousands may be in
+  // flight. The expensive part is the brief local step (spawn a jailed
+  // process, read/write a file), and THAT is what the box must bound. One
+  // limiter is shared by every port instance so the bound is per-box, not
+  // per-run.
+  const toolStepLimit = (() => {
+    const raw = env.OVID_MAX_CONCURRENT_TOOL_STEPS;
+    if (raw === undefined || raw.trim() === "") return 200;
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      throw new Error(
+        `OVID_MAX_CONCURRENT_TOOL_STEPS must be a positive integer, got: ${raw}`,
+      );
+    }
+    return parsed;
+  })();
+  const stepLimit = createStepLimiter(toolStepLimit);
+
   const sandboxConfig = loadSandboxConfig(env);
   const rootfs = await resolveRootfs(sandboxConfig.rootfsPath);
   const cgroups = createCgroupManager(sandboxConfig);
@@ -708,11 +728,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     // provider egress inside the processor allowlists this configured
     // LiteLLM origin (which is loopback in production) — user URLs stay
     // fully guarded.
-    sandbox: createSandboxPort(manager),
+    sandbox: createSandboxPort(manager, { stepLimit }),
     // Review I2: one port per tier so the workspace quota project matches
     // the user's plan (free 500 MB / pro 2048 MB), and the P2 handle the
     // adapted six-tool roster needs is attached with the SAME tier.
-    sandboxForTier: (tier) => createSandboxPort(manager, { tier }),
+    sandboxForTier: (tier) => createSandboxPort(manager, { tier, stepLimit }),
     sandboxHandleFor: (userId, tier) => manager.attach(userId, { tier }),
     github,
     litellmBaseUrl: cfg.litellmBaseUrl,

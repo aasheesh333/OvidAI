@@ -785,17 +785,20 @@ validate_env() {
       || guard_fail "OVID_RUN_STALE_MS" "must be >= 60000 ms in the env file — anything shorter sweeps healthy long runs as run_lost (got '$OVID_RUN_STALE_MS'); the chaos harness may lower it per-run via --env"
   fi
   require_var OVID_MAX_ACTIVE_SANDBOXES
-  # Raised from 24 to 160 (founder directive 2026-10-18). Measured: an idle
-  # jail costs ~1.7 MB of slice memory, so 160 concurrent sandboxes fit the
-  # 10G slice; the per-jail memory.max (512 MB) is the ceiling, not the
-  # reservation.
-  [[ "$OVID_MAX_ACTIVE_SANDBOXES" == "160" ]] \
-    || guard_fail "OVID_MAX_ACTIVE_SANDBOXES" "must be 160 (got '$OVID_MAX_ACTIVE_SANDBOXES')"
+  # Raised to 1500 (founder directive 2026-10-18): an idle jail costs ~1.7 MB
+  # of slice memory, so 1500 live envs fit the 10G slice; the per-jail
+  # memory.max (512 MB) is a ceiling, not a reservation. The REAL bound on
+  # local work is OVID_MAX_CONCURRENT_TOOL_STEPS (200), applied around shell
+  # and file steps only — never during LLM streaming.
+  [[ "$OVID_MAX_ACTIVE_SANDBOXES" == "1500" ]] \
+    || guard_fail "OVID_MAX_ACTIVE_SANDBOXES" "must be 1500 (got '$OVID_MAX_ACTIVE_SANDBOXES')"
   require_var MAX_LIVE_BROWSERS
-  # The founder raised the live-context cap to 32 with the ephemeral-lease
-  # model (15 s freeze + resource diet); 4 was the pre-diet ceiling.
-  [[ "$MAX_LIVE_BROWSERS" == "32" ]] \
-    || guard_fail "MAX_LIVE_BROWSERS" "must be 32 (got '$MAX_LIVE_BROWSERS')"
+  # Live-context cap 48 with the ephemeral-lease model (15 s freeze +
+  # resource diet). 48 x ~240 MB ≈ 11.5 GB is above the 6-8 GB browser budget
+  # on a quiet box, so the lease — not this number — is what keeps the
+  # steady-state count low.
+  [[ "$MAX_LIVE_BROWSERS" == "48" ]] \
+    || guard_fail "MAX_LIVE_BROWSERS" "must be 48 (got '$MAX_LIVE_BROWSERS')"
   require_var OVID_MAX_WARM_GB
   [[ "$OVID_MAX_WARM_GB" == "8" ]] \
     || guard_fail "OVID_MAX_WARM_GB" "must be 8 (got '$OVID_MAX_WARM_GB')"

@@ -56,30 +56,87 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && "code" in err;
 }
 
+/**
+ * A bounded gate around LOCAL resource execution (owner directive
+ * 2026-10-18). Agent runs spend most of their life streaming model tokens —
+ * pure async I/O that costs no CPU and a couple of MB. The expensive part is
+ * the brief local step: spawning a jailed process, reading/writing a file.
+ * So run concurrency and step concurrency are DIFFERENT budgets:
+ *
+ *   - runs: thousands may be in flight (BullMQ concurrency + admission)
+ *   - steps: a bounded number may actually execute at once
+ *
+ * Without this, N runs that each call `run_shell` at the same moment spawn N
+ * processes, and the box thrashes on CPU rather than queueing cleanly.
+ *
+ * `release` runs in a finally, so a throwing tool can never leak a permit.
+ */
+export interface StepLimiter {
+  run<T>(fn: () => Promise<T>): Promise<T>;
+  stats(): { active: number; waiting: number; max: number };
+}
+
+export function createStepLimiter(max: number): StepLimiter {
+  if (!Number.isInteger(max) || max < 1) {
+    throw new Error(`createStepLimiter: max must be a positive integer, got ${max}`);
+  }
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return {
+    async run<T>(fn: () => Promise<T>): Promise<T> {
+      if (active >= max) {
+        // FIFO: the earliest waiter is released first, so a burst of tool
+        // calls executes in arrival order instead of starving.
+        await new Promise<void>((resolve) => waiting.push(resolve));
+      }
+      active += 1;
+      try {
+        return await fn();
+      } finally {
+        active -= 1;
+        const next = waiting.shift();
+        if (next !== undefined) next();
+      }
+    },
+    stats: () => ({ active, waiting: waiting.length, max }),
+  };
+}
+
 export function createSandboxPort(
   manager: SandboxManager,
-  opts?: { tier?: "free" | "pro" },
+  opts?: {
+    tier?: "free" | "pro";
+    /**
+     * Shared across EVERY port instance (one per run) — the bound is on the
+     * box, not on a run. Absent ⇒ unbounded (tests / non-production).
+     */
+    stepLimit?: StepLimiter;
+  },
 ): SandboxPort {
   const calls = new Map<string, TrackedExec>();
   const attach = (userId: string) =>
     manager.attach(userId, opts?.tier ? { tier: opts.tier } : undefined);
+  const step = <T>(fn: () => Promise<T>): Promise<T> =>
+    opts?.stepLimit === undefined ? fn() : opts.stepLimit.run(fn);
 
   return {
     async exec(userId, o) {
-      const handle = await attach(userId);
-      const req: ExecRequest = {
-        command: o.cmd,
-        cwd: jailCwd(o.cwd),
-        timeoutMs: o.timeoutMs,
-        env: o.env,
-      };
-      const done = handle.exec(req);
-      if (o.callKey) calls.set(o.callKey, { userId, done });
-      try {
-        return mapExecResult(await done);
-      } finally {
-        if (o.callKey) calls.delete(o.callKey);
-      }
+      return step(async () => {
+        const handle = await attach(userId);
+        const req: ExecRequest = {
+          command: o.cmd,
+          cwd: jailCwd(o.cwd),
+          timeoutMs: o.timeoutMs,
+          env: o.env,
+        };
+        const done = handle.exec(req);
+        if (o.callKey) calls.set(o.callKey, { userId, done });
+        try {
+          return mapExecResult(await done);
+        } finally {
+          if (o.callKey) calls.delete(o.callKey);
+        }
+      });
     },
 
     async killCall(userId, callKey) {
@@ -92,47 +149,57 @@ export function createSandboxPort(
     },
 
     async readFile(userId, path) {
-      const handle = await attach(userId);
-      const host = await resolveConfined(handle.workspaceDir, path);
-      try {
-        return await readFile(host, "utf8");
-      } catch (err) {
-        if (isErrnoException(err) && err.code === "ENOENT") {
-          throw new Error(`no such file: ${path}`);
+      return step(async () => {
+        const handle = await attach(userId);
+        const host = await resolveConfined(handle.workspaceDir, path);
+        try {
+          return await readFile(host, "utf8");
+        } catch (err) {
+          if (isErrnoException(err) && err.code === "ENOENT") {
+            throw new Error(`no such file: ${path}`);
+          }
+          throw err;
         }
-        throw err;
-      }
+      });
     },
 
     async writeFile(userId, path, content) {
-      const handle = await attach(userId);
-      const host = await resolveConfined(handle.workspaceDir, path);
-      await mkdir(dirname(host), { recursive: true });
-      await writeFile(host, content, "utf8");
+      return step(async () => {
+        const handle = await attach(userId);
+        const host = await resolveConfined(handle.workspaceDir, path);
+        await mkdir(dirname(host), { recursive: true });
+        await writeFile(host, content, "utf8");
+      });
     },
 
     async exists(userId, path) {
-      const handle = await attach(userId);
-      const host = await resolveConfined(handle.workspaceDir, path);
-      try {
-        await stat(host);
-        return true;
-      } catch (err) {
-        if (isErrnoException(err) && err.code === "ENOENT") return false;
-        throw err;
-      }
+      return step(async () => {
+        const handle = await attach(userId);
+        const host = await resolveConfined(handle.workspaceDir, path);
+        try {
+          await stat(host);
+          return true;
+        } catch (err) {
+          if (isErrnoException(err) && err.code === "ENOENT") return false;
+          throw err;
+        }
+      });
     },
 
     async listDir(userId, path) {
-      const handle = await attach(userId);
-      const host = await resolveConfined(handle.workspaceDir, path);
-      return readdir(host);
+      return step(async () => {
+        const handle = await attach(userId);
+        const host = await resolveConfined(handle.workspaceDir, path);
+        return readdir(host);
+      });
     },
 
     async jobStart(userId, o) {
-      const handle = await attach(userId);
-      const info = await handle.jobs.start({ command: o.cmd, cwd: jailCwd(o.cwd) });
-      return { jobId: info.id };
+      return step(async () => {
+        const handle = await attach(userId);
+        const info = await handle.jobs.start({ command: o.cmd, cwd: jailCwd(o.cwd) });
+        return { jobId: info.id };
+      });
     },
 
     async jobOutput(userId, jobId, o) {
