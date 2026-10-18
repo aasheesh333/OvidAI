@@ -1000,11 +1000,11 @@ describe("security — sandbox isolation corpus (host-gated)", () => {
       expect(mknod.stderr).toMatch(/Operation not permitted|Permission denied|Invalid argument/i);
       expect(existsSync(join(h.workspaceDir, "devmem")), "mknod created a host file").toBe(false);
 
-      // Mount namespace: the jail's PID 1 is its own, and its mount namespace
-      // inode must differ from the host's.
-      const hostMntNs = statSync("/proc/1/ns/mnt").ino;
+      // Mount namespace: the exec's mount namespace inode must differ from
+      // the test process's (host) mount namespace.
+      const hostMntNs = statSync("/proc/self/ns/mnt").ino;
       const jailMntNs = await h.exec({
-        command: "stat -Lc %i /proc/1/ns/mnt",
+        command: "stat -Lc %i /proc/self/ns/mnt",
         timeoutMs: 20_000,
       });
       expect(jailMntNs.exitCode, jailMntNs.stderr).toBe(0);
