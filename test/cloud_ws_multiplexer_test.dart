@@ -13,6 +13,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show HttpClient, HttpOverrides, SecurityContext;
+import 'dart:typed_data';
 
 // fake_async comes transitively through flutter_test; promoting it to a
 // direct dev_dependency needs a pubspec edit that is outside this task's
@@ -61,6 +62,10 @@ class FakeCloudSocket implements CloudSocket {
   /// real socket delivers them; Strings pass through as-is.
   void server(Object frame) =>
       _frames.add(frame is String ? frame : jsonEncode(frame));
+
+  /// Server → client BINARY frame (the P6 browser screencast). `dart:io`
+  /// delivers these as Uint8List, so the fake does too.
+  void serverBinary(List<int> bytes) => _frames.add(Uint8List.fromList(bytes));
 
   /// The client (or a test simulating the server) closing the socket.
   @override
@@ -647,6 +652,30 @@ void main() {
     expect(fresh.sockets, hasLength(1));
     expect(fresh.sockets.single.sentJson().single['op'], 'ping');
     await ws2.disconnect();
+  });
+
+  test('(l2) binary server frames reach binaryServerFrames, not the text '
+      'pipeline (P6 browser screencast)', () async {
+    final spy = SocketFactorySpy();
+    final ws = await _build(spy);
+    ws.subscribe('s1');
+    await pumpEventQueue();
+
+    final binary = <Uint8List>[];
+    final raw = <Map<String, dynamic>>[];
+    final events = <CloudSessionEvent>[];
+    ws.binaryServerFrames.listen(binary.add);
+    ws.rawServerFrames.listen(raw.add);
+    ws.subscribe('s1').listen(events.add);
+
+    spy.sockets.single.serverBinary(const [0x52, 0x49, 0x46, 0x46]);
+    await pumpEventQueue();
+
+    expect(binary, hasLength(1));
+    expect(binary.single, <int>[0x52, 0x49, 0x46, 0x46]);
+    expect(raw, isEmpty, reason: 'binary frames are not JSON ops');
+    expect(events, isEmpty, reason: 'binary frames are not session events');
+    await ws.disconnect();
   });
 
   test('(m) the production socket factory goes through HttpOverrides — '
