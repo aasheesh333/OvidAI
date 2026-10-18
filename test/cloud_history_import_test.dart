@@ -8,7 +8,7 @@
 // Fixtures mirror the durable stores:
 //   * SessionHistoryRepository legacy mode → prefs StringList rows
 //   * SessionHistoryRepository SQLite mode → history_rows authority
-//   * SessionLedger.rootOverrideForTest → <root>/*.jsonl
+//   * <docs>/session-ledgers/*.jsonl (the retired ledger's directory)
 //   * a per-account memory root injected through the service's test seam
 
 import 'dart:convert';
@@ -20,9 +20,20 @@ import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/history_import.dart';
 import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/session_history_store.dart';
-import 'package:ovid_ai/core/session_ledger.dart';
+// ignore: depend_on_referenced_packages
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqlite3/open.dart';
+
+/// Minimal path_provider override: the service resolves the retired ledger
+/// directory under the documents root (`<docs>/session-ledgers`).
+class _Paths extends PathProviderPlatform {
+  _Paths(this.directory);
+  final Directory directory;
+
+  @override
+  Future<String> getApplicationDocumentsPath() async => directory.path;
+}
 
 // ---------------------------------------------------------------------------
 // Fake REST
@@ -121,21 +132,23 @@ void main() {
   late Directory ledgerDir;
   late Directory memoryDir;
   late List<SessionHistoryRepository> opened;
+  late PathProviderPlatform originalPaths;
 
   setUp(() {
     root = Directory.systemTemp.createTempSync('history-import-');
     dbDir = Directory('${root.path}/db')..createSync();
-    ledgerDir = Directory('${root.path}/ledgers')..createSync();
+    ledgerDir = Directory('${root.path}/session-ledgers')..createSync();
     memoryDir = Directory('${root.path}/memory')..createSync();
     opened = <SessionHistoryRepository>[];
-    SessionLedger.rootOverrideForTest = ledgerDir;
+    originalPaths = PathProviderPlatform.instance;
+    PathProviderPlatform.instance = _Paths(root);
   });
 
   tearDown(() async {
     for (final repo in opened) {
       await repo.close();
     }
-    SessionLedger.rootOverrideForTest = null;
+    PathProviderPlatform.instance = originalPaths;
     root.deleteSync(recursive: true);
   });
 

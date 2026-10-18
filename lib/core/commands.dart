@@ -8,7 +8,6 @@ import 'package:path_provider/path_provider.dart';
 import 'cloud/cloud_agent_facade.dart';
 import 'cloud/models.dart';
 import 'presets.dart';
-import 'session_ledger.dart';
 import 'state.dart';
 
 /// ── Composer command system ──────────────────────────────────────────────
@@ -412,7 +411,6 @@ class CommandService {
         'sessions': app.sessions.length,
         'contents': [
           'sessions.json — every session (messages, lineage, goals, todos)',
-          'ledgers/<id>.jsonl — append-only event ledger per session',
         ],
       }),
     );
@@ -425,14 +423,9 @@ class CommandService {
       }),
     );
 
-    // Event ledgers (best-effort per session).
-    for (final s in app.sessions) {
-      final events = await SessionLedger.I.read(s.id);
-      if (events.isEmpty) continue;
-      final lines = events.map((e) => jsonEncode(e)).join('\n');
-      addText('ledgers/${s.id}.jsonl', lines);
-    }
-
+    // The local event ledger was deleted in P8 Task 20 (the trajectory view
+    // reads the server event mirror now), so there is no `ledgers/` section
+    // to export. Transcripts above remain the export's payload.
     final bytes = ZipEncoder().encode(archive);
     await file.writeAsBytes(bytes);
     return file;

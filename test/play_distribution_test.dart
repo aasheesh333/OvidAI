@@ -11,8 +11,9 @@ void main() {
   test('Control mode and the on-device sandbox are gone on every channel', () {
     for (final play in [false, true]) {
       Distribution.playOverrideForTest = play;
-      expect(Distribution.controlModeAvailable, isFalse);
-      expect(Distribution.onDeviceSandboxAvailable, isFalse);
+      // The capability getters themselves were deleted in P8 Task 20; the
+      // invariant that survives is that the model/surface cannot express
+      // Control mode and the picker always offers a cloud-executable mode.
       expect(AgentMode.values.map((m) => m.name), isNot(contains('control')));
       expect(modeOptionsForPicker(), contains(AgentMode.auto));
     }

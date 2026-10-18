@@ -103,7 +103,7 @@ void main() {
   );
 
   group('header', () {
-    testWidgets('shows exactly two actions on the default build: Studio, ⋮', (
+    testWidgets('shows the cloud header actions: Studio, Browser, ⋮', (
       tester,
     ) async {
       addSession('h1', [
@@ -113,17 +113,18 @@ void main() {
       await pumpChat(tester);
       final bar = tester.widget<AppBar>(find.byType(AppBar));
       final actions = bar.actions!.where((w) => w is! SizedBox).toList();
-      expect(actions, hasLength(2));
+      expect(actions, hasLength(3));
       expect(find.byKey(const ValueKey('chat-header-studio')), findsOneWidget);
-      // P8 Task 16 removed the on-device browser; the cloud viewer is thin-only.
-      expect(find.byKey(const ValueKey('chat-header-browser')), findsNothing);
+      // P8 Task 20 removed the dual-path gate: the cloud screencast viewer is
+      // the only browser surface and is always present.
+      expect(find.byKey(const ValueKey('chat-header-browser')), findsOneWidget);
       expect(find.byKey(const ValueKey('chat-header-more')), findsOneWidget);
       // The old share / new-session / jobs icons are gone from the header.
       final inBar = find.descendant(
         of: find.byType(AppBar),
         matching: find.byType(IconButton),
       );
-      expect(inBar, findsNWidgets(2 + (bar.automaticallyImplyLeading ? 0 : 0)));
+      expect(inBar, findsNWidgets(3));
       expect(find.byTooltip('Share chat'), findsNothing);
       expect(find.byTooltip('New session'), findsNothing);
       expect(find.byTooltip('Background jobs'), findsNothing);
@@ -754,7 +755,7 @@ void main() {
       await pumpChat(tester, size: const Size(320, 640), textScale: 2.0);
       expect(tester.takeException(), isNull);
       final bar = tester.widget<AppBar>(find.byType(AppBar));
-      expect(bar.actions!.where((w) => w is! SizedBox), hasLength(2));
+      expect(bar.actions!.where((w) => w is! SizedBox), hasLength(3));
       await tester.tap(find.byKey(const ValueKey('chat-header-more')));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);

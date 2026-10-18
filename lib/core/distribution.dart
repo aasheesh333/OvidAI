@@ -5,15 +5,10 @@
 /// Flutter's forwarded dart-defines): targetSdk 36, no bundled Linux userland,
 /// and the src/play manifest overlay without the AccessibilityService.
 ///
-/// Every Play-policy feature cut is expressed here so it is reviewable in one
-/// place (see docs/play/PLAY_COMPLIANCE_AUDIT.md):
-///  * Control mode — Play prohibits using the Accessibility API to let an app
-///    "autonomously initiate, plan, and execute actions" (answer/10964491).
-///  * On-device sandbox — exec from app data is blocked at targetSdk >= 29
-///    and downloading executables from outside Play violates Device and
-///    Network Abuse (answer/9888379).
-///  * Idle keep-alive — a foreground service with no user task is not an
-///    approvable foreground-service use (answer/13392821).
+/// P8 Task 20 collapsed the thin-client migration scaffolding: the app has no
+/// local execution path any more (spec NG3), so the cloud surfaces are plain
+/// `true` constants rather than channel/define gates. What remains here is
+/// channel packaging (`play`) and the still-dark P5 plugin runtime.
 library;
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
@@ -30,38 +25,30 @@ class Distribution {
   static bool get play => playOverrideForTest ?? _playDefine;
 
   // -------------------------------------------------------------------------
-  // Thin client (P8) — the cloud-execution migration gates.
+  // Thin client (P8) — the only implementation since Task 19.
   //
-  // Every consumer keeps BOTH paths compiled (Global Constraints: dies in
-  // pieces) and branches on these flags. `OVID_THIN_CLIENT=true` opts a
-  // sideload build into the cloud client before Play becomes the default.
+  // There is no `OVID_THIN_CLIENT` opt-in and no on-device fallback: chat and
+  // runs execute on Ovid Cloud, Studio is remote, schedules are server rows
+  // and the browser is the cloud screencast. Consumers render the cloud arm
+  // directly; these constants exist so the surface stays greppable while the
+  // last references are removed.
   // -------------------------------------------------------------------------
 
-  static const bool _thinDefine = bool.fromEnvironment('OVID_THIN_CLIENT');
+  /// Chat + runs via cloud.
+  static const bool cloudExecution = true;
 
-  /// Test seam: force thin-client mode on/off. Null falls through to the
-  /// compile-time define and the Play channel.
-  @visibleForTesting
-  static bool? thinOverrideForTest;
+  /// Remote Studio.
+  static const bool cloudStudio = true;
 
-  /// True when chat/runs execute in Ovid Cloud instead of on-device.
-  static bool get thinClient => thinOverrideForTest ?? (_thinDefine || play);
-
-  /// Chat + runs via cloud (Task 10 flips the consumers).
-  static bool get cloudExecution => thinClient;
-
-  /// Remote Studio is live only after Task 15.
-  static bool get cloudStudio => thinClient;
-
-  /// Cloud schedules are live only after Task 14.
-  static bool get cloudSchedules => thinClient;
+  /// Cloud schedules.
+  static const bool cloudSchedules = true;
 
   /// Cloud browser screencast (P8 Task 16) — the only browser surface now
   /// that the on-device WebView browser is removed.
-  static bool get cloudBrowser => thinClient;
+  static const bool cloudBrowser = true;
 
   /// MCP/plugin runtime is dark until P5.
-  static bool get cloudPlugins => false;
+  static const bool cloudPlugins = false;
 
   /// BYOK escrow is live with the P9 escrow endpoints.
   ///
@@ -70,13 +57,6 @@ class Distribution {
   static bool? byokOverrideForTest;
 
   static bool get cloudByok => byokOverrideForTest ?? true;
-
-  /// Accessibility-driven Control mode. Removed entirely in P8 Task 13
-  /// (spec D5): false for every channel, not just Play.
-  static bool get controlModeAvailable => false;
-
-  /// Termux-style on-device Linux sandbox. Removed entirely in P8 Task 13.
-  static bool get onDeviceSandboxAvailable => false;
 
   /// Device permissions the app actually declares, for the UI that explains
   /// why a request can fail. This used to be a 15-entry list mirroring the
@@ -90,13 +70,4 @@ class Distribution {
     'notifications',
     'microphone',
   ];
-
-  /// User-facing reason shown when a sideload-only capability is requested.
-  static const String sandboxUnavailableMessage =
-      'The on-device terminal is not part of the Google Play version of Ovid. '
-      'Chat, providers, the browser and cloud features work normally; '
-      'commands that need a local Linux shell are unavailable.';
-
-  static const String controlUnavailableMessage =
-      'Control mode is not available in the Google Play version of Ovid.';
 }

@@ -8,7 +8,6 @@ import 'settings_actions.dart';
 enum ResetStoreKind {
   sessions('sessions'),
   search('search'),
-  ledger('ledger'),
   memory('memory'),
   account('account'),
   imageReceipts('image-receipts'),

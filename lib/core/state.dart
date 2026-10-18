@@ -22,14 +22,12 @@ import 'image_studio.dart';
 import 'model_limits.dart';
 import 'composer_drafts.dart';
 import 'studio_drafts.dart';
-import 'memory_store.dart';
 import 'secure_store.dart';
 import 'security_service.dart';
 import 'theme.dart';
 import 'conversation_share_service.dart';
 import 'session_history_store.dart';
 import 'session_search.dart';
-import 'session_ledger.dart';
 import 'settings_actions.dart';
 import 'settings_backup_service.dart';
 import 'presets.dart';
@@ -559,28 +557,6 @@ class Message {
   };
 }
 
-/// A durable memory snippet — saved via memory_save, searchable via
-/// memory_search, persisted across sessions (the long-term memory store equivalent).
-class MemoryItem {
-  final String id;
-  final String content;
-  final DateTime createdAt;
-  MemoryItem({required this.id, required this.content, DateTime? createdAt})
-    : createdAt = createdAt ?? DateTime.now();
-
-  factory MemoryItem.fromJson(Map<String, dynamic> j) => MemoryItem(
-    id: j['id'] as String,
-    content: j['content'] as String,
-    createdAt:
-        DateTime.tryParse(j['createdAt'] as String? ?? '') ?? DateTime.now(),
-  );
-
-  Map<String, dynamic> toJson() => {
-    'id': id,
-    'content': content,
-    'createdAt': createdAt.toIso8601String(),
-  };
-}
 
 class SessionAnalytics {
   int inputTokens;
@@ -1249,7 +1225,7 @@ class AppState extends ChangeNotifier {
 
   @visibleForTesting
   factory AppState.createForTest({
-    MemoryStore? memoryStore,
+    Directory? memoryRootForTest,
     String? sessionAccountIdForTest,
     void Function(String stage)? startupStageRecorder,
     Map<String, StartupStageDelegate> startupStageDelegates = const {},
@@ -1260,7 +1236,7 @@ class AppState extends ChangeNotifier {
     Duration sessionPersistDebounce = Duration.zero,
   }) {
     final instance = AppState._(
-      memoryStore: memoryStore,
+      memoryRootForTest: memoryRootForTest,
       sessionAccountIdForTest: sessionAccountIdForTest,
       startupStageRecorder: startupStageRecorder,
       startupStageDelegates: startupStageDelegates,
@@ -1311,7 +1287,7 @@ class AppState extends ChangeNotifier {
   }
 
   AppState._({
-    MemoryStore? memoryStore,
+    Directory? memoryRootForTest,
     String? sessionAccountIdForTest,
     this._startupStageRecorder,
     Map<String, StartupStageDelegate> startupStageDelegates = const {},
@@ -1321,9 +1297,8 @@ class AppState extends ChangeNotifier {
     AccountLifecycleIntegration? accountLifecycle,
     Duration? sessionPersistDebounce,
   }) : _startupStageDelegates = Map.unmodifiable(startupStageDelegates),
-       _memoryRootOverride = memoryStore?.root {
+       _memoryRootOverride = memoryRootForTest {
     _sessionPersistDebounce = sessionPersistDebounce ?? Duration.zero;
-    _memoryStore = memoryStore;
     _sessionAccountId = sessionAccountIdForTest ?? 'guest';
     _persistedSessionDecoderForTest = persistedSessionDecoder;
     _sessionBootstrapDecoder =
@@ -1495,7 +1470,6 @@ class AppState extends ChangeNotifier {
   final Set<String> _deferredDeletedSessionIds = {};
   final Set<String> _notifiedDeletedSessionIds = {};
   final List<_SessionCleanup> _pendingWorkspaceDeletions = [];
-  final Map<String, _SessionCleanup> _ledgerDeletions = {};
   String? _deferredActiveSessionId;
   ChatSession? _deferredActiveSession;
   final Map<String, ({ChatSession owner, int? prefixLength})>
@@ -1567,17 +1541,11 @@ class AppState extends ChangeNotifier {
     final token = _sessionAccountToken = Object();
     _sessionCleanupToken = Object();
     _sessionAccountId = account;
-    _memoryStore = null;
-    _memoryStoreToken = null;
-    _memoryOpening = null;
-    _memoryOpeningToken = null;
-    _memoryError = null;
     _sessionAccountReady = false;
     _sessionNamespaceLoaded = false;
     _clearDeferredSessions();
     _dirtySessionIds.clear();
     _notifiedDeletedSessionIds.clear();
-    _ledgerDeletions.clear();
     _pendingWorkspaceDeletions.clear();
     _pendingAccountCleanup.addAll(oldCleanup);
     sessions.clear();
@@ -1881,7 +1849,6 @@ class AppState extends ChangeNotifier {
     await loadSessions();
     await _loadOvidCloudTier();
     await _loadCustomPresets();
-    await _loadMemories();
   }
 
   Future<void> _mountRuntimeSkills() async {
@@ -2584,13 +2551,8 @@ class AppState extends ChangeNotifier {
     if (!_notifiedDeletedSessionIds.add(id)) return;
     final token = _sessionCleanupToken;
     bool current() => identical(token, _sessionCleanupToken);
-    // Enqueue the ledger fence synchronously BEFORE lifecycle callbacks can
-    // schedule late hook/run events, including for deferred descendants.
-    final ledger = _SessionCleanup(() async {
-      if (current()) await SessionLedger.I.delete(id);
-    });
-    _ledgerDeletions[id] = ledger;
-    _pendingWorkspaceDeletions.add(ledger);
+    // The local ledger is gone (P8 Task 20); the remaining stores are enqueued
+    // synchronously so late lifecycle callbacks cannot race a session switch.
     _pendingWorkspaceDeletions.add(
       _SessionCleanup(() async {
         if (current()) await SessionSearch.I.deleteSession(id);
@@ -2598,8 +2560,7 @@ class AppState extends ChangeNotifier {
     );
     _pendingWorkspaceDeletions.add(
       _SessionCleanup(() async {
-        final store = await _openMemoryStore();
-        if (current()) store.deleteSession(id);
+        if (current()) await _deleteSessionMemory(id);
       }),
     );
     if (sandboxId != null) {
@@ -2626,10 +2587,6 @@ class AppState extends ChangeNotifier {
             observed.contains(task) && !task.running && task.error == null,
       );
     }
-    _ledgerDeletions.removeWhere(
-      (_, task) =>
-          observed.contains(task) && !task.running && task.error == null,
-    );
     if (_pendingWorkspaceDeletions.any(
       (task) => task.running || task.error != null,
     )) {
@@ -2637,7 +2594,7 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Drain every deletion store, including FTS. Retry only failed operations;
+  /// Await every remaining deletion task. Retry only failed operations;
   /// completed lifecycle callbacks are never repeated. Owners captured by each
   /// task reject a retry after an account transition.
   Future<void> awaitSessionDeletions({bool retryFailed = false}) async {
@@ -2652,41 +2609,6 @@ class AppState extends ChangeNotifier {
       }
     }
     await _awaitWorkspaceDeletions();
-  }
-
-  /// Await ledger cleanup, including descendants discovered in deferred state.
-  /// Failed IDs/errors remain available across persistence drains. Explicit
-  /// retry affects only failed ledger deletions, never lifecycle callbacks or
-  /// other stores. An empty result is ledger cleanup success, not all-store
-  /// deletion success. Errors are for the caller; do not log raw paths/data.
-  Future<Map<String, Object>> awaitSessionLedgerDeletions({
-    bool retryFailed = false,
-  }) async {
-    await _loadDeferredSessionSnapshot();
-    final observed = <String>{};
-    while (true) {
-      final entries = _ledgerDeletions.entries
-          .where((entry) => !observed.contains(entry.key))
-          .toList();
-      if (entries.isEmpty) break;
-      for (final entry in entries) {
-        observed.add(entry.key);
-        final task = entry.value;
-        await task.pending;
-        if (retryFailed && task.error != null) {
-          task.retry();
-          await task.pending;
-        }
-        if (task.error == null) {
-          _ledgerDeletions.remove(entry.key);
-          _pendingWorkspaceDeletions.remove(task);
-        }
-      }
-    }
-    return Map.unmodifiable({
-      for (final entry in _ledgerDeletions.entries)
-        if (entry.value.error != null) entry.key: entry.value.error!,
-    });
   }
 
   Future<void> _hydrateDeferredSessions() async {
@@ -3343,13 +3265,12 @@ class AppState extends ChangeNotifier {
     if (_settingsBusy) throw StateError('Settings operation in progress.');
     try {
       try {
-        (await _openMemoryStore()).deleteAll();
-        _memoryError = null;
+        // Memory is server-owned; delete the pre-cloud Markdown directory
+        // directly so the local cleanup guarantee survives the store removal.
+        await _deleteMemoryRoot();
       } catch (e) {
-        _memoryError = 'Memory deletion failed: $e';
         Diag.swallow('memory.deleteAll', e);
       }
-      _memoryOpening = null;
       final prefs = await SharedPreferences.getInstance();
       await prefs.clear();
       try {
@@ -3369,7 +3290,6 @@ class AppState extends ChangeNotifier {
       activeSessionId = null;
       providers.clear();
       _seed();
-      memories.clear();
         memoryEnabled = true;
       showReasoning = true;
       githubSync = true;
@@ -3822,31 +3742,13 @@ class AppState extends ChangeNotifier {
   final List<ChatSession> sessions = [];
   String? activeSessionId;
 
-  /// Legacy snippets retained only as a compatibility view during migration.
-  final List<MemoryItem> memories = [];
-  static const _kMemories = 'ovid_memories';
-
-  MemoryStore? _memoryStore;
-  Object? _memoryStoreToken;
   final Directory? _memoryRootOverride;
-  Future<MemoryStore>? _memoryOpening;
-  Object? _memoryOpeningToken;
-  String? _memoryError;
 
-  /// Only trusted persisted parentId lineage grants access to session memory.
-  /// Transcript-sharing settings and @session references grant no memory access.
-  String memoryOwner(String sessionId) {
-    var current = sessionById(sessionId);
-    if (current == null) throw StateError('Memory session no longer exists.');
-    final seen = <String>{};
-    while (current!.parentId != null) {
-      if (!seen.add(current.id)) throw StateError('Invalid memory lineage.');
-      current = sessionById(current.parentId);
-      if (current == null) throw StateError('Memory parent no longer exists.');
-    }
-    return current.id;
-  }
-
+  /// Per-account Markdown memory root.
+  ///
+  /// Memory is server-owned since P8 Task 18. The local directory survives
+  /// only as a cleanup target for pre-cloud files, so reset and session
+  /// deletion remove it directly (below) instead of opening a local store.
   Future<Directory> _memoryRootForAccount(String account) async {
     final baseRoot =
         _memoryRootOverride ??
@@ -3860,135 +3762,20 @@ class AppState extends ChangeNotifier {
           );
   }
 
-  /// Opens the current account's memory root WITHOUT running the legacy
-  /// `ovid_memories` migration. Deletion/reset paths use this so malformed
-  /// legacy data can never block clearing Markdown memory.
-  Future<MemoryStore> _openMemoryStore() async {
-    final token = _sessionAccountToken;
+  /// Reset path: remove the whole per-account memory directory. Bounded to
+  /// the resolved root; a missing directory is already empty.
+  Future<void> _deleteMemoryRoot() async {
     final root = await _memoryRootForAccount(_sessionAccountId);
-    if (!identical(token, _sessionAccountToken)) {
-      throw StateError('Stale memory account owner');
-    }
-    final existing = _memoryStore;
-    if (existing != null &&
-        identical(_memoryStoreToken, token) &&
-        existing.root.path == root.path) {
-      return existing;
-    }
-    return MemoryStore(root);
+    if (await root.exists()) await root.delete(recursive: true);
   }
 
-  Future<MemoryStore> prepareMemory() {
-    final token = _sessionAccountToken;
-    final account = _sessionAccountId;
-    if (_memoryOpening != null && identical(_memoryOpeningToken, token)) {
-      return _memoryOpening!;
-    }
-    late final Future<MemoryStore> opening;
-    opening = () async {
-      try {
-        // Resolve the root inside the guarded opening so a cached opening
-        // never leaves an unawaited, rejecting root future behind.
-        final store = await _openMemoryStore();
-        if (!identical(token, _sessionAccountToken)) {
-          throw StateError('Stale memory account owner');
-        }
-        final prefs = await SharedPreferences.getInstance();
-        if (!identical(token, _sessionAccountToken)) {
-          throw StateError('Stale memory account owner');
-        }
-        final raw = prefs.getString(_kMemories);
-        if (account == 'guest' && raw != null) {
-          // Deterministic content-addressed names make interrupted migration
-          // retryable. Never seed over the user's entrypoint or existing edits.
-          final items = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
-          final chunks = <String>[];
-          var chunk = StringBuffer();
-          var bytes = 0;
-          for (final item in items) {
-            // Pack legacy snippets instead of consuming one slot per snippet
-            // (the old store allowed 200). Split on rune boundaries if needed.
-            final text =
-                '\n\n## Saved memory ${item['id']}\n${item['content']}';
-            for (final rune in text.runes) {
-              final char = String.fromCharCode(rune);
-              final size = utf8.encode(char).length;
-              if (bytes + size > 24000) {
-                chunks.add(chunk.toString());
-                chunk = StringBuffer();
-                bytes = 0;
-              }
-              chunk.write(char);
-              bytes += size;
-            }
-          }
-          if (chunk.isNotEmpty) chunks.add(chunk.toString());
-          for (final content in chunks) {
-            final digest = sha256.convert(utf8.encode(content)).toString();
-            final name = 'legacy-${digest.substring(0, 24)}.md';
-            if (store.list(null).contains(name)) {
-              if (store.read(null, name).content != content) {
-                throw StateError(
-                  'Legacy memory conflicts with $name; original snippets retained.',
-                );
-              }
-            } else {
-              store.save(null, name, content, mode: 'create');
-            }
-          }
-          if (!identical(token, _sessionAccountToken)) {
-            throw StateError('Stale memory account owner');
-          }
-          await prefs.remove(_kMemories);
-          memories.clear();
-        }
-        if (!identical(token, _sessionAccountToken)) {
-          throw StateError('Stale memory account owner');
-        }
-        _memoryStore = store;
-        _memoryStoreToken = token;
-        _memoryError = null;
-        return store;
-      } catch (e) {
-        if (identical(token, _sessionAccountToken)) _memoryError = '$e';
-        rethrow;
-      } finally {
-        if (identical(_memoryOpening, opening)) {
-          _memoryOpening = null;
-          _memoryOpeningToken = null;
-        }
-      }
-    }();
-    _memoryOpening = opening;
-    _memoryOpeningToken = token;
-    return opening;
-  }
-
-  String memoryContext(String sessionId) {
-    if (!memoryEnabled) return '';
-    try {
-      final owner = memoryOwner(sessionId);
-      if (_memoryError != null) return 'Memory unavailable: $_memoryError';
-      if (_memoryStore == null ||
-          !identical(_memoryStoreToken, _sessionAccountToken)) {
-        return '';
-      }
-      return _memoryStore!.context(owner);
-    } catch (e) {
-      return 'Memory unavailable: $e';
-    }
-  }
-
-  Future<void> saveMemory(MemoryItem m) async {
-    (await prepareMemory()).save(null, 'MEMORY.md', m.content, mode: 'append');
-  }
-
-  Future<void> _loadMemories() async {
-    try {
-      await prepareMemory();
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
+  /// Session-deletion path: remove that session's memory scope only.
+  Future<void> _deleteSessionMemory(String owner) async {
+    final root = await _memoryRootForAccount(_sessionAccountId);
+    final scope = Directory(
+      '${root.path}/session-${sha256.convert(utf8.encode(owner))}',
+    );
+    if (await scope.exists()) await scope.delete(recursive: true);
   }
 
   // [activeSession] memo. [sessions] is mutated in place all over the app, so

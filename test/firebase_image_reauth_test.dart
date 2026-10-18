@@ -12,8 +12,6 @@ import 'package:ovid_ai/core/auth_providers.dart';
 import 'package:ovid_ai/core/firebase_service.dart';
 import 'package:ovid_ai/core/image_receipt_store.dart';
 import 'package:ovid_ai/core/image_studio.dart';
-import 'package:ovid_ai/core/memory_store.dart';
-import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
 // ignore: depend_on_referenced_packages
@@ -87,8 +85,7 @@ void main() {
     originalPaths = PathProviderPlatform.instance;
     PathProviderPlatform.instance = _Paths(directory);
     SessionSearch.dbPathOverrideForTest = '${directory.path}/search.db';
-    SessionLedger.rootOverrideForTest = directory;
-    app = AppState.createForTest(memoryStore: MemoryStore(directory));
+    app = AppState.createForTest(memoryRootForTest: directory);
     app.suspendCoalescedPersistenceForTest = true;
     images.bindAccount(null);
     store = ImageReceiptStore(directory: () async => directory);
@@ -129,7 +126,6 @@ void main() {
     await app.awaitPendingSessionWritesForTest();
     await SessionSearch.I.close();
     SessionSearch.dbPathOverrideForTest = null;
-    SessionLedger.rootOverrideForTest = null;
     AppState.resetTestInstance();
     PathProviderPlatform.instance = originalPaths;
     await directory.delete(recursive: true);

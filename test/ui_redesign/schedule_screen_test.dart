@@ -1,13 +1,12 @@
 // Aether redesign — Schedule screen widget tests (P8 Task 14).
 //
-// The screen is server-backed: rows come from ScheduleClient (P4 REST) behind
-// `Distribution.cloudSchedules`. These tests use a fake gateway that mirrors
-// the built routes, so they exercise the real DTO parsing + bindings.
+// The screen is server-backed: rows come from ScheduleClient (P4 REST).
+// These tests use a fake gateway that mirrors the built routes, so they
+// exercise the real DTO parsing + bindings.
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/cloud/schedule_client.dart';
-import 'package:ovid_ai/core/distribution.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/schedule_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -41,7 +40,6 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
-    Distribution.thinOverrideForTest = true;
     ScheduleClient.timeZoneOverrideForTest = 'UTC';
     app = AppState.createForTest();
     app.sessions.add(ChatSession(id: 's', title: 'My work', model: 'm'));
@@ -49,7 +47,6 @@ void main() {
   });
 
   tearDown(() {
-    Distribution.thinOverrideForTest = null;
     ScheduleClient.timeZoneOverrideForTest = null;
     AppState.resetTestInstance();
   });
@@ -237,22 +234,6 @@ void main() {
     expect(find.textContaining('every=3600s'), findsOneWidget);
     expect(find.textContaining('Up to 2'), findsOneWidget);
     expect(find.text('All clear'), findsOneWidget);
-  });
-
-  testWidgets('shows the cloud-empty state when cloud schedules are off',
-      (tester) async {
-    Distribution.thinOverrideForTest = false;
-    ScheduleClient.installForTest(
-      FakeScheduleGateway(const []).client,
-    );
-    await tester.pumpWidget(
-      const MaterialApp(home: ScheduleScreen(sessionId: 's')),
-    );
-    await _settle(tester);
-
-    expect(find.text('Schedules run in Ovid Cloud'), findsOneWidget);
-    expect(find.text('No scheduled tasks'), findsNothing);
-    expect(find.text('Cloud scheduling active'), findsNothing);
   });
 
   testWidgets('a failed load offers Retry', (tester) async {

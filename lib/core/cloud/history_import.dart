@@ -34,7 +34,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../session_history_store.dart';
-import '../session_ledger.dart';
 import 'cloud_rest.dart';
 import 'models.dart';
 
@@ -133,9 +132,9 @@ class HistoryImportService {
   /// Scan the durable transcript store and read the completion marker.
   ///
   /// No network and no preference writes. (Ledger/memory are deliberately not
-  /// touched here: `SessionLedger.storedSessionIds` and `MemoryStore.list` can
-  /// create their roots, which would break the read-only promise. They are
-  /// counted during [run], where the import is already a mutating operation.)
+  /// touched here: scanning them during `plan` would make the read-only
+  /// promise depend on filesystem state. They are counted during [run], where
+  /// the import is already a mutating operation.)
   Future<HistoryImportPlan> plan() async {
     final sessions = await _scanSessions();
     return HistoryImportPlan(
@@ -422,14 +421,25 @@ class HistoryImportService {
     return sha256.convert(utf8.encode(input)).toString();
   }
 
-  /// Events in `<docs>/session-ledgers/*.jsonl`. Best-effort: a ledger that
-  /// cannot be read contributes zero and never fails the import.
+  /// Events in `<docs>/session-ledgers/*.jsonl` — the directory the retired
+  /// local ledger wrote (P8 Task 20). The files are read directly because the
+  /// ledger module no longer exists; the count feeds the same
+  /// `skipped (server endpoint not live)` report. Best-effort: an unreadable
+  /// ledger contributes zero and never fails the import.
   Future<int> _scanLedgerEvents() async {
     try {
-      final ids = await SessionLedger.I.storedSessionIds();
+      final docs = await getApplicationDocumentsDirectory();
+      final dir = Directory('${docs.path}/session-ledgers');
+      if (!await dir.exists()) return 0;
       var count = 0;
-      for (final id in ids) {
-        count += (await SessionLedger.I.read(id)).length;
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is! File || !entity.path.endsWith('.jsonl')) continue;
+        try {
+          final lines = await entity.readAsLines();
+          count += lines.where((line) => line.trim().isNotEmpty).length;
+        } catch (_) {
+          // A single unreadable ledger contributes zero.
+        }
       }
       return count;
     } catch (_) {

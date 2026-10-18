@@ -13,7 +13,6 @@ import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/theme.dart';
-import '../core/distribution.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
 import '../core/cloud/cloud_session_store.dart';
@@ -1032,7 +1031,7 @@ class _ChatScreenState extends State<ChatScreen>
     unawaited(
       ComposerDraftStore.I.load().then((_) => _restorePersistedDraft()),
     );
-    if (Distribution.cloudExecution) unawaited(_bootCloud());
+    unawaited(_bootCloud());
   }
 
   /// P8 Task 10 boot path (binding carries from Task 9):
@@ -1071,7 +1070,7 @@ class _ChatScreenState extends State<ChatScreen>
   /// write). A local-only session (never sent) has no server transcript —
   /// the REST failure is swallowed and the empty chat renders.
   Future<void> _loadCloudTranscript(String sessionId) async {
-    if (!mounted || !Distribution.cloudExecution) return;
+    if (!mounted) return;
     if (!_cloudTranscriptsLoaded.add(sessionId)) return;
     try {
       final store = CloudSessionStore.I;
@@ -1157,14 +1156,12 @@ class _ChatScreenState extends State<ChatScreen>
     }
   }
 
-  /// The transcript list the chat renders (P8 Task 10): the thin client
-  /// renders the facade's live projection — cloud sessions keep
-  /// `ChatSession.messages` empty, so message actions that mutate local
-  /// history decline gracefully (`_canChangeHistory` finds no rows). The
-  /// default build renders the session's own list, unchanged.
-  List<Message> _messagesOf(ChatSession s) => Distribution.cloudExecution
-      ? (CloudAgentFacade.I.transcriptFor(s.id) ?? s.messages)
-      : s.messages;
+  /// The transcript list the chat renders (P8 Task 10): the facade's live
+  /// projection — cloud sessions keep `ChatSession.messages` empty, so
+  /// message actions that mutate local history decline gracefully
+  /// (`_canChangeHistory` finds no rows).
+  List<Message> _messagesOf(ChatSession s) =>
+      CloudAgentFacade.I.transcriptFor(s.id) ?? s.messages;
 
   /// The bounded folded window for [s], recomputed only when its inputs
   /// change (Task 4). Streaming token appends mutate the live message in
@@ -1435,21 +1432,17 @@ class _ChatScreenState extends State<ChatScreen>
                     ),
               ),
               // Browser button — P8 Task 16: the on-device WebView browser is
-              // gone, so the thin arm opens the cloud screencast viewer. The
-              // gate follows `Distribution.cloudBrowser` (== thinClient); the
-              // T10 inversion was fixed by deleting the on-device screen, not
-              // by flipping this condition back.
-              if (Distribution.cloudBrowser)
-                IconButton(
-                  key: const ValueKey('chat-header-browser'),
-                  tooltip: context.l10n.chatHeaderBrowser,
-                  icon: const Icon(Icons.public, size: 19),
-                  onPressed: () => Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => BrowserScreen(sessionId: s?.id),
-                    ),
+              // gone, so this always opens the cloud screencast viewer.
+              IconButton(
+                key: const ValueKey('chat-header-browser'),
+                tooltip: context.l10n.chatHeaderBrowser,
+                icon: const Icon(Icons.public, size: 19),
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => BrowserScreen(sessionId: s?.id),
                   ),
                 ),
+              ),
               ChatOverflowMenu(
                 session: s,
                 onJobs: (id) => _showJobsPopover(context, id),
@@ -1474,17 +1467,15 @@ class _ChatScreenState extends State<ChatScreen>
                     const _GoalBar(),
                     const _TodoDock(),
                     const _StatsLine(),
-                    // Thin client only: the offline prompt outbox chip and
-                    // the cloud error-envelope row (402/409/503).
-                    if (Distribution.cloudExecution) ...[
-                      _CloudOutboxChip(
-                        sessionId: AppState.I.activeSessionId,
-                      ),
-                      _CloudErrorRow(
-                        sessionId: AppState.I.activeSessionId,
-                        onRetry: _retryFailedCloudPrompt,
-                      ),
-                    ],
+                    // The offline prompt outbox chip and the cloud
+                    // error-envelope row (402/409/503).
+                    _CloudOutboxChip(
+                      sessionId: AppState.I.activeSessionId,
+                    ),
+                    _CloudErrorRow(
+                      sessionId: AppState.I.activeSessionId,
+                      onRetry: _retryFailedCloudPrompt,
+                    ),
                     _QueueDock(
                       sessionId: AppState.I.activeSessionId,
                       onEdited: () => setState(() {}),
@@ -2154,8 +2145,7 @@ class _ChatScreenState extends State<ChatScreen>
       return false;
     }
     final agent = _agent;
-    final pending = agent.pendingAttachments;
-    final paths = pending.map((a) => a.path).toSet();
+    final paths = agent.pendingAttachments.map((a) => a.path).toSet();
     final previousIds = agent.queuedMessageIdsFor(session.id).toSet();
     agent.enqueueMessage(text, sessionId: session.id);
     // enqueue can reject admission. Never clear a rejected draft.
@@ -2164,18 +2154,11 @@ class _ChatScreenState extends State<ChatScreen>
         .any((id) => !previousIds.contains(id))) {
       return false;
     }
-    // Ownership transfer of staged files. The DEFAULT arm keeps the original
-    // captured-list mutation: `pendingAttachments` is the originating
-    // session's live list, so a session switch triggered by the enqueue
-    // notification must not retarget the removal. The CLOUD arm serves an
-    // unmodifiable view from the facade, so it goes through the surface's
-    // removeAttachment (the send is always for the active session there).
-    if (Distribution.cloudExecution) {
-      for (final path in paths) {
-        agent.removeAttachment(path);
-      }
-    } else {
-      pending.removeWhere((a) => paths.contains(a.path));
+    // Ownership transfer of staged files. The facade serves an unmodifiable
+    // view, so hand the paths to the surface's removeAttachment (the send is
+    // always for the active session).
+    for (final path in paths) {
+      agent.removeAttachment(path);
     }
     app.refresh();
     return true;
@@ -2194,66 +2177,10 @@ class _ChatScreenState extends State<ChatScreen>
         !identical(app.sessionById(session.id), session)) {
       return;
     }
-    if (Distribution.cloudExecution) {
-      // P8 Task 10: no local provider validation and no local optimistic
-      // row — the run is admitted server-side and the facade owns staging.
-      unawaited(_sendCloudPrompt(session, t, onAccepted: onAccepted));
-      return;
-    }
-    final provider = app.providerForSession(session);
-    if (provider == null || session.model == 'Select a provider') {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Select a provider and model before sending.'),
-          action: SnackBarAction(
-            label: 'Select',
-            onPressed: () => _modelPicker(context),
-          ),
-        ),
-      );
-      return;
-    }
-    if (!provider.isConfigured) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Add an API key for ${provider.name} first.')),
-      );
-      return;
-    }
-    final selectedModel = session.model.split('·').first.trim();
-    if (!provider.models.contains(selectedModel)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('The selected model is no longer available.'),
-        ),
-      );
-      return;
-    }
-
-    final agent = _agent;
-    if (agent.busyFor(session.id)) {
-      if (_enqueuePrompt(session, t)) onAccepted?.call();
-      return;
-    }
-    app.sendMessage(t);
-    onAccepted?.call();
-    // New user message → snap to bottom so the user sees the answer start.
-    _atBottom = true;
-    Future.delayed(const Duration(milliseconds: 80), () {
-      if (_scroll.hasClients) {
-        _scroll.jumpTo(_scroll.position.maxScrollExtent);
-      }
-    });
-    // @file/@session references expand into model-visible context blocks
-    // (the composer mention expander file-reference parity) before the run starts.
-    _agent.runTask(t, sessionId: session.id, expandRefsFor: session);
-    // An ADMITTED run owns the staged files from this tick on: runTask
-    // snapshots them onto the submitted row synchronously at admission, so
-    // the composer's staging area must hand them over now instead of
-    // waiting for the first provider response — a mid-run cancel then keeps
-    // them on the message row rather than resurrecting them as new chips.
-    if (_agent.busyFor(session.id)) {
-      _agent.clearAttachment();
-    }
+    // P8 Task 20: the local provider/run arm is gone. There is no local
+    // provider validation and no local optimistic row — the run is admitted
+    // server-side and the facade owns staging.
+    unawaited(_sendCloudPrompt(session, t, onAccepted: onAccepted));
   }
 
   /// The last cloud prompt whose send FAILED — the error row's Retry

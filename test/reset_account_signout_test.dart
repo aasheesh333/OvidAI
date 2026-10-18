@@ -7,7 +7,6 @@ import 'package:ovid_ai/core/auth_identity.dart';
 import 'package:ovid_ai/core/auth_providers.dart';
 import 'package:ovid_ai/core/firebase_service.dart';
 import 'package:ovid_ai/core/image_studio.dart';
-import 'package:ovid_ai/core/memory_store.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/settings_actions.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -52,7 +51,7 @@ void main() {
     originalPaths = PathProviderPlatform.instance;
     PathProviderPlatform.instance = _Paths(directory);
     SessionSearch.dbPathOverrideForTest = '${directory.path}/search.db';
-    app = AppState.createForTest(memoryStore: MemoryStore(directory));
+    app = AppState.createForTest(memoryRootForTest: directory);
     app.suspendCoalescedPersistenceForTest = true;
     images.bindAccount(null);
     user = TestUser('alice', ['google.com']);

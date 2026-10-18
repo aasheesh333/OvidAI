@@ -3,19 +3,18 @@ import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/studio_remote_client.dart';
 import 'package:ovid_ai/core/composer_drafts.dart';
-import 'package:ovid_ai/core/memory_store.dart';
 import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/secure_store.dart';
 import 'package:ovid_ai/core/settings_actions.dart';
 import 'package:ovid_ai/core/settings_backup_service.dart';
 import 'package:ovid_ai/core/session_history_store.dart';
-import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/studio_drafts.dart';
@@ -48,9 +47,21 @@ void main() {
   late SharedPreferences prefs;
   late _Preferences backend;
   late ChatSession original;
-  late MemoryStore memory;
   late Set<String> originalWorkspacePaths;
   late File existingWorkspaceFile;
+
+  /// Seed the pre-cloud Markdown memory layout directly (the local store was
+  /// deleted in P8 Task 20): `global/` and `session-<sha256(owner)>/`.
+  void seedMemory(String owner, String content) {
+    final memoryRoot = Directory('${root.path}/memory');
+    File('${memoryRoot.path}/global/MEMORY.md')
+      ..createSync(recursive: true)
+      ..writeAsStringSync(content);
+    final session = Directory(
+      '${memoryRoot.path}/session-${sha256.convert(utf8.encode(owner))}',
+    )..createSync(recursive: true);
+    File('${session.path}/MEMORY.md').writeAsStringSync(content);
+  }
 
   setUpAll(() {
     open.overrideFor(OperatingSystem.linux,
@@ -78,8 +89,7 @@ void main() {
     await prefs.setString('ovid_active_session', original.id);
     await prefs.setString('ovid_session_bootstrap_v1', 'original snapshot');
     await prefs.setBool('show_reasoning', false);
-    memory = MemoryStore(Directory('${root.path}/memory'));
-    app = AppState.createForTest(memoryStore: memory);
+    app = AppState.createForTest(memoryRootForTest: Directory('${root.path}/memory'));
     // The constructor warms its provisional session's workspace asynchronously.
     // Await that real path before snapshotting existing files: rollback owns
     // only the new import directories, not this already-created workspace.
@@ -385,8 +395,7 @@ void main() {
   });
 
   test('wired all-store reset clears verifiable stores and reports the rest truthfully', () async {
-    memory.save(null, 'MEMORY.md', 'Forget global', mode: 'append');
-    memory.save('existing', 'MEMORY.md', 'Forget session', mode: 'append');
+    seedMemory('existing', 'Forget memory');
     await prefs.setString('ovid_memories', 'invalid json');
     final file = File('${root.path}/user-file')..writeAsStringSync('keep');
 
@@ -400,7 +409,6 @@ void main() {
       containsAll([
         'sessions',
         'search',
-        'ledger',
         'memory',
         'account',
         'image-receipts',
@@ -416,7 +424,7 @@ void main() {
     expect(prefs.getStringList('ovid_sessions'), isNull);
     expect(prefs.getString('ovid_active_session'), isNull);
     expect(prefs.getString('ovid_session_bootstrap_v1'), isNull);
-    expect(memory.root.existsSync(), isFalse);
+    expect(Directory('${root.path}/memory').existsSync(), isFalse);
     expect(app.sessions.any((s) => s.id == 'existing'), isFalse);
     // A user file outside app-owned stores is never touched.
     expect(file.readAsStringSync(), 'keep');
@@ -436,10 +444,7 @@ void main() {
     // Migrate this account's prefs rows into SQLite, as production startup
     // does, so the reset owns a loaded namespace.
     await app.loadSessions();
-    SessionLedger.rootOverrideForTest =
-        Directory('${root.path}/session-ledgers')..createSync(recursive: true);
     addTearDown(() async {
-      SessionLedger.rootOverrideForTest = null;
       StudioDraftStore.I.disableForTest();
       ComposerDraftStore.I.resetForTest();
       await SessionHistoryRepository.I.resetForTest();
@@ -500,11 +505,6 @@ void main() {
       ..writeAsStringSync('zip');
     final shareCache = Directory('${root.path}/outgoing-shares')..createSync();
     final userFile = File('${root.path}/user-file')..writeAsStringSync('keep');
-    // SessionLedger.I caches the first test's (since deleted) root; point it
-    // at this test's root so the ledger tombstone can be written.
-    SessionLedger.rootOverrideForTest =
-        Directory('${root.path}/session-ledgers')..createSync(recursive: true);
-    addTearDown(() => SessionLedger.rootOverrideForTest = null);
 
     final report = await SettingsActions.resetAll!();
 
@@ -531,14 +531,12 @@ void main() {
   });
 
   test('legacy deleteAllData still clears memory preferences and sessions', () async {
-    memory.save(null, 'MEMORY.md', 'Forget global', mode: 'append');
-    memory.save('existing', 'MEMORY.md', 'Forget session', mode: 'append');
+    seedMemory('existing', 'Forget memory');
     await prefs.setString('ovid_memories', 'invalid json');
     app.suspendCoalescedPersistenceForTest = false;
     await app.deleteAllData();
     await prefs.reload();
-    expect(memory.read(null, 'MEMORY.md').content, isEmpty);
-    expect(memory.read('existing', 'MEMORY.md').content, isEmpty);
+    expect(Directory('${root.path}/memory').existsSync(), isFalse);
     expect(prefs.containsKey('ovid_memories'), false);
     expect(prefs.containsKey('show_reasoning'), false);
     expect(app.sessions, hasLength(1));

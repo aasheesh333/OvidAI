@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../core/cloud/cloud_session_store.dart';
-import '../core/distribution.dart';
 import '../core/share_link_resolver.dart'
     show ShareLinkResolver, ShareViewerRoute;
 import '../core/state.dart';
@@ -135,25 +134,21 @@ class AppRouter {
         return true;
       case ChatRoute(:final sessionId):
         if (AppState.I.sessionById(sessionId) == null) {
-          // P8 Task 10: `/c/<id>` accepts SERVER ids on the thin client. A
-          // server row not yet reconciled into AppState (a warm-app
-          // notification tap) is reconciled now and the chat opens as soon
-          // as it lands; only a genuinely missing session shows "Chat not
-          // found". The wait is bounded (see [_reconcileTimeout]).
-          if (Distribution.cloudExecution) {
-            unawaited(
-              _openCloudChatWhenReconciled(
-                navigator,
-                sessionId,
-                notFound: notFound,
-              ),
-            );
-            // Accepted: the reconciliation owns the outcome, including the
-            // not-found feedback if the row never appears.
-            return true;
-          }
-          notFound();
-          return false;
+          // P8 Task 10: `/c/<id>` accepts SERVER ids. A server row not yet
+          // reconciled into AppState (a warm-app notification tap) is
+          // reconciled now and the chat opens as soon as it lands; only a
+          // genuinely missing session shows "Chat not found". The wait is
+          // bounded (see [_reconcileTimeout]).
+          unawaited(
+            _openCloudChatWhenReconciled(
+              navigator,
+              sessionId,
+              notFound: notFound,
+            ),
+          );
+          // Accepted: the reconciliation owns the outcome, including the
+          // not-found feedback if the row never appears.
+          return true;
         }
         navigator.popUntil((r) => r.isFirst);
         AppState.I.selectSession(sessionId);

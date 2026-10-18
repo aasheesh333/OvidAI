@@ -37,7 +37,6 @@ extension _SettingsStateIntegration on AppState {
     final account = _sessionAccountToken;
     final result = await _withSettingsBarrier(account, (token) async {
       _checkSettingsOwner(token);
-      final ledgerIds = <String>{};
       final workspaceIds = <String>{};
       final receipts = ImageReceiptStore();
       final receiptAccount = ImageStudio.I.accountId;
@@ -100,27 +99,15 @@ extension _SettingsStateIntegration on AppState {
           onDelete: () => SessionSearch.I.clear(),
           onVerifyDeleted: () => SessionSearch.I.isEmpty(),
         ),
-        ResetStoreKind.ledger: FunctionalResetStore(
-          name: ResetStoreKind.ledger.id,
-          onStage: () async {
-            ledgerIds
-              ..clear()
-              ..addAll(sessions.map((session) => session.id))
-              ..addAll(_deferredLedgerSessionIds());
-          },
-          onDelete: () async {
-            for (final id in ledgerIds) {
-              await SessionLedger.I.delete(id);
-            }
-          },
-          onVerifyDeleted: () => SessionLedger.I.isEmpty(),
-        ),
         ResetStoreKind.memory: FunctionalResetStore(
           name: ResetStoreKind.memory.id,
           onStage: () async {},
-          onDelete: () async => (await _openMemoryStore()).deleteAll(),
+          // Memory is server-owned; the pre-cloud Markdown directory is the
+          // only local artifact and is removed directly (P8 Task 20 retired
+          // the local store).
+          onDelete: _deleteMemoryRoot,
           onVerifyDeleted: () async =>
-              !(await _openMemoryStore()).root.existsSync(),
+              !(await _memoryRootForAccount(_sessionAccountId)).existsSync(),
         ),
         ResetStoreKind.account: FunctionalResetStore(
           name: ResetStoreKind.account.id,
@@ -343,7 +330,6 @@ extension _SettingsStateIntegration on AppState {
       }
     }
     await prefs.reload();
-    memories.clear();
     memoryEnabled = true;
     showReasoning = true;
     githubSync = true;
@@ -396,19 +382,6 @@ extension _SettingsStateIntegration on AppState {
 
   String _baseName(String path) =>
       path.substring(path.lastIndexOf(Platform.pathSeparator) + 1);
-
-  Set<String> _deferredLedgerSessionIds() {
-    final ids = <String>{};
-    for (final raw in _deferredSessionJson ?? const <String>[]) {
-      try {
-        final id = (jsonDecode(raw) as Map<String, dynamic>)['id'];
-        if (id is String && id.isNotEmpty) ids.add(id);
-      } catch (_) {
-        // A malformed deferred row is not a ledger owner.
-      }
-    }
-    return ids;
-  }
 
   Future<T> _withSettingsBarrier<T>(
     Object expectedAccount,

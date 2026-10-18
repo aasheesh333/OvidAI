@@ -1,32 +1,31 @@
-import 'dart:io';
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/session_ledger.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/trajectory_screen.dart';
 
+import 'support/fake_cloud_events.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  late Directory root;
+  late FakeCloudEventsRest rest;
   late AppState app;
 
   setUp(() async {
+    SharedPreferences.setMockInitialValues({});
     AppState.resetTestInstance();
     app = AppState.createForTest();
-    root = await Directory.systemTemp.createTemp('trajectory-premium-');
-    SessionLedger.rootOverrideForTest = root;
+    rest = FakeCloudEventsRest();
+    installFakeCloudEvents(rest);
   });
 
   tearDown(() async {
-    for (final id in SessionLedger.I.sinkOpensForTest.keys.toList()) {
-      await SessionLedger.I.close(id);
-    }
-    SessionLedger.rootOverrideForTest = null;
     AppState.resetTestInstance();
-    if (root.existsSync()) root.deleteSync(recursive: true);
   });
 
   Future<void> pumpReady(WidgetTester tester, String id) async {
@@ -34,12 +33,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(theme: Aether.theme(), home: TrajectoryScreen(sessionId: id)),
       );
-      final deadline = DateTime.now().add(const Duration(seconds: 10));
-      while (find.byType(CircularProgressIndicator).evaluate().isNotEmpty &&
-          DateTime.now().isBefore(deadline)) {
-        await Future<void>.delayed(const Duration(milliseconds: 10));
-        await tester.pump();
-      }
+      await settleTrajectory(tester);
     });
   }
 
@@ -47,17 +41,15 @@ void main() {
       (tester) async {
     const id = 'trajectory-premium-outcomes';
     app.sessions.add(ChatSession(id: id, title: 'Outcomes', model: 'm', mode: 'auto'));
-    await tester.runAsync(() async {
-      await SessionLedger.I.append(id, 'tool_end', {
-        'tool': 'search', 'ms': 12, 'ok': true,
-      });
-      await SessionLedger.I.append(id, 'tool_end', {
-        'tool': 'write', 'ms': 18, 'ok': false, 'error': 'permission denied',
-      });
-      await SessionLedger.I.append(id, 'subagent_end', {
-        'agent': 'researcher', 'ok': false, 'error': 'timed out',
-      });
-    });
+    rest.events = [
+      cloudEvent('1', 'tool_completed', {'name': 'search', 'isError': false}),
+      cloudEvent('2', 'tool_completed', {'name': 'write', 'isError': true}),
+      cloudEvent('3', 'subagent_completed', {
+        'agent': 'researcher',
+        'ok': false,
+        'error': 'timed out',
+      }),
+    ];
     await pumpReady(tester, id);
 
     expect(find.text('Tool succeeded: search'), findsOneWidget);
@@ -65,50 +57,36 @@ void main() {
     expect(find.text('Subagent failed: researcher'), findsOneWidget);
     expect(find.byIcon(Icons.check_circle_outline), findsOneWidget);
     expect(find.byIcon(Icons.error_outline), findsNWidgets(2));
-    expect(find.bySemanticsLabel('Tool failed: write. 18ms. Error: permission denied'), findsOneWidget);
+    expect(find.bySemanticsLabel('Tool done: write. failed'), findsOneWidget);
   });
 
-  testWidgets('renders responsive stats with explicit labels', (tester) async {
-    const id = 'trajectory-premium-stats';
-    app.sessions.add(ChatSession(id: id, title: 'Stats', model: 'm', mode: 'auto'));
-    await tester.runAsync(() async {
-      await SessionLedger.I.append(id, 'turn_start', {'turn': 1});
-      await SessionLedger.I.append(id, 'tool_start', {'tool': 'search'});
-      await SessionLedger.I.append(id, 'turn_end', {'llmMs': 120});
-    });
-    await pumpReady(tester, id);
-
-    expect(find.text('Turns'), findsOneWidget);
-    expect(find.text('Tool calls'), findsOneWidget);
-    expect(find.text('Wall time'), findsOneWidget);
-    expect(find.text('LLM time'), findsOneWidget);
-    expect(find.text('Tool time'), findsOneWidget);
-  });
-
-  testWidgets('keeps the existing timeline visible while reloading', (tester) async {
+  testWidgets('keeps the existing timeline visible while reloading',
+      (tester) async {
     const id = 'trajectory-premium-refresh';
     app.sessions.add(ChatSession(id: id, title: 'Refresh', model: 'm', mode: 'auto'));
-    await tester.runAsync(() async {
-      await SessionLedger.I.append(id, 'note', {'text': 'Existing timeline'});
-    });
+    rest.events = [
+      cloudEvent('1', 'system_note', {'message': 'Existing timeline'}),
+    ];
     await pumpReady(tester, id);
 
-    await tester.tap(find.byTooltip('Reload ledger'));
-    await tester.pump();
+    final gate = Completer<void>();
+    rest.hold = gate;
+    rest.events = [
+      ...rest.events,
+      cloudEvent('2', 'system_note', {'message': 'New timeline'}),
+    ];
+    await tester.runAsync(() async {
+      await tester.tap(find.byTooltip('Reload events'));
+      await tester.pump();
+    });
 
     expect(find.text('Existing timeline'), findsOneWidget);
     expect(find.byType(LinearProgressIndicator), findsOneWidget);
 
-    // The reload read starts in the fake-clock zone; let its real file/isolate
-    // IO finish so the shared ledger teardown can close the sink instead of
-    // blocking forever on the never-completing read future.
     await tester.runAsync(() async {
-      final deadline = DateTime.now().add(const Duration(seconds: 30));
-      while (find.byType(LinearProgressIndicator).evaluate().isNotEmpty &&
-          DateTime.now().isBefore(deadline)) {
-        await Future<void>.delayed(const Duration(milliseconds: 10));
-        await tester.pump();
-      }
+      gate.complete();
+      await settleTrajectory(tester);
     });
+    expect(find.text('New timeline'), findsOneWidget);
   });
 }

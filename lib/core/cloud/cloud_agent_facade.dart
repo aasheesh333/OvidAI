@@ -8,11 +8,12 @@
 ///  * `EventTranscriptProjector` / `TranscriptProjection` (Task 7) — the
 ///    event→transcript fold.
 ///
-/// The facade is DARK: nothing constructs it outside tests until Task 10
-/// binds `chat_screen.dart` to `Distribution.cloudExecution`. It owns no
-/// local execution machinery — no tool loop, no approvals, no jobs. Sections
-/// whose server events have not landed yet (P2 jobs, P3 approvals/usage) are
-/// explicitly inert with a marker rather than silently faked.
+/// The facade is the ONLY [AgentSurface] implementation since Task 19:
+/// `chat_screen.dart` binds to it directly (Task 20 removed the dual-path
+/// gate). It owns no local execution machinery — no tool loop, no approvals,
+/// no jobs. Sections whose server events have not landed yet (P2 jobs, P3
+/// approvals/usage) are explicitly inert with a marker rather than silently
+/// faked.
 library;
 
 import 'dart:async';
@@ -1319,10 +1320,9 @@ class CloudAgentFacade extends ChangeNotifier
   // renders ChatSession.messages straight from the server projection).
   // -------------------------------------------------------------------------
 
-  /// The live transcript list chat_screen renders under
-  /// `Distribution.cloudExecution` (oldest-first; null before the session
-  /// was first used — the caller falls back to `ChatSession.messages`).
-  /// Accepts a local or server session id.
+  /// The live transcript list chat_screen renders (oldest-first; null before
+  /// the session was first used — the caller falls back to
+  /// `ChatSession.messages`). Accepts a local or server session id.
   List<Message>? transcriptFor(String sessionId) =>
       _sessions[_serverId(sessionId) ?? sessionId]?.projection.messages;
 

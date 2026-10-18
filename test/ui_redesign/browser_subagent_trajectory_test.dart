@@ -1,68 +1,55 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/trajectory_screen.dart';
 import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
 
-/// Wave 2 UI redesign — subagent / trajectory render contract.
+import '../support/fake_cloud_events.dart';
+
+/// Wave 2 UI redesign — trajectory render contract.
 ///
-/// Asserts the premium Aether primitives are mounted on the two surviving
-/// screens, while the ORIGINAL navigation, dispatch and playback entry points
-/// remain intact (visible buttons, open callbacks, screen types). These tests
-/// are deliberately shallow: they prove the redesign surface, not the
-/// underlying services.
+/// Asserts the premium Aether primitives are mounted on the surviving
+/// trajectory screen while the playback entry point (the server event
+/// mirror) remains intact. These tests are deliberately shallow: they prove
+/// the redesign surface, not the gateway.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  late FakeCloudEventsRest rest;
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     AppState.resetTestInstance();
     AppState.createForTest().seenWelcomeVersion = AppState.welcomeVersion;
-    SessionLedger.rootOverrideForTest = await Directory.systemTemp
-        .createTemp('wave2-trajectory-');
+    rest = FakeCloudEventsRest();
+    installFakeCloudEvents(rest);
   });
 
   tearDown(() {
     AppState.resetTestInstance();
-    final root = SessionLedger.rootOverrideForTest;
-    SessionLedger.rootOverrideForTest = null;
-    try {
-      root?.deleteSync(recursive: true);
-    } catch (_) {}
   });
 
   Widget host(Widget child) =>
       MaterialApp(theme: Aether.theme(), home: child);
 
-  Future<void> pumpUntilTrajectoryReady(
-    WidgetTester tester,
-  ) async {
-    // Called inside runAsync: ledger reads use real files and worker isolates,
-    // which advancing the widget test's fake clock cannot complete.
-    // Generous bound: under the full suite several isolates and real file IO
-    // run concurrently, so loading can take far longer than an idle 5s. The
-    // wait is still condition-based; the bound only guards against hangs.
-    final deadline = DateTime.now().add(const Duration(seconds: 30));
-    // Readiness is loading completion, not a lazy offscreen event header.
-    // Keep pumping while IO runs: frame callbacks can enqueue fake-zone
-    // microtasks that a directly awaited ledger barrier cannot drain.
-    while (find.byType(CircularProgressIndicator).evaluate().isNotEmpty &&
-        DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-      await tester.pump();
-    }
+  Future<void> pumpUntilTrajectoryReady(WidgetTester tester) async {
+    await settleTrajectory(tester);
     expect(find.byType(CircularProgressIndicator), findsNothing,
-        reason: 'Ledger must leave loading once real IO completes');
+        reason: 'The event request must leave loading once it answers');
+  }
+
+  Future<void> pumpTrajectory(WidgetTester tester, String id) async {
+    await tester.runAsync(() async {
+      await tester.pumpWidget(host(TrajectoryScreen(sessionId: id)));
+      await pumpUntilTrajectoryReady(tester);
+    });
   }
 
   testWidgets(
-    'trajectory screen renders AetherEmptyState when the ledger has no events',
+    'trajectory screen renders AetherEmptyState when the mirror is empty',
     (tester) async {
       final session = ChatSession(
         id: 'wave2-ui-traj-empty',
@@ -71,14 +58,7 @@ void main() {
         mode: 'auto',
       );
       AppState.I.sessions.add(session);
-      await tester.runAsync(() async {
-      await tester.pumpWidget(
-        host(TrajectoryScreen(sessionId: session.id)),
-      );
-      await pumpUntilTrajectoryReady(
-        tester,
-      );
-      });
+      await pumpTrajectory(tester, session.id);
 
       expect(
         find.byKey(const ValueKey('trajectory-empty')),
@@ -99,25 +79,12 @@ void main() {
         mode: 'auto',
       );
       AppState.I.sessions.add(session);
-      addTearDown(() => SessionLedger.I.close(session.id));
-      await tester.runAsync(() async {
-      await SessionLedger.I.append(session.id, 'turn_start', {
-        'turn': 1,
-        'msgs': 2,
-      });
-      await SessionLedger.I.append(session.id, 'tool_end', {
-        'tool': 'read_file',
-        'ms': 42,
-        'ok': true,
-      });
+      rest.events = [
+        cloudEvent('1', 'run_started', {'runId': 'r1'}),
+        cloudEvent('2', 'tool_completed', {'name': 'read_file', 'isError': false}),
+      ];
 
-      await tester.pumpWidget(
-        host(TrajectoryScreen(sessionId: session.id)),
-      );
-      await pumpUntilTrajectoryReady(
-        tester,
-      );
-      });
+      await pumpTrajectory(tester, session.id);
 
       final eventsTitle = find.byKey(const ValueKey('trajectory-events-title'));
       await tester.scrollUntilVisible(eventsTitle, 180,
@@ -130,12 +97,11 @@ void main() {
         findsOneWidget,
       );
       expect(find.byType(AetherSectionTitle), findsOneWidget);
-      // Two events → two event cards, plus the stats projection strip card
-      // (turns > 0). The empty-state branch is not taken.
-      expect(find.byType(AetherCard), findsNWidgets(3));
-      expect(find.text('#1 · Turn start (turn 1)'), findsOneWidget);
+      // Two events → two event cards. The empty-state branch is not taken.
+      expect(find.byType(AetherCard), findsNWidgets(2));
+      expect(find.text('#1 · Run started'), findsOneWidget);
       expect(find.text('#2 · Tool done: read_file'), findsOneWidget);
-      expect(find.text('42ms · ok'), findsOneWidget);
+      expect(find.text('ok'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
   );

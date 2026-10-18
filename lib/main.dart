@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import 'core/cert_pinning.dart';
+import 'core/cloud/cloud_session_store.dart';
+import 'core/cloud/cloud_ws.dart';
 import 'core/cloud/push_service.dart';
 import 'core/diag.dart';
 import 'core/state.dart';
@@ -137,10 +139,9 @@ Future<void> main() async {
   } else {
     Aether.dark = !AppState.I.lightTheme;
   }
-  // First launch goes straight to the chat shell — there is no setup gate
-  // anymore. The sandbox (core + runtimes) installs on Studio first-open
-  // via openStudio(); the sandboxInstalled detection above stays available
-  // for guards elsewhere.
+  // First launch goes straight to the chat shell — login → session list (or
+  // the empty state → new chat) → send. There is no setup gate: the local
+  // sandbox/runtime install was deleted with the on-device agent (P8 Task 20).
   //
   // Runs execute detached on the cloud gateway; this process is a thin
   // client. Push wakes it to show results — nothing here keeps it alive.
@@ -189,16 +190,36 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     PushService.I.onOpenRoute = _openRouteFromNotification;
     BackgroundNotifier.I.inAppPresenter = _showInAppNotification;
     // Firebase must be up before a token can be requested; LoginGate owns
-    // initialization, so start push as soon as readiness flips.
-    FirebaseService.I.addListener(_maybeStartPush);
-    _maybeStartPush();
+    // initialization, so start push and warm the cloud link/store as soon as
+    // readiness flips. P8 Task 20 boot is exactly: Firebase + PushService +
+    // WsMultiplexer + CloudSessionStore warm-up.
+    FirebaseService.I.addListener(_maybeStartCloud);
+    _maybeStartCloud();
     _restoreAndListenForLinks();
   }
 
-  void _maybeStartPush() {
-    if (!FirebaseService.I.isAvailable) return;
-    FirebaseService.I.removeListener(_maybeStartPush);
+  /// One-shot cold-boot warm-up once Firebase reports an account.
+  ///
+  /// Push registration, the WS link and the session store all need the
+  /// signed-in identity; warming before that would mint an unauthenticated
+  /// ticket. A later sign-in is covered by the shell's resume path.
+  void _maybeStartCloud() {
+    final firebase = FirebaseService.I;
+    if (!firebase.isAvailable) return;
+    if (!firebase.isSignedIn || !firebase.accountReady) return;
+    firebase.removeListener(_maybeStartCloud);
     unawaited(PushService.I.init());
+    unawaited(_warmCloud());
+  }
+
+  Future<void> _warmCloud() async {
+    await CloudSessionStore.I.ready;
+    try {
+      await WsMultiplexer.I.connectIfNeeded();
+      await CloudSessionStore.I.refreshSessions();
+    } catch (e) {
+      Diag.swallow('main.warmCloud', e);
+    }
   }
 
   bool _openChatFromNotification(String sessionId, [int attempt = 0]) {
@@ -342,7 +363,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     AppState.I.setAccountFeaturesForeground(false);
     WidgetsBinding.instance.removeObserver(this);
     AppState.I.removeListener(_onThemeChanged);
-    FirebaseService.I.removeListener(_maybeStartPush);
+    FirebaseService.I.removeListener(_maybeStartCloud);
     if (PushService.I.onOpenRoute == _openRouteFromNotification) {
       PushService.I.onOpenRoute = null;
     }

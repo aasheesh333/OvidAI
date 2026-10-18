@@ -4,7 +4,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../core/connection_service.dart';
-import '../core/distribution.dart';
 import '../core/firebase_service.dart';
 import '../core/session_history_store.dart';
 import '../core/theme.dart';
@@ -153,20 +152,18 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
   final TextEditingController _searchController = TextEditingController();
   final SidebarSessionsNotifier _sessions = SidebarSessionsNotifier();
 
-  /// P8 Task 10: on the thin client the session list is the store's
-  /// reconciliation output — refresh it once at mount (offline: the list
-  /// renders from the local cache read-only, spec §12).
+  /// P8 Task 10: the session list is the store's reconciliation output —
+  /// refresh it once at mount (offline: the list renders from the local cache
+  /// read-only, spec §12).
   @override
   void initState() {
     super.initState();
-    if (Distribution.cloudExecution) {
-      unawaited(
-        CloudSessionStore.I.ready.then((_) async {
-          if (CloudSessionStore.I.offline) return;
-          await CloudSessionStore.I.refreshSessions();
-        }).catchError((Object _) {}),
-      );
-    }
+    unawaited(
+      CloudSessionStore.I.ready.then((_) async {
+        if (CloudSessionStore.I.offline) return;
+        await CloudSessionStore.I.refreshSessions();
+      }).catchError((Object _) {}),
+    );
   }
 
   /// Pull-to-refresh (thin client): re-walks the gateway's session pages
@@ -499,9 +496,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                         ],
                       );
                       // P8 Task 10: pull-to-refresh reconciles the gateway's
-                      // session list on the thin client (the default build
-                      // has no server list to pull).
-                      if (!Distribution.cloudExecution) return scrollView;
+                      // session list.
                       return RefreshIndicator(
                         onRefresh: _refreshCloudSessions,
                         child: scrollView,
@@ -1189,49 +1184,13 @@ class _SessionTileState extends State<_SessionTile> {
                 _rename(context);
               },
             ),
-            // P8 Task 10: title GENERATION is an on-device agent concern —
-            // the facade member is inert until the owning server task wires
-            // it, so the action is hidden on the thin client.
-            if (!Distribution.cloudExecution)
-              ListTile(
-                dense: true,
-                leading: Icon(
-                  Icons.auto_awesome_outlined,
-                  size: 19,
-                  color: Aether.accent,
-                ),
-                title: const Text(
-                  'Regenerate title',
-                  style: TextStyle(fontSize: 13.5),
-                ),
-                onTap: () {
-                  Navigator.pop(sheetCtx);
-                  _regenerateTitle(context);
-                },
-              ),
+            // P8 Task 20: title generation is a server concern and the facade
+            // member is inert until the owning server task wires it, so the
+            // action is not offered.
           ],
         ),
       ),
     );
-  }
-
-  Future<void> _regenerateTitle(BuildContext context) async {
-    final session = widget.session;
-    final messenger = ScaffoldMessenger.of(context);
-    final previous = session.title;
-    messenger.showSnackBar(
-      const SnackBar(
-        content: Text('Generating title…'),
-        duration: Duration(seconds: 2),
-      ),
-    );
-    await _agent.regenerateSessionTitle(session);
-    if (session.title == previous) {
-      messenger.hideCurrentSnackBar();
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Could not generate a title')),
-      );
-    }
   }
 
   void _rename(BuildContext context) =>

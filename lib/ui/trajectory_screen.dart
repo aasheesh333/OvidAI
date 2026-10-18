@@ -1,23 +1,31 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import '../core/format.dart';
 
-import '../core/session_ledger.dart';
+import '../core/cloud/cloud_rest.dart';
+import '../core/cloud/cloud_session_store.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'widgets/aether_primitives.dart';
 
-/// Trajectory view (PR19) — the event-ledger tab for one session:
-/// every turn / tool / checkpoint / recovery record from the append-only
-/// ledger, with per-record detail (tokens, duration, data). The summary
-/// strip carries the stats projection (turns, steps, wall time, top tools).
+/// Trajectory view (PR19) — the durable event timeline for one session.
+///
+/// P8 Task 20 re-pointed this screen from the deleted local JSONL ledger to
+/// the gateway's event mirror:
+///
+///   `GET /sessions/:id/events?tail=1&limit=N` — newest page (ascending)
+///   `GET /sessions/:id/events?before=<seq>&limit=N` — older page
+///
+/// The screen is opened with a LOCAL `ChatSession.id`; it resolves the server
+/// UUID through [CloudSessionStore] before the first request. A bare request
+/// without a cursor returns from the BEGINNING on the server, so the tail is
+/// always explicit.
 class TrajectoryScreen extends StatefulWidget {
   final String sessionId;
   const TrajectoryScreen({super.key, required this.sessionId});
 
-  /// Events decoded per page; the ledger is never truncated, so only the
-  /// newest page is loaded up front and older ones on request.
+  /// Events decoded per page. The mirror is paged newest-first on open and
+  /// older pages are loaded on request.
   static const pageSize = 200;
 
   @override
@@ -27,10 +35,9 @@ class TrajectoryScreen extends StatefulWidget {
 class _TrajectoryScreenState extends State<TrajectoryScreen> {
   List<Map<String, dynamic>> _events = [];
 
-  /// Ledger record offset of `_events.first`; > 0 means earlier events exist.
-  int _firstOffset = 0;
+  /// True while older events may exist (`before=<oldest seq>`).
+  bool _hasEarlier = false;
   bool _loadingEarlier = false;
-  SessionProjection? _proj;
   bool _loading = true;
   String? _error;
 
@@ -40,54 +47,109 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
     _load();
   }
 
+  /// Resolve the local session id to the server UUID the gateway routes on.
+  Future<String> _serverSessionId() async {
+    final store = CloudSessionStore.I;
+    await store.ready;
+    return store.serverIdFor(widget.sessionId) ?? widget.sessionId;
+  }
+
+  Future<Map<String, dynamic>> _fetch(Map<String, String> query) async {
+    final serverId = await _serverSessionId();
+    return CloudRestClient.I.getJson(
+      '/sessions/$serverId/events',
+      query: query,
+    );
+  }
+
+  static List<Map<String, dynamic>> _decodeEvents(Map<String, dynamic> body) {
+    final raw = body['events'];
+    if (raw is! List) return const [];
+    return [
+      for (final event in raw)
+        if (event is Map) Map<String, dynamic>.from(event),
+    ];
+  }
+
   Future<void> _load() async {
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
-      // One isolate scan: projection over the whole ledger + newest page.
-      final tail = await SessionLedger.I.readTail(
-        widget.sessionId,
-        limit: TrajectoryScreen.pageSize,
-      );
+      final body = await _fetch({
+        'tail': '1',
+        'limit': '${TrajectoryScreen.pageSize}',
+      });
+      final events = _decodeEvents(body);
       if (!mounted) return;
       setState(() {
-        _events = tail.events;
-        _firstOffset = tail.firstOffset;
-        _proj = tail.projection;
+        _events = events;
+        _hasEarlier = events.length >= TrajectoryScreen.pageSize;
         _loading = false;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = '$e';
+        _error = _errorMessage(e);
         _loading = false;
       });
     }
   }
 
   Future<void> _loadEarlier() async {
-    if (_loadingEarlier || _firstOffset <= 0) return;
+    if (_loadingEarlier || !_hasEarlier || _events.isEmpty) return;
+    final oldest = _events.first['seq'];
+    if (oldest == null) return;
     setState(() => _loadingEarlier = true);
-    final offset = (_firstOffset - TrajectoryScreen.pageSize).clamp(0, _firstOffset);
-    final earlier = await SessionLedger.I.read(
-      widget.sessionId,
-      offset: offset,
-      limit: _firstOffset - offset,
-    );
-    if (!mounted) return;
-    setState(() {
-      _loadingEarlier = false;
-      if (earlier.isEmpty) return;
-      _events = [...earlier, ..._events];
-      _firstOffset = offset;
-    });
-    if (earlier.isEmpty) {
+    try {
+      final body = await _fetch({
+        'before': '$oldest',
+        'limit': '${TrajectoryScreen.pageSize}',
+      });
+      final earlier = _decodeEvents(body);
+      if (!mounted) return;
+      setState(() {
+        _loadingEarlier = false;
+        if (earlier.isEmpty) {
+          _hasEarlier = false;
+          return;
+        }
+        _events = [...earlier, ..._events];
+        _hasEarlier = earlier.length >= TrajectoryScreen.pageSize;
+      });
+      if (earlier.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Couldn't load earlier events.")),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loadingEarlier = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Couldn't load earlier events.")),
+        SnackBar(content: Text(_errorMessage(e))),
       );
     }
+  }
+
+  /// A real, user-readable failure — a 404 (unknown/not-owned session), an
+  /// offline transport error, or any other gateway envelope. Never an
+  /// endless spinner.
+  String _errorMessage(Object error) {
+    if (error is CloudApiException) {
+      if (error.status == 404) {
+        return 'This session was not found on Ovid Cloud.';
+      }
+      return error.message;
+    }
+    return 'Could not reach Ovid Cloud. Check your connection and retry.';
+  }
+
+  String _typeOf(Map<String, dynamic> e) => e['type'] as String? ?? '';
+
+  Map<String, dynamic> _payloadOf(Map<String, dynamic> e) {
+    final payload = e['payload'];
+    return payload is Map ? Map<String, dynamic>.from(payload) : const {};
   }
 
   void _showDetail(Map<String, dynamic> event) {
@@ -110,177 +172,145 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
     );
   }
 
-  IconData _iconFor(String? kind) => switch (kind) {
-    'turn_start' => Icons.play_arrow_outlined,
-    'turn_end' => Icons.flag_outlined,
-    'tool_start' => Icons.build_outlined,
-    'tool_end' => Icons.check_circle_outline,
-    'subagent_end' => Icons.check_circle_outline,
-    'checkpoint' => Icons.save_outlined,
-    'note' => Icons.notes_outlined,
+  IconData _iconFor(String type) => switch (type) {
+    'run_started' => Icons.play_arrow_outlined,
+    'run_started_retry' => Icons.refresh,
+    'run_completed' => Icons.flag_outlined,
+    'run_failed' => Icons.error_outline,
+    'run_cancelled' => Icons.cancel_outlined,
+    'tool_started' => Icons.build_outlined,
+    'tool_completed' => Icons.check_circle_outline,
+    'subagent_started' => Icons.hub_outlined,
+    'subagent_completed' => Icons.check_circle_outline,
+    'artifact_created' => Icons.save_outlined,
+    'workspace_hibernated' => Icons.cloud_off_outlined,
+    'workspace_hydrated' => Icons.cloud_done_outlined,
+    'approval_requested' => Icons.verified_user_outlined,
+    'approval_resolved' => Icons.verified_user,
+    'todo_updated' => Icons.checklist_outlined,
+    'goal_updated' => Icons.flag_outlined,
+    'plan_mode_changed' => Icons.account_tree_outlined,
+    'compaction_completed' => Icons.compress,
+    'system_note' => Icons.notes_outlined,
+    'message_completed' => Icons.chat_bubble_outline,
     _ => Icons.circle_outlined,
   };
 
-  bool _isFailed(Map<String, dynamic> e) =>
-      (e['kind'] == 'tool_end' || e['kind'] == 'subagent_end') &&
-      e['ok'] == false;
+  bool _isFailed(Map<String, dynamic> e) {
+    final type = _typeOf(e);
+    if (type == 'run_failed' || type == 'run_cancelled') return true;
+    if (type == 'tool_completed') {
+      final p = _payloadOf(e);
+      return p['isError'] == true || p['ok'] == false;
+    }
+    if (type == 'subagent_completed') {
+      final p = _payloadOf(e);
+      return p['ok'] == false || p['isError'] == true;
+    }
+    return false;
+  }
 
   IconData _eventIcon(Map<String, dynamic> e) =>
-      _isFailed(e) ? Icons.error_outline : _iconFor(e['kind'] as String?);
+      _isFailed(e) ? Icons.error_outline : _iconFor(_typeOf(e));
 
   /// Outcome-accurate label for terminal tool/subagent events, or null for
-  /// event kinds that carry no outcome. Rendered next to the `#seq · title`
-  /// so success/failure is explicit, not merely implied by the icon.
+  /// event types that carry no outcome.
   String? _outcomeLabel(Map<String, dynamic> e) {
-    final ok = e['ok'] == true;
-    return switch (e['kind']) {
-      'tool_end' =>
-        'Tool ${ok ? 'succeeded' : 'failed'}: ${e['tool'] ?? '?'}',
-      'subagent_end' =>
-        'Subagent ${ok ? 'succeeded' : 'failed'}: ${e['agent'] ?? '?'}',
+    final p = _payloadOf(e);
+    final ok = !(p['isError'] == true || p['ok'] == false);
+    return switch (_typeOf(e)) {
+      'tool_completed' =>
+        'Tool ${ok ? 'succeeded' : 'failed'}: ${p['name'] ?? '?'}',
+      'subagent_completed' =>
+        'Subagent ${ok ? 'succeeded' : 'failed'}: '
+            '${p['agent'] ?? p['name'] ?? '?'}',
       _ => null,
     };
   }
 
-  Color _colorFor(String? kind, {bool failed = false}) {
+  Color _colorFor(String type, {bool failed = false}) {
     if (failed) return Aether.danger;
-    return switch (kind) {
-      'turn_start' => Aether.accent,
-      'turn_end' => Aether.success,
-      'tool_start' => Aether.textMuted,
-      'tool_end' => Aether.textMuted,
-      'subagent_end' => Aether.textMuted,
-      'checkpoint' => Aether.warn,
-      'note' => Aether.danger,
+    return switch (type) {
+      'run_started' => Aether.accent,
+      'run_completed' => Aether.success,
+      'tool_started' => Aether.textMuted,
+      'tool_completed' => Aether.textMuted,
+      'subagent_completed' => Aether.textMuted,
+      'artifact_created' => Aether.warn,
+      'system_note' => Aether.danger,
       _ => Aether.textFaint,
     };
   }
 
   String _titleFor(Map<String, dynamic> e) {
-    final kind = e['kind'] as String? ?? '';
-    return switch (kind) {
-      'turn_start' => 'Turn start (turn ${e['turn'] ?? '?'})',
-      'turn_end' => 'Turn end',
-      'tool_start' => 'Tool: ${e['tool'] ?? '?'}',
-      'tool_end' => 'Tool done: ${e['tool'] ?? '?'}',
-      'subagent_end' => 'Subagent done: ${e['agent'] ?? '?'}',
-      'checkpoint' => 'Checkpoint (${e['at'] ?? '?'})',
-      'note' => 'Note',
-      _ => kind,
+    final p = _payloadOf(e);
+    return switch (_typeOf(e)) {
+      'run_started' => 'Run started',
+      'run_started_retry' => 'Run retry (attempt ${p['attempt'] ?? '?'})',
+      'run_completed' => 'Run completed',
+      'run_failed' => 'Run failed',
+      'run_cancelled' => 'Run cancelled',
+      'message_delta' => 'Message delta',
+      'message_completed' => 'Message completed',
+      'system_note' => 'Note',
+      'tool_started' => 'Tool: ${p['name'] ?? '?'}',
+      'tool_completed' => 'Tool done: ${p['name'] ?? '?'}',
+      'artifact_created' => 'Artifact created',
+      'workspace_hibernated' => 'Workspace hibernated',
+      'workspace_hydrated' => 'Workspace hydrated',
+      'approval_requested' => 'Approval requested',
+      'approval_resolved' => 'Approval resolved',
+      'todo_updated' => 'Todo updated',
+      'goal_updated' => 'Goal updated',
+      'plan_mode_changed' => 'Plan mode changed',
+      'subagent_started' => 'Subagent started: ${p['agent'] ?? p['name'] ?? '?'}',
+      'subagent_completed' =>
+        'Subagent done: ${p['agent'] ?? p['name'] ?? '?'}',
+      'compaction_completed' => 'Compaction completed',
+      final type => type.isEmpty ? 'Event' : type,
     };
   }
 
   String _detailFor(Map<String, dynamic> e) {
-    final kind = e['kind'] as String? ?? '';
-    return switch (kind) {
-      'turn_start' => 'model request · ${e['msgs'] ?? '?'} rows',
-      'turn_end' =>
-        'steps ${e['steps'] ?? 0} · turns ${e['turns'] ?? 0} · '
-         'tool ${(e['toolMs'] as num?)?.toInt() ?? 0}ms · '
-         'llm ${(e['llmMs'] as num?)?.toInt() ?? 0}ms',
-      'tool_end' =>
-          '${(e['ms'] as num?)?.toInt() ?? 0}ms · ${e['ok'] == true ? 'ok' : 'failed'}'
-          '${e['error'] != null ? ' · ${e['error']}' : ''}',
-      'subagent_end' =>
-          '${e['ok'] == true ? 'ok' : 'failed'}'
-          '${e['error'] != null ? ' · ${e['error']}' : ''}',
-      'note' => '${e['text'] ?? e['message'] ?? ''}',
+    final p = _payloadOf(e);
+    final type = _typeOf(e);
+    return switch (type) {
+      'run_failed' || 'run_cancelled' =>
+        '${p['code'] ?? 'failed'}'
+            '${p['message'] != null ? ' · ${p['message']}' : ''}',
+      'tool_completed' =>
+        '${p['isError'] == true || p['ok'] == false ? 'failed' : 'ok'}'
+            '${p['truncated'] == true ? ' · truncated' : ''}',
+      'subagent_completed' =>
+        '${p['ok'] == false ? 'failed' : 'ok'}'
+            '${p['error'] != null ? ' · ${p['error']}' : ''}',
+      'system_note' => '${p['message'] ?? p['code'] ?? ''}',
+      'message_delta' => _preview(p['content'] ?? p['text']),
       _ => '',
     };
   }
 
-  String _accessibilityLabel(Map<String, dynamic> e) {
-    final title = _titleFor(e);
-    switch (e['kind']) {
-      case 'tool_end':
-        final ms = (e['ms'] as num?)?.toInt() ?? 0;
-        final error = e['error'];
-        return '${_outcomeLabel(e)!}. ${ms}ms.${error != null ? ' Error: $error' : ''}';
-      case 'subagent_end':
-        return '${_outcomeLabel(e)!}.${e['error'] != null ? ' Error: ${e['error']}' : ''}';
-      default:
-        final detail = _detailFor(e);
-        return detail.isEmpty ? title : '$title. ${detail.replaceAll(' · ', '. ')}';
-    }
+  static String _preview(Object? value) {
+    final text = value?.toString() ?? '';
+    if (text.length <= 160) return text;
+    return '${text.substring(0, 160)}…';
   }
 
-  Widget _stat(String label, String value) => SizedBox(
-        width: 92,
-        child: Semantics(
-          label: '$label: $value',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(label, style: AetherType.caption),
-              const SizedBox(height: 2),
-              Text(value, style: AetherType.title.copyWith(fontSize: 14)),
-            ],
-          ),
-        ),
-      );
+  String _accessibilityLabel(Map<String, dynamic> e) {
+    final title = _titleFor(e);
+    final detail = _detailFor(e);
+    return detail.isEmpty ? title : '$title. ${detail.replaceAll(' · ', '. ')}';
+  }
 
-  Widget _stats(SessionProjection p) => Wrap(
-        spacing: AetherSpacing.space4,
-        runSpacing: AetherSpacing.space3,
-        children: [
-          _stat('Turns', '${p.turns}'),
-          _stat('Tool calls', '${p.steps}'),
-          _stat('Wall time', formatCompactDuration(Duration(milliseconds: p.wallMs))),
-          _stat('LLM time', formatCompactDuration(Duration(milliseconds: p.llmMs))),
-          _stat('Tool time', formatCompactDuration(Duration(milliseconds: p.toolMs))),
-        ],
-      );
-
-  String _topTools(SessionProjection p) => (p.toolCounts.entries.toList()
-        ..sort((a, b) => b.value.compareTo(a.value)))
-      .take(4)
-      .map((e) => '${e.key}×${e.value}')
-      .join(' · ');
-
-  Widget _ledgerContent(SessionProjection? p) => CustomScrollView(
+  Widget _eventsContent() => CustomScrollView(
         slivers: [
-          if (p != null && p.turns > 0)
-            SliverToBoxAdapter(child: Padding(
-              padding: const EdgeInsets.fromLTRB(
-                AetherSpacing.space4,
-                AetherSpacing.space3,
-                AetherSpacing.space4,
-                AetherSpacing.space2,
-              ),
-              child: AetherCard(
-                key: const ValueKey('trajectory-stats'),
-                padding: const EdgeInsets.all(AetherSpacing.space4),
-                title: const Text('Session stats (ledger projection)'),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '${p.turns} turns · ${p.steps} tool calls · '
-                      'wall ${formatCompactDuration(Duration(milliseconds: p.wallMs))} · '
-                      'llm ${formatCompactDuration(Duration(milliseconds: p.llmMs))} · '
-                      'tools ${formatCompactDuration(Duration(milliseconds: p.toolMs))}',
-                      style: AetherType.bodyMuted.copyWith(fontSize: 12),
-                    ),
-                    const SizedBox(height: AetherSpacing.space3),
-                    _stats(p),
-                    if (p.toolCounts.isNotEmpty) ...[
-                      const SizedBox(height: AetherSpacing.space3),
-                      Text(
-                        'top: ${_topTools(p)}',
-                        style: AetherType.caption,
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            )),
           if (_error != null && _events.isNotEmpty)
             SliverToBoxAdapter(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
                 child: AetherEmptyState(
                   icon: Icons.error_outline,
-                  title: 'Could not refresh ledger',
+                  title: 'Could not refresh events',
                   message: _error,
                   action: AetherSecondaryButton(label: 'Retry', onPressed: _load),
                 ),
@@ -290,14 +320,14 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
             const SliverToBoxAdapter(child: AetherEmptyState(
               key: ValueKey('trajectory-empty'),
               icon: Icons.timeline_outlined,
-              title: 'No ledger records yet',
-              message: 'Events are recorded as you run the agent in this session.',
+              title: 'No events yet',
+              message: 'Events appear here as the agent runs in this session.',
             ))
           else
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(14, 4, 14, 16),
               sliver: SliverList.builder(
-                itemCount: _events.length + (_firstOffset > 0 ? 2 : 1),
+                itemCount: _events.length + (_hasEarlier ? 2 : 1),
                 itemBuilder: (_, row) {
                   if (row == 0) {
                     return const Padding(
@@ -308,26 +338,21 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
                       ),
                     );
                   }
-                  if (_firstOffset > 0 && row == 1) {
+                  if (_hasEarlier && row == 1) {
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 8),
                       child: AetherSecondaryButton(
                         key: const ValueKey('trajectory-load-earlier'),
-                        label: _loadingEarlier
-                            ? 'Loading…'
-                            : 'Show $_firstOffset earlier '
-                                  'event${_firstOffset == 1 ? '' : 's'}',
+                        label: _loadingEarlier ? 'Loading…' : 'Load earlier events',
                         onPressed: _loadingEarlier ? null : _loadEarlier,
                       ),
                     );
                   }
-                  final index = row - (_firstOffset > 0 ? 2 : 1);
-                  // Ledger-wide position, used when a record has no seq.
-                  final i = _firstOffset + index + 1;
+                  final index = row - (_hasEarlier ? 2 : 1);
                   final e = _events[index];
                   final detail = _detailFor(e);
-                  final kind = e['kind'] as String?;
-                  final color = _colorFor(kind, failed: _isFailed(e));
+                  final type = _typeOf(e);
+                  final color = _colorFor(type, failed: _isFailed(e));
                   final outcome = _outcomeLabel(e);
                   return Padding(
                     padding: const EdgeInsets.only(bottom: 8),
@@ -343,9 +368,9 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                Text('${e['t'] ?? ''}', style: AetherType.mono.copyWith(fontSize: 11, color: Aether.textFaint)),
+                                Text('${e['ts'] ?? ''}', style: AetherType.mono.copyWith(fontSize: 11, color: Aether.textFaint)),
                                 const SizedBox(height: 2),
-                                Text('#${e['seq'] ?? i - 1} · ${_titleFor(e)}', style: AetherType.title.copyWith(fontSize: 13)),
+                                Text('#${e['seq'] ?? index + 1} · ${_titleFor(e)}', style: AetherType.title.copyWith(fontSize: 13)),
                                 if (outcome != null) ...[
                                   const SizedBox(height: 2),
                                   Text(
@@ -366,7 +391,7 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
                                   label: _accessibilityLabel(e),
                                   button: true,
                                   child: TextButton(
-                                    key: ValueKey('trajectory-detail-${e['seq'] ?? i - 1}'),
+                                    key: ValueKey('trajectory-detail-${e['seq'] ?? index + 1}'),
                                     onPressed: () => _showDetail(e),
                                     child: const Text('View details'),
                                   ),
@@ -386,14 +411,14 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
       );
 
   Widget _body() {
-    if (_loading && _events.isEmpty && _proj == null) {
+    if (_loading && _events.isEmpty) {
       return const Center(child: CircularProgressIndicator(strokeWidth: 1.6));
     }
     if (_error != null && _events.isEmpty) {
       return SingleChildScrollView(
         child: AetherEmptyState(
           icon: Icons.error_outline,
-          title: 'Could not load ledger',
+          title: 'Could not load events',
           message: _error,
           action: AetherSecondaryButton(label: 'Retry', onPressed: _load),
         ),
@@ -401,7 +426,7 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
     }
     return Stack(
       children: [
-        _ledgerContent(_proj),
+        _eventsContent(),
         if (_loading)
           const Positioned(
             top: 0,
@@ -431,7 +456,7 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
         ),
         actions: [
           IconButton(
-            tooltip: 'Reload ledger',
+            tooltip: 'Reload events',
             icon: const Icon(Icons.refresh, size: 19),
             onPressed: _loading ? null : _load,
           ),

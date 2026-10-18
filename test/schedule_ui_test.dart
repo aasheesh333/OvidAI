@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/cloud/schedule_client.dart';
-import 'package:ovid_ai/core/distribution.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/schedule_screen.dart';
 import 'package:ovid_ai/ui/sidebar.dart';
@@ -29,7 +28,6 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
-    Distribution.thinOverrideForTest = true;
     ScheduleClient.timeZoneOverrideForTest = 'UTC';
     app = AppState.createForTest();
     app.sessions.add(ChatSession(id: 's', title: 'My work', model: 'm'));
@@ -39,7 +37,6 @@ void main() {
   });
 
   tearDown(() {
-    Distribution.thinOverrideForTest = null;
     ScheduleClient.timeZoneOverrideForTest = null;
     AppState.resetTestInstance();
   });

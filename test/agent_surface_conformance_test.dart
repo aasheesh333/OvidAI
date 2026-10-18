@@ -1,9 +1,8 @@
 // P8 Task 8 — AgentSurface conformance.
 //
-// The seam exists so chat_screen binds to `AgentSurface` while the
-// implementation is swapped behind `Distribution.cloudExecution`. Task 19
-// retired the local service, so `CloudAgentFacade` is now the only
-// implementation and its conformance is the whole contract.
+// The seam exists so chat_screen binds to `AgentSurface`. Task 19 retired the
+// local service, so `CloudAgentFacade` is now the only implementation and its
+// conformance is the whole contract. Task 20 removed the dual-path flag.
 //
 // The `final AgentSurface surface = …` assignment below is the real
 // compile-time check; the expects are the runtime belt-and-suspenders the
@@ -54,12 +53,10 @@ void main() {
     facade.dispose();
   });
 
-  group('Distribution thin-client flags', () {
-    tearDown(() => Distribution.thinOverrideForTest = null);
-
-    test('the test override wins over the compile-time define and play', () {
-      Distribution.thinOverrideForTest = true;
-      expect(Distribution.thinClient, isTrue);
+  group('Distribution cloud surfaces', () {
+    // P8 Task 20 collapsed the migration flags: there is no local arm and no
+    // test override. The invariant is now that every cloud surface is on.
+    test('every cloud surface is unconditionally enabled', () {
       expect(Distribution.cloudExecution, isTrue);
       expect(Distribution.cloudStudio, isTrue);
       expect(Distribution.cloudSchedules, isTrue);
@@ -67,16 +64,6 @@ void main() {
       expect(Distribution.cloudPlugins, isFalse, reason: 'dark until P5');
       expect(Distribution.cloudByok, isTrue,
           reason: 'the P9 escrow endpoints are built');
-
-      Distribution.thinOverrideForTest = false;
-      expect(Distribution.thinClient, isFalse);
-      expect(Distribution.cloudExecution, isFalse);
-    });
-
-    test('unset override falls back to the compile-time define', () {
-      // This test binary is not built with --dart-define=OVID_THIN_CLIENT.
-      Distribution.thinOverrideForTest = null;
-      expect(Distribution.thinClient, isFalse);
     });
   });
 }

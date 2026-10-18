@@ -1,9 +1,7 @@
-// P8 Task 10 — chat rewire: `chat_screen.dart` on the facade behind
-// `Distribution.cloudExecution`.
+// P8 Task 10 — chat rewire: `chat_screen.dart` on the facade.
 //
-// Everything here runs with `Distribution.thinOverrideForTest = true` and a
-// facade + store bound to fakes, proving the THIN arm of the dual-path
-// binding:
+// The app is the thin client on every build since Task 20 removed the
+// dual-path flag. Everything here binds a facade + store to fakes, proving:
 //   * typing + Send reaches the FACADE's REST client (never a local run);
 //   * a run_started / message_delta / message_completed sequence through the
 //     fake socket renders a live bubble and then the finalized row;
@@ -26,7 +24,6 @@ import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
 import 'package:ovid_ai/core/cloud/cloud_ws.dart';
 import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/connection_service.dart';
-import 'package:ovid_ai/core/distribution.dart';
 import 'package:ovid_ai/core/session_history_store.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -240,13 +237,11 @@ void main() {
     SharedPreferences.setMockInitialValues(const <String, Object>{});
     AppState.resetTestInstance();
     AppState.createForTest();
-    Distribution.thinOverrideForTest = true;
     // The local engine must never be consulted; pausing its timer keeps the
     // assertion below safe to make without pending-timer noise.
   });
 
   tearDown(() async {
-    Distribution.thinOverrideForTest = null;
     CloudAgentFacade.resetForTest();
     CloudSessionStore.resetForTest();
     AppState.resetTestInstance();

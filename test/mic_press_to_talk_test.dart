@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -19,7 +18,7 @@ import 'package:sqlite3/open.dart' show open, OperatingSystem;
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  late Directory ledgerDir;
+  late Directory tmpDir;
   late AppState app;
   final voice = VoiceInputService.I;
 
@@ -27,9 +26,8 @@ void main() {
     HttpOverrides.global = null;
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
-    ledgerDir = Directory.systemTemp.createTempSync('mic-ptt-');
-    SessionLedger.rootOverrideForTest = ledgerDir;
-    SessionSearch.dbPathOverrideForTest = '${ledgerDir.path}/search.db';
+    tmpDir = Directory.systemTemp.createTempSync('mic-ptt-');
+    SessionSearch.dbPathOverrideForTest = '${tmpDir.path}/search.db';
     if (Platform.isLinux) {
       open.overrideFor(OperatingSystem.linux, () {
         try {

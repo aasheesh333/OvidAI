@@ -1,16 +1,11 @@
-// P8 Task 10 fix round — `Distribution` flag gates in the chat surface.
+// P8 Task 10 fix round — distribution gates in the chat surface.
 //
-// Two defects were fixed here:
-//   * the composer's Skills / MCP-tool / plugin slash sources were gated on
-//     `Distribution.cloudPlugins` (hardcoded false, so a no-op) or not gated
-//     at all — they now follow `!Distribution.cloudExecution`;
-//   * the header browser button was gated on `Distribution.cloudBrowser`
-//     (which IS `thinClient`), inverting both arms — it now follows
-//     `!Distribution.cloudExecution`.
-//
-// These tests seed one local source at a time (a command is always seeded so
-// the menu is non-empty on both arms) and assert the group header the
-// composer renders: `SKILLS`, `MCP TOOLS`, `PLUGINS`.
+// Task 20 removed the dual-path flags: the app is the thin client on every
+// channel, so these tests pin the surviving (cloud) arm:
+//   * the composer's on-device Skills / MCP-tool / plugin slash sources stay
+//     gone;
+//   * the header browser action always opens the cloud screencast viewer;
+//   * `/c/<server-id>` reconciliation always runs.
 
 import 'dart:io';
 
@@ -26,7 +21,6 @@ import 'package:ovid_ai/core/cloud/cloud_ws.dart';
 import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/commands.dart';
 import 'package:ovid_ai/core/connection_service.dart';
-import 'package:ovid_ai/core/distribution.dart';
 import 'package:ovid_ai/core/session_history_store.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -141,33 +135,26 @@ void main() {
     AppState.resetTestInstance();
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
-    Distribution.thinOverrideForTest = null;
     tmp = Directory.systemTemp.createTempSync('distribution-gates-');
   });
 
   tearDown(() async {
-    Distribution.thinOverrideForTest = null;
     CloudAgentFacade.resetForTest();
     CloudSessionStore.resetForTest();
     AppState.resetTestInstance();
     if (tmp.existsSync()) tmp.deleteSync(recursive: true);
   });
 
-  group('composer slash sources — default build', () {
-    testWidgets('Browser header action is absent on the default build', (
+  group('composer slash sources — cloud client', () {
+    testWidgets('Browser header action is present and opens the cloud viewer', (
       tester,
     ) async {
       _addSession('gate-browser-default');
+      await _bindCloud();
       await _pumpChat(tester);
-      // The on-device WebView browser was removed (P8 Task 16); the cloud
-      // screencast button exists only on the thin arm.
-      expect(find.byKey(const ValueKey('chat-header-browser')), findsNothing);
-    });
-  });
-
-  group('composer slash sources — thin client', () {
-    setUp(() {
-      Distribution.thinOverrideForTest = true;
+      // The on-device WebView browser was removed (P8 Task 16); the header
+      // action is the cloud screencast viewer and exists on every build.
+      expect(find.byKey(const ValueKey('chat-header-browser')), findsOneWidget);
     });
 
     testWidgets('Skills, MCP tools and Plugins are NOT offered', (
@@ -191,7 +178,7 @@ void main() {
       expect(find.text('Gate Plugin'), findsNothing);
     });
 
-    testWidgets('Browser header action opens the cloud viewer on the thin client', (
+    testWidgets('Browser header action opens the cloud viewer', (
       tester,
     ) async {
       _addSession('gate-browser-thin');
@@ -204,11 +191,7 @@ void main() {
     });
   });
 
-  group('router — server ids on the thin client', () {
-    setUp(() {
-      Distribution.thinOverrideForTest = true;
-    });
-
+  group('router — server ids', () {
     Future<(GlobalKey<NavigatorState>, GlobalKey<ScaffoldMessengerState>)>
     pumpShell(WidgetTester tester) async {
       final nav = GlobalKey<NavigatorState>();

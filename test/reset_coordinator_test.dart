@@ -221,7 +221,6 @@ void main() {
       expect(report.stores.map((store) => store.name), [
         'sessions',
         'search',
-        'ledger',
         'memory',
         'account',
         'image-receipts',

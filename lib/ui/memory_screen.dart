@@ -7,8 +7,8 @@ import 'widgets/aether_primitives.dart';
 ///
 /// Memory is a server-owned Ovid Cloud store (P3 memory endpoints). Until the
 /// read/write endpoint ships this surface is an honest empty state; the local
-/// `MemoryStore` is retained only for the one-time history import window
-/// (Task 20), not as an editable local memory.
+/// Markdown memory store was deleted with the rest of the on-device runtime
+/// (P8 Task 20).
 class MemoryScreen extends StatelessWidget {
   const MemoryScreen({super.key});
 
