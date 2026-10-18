@@ -88,7 +88,11 @@ jobs:
           pipx run pip-audit -r "$RUNNER_TEMP/litellm-hook-requirements.txt"
       - name: Build
         run: pnpm -r build
-      - name: Typecheck
-        run: pnpm -r exec tsc --noEmit -p tsconfig.json
+      # Uses the tsconfig.check.json configs, which include test sources.
+      # They were written in P10-T3 but the step could not be switched until
+      # the 174 pre-existing test-source type errors were cleared (done
+      # 2026-10-18); until then this step checked production src only.
+      - name: Typecheck (src + tests)
+        run: pnpm -r exec tsc --noEmit -p tsconfig.check.json
       - name: Test
         run: pnpm -r test
