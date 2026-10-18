@@ -240,7 +240,7 @@ steps or skip a gate.
 | 0 | ~~Quiet tree + lockfile regeneration~~ **DONE** | Landed in `873d993`; a scratch `pnpm install --frozen-lockfile --offline` exits 0 with "Lockfile is up to date". Nothing to run. See §7. | — |
 | 1 | bwrap probe → fill `MECHANISM.md` DECISION | Decides `OVID_SANDBOX_LAUNCH` (`setuid` vs `rootmap`) before the worker env is written. | `[OWNER]` |
 | 2 | R1 compose spine, or an explicit P2-only decision | §11 steps 5–7 assume the compose spine (gateway, redis-q, proxies) is up. If activating P2-only with the gateway absent, record that decision in the log. | `[OWNER]` |
-| 2a | R2 credentials: bucket, token, both env blocks, verified | Both gateway and worker call `loadStorageEnv` at boot; production refuses `fs`; a missing/empty `OVID_R2_*` block stops both. `CHANGE_ME` passes the non-empty boot check and fails at runtime, so step 5's probe is the real gate. See §5. | `[OWNER]` |
+| 2a | R2 credentials: bucket, token, both env blocks, verified — **DONE 2026-10-18** | Bucket `ovid-cloud` (APAC, Standard, no public URL, no CORS); token `ovid-cloud-worker` = Object Read & Write, **scoped to that bucket only**, TTL Forever; 7-day multipart-abort lifecycle rule enabled; `verify-r2.mjs` 7/7 `[ok]` and `r2.live.test.ts` 10/10 green against the real bucket. Repo `cloud/deploy/.env` filled 0600. **Remaining:** copy the block into the live `/opt/ovid-cloud/worker.env` (gate 9). See §5. | `[OWNER]` (done) |
 | 3 | §11 step 2 — rootfs install | The jail filesystem must exist before the worker can boot. Current artifact `ubuntu-noble-min-20261017-r2` is already built. | `[OWNER]` |
 | 4 | §11 step 3 — `/workspaces` XFS volume | Hard prerequisite for P2 and P7. | `[OWNER]` |
 | 5 | §11 step 3 — XFS EDQUOT sanity check | The only proof that the quota manager's byte convention matches the filesystem; run immediately after the volume gate. | `[OWNER]` |
@@ -722,11 +722,11 @@ real gate.
 
 | Step | Action | Gate / detail | Owner |
 |---|---|---|---|
-| 1 | Create the R2 bucket `ovid-cloud` (Cloudflare dashboard). | No CORS; **no public access / `r2.dev` URL**; default storage class Standard. | `[OWNER]` |
-| 2 | Create a least-privilege API token. | **Object Read & Write**, scoped to `ovid-cloud` only; **no account-admin/billing/bucket-admin**; record TTL/expiry. Cloudflare shows the secret once. Store in both env files; `chmod 600`. | `[OWNER]` |
-| 3 | Lifecycle rules. | **AbortIncompleteMultipartUpload: 7 days — required.** `pg/{TS}/…` (the actual backup prefix) has no expiration. `users/` follows application lifetime; no bucket-wide expiration without an owner decision. | `[OWNER]` |
-| 4 | Fill the `Storage (P7)` block in both env files. | See the value list below; shared values must be identical. | `[OWNER]` |
-| 5 | Verify the credentials. | `verify-r2.mjs` must print seven `[ok]` lines (config, put, head, get, presign, delete, gone) and exit 0; `r2.live.test.ts` must be green (not skipped). | `[OWNER]` |
+| 1 | Create the R2 bucket `ovid-cloud` (Cloudflare dashboard). | No CORS; **no public access / `r2.dev` URL**; default storage class Standard. | `[OWNER]` **DONE 2026-10-18** |
+| 2 | Create a least-privilege API token. | **Object Read & Write**, scoped to `ovid-cloud` only; **no account-admin/billing/bucket-admin**; record TTL/expiry. Cloudflare shows the secret once. Store in both env files; `chmod 600`. | `[OWNER]` **DONE** — token `ovid-cloud-worker`, TTL Forever, repo `.env` 0600 |
+| 3 | Lifecycle rules. | **AbortIncompleteMultipartUpload: 7 days — required.** `pg/{TS}/…` (the actual backup prefix) has no expiration. `users/` follows application lifetime; no bucket-wide expiration without an owner decision. | `[OWNER]` **DONE** — default + `abort-incomplete-multipart-7d`, no expiration rule |
+| 4 | Fill the `Storage (P7)` block in both env files. | See the value list below; shared values must be identical. | `[OWNER]` repo `.env` done; `worker.env` at gate 9 |
+| 5 | Verify the credentials. | `verify-r2.mjs` must print seven `[ok]` lines (config, put, head, get, presign, delete, gone) and exit 0; `r2.live.test.ts` must be green (not skipped). | `[OWNER]` **DONE** — 7/7 and 10/10 |
 | 6.1 | Dry validation (no side effects). | `docker compose config -q`; `node --check ../scripts/verify-r2.mjs`. | no |
 | 6.2 | Bring up redis-c + updated gateway. | `docker compose up -d --build` (`--build` is required for the P7 imports). Gate: redis-c healthy, gateway up, `:6393` loopback only. | `[OWNER]` |
 | 6.3 | `/workspaces`. | Already created by §3 Gate 4; re-check `stat -fc %T /workspaces` → xfs and that the mount options contain `prjquota`. | no |
@@ -1126,10 +1126,16 @@ complete in the cited review.
   `HARDENING.md`/`RUNBOOKS.md`). Re-check read-only; do not mutate it.
 
 **Still not done (the actual owner work):** the Q1/Q2/Q3/Q6/Q7/Q8 answers; the
-lockfile regeneration; every secret in §4; the bwrap probe; P2 activation
-Gates 3–11; the browser installs and egress-uid resolution; R2 provisioning;
-staging + the 100-user run; monitoring install; R0 items A/B/C/E/F/G; R4 store
-paperwork; R5 submissions; R6 decommission; R7 evidence.
+remaining secrets in §4 (`OVID_MASTER_KEY`, `OVID_INTERNAL_TOKEN`,
+`REDIS_C_PASSWORD`, …); the bwrap probe; P2 activation Gates 3–11; the browser
+installs and egress-uid resolution; staging + the 100-user run; monitoring
+install; R0 items A/B/C/E/F/G; R4 store paperwork; R5 submissions; R6
+decommission; R7 evidence.
+
+**Done since this list was written:** lockfile regeneration (§7.1) and
+**R2 provisioning (§5 steps 1–3, 5)** — bucket, scoped token, lifecycle rule,
+and a real-bucket verification (7/7 probe + 10/10 live suite) all completed
+2026-10-18.
 
 ---
 

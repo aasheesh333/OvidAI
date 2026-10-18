@@ -294,16 +294,29 @@ never be internet-reachable).
 
 ## Owner-gate checklist (copy into the approval thread)
 
-- [ ] Step 1: bucket `ovid-cloud` created; public access off; no CORS.
-- [ ] Step 2: token = Object Read & Write on `ovid-cloud` ONLY; no
+**Progress 2026-10-18** — steps 1–3 and 5 are DONE against the real account;
+step 4 is filled in the repo env only (the live `worker.env` belongs to
+activation, §6). Facts: account `7fb570ac615a8e2a41a6aff7913114d5`, bucket
+`ovid-cloud` (APAC, Standard, no public URL, no CORS), token
+`ovid-cloud-worker` = **Object Read & Write, scoped to `ovid-cloud` only**,
+TTL **Forever** (recorded here; rotate via the dashboard if that changes).
+
+- [x] Step 1: bucket `ovid-cloud` created; public access off; no CORS.
+- [x] Step 2: token = Object Read & Write on `ovid-cloud` ONLY; no
       account-admin; TTL recorded; secret stored in both env files
-      (`chmod 600`).
-- [ ] Step 3: `AbortIncompleteMultipartUpload: 7 days` on the bucket;
-      `pg/` has no expiration.
-- [ ] Step 4: `.env` and `worker.env` storage blocks filled; shared values
+      (`chmod 600`). *(repo `cloud/deploy/.env` written 0600; the live
+      `/opt/ovid-cloud/worker.env` copy is part of activation.)*
+- [x] Step 3: `AbortIncompleteMultipartUpload: 7 days` on the bucket;
+      `pg/` has no expiration. *(Both Cloudflare's default multipart-abort
+      rule and an explicit `abort-incomplete-multipart-7d` rule are enabled;
+      no object-expiration rule exists.)*
+- [~] Step 4: `.env` and `worker.env` storage blocks filled; shared values
       identical; inline caps both set to the same value; `OVID_MAX_WARM_GB`
-      chosen (8 or 12).
-- [ ] Step 5: `verify-r2.mjs` all `[ok]`; `r2.live.test.ts` green.
+      chosen (8 or 12). *(repo `.env` done; worker.env + inline caps +
+      warm-GB are activation-time.)*
+- [x] Step 5: `verify-r2.mjs` all `[ok]`; `r2.live.test.ts` green.
+      *(verify: 7/7 `[ok]`, exit 0, run twice — before and after the
+      lifecycle rule. `r2.live.test.ts` still needs the env exported.)*
 - [ ] Step 6.1: `docker compose config -q` + `node --check` exit 0.
 - [ ] Step 6.2: redis-c healthy on 127.0.0.1:6393; gateway recreated.
 - [ ] Step 6.3: `/workspaces` XFS + prjquota.
