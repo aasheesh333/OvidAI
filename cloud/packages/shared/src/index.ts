@@ -6,6 +6,9 @@ export * from "./keys.js";
 // P5 Task 15: MCP/plugins REST DTOs (additive — consumed by the gateway
 // mcp/plugins routes and their tests).
 export * from "./mcpRest.js";
+// SSRF address classification — the ONE copy shared by every egress guard
+// (agent-core, escrow, mcp, browser). Do not reintroduce a local blocklist.
+export * from "./netAddress.js";
 export * from "./notifications.js";
 export * from "./pty.js";
 // P5 Task 12: plugin-source wire contract (additive — consumed by the REST

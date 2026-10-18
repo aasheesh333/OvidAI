@@ -572,6 +572,9 @@ importers:
       '@ovid/db':
         specifier: workspace:*
         version: link:../db
+      '@ovid/shared':
+        specifier: workspace:*
+        version: link:../shared
     devDependencies:
       '@types/node':
         specifier: ^22.20.5

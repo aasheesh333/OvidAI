@@ -7,15 +7,14 @@
  *
  * `assertPublicHost` is the fetch-side SSRF guard. It classifies literal IPs
  * directly and RESOLVES named hosts, refusing when ANY returned address is
- * non-public — plus the host's own public IP (self-block). The IP
- * classification is vendored from @ovid/agent-core's ssrf.ts (landed but not
- * yet exported from its index.ts — P3-T4 owns index.ts this wave).
- * TODO(dedupe): once @ovid/agent-core exports isNonPublicAddress, drop this
- * local copy and import it (controller rules the dedupe at P3-T4 review).
+ * non-public — plus the host's own public IP (self-block). The address
+ * classifier itself is the ONE copy in @ovid/shared (`netAddress.ts`); this
+ * module only owns the resolution/self-block behaviour.
  */
 
 import { lookup as dnsLookup } from "node:dns/promises";
-import { isIP } from "node:net";
+
+import { bareHost, isNonPublicAddress, parseAddressBytes } from "@ovid/shared";
 
 import type { BrowserEngineConfig } from "./config.js";
 
@@ -42,138 +41,6 @@ export function navigableUrlReason(url: string, tool: string): string | null {
   }
   if (scheme === "http:" || scheme === "https:") return null;
   return `${tool}: refused — ${scheme} URLs are not navigable (http/https only): ${url}`;
-}
-
-// ---------------------------------------------------------------------------
-// IP classification — vendored from @ovid/agent-core ssrf.ts
-// (byte-for-byte the same logic; see the file-header TODO for the dedupe)
-// ---------------------------------------------------------------------------
-
-function parseIpv4Bytes(s: string): number[] | null {
-  const parts = s.split(".");
-  if (parts.length !== 4) return null;
-  const out: number[] = [];
-  for (const part of parts) {
-    if (!/^\d{1,3}$/.test(part)) return null;
-    const value = Number(part);
-    if (value > 255) return null;
-    out.push(value);
-  }
-  return out;
-}
-
-function parseHexGroup(group: string): number | null {
-  if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
-  return Number.parseInt(group, 16);
-}
-
-function parseIpv6Bytes(s: string): number[] | null {
-  let body = s;
-  // An IPv4 dotted tail (::ffff:a.b.c.d) becomes two hex groups.
-  if (body.includes(".")) {
-    const lastColon = body.lastIndexOf(":");
-    if (lastColon === -1) return null;
-    const v4 = parseIpv4Bytes(body.slice(lastColon + 1));
-    if (!v4) return null;
-    const hi = ((v4[0] << 8) | v4[1]).toString(16);
-    const lo = ((v4[2] << 8) | v4[3]).toString(16);
-    body = body.slice(0, lastColon + 1) + hi + ":" + lo;
-  }
-  const dbl = body.indexOf("::");
-  let head: string[];
-  let tail: string[] = [];
-  if (dbl !== -1) {
-    if (body.indexOf("::", dbl + 1) !== -1) return null;
-    const headPart = body.slice(0, dbl);
-    const tailPart = body.slice(dbl + 2);
-    head = headPart === "" ? [] : headPart.split(":");
-    tail = tailPart === "" ? [] : tailPart.split(":");
-    if (head.length + tail.length > 7) return null;
-  } else {
-    head = body.split(":");
-    if (head.length !== 8) return null;
-  }
-  const groups: number[] = [];
-  for (const g of head) {
-    const v = parseHexGroup(g);
-    if (v === null) return null;
-    groups.push(v);
-  }
-  while (groups.length < 8 - tail.length) groups.push(0);
-  for (const g of tail) {
-    const v = parseHexGroup(g);
-    if (v === null) return null;
-    groups.push(v);
-  }
-  if (groups.length !== 8) return null;
-  const bytes: number[] = [];
-  for (const g of groups) bytes.push(g >> 8, g & 0xff);
-  return bytes;
-}
-
-function bareHost(host: string): string {
-  let h = host.trim().toLowerCase();
-  if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1);
-  while (h.endsWith(".")) h = h.slice(0, -1);
-  return h;
-}
-
-function parseAddressBytes(ip: string): number[] | null {
-  const bare = bareHost(ip);
-  if (bare === "") return null;
-  const family = isIP(bare);
-  if (family === 4) return parseIpv4Bytes(bare);
-  if (family === 6) return parseIpv6Bytes(bare);
-  return null;
-}
-
-function isNonPublicIpv4Bytes(b: number[]): boolean {
-  const a0 = b[0];
-  const a1 = b[1];
-  if (a0 === 0) return true;
-  if (a0 === 10) return true;
-  if (a0 === 100 && a1 >= 64 && a1 <= 127) return true;
-  if (a0 === 127) return true;
-  if (a0 === 169 && a1 === 254) return true;
-  if (a0 === 172 && a1 >= 16 && a1 <= 31) return true;
-  if (a0 === 192 && a1 === 0 && b[2] === 0) return true;
-  if (a0 === 192 && a1 === 168) return true;
-  if (a0 === 198 && (a1 === 18 || a1 === 19)) return true;
-  if (a0 >= 224) return true;
-  return false;
-}
-
-/** True for every address the browser engine must never fetch. Fail-closed. */
-function isNonPublicAddress(ip: string): boolean {
-  const b = parseAddressBytes(ip);
-  if (b === null) return true;
-  if (b.length === 4) return isNonPublicIpv4Bytes(b);
-  if (b.length !== 16) return true;
-  let allZeroPrefix = true;
-  for (let i = 0; i < 10; i++) {
-    if (b[i] !== 0) {
-      allZeroPrefix = false;
-      break;
-    }
-  }
-  if (allZeroPrefix) {
-    if ((b[10] === 0xff && b[11] === 0xff) || (b[10] === 0 && b[11] === 0)) {
-      return isNonPublicIpv4Bytes(b.slice(12));
-    }
-  }
-  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b) {
-    let zeros = true;
-    for (let i = 4; i < 12; i++) {
-      if (b[i] !== 0) zeros = false;
-    }
-    if (zeros) return isNonPublicIpv4Bytes(b.slice(12));
-  }
-  if (b[0] === 0x20 && b[1] === 0x02) return isNonPublicIpv4Bytes(b.slice(2, 6));
-  if ((b[0] & 0xfe) === 0xfc) return true; // fc00::/7 ULA
-  if (b[0] === 0xfe && (b[1] & 0xc0) === 0x80) return true; // fe80::/10 link-local
-  if (b[0] === 0xfe && (b[1] & 0xc0) === 0xc0) return true; // fec0::/10 site-local
-  if (b[0] === 0xff) return true; // multicast
-  return false;
 }
 
 // ---------------------------------------------------------------------------

@@ -22,6 +22,12 @@
 import { resolve4, resolve6 } from "node:dns/promises";
 import { isIP } from "node:net";
 
+import { isNonPublicAddress, parseAddressBytes } from "@ovid/shared";
+
+// Re-exported because consumers (and the package barrel) import the
+// classifier from "./ssrf.js"; the implementation lives in @ovid/shared.
+export { isNonPublicAddress };
+
 /** Resolves a host name to every address (IP strings) it maps to. */
 export type HostResolver = (host: string) => Promise<string[]>;
 
@@ -44,145 +50,10 @@ export interface GuardedFetchOptions {
 
 export type GuardedFetch = (url: string, init?: RequestInit) => Promise<Response>;
 
-// ---------------------------------------------------------------------------
-// Address parsing (the Dart code parsed to raw bytes; we parse IP strings)
-// ---------------------------------------------------------------------------
-
-function ipv4Bytes(ip: string): number[] | null {
-  const parts = ip.split(".");
-  if (parts.length !== 4) return null;
-  const out: number[] = [];
-  for (const p of parts) {
-    if (!/^\d{1,3}$/.test(p)) return null;
-    const n = Number(p);
-    if (n > 255) return null;
-    out.push(n);
-  }
-  return out;
-}
-
-function ipv6Groups(chunk: string): number[] | null {
-  if (chunk === "") return [];
-  const groups: number[] = [];
-  for (const g of chunk.split(":")) {
-    if (g.includes(".")) {
-      const v4 = ipv4Bytes(g);
-      if (v4 === null) return null;
-      groups.push((v4[0] << 8) | v4[1], (v4[2] << 8) | v4[3]);
-    } else {
-      if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
-      groups.push(Number.parseInt(g, 16));
-    }
-  }
-  return groups;
-}
-
-function ipv6Bytes(addr: string): number[] | null {
-  let h = addr.toLowerCase();
-  const zone = h.indexOf("%"); // strip a zone index (%eth0)
-  if (zone !== -1) h = h.slice(0, zone);
-  if (!h.includes(":")) return null;
-  const halves = h.split("::");
-  if (halves.length > 2) return null;
-  const bytes: number[] = [];
-  const pushGroups = (groups: number[]): void => {
-    for (const g of groups) bytes.push(g >>> 8, g & 0xff);
-  };
-  if (halves.length === 2) {
-    const head = ipv6Groups(halves[0]);
-    const tail = ipv6Groups(halves[1]);
-    if (head === null || tail === null) return null;
-    if (head.length + tail.length > 8) return null;
-    pushGroups(head);
-    for (let i = head.length + tail.length; i < 8; i++) bytes.push(0, 0);
-    pushGroups(tail);
-  } else {
-    const groups = ipv6Groups(h);
-    if (groups === null || groups.length !== 8) return null;
-    pushGroups(groups);
-  }
-  return bytes.length === 16 ? bytes : null;
-}
-
-function addressBytes(ip: string): number[] | null {
-  return ip.includes(":") ? ipv6Bytes(ip) : ipv4Bytes(ip);
-}
-
-// ---------------------------------------------------------------------------
-// Classification (byte-for-byte the Dart isNonPublicAddress)
-// ---------------------------------------------------------------------------
-
-function isNonPublicIpv4(b: number[]): boolean {
-  const a0 = b[0];
-  const a1 = b[1];
-  if (a0 === 0) return true;
-  if (a0 === 10) return true;
-  if (a0 === 100 && a1 >= 64 && a1 <= 127) return true; // CGNAT, incl. Alibaba metadata 100.100.100.200
-  if (a0 === 127) return true;
-  if (a0 === 169 && a1 === 254) return true; // link-local / cloud metadata
-  if (a0 === 172 && a1 >= 16 && a1 <= 31) return true;
-  if (a0 === 192 && a1 === 0 && b[2] === 0) return true;
-  if (a0 === 192 && a1 === 168) return true;
-  if (a0 === 198 && (a1 === 18 || a1 === 19)) return true;
-  if (a0 >= 224) return true; // multicast, reserved, broadcast
-  return false;
-}
-
-/**
- * True for every address an agent or plugin fetch must never reach:
- *
- * IPv4 `0.0.0.0/8`, `10/8`, `100.64/10` (CGNAT, incl. Alibaba metadata
- * `100.100.100.200`), `127/8`, `169.254/16` (link-local / cloud metadata),
- * `172.16/12`, `192.0.0/24`, `192.168/16`, `198.18/15`, multicast `224/4`,
- * reserved `240/4` and broadcast.
- *
- * IPv6 unspecified `::`, loopback `::1`, ULA `fc00::/7`, link-local
- * `fe80::/10`, deprecated site-local `fec0::/10`, multicast `ff00::/8`, and
- * every IPv6 form that embeds an IPv4 address — mapped `::ffff:a.b.c.d`,
- * compatible `::a.b.c.d`, NAT64 `64:ff9b::/96` and 6to4 `2002::/16` —
- * classified by the embedded IPv4.
- *
- * Unparseable input is non-public (fail closed).
- */
-export function isNonPublicAddress(ip: string): boolean {
-  const b = addressBytes(ip);
-  if (b === null) return true;
-  if (b.length === 4) return isNonPublicIpv4(b);
-  if (b.length !== 16) return true;
-  let allZeroPrefix = true;
-  for (let i = 0; i < 10; i++) {
-    if (b[i] !== 0) {
-      allZeroPrefix = false;
-      break;
-    }
-  }
-  if (allZeroPrefix) {
-    // ::ffff:a.b.c.d (mapped) and ::a.b.c.d (compatible; also covers
-    // :: and ::1, whose embedded "IPv4" is 0.0.0.0 / 0.0.0.1).
-    if ((b[10] === 0xff && b[11] === 0xff) || (b[10] === 0 && b[11] === 0)) {
-      return isNonPublicIpv4(b.slice(12));
-    }
-  }
-  // NAT64 well-known prefix 64:ff9b::/96.
-  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b) {
-    let zeros = true;
-    for (let i = 4; i < 12; i++) {
-      if (b[i] !== 0) zeros = false;
-    }
-    if (zeros) return isNonPublicIpv4(b.slice(12));
-  }
-  // 6to4 2002:AABB:CCDD::/48 embeds AA.BB.CC.DD.
-  if (b[0] === 0x20 && b[1] === 0x02) return isNonPublicIpv4(b.slice(2, 6));
-  if ((b[0] & 0xfe) === 0xfc) return true; // fc00::/7 ULA
-  if (b[0] === 0xfe && (b[1] & 0xc0) === 0x80) return true; // fe80::/10
-  if (b[0] === 0xfe && (b[1] & 0xc0) === 0xc0) return true; // fec0::/10
-  if (b[0] === 0xff) return true; // multicast
-  return false;
-}
 
 /** Loopback only (127/8, ::1, and their IPv6-embedded forms) — the dev-mode exemption. */
 function isLoopbackAddress(ip: string): boolean {
-  const b = addressBytes(ip);
+  const b = parseAddressBytes(ip);
   if (b === null) return false;
   if (b.length === 4) return b[0] === 127;
   if (b.length !== 16) return false;
