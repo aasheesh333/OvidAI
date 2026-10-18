@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Redis } from "ioredis";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -18,6 +21,10 @@ import {
   evaluateClockSkewOutcome,
   summarizeScheduleLedger,
 } from "./clockSkew.js";
+import {
+  STAGING_QUEUE_PREFIX,
+  createScenarioQueues,
+} from "./redisQRestart.js";
 
 /**
  * Clock-skew evidence (Task 7 Step 1 + the scenario's re-run leg).
@@ -172,6 +179,118 @@ describe("evaluateClockSkewOutcome", () => {
   });
 });
 
+describe("clock-skew queue prefix matches the running stack (F2)", () => {
+  it("derives the same no-prefix keys the gateway and worker use", async () => {
+    expect(STAGING_QUEUE_PREFIX).toBe("bull");
+    const queues = createScenarioQueues("redis://127.0.0.1:1");
+    try {
+      expect(queues.agentRuns.opts.prefix).toBe("bull");
+      expect(queues.agentRuns.toKey("wait")).toBe("bull:agent-runs:wait");
+      expect(queues.schedules.opts.prefix).toBe("bull");
+      expect(queues.schedules.toKey("wait")).toBe("bull:schedules:wait");
+      expect(queues.agentRuns.toKey("wait")).not.toContain("bull:staging");
+    } finally {
+      await Promise.allSettled(
+        Object.values(queues)
+          .filter(
+            (queue): queue is NonNullable<typeof queue> => queue !== undefined,
+          )
+          .map((queue) => queue.close()),
+      );
+    }
+  });
+
+  it("clockSkew.ts builds queues through createScenarioQueues, never BULL_PREFIX", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(`${here}/clockSkew.ts`, "utf8");
+    expect(source).toContain("createScenarioQueues(redisQUrl)");
+    expect(source).not.toContain("ctx.env.BULL_PREFIX");
+    expect(source).not.toMatch(/createQueues\(\{ url: redisQUrl \}, \{ prefix \}\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F12: deterministic double-claim barrier
+// ---------------------------------------------------------------------------
+
+interface Latch {
+  arrive(): Promise<void>;
+  arrivals(): number;
+}
+
+/**
+ * Both sweeps must finish `listStaleRunning` before either may `finish`.
+ * Wrapping the drizzle select thenable gives exactly that interleaving; a
+ * serialized run (list+finish, then list+finish) would let emit-first pass.
+ */
+function createLatch(parties: number): Latch {
+  let arrived = 0;
+  let release!: () => void;
+  const released = new Promise<void>((resolvePromise) => {
+    release = resolvePromise;
+  });
+  return {
+    arrivals: () => arrived,
+    async arrive() {
+      arrived += 1;
+      if (arrived >= parties) release();
+      await released;
+    },
+  };
+}
+
+function gateThenable<T extends object>(query: T, latch: Latch): T {
+  return new Proxy(query, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop);
+      if (prop === "then") {
+        return (
+          onFulfilled?: (rows: unknown) => unknown,
+          onRejected?: (err: unknown) => unknown,
+        ) =>
+          new Promise((resolvePromise, rejectPromise) => {
+            (
+              value as (
+                res: (rows: unknown) => void,
+                rej: (err: unknown) => void,
+              ) => void
+            ).call(target, resolvePromise, rejectPromise);
+          })
+            .then(async (rows) => {
+              await latch.arrive();
+              return rows;
+            })
+            .then(onFulfilled, onRejected);
+      }
+      if (typeof value === "function") {
+        return (...args: unknown[]) =>
+          gateThenable(
+            (value as (...inner: unknown[]) => object).apply(target, args),
+            latch,
+          );
+      }
+      return value;
+    },
+  }) as T;
+}
+
+/** Intercept the drizzle select chain (listStaleRunning) after it resolves. */
+function barrierAfterSelect<T extends object>(db: T, latch: Latch): T {
+  const select = (
+    db as unknown as { select: (...args: unknown[]) => object }
+  ).select.bind(db);
+  return new Proxy(db, {
+    get(target, prop) {
+      if (prop === "select") {
+        return (...args: unknown[]) =>
+          gateThenable(select(...args), latch);
+      }
+      const value = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
   "sweepStaleRuns under injected clock skew (real Postgres + Redis)",
   () => {
@@ -278,9 +397,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
     const readMirror = (sessionId: string): Promise<SessionEvent[]> =>
       eventMirror.readSince(db, sessionId, null, 100);
 
-    const sweep = (clockMs: number): Promise<number> =>
+    const sweep = (clockMs: number, targetDb: Db = db): Promise<number> =>
       sweepStaleRuns(
-        { db, events, clock: () => new Date(clockMs) },
+        { db: targetDb, events, clock: () => new Date(clockMs) },
         { staleAfterMs: STALE_AFTER_MS },
       );
 
@@ -320,11 +439,18 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
     it("double-claim under skew: two concurrent sweeps emit exactly one run_failed", async () => {
       const seeded = await seedRunningRun(BASE);
 
+      // F12 barrier: both sweeps complete listStaleRunning before either may
+      // claim. Without it, a serialized interleaving would pass even if the
+      // implementation emitted before claiming.
+      const latch = createLatch(2);
+      const gatedDb = barrierAfterSelect(db, latch);
+
       // Both clocks call the run stale (cutoffs BASE+20min and BASE+15min).
       const counts = await Promise.all([
-        sweep(FORWARD_NOW),
-        sweep(FORWARD_NOW - 5 * 60_000),
+        sweep(FORWARD_NOW, gatedDb),
+        sweep(FORWARD_NOW - 5 * 60_000, gatedDb),
       ]);
+      expect(latch.arrivals()).toBe(2);
       // Claim-then-emit: only one sweep may claim the row, even if both
       // listed it. (emit-then-finish returns 1 from both.)
       expect(counts[0]! + counts[1]!).toBe(1);

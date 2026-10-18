@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   evaluateStagingTarget,
   evaluateWorkerKillGate,
   evaluateWorkerKillOutcome,
+  evaluateWorkerProcessIdentity,
+  restoreWorkerIfKilled,
   type WorkerKillClientState,
 } from "./workerKill.js";
 
@@ -24,6 +26,8 @@ const healthyGate = {
   healthStatus: "ok" as const,
   workerAlive: true,
   targetProblems: [] as string[],
+  workerIdentityProblems: [] as string[],
+  runStatus: "running",
   // A real staging pidfile yields a pid; null is the unreadable case, which
   // has its own rejection test below.
   workerPid: 4242,
@@ -55,8 +59,47 @@ describe("evaluateStagingTarget", () => {
     expect(problems.join(" ")).toContain("staging");
   });
 
+  it("rejects a non-loopback gateway even when it is not the literal production host", () => {
+    const problems = evaluateStagingTarget({
+      ...stagingEnv,
+      STAGING_GATEWAY_URL: "https://203.0.113.10",
+    });
+    expect(problems.join(" ")).toContain("loopback");
+  });
+
   it("rejects a missing pidfile or gateway URL", () => {
     expect(evaluateStagingTarget({}).length).toBeGreaterThan(0);
+  });
+});
+
+describe("evaluateWorkerProcessIdentity (F3 ground truth)", () => {
+  it("accepts dist/main.js with an apps/worker cwd", () => {
+    expect(
+      evaluateWorkerProcessIdentity({
+        cmdline: "node dist/main.js",
+        cwd: "/root/OvidAI/cloud/apps/worker",
+      }),
+    ).toEqual([]);
+  });
+
+  it("rejects a live pid that is not the worker entrypoint", () => {
+    const problems = evaluateWorkerProcessIdentity({
+      cmdline: "node /opt/ovid/prod-server.js",
+      cwd: "/root/OvidAI/cloud/apps/worker",
+    });
+    expect(problems.join(" ")).toContain("dist/main.js");
+  });
+
+  it("rejects a worker entrypoint running outside an apps/worker checkout", () => {
+    const problems = evaluateWorkerProcessIdentity({
+      cmdline: "node dist/main.js",
+      cwd: "/opt/ovid/prod/apps/gateway",
+    });
+    expect(problems.join(" ")).toContain("apps/worker");
+  });
+
+  it("rejects an unreadable /proc entry (the pid is gone)", () => {
+    expect(evaluateWorkerProcessIdentity(null).length).toBeGreaterThan(0);
   });
 });
 
@@ -118,6 +161,24 @@ describe("evaluateWorkerKillGate", () => {
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("production");
   });
+
+  it("rejects a pid that is not the staging worker (stale/reused pidfile)", () => {
+    const result = evaluateWorkerKillGate({
+      ...healthyGate,
+      workerIdentityProblems: ["pid cmdline 'node other.js' is not the staging worker"],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("staging worker");
+  });
+
+  it("rejects a held run that is not running at kill time", () => {
+    const result = evaluateWorkerKillGate({
+      ...healthyGate,
+      runStatus: "failed",
+    });
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("running");
+  });
 });
 
 describe("evaluateWorkerKillOutcome", () => {
@@ -126,6 +187,7 @@ describe("evaluateWorkerKillOutcome", () => {
     requiredDeadMs: 20_000,
     runLostSeen: true,
     runLostCode: "run_lost",
+    runLostAfterRestart: true,
     recoveryMs: 42_000,
     recoveryBudgetMs: 95_000,
     runRowStatus: "failed",
@@ -169,6 +231,15 @@ describe("evaluateWorkerKillOutcome", () => {
     ).toBe(false);
   });
 
+  it("fails when run_lost was emitted before the restart (pre-restart sweeper)", () => {
+    expect(
+      assertion(
+        { ...recovered, runLostAfterRestart: false, recoveryMs: -1_000 },
+        "run-lost-within-budget",
+      )?.passed,
+    ).toBe(false);
+  });
+
   it("fails when the run row is still running", () => {
     expect(
       assertion({ ...recovered, runRowStatus: "running" }, "run-row-failed")?.passed,
@@ -201,5 +272,30 @@ describe("evaluateWorkerKillOutcome", () => {
     expect(
       assertion({ ...recovered, workerAlive: false }, "worker-restarted")?.passed,
     ).toBe(false);
+  });
+});
+
+describe("restoreWorkerIfKilled (F7)", () => {
+  it("does nothing when the scenario never killed the worker", async () => {
+    const workerAlive = vi.fn(async () => false);
+    const workerStart = vi.fn(async () => {});
+    await restoreWorkerIfKilled({ workerAlive, workerStart }, false);
+    expect(workerStart).not.toHaveBeenCalled();
+  });
+
+  it("starts the worker when inject threw after the kill", async () => {
+    const workerAlive = vi.fn(async () => false);
+    const workerStart = vi.fn(async () => {});
+    await restoreWorkerIfKilled({ workerAlive, workerStart }, true);
+    expect(workerStart).toHaveBeenCalledWith({
+      OVID_RUN_STALE_MS: "15000",
+    });
+  });
+
+  it("does not restart an already-live worker", async () => {
+    const workerAlive = vi.fn(async () => true);
+    const workerStart = vi.fn(async () => {});
+    await restoreWorkerIfKilled({ workerAlive, workerStart }, true);
+    expect(workerStart).not.toHaveBeenCalled();
   });
 });

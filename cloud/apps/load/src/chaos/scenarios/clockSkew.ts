@@ -8,13 +8,9 @@ import {
   users,
   type Db,
 } from "@ovid/db";
-import {
-  createRedisEventLog,
-  createRedisSystemBus,
-  type EventLog,
-  type SystemBus,
-} from "@ovid/events";
-import { createQueues, type QueueServices } from "@ovid/queue";
+import { createRedisEventLog, createRedisSystemBus } from "@ovid/events";
+import type { EventLog, SystemBus } from "@ovid/events";
+import type { QueueServices } from "@ovid/queue";
 import {
   runSchedulerTick,
   sweepStaleRuns,
@@ -34,6 +30,7 @@ import {
   type ChaosClient,
 } from "../helpers.js";
 import { evaluateStagingTarget } from "./workerKill.js";
+import { createScenarioQueues } from "./redisQRestart.js";
 
 /** Injected clocks only: the host clock must not move during the scenario. */
 export const HOST_CLOCK_DRIFT_LIMIT_MS = 5_000;
@@ -201,6 +198,7 @@ export function evaluateClockSkewOutcome(
 
 interface ScheduleHandle {
   id: string;
+  uid: string;
   kind: "at" | "every";
   nextRunAtMs: number;
   sessionId: string;
@@ -319,7 +317,6 @@ export const clockSkewScenario: ChaosScenario<Prepared> = {
     const baseUrl = ctx.env.STAGING_GATEWAY_URL ?? "";
     const redisQUrl = ctx.env.STAGING_REDIS_Q_URL ?? "";
     const databaseUrl = ctx.env.STAGING_DATABASE_URL ?? "";
-    const prefix = ctx.env.BULL_PREFIX ?? "bull:staging";
     const tag = `clockskew-${Date.now().toString(36)}`;
     const targetProblems = evaluateStagingTarget(ctx.env);
     const hostNowBeforeMs = Date.now();
@@ -331,32 +328,44 @@ export const clockSkewScenario: ChaosScenario<Prepared> = {
     const createdIds: string[] = [];
     try {
       const atAt = new Date(Date.now() + 120_000).toISOString();
-      const created = await Promise.all([
-        createSchedule(
+      // Sequential creates so `createdIds` is accurate even when a later
+      // create fails: the catch below can then delete every schedule that
+      // was actually created (F6/F8 — no recurring schedule left behind).
+      const specs = [
+        {
+          uid: clients[0]!.uid,
+          sessionId: clients[0]!.sessionId,
+          trigger: { kind: "at", at: atAt },
+          title: `${tag} at`,
+        },
+        {
+          uid: clients[1]!.uid,
+          sessionId: clients[1]!.sessionId,
+          trigger: { kind: "every", seconds: 300 },
+          title: `${tag} every-1`,
+        },
+        {
+          uid: clients[2]!.uid,
+          sessionId: clients[2]!.sessionId,
+          trigger: { kind: "every", seconds: 300 },
+          title: `${tag} every-2`,
+        },
+      ];
+      const created: Array<{ id: string; nextRunAt: string }> = [];
+      for (const spec of specs) {
+        const row = await createSchedule(
           baseUrl,
-          clients[0]!.uid,
-          clients[0]!.sessionId,
-          { kind: "at", at: atAt },
-          `${tag} at`,
-        ),
-        createSchedule(
-          baseUrl,
-          clients[1]!.uid,
-          clients[1]!.sessionId,
-          { kind: "every", seconds: 300 },
-          `${tag} every-1`,
-        ),
-        createSchedule(
-          baseUrl,
-          clients[2]!.uid,
-          clients[2]!.sessionId,
-          { kind: "every", seconds: 300 },
-          `${tag} every-2`,
-        ),
-      ]);
-      createdIds.push(...created.map((row) => row.id));
+          spec.uid,
+          spec.sessionId,
+          spec.trigger,
+          spec.title,
+        );
+        created.push(row);
+        createdIds.push(row.id);
+      }
       const scheduleHandles: ScheduleHandle[] = created.map((row, index) => ({
         id: row.id,
+        uid: clients[index]!.uid,
         kind: index === 0 ? "at" : "every",
         nextRunAtMs: Date.parse(row.nextRunAt),
         sessionId: clients[index]!.sessionId,
@@ -367,7 +376,12 @@ export const clockSkewScenario: ChaosScenario<Prepared> = {
       redis.on("error", () => {});
       const log = createRedisEventLog(redis);
       const system = createRedisSystemBus(redis);
-      const queues = createQueues({ url: redisQUrl }, { prefix });
+      // F2: derive the queue keys EXACTLY like the gateway/worker mains —
+      // they pass NO prefix, so BullMQ's default `bull` applies. Reading
+      // `BULL_PREFIX` here inspected `bull:staging:agent-runs`, which no
+      // worker consumes (the fired runs never left `queued` and drain timed
+      // out). Same derivation and unit pin as Task 6's redis-q-restart.
+      const queues = createScenarioQueues(redisQUrl);
       for (const queue of Object.values(queues)) {
         queue?.on("error", () => {});
       }
@@ -596,7 +610,20 @@ export const clockSkewScenario: ChaosScenario<Prepared> = {
     });
   },
 
-  async cleanup(_ctx: ChaosContext, prepared: Prepared): Promise<void> {
+  async cleanup(ctx: ChaosContext, prepared: Prepared | undefined): Promise<void> {
+    // F8: prepare's catch unwinds its own partial state when prepared is
+    // undefined (the runner calls cleanup(ctx, undefined) in that path).
+    if (prepared === undefined) return;
+
+    // F6: delete the REST schedules. The `at` one is done, but the two
+    // `every 300` schedules would keep firing runs into staging forever.
+    const baseUrl = ctx.env.STAGING_GATEWAY_URL ?? "";
+    await Promise.allSettled(
+      prepared.scheduleHandles.map((handle) =>
+        deleteSchedule(baseUrl, handle.uid, handle.id),
+      ),
+    );
+
     // The evidence rows are deliberately seeded as 'running'; terminalize
     // ours so a later real-clock sweep never mistakes them for stranded work.
     for (const runId of prepared.seededRuns) {

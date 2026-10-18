@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { readFileSync, readlinkSync } from "node:fs";
+import { basename, dirname } from "node:path";
 import { eventMirror, createDb, type Db } from "@ovid/db";
 import type {
   Assertion,
@@ -51,6 +51,10 @@ export interface WorkerKillGateState {
   healthStatus: "ok" | "degraded" | "unreachable";
   workerAlive: boolean;
   targetProblems: string[];
+  /** F3: /proc/<pid> cmdline + cwd must prove the pid is the worker. */
+  workerIdentityProblems: string[];
+  /** F3: the held run must still be `running` when the gate passes. */
+  runStatus: string | null;
   /** null = the staging pidfile was missing/unreadable. */
   workerPid: number | null;
 }
@@ -60,6 +64,8 @@ export interface WorkerKillOutcomeState {
   requiredDeadMs: number;
   runLostSeen: boolean;
   runLostCode: string | null;
+  /** F9: the run_lost event's own `ts` was at/after the restart. */
+  runLostAfterRestart: boolean;
   recoveryMs: number;
   recoveryBudgetMs: number;
   runRowStatus: string | null;
@@ -76,10 +82,21 @@ export const STALE_OVERRIDE_MS = 15_000;
 
 const PRODUCTION_HOST = "api.ovidsi.com";
 
+function isLoopbackHost(hostname: string): boolean {
+  return (
+    hostname === "127.0.0.1" ||
+    hostname === "localhost" ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  );
+}
+
 /**
  * Proven-staging target checks. A chaos run must never be able to signal a
- * live worker: the pidfile must be staging-named, and the gateway URL must
- * not point at the production host.
+ * live worker: the pidfile must be staging-named, and the gateway URL must be
+ * loopback (a production host reached by IP or alias fails too). The /proc
+ * identity check in `evaluateWorkerProcessIdentity` is the ground truth for
+ * the pid itself; the name check alone cannot distinguish a stale pidfile.
  */
 export function evaluateStagingTarget(env: Record<string, string>): string[] {
   const problems: string[] = [];
@@ -92,6 +109,18 @@ export function evaluateStagingTarget(env: Record<string, string>): string[] {
     problems.push(
       `STAGING_GATEWAY_URL points at the production host (${PRODUCTION_HOST}) — refusing to run chaos`,
     );
+  } else {
+    let hostname = "";
+    try {
+      hostname = new URL(gateway).hostname;
+    } catch {
+      problems.push(`STAGING_GATEWAY_URL (${gateway}) is not a valid URL`);
+    }
+    if (hostname !== "" && !isLoopbackHost(hostname)) {
+      problems.push(
+        `STAGING_GATEWAY_URL host '${hostname}' is not loopback — refusing to run against a non-staging target`,
+      );
+    }
   }
 
   if (pidfile === "") {
@@ -111,6 +140,14 @@ export function evaluateWorkerKillGate(state: WorkerKillGateState): GateResult {
   if (state.targetProblems.length > 0) problems.push(...state.targetProblems);
   if (state.workerPid === null) {
     problems.push("staging worker pidfile is missing/unreadable — no proven kill target");
+  }
+  if (state.workerIdentityProblems.length > 0) {
+    problems.push(...state.workerIdentityProblems);
+  }
+  if (state.runStatus !== "running") {
+    problems.push(
+      `held run is '${state.runStatus ?? "missing"}', expected 'running' at kill time`,
+    );
   }
   if (state.clients.length === 0) problems.push("no clients prepared");
   state.clients.forEach((client, index) => {
@@ -158,8 +195,13 @@ export function evaluateWorkerKillOutcome(
     {
       name: "run-lost-within-budget",
       passed:
-        state.runLostSeen && state.recoveryMs <= state.recoveryBudgetMs,
-      detail: `recovered ${state.recoveryMs}ms after worker restart (budget ${state.recoveryBudgetMs}ms = 15s stale + 60s sweep + 20s slack)`,
+        state.runLostSeen &&
+        state.runLostAfterRestart &&
+        state.recoveryMs >= 0 &&
+        state.recoveryMs <= state.recoveryBudgetMs,
+      detail: state.runLostSeen
+        ? `run_lost emitted ${state.recoveryMs}ms after the worker restart (budget ${state.recoveryBudgetMs}ms = 15s stale + 60s sweep + 20s slack); emitted-after-restart: ${state.runLostAfterRestart}`
+        : "no run_lost event to time",
     },
     {
       name: "run-row-failed",
@@ -215,6 +257,99 @@ export function isPidAlive(pid: number): boolean {
   }
 }
 
+export interface ProcessIdentity {
+  cmdline: string;
+  cwd: string | null;
+}
+
+/** Read `/proc/<pid>` ground truth. null = the process (or /proc) is gone. */
+export function readProcessIdentity(pid: number): ProcessIdentity | null {
+  let cmdline: string;
+  try {
+    cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8")
+      .split("\0")
+      .filter((part) => part !== "")
+      .join(" ");
+  } catch {
+    return null;
+  }
+  let cwd: string | null = null;
+  try {
+    cwd = readlinkSync(`/proc/${pid}/cwd`);
+  } catch {
+    cwd = null;
+  }
+  return { cmdline, cwd };
+}
+
+/**
+ * F3: the same identity staging.sh's `worker-stop` verifies before signalling
+ * — the entrypoint must be `dist/main.js` and the cwd must be an
+ * `apps/worker` checkout. A stale/reused pidfile pid fails here even when it
+ * is alive, so the scenario cannot kill an unrelated process and call the
+ * wrong death a recovery.
+ */
+export function evaluateWorkerProcessIdentity(
+  identity: ProcessIdentity | null,
+): string[] {
+  if (identity === null) {
+    return [
+      "/proc/<pid> is unreadable — cannot prove the pidfile pid is the staging worker",
+    ];
+  }
+  const problems: string[] = [];
+  if (!identity.cmdline.includes("dist/main.js")) {
+    problems.push(
+      `pid cmdline '${identity.cmdline}' is not the staging worker entrypoint (dist/main.js) — refusing to signal`,
+    );
+  }
+  if (
+    identity.cwd === null ||
+    basename(identity.cwd) !== "worker" ||
+    basename(dirname(identity.cwd)) !== "apps"
+  ) {
+    problems.push(
+      `pid cwd '${identity.cwd ?? "<unreadable>"}' is not an apps/worker checkout — refusing to signal`,
+    );
+  }
+  return problems;
+}
+
+async function readRunStatus(db: Db, runId: string): Promise<string | null> {
+  try {
+    const rows = (await db.$client.unsafe(
+      "SELECT status FROM runs WHERE id = $1",
+      [runId],
+    )) as Array<{ status: string }>;
+    return rows[0]?.status ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * F7: cleanup must restore the worker even when inject threw after the kill.
+ * Exported so the restore path is unit-testable with a fake handle.
+ */
+export async function restoreWorkerIfKilled(
+  staging: {
+    workerAlive(): Promise<boolean>;
+    workerStart(env?: Record<string, string>): Promise<void>;
+  },
+  killed: boolean,
+): Promise<void> {
+  if (!killed) return;
+  let alive = false;
+  try {
+    alive = await staging.workerAlive();
+  } catch {
+    alive = false;
+  }
+  if (!alive) {
+    await staging.workerStart({ OVID_RUN_STALE_MS: String(STALE_OVERRIDE_MS) });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Scenario
 // ---------------------------------------------------------------------------
@@ -226,11 +361,14 @@ interface Prepared {
   gateReleased: boolean;
   workerPid: number | null;
   targetProblems: string[];
+  workerIdentityProblems: string[];
+  workerKilled: boolean;
   db: Db;
   redis: ReturnType<typeof createGroundTruth>["redis"];
   log: ReturnType<typeof createGroundTruth>["log"];
   stayedDeadMs: number;
   workerRestartedAtMs: number;
+  runLostEmittedAtMs: number | null;
   recoveryMs: number;
   freshRunId: string | null;
   freshRunCompleted: boolean;
@@ -251,6 +389,11 @@ export const workerKillScenario: ChaosScenario<Prepared> = {
     // so a post-kill read could not prove the process actually died.
     const workerPid = readStagingWorkerPid(ctx.env);
     const targetProblems = evaluateStagingTarget(ctx.env);
+    // F3: name/URL checks are not enough — prove the pid is the worker.
+    const workerIdentityProblems =
+      workerPid === null
+        ? []
+        : evaluateWorkerProcessIdentity(readProcessIdentity(workerPid));
 
     // Arm BEFORE sending: the run's first LLM request snapshots this gate.
     const gate = ctx.mockArm({
@@ -276,11 +419,14 @@ export const workerKillScenario: ChaosScenario<Prepared> = {
         gateReleased: false,
         workerPid,
         targetProblems,
+        workerIdentityProblems,
+        workerKilled: false,
         db,
         redis,
         log: groundTruth.log,
         stayedDeadMs: 0,
         workerRestartedAtMs: 0,
+        runLostEmittedAtMs: null,
         recoveryMs: Number.POSITIVE_INFINITY,
         freshRunId: null,
         freshRunCompleted: false,
@@ -314,12 +460,33 @@ export const workerKillScenario: ChaosScenario<Prepared> = {
         terminal:
           counts.completed.has(runId) || counts.failed.has(runId),
       };
+      // F3: re-read the pidfile and /proc each pass. A reused pid or a
+      // replaced worker between prepare and injection must fail the gate.
+      const currentPid = readStagingWorkerPid(ctx.env) ?? prepared.workerPid;
+      const identityProblems =
+        currentPid === null
+          ? []
+          : evaluateWorkerProcessIdentity(readProcessIdentity(currentPid));
+      if (
+        currentPid !== null &&
+        prepared.workerPid !== null &&
+        currentPid !== prepared.workerPid
+      ) {
+        identityProblems.push(
+          `pidfile pid changed from ${prepared.workerPid} to ${currentPid} — the kill target is no longer the prepared worker`,
+        );
+      }
       last = evaluateWorkerKillGate({
         clients: [state],
         gateReleased: prepared.gateReleased,
         healthStatus: health.status,
         workerAlive: await ctx.staging.workerAlive(),
         targetProblems: prepared.targetProblems,
+        workerIdentityProblems: [
+          ...prepared.workerIdentityProblems,
+          ...identityProblems,
+        ],
+        runStatus: await readRunStatus(prepared.db, runId),
         workerPid: prepared.workerPid,
       });
       if (last.ok || Date.now() >= deadline) return last;
@@ -329,28 +496,58 @@ export const workerKillScenario: ChaosScenario<Prepared> = {
 
   async inject(ctx: ChaosContext, prepared: Prepared): Promise<void> {
     const workerPid = prepared.workerPid!;
-    const killedAt = Date.now();
+
+    // F3: ground truth immediately before the signal. staging.sh re-verifies
+    // too, but the scenario must prove it killed the worker it thinks it did.
+    const pidAtKill = readStagingWorkerPid(ctx.env);
+    if (pidAtKill !== workerPid) {
+      throw new Error(
+        `worker-kill: pidfile changed between prepare (${workerPid}) and inject (${pidAtKill ?? "missing"}) — refusing to kill`,
+      );
+    }
+    if (!isPidAlive(workerPid)) {
+      throw new Error(`worker-kill: pid ${workerPid} is not alive before the kill`);
+    }
+    const identityProblems = evaluateWorkerProcessIdentity(
+      readProcessIdentity(workerPid),
+    );
+    if (identityProblems.length > 0) {
+      throw new Error(`worker-kill: ${identityProblems.join("; ")}`);
+    }
+    const statusAtKill = await readRunStatus(prepared.db, prepared.runId);
+    if (statusAtKill !== "running") {
+      throw new Error(
+        `worker-kill: held run is '${statusAtKill ?? "missing"}', expected 'running' at kill time`,
+      );
+    }
+
+    // Set before the command: `worker-stop kill` can exit non-zero after the
+    // signal (e.g. the post-check fails). Cleanup then still restores the
+    // worker; `restoreWorkerIfKilled` only starts it when it is not alive.
+    prepared.workerKilled = true;
     await ctx.staging.workerKill();
 
-    // Prove the process is gone for the whole window. The staging handle
-    // removed the pidfile, so probe the pid we read in prepare with signal 0.
-    let deadSince = killedAt;
-    while (Date.now() - killedAt < REQUIRED_DEAD_MS) {
+    // F9: measure the verified dead window from AFTER the kill command
+    // returned, not from before it (which overstated the 20 s claim).
+    const deadSince = Date.now();
+    while (Date.now() - deadSince < REQUIRED_DEAD_MS) {
       if (isPidAlive(workerPid)) {
         // A live pid during the window means the kill did not take.
-        deadSince = Date.now();
         throw new Error(
-          `worker-kill: staging pid ${workerPid} is still alive ${Date.now() - killedAt}ms after kill -9`,
+          `worker-kill: staging pid ${workerPid} is still alive ${Date.now() - deadSince}ms after kill -9`,
         );
       }
       await sleep(250);
     }
     prepared.stayedDeadMs = Date.now() - deadSince;
 
+    // The restart boundary is when we ASK for the restart, not when the
+    // process is observed alive: a sweep during startup is still a
+    // post-restart recovery, while an old-worker emit cannot be after this.
+    prepared.workerRestartedAtMs = Date.now();
     await ctx.staging.workerStart({
       OVID_RUN_STALE_MS: String(STALE_OVERRIDE_MS),
     });
-    prepared.workerRestartedAtMs = Date.now();
     await waitFor(
       "staging worker restarted",
       async () => ((await ctx.staging.workerAlive()) ? true : null),
@@ -386,6 +583,11 @@ export const workerKillScenario: ChaosScenario<Prepared> = {
             typeof terminal.payload.code === "string"
               ? terminal.payload.code
               : null;
+          // F9: the event's own emit timestamp, not when we noticed it.
+          const emittedAt = Date.parse(terminal.ts);
+          prepared.runLostEmittedAtMs = Number.isFinite(emittedAt)
+            ? emittedAt
+            : null;
           return true;
         },
         RECOVERY_BUDGET_MS,
@@ -394,9 +596,12 @@ export const workerKillScenario: ChaosScenario<Prepared> = {
     } catch {
       // recorded by the outcome evaluator below
     }
+    const runLostAfterRestart =
+      prepared.runLostEmittedAtMs !== null &&
+      prepared.runLostEmittedAtMs >= prepared.workerRestartedAtMs;
     prepared.recoveryMs =
-      runLostSeen
-        ? Date.now() - prepared.workerRestartedAtMs
+      prepared.runLostEmittedAtMs !== null
+        ? prepared.runLostEmittedAtMs - prepared.workerRestartedAtMs
         : Number.POSITIVE_INFINITY;
 
     // Run row state (staging Postgres).
@@ -467,6 +672,7 @@ export const workerKillScenario: ChaosScenario<Prepared> = {
       requiredDeadMs: REQUIRED_DEAD_MS,
       runLostSeen,
       runLostCode,
+      runLostAfterRestart,
       recoveryMs: prepared.recoveryMs,
       recoveryBudgetMs: RECOVERY_BUDGET_MS,
       runRowStatus,
@@ -477,10 +683,17 @@ export const workerKillScenario: ChaosScenario<Prepared> = {
     });
   },
 
-  async cleanup(_ctx: ChaosContext, prepared: Prepared): Promise<void> {
+  async cleanup(ctx: ChaosContext, prepared: Prepared | undefined): Promise<void> {
+    // F8: the runner calls cleanup(ctx, undefined) when prepare throws; the
+    // prepare catch already released the gate and closed its resources.
+    if (prepared === undefined) return;
     if (!prepared.gateReleased) prepared.gate.release();
     await closeClients(prepared.clients);
     await prepared.redis.quit().catch(() => {});
     await prepared.db.$client.end({ timeout: 5 }).catch(() => {});
+    // F7: inject can throw after `workerKill()` (dead-window or restart
+    // failure). Never leave the staging worker dead for the next scenario.
+    // A restart failure propagates so the runner records a cleanup failure.
+    await restoreWorkerIfKilled(ctx.staging, prepared.workerKilled);
   },
 };

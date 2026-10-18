@@ -25,7 +25,10 @@ DEFAULT_MINT_ENV_FILE="$DEPLOY_DIR/.env.staging.mint"
 ENV_FILE="${STAGING_ENV_FILE:-$DEFAULT_ENV_FILE}"
 MINT_ENV_FILE="${STAGING_MINT_ENV_FILE:-$DEFAULT_MINT_ENV_FILE}"
 
-log() { printf '[staging] %s\n' "$*"; }
+# F1: logs go to STDERR so machine-readable stdout stays parseable. In
+# particular `pressure-mount` prints ONLY the mount path on stdout (the
+# @ovid/load chaos harness parses it), and `env` prints only KEY=VALUE lines.
+log() { printf '[staging] %s\n' "$*" >&2; }
 
 die() {
   printf '[staging] ERROR: %s\n' "$*" >&2
@@ -841,6 +844,19 @@ cmd_pressure_mount() {
   command -v losetup >/dev/null || die "pressure-mount: losetup not found (util-linux)"
 
   if mountpoint -q "$mount_dir"; then
+    # F5: an existing mount is only acceptable when it is OUR loopback image.
+    # The size gate alone would let a foreign 256 MB filesystem through (and
+    # pressure-unmount would then correctly refuse it, stranding both).
+    local source_dev backing=""
+    source_dev="$(findmnt -n -o SOURCE --target "$mount_dir" 2>/dev/null || true)"
+    if [[ -z "$source_dev" ]]; then
+      source_dev="$(awk -v m="$mount_dir" '$2 == m {print $1}' /proc/mounts)"
+    fi
+    if [[ "$source_dev" == /dev/loop* ]]; then
+      backing="$(losetup -n -O BACK-FILE "$source_dev" 2>/dev/null || true)"
+    fi
+    [[ "$backing" == "$image" ]] \
+      || die "pressure-mount: $mount_dir (source ${source_dev:-unknown}, backing ${backing:-unknown}) is not our $image — refusing to reuse a foreign mount"
     log "pressure fixture already mounted at $mount_dir"
     printf '%s\n' "$mount_dir"
     return 0
@@ -852,6 +868,14 @@ cmd_pressure_mount() {
   fi
 
   mkdir -p "$mount_dir"
+  # F11: refuse to create the image unless the HOST has room for it. The
+  # post-prepare gate's 1 GB floor is too late — dd would already have run.
+  local host_free_mb
+  host_free_mb="$(df -Pm / | awk 'NR==2 {print $4}')"
+  [[ "$host_free_mb" =~ ^[0-9]+$ ]] \
+    || die "pressure-mount: could not read host free space"
+  (( host_free_mb >= 1024 )) \
+    || die "pressure-mount: host has only ${host_free_mb}MB free (< 1024MB floor) — refusing to create a ${mb}MB image"
   rm -f -- "$image"
   log "creating ${mb}MB loopback ext4 at $image (host root untouched beyond this file)"
   dd if=/dev/zero of="$image" bs=1M count="$mb" status=none \
