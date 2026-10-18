@@ -22,6 +22,14 @@
 FROM node:22-slim AS build
 WORKDIR /repo
 RUN corepack enable
+# Native-build toolchain for the BUILD stage only. The install below is
+# unfiltered, so it pulls packages/sandbox -> node-pty, whose published
+# prebuilds are darwin/win32 only; on Linux its install script falls through
+# to `node-gyp rebuild`. node:22-slim ships no python3/make/g++. This stage is
+# discarded — the runtime image below stays slim.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 make g++ \
+ && rm -rf /var/lib/apt/lists/*
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY packages ./packages
 COPY apps ./apps

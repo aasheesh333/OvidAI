@@ -9,6 +9,12 @@
 FROM node:22-alpine AS build
 WORKDIR /repo
 RUN corepack enable
+# Native-build toolchain for the BUILD stage only. `pnpm install` runs
+# node-pty's install script (packages/sandbox, allowed by pnpm-workspace.yaml's
+# allowBuilds); its published prebuilds are darwin/win32 only, so on Linux it
+# falls through to `node-gyp rebuild`. node:22-alpine ships no python3/make/g++.
+# This stage is discarded — the runtime image below stays slim.
+RUN apk add --no-cache python3 make g++ linux-headers
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY packages ./packages
 COPY apps ./apps
