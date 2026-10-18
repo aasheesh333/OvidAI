@@ -897,6 +897,45 @@ void main() {
     await ws.disconnect();
   });
 
+  test('(s2) a registered browser attach also sees session-scoped errors on '
+      'the raw lane (T16 fix)', () async {
+    final spy = SocketFactorySpy();
+    final ws = await _build(spy);
+    final (events, errors) = await _subscribeAndListen(ws, 's1');
+    final raw = <Map<String, dynamic>>[];
+    ws.rawServerFrames.listen(raw.add);
+
+    ws.watchSessionErrors('s1');
+    spy.sockets.single.server(const {
+      'op': 'error',
+      'code': 'forbidden',
+      'message': 'Session not found.',
+      'sessionId': 's1',
+    });
+    await pumpEventQueue();
+
+    expect(raw, hasLength(1));
+    expect(raw.single['op'], 'error');
+    expect(raw.single['code'], 'forbidden');
+    expect(raw.single['sessionId'], 's1');
+    expect(errors, hasLength(1),
+        reason: 'session-stream routing is unchanged (no duplicate event)');
+    expect(events, isEmpty);
+
+    // Once the viewer detaches, the raw lane stops receiving them.
+    ws.unwatchSessionErrors('s1');
+    spy.sockets.single.server(const {
+      'op': 'error',
+      'code': 'forbidden',
+      'message': 'Session not found.',
+      'sessionId': 's1',
+    });
+    await pumpEventQueue();
+    expect(raw, hasLength(1));
+    expect(errors, hasLength(2));
+    await ws.disconnect();
+  });
+
   test('(t) sync teardown inside the connecting transition: a later '
       'connect starts a FRESH chain, not the dead future (fix round 2)',
       () async {

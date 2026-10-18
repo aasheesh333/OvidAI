@@ -10,8 +10,10 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ovid_ai/core/cloud/browser_stream.dart';
+import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
 import 'package:ovid_ai/core/cloud/cloud_ws.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/browser_screen.dart';
@@ -38,6 +40,8 @@ void main() {
   late BrowserStreamClient client;
 
   setUp(() {
+    SharedPreferences.setMockInitialValues(const <String, Object>{});
+    CloudSessionStore.resetForTest();
     raw = StreamController<Map<String, dynamic>>.broadcast();
     binary = StreamController<Uint8List>.broadcast();
     client = BrowserStreamClient(
@@ -50,6 +54,7 @@ void main() {
 
   tearDown(() async {
     client.dispose();
+    CloudSessionStore.resetForTest();
     await raw.close();
     await binary.close();
   });
@@ -65,6 +70,9 @@ void main() {
         home: BrowserScreen(sessionId: 's1', client: client),
       ),
     );
+    // The screen resolves the local→server id asynchronously before it
+    // subscribes; let attach() run before the test emits a state.
+    await tester.pump();
     await tester.pump();
   }
 

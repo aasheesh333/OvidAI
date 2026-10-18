@@ -9590,8 +9590,8 @@ class _OvidMarkdown extends StatelessWidget {
     final body = color ?? Aether.text;
     return MarkdownBody(
       data: text,
-      // Prose is selectable (long-press to select/copy) and links open in the
-      // in-app browser, matching a real chat surface.
+      // Prose is selectable (long-press to select/copy) and web links open in
+      // the system browser, matching the cloud viewer's read-only contract.
       selectable: true,
       onTapLink: (text, href, title) => _openLink(context, text, href, title),
       // Never the package default (Image.network on render / Image.file for
@@ -9685,10 +9685,9 @@ Future<void> _openToolOutputLink(BuildContext context, String raw) async {
   }
 }
 
-/// Open a markdown link: http(s) in the in-app browser (so the agent and the
-/// user share one browsing surface, and its address bar shows the real
-/// domain), everything else (mailto:, tel:, custom schemes) through the
-/// platform handler.
+/// Open a markdown link: http(s) through the SYSTEM browser (the cloud
+/// viewer is a read-only screencast with no navigate op), everything else
+/// (mailto:, tel:, custom schemes) through the platform handler.
 ///
 /// Model-authored links are attacker-influenced, so a confirm sheet with the
 /// real host comes first whenever the link could deceive: a non-http(s)
@@ -9731,31 +9730,25 @@ Future<void> _openLink(
     if (choice != LinkChoice.open || !context.mounted) return;
   }
   if (link.isWeb) {
-    // The on-device browser was removed (P8 Task 16). The thin arm opens the
-    // cloud screencast viewer; a non-cloud build has no in-app web surface, so
-    // the link goes to the system browser.
-    if (!Distribution.cloudBrowser) {
-      try {
-        final ok = await launchUrl(
-          link.uri,
-          mode: LaunchMode.externalApplication,
-        );
-        if (!ok) throw StateError('not launched');
-      } catch (_) {
-        messenger.showSnackBar(
-          const SnackBar(
-            content: Text('Could not open this link.'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-      return;
+    // The on-device browser was removed (P8 Task 16), and the cloud viewer
+    // is a READ-ONLY screencast with no navigate op — opening it on a link
+    // tap would show the agent's last page, not the tapped URL. So every
+    // build opens the link in the SYSTEM browser; the header button still
+    // opens the cloud viewer.
+    try {
+      final ok = await launchUrl(
+        link.uri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!ok) throw StateError('not launched');
+    } catch (_) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Could not open this link.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
-    await BrowserScreen.open(
-      context,
-      url: link.uri.toString(),
-      sessionId: AppState.I.activeSessionId,
-    );
     return;
   }
   try {

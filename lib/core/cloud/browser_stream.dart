@@ -45,16 +45,33 @@ import 'cloud_ws.dart';
 /// `BrowserState.frameFormat` says (WebP in practice, JPEG on a probe
 /// fallback). [width]/[height] come from decoding the image — the binary
 /// channel carries no dimensions.
+///
+/// [image] is the decoded frame the production decoder already produced, so
+/// the viewer can paint it directly ([RawImage]) instead of decoding the
+/// bytes a second time. It is null only for a test decoder that supplies
+/// dimensions without an engine image. The CONSUMER owns it and must dispose
+/// it once it is no longer painted.
 class BrowserFrame {
   const BrowserFrame({
     required this.webpBytes,
     required this.width,
     required this.height,
+    this.image,
   });
 
   final Uint8List webpBytes;
   final int width;
   final int height;
+  final ui.Image? image;
+}
+
+/// A browser-channel `{"op":"error"}` frame (forbidden, unavailable,
+/// internal, not_attached — the gateway's browser ops).
+class BrowserStreamError {
+  const BrowserStreamError({required this.code, required this.message});
+
+  final String code;
+  final String message;
 }
 
 /// The server's `BrowserStateDto` (`@ovid/shared` browser.ts).
@@ -120,15 +137,14 @@ Future<BrowserFrame> decodeBrowserFrame(Uint8List bytes) async {
   try {
     final frame = await codec.getNextFrame();
     final image = frame.image;
-    try {
-      return BrowserFrame(
-        webpBytes: bytes,
-        width: image.width,
-        height: image.height,
-      );
-    } finally {
-      image.dispose();
-    }
+    // The image stays alive after the codec is disposed; the viewer paints
+    // this instance and disposes it when the next frame replaces it.
+    return BrowserFrame(
+      webpBytes: bytes,
+      width: image.width,
+      height: image.height,
+      image: image,
+    );
   } finally {
     codec.dispose();
   }
@@ -151,7 +167,10 @@ class BrowserStreamClient extends ChangeNotifier {
         _binaryFrames = binaryFramesOverride ?? ws.binaryServerFrames,
         // ignore: prefer_initializing_formals
         _sendOverride = sendOverride,
-        _decodeFrame = decodeFrame ?? decodeBrowserFrame;
+        _decodeFrame = decodeFrame ?? decodeBrowserFrame,
+        _lastLinkState = ws.linkState {
+    _ws.addListener(_onLinkChanged);
+  }
 
   static BrowserStreamClient? _instance;
 
@@ -179,8 +198,25 @@ class BrowserStreamClient extends ChangeNotifier {
 
   String? _sessionId;
   BrowserState? _state;
+  BrowserStreamError? _error;
   bool _takeoverActive = false;
   bool _disposed = false;
+
+  /// Monotonic attach generation. Every binary frame captures the generation
+  /// it arrived under and is dropped unless it is still current — frames
+  /// carry no session id, so a decode queued for session A must never paint
+  /// into B after a re-attach.
+  int _generation = 0;
+
+  /// Link-state tracking for reconnect recovery: the gateway tears the
+  /// browser attach down with the socket, so a transition back to `online`
+  /// must re-send `browser_attach`.
+  WsLinkState _lastLinkState;
+
+  /// True once this attach has been (or was queued while) online. The first
+  /// offline→online transition just flushes the queued attach; every later
+  /// one is a reconnect and must re-attach explicitly.
+  bool _onlineSinceAttach = false;
 
   /// Frames decode strictly in arrival order: concurrent decodes could paint
   /// an older frame last.
@@ -192,6 +228,14 @@ class BrowserStreamClient extends ChangeNotifier {
   /// Latest server state (url/title/viewport/takeover), or null before the
   /// first `browser_state`.
   BrowserState? get state => _state;
+
+  /// The last browser-channel error (cleared by the next `browser_state` or
+  /// attach), or null.
+  BrowserStreamError? get error => _error;
+
+  /// The attach generation (bumped on attach, detach and reconnect). A
+  /// viewer uses it to discard a frame painted by a previous attach.
+  int get generation => _generation;
 
   /// The attached session id, or null when detached.
   String? get sessionId => _sessionId;
@@ -211,9 +255,16 @@ class BrowserStreamClient extends ChangeNotifier {
     if (_disposed || sessionId.isEmpty) return;
     if (_sessionId == sessionId && _rawSub != null) return;
     if (_sessionId != null) detach();
+    _generation++;
     _sessionId = sessionId;
     _state = null;
+    _error = null;
     _takeoverActive = false;
+    _onlineSinceAttach = _ws.linkState == WsLinkState.online;
+    // Session-scoped gateway errors (forbidden/unavailable/internal) carry a
+    // sessionId, not a ptyId; register so the multiplexer copies them onto
+    // the raw lane this client listens to.
+    _ws.watchSessionErrors(sessionId);
     _listen();
     await _send(<String, Object?>{
       'op': 'browser_attach',
@@ -223,10 +274,18 @@ class BrowserStreamClient extends ChangeNotifier {
 
   /// Detaches from the server and stops forwarding frames/states.
   void detach() {
+    // A viewer may call this from its own dispose after the injected client
+    // was already torn down (test teardown order); never touch a disposed
+    // notifier.
+    if (_disposed) return;
     final id = _sessionId;
+    _generation++;
     _sessionId = null;
     _state = null;
+    _error = null;
     _takeoverActive = false;
+    _onlineSinceAttach = false;
+    if (id != null) _ws.unwatchSessionErrors(id);
     unawaited(_rawSub?.cancel());
     unawaited(_binarySub?.cancel());
     _rawSub = null;
@@ -238,6 +297,34 @@ class BrowserStreamClient extends ChangeNotifier {
       }));
     }
     notifyListeners();
+  }
+
+  /// A socket reconnect is a NEW link: the gateway's `close` handler tore the
+  /// old attach down (`ws.ts`), and raw ops are not replayed. Re-send
+  /// `browser_attach` and drop the stale state so the canvas cannot present a
+  /// pre-reconnect frame as live.
+  void _onLinkChanged() {
+    final link = _ws.linkState;
+    final previous = _lastLinkState;
+    _lastLinkState = link;
+    if (_disposed || link != WsLinkState.online) return;
+    if (previous == WsLinkState.online) return;
+    final id = _sessionId;
+    if (id == null) return;
+    if (!_onlineSinceAttach) {
+      // The attach was queued mid-connect; the multiplexer flushes it now.
+      _onlineSinceAttach = true;
+      return;
+    }
+    _generation++;
+    _state = null;
+    _error = null;
+    _takeoverActive = false;
+    notifyListeners();
+    unawaited(_send(<String, Object?>{
+      'op': 'browser_attach',
+      'sessionId': id,
+    }));
   }
 
   void _listen() {
@@ -253,13 +340,29 @@ class BrowserStreamClient extends ChangeNotifier {
   }
 
   void _onRawFrame(Map<String, dynamic> frame) {
-    if (frame['op'] != 'browser_state') return;
     final id = _sessionId;
     if (id == null) return;
+    final op = frame['op'];
+    if (op == 'error') {
+      final rawId = frame['sessionId'];
+      if (rawId is String && rawId.isNotEmpty && rawId != id) return;
+      final code = frame['code'];
+      final message = frame['message'];
+      _error = BrowserStreamError(
+        code: code is String ? code : 'internal',
+        message: message is String ? message : 'Unknown error.',
+      );
+      notifyListeners();
+      return;
+    }
+    if (op != 'browser_state') return;
     final raw = frame['state'];
     if (raw is! Map) return;
     final json = Map<String, dynamic>.from(raw);
-    if ((json['sessionId'] as String? ?? id) != id) return;
+    // Off-contract casts stay inside the guarded region: a non-string
+    // sessionId is simply not a mismatch signal.
+    final rawId = json['sessionId'];
+    if (rawId is String && rawId != id) return;
     BrowserState state;
     try {
       state = BrowserState.fromJson(json);
@@ -267,6 +370,7 @@ class BrowserStreamClient extends ChangeNotifier {
       debugPrint('browser stream: off-contract state dropped: $err');
       return;
     }
+    _error = null;
     _state = state;
     _takeoverActive = state.takeover;
     notifyListeners();
@@ -274,11 +378,24 @@ class BrowserStreamClient extends ChangeNotifier {
 
   void _onBinaryFrame(Uint8List bytes) {
     if (_sessionId == null || _frames.isClosed) return;
+    final generation = _generation;
     _decodeChain = _decodeChain.then((_) async {
-      if (_sessionId == null || _frames.isClosed) return;
+      if (generation != _generation ||
+          _sessionId == null ||
+          _frames.isClosed) {
+        return;
+      }
       try {
         final frame = await _decodeFrame(bytes);
-        if (_sessionId == null || _frames.isClosed) return;
+        // A detach/re-attach while the decode was in flight invalidates it:
+        // the bytes belong to the previous attach (binary frames carry no
+        // session id). The dropped frame's decoded image is ours to release.
+        if (generation != _generation ||
+            _sessionId == null ||
+            _frames.isClosed) {
+          frame.image?.dispose();
+          return;
+        }
         _frames.add(frame);
       } catch (err) {
         // A truncated/unsupported frame must not kill the stream.
@@ -343,7 +460,10 @@ class BrowserStreamClient extends ChangeNotifier {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    final id = _sessionId;
     _sessionId = null;
+    if (id != null) _ws.unwatchSessionErrors(id);
+    _ws.removeListener(_onLinkChanged);
     unawaited(_rawSub?.cancel());
     unawaited(_binarySub?.cancel());
     _rawSub = null;

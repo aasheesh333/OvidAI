@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/cloud/browser_stream.dart';
+import '../core/cloud/cloud_session_store.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'widgets/aether_primitives.dart';
@@ -25,14 +27,19 @@ import 'widgets/aether_primitives.dart';
 ///
 /// There is deliberately no omnibar navigation here: the wire contract has no
 /// navigation input event (navigation is the agent's `browser_navigate` tool,
-/// server-side). The address row is a read-only, spoof-resistant display.
+/// server-side). The address row is a read-only, spoof-resistant display; a
+/// link tapped in the transcript opens the SYSTEM browser instead of this
+/// read-only viewer.
+///
+/// The `sessionId` callers pass is the local chat id; [_BrowserScreenState]
+/// resolves it through `CloudSessionStore.serverIdFor` before attaching (the
+/// gateway accepts only the owned server UUID).
 class BrowserScreen extends StatefulWidget {
-  /// Server session id to attach to. Defaults to the active chat's id.
+  /// Session id to attach to. This is the LOCAL `ChatSession.id` (or a server
+  /// id when the caller already has one); the screen resolves it to the
+  /// mapped server UUID before it sends `browser_attach`, because the
+  /// gateway requires a UUID it owns.
   final String? sessionId;
-
-  /// Retained for link taps. The cloud viewer cannot navigate by itself, so
-  /// this is informational only (the agent owns navigation server-side).
-  final String? openUrl;
 
   /// Test seam: inject a configured client instead of the process singleton.
   final BrowserStreamClient? client;
@@ -40,19 +47,17 @@ class BrowserScreen extends StatefulWidget {
   const BrowserScreen({
     super.key,
     this.sessionId,
-    this.openUrl,
     this.client,
   });
 
   /// Push the browser for [sessionId] (defaults to the active chat).
   static Future<void> open(
     BuildContext context, {
-    String? url,
     String? sessionId,
   }) async {
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => BrowserScreen(sessionId: sessionId, openUrl: url),
+        builder: (_) => BrowserScreen(sessionId: sessionId),
       ),
     );
   }
@@ -62,35 +67,146 @@ class BrowserScreen extends StatefulWidget {
 }
 
 class _BrowserScreenState extends State<BrowserScreen> {
+  /// How long "attached, but the server has not sent a state/frame yet" may
+  /// look like normal startup before the viewer says the agent has not opened
+  /// a page. The worker sends NOTHING for a chat with no live browser
+  /// (`bridge.ts` ignores viewer_join), so an unbounded spinner is a lie.
+  static const Duration _firstFrameTimeout = Duration(seconds: 8);
+
   late final BrowserStreamClient _client;
-  late final String _sessionId;
+
+  /// The id the caller gave us (local chat id or already a server id).
+  late final String _localSessionId;
+
+  /// The resolved server UUID used for `browser_attach`.
+  String? _serverSessionId;
+
   StreamSubscription<BrowserFrame>? _framesSub;
   BrowserFrame? _frame;
   Offset _drag = Offset.zero;
+
+  Timer? _waitTimer;
+  bool _waitExpired = false;
+
+  /// The attach generation [frame] was received under. A reconnect (or a
+  /// detach/re-attach) bumps the client's generation and invalidates it.
+  int _frameGeneration = -1;
+
+  /// Decoded images released after the frame that replaced them has painted.
+  final Set<ui.Image> _pendingRelease = <ui.Image>{};
 
   @override
   void initState() {
     super.initState();
     _client = widget.client ?? BrowserStreamClient.I;
-    _sessionId = widget.sessionId ?? AppState.I.activeSession?.id ?? '';
+    _localSessionId = widget.sessionId ?? AppState.I.activeSession?.id ?? '';
     _client.addListener(_onClientChanged);
-    _framesSub = _client.frames.listen((frame) {
-      if (!mounted) return;
-      setState(() => _frame = frame);
-    });
-    if (_sessionId.isNotEmpty) {
-      unawaited(_client.attach(_sessionId));
+    _framesSub = _client.frames.listen(_onFrame);
+    if (_localSessionId.isNotEmpty) {
+      // Start the bounded wait immediately: resolving the id is fast, and
+      // the timeout is about the server sending no state/frame at all.
+      _startWaitTimer();
+      unawaited(_attachResolved());
     }
   }
 
+  /// Resolves the local chat id to the server UUID at the boundary (the
+  /// gateway rejects a non-UUID id with `forbidden`). The mapping is loaded
+  /// asynchronously, so wait for the store before reading it.
+  Future<void> _attachResolved() async {
+    var serverId = _localSessionId;
+    try {
+      final store = CloudSessionStore.I;
+      await store.ready;
+      serverId = store.serverIdFor(_localSessionId) ?? _localSessionId;
+    } catch (_) {
+      // No cloud store available (isolated widget test): fall back to the id
+      // we were given. Production always has the store.
+    }
+    if (!mounted) return;
+    _serverSessionId = serverId;
+    await _client.attach(serverId);
+  }
+
+  void _startWaitTimer() {
+    _waitTimer?.cancel();
+    _waitExpired = false;
+    _waitTimer = Timer(_firstFrameTimeout, () {
+      if (!mounted) return;
+      if (_frame == null &&
+          _client.state == null &&
+          _client.error == null) {
+        setState(() => _waitExpired = true);
+      }
+    });
+  }
+
   void _onClientChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    final generation = _client.generation;
+    final stale = _frame != null && generation != _frameGeneration;
+    final old = stale ? _frame : null;
+    if (_client.state != null || _client.error != null) {
+      _waitTimer?.cancel();
+    }
+    setState(() {
+      if (stale) _frame = null;
+      if (_client.state != null || _client.error != null) {
+        _waitExpired = false;
+      }
+    });
+    _releaseFrame(old);
+  }
+
+  void _onFrame(BrowserFrame frame) {
+    if (!mounted) return;
+    _waitTimer?.cancel();
+    final old = _frame;
+    setState(() {
+      _frame = frame;
+      _frameGeneration = _client.generation;
+      _waitExpired = false;
+    });
+    _releaseFrame(old);
+  }
+
+  /// Disposes a replaced decoded image only AFTER the frame that swapped it
+  /// out has been painted, so the render tree never draws a released image.
+  void _releaseFrame(BrowserFrame? frame) {
+    final image = frame?.image;
+    if (image == null) return;
+    if (!_pendingRelease.add(image)) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_pendingRelease.remove(image)) image.dispose();
+    });
+  }
+
+  /// Retry an errored/timed-out attach: tear the old one down and attach
+  /// again. The generation bump also clears the stale canvas.
+  void _retry() {
+    final id = _serverSessionId;
+    if (id == null) return;
+    final old = _frame;
+    setState(() {
+      _frame = null;
+      _frameGeneration = -1;
+      _waitExpired = false;
+    });
+    _releaseFrame(old);
+    _client.detach();
+    _startWaitTimer();
+    unawaited(_client.attach(id));
   }
 
   @override
   void dispose() {
+    _waitTimer?.cancel();
+    _waitTimer = null;
     _client.removeListener(_onClientChanged);
     unawaited(_framesSub?.cancel());
+    final image = _frame?.image;
+    _frame = null;
+    if (image != null && _pendingRelease.remove(image)) image.dispose();
     _client.detach();
     super.dispose();
   }
@@ -192,8 +308,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       key: const ValueKey('browser-canvas'),
                       frame: _frame,
                       live: state?.live ?? false,
-                      attached: _sessionId.isNotEmpty,
+                      attached: _localSessionId.isNotEmpty,
                       takeover: takeover,
+                      error: _client.error,
+                      waitExpired: _waitExpired,
+                      onRetry: _retry,
                       onTap: (local, box) {
                         final point = _toPage(local, box);
                         if (point != null) _client.sendTap(point.x, point.y);
@@ -383,6 +502,9 @@ class _FrameCanvas extends StatelessWidget {
     required this.live,
     required this.attached,
     required this.takeover,
+    required this.error,
+    required this.waitExpired,
+    required this.onRetry,
     required this.onTap,
     required this.onDragStart,
     required this.onDragUpdate,
@@ -393,6 +515,9 @@ class _FrameCanvas extends StatelessWidget {
   final bool live;
   final bool attached;
   final bool takeover;
+  final BrowserStreamError? error;
+  final bool waitExpired;
+  final VoidCallback onRetry;
   final void Function(Offset local, Size box) onTap;
   final VoidCallback onDragStart;
   final void Function(Offset delta) onDragUpdate;
@@ -409,6 +534,15 @@ class _FrameCanvas extends StatelessWidget {
       builder: (context, constraints) {
         final box = Size(constraints.maxWidth, constraints.maxHeight);
         final image = frame;
+        if (image == null) {
+          // No page yet: the placeholder (error / retry / timeout) must stay
+          // tappable even while the agent holds control.
+          return Container(
+            color: Aether.bg,
+            alignment: Alignment.center,
+            child: _placeholder(),
+          );
+        }
         return IgnorePointer(
           ignoring: !takeover,
           child: GestureDetector(
@@ -420,37 +554,107 @@ class _FrameCanvas extends StatelessWidget {
             child: Container(
               color: Aether.bg,
               alignment: Alignment.center,
-              child: image == null
-                  ? Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const SizedBox(
-                          width: 22,
-                          height: 22,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          live
-                              ? 'Waiting for the live browser…'
-                              : 'The cloud browser is starting…',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Aether.textMuted,
-                          ),
-                        ),
-                      ],
-                    )
-                  : Image.memory(
-                      image.webpBytes,
-                      fit: BoxFit.contain,
-                      gaplessPlayback: true,
-                      filterQuality: FilterQuality.medium,
-                    ),
+              child: _FrameImage(frame: image),
             ),
           ),
         );
       },
+    );
+  }
+
+  Widget _placeholder() {
+    final failure = error;
+    if (failure != null) {
+      return Padding(
+        key: const ValueKey('browser-error'),
+        padding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.cloud_off, size: 28, color: Aether.textMuted),
+            const SizedBox(height: 10),
+            const Text(
+              'Browser unavailable',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              failure.message,
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: Aether.textMuted),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              failure.code,
+              style: TextStyle(fontSize: 11, color: Aether.textFaint),
+            ),
+            const SizedBox(height: 10),
+            TextButton(
+              key: const ValueKey('browser-retry'),
+              onPressed: onRetry,
+              child: const Text('Retry'),
+            ),
+          ],
+        ),
+      );
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const SizedBox(
+          width: 22,
+          height: 22,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+        const SizedBox(height: 12),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 28),
+          child: Text(
+            waitExpired
+                ? "The agent hasn't opened a page in this chat yet."
+                : live
+                    ? 'Waiting for the live browser…'
+                    : 'The cloud browser is starting…',
+            key: const ValueKey('browser-status'),
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 12, color: Aether.textMuted),
+          ),
+        ),
+        if (waitExpired)
+          TextButton(
+            key: const ValueKey('browser-retry'),
+            onPressed: onRetry,
+            child: const Text('Check again'),
+          ),
+      ],
+    );
+  }
+}
+
+/// Paints the already-decoded engine image. The production decoder returns
+/// the `ui.Image` it decoded to learn the dimensions, so this never decodes
+/// the same bytes a second time. A test decoder without an image falls back
+/// to [Image.memory].
+class _FrameImage extends StatelessWidget {
+  const _FrameImage({required this.frame});
+
+  final BrowserFrame frame;
+
+  @override
+  Widget build(BuildContext context) {
+    final image = frame.image;
+    if (image != null) {
+      return RawImage(
+        image: image,
+        fit: BoxFit.contain,
+        filterQuality: FilterQuality.medium,
+      );
+    }
+    return Image.memory(
+      frame.webpBytes,
+      fit: BoxFit.contain,
+      gaplessPlayback: true,
+      filterQuality: FilterQuality.medium,
     );
   }
 }

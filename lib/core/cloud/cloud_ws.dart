@@ -324,6 +324,21 @@ class WsMultiplexer extends ChangeNotifier {
   /// Raw binary frames (see [_binaryFrames]).
   Stream<Uint8List> get binaryServerFrames => _binaryFrames.stream;
 
+  /// Sessions whose RAW-lane consumer (the P6 browser attach) must also see
+  /// session-scoped `error` frames. Those errors normally surface only on
+  /// the session-event stream ([_onErrorFrame]); the browser channel has no
+  /// session subscription and would otherwise never observe
+  /// `forbidden`/`unavailable`/`internal`/`not_attached`.
+  final Set<String> _rawSessionErrorWatchers = <String>{};
+
+  /// Registers [sessionId] for raw-lane session error frames (idempotent).
+  void watchSessionErrors(String sessionId) =>
+      _rawSessionErrorWatchers.add(sessionId);
+
+  /// Stops forwarding [sessionId]'s errors to the raw lane (idempotent).
+  void unwatchSessionErrors(String sessionId) =>
+      _rawSessionErrorWatchers.remove(sessionId);
+
   /// The replay cursor currently held for [sessionId]: the live
   /// subscription's max accepted seq, else a Task 9 seed, else the persisted
   /// pref. Task 9 records it as the offline cache's high-water mark.
@@ -841,6 +856,13 @@ class WsMultiplexer extends ChangeNotifier {
     final messageText = message is String ? message : 'Unknown error.';
 
     if (sessionId is String && sessionId.isNotEmpty) {
+      // A browser attach (Task 16) listens on the RAW lane, not the session
+      // event stream; copy the error there when one is registered. The
+      // session-stream routing below is unchanged (no duplicate copy).
+      if (_rawSessionErrorWatchers.contains(sessionId) &&
+          !_rawFrames.isClosed) {
+        _rawFrames.add(msg);
+      }
       final sub = _subs[sessionId];
       if (sub == null) {
         debugPrint('cloud ws: error for unknown session '
