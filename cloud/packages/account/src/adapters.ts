@@ -19,6 +19,10 @@ import {
   type DataAdapter,
 } from "./domain.js";
 
+// Re-exported so route/tests can catch the typed error without importing
+// domain.js directly (adapters.test.ts imports it from here).
+export { AccountError };
+
 // ---------------------------------------------------------------------------
 // Firebase Admin
 // ---------------------------------------------------------------------------

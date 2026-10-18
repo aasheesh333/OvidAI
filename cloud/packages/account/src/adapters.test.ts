@@ -455,7 +455,7 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
   it("captures tokens/session ids, blocks keys, then deletes every uid-owned row idempotently", async () => {
     await seed();
     const ctx = await cleanup.prepare(UID);
-    expect(ctx.tokens.sort()).toEqual(["tok-a", "tok-b"]);
+    expect((ctx.tokens as string[]).sort()).toEqual(["tok-a", "tok-b"]);
     expect(ctx.session_ids).toEqual([SESSION]);
 
     await cleanup.revokeKeys(UID, ctx);
@@ -538,7 +538,7 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
     keys.listTokens = ["tok-orphan"];
     const ctx = await cleanup.prepare(UID);
     expect(keys.listCalls).toEqual([UID]);
-    expect(ctx.tokens.sort()).toEqual(["tok-a", "tok-b", "tok-orphan"]);
+    expect((ctx.tokens as string[]).sort()).toEqual(["tok-a", "tok-b", "tok-orphan"]);
 
     await cleanup.revokeKeys(UID, ctx);
     expect(keys.blocked.sort()).toEqual(["tok-a", "tok-b", "tok-orphan"]);

@@ -15,6 +15,10 @@ import type {
   DeletionStore,
 } from "./domain.js";
 
+// Re-exported for consumers that reach the row shape through the store
+// (store.test.ts imports it from here).
+export type { DeletionRow } from "./domain.js";
+
 export function createPostgresDeletionStore(db: Db): DeletionStore {
   return {
     locked<T>(uid: string, fn: (session: DeletionSession) => Promise<T>): Promise<T> {
