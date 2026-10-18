@@ -190,21 +190,76 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway session-event routes (real postgres
     expect((first.json() as { events: SessionEvent[] }).events).toEqual([]);
   });
 
-  it("before with no value returns the NEWEST page in ascending order", async () => {
+  it("no cursor (or an empty before=/after=) reads from the BEGINNING, matching CloudMirrorReader", async () => {
     const app = makeApp();
-    const uid = testUid("evt-newest");
+    const uid = testUid("evt-begin");
     const sid = await createSession(app, uid);
     const seeded = await seedEvents(sid, SEQ);
 
-    const res = await getEvents(app, uid, sid, "?before=");
-    expect(res.statusCode).toBe(200);
-    expect((res.json() as { events: SessionEvent[] }).events.map((e) => e.seq)).toEqual(SEQ);
+    // The mirror reader's documented contract: null lastSeq ⇒ from the
+    // beginning. `_restMirrorReader` encodes it as `?after=`.
+    for (const query of ["", "?before=", "?after="]) {
+      const res = await getEvents(app, uid, sid, query);
+      expect(res.statusCode, query).toBe(200);
+      expect((res.json() as { events: SessionEvent[] }).events, query).toEqual(seeded);
+    }
 
+    // The limit takes the OLDEST rows, not the newest.
     const limited = await getEvents(app, uid, sid, "?limit=2");
     expect((limited.json() as { events: SessionEvent[] }).events).toEqual(
-      seeded.slice(-2),
+      seeded.slice(0, 2),
     );
   });
+
+  it("truncation regression: 250 events, no cursor → the FIRST 200 (never only the tail)", async () => {
+    const app = makeApp();
+    const uid = testUid("evt-trunc");
+    const sid = await createSession(app, uid);
+    const total = 250;
+    const seqs = Array.from({ length: total }, (_, i) => `1700000000000-${i}`);
+    await seedEvents(sid, seqs);
+
+    // No cursor: from the beginning, ascending. This is what a first-ever
+    // subscribe with a degraded WS replay asks for (`?after=`).
+    for (const query of ["", "?before=", "?after="]) {
+      const res = await getEvents(app, uid, sid, `${query}${query === "" ? "?" : "&"}limit=200`);
+      expect(res.statusCode, query).toBe(200);
+      const events = (res.json() as { events: SessionEvent[] }).events;
+      expect(events, query).toHaveLength(200);
+      expect(events[0]!.seq, query).toBe("1700000000000-0");
+      expect(events[events.length - 1]!.seq, query).toBe("1700000000000-199");
+    }
+
+    // Explicit tail opt-in: the LAST 200, ascending, starting at event 51.
+    const tail = await getEvents(app, uid, sid, "?tail=1&limit=200");
+    expect(tail.statusCode).toBe(200);
+    const tailEvents = (tail.json() as { events: SessionEvent[] }).events;
+    expect(tailEvents).toHaveLength(200);
+    expect(tailEvents[0]!.seq).toBe("1700000000000-50");
+    expect(tailEvents[tailEvents.length - 1]!.seq).toBe("1700000000000-249");
+
+    // tail=true is the other accepted spelling; limit still applies.
+    const tailTrue = await getEvents(app, uid, sid, "?tail=true&limit=2");
+    expect(tailTrue.statusCode).toBe(200);
+    expect((tailTrue.json() as { events: SessionEvent[] }).events.map((e) => e.seq)).toEqual([
+      "1700000000000-248",
+      "1700000000000-249",
+    ]);
+
+    // Forward from the oldest seq: unchanged (exclusive).
+    const forward = await getEvents(app, uid, sid, "?after=1700000000000-0&limit=2");
+    expect((forward.json() as { events: SessionEvent[] }).events.map((e) => e.seq)).toEqual([
+      "1700000000000-1",
+      "1700000000000-2",
+    ]);
+
+    // after wins over tail (documented precedence).
+    const both = await getEvents(app, uid, sid, "?tail=1&after=1700000000000-10&limit=2");
+    expect((both.json() as { events: SessionEvent[] }).events.map((e) => e.seq)).toEqual([
+      "1700000000000-11",
+      "1700000000000-12",
+    ]);
+  }, 60_000);
 
   it("after wins when both after and before are present", async () => {
     const app = makeApp();
@@ -236,7 +291,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway session-event routes (real postgres
     for (const query of ["?after=garbage", "?before=not-a-seq", "?after=-1", "?before=1-2-3"]) {
       const res = await getEvents(app, uid, sid, query);
       expect(res.statusCode, query).toBe(200);
-      // No usable cursor → the newest page (all five here), ascending.
+      // No usable cursor → FROM THE BEGINNING (all five here), ascending.
       expect((res.json() as { events: SessionEvent[] }).events.map((e) => e.seq), query).toEqual(SEQ);
     }
   });
@@ -253,18 +308,25 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway session-event routes (real postgres
       const res = await getEvents(app, uid, sid, query);
       expect(res.statusCode, query).toBe(200);
       const events = (res.json() as { events: SessionEvent[] }).events;
-      // Newest 200, ascending: i = 801 … 1000.
+      // Default 200 from the BEGINNING, ascending: i = 0 … 199.
       expect(events, query).toHaveLength(200);
-      expect(events[0]!.seq, query).toBe(`1700000000000-${total - 200}`);
-      expect(events[events.length - 1]!.seq, query).toBe(`1700000000000-${total - 1}`);
+      expect(events[0]!.seq, query).toBe("1700000000000-0");
+      expect(events[events.length - 1]!.seq, query).toBe("1700000000000-199");
     }
+
+    // The same clamping applies to the explicit tail request.
+    const tailCapped = await getEvents(app, uid, sid, "?tail=1&limit=0");
+    expect(tailCapped.statusCode).toBe(200);
+    const tailEvents = (tailCapped.json() as { events: SessionEvent[] }).events;
+    expect(tailEvents).toHaveLength(200);
+    expect(tailEvents[0]!.seq).toBe(`1700000000000-${total - 200}`);
 
     const capped = await getEvents(app, uid, sid, "?limit=5000");
     expect(capped.statusCode).toBe(200);
     const events = (capped.json() as { events: SessionEvent[] }).events;
     expect(events).toHaveLength(1000);
-    expect(events[0]!.seq).toBe("1700000000000-1");
-    expect(events[events.length - 1]!.seq).toBe(`1700000000000-${total - 1}`);
+    expect(events[0]!.seq).toBe("1700000000000-0");
+    expect(events[events.length - 1]!.seq).toBe("1700000000000-999");
   }, 60_000);
 
   it("an empty session answers {events: []}", async () => {
