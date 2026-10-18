@@ -277,14 +277,15 @@ GATE 10 release-evidence [REQUIRED]
             per-gate output, total duration. Written on failure too.
 
 Known blockers (reported, not worked around):
-  - staging.sh does not install the 'sandbox_egress_staging' nft table that
-    the Task 8 corpus expects -> the egress group will be SKIPPED and gate 4
-    will (correctly) fail on a box without it. This is the ONLY remaining
-    blocker for a full run; install the staging nft table (owner-gated) before
-    running.
-  - CLEARED since this text was first written: Dockerfile.mint, ROLLOUT.md and
-    packages/account/tsconfig.check.json now all exist. Do not defer the run
-    for those.
+  - None left in the scripts. The former 'sandbox_egress_staging' blocker is
+    CLEARED: staging.sh now installs that table in 'up' and removes it in
+    'down' (install_staging_egress/remove_staging_egress, rendered by
+    @ovid/sandbox's renderNftRuleset, a SEPARATE table from production's
+    ovid_sandbox). What remains is the owner-gated run itself: it needs root
+    for nft, a real bwrap/rootfs, and the staging stack.
+  - Also CLEARED since this text was first written: Dockerfile.mint, ROLLOUT.md
+    and packages/account/tsconfig.check.json now all exist. Do not defer the
+    run for those.
 
 Dry run complete: nothing was executed, staging was not touched, and no
 evidence file was written.
