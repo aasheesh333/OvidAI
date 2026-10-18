@@ -18,6 +18,18 @@ import { resolve } from "node:path";
  * script at arrival, so a later `arm()` never mutates an in-flight stream.
  */
 
+/**
+ * A provider tool call the mock can stream. `arguments` is the raw JSON
+ * string, exactly as an OpenAI-compatible provider streams it; the worker's
+ * [OI] transport aggregates it and JSON-parses it into tool-call args.
+ */
+export interface MockLlmToolCall {
+  id: string;
+  name: string;
+  /** Raw JSON argument string (e.g. `{"command":"echo load-ok"}`). */
+  arguments: string;
+}
+
 export interface MockLlmScript {
   /** Content deltas streamed as choices[0].delta.content. */
   deltas?: string[];
@@ -27,6 +39,18 @@ export interface MockLlmScript {
   gateAfterDeltas?: number | null;
   /** After writing the Nth delta, destroy the socket WITHOUT [DONE]. */
   closeSocketAfterDeltas?: number | null;
+  /**
+   * Emit a provider `tool_calls` delta instead of content on the FIRST
+   * provider call of a run. `undefined` keeps the server default; `null`
+   * disables tool calls.
+   */
+  toolCall?: MockLlmToolCall | null;
+  /**
+   * Only emit `toolCall` when the last user message starts with this marker.
+   * `null` = emit for every run. Default: `"[sandbox]"` — the marker the
+   * scenario already prefixes onto `sandboxDutyCycle` runs.
+   */
+  toolCallMarker?: string | null;
 }
 
 export interface MockLlmServer {
@@ -48,7 +72,22 @@ interface ResolvedScript {
   chunkDelayMs: number;
   gateAfterDeltas: number | null;
   closeSocketAfterDeltas: number | null;
+  toolCall: MockLlmToolCall | null;
+  toolCallMarker: string | null;
 }
+
+/**
+ * The default sandbox-trigger call. `run_shell` is in the worker's real P2
+ * roster; `echo load-ok` passes the command policy, is read-only (so it is
+ * allowed even in plan/read-only mode), is deterministic and exits at once.
+ * The worker executes it in the attached sandbox and emits the normal
+ * `tool_started` / `tool_completed` events.
+ */
+const DEFAULT_SANDBOX_TOOL_CALL: MockLlmToolCall = {
+  id: "call_load_sandbox",
+  name: "run_shell",
+  arguments: JSON.stringify({ command: "echo load-ok" }),
+};
 
 interface Deferred {
   promise: Promise<void>;
@@ -77,7 +116,89 @@ function resolveScript(script: MockLlmScript, fallback: ResolvedScript): Resolve
       script.closeSocketAfterDeltas === undefined
         ? fallback.closeSocketAfterDeltas
         : script.closeSocketAfterDeltas,
+    // `null` is meaningful (disable), so only `undefined` falls back.
+    toolCall: script.toolCall === undefined ? fallback.toolCall : script.toolCall,
+    toolCallMarker:
+      script.toolCallMarker === undefined ? fallback.toolCallMarker : script.toolCallMarker,
   };
+}
+
+interface ChatRequestMessage {
+  role?: unknown;
+  content?: unknown;
+  tool_calls?: unknown;
+}
+
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        part !== null && typeof part === "object" && "text" in part
+          ? String((part as { text?: unknown }).text ?? "")
+          : "",
+      )
+      .join("");
+  }
+  return "";
+}
+
+function parseMessages(rawBody: string): ChatRequestMessage[] {
+  try {
+    const body = JSON.parse(rawBody) as { messages?: unknown };
+    return Array.isArray(body.messages) ? (body.messages as ChatRequestMessage[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function lastUserMessage(messages: ChatRequestMessage[]): ChatRequestMessage | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") return messages[index];
+  }
+  return undefined;
+}
+
+/**
+ * True when this is the first provider call for the run's latest user
+ * message. The engine's continuation rounds append an assistant message with
+ * `tool_calls` and a `role:"tool"` result AFTER that user message, so their
+ * presence marks a continuation. History from earlier runs sits BEFORE the
+ * last user message and does not confuse the check.
+ */
+function isFirstProviderCall(messages: ChatRequestMessage[]): boolean {
+  let lastUser = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") {
+      lastUser = index;
+      break;
+    }
+  }
+  if (lastUser === -1) return true;
+  for (let index = lastUser + 1; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.role === "tool") return false;
+    if (
+      message?.role === "assistant" &&
+      Array.isArray(message.tool_calls) &&
+      message.tool_calls.length > 0
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function shouldEmitToolCall(script: ResolvedScript, rawBody: string): boolean {
+  if (script.toolCall === null) return false;
+  const messages = parseMessages(rawBody);
+  if (!isFirstProviderCall(messages)) return false;
+  if (script.toolCallMarker !== null) {
+    const lastUser = lastUserMessage(messages);
+    const text = lastUser === undefined ? "" : contentText(lastUser.content);
+    if (!text.startsWith(script.toolCallMarker)) return false;
+  }
+  return true;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -125,6 +246,8 @@ export async function startMockLlmServer(
     chunkDelayMs: 0,
     gateAfterDeltas: null,
     closeSocketAfterDeltas: null,
+    toolCall: DEFAULT_SANDBOX_TOOL_CALL,
+    toolCallMarker: "[sandbox]",
   });
   let current = fallback;
   let gate = deferred();
@@ -134,6 +257,7 @@ export async function startMockLlmServer(
     res: ServerResponse,
     script: ResolvedScript,
     requestGate: Deferred,
+    emitToolCall: boolean,
   ): Promise<void> {
     res.writeHead(200, {
       "content-type": "text/event-stream",
@@ -143,6 +267,40 @@ export async function startMockLlmServer(
     const writeData = (payload: string): void => {
       res.write(`data: ${payload}\n\n`);
     };
+
+    if (emitToolCall && script.toolCall !== null) {
+      if (script.chunkDelayMs > 0) await sleep(script.chunkDelayMs);
+      if (res.destroyed || res.writableEnded) return;
+      // Real provider tool-call wire shape: one fragment with index/id/name/
+      // arguments, then a finish_reason:"tool_calls" chunk. The worker's [OI]
+      // transport aggregates this and dispatches the real tool.
+      writeData(
+        JSON.stringify({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: script.toolCall.id,
+                    type: "function",
+                    function: {
+                      name: script.toolCall.name,
+                      arguments: script.toolCall.arguments,
+                    },
+                  },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+        }),
+      );
+      writeData(JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] }));
+      res.end("data: [DONE]\n\n");
+      return;
+    }
+
     for (let i = 0; i < script.deltas.length; i += 1) {
       if (script.chunkDelayMs > 0) await sleep(script.chunkDelayMs);
       if (res.destroyed || res.writableEnded) return;
@@ -173,12 +331,12 @@ export async function startMockLlmServer(
       // Chat completions — the worker transport appends /chat/completions to
       // its base URL (agent-core/openai.ts), so match the suffix.
       if (req.method === "POST" && path.endsWith("/chat/completions")) {
-        await readBody(req);
+        const body = await readBody(req);
         chatRequests += 1;
         // Snapshot per request: a later arm() never mutates an in-flight stream.
         const script = { ...current, deltas: [...current.deltas] };
         const requestGate = gate;
-        await stream(res, script, requestGate);
+        await stream(res, script, requestGate, shouldEmitToolCall(script, body));
         return;
       }
 

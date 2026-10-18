@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { LoadReport } from "./scenario.js";
+import type { LoadProfile, LoadReport } from "./scenario.js";
 import { FULL_THRESHOLDS, SMOKE_THRESHOLDS, checkThresholds } from "./thresholds.js";
 
 /**
@@ -7,6 +7,19 @@ import { FULL_THRESHOLDS, SMOKE_THRESHOLDS, checkThresholds } from "./thresholds
  * run, never reconnected, never spiked or never sampled a container reports
  * zeros — and zeros must fail, not pass. These tests pin that contract.
  */
+
+/** The full100 shape for profile-conditional gates. */
+const PROFILE: LoadProfile = {
+  users: 100,
+  durationMs: 1_800_000,
+  rampMs: 300_000,
+  runsPerUserEveryMs: 90_000,
+  sandboxDutyCycle: 0.35,
+  browserUsers: 4,
+  schedules: 10,
+  reconnectEveryMs: 60_000,
+  spike: { atMs: 900_000, extraConcurrentRuns: 16, durationMs: 300_000 },
+};
 
 function healthyReport(): LoadReport {
   return {
@@ -23,7 +36,12 @@ function healthyReport(): LoadReport {
     admission: {
       maxObservedActiveSandboxes: 30,
       queuedAtCap: 5,
+      queuedAtCapBasis: "accepted-not-started-peak",
       rejectedAtCap: 0,
+      rejectedAtCapBasis: "run_failed",
+      ptySandboxBusy: 0,
+      ptySandboxUnavailable: 0,
+      acceptedNotTerminal: 0,
       spikeDrainMs: 1_000,
       spikeRuns: 16,
     },
@@ -46,7 +64,12 @@ function deadReport(): LoadReport {
     admission: {
       maxObservedActiveSandboxes: 0,
       queuedAtCap: 0,
+      queuedAtCapBasis: "not-measured",
       rejectedAtCap: 0,
+      rejectedAtCapBasis: "run_failed",
+      ptySandboxBusy: 0,
+      ptySandboxUnavailable: 0,
+      acceptedNotTerminal: 0,
       spikeDrainMs: 0,
       spikeRuns: 0,
     },
@@ -58,11 +81,11 @@ function deadReport(): LoadReport {
 
 describe("FULL_THRESHOLDS positive-data gates", () => {
   it("a healthy report passes every threshold", () => {
-    expect(checkThresholds(healthyReport(), FULL_THRESHOLDS)).toEqual([]);
+    expect(checkThresholds(healthyReport(), FULL_THRESHOLDS, PROFILE)).toEqual([]);
   });
 
   it("a dead run cannot pass: zero samples/runs/replay/spike/schedule/memory all fail", () => {
-    const failures = checkThresholds(deadReport(), FULL_THRESHOLDS);
+    const failures = checkThresholds(deadReport(), FULL_THRESHOLDS, PROFILE);
     expect(failures).toEqual(
       expect.arrayContaining([
         "eventDelivery.samples",
@@ -70,6 +93,7 @@ describe("FULL_THRESHOLDS positive-data gates", () => {
         "runsCompleted",
         "replay.samples",
         "admission.spikeRuns",
+        "admission.maxObservedActiveSandboxes",
         "scheduleRuns.fired",
         "memory.gatewayMaxRssMb",
         "memory.workerMaxRssMb",
@@ -79,16 +103,36 @@ describe("FULL_THRESHOLDS positive-data gates", () => {
     );
   });
 
+  it("sandboxDutyCycle>0 with maxObservedActiveSandboxes==0 FAILS (GAP B self-detecting)", () => {
+    const report = healthyReport();
+    report.admission.maxObservedActiveSandboxes = 0;
+    expect(checkThresholds(report, FULL_THRESHOLDS, PROFILE)).toContain(
+      "admission.maxObservedActiveSandboxes",
+    );
+  });
+
+  it("the sandbox gate does not apply when the profile declares no sandbox work", () => {
+    const report = healthyReport();
+    report.admission.maxObservedActiveSandboxes = 0;
+    expect(
+      checkThresholds(report, FULL_THRESHOLDS, { ...PROFILE, sandboxDutyCycle: 0 }),
+    ).not.toContain("admission.maxObservedActiveSandboxes");
+  });
+
   it("an off-contract frame count fails the harness-honesty gate", () => {
     const report = healthyReport();
     report.harness.invalidFrames = 1;
-    expect(checkThresholds(report, FULL_THRESHOLDS)).toContain("harness.invalidFrames");
+    expect(checkThresholds(report, FULL_THRESHOLDS, PROFILE)).toContain(
+      "harness.invalidFrames",
+    );
   });
 
   it("an unattributed run_failed fails instead of silently reading as zero failures", () => {
     const report = healthyReport();
     report.runsFailedUnattributed = 1;
-    expect(checkThresholds(report, FULL_THRESHOLDS)).toContain("runsFailedUnattributed");
+    expect(checkThresholds(report, FULL_THRESHOLDS, PROFILE)).toContain(
+      "runsFailedUnattributed",
+    );
   });
 
   it("keeps the brief's spike-drain threshold (T4 M1): ≤600 s", () => {

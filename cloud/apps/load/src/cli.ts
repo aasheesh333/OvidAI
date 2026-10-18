@@ -217,8 +217,18 @@ function renderMarkdown(
     ["integrity.duplicateEvents", String(report.integrity.duplicateEvents)],
     ["integrity.gapsVsMirror", String(report.integrity.gapsVsMirror)],
     ["admission.maxObservedActiveSandboxes", String(report.admission.maxObservedActiveSandboxes)],
-    ["admission.queuedAtCap", String(report.admission.queuedAtCap)],
+    [
+      "admission.queuedAtCap",
+      report.admission.queuedAtCapBasis === "not-measured"
+        ? "NOT MEASURED"
+        : String(report.admission.queuedAtCap),
+    ],
+    ["admission.queuedAtCapBasis", report.admission.queuedAtCapBasis],
     ["admission.rejectedAtCap", String(report.admission.rejectedAtCap)],
+    ["admission.rejectedAtCapBasis", report.admission.rejectedAtCapBasis],
+    ["admission.ptySandboxBusy", String(report.admission.ptySandboxBusy)],
+    ["admission.ptySandboxUnavailable", String(report.admission.ptySandboxUnavailable)],
+    ["admission.acceptedNotTerminal", String(report.admission.acceptedNotTerminal)],
     ["admission.spikeDrainMs", String(report.admission.spikeDrainMs ?? 0)],
     ["admission.spikeRuns", String(report.admission.spikeRuns)],
     ["memory.gatewayMaxRssMb", String(report.memory.gatewayMaxRssMb)],
@@ -292,7 +302,7 @@ export async function runCli(argv: string[]): Promise<number> {
     `load: profile=${name} users=${profile.users} durationMs=${profile.durationMs} target=${target.baseUrl}`,
   );
   const report = await runScenario(profile, target);
-  const failures = checkThresholds(report, thresholds);
+  const failures = checkThresholds(report, thresholds, profile);
   report.thresholdFailures = failures;
 
   const markdown = renderMarkdown(name, profile, target, report, thresholds, failures);

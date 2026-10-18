@@ -433,6 +433,76 @@ describe("load harness (self-contained in-process)", () => {
     expect(text).toContain("[DONE]");
   });
 
+  it("emits a REAL provider tool_calls delta once per [sandbox] run (GAP B)", async () => {
+    sse.arm({ deltas: ["done"], chunkDelayMs: 0 });
+
+    const request = async (messages: unknown[]): Promise<string> => {
+      const response = await fetch(`${sse.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ stream: true, messages }),
+      });
+      expect(response.status).toBe(200);
+      return response.text();
+    };
+
+    const firstText = await request([{ role: "user", content: "[sandbox] load run 1" }]);
+    const firstFrame = firstText
+      .split("\n")
+      .find((line) => line.startsWith("data: ") && !line.includes("[DONE]"));
+    expect(firstFrame).toBeDefined();
+    const chunk = JSON.parse(firstFrame!.slice("data: ".length)) as {
+      choices: Array<{
+        delta: {
+          tool_calls?: Array<{
+            index: number;
+            id: string;
+            type: string;
+            function: { name: string; arguments: string };
+          }>;
+        };
+        finish_reason: string | null;
+      }>;
+    };
+    const call = chunk.choices[0]!.delta.tool_calls?.[0];
+    expect(call).toMatchObject({
+      index: 0,
+      id: "call_load_sandbox",
+      type: "function",
+      function: { name: "run_shell" },
+    });
+    // The arguments are the real provider JSON string the worker parses.
+    expect(JSON.parse(call!.function.arguments)).toEqual({ command: "echo load-ok" });
+    expect(firstText).toContain('"finish_reason":"tool_calls"');
+    expect(firstText).toContain("[DONE]");
+
+    // The continuation round carries the assistant tool_calls + tool result
+    // after the last user message: the mock must stream content, not loop.
+    const secondText = await request([
+      { role: "user", content: "[sandbox] load run 1" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "call_load_sandbox",
+            type: "function",
+            function: { name: "run_shell", arguments: '{"command":"echo load-ok"}' },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_load_sandbox", content: "load-ok" },
+    ]);
+    expect(secondText).not.toContain('"tool_calls"');
+    expect(secondText).toContain('"finish_reason":"stop"');
+    expect(secondText).toContain("done");
+
+    // A non-sandbox run (no marker) never gets a tool call.
+    const plainText = await request([{ role: "user", content: "plain load run" }]);
+    expect(plainText).not.toContain('"tool_calls"');
+    expect(plainText).toContain('"finish_reason":"stop"');
+  });
+
   it("smoke run: zero loss/duplicates vs readSince ground truth, harness under the latency floor", async () => {
     // Restore the default script after the gate test above.
     sse.arm({ deltas: ["Hello", " from", " the mock"], chunkDelayMs: 5 });

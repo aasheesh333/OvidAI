@@ -8,9 +8,11 @@ import { createLoadClient, type LoadClient } from "./client.js";
 import {
   compareSeq,
   deliveryLatencies,
+  deriveAdmissionMetrics,
   diffIntegrity,
   eventDeliveryStats,
   percentile,
+  type AcceptedRun,
   type EventDeliveryStats,
 } from "./metrics.js";
 
@@ -71,9 +73,35 @@ export interface LoadReport {
   replay: { p95Ms: number; maxMs: number; reconnects: number; samples: number };
   integrity: { lostEvents: number; duplicateEvents: number; gapsVsMirror: number };
   admission: {
+    /**
+     * Peak concurrent `tool_started` events across all sessions. A sandboxed
+     * run's tool call executes against its attached sandbox; this is a tool-
+     * concurrency proxy, not a worker-internal sandbox gauge.
+     */
     maxObservedActiveSandboxes: number;
+    /**
+     * Peak accepted-but-not-started runs. This is a real backlog measurement
+     * but a PROXY for the sandbox admission queue: the event stream cannot
+     * separate the per-session turn queue from sandbox admission. The
+     * `queuedAtCapBasis` field says so in the report.
+     */
     queuedAtCap: number;
+    queuedAtCapBasis: "accepted-not-started-peak" | "not-measured";
+    /**
+     * `run_failed` events with an admission code (`sandbox_unavailable` /
+     * `sandbox_busy`). This is the REAL run-admission surface.
+     */
     rejectedAtCap: number;
+    rejectedAtCapBasis: "run_failed";
+    /**
+     * PTY admission WS error frames (`{op:"error"}` code sandbox_busy /
+     * sandbox_unavailable). A DIFFERENT surface — kept separate so it can
+     * never masquerade as run admission.
+     */
+    ptySandboxBusy: number;
+    ptySandboxUnavailable: number;
+    /** Accepted runs that never produced a start or terminal event. */
+    acceptedNotTerminal: number;
     /** Additive: spike-end → last queued spike run started (Task 5 ≤600 s). */
     spikeDrainMs?: number;
     /**
@@ -274,6 +302,11 @@ export async function runScenario(
   let maxPendingFrames = 0;
   let browserAttached = 0;
   const spikeRunIds: string[] = [];
+  /**
+   * Every run the gateway accepted (202). Admission metrics are derived from
+   * this list plus the event stream — never from WS error frames.
+   */
+  const acceptedRuns: AcceptedRun[] = [];
   let spikeEndedAt: number | undefined;
 
   // ---- Ground truth (read-only) -------------------------------------------
@@ -397,7 +430,12 @@ export async function runScenario(
         const sandbox = slot < Math.round(profile.sandboxDutyCycle * 100);
         const content = `${sandbox ? "[sandbox] " : ""}${runTag} run ${sends}`;
         try {
-          await client.sendMessage(sessionId, content);
+          const sent = await client.sendMessage(sessionId, content);
+          acceptedRuns.push({
+            runId: sent.runId,
+            sessionId,
+            acceptedAtMs: Date.now(),
+          });
           sends += 1;
         } catch (err) {
           sendFailures += 1;
@@ -434,6 +472,11 @@ export async function runScenario(
       try {
         const sent = await chosen.client.sendMessage(chosen.sessionId, `${runTag} spike ${i}`);
         spikeRunIds.push(sent.runId);
+        acceptedRuns.push({
+          runId: sent.runId,
+          sessionId: chosen.sessionId,
+          acceptedAtMs: Date.now(),
+        });
         sends += 1;
       } catch (err) {
         sendFailures += 1;
@@ -585,26 +628,61 @@ export async function runScenario(
     gapsVsMirror += diff.gapsVsMirror;
   }
 
-  // Admission: track tool_started/tool_completed pairs per session.
-  let maxObservedActiveSandboxes = 0;
-  for (let index = 0; index < sessions.length; index += 1) {
-    const client = clients[index];
-    if (client === undefined) continue;
-    let active = 0;
-    for (const item of client.received) {
-      if (item.event.type === "tool_started") {
-        active += 1;
-        maxObservedActiveSandboxes = Math.max(maxObservedActiveSandboxes, active);
-      } else if (item.event.type === "tool_completed") {
-        active = Math.max(0, active - 1);
-      }
-    }
-  }
-  const errorFrames = clients.flatMap((client) => client?.errors ?? []);
-  const queuedAtCap = errorFrames.filter((error) => error.code === "sandbox_busy").length;
-  const rejectedAtCap = errorFrames.filter(
+  // ---- Admission -----------------------------------------------------------
+  // Derived from the REAL surfaces:
+  //  - run_failed {code:"sandbox_unavailable"|"sandbox_busy"} session events
+  //    (the worker's sandbox.attach catch) → rejectedAtCap;
+  //  - accepted-but-not-started windows → queuedAtCap (a backlog proxy; see
+  //    the LoadReport field docs and the note emitted below);
+  //  - tool_started/tool_completed across ALL sessions → active tool calls.
+  // WS `{op:"error"}` frames are NOT admission; they are the pty_open surface
+  // and are reported separately.
+  const endedAtMs = Date.now();
+  const admission = deriveAdmissionMetrics(allReceived, acceptedRuns, endedAtMs);
+  const ptyErrors = clients.flatMap((client) => client?.errors ?? []);
+  const ptySandboxBusy = ptyErrors.filter((error) => error.code === "sandbox_busy").length;
+  const ptySandboxUnavailable = ptyErrors.filter(
     (error) => error.code === "sandbox_unavailable",
   ).length;
+  const queuedAtCapBasis: "accepted-not-started-peak" | "not-measured" =
+    acceptedRuns.length > 0 ? "accepted-not-started-peak" : "not-measured";
+
+  if (profile.sandboxDutyCycle > 0) {
+    notes.push(
+      "admission.queuedAtCap is a PROXY (peak accepted runs with no run_started/terminal event: " +
+        "session-turn queue + sandbox admission). Exact sandbox queue depth is not exposed by the " +
+        "worker; a server-side admission gauge is required for that.",
+    );
+  }
+  if (queuedAtCapBasis === "not-measured") {
+    notes.push(
+      "admission.queuedAtCap: NOT MEASURED — no accepted run ids were recorded (no send returned 202).",
+    );
+  }
+  if (admission.rejectedAtCap > 0) {
+    const codes = Object.entries(admission.rejectedCodes)
+      .map(([code, count]) => `${code}=${count}`)
+      .join(", ");
+    notes.push(`admission: ${admission.rejectedAtCap} run(s) rejected at cap (run_failed: ${codes}).`);
+  }
+  if (admission.acceptedNotTerminal > 0) {
+    notes.push(
+      `admission: ${admission.acceptedNotTerminal} accepted run(s) produced no run_started/terminal event ` +
+        "(queued or lost at teardown).",
+    );
+  }
+  if (ptySandboxBusy > 0 || ptySandboxUnavailable > 0) {
+    notes.push(
+      `PTY admission errors observed (separate surface, NOT run admission): ` +
+        `sandbox_busy=${ptySandboxBusy}, sandbox_unavailable=${ptySandboxUnavailable}.`,
+    );
+  }
+  if (profile.sandboxDutyCycle > 0 && admission.maxObservedActiveSandboxes === 0) {
+    notes.push(
+      "sandbox admission: NOT EXERCISED — sandboxDutyCycle>0 but no tool_started event was observed; " +
+        "the sandboxed run never executed a tool (the mock tool-call path did not fire).",
+    );
+  }
 
   // Spike drain: from the end of the spike burst to the last spike run's
   // run_started. 0 when no spike ran; a value only appears once every spike
@@ -687,9 +765,14 @@ export async function runScenario(
     },
     integrity: { lostEvents, duplicateEvents, gapsVsMirror },
     admission: {
-      maxObservedActiveSandboxes,
-      queuedAtCap,
-      rejectedAtCap,
+      maxObservedActiveSandboxes: admission.maxObservedActiveSandboxes,
+      queuedAtCap: admission.queuedAtCap,
+      queuedAtCapBasis,
+      rejectedAtCap: admission.rejectedAtCap,
+      rejectedAtCapBasis: "run_failed",
+      ptySandboxBusy,
+      ptySandboxUnavailable,
+      acceptedNotTerminal: admission.acceptedNotTerminal,
       spikeDrainMs,
       spikeRuns: spikeRunIds.length,
     },

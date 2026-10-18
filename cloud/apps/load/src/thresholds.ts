@@ -1,4 +1,4 @@
-import type { LoadReport } from "./scenario.js";
+import type { LoadProfile, LoadReport } from "./scenario.js";
 
 /**
  * Declarative threshold table (Task 5's acceptance table, values pinned here
@@ -15,6 +15,13 @@ export interface LoadThreshold {
   value: number;
   /** Human-readable rationale for the report table. */
   rationale: string;
+  /**
+   * Evaluate this gate only when the profile's numeric field is > 0. Used by
+   * positive-data gates that cannot apply to a profile which never exercises
+   * the tier. A profile-less call evaluates the gate, so missing context can
+   * never hide a dead measurement.
+   */
+  whenProfileFieldPositive?: "sandboxDutyCycle";
 }
 
 /**
@@ -190,6 +197,14 @@ export const FULL_THRESHOLDS: LoadThreshold[] = [
     rationale: "positive data: the spike burst actually fired",
   },
   {
+    metric: "admission.maxObservedActiveSandboxes",
+    op: "gt",
+    value: 0,
+    whenProfileFieldPositive: "sandboxDutyCycle",
+    rationale:
+      "positive data: sandboxDutyCycle>0 must execute a sandbox-backed tool (tool_started observed)",
+  },
+  {
     metric: "scheduleRuns.fired",
     op: "gt",
     value: 0,
@@ -253,9 +268,14 @@ function passes(measured: number, op: ThresholdOp, expected: number): boolean {
 export function checkThresholds(
   report: LoadReport,
   thresholds: LoadThreshold[],
+  profile?: LoadProfile,
 ): string[] {
   const failures: string[] = [];
   for (const threshold of thresholds) {
+    if (threshold.whenProfileFieldPositive !== undefined && profile !== undefined) {
+      const profileValue = profile[threshold.whenProfileFieldPositive];
+      if (typeof profileValue === "number" && profileValue <= 0) continue;
+    }
     const measured = readMetric(report, threshold.metric);
     if (measured === undefined || !passes(measured, threshold.op, threshold.value)) {
       failures.push(threshold.metric);
