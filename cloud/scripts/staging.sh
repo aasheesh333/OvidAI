@@ -367,9 +367,14 @@ guard_env_file() {
   require_var OVID_DEFAULT_MODEL
 
   # ── queue prefix / worker knobs ──
+  # BULL_PREFIX must equal what the staging gateway/worker ACTUALLY use. Their
+  # mains pass no `prefix` option, so BullMQ's default "bull" applies. This
+  # guard previously REQUIRED "bull:staging", which enforced a value nothing
+  # reads and sent two chaos scenarios to inspect empty queues. Isolation from
+  # prod comes from the separate redis-q instance, not from the prefix.
   require_var BULL_PREFIX
-  [[ "$BULL_PREFIX" == "bull:staging" ]] \
-    || guard_fail "BULL_PREFIX" "must be bull:staging (got '$BULL_PREFIX')"
+  [[ "$BULL_PREFIX" == "bull" ]] \
+    || guard_fail "BULL_PREFIX" "must be 'bull' — the value the staging gateway/worker mains actually use (no prefix option => BullMQ default); got '$BULL_PREFIX'"
   require_var OVID_RUN_STALE_MS
   [[ "$OVID_RUN_STALE_MS" == "15000" ]] \
     || guard_fail "OVID_RUN_STALE_MS" "must be 15000 (got '$OVID_RUN_STALE_MS')"
@@ -595,7 +600,12 @@ cmd_env() {
   printf 'STAGING_MOCK_LLM_URL=%s\n' "${STAGING_MOCK_LLM_URL:-http://127.0.0.1:14000}"
   printf 'STAGING_WORKER_PIDFILE=%s\n' "${STAGING_WORKER_PIDFILE:-/tmp/opencode/ovid-staging-worker.pid}"
   printf 'STAGING_MOCK_PIDFILE=%s\n' "${STAGING_MOCK_PIDFILE:-/tmp/opencode/ovid-staging-mock.pid}"
-  printf 'BULL_PREFIX=%s\n' "${BULL_PREFIX:-bull:staging}"
+  # The BullMQ prefix the staging gateway/worker ACTUALLY use. Their mains pass
+  # no `prefix` option, so BullMQ's default "bull" applies — a value of
+  # "bull:staging" here once sent two chaos scenarios to inspect queues nobody
+  # writes to. Do not change this without threading the same prefix into the
+  # gateway and worker queue construction.
+  printf 'BULL_PREFIX=%s\n' "${BULL_PREFIX:-bull}"
 }
 
 cmd_up() {

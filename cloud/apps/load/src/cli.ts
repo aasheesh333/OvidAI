@@ -169,7 +169,12 @@ async function resolveTarget(target: string): Promise<LoadTarget> {
     redisQUrl,
     databaseUrl,
     mockLlmUrl,
-    queuePrefix: env.BULL_PREFIX ?? "bull:staging",
+    // The gateway and worker call createQueues/createAgentRunsWorker with NO
+    // prefix option, so every job lands under BullMQ's default "bull". This
+    // field is REPORTED (see the markdown header) and must say that, not
+    // "bull:staging" — a report claiming the wrong prefix is misleading
+    // evidence. `staging.sh env` prints the same value.
+    queuePrefix: env.BULL_PREFIX ?? "bull",
   };
 }
 
