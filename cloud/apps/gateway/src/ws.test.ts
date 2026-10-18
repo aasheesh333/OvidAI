@@ -34,7 +34,7 @@ import {
   stubSystemBus as sharedSystemBus,
   type TicketStub,
 } from "./test/stubs.js";
-import { compareSeq, MAX_SUBSCRIPTIONS_PER_CONNECTION } from "./ws.js";
+import { compareSeq, MAX_SUBSCRIPTIONS_PER_CONNECTION, PTY_DISABLED_MESSAGE } from "./ws.js";
 import type { PtyOutMsg, RingChunkWire } from "@ovid/shared";
 import type { SystemHub } from "./systemChannel.js";
 
@@ -772,212 +772,86 @@ describe("gateway /cloud/ws pty ops (stub PtyBridge)", () => {
     return `ws://127.0.0.1:${port}${WS_PATH}`;
   }
 
-  it("pty_open happy → pty_opened, then snapshot + live pty_output frames in order", async () => {
+  // ── Agent-only execution (owner directive 2026-10-18) ──────────────────
+  // The user has no interactive terminal. The model runs commands in the
+  // user's sandbox; the user follows the read-only run log. Every client pty
+  // frame is refused at the dispatch boundary, BEFORE any ownership lookup or
+  // bridge work — so the refusal cannot be used to probe which session ids
+  // exist, and the bridge is never touched.
+
+  it("pty_open → forbidden with the pinned copy; the bridge is never opened", async () => {
     const stub = stubPtyBridge();
     const tickets = stubTickets();
     const wsBase = await makePtyApp(stub, ptyDb(() => true), tickets);
-    const client = await connectClient(wsBase, await tickets.mint("pty-happy"));
+    const client = await connectClient(wsBase, await tickets.mint("pty-refused"));
     clients.push(client);
 
     client.send({ op: "pty_open", sessionId: PTY_SID, cols: 120, rows: 40 });
-    await client.waitFor(() => client.messages.some((m) => m.op === "pty_opened"), "pty_opened");
-
-    const ptyId = stub.opens[0]!.ptyId;
-    expect(client.messages[0]).toEqual({ op: "pty_opened", ptyId, sessionId: PTY_SID });
-    // Snapshot chunks arrive as pty_output frames, in snapshot order, right
-    // after the ack.
-    expect(client.messages[1]).toEqual({ op: "pty_output", ptyId, data: b64("hi"), offset: 0 });
-    expect(client.messages[2]).toEqual({ op: "pty_output", ptyId, data: b64("!"), offset: 2 });
-    expect(stub.opens).toEqual([
-      {
-        ptyId: expect.any(String),
-        meta: { userId: "pty-happy", sessionId: PTY_SID, cols: 120, rows: 40 },
-        timeoutMs: PTY_OPEN_TIMEOUT_MS,
-      },
-    ]);
-    expect(stub.attaches[0]).toMatchObject({ ptyId, lastOffset: null, timeoutMs: PTY_REPLY_TIMEOUT_MS });
-
-    // Live tail after the snapshot.
-    stub.deliver({ type: "output", ptyId, offset: 3, data: b64("?") });
     await client.waitFor(
-      () => client.messages.some((m) => m.op === "pty_output" && m.offset === 3),
-      "live pty_output",
+      () => client.messages.some((m) => m.op === "error"),
+      "pty_open refusal",
     );
-  }, 15_000);
 
-  it("pty_exit → pty_exit frame, sub dropped (no further output)", async () => {
-    const stub = stubPtyBridge();
-    const tickets = stubTickets();
-    const wsBase = await makePtyApp(stub, ptyDb(() => true), tickets);
-    const client = await connectClient(wsBase, await tickets.mint("pty-exit"));
-    clients.push(client);
-
-    client.send({ op: "pty_open", sessionId: PTY_SID, cols: 80, rows: 24 });
-    await client.waitFor(() => client.messages.some((m) => m.op === "pty_opened"), "pty_opened");
-    const ptyId = stub.opens[0]!.ptyId;
-
-    stub.deliver({ type: "exit", ptyId, exitCode: 0 });
-    await client.waitFor(() => client.messages.some((m) => m.op === "pty_exit"), "pty_exit frame");
-    expect(client.messages.find((m) => m.op === "pty_exit")).toEqual({
-      op: "pty_exit",
-      ptyId,
-      exitCode: 0,
-    });
-    // Sub dropped: a later live output is NOT forwarded.
-    stub.deliver({ type: "output", ptyId, offset: 9, data: b64("x") });
-    await sleep(150);
-    expect(client.messages.some((m) => m.op === "pty_output" && m.offset === 9)).toBe(false);
-    expect(stub.detached).toContain(ptyId);
-  }, 15_000);
-
-  it("pty_open on another user's session → forbidden, bridge never called; PtyBridgeError passes through and the connection survives", async () => {
-    // Ownership check fails (sessions.get → null): forbidden, no bridge call.
-    const forbidden = stubPtyBridge();
-    const ticketsF = stubTickets();
-    const wsBaseF = await makePtyApp(forbidden, ptyDb(() => false), ticketsF);
-    const clientF = await connectClient(wsBaseF, await ticketsF.mint("pty-other"));
-    clients.push(clientF);
-    clientF.send({ op: "pty_open", sessionId: PTY_SID, cols: 80, rows: 24 });
-    await clientF.waitFor(() => clientF.messages.some((m) => m.op === "error"), "forbidden");
-    expect(clientF.messages[0]).toEqual({
+    const err = client.messages.find((m) => m.op === "error");
+    expect(err).toMatchObject({
       op: "error",
       code: "forbidden",
-      message: expect.any(String),
+      message: PTY_DISABLED_MESSAGE,
       sessionId: PTY_SID,
     });
-    expect(forbidden.opens).toHaveLength(0);
-
-    // PtyBridgeError from open → {op:"error", code, ptyId}; connection survives.
-    const failing = stubPtyBridge({ openError: new PtyBridgeError("sandbox_busy", "admission queue full") });
-    const ticketsE = stubTickets();
-    const wsBaseE = await makePtyApp(failing, ptyDb(() => true), ticketsE);
-    const clientE = await connectClient(wsBaseE, await ticketsE.mint("pty-busy"));
-    clients.push(clientE);
-    clientE.send({ op: "pty_open", sessionId: PTY_SID, cols: 80, rows: 24 });
-    await clientE.waitFor(() => clientE.messages.some((m) => m.op === "error"), "sandbox_busy error frame");
-    expect(clientE.messages[0]).toEqual({
-      op: "error",
-      code: "sandbox_busy",
-      message: "admission queue full",
-      ptyId: expect.any(String),
-    });
-    clientE.send({ op: "ping" });
-    await clientE.waitFor(() => clientE.messages.some((m) => m.op === "pong"), "pong (connection survived)");
-  }, 15_000);
-
-  it("pty_attach owned → pty_attached + snapshot frames; pty_input on the attached pty is allowed with no extra lookup", async () => {
-    const ptyId = "att-1";
-    const stub = stubPtyBridge({
-      lookup: new Map([[ptyId, { userId: "pty-attach", sessionId: PTY_SID }]]),
-    });
-    const tickets = stubTickets();
-    const wsBase = await makePtyApp(stub, ptyDb(() => true), tickets);
-    const client = await connectClient(wsBase, await tickets.mint("pty-attach"));
-    clients.push(client);
-
-    client.send({ op: "pty_attach", ptyId, lastOffset: 0 });
-    await client.waitFor(() => client.messages.some((m) => m.op === "pty_attached"), "pty_attached");
-    expect(client.messages[0]).toEqual({ op: "pty_attached", ptyId, truncated: false });
-    expect(client.messages[1]).toEqual({ op: "pty_output", ptyId, data: b64("hi"), offset: 0 });
-    expect(client.messages[2]).toEqual({ op: "pty_output", ptyId, data: b64("!"), offset: 2 });
-    expect(stub.attaches[0]).toMatchObject({ ptyId, lastOffset: 0 });
-
-    // This connection attached the pty: input is allowed without a lookup.
-    client.send({ op: "pty_input", ptyId, data: b64("ls\n") });
-    await client.waitFor(() => stub.sends.length === 1, "bridge.send(input)");
-    expect(stub.sends[0]).toEqual({ ptyId, msg: { type: "input", data: b64("ls\n") } });
-    expect(stub.lookups).toEqual([ptyId]); // exactly the attach lookup
-  }, 15_000);
-
-  it("pty_attach on a registry owned by another uid → {op:error, forbidden, ptyId}; nothing attached", async () => {
-    const ptyId = "att-other";
-    const stub = stubPtyBridge({
-      lookup: new Map([[ptyId, { userId: "someone-else", sessionId: PTY_SID }]]),
-    });
-    const tickets = stubTickets();
-    const wsBase = await makePtyApp(stub, ptyDb(() => true), tickets);
-    const client = await connectClient(wsBase, await tickets.mint("pty-victim"));
-    clients.push(client);
-
-    client.send({ op: "pty_attach", ptyId });
-    await client.waitFor(() => client.messages.some((m) => m.op === "error"), "forbidden");
-    expect(client.messages[0]).toEqual({
-      op: "error",
-      code: "forbidden",
-      message: expect.any(String),
-      ptyId,
-    });
+    // No bridge work at all: no open, no attach, no lookup.
+    expect(stub.opens).toHaveLength(0);
     expect(stub.attaches).toHaveLength(0);
-  }, 15_000);
+    expect(stub.lookups).toHaveLength(0);
+  });
 
-  it("pty_input on a pty never opened/attached here and unknown to lookup → forbidden, nothing sent", async () => {
+  it("pty_input / pty_resize / pty_attach / pty_close are all refused", async () => {
     const stub = stubPtyBridge();
     const tickets = stubTickets();
     const wsBase = await makePtyApp(stub, ptyDb(() => true), tickets);
-    const client = await connectClient(wsBase, await tickets.mint("pty-ghost"));
+    const client = await connectClient(wsBase, await tickets.mint("pty-ctl-refused"));
     clients.push(client);
 
-    client.send({ op: "pty_input", ptyId: "ghost-pty", data: b64("x") });
-    await client.waitFor(() => client.messages.some((m) => m.op === "error"), "forbidden");
-    expect(client.messages[0]).toEqual({
-      op: "error",
-      code: "forbidden",
-      message: expect.any(String),
-      ptyId: "ghost-pty",
-    });
-    expect(stub.lookups).toEqual(["ghost-pty"]);
+    const frames = [
+      { op: "pty_input", ptyId: "p1", data: b64("rm -rf /") },
+      { op: "pty_resize", ptyId: "p1", cols: 200, rows: 50 },
+      { op: "pty_attach", ptyId: "p1", lastOffset: null },
+      { op: "pty_close", ptyId: "p1" },
+    ];
+    for (const frame of frames) {
+      const before = client.messages.length;
+      client.send(frame);
+      await client.waitFor(
+        () =>
+          client.messages.length > before &&
+          client.messages[client.messages.length - 1]!.op === "error",
+        `${frame.op} refusal`,
+      );
+      expect(client.messages[client.messages.length - 1]).toMatchObject({
+        op: "error",
+        code: "forbidden",
+        message: PTY_DISABLED_MESSAGE,
+        ptyId: "p1",
+      });
+    }
+    // Nothing reached the bridge: no send, no attach, no lookup.
     expect(stub.sends).toHaveLength(0);
-  }, 15_000);
+    expect(stub.attaches).toHaveLength(0);
+    expect(stub.lookups).toHaveLength(0);
+  });
 
-  it("malformed pty_resize (cols:\"x\") → bad_message; the connection survives", async () => {
+  it("the connection survives a refused pty frame and still serves normal ops", async () => {
     const stub = stubPtyBridge();
     const tickets = stubTickets();
     const wsBase = await makePtyApp(stub, ptyDb(() => true), tickets);
-    const client = await connectClient(wsBase, await tickets.mint("pty-malformed"));
+    const client = await connectClient(wsBase, await tickets.mint("pty-survives"));
     clients.push(client);
 
-    client.send({ op: "pty_resize", ptyId: "p", cols: "x", rows: 24 });
-    await client.waitFor(() => client.messages.some((m) => m.op === "error"), "bad_message");
-    expect(client.messages[0]).toMatchObject({ op: "error", code: "bad_message" });
-    expect(stub.sends).toHaveLength(0);
-
-    client.send({ op: "ping" });
-    await client.waitFor(() => client.messages.some((m) => m.op === "pong"), "pong (connection survived)");
-  }, 15_000);
-
-  it("socket close → detach for every opened/attached pty; send close NOT called (ptys survive)", async () => {
-    const p1 = "survive-1";
-    const p2 = "survive-2";
-    const stub = stubPtyBridge({
-      lookup: new Map([
-        [p1, { userId: "pty-survive", sessionId: PTY_SID }],
-        [p2, { userId: "pty-survive", sessionId: PTY_SID }],
-      ]),
-    });
-    const tickets = stubTickets();
-    const wsBase = await makePtyApp(stub, ptyDb(() => true), tickets);
-    const client = await connectClient(wsBase, await tickets.mint("pty-survive"));
-    clients.push(client);
-
-    client.send({ op: "pty_attach", ptyId: p1 });
-    client.send({ op: "pty_attach", ptyId: p2 });
     client.send({ op: "pty_open", sessionId: PTY_SID, cols: 80, rows: 24 });
-    await client.waitFor(
-      () =>
-        client.messages.filter((m) => m.op === "pty_attached").length === 2 &&
-        client.messages.some((m) => m.op === "pty_opened"),
-      "two attached + one opened",
-    );
-    const p3 = stub.opens[0]!.ptyId;
-
-    await client.close();
-    // Detach (not kill): every sub torn down…
-    await waitFor(() => stub.detached.includes(p1), "p1 detached");
-    await waitFor(() => stub.detached.includes(p2), "p2 detached");
-    await waitFor(() => stub.detached.includes(p3), "p3 detached");
-    // …and no pty_close was ever SENT — the ptys survive for re-attach.
-    expect(stub.sends.filter((s) => s.msg.type === "close")).toHaveLength(0);
-  }, 15_000);
+    await client.waitFor(() => client.messages.some((m) => m.op === "error"), "refusal");
+    client.send({ op: "ping" });
+    await client.waitFor(() => client.messages.some((m) => m.op === "pong"), "pong after refusal");
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -16,15 +16,12 @@ import 'studio_editor.dart';
 import 'studio_errors.dart';
 import 'studio_file_tree.dart';
 import 'studio_layout.dart';
-import 'studio_terminal_tabs.dart';
 import 'widgets/aether_primitives.dart';
 
 // Studio's panes live in their own libraries; re-exported so callers (and the
 // existing widget tests) keep reaching them through this one import.
 export 'studio_editor.dart' show StudioEditor, StudioEditorTabs;
 export 'studio_file_tree.dart' show StudioFileTree;
-export 'studio_terminal_tabs.dart'
-    show StudioTerminalTabs, studioTerminalStopKey;
 
 /// Test seam: overrides the GitHub login prompt so host widget tests can
 /// assert the Studio auth gate without starting a real device flow.
@@ -33,7 +30,13 @@ export 'studio_terminal_tabs.dart'
 void Function(BuildContext context)? studioLoginPromptOverrideForTest;
 
 /// Studio — remote coding workspace: the P7 file tree/editor over the cloud
-/// workspace API plus the P2 terminal channel.
+/// workspace API.
+///
+/// There is deliberately NO interactive terminal (owner directive
+/// 2026-10-18): execution is agent-only. The model runs commands in the
+/// user's sandbox on their behalf, and the user follows what happened through
+/// the read-only run/trajectory log. The client cannot open, type into,
+/// resize or re-attach a PTY — the gateway refuses every pty_* frame.
 ///
 /// Local git UI (branch chips, sync progress, commit staging, credential env)
 /// is GONE: the server owns the workspace and the git tools. The layout is
@@ -60,8 +63,6 @@ class _StudioScreenState extends State<StudioScreen> {
   /// back through [StudioMetrics.clampTreeWidth] / [clampTerminalHeight] so a
   /// stale drag value can never starve the editor after a rotation.
   double? _treeWidthOverride;
-  double? _terminalHeightOverride;
-  bool? _terminalCollapsedOverride;
 
   bool _refreshing = false;
   bool _handledInitialAuth = false;
@@ -237,15 +238,12 @@ class _StudioScreenState extends State<StudioScreen> {
             appBar: _appBar(compactActions),
             body: SafeArea(
               child: StudioPaneViewport(
-                // Keep the tab strip, a real editor viewport and terminal chrome
-                // reachable even under a long approval or the software keyboard.
+                // Keep the tab strip and a real editor viewport reachable
+                // even under a long approval or the software keyboard. (No
+                // terminal chrome any more — execution is agent-only.)
                 minContentHeight: 122 +
                     math.max(1.0, MediaQuery.textScalerOf(context).scale(1.0)) *
-                        (kStudioTapTarget +
-                            (_terminalCollapsedOverride == false
-                                ? StudioMetrics.collapsedBarHeight +
-                                    StudioMetrics.commandRowHeight
-                                : StudioMetrics.collapsedBarHeight)),
+                        kStudioTapTarget,
                 chrome: [
                   _WorkspaceBar(
                     snapshot: _remote.snapshotFor(_sid),
@@ -327,20 +325,6 @@ class _StudioScreenState extends State<StudioScreen> {
       _treeWidthOverride ?? m.treeWidth,
       regionWidth: c.maxWidth - kStudioTapTarget,
     );
-    // An explicit collapse wins; otherwise a viewport too short for both
-    // panes collapses the terminal instead of squeezing the editor.
-    final collapsed = _terminalCollapsedOverride ?? !m.terminalFits;
-    final requestedTerminalHeight = collapsed
-        ? StudioMetrics.collapsedBarHeight * m.textScale
-        : m.resolveTerminalHeight(
-            _terminalHeightOverride ?? m.terminalHeight,
-            regionHeight: c.maxHeight,
-          );
-    final terminalHeight = math.min(
-        requestedTerminalHeight,
-        math.max(
-            0.0, c.maxHeight - (kStudioTapTarget * m.textScale + 122)));
-
     final editor = Column(
       children: [
         StudioEditorTabs(sessionId: _sid),
@@ -411,25 +395,6 @@ class _StudioScreenState extends State<StudioScreen> {
                   ),
                 ),
             ],
-          ),
-        ),
-        SizedBox(
-          key: studioTerminalPaneKey,
-          height: terminalHeight,
-          child: StudioTerminalTabs(
-            sessionId: _sid,
-            collapsed: collapsed,
-            onToggleCollapse: () => setState(
-              () => _terminalCollapsedOverride = !collapsed,
-            ),
-            onResizeDrag: collapsed
-                ? null
-                : (d) => setState(
-                      () => _terminalHeightOverride = m.resolveTerminalHeight(
-                        terminalHeight - d,
-                        regionHeight: c.maxHeight,
-                      ),
-                    ),
           ),
         ),
       ],

@@ -22,6 +22,14 @@ import {
   type BrowserChannelDeps,
 } from "./browserChannel.js";
 import { PTY_OPEN_TIMEOUT_MS, PTY_REPLY_TIMEOUT_MS, PtyBridgeError, type PtyBridge } from "./wsPty.js";
+
+/**
+ * Exact client-facing copy when a client asks for an interactive terminal.
+ * Agent-only execution (owner directive 2026-10-18): the model runs commands
+ * in the user's sandbox; the user follows the read-only run log.
+ */
+export const PTY_DISABLED_MESSAGE =
+  "Interactive terminals are not available. Ovid runs commands on your behalf — follow them in the run log.";
 import type { SystemHub } from "./systemChannel.js";
 
 /**
@@ -630,38 +638,31 @@ export async function handleWsConnection(
     }
   }
 
+  /**
+   * User-facing interactive terminals are DISABLED (owner directive
+   * 2026-10-18). Execution is agent-only: the model runs commands in the
+   * user's sandbox on their behalf, and the user follows what happened
+   * through the read-only run/event log. The PTY machinery stays in the
+   * worker for internal use, but no client frame may open, type into, resize
+   * or re-attach one.
+   *
+   * Refused BEFORE any ownership lookup or bridge work: a client cannot use
+   * the error text to probe which session ids exist.
+   */
+  function refuseClientPty(sessionId?: string, ptyId?: string): void {
+    send(socket, {
+      op: "error",
+      code: "forbidden",
+      message: PTY_DISABLED_MESSAGE,
+      ...(sessionId !== undefined ? { sessionId } : {}),
+      ...(ptyId !== undefined ? { ptyId } : {}),
+    });
+  }
+
   async function handlePtyOpen(msg: Extract<WsClientMsg, { op: "pty_open" }>): Promise<void> {
-    // Ownership FIRST, before any bridge work — sessions.get is ownership-
-    // scoped (null on unknown id AND wrong owner; the uuid shape guard keeps
-    // client garbage away from the id column).
-    const owned = isUuid(msg.sessionId) ? await sessions.get(deps.db, msg.sessionId, uid) : null;
-    if (owned === null) {
-      send(socket, {
-        op: "error",
-        code: "forbidden",
-        message: "Session not found.",
-        sessionId: msg.sessionId,
-      });
-      return;
-    }
-    const ptyId = randomUUID();
-    const entry: PtyEntry = { detach: async () => {} };
-    try {
-      await deps.pty.open(
-        ptyId,
-        { userId: uid, sessionId: msg.sessionId, cols: msg.cols, rows: msg.rows },
-        PTY_OPEN_TIMEOUT_MS,
-      );
-    } catch (err) {
-      ptyError(err, ptyId);
-      return;
-    }
-    await armPty(
-      entry,
-      ptyId,
-      () => deps.pty.attach(ptyId, null, forwardPty(ptyId, entry), PTY_REPLY_TIMEOUT_MS),
-      () => send(socket, { op: "pty_opened", ptyId, sessionId: msg.sessionId }),
-    );
+    // Agent-only execution (owner directive 2026-10-18): a client may not
+    // open an interactive terminal. See refuseClientPty.
+    refuseClientPty(msg.sessionId);
   }
 
   async function handlePtyAttach(msg: Extract<WsClientMsg, { op: "pty_attach" }>): Promise<void> {
@@ -1017,17 +1018,15 @@ export async function handleWsConnection(
       case "pty_open":
         await handlePtyOpen(msg);
         return;
+      // Every other pty op is refused for the same reason: no client may
+      // type into, resize, re-attach or close a sandbox terminal. (close is
+      // included so a client cannot tear down a terminal it does not own —
+      // the worker reaps its own.)
       case "pty_attach":
-        await handlePtyAttach(msg);
-        return;
       case "pty_input":
-        await handlePtyCtl(msg.ptyId, { type: "input", data: msg.data });
-        return;
       case "pty_resize":
-        await handlePtyCtl(msg.ptyId, { type: "resize", cols: msg.cols, rows: msg.rows });
-        return;
       case "pty_close":
-        await handlePtyCtl(msg.ptyId, { type: "close" });
+        refuseClientPty(undefined, msg.ptyId);
         return;
       case "browser_attach":
         await handleBrowserAttach(msg.sessionId);

@@ -162,8 +162,12 @@ McpRouter (in gateway+worker): curated shared-singleton MCPs (Free);
   stream (retention: 24 h / 50 MB per session stream, then Postgres is the source for history).
 - Approvals: worker publishes an approval request event; gateway pushes over WS + FCM; client
   answers via REST/WS; default policy on timeout = deny (120 s, matching current app behavior).
-- Terminal: WS `pty` channel carries raw bytes + resize messages; server keeps a scrollback
-  ring (256 KB) so a reconnecting client can repaint.
+- Terminal: **no client-facing terminal** (owner directive 2026-10-18). Execution is
+  agent-only: the model runs commands in the user's sandbox, and the user follows what
+  happened through the read-only session event log (tool_started / tool_completed /
+  system_note). The gateway refuses every client `pty_*` frame (`pty_open`, `pty_attach`,
+  `pty_input`, `pty_resize`, `pty_close`) with a `forbidden` error carrying the pinned copy.
+  The worker's PTY machinery remains available for internal use only.
 - Browser: WS `browser` channel, binary WebP frames (3–5 fps, quality-tuned to bandwidth),
   JSON input events (tap/scroll/keys), `takeover` handoff flag.
 
@@ -339,7 +343,7 @@ The Dart test suite is ported to Vitest case-by-case as each agent-core module i
 |---|---|---|
 | P0 | VPS re-provision + repo scaffold (`cloud/` pnpm monorepo, CI, compose at `/opt/ovid-cloud`, dual Redis, `ovid_cloud` DB, backups, hardening checklist) | hardened box; `pnpm test` green in empty monorepo |
 | P1 | **Cloud spine**: auth, Postgres schema, Redis Streams event log, BullMQ, gateway REST+WS, worker agent-run job with tool-less loop streaming via LiteLLM, message persistence + cursor paging, reconnect replay | end-to-end server-side chat from a test client |
-| P2 | **SandboxManager**: bwrap jails, cgroups, command blocker (3 layers), shared pnpm/uv stores, `ovid install`, shell/file/git/job tools, PTY over WS, terminal repaint | agent writes and runs code in a jail; user terminal works |
+| P2 | **SandboxManager**: bwrap jails, cgroups, command blocker (3 layers), shared pnpm/uv stores, `ovid install`, shell/file/git/job tools (agent-invoked only) | agent writes and runs code in a jail; the user follows the run through the read-only event log — there is no interactive terminal (owner directive 2026-10-18) |
 | P3 | **Agent-core parity**: full tool roster, subagents, hooks, skills, memory, compaction, plan mode, approvals, presets, catalog tools | behavioral parity per ported Dart test suite |
 | P4 | **Scheduler + notifications**: §8 in full, FCM push, schedule feed | unattended autonomous tasks run and report |
 | P5 | **MCP + plugins + tier gate**: McpRouter, curated MCP set (port native handlers + top REST descriptors), custom MCP (Pro), plugin pipeline, MCP OAuth | Free/Pro gating live |

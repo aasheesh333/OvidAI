@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -6,15 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/cloud/cloud_ws.dart';
-import 'package:ovid_ai/core/cloud/studio_pty.dart';
 import 'package:ovid_ai/core/cloud/studio_remote_client.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/studio_drafts.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/studio_editor.dart';
 import 'package:ovid_ai/ui/studio_screen.dart';
-import 'package:ovid_ai/ui/studio_terminal_tabs.dart';
 
 import 'support/studio_fake_gateway.dart';
 
@@ -29,34 +25,15 @@ void main() {
   late FakeStudioGateway fake;
   late StudioRemoteClient remote;
 
-  WsMultiplexer idleWs() => WsMultiplexer(
-        mintTicket: () async => 'ticket',
-        heartbeatInterval: const Duration(hours: 1),
-        pongTimeout: const Duration(hours: 1),
-      );
 
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     AppState.resetTestInstance();
     StudioDraftStore.I.disableForTest();
     studioLoginPromptOverrideForTest = (_) {};
-    studioPtyChannelFactoryOverrideForTest = (sessionId, tabId) =>
-        CloudPtyChannel(
-          sessionId: sessionId,
-          tabId: tabId,
-          ws: idleWs(),
-          rawFramesOverride: const Stream<Map<String, dynamic>>.empty(),
-          sendOverride: (_) async {},
-        );
+    StudioDraftStore.I.disableForTest();
     fake = FakeStudioGateway();
     remote = installFakeStudio(fake);
-  });
-
-  tearDown(() {
-    studioLoginPromptOverrideForTest = null;
-    studioPtyChannelFactoryOverrideForTest = null;
-    StudioDraftStore.I.disableForTest();
-    remote.clearAll();
     AppState.resetTestInstance();
   });
 
@@ -209,83 +186,6 @@ void main() {
     });
   });
 
-  group('terminal session binding and resize (M1/M4)', () {
-    testWidgets('switching session recreates terminals for the new session',
-        (tester) async {
-      final created = <String>[];
-      final channels = <CloudPtyChannel>[];
-      studioPtyChannelFactoryOverrideForTest = (sessionId, tabId) {
-        created.add(sessionId);
-        final channel = CloudPtyChannel(
-          sessionId: sessionId,
-          tabId: tabId,
-          ws: idleWs(),
-          rawFramesOverride: const Stream<Map<String, dynamic>>.empty(),
-          sendOverride: (_) async {},
-        );
-        channels.add(channel);
-        return channel;
-      };
-
-      await tester.pumpWidget(const MaterialApp(
-        home: Scaffold(
-          body: SizedBox(
-            width: 400,
-            height: 300,
-            child: StudioTerminalTabs(sessionId: 'a'),
-          ),
-        ),
-      ));
-      await tester.pump();
-      expect(created, ['a']);
-
-      await tester.pumpWidget(const MaterialApp(
-        home: Scaffold(
-          body: SizedBox(
-            width: 400,
-            height: 300,
-            child: StudioTerminalTabs(sessionId: 'b'),
-          ),
-        ),
-      ));
-      await tester.pump();
-
-      expect(created.last, 'b',
-          reason: 'existing tabs must rebind to the new session');
-      expect(channels.first.closed, isTrue,
-          reason: 'the old session channel must not keep sending to A');
-    });
-
-    testWidgets('the terminal pane reports its real cols/rows', (tester) async {
-      final resizes = <(int, int)>[];
-      studioPtyChannelFactoryOverrideForTest = (sessionId, tabId) =>
-          _RecordingChannel(
-            sessionId: sessionId,
-            tabId: tabId,
-            ws: idleWs(),
-            onResize: (cols, rows) => resizes.add((cols, rows)),
-          );
-
-      await tester.pumpWidget(const MaterialApp(
-        home: Scaffold(
-          body: SizedBox(
-            width: 400,
-            height: 300,
-            child: StudioTerminalTabs(sessionId: 's1'),
-          ),
-        ),
-      ));
-      await tester.pump();
-
-      expect(resizes, isNotEmpty,
-          reason: 'resize was implemented but never wired');
-      final (cols, rows) = resizes.last;
-      expect(cols, greaterThan(20));
-      expect(rows, greaterThanOrEqualTo(4));
-      expect(cols, lessThan(500));
-    });
-  });
-
   group('binary files', () {
     test('content sniffing', () {
       expect(looksBinaryBytes([0x50, 0x4b, 0x00, 0x03]), isTrue);
@@ -401,21 +301,4 @@ void main() {
       expect(controller(tester).text, 'A');
     });
   });
-}
-
-class _RecordingChannel extends CloudPtyChannel {
-  _RecordingChannel({
-    required super.sessionId,
-    required super.tabId,
-    required super.ws,
-    required this.onResize,
-  }) : super(
-          rawFramesOverride: const Stream<Map<String, dynamic>>.empty(),
-          sendOverride: (_) async {},
-        );
-
-  final void Function(int cols, int rows) onResize;
-
-  @override
-  void resize(int cols, int rows) => onResize(cols, rows);
 }
