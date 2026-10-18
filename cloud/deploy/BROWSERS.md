@@ -174,6 +174,31 @@ known levers are `MAX_LIVE_BROWSERS` 4→3 (drops the worst-case by roughly
 one context) and/or a lighter fixture if the owner judges `/big`
 unrepresentative. Never raise the alarm threshold to make a run pass.
 
+**ACTIVATION RE-RUN (2026-10-18, production host, `PLAYWRIGHT_BROWSERS_PATH=
+/opt/ovid-browsers/ms-playwright`, gate 14):**
+
+```
+context RSS ladder (1 shared chromium process, 4 live contexts on /big):
+  0 pages open:     303 MB   (chromium base)
+  1 page  open:     549 MB
+  2 pages open:     793 MB
+  3 pages open:    1037 MB
+  4 pages open:    1275 MB
+
+60 s scroll load: peak 1392 MB (30 samples, 9 procs in tree; alarm threshold 1300 MB, hard ceiling 2048 MB)
+VERDICT: REGRESSION — peak exceeds the planned-peak alarm; investigate before activation
+```
+
+The production-host numbers are consistent with the dev-box capture
+(base 303 vs 298 MB; peak 1392 vs 1376 MB; per-context delta ~243 vs
+~240 MB) — the finding is REPRODUCIBLE, not a dev-box artifact. Status:
+**investigate-first gate, unresolved.** The same levers apply
+(`MAX_LIVE_BROWSERS` 4→3 ≈ −1 context ≈ −240 MB at this load; the fixture
+question is the owner's). Per the §(c) budget math the hard ceiling still
+holds at 4 contexts (1392 + tier-1/lightpanda ≤ ~700 MB vs 2048 MB), but
+the planned-peak alarm is intentionally stricter than the ceiling, so this
+stays open as an owner decision rather than being closed here.
+
 ## (d) SSRF / egress decision
 
 **Browser processes run as a dedicated uid, never as the worker uid.** The
