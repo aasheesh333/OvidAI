@@ -79,14 +79,38 @@ class FakeStdioProcess implements SandboxedProcess {
   serverResponses: { id: number | string; result?: unknown; error?: { code: number; message: string } }[] = [];
   private stdoutCb: ((line: string) => void) | undefined;
   private exitCb: ((code: number | null) => void) | undefined;
+  /** Lines written but not yet delivered to stdout (async mode only). */
+  private inbound: string[] = [];
+  private pump: ReturnType<typeof setInterval> | undefined;
 
   constructor(
     private readonly tools: FakeToolDef[],
     private readonly serverRequest: "sampling" | "elicitation" | null,
-  ) {}
+    private readonly asyncDelivery = false,
+  ) {
+    if (asyncDelivery) {
+      // Emulate a real child process: stdout is delivered by an async
+      // resource created at SPAWN time, so its callbacks carry the spawn-time
+      // AsyncLocalStorage store — NOT the store of whoever calls writeLine.
+      // This is exactly what child.stdout's `data` listener does.
+      this.pump = setInterval(() => {
+        const queued = this.inbound.splice(0);
+        for (const line of queued) this.processLine(line);
+      }, 1);
+      this.pump.unref?.();
+    }
+  }
 
   writeLine(line: string): void {
     this.lines.push(line);
+    if (this.asyncDelivery) {
+      this.inbound.push(line);
+      return;
+    }
+    this.processLine(line);
+  }
+
+  private processLine(line: string): void {
     let msg: Record<string, unknown>;
     try {
       msg = JSON.parse(line) as Record<string, unknown>;
@@ -165,6 +189,7 @@ class FakeStdioProcess implements SandboxedProcess {
   async kill(): Promise<void> {
     if (this.killed) return;
     this.killed = true;
+    if (this.pump !== undefined) clearInterval(this.pump);
     this.exitCb?.(0);
   }
 
@@ -182,13 +207,15 @@ class FakeSpawner implements SandboxSpawner {
     { name: "search", description: "Search.", inputSchema: { type: "object" } },
   ];
   serverRequest: "sampling" | "elicitation" | null = null;
+  /** Deliver stdout from a spawn-time async resource (real-process shape). */
+  asyncDelivery = false;
 
   async spawn(
     uid: string,
     spec: { command: string; args: string[]; env?: Record<string, string>; cwd?: string },
   ): Promise<SandboxedProcess> {
     this.calls.push({ uid, spec });
-    const proc = new FakeStdioProcess(this.tools, this.serverRequest);
+    const proc = new FakeStdioProcess(this.tools, this.serverRequest, this.asyncDelivery);
     this.processes.push(proc);
     return proc;
   }
@@ -317,6 +344,17 @@ class FakeBus implements UserSystemBus {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** The sampler answers a fake stdio process sent back for id 900. */
+function samplingAnswers(proc: FakeStdioProcess): string[] {
+  return proc.serverResponses
+    .filter((r) => r.id === 900)
+    .map((r) => {
+      if (r.error !== undefined) return `ERROR ${r.error.code}: ${r.error.message}`;
+      const text = (r.result as { content?: { text?: string } } | undefined)?.content?.text;
+      return typeof text === "string" ? text : "(no result)";
+    });
 }
 
 async function waitFor(cond: () => boolean, what: string, timeoutMs = 5000): Promise<void> {
@@ -867,9 +905,9 @@ describe.skipIf(!TEST_DATABASE_URL)("McpRouter", () => {
     const router = makeRouter({ spawner, systemBus: bus });
     await addStdioServer(router, uid, "two-sessions");
 
-    // One shared custom connection; two runs of DIFFERENT sessions call it
-    // concurrently. Each server→client sampling request must be served by the
-    // sampler of the run whose call is on that async chain.
+    // Two runs of DIFFERENT sessions call the same stdio server
+    // concurrently. Per-run keying gives each its own process, and each
+    // server→client sampling request must be served by that run's sampler.
     await router.connectForRun(uid, RUN1);
     const runA: RunContext = {
       sessionId: "session-A",
@@ -893,15 +931,197 @@ describe.skipIf(!TEST_DATABASE_URL)("McpRouter", () => {
       router.callTool(uid, name, {}, runB),
     ]);
 
-    await waitFor(
-      () => spawner.processes[0]!.serverResponses.filter((r) => r.id === 900).length === 2,
-      "both sampling responses",
-    );
-    const sampled = spawner.processes[0]!.serverResponses
-      .filter((r) => r.id === 900)
-      .map((r) => (r.result as { content: { text: string } }).content.text)
+    // RUN1's process (no call), then one process per calling run.
+    await waitFor(() => spawner.processes.length === 3, "one process per run");
+    const sampled = spawner.processes
+      .slice(1)
+      .flatMap(samplingAnswers)
       .sort();
     expect(sampled).toEqual(["sampled-A", "sampled-B"]);
+    // The idle RUN1 process never answered either run's request.
+    expect(samplingAnswers(spawner.processes[0]!)).toEqual([]);
+  });
+
+  it("a lazily spawned stdio process belongs to its run (async stdout delivery)", async () => {
+    const uid = await seedUser("pro");
+    const spawner = new FakeSpawner();
+    // Real-process shape: stdout is delivered by a spawn-time async resource,
+    // so AsyncLocalStorage carries the SPAWN-time store, not the caller's.
+    spawner.asyncDelivery = true;
+    spawner.serverRequest = "sampling";
+    const bus = new FakeBus();
+    bus.reply = () => ({ id: "approval", payload: { approved: true } });
+    const router = makeRouter({ spawner, systemBus: bus });
+    await addStdioServer(router, uid, "async-owner");
+
+    const runA: RunContext = {
+      sessionId: "session-A",
+      runId: "run-A",
+      sampler: async () => ({
+        role: "assistant",
+        content: { type: "text", text: "sampled-A" },
+      }),
+    };
+    const runB: RunContext = {
+      sessionId: "session-B",
+      runId: "run-B",
+      sampler: async () => ({
+        role: "assistant",
+        content: { type: "text", text: "sampled-B" },
+      }),
+    };
+    const name = toolNameFor("async-owner", "echo");
+
+    // Run A lazily spawns the process.
+    await router.callTool(uid, name, {}, runA);
+    await waitFor(
+      () => samplingAnswers(spawner.processes[0]!).length === 1,
+      "run A sampling response",
+    );
+    expect(samplingAnswers(spawner.processes[0]!)).toEqual(["sampled-A"]);
+
+    // Run B must NEVER attach to A's process. Pre-fix it does, and the
+    // spawn-time ALS store answers B's request with A's sampler.
+    await router.callTool(uid, name, {}, runB);
+    await waitFor(
+      () =>
+        spawner.processes.length === 2 ||
+        samplingAnswers(spawner.processes[0]!).length === 2,
+      "run B delivery",
+    );
+    if (spawner.processes.length === 1) {
+      throw new Error(
+        `run B borrowed run A's connection: ${JSON.stringify(samplingAnswers(spawner.processes[0]!))}`,
+      );
+    }
+    await waitFor(
+      () => samplingAnswers(spawner.processes[1]!).length === 1,
+      "run B sampling response",
+    );
+    expect(samplingAnswers(spawner.processes[1]!)).toEqual(["sampled-B"]);
+    // A's process answered A's request only.
+    expect(samplingAnswers(spawner.processes[0]!)).toEqual(["sampled-A"]);
+    expect(spawner.calls).toHaveLength(2);
+  });
+
+  it("per-run stdio attributes requests to the connection owner, not spawn-time ALS", async () => {
+    const uid = await seedUser("pro");
+    const spawner = new FakeSpawner();
+    spawner.asyncDelivery = true;
+    spawner.serverRequest = "sampling";
+    const bus = new FakeBus();
+    bus.reply = () => ({ id: "approval", payload: { approved: true } });
+    const router = makeRouter({ spawner, systemBus: bus });
+    await addStdioServer(router, uid, "owner-attribution");
+
+    // The production shape: connectForRun spawns the process WITHOUT a
+    // sampler (it only has the run ids). The process's stdout async resource
+    // therefore carries that no-sampler context for its whole life.
+    await router.connectForRun(uid, RUN1);
+
+    // A later call in the SAME run carries the sampler. Attribution must use
+    // the connection's owner (the same run, refreshed by the call), not the
+    // spawn-time ALS store — which can never see this sampler.
+    const withSampler: RunContext = {
+      ...RUN1,
+      sampler: async () => ({
+        role: "assistant",
+        content: { type: "text", text: "sampled-owner" },
+      }),
+    };
+    await router.callTool(uid, toolNameFor("owner-attribution", "echo"), {}, withSampler);
+    await waitFor(
+      () => samplingAnswers(spawner.processes[0]!).length === 1,
+      "owner sampling response",
+    );
+    expect(samplingAnswers(spawner.processes[0]!)).toEqual(["sampled-owner"]);
+    expect(spawner.calls).toHaveLength(1); // same run reused its process
+  });
+
+  it("two concurrent lazy runs with distinct samplers never cross", async () => {
+    const uid = await seedUser("pro");
+    const spawner = new FakeSpawner();
+    spawner.asyncDelivery = true;
+    spawner.serverRequest = "sampling";
+    const bus = new FakeBus();
+    bus.reply = () => ({ id: "approval", payload: { approved: true } });
+    const router = makeRouter({ spawner, systemBus: bus });
+    await addStdioServer(router, uid, "concurrent-owner");
+
+    const runA: RunContext = {
+      sessionId: "session-A",
+      runId: "run-A",
+      sampler: async () => ({
+        role: "assistant",
+        content: { type: "text", text: "sampled-A" },
+      }),
+    };
+    const runB: RunContext = {
+      sessionId: "session-B",
+      runId: "run-B",
+      sampler: async () => ({
+        role: "assistant",
+        content: { type: "text", text: "sampled-B" },
+      }),
+    };
+    const name = toolNameFor("concurrent-owner", "echo");
+
+    await Promise.all([
+      router.callTool(uid, name, {}, runA),
+      router.callTool(uid, name, {}, runB),
+    ]);
+    await waitFor(
+      () =>
+        spawner.processes.length === 2 ||
+        spawner.processes.some((p) => samplingAnswers(p).length > 1),
+      "two processes",
+    );
+    if (spawner.processes.length !== 2) {
+      throw new Error(
+        `runs shared a connection: ${JSON.stringify(spawner.processes.map(samplingAnswers))}`,
+      );
+    }
+    await waitFor(
+      () => spawner.processes.every((p) => samplingAnswers(p).length === 1),
+      "one answer per process",
+    );
+    expect(spawner.processes.flatMap(samplingAnswers).sort()).toEqual([
+      "sampled-A",
+      "sampled-B",
+    ]);
+  });
+
+  it("per-run stdio ownership: releaseRun kills only its own process; a new run spawns fresh", async () => {
+    const uid = await seedUser("pro");
+    const spawner = new FakeSpawner();
+    const router = makeRouter({ spawner });
+    await addStdioServer(router, uid, "per-run-release");
+
+    await router.connectForRun(uid, RUN1);
+    await router.connectForRun(uid, RUN2);
+    expect(spawner.calls).toHaveLength(2); // one process per run, never shared
+    expect(spawner.processes[0]!.killed).toBe(false);
+    expect(spawner.processes[1]!.killed).toBe(false);
+
+    await router.releaseRun(uid, RUN1);
+    expect(spawner.processes[0]!.killed).toBe(true); // run-1 process gone
+    expect(spawner.processes[1]!.killed).toBe(false); // run-2 untouched
+
+    // The next run spawns a fresh process rather than reusing a stale one.
+    const result = await router.callTool(
+      uid,
+      toolNameFor("per-run-release", "echo"),
+      {},
+      RUN3,
+    );
+    expect(result.isError).toBe(false);
+    expect(spawner.calls).toHaveLength(3);
+    expect(spawner.processes[2]!.killed).toBe(false);
+
+    await router.releaseRun(uid, RUN2);
+    expect(spawner.processes[1]!.killed).toBe(true);
+    await router.releaseRun(uid, RUN3);
+    expect(spawner.processes[2]!.killed).toBe(true);
   });
 
   it("elicitation: bus kind mcp_elicitation; accept-response is validated and returned", async () => {

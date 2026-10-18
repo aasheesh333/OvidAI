@@ -309,6 +309,16 @@ export interface FullRunDeps {
    * pre-P4 roster exactly.
    */
   extraTools?: readonly CoreTool[];
+  /**
+   * P5 Task 11 I4: release this run's MCP connections when it ends. Custom
+   * stdio (and legacy SSE) connections are per-run; without this they would
+   * live until process shutdown. The composition root wires the MCP router's
+   * `releaseRun`; absent → no-op (deployments without an MCP runtime).
+   */
+  mcpReleaseRun?: (
+    uid: string,
+    runCtx: { sessionId: string; runId: string },
+  ) => Promise<void>;
 }
 
 /** The full processor plus its shutdown handle (the redis approval bridge). */
@@ -1742,6 +1752,11 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       mode,
     });
     } finally {
+      // P5 Task 11 I4: a run's per-run MCP stdio/legacy-SSE connection must
+      // not outlive the run. This finally covers every terminal path inside
+      // the try (completion, run-level failure, prepass finish, cancel).
+      // Best-effort: release must never turn a finished run into a job throw.
+      await deps.mcpReleaseRun?.(userId, { sessionId, runId }).catch(() => {});
       await bumpActivity();
     }
   }) as FullAgentRunProcessor;

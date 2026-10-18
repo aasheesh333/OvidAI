@@ -732,6 +732,18 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     // P4 Task 13: the agent schedule tools enter P3's roster through the
     // additive FullRunDeps.extraTools seam (adapted beside P2's six).
     extraTools: toCoreTools(createScheduleTools({ db, system })),
+    // P5 Task 11 I4: kill the run's lazily spawned per-run MCP stdio/legacy
+    // SSE connections when the run ends. (connectForRun is unnecessary here:
+    // the first callTool spawns under its own run context and this releases
+    // it; eager connect would spawn servers the run never uses.)
+    ...(mcpRuntime !== null
+      ? {
+          mcpReleaseRun: (
+            uid: string,
+            runCtx: { sessionId: string; runId: string },
+          ) => mcpRuntime.router.releaseRun(uid, runCtx),
+        }
+      : {}),
   });
 
   // ---- P4 Task 10: the scheduler loop + schedules-mirror consumer. --------

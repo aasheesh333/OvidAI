@@ -301,7 +301,10 @@ interface ServerRef {
 }
 
 interface LiveEntry {
+  /** Run-scoped map key: `<row id>#run:<runId>` for per-run transports. */
   key: string;
+  /** Run-independent identity of the server (row id / curated key). */
+  baseKey: string;
   uid: string;
   kind: "curated" | "custom";
   ref: ServerRef;
@@ -310,12 +313,21 @@ interface LiveEntry {
   transportKind: "native" | "http" | "sse" | "stdio";
   reconnector: McpReconnector | null;
   lastUsed: number;
-  /** stdio processes belong to the run that spawned them. */
+  /**
+   * Per-run stdio/legacy-SSE connections belong to the run that spawned
+   * them. Server→client requests on these transports are attributed from
+   * THIS captured context, never from AsyncLocalStorage: the transport's
+   * read loop is an async resource created at spawn time, so its callbacks
+   * carry the spawn-time store and can never observe a later run's store.
+   */
+  ownerRun: RunContext | undefined;
+  /** The owner run's id (release/eviction key); null for shared entries. */
   ownerRunId: string | null;
-  /** The most recent run using this connection — the fallback context for
-   *  SERVER-INITIATED requests that arrive outside any call (SSE/stdio
-   *  callbacks). Per-call requests use the AsyncLocalStorage slot, so two
-   *  concurrent runs never borrow each other's sampler. */
+  /** The most recent run using a SHARED connection (http/native) — the
+   *  fallback context for server-initiated pushes that arrive outside any
+   *  call. In-call requests on those transports use the AsyncLocalStorage
+   *  slot, which is exact because they are dispatched inside the call's own
+   *  async chain. Documented fallback: last writer wins. */
   activeRun: RunContext | undefined;
   toolDefs: McpToolDef[] | null;
   closing: boolean;
@@ -342,9 +354,16 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
    * a single per-uid slot would let one session's sampling request borrow
    * another session's sampler/model/API key. AsyncLocalStorage propagates
    * through the await chains that dispatch a call, including server→client
-   * requests delivered while a response is being read (HTTP/native). A
-   * server-initiated push outside any call falls back to the entry's
-   * `activeRun` (exact for per-run stdio; last-user-wins for shared http/sse).
+   * requests delivered while an HTTP/native response is being read.
+   *
+   * It is NOT sufficient across a transport read loop: stdio's stdout and
+   * legacy SSE's GET stream are async resources created when the connection
+   * was spawned/opened, so their callbacks carry the SPAWN-time store, not the
+   * store of the run whose call is currently in flight. Per-run stdio/SSE
+   * entries therefore attribute requests from their captured `ownerRun`
+   * (connection ownership). Shared HTTP/native entries use this slot, with the
+   * entry's `activeRun` as the documented last-writer-wins fallback for
+   * out-of-band pushes.
    */
   const runStorage = new AsyncLocalStorage<RunContext>();
   let closed = false;
@@ -359,6 +378,19 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
 
   function nowMs(): number {
     return deps.now?.()?.getTime() ?? Date.now();
+  }
+
+  /** Route a custom server's egress through the injected guarded fetch. */
+  function customTransportFetch(): typeof fetch {
+    return (input, init) => {
+      const target =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      return deps.fetchImpl(target, init);
+    };
   }
 
   async function repos(): Promise<RouterDbRepos> {
@@ -378,12 +410,66 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     return `curated:${curatedId}:${uid}`;
   }
 
-  function entryKey(ref: ServerRef): string {
+  /** Transports whose connection belongs to ONE run (see LiveEntry.ownerRun). */
+  function isPerRunTransport(transport: string): boolean {
+    return transport === "stdio" || transport === "sse";
+  }
+
+  function isPerRunEntry(entry: LiveEntry): boolean {
+    return (
+      entry.kind === "custom" &&
+      (entry.transportKind === "stdio" || entry.transportKind === "sse")
+    );
+  }
+
+  /** Run-independent key: curated singleton or custom row id. */
+  function baseEntryKey(ref: ServerRef): string {
     return ref.curated !== null ? curatedKey(ref.curated.curatedId, ref.uid) : ref.row!.id;
+  }
+
+  /**
+   * Run-scoped key. stdio and legacy SSE connections are keyed by
+   * `(uid, runId)` — a run's tool call must never attach to a connection
+   * spawned by a different run (the sampler/model/API key leak). Streamable
+   * HTTP stays per-uid and shared: its requests are request-scoped.
+   */
+  function entryKeyFor(ref: ServerRef, runCtx: RunContext | undefined): string {
+    const base = baseEntryKey(ref);
+    if (ref.curated !== null || !isPerRunTransport(ref.transport)) return base;
+    return runCtx === undefined ? base : `${base}#run:${runCtx.runId}`;
   }
 
   function rowEntryKey(row: DbServerRow, uid: string): string {
     return row.curatedId !== null ? curatedKey(row.curatedId, uid) : row.id;
+  }
+
+  /**
+   * The live entry for `ref`. With a run, per-run transports resolve to that
+   * run's incarnation exactly. Without a run (tool enumeration), the most
+   * recently used connected incarnation is reused so listing does not
+   * double-spawn; a run's calls never take this path.
+   */
+  function findLiveEntry(ref: ServerRef, runCtx: RunContext | undefined): LiveEntry | undefined {
+    if (ref.curated !== null) return entries.get(baseEntryKey(ref));
+    if (isPerRunTransport(ref.transport)) {
+      if (runCtx !== undefined) return entries.get(entryKeyFor(ref, runCtx));
+      const base = baseEntryKey(ref);
+      let best: LiveEntry | undefined;
+      for (const entry of entries.values()) {
+        if (entry.baseKey !== base || !entry.client.connected) continue;
+        if (best === undefined || entry.lastUsed > best.lastUsed) best = entry;
+      }
+      return best;
+    }
+    return entries.get(baseEntryKey(ref));
+  }
+
+  /** Drop every incarnation of one server (all runs) — update/remove. */
+  async function disposeEntriesForBase(uid: string, base: string): Promise<void> {
+    const doomed = [...entries.values()].filter(
+      (entry) => entry.uid === uid && entry.baseKey === base,
+    );
+    for (const entry of doomed) await disposeEntry(entry);
   }
 
   // -- refs ----------------------------------------------------------------
@@ -454,10 +540,10 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
   }
 
   function statusFor(ref: ServerRef): McpServerSummary["status"] {
-    const key = entryKey(ref);
-    const live = entries.get(key);
+    const live = findLiveEntry(ref, undefined);
     if (live !== undefined && live.client.connected) return "connected";
-    if (needsAuth.has(key)) return "needs_auth";
+    const base = baseEntryKey(ref);
+    if (needsAuth.has(base)) return "needs_auth";
     return "disconnected";
   }
 
@@ -529,9 +615,19 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     ref: ServerRef,
     live: () => LiveEntry | undefined,
   ): McpClientHooks {
-    /** This call's run when inside one; else the connection's last run. */
-    const runCtx = (): RunContext | undefined =>
-      runStorage.getStore() ?? live()?.activeRun;
+    /**
+     * Attribution of server→client requests. Per-run stdio/SSE connections
+     * use their captured owner: the read loop was created at spawn time, so
+     * AsyncLocalStorage there is the spawn-time (or stale) store, never the
+     * calling run's. Shared HTTP/native connections are request-scoped and
+     * use this call's run, falling back to the last user for out-of-band
+     * pushes (documented last-writer-wins).
+     */
+    const runCtx = (): RunContext | undefined => {
+      const entry = live();
+      if (entry !== undefined && isPerRunEntry(entry)) return entry.ownerRun;
+      return runStorage.getStore() ?? entry?.activeRun;
+    };
     const handler = createClientRequestHandler({
       rootsProvider: () => [{ uri: "file:///workspace", name: "workspace" }],
       samplingApprover: async (req: SamplingRequest): Promise<boolean> => {
@@ -583,7 +679,7 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     entry.reconnector?.cancel();
     entry.closing = true;
     if (entries.get(entry.key) === entry) entries.delete(entry.key);
-    needsAuth.delete(entry.key);
+    needsAuth.delete(entry.baseKey);
     if (entry.kind === "curated") {
       // The native transport's close() disposes the SHARED handler. A per-uid
       // client must never tear down the singleton; dropping the reference is
@@ -601,14 +697,27 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
   async function sweepIdle(): Promise<void> {
     const now = nowMs();
     for (const entry of [...entries.values()]) {
-      if (entry.kind !== "custom" || entry.transportKind === "stdio") continue;
+      if (entry.kind !== "custom") continue;
+      // Per-run stdio/SSE entries are normally released when their run ends
+      // (releaseRun, wired by the worker). The idle TTL is the backstop for a
+      // consumer that never calls releaseRun: no process lives until shutdown.
       if (now - entry.lastUsed > idleTtl) await disposeEntry(entry);
     }
   }
 
-  async function enforceCustomCap(uid: string, keepKey: string): Promise<void> {
+  async function enforceCustomCap(
+    uid: string,
+    keepKey: string,
+    ownerRunId: string | null,
+  ): Promise<void> {
     const custom = [...entries.values()].filter(
-      (e) => e.kind === "custom" && e.uid === uid && e.key !== keepKey,
+      (e) =>
+        e.kind === "custom" &&
+        e.uid === uid &&
+        e.key !== keepKey &&
+        // Never evict another live run's per-run connection: it is in use by
+        // a concurrent call, and per-run ownership forbids cross-run reuse.
+        !(isPerRunEntry(e) && e.ownerRunId !== ownerRunId),
     );
     const over = custom.length - maxCustom + 1;
     if (over <= 0) return;
@@ -633,10 +742,13 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
           await teardownCustom(entry.uid);
           return false;
         }
+        // A per-run connection must be respawned under its ORIGINAL owner —
+        // never under whatever run happens to trigger the retry.
+        if (isPerRunEntry(entry) && entry.ownerRun === undefined) return false;
         await entry.client.close().catch(() => {});
         let fresh: LiveEntry;
         try {
-          fresh = await createCustomEntry(entry.ref, entry.ownerRunId);
+          fresh = await createCustomEntry(entry.ref, entry.ownerRun);
         } catch {
           return false;
         }
@@ -660,7 +772,8 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     const hooks = clientHooks(ref, () => live);
     const client = new McpClient(transport, { hooks });
     live = {
-      key: entryKey(ref),
+      key: entryKeyFor(ref, undefined),
+      baseKey: baseEntryKey(ref),
       uid: ref.uid,
       kind: "curated",
       ref,
@@ -669,6 +782,7 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
       transportKind: "native",
       reconnector: null,
       lastUsed: nowMs(),
+      ownerRun: undefined,
       ownerRunId: null,
       activeRun: undefined,
       toolDefs: null,
@@ -677,11 +791,16 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     return live;
   }
 
-  async function createCustomEntry(ref: ServerRef, ownerRunId: string | null): Promise<LiveEntry> {
+  async function createCustomEntry(
+    ref: ServerRef,
+    runCtx: RunContext | undefined,
+  ): Promise<LiveEntry> {
     const row = ref.row!;
     const config = row.config ?? {};
     const secrets = customSecrets(row);
-    const key = entryKey(ref);
+    const perRun = isPerRunTransport(row.transport);
+    const key = entryKeyFor(ref, runCtx);
+    const ownerRunId = perRun ? runCtx?.runId ?? null : null;
 
     let transport: McpTransport;
     let transportKind: LiveEntry["transportKind"];
@@ -689,19 +808,10 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     switch (row.transport) {
       case "http": {
         const url = requireUrl(config.url);
-        const guardedFetch: typeof fetch = (input, init) => {
-          const target =
-            typeof input === "string"
-              ? input
-              : input instanceof URL
-                ? input.toString()
-                : input.url;
-          return deps.fetchImpl(target, init);
-        };
         transport = createHttpTransport({
           url,
           headers: secrets.headers,
-          fetchImpl: guardedFetch,
+          fetchImpl: customTransportFetch(),
           accessToken: () => deps.oauth.getAccessToken(ref.uid, row.id),
         });
         transportKind = "http";
@@ -709,19 +819,10 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
       }
       case "sse": {
         const url = requireUrl(config.url);
-        const guardedFetch: typeof fetch = (input, init) => {
-          const target =
-            typeof input === "string"
-              ? input
-              : input instanceof URL
-                ? input.toString()
-                : input.url;
-          return deps.fetchImpl(target, init);
-        };
         transport = createSseTransport({
           url,
           headers: secrets.headers,
-          fetchImpl: guardedFetch,
+          fetchImpl: customTransportFetch(),
           accessToken: () => deps.oauth.getAccessToken(ref.uid, row.id),
         });
         transportKind = "sse";
@@ -746,13 +847,14 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
         throw new Error(`unsupported MCP transport "${row.transport}"`);
     }
 
-    await enforceCustomCap(ref.uid, key);
+    await enforceCustomCap(ref.uid, key, ownerRunId);
 
     let live: LiveEntry | undefined;
     const hooks = clientHooks(ref, () => live);
     const client = new McpClient(transport, { hooks });
     live = {
       key,
+      baseKey: baseEntryKey(ref),
       uid: ref.uid,
       kind: "custom",
       ref,
@@ -761,8 +863,9 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
       transportKind,
       reconnector: null,
       lastUsed: nowMs(),
-      ownerRunId: transportKind === "stdio" ? ownerRunId : null,
-      activeRun: runStorage.getStore(),
+      ownerRun: perRun ? runCtx : undefined,
+      ownerRunId,
+      activeRun: runCtx,
       toolDefs: null,
       closing: false,
     };
@@ -775,9 +878,9 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
         const version = client.protocolVersion;
         if (version !== null) transport.setProtocolVersion(version);
       }
-      needsAuth.delete(key);
+      needsAuth.delete(live.baseKey);
     } catch (err) {
-      if (isAuthRequired(err)) needsAuth.add(key);
+      if (isAuthRequired(err)) needsAuth.add(live.baseKey);
       await client.close().catch(() => {});
       throw err;
     }
@@ -786,10 +889,11 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
   }
 
   async function ensureLive(ref: ServerRef, runCtx: RunContext | undefined): Promise<LiveEntry> {
-    const key = entryKey(ref);
+    const key = entryKeyFor(ref, runCtx);
     const existing = entries.get(key);
     if (existing !== undefined) {
-      if (existing.kind === "custom" && existing.transportKind !== "stdio") {
+      if (existing.kind === "custom" && !isPerRunEntry(existing)) {
+        // Shared http: cache with an idle TTL across runs.
         if (nowMs() - existing.lastUsed > idleTtl) {
           await disposeEntry(existing);
         } else if (existing.client.connected) {
@@ -800,8 +904,11 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
           await disposeEntry(existing);
         }
       } else if (existing.client.connected) {
-        if (runCtx !== undefined) {
-          existing.ownerRunId = runCtx.runId;
+        // Per-run (the key already scopes the run) or curated. Ownership is
+        // fixed at creation — never reassign it to another run — but the same
+        // run may refresh its sampler for later server→client requests.
+        if (runCtx !== undefined && isPerRunEntry(existing)) {
+          existing.ownerRun = runCtx;
           existing.activeRun = runCtx;
         }
         existing.lastUsed = nowMs();
@@ -814,14 +921,14 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     const entry =
       ref.curated !== null
         ? buildNativeEntry(ref)
-        : await createCustomEntry(ref, runCtx?.runId ?? null);
+        : await createCustomEntry(ref, runCtx);
 
     if (ref.curated !== null) {
       await entry.transport.start();
       await entry.client.initialize();
     }
     if (runCtx !== undefined) entry.activeRun = runCtx;
-    entries.set(key, entry);
+    entries.set(entry.key, entry);
     return entry;
   }
 
@@ -834,19 +941,40 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     return entry.toolDefs;
   }
 
-  /** stdio without a run: spawn a throwaway process just to enumerate. */
-  async function transientStdioDefs(ref: ServerRef): Promise<McpToolDef[]> {
+  /**
+   * A custom stdio/legacy-SSE server without a run: open a throwaway
+   * connection just to enumerate. Both transports are per-run, so with no run
+   * there is no connection a listing may legitimately attach to.
+   */
+  async function transientCustomDefs(ref: ServerRef): Promise<McpToolDef[]> {
     const row = ref.row!;
     const config = row.config ?? {};
     const secrets = customSecrets(row);
-    const transport = createStdioTransport(deps.spawner, ref.uid, {
-      command: requireString(config.command, "command"),
-      args: Array.isArray(config.args)
-        ? config.args.filter((a): a is string => typeof a === "string")
-        : [],
-      env: secrets.env,
-      cwd: typeof config.cwd === "string" ? config.cwd : undefined,
-    });
+    let transport: McpTransport;
+    switch (row.transport) {
+      case "stdio": {
+        transport = createStdioTransport(deps.spawner, ref.uid, {
+          command: requireString(config.command, "command"),
+          args: Array.isArray(config.args)
+            ? config.args.filter((a): a is string => typeof a === "string")
+            : [],
+          env: secrets.env,
+          cwd: typeof config.cwd === "string" ? config.cwd : undefined,
+        });
+        break;
+      }
+      case "sse": {
+        transport = createSseTransport({
+          url: requireUrl(config.url),
+          headers: secrets.headers,
+          fetchImpl: customTransportFetch(),
+          accessToken: () => deps.oauth.getAccessToken(ref.uid, row.id),
+        });
+        break;
+      }
+      default:
+        throw new Error(`unsupported MCP transport "${row.transport}"`);
+    }
     const client = new McpClient(transport, {
       hooks: clientHooks(ref, () => undefined),
     });
@@ -864,17 +992,22 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
     runCtx: RunContext | undefined,
     refresh = false,
   ): Promise<McpToolDef[]> {
-    // Prefer an ALREADY-LIVE connection (a per-run stdio process spawned by
-    // connectForRun, or a cached http/sse client). Without this, every
-    // resolveTool call would transient-spawn a second jailed process and
-    // T16's resolveTool → callTool flow would spawn twice per tool call.
-    const live = entries.get(entryKey(ref));
+    // Prefer an ALREADY-LIVE connection (this run's stdio/SSE incarnation, a
+    // cached http client, or — for run-less enumeration — any live per-run
+    // incarnation). Without this, every resolveTool call would transient-spawn
+    // a second jailed process and T16's resolveTool → callTool flow would
+    // spawn twice per tool call.
+    const live = findLiveEntry(ref, runCtx);
     const reusable = live !== undefined && live.client.connected;
-    if (ref.curated === null && ref.transport === "stdio" && runCtx === undefined && !reusable) {
-      return transientStdioDefs(ref);
+    const perRunCustom = ref.curated === null && isPerRunTransport(ref.transport);
+    if (perRunCustom && runCtx === undefined && !reusable) {
+      return transientCustomDefs(ref);
     }
-    const entry = reusable ? live : await ensureLive(ref, runCtx);
-    if (reusable && runCtx !== undefined) entry.activeRun = runCtx;
+    const entry = reusable ? live! : await ensureLive(ref, runCtx);
+    if (reusable && runCtx !== undefined) {
+      if (isPerRunEntry(entry)) entry.ownerRun = runCtx;
+      else entry.activeRun = runCtx;
+    }
     return listDefs(entry, refresh);
   }
 
@@ -1123,17 +1256,19 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
           : await (await repos()).mcpServers.update(deps.db, row.id, uid, fields);
       if (updated === null) throw notFound();
 
-      const live = entries.get(rowEntryKey(updated, uid));
-      if (live !== undefined) {
-        if (updated.curatedId !== null) {
-          // The native ctx provider reads entry.ref.row on every call, so a
-          // credential refresh needs no reconnect (and must not dispose the
-          // shared handler).
-          live.ref.row = updated;
-        } else if (patch.enabled === false || patch.secrets !== undefined) {
-          // Transport env/headers changed: reconnect on next use.
-          await disposeEntry(live);
-        }
+      const base = rowEntryKey(updated, uid);
+      const liveEntries = [...entries.values()].filter(
+        (entry) => entry.uid === uid && entry.baseKey === base,
+      );
+      if (updated.curatedId !== null) {
+        // The native ctx provider reads entry.ref.row on every call, so a
+        // credential refresh needs no reconnect (and must not dispose the
+        // shared handler).
+        for (const live of liveEntries) live.ref.row = updated;
+      } else if (patch.enabled === false || patch.secrets !== undefined) {
+        // Transport env/headers changed: reconnect on next use. Drop every
+        // per-run incarnation, not just whichever key was looked up.
+        await disposeEntriesForBase(uid, base);
       }
 
       if (updated.curatedId !== null) {
@@ -1150,8 +1285,8 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
         ? curatedKey(serverId.slice("curated:".length), uid)
         : serverId;
 
-      const live = entries.get(key);
-      if (live !== undefined) await disposeEntry(live);
+      // A custom stdio/SSE server may have one live incarnation per run.
+      await disposeEntriesForBase(uid, key);
 
       if (row === null) throw notFound();
       // Curated: this deletes only the user's credential row; the catalog
@@ -1263,17 +1398,15 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter {
 
     async releaseRun(uid: string, runCtx: RunContext): Promise<void> {
       for (const entry of [...entries.values()]) {
-        if (
-          entry.kind === "custom" &&
-          entry.uid === uid &&
-          entry.transportKind === "stdio" &&
-          entry.ownerRunId === runCtx.runId
-        ) {
+        if (entry.uid !== uid) continue;
+        if (isPerRunEntry(entry) && entry.ownerRunId === runCtx.runId) {
+          // This run's stdio process / legacy-SSE stream: kill it now. The
+          // next run spawns a fresh connection under its own key.
           await disposeEntry(entry);
-        } else if (entry.uid === uid && entry.activeRun?.runId === runCtx.runId) {
+        } else if (entry.activeRun?.runId === runCtx.runId) {
           // Drop the run's sampler closure (it may capture the model
           // transport and API key) as soon as the run is over. Cached
-          // http/sse connections stay, but no longer carry this run.
+          // http/native connections stay, but no longer carry this run.
           entry.activeRun = undefined;
         }
       }
