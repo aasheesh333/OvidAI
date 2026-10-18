@@ -10,7 +10,9 @@ import {
 // Port of server/shares/snapshot.py vectors. The Python regex is transcribed
 // verbatim into JS; this matrix is the proof the transcription is faithful.
 
-function body(messages: Array<{ role: string; content: string }>): unknown {
+// The index signature is deliberate: several vectors pass extra fields
+// (`thinking`, `attachments`) to prove the parser rejects them (extra=forbid).
+function body(messages: Array<{ role: string; content: string; [extra: string]: unknown }>): unknown {
   return { session_id: "session-1", request_id: "request-1", messages };
 }
 

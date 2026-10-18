@@ -140,7 +140,9 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway run-cancel routes (real postgres)",
       "SELECT status, cancel_requested, last_error, finished_at FROM runs WHERE id = $1",
       [runId],
     );
-    const row = rows[0] as {
+    // postgres.js rows are `Row & Iterable<Row>`; the SELECT projection above
+    // is known, so cast through `unknown` to name it.
+    const row = rows[0] as unknown as {
       status: string;
       cancel_requested: boolean;
       last_error: string | null;

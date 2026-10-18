@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, InjectOptions } from "fastify";
 import { users, type Db } from "@ovid/db";
 import { PRO_REQUIRED_MESSAGE, createEnvelopeCrypto, parseMcpConfig } from "@ovid/mcp";
 import { mcpServerDtoSchema, type McpServerDto } from "@ovid/shared";
@@ -58,7 +58,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
     await db.$client.unsafe("UPDATE users SET tier = 'pro' WHERE uid = $1", [uid]);
   }
 
-  async function postServer(uid: string, payload: unknown) {
+  async function postServer(uid: string, payload: NonNullable<InjectOptions["payload"]>) {
     return app.inject({
       method: "POST",
       url: "/cloud/v1/mcp/servers",

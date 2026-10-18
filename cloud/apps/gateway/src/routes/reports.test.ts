@@ -54,7 +54,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway legacy /v1/reports route (real post
     const app = buildGateway({
       system: stubSystemBus(),
       db,
-      queues: stubQueues(),
+      queues: stubQueues().queues,
       verifier: stubVerifier(),
       tickets: stubTickets(),
       keys: stubKeys(),

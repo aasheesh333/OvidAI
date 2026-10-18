@@ -83,7 +83,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway artifact routes (real postgres)", (
     const app = buildGateway({
       system: stubSystemBus(),
       db,
-      queues: stubQueues(),
+      queues: stubQueues().queues,
       verifier: stubVerifier(),
       tickets: stubTickets(),
       keys: stubKeys(),

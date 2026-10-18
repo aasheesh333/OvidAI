@@ -559,7 +559,7 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
       expect(leave).toEqual({ type: "viewer_leave", viewerId: join.viewerId });
 
       await waitForAsync(
-        () => created.every((c) => c.status === "end"),
+        async () => created.every((c) => c.status === "end"),
         "both attach connections quit",
       );
       await waitForAsync(
@@ -587,7 +587,7 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
       const leave = parseJson((await ctlTap.next("leave on detach")).message);
       expect(leave).toEqual({ type: "viewer_leave", viewerId: join.viewerId });
       await waitForAsync(
-        () => created.every((c) => c.status === "end"),
+        async () => created.every((c) => c.status === "end"),
         "both attach connections quit on detach",
       );
 
@@ -773,7 +773,7 @@ describe.skipIf(!TEST_REDIS_URL)(
 
       // Teardown quits both attach connections.
       s.emitClose();
-      await waitForAsync(() => created.every((c) => c.status === "end"), "connections quit");
+      await waitForAsync(async () => created.every((c) => c.status === "end"), "connections quit");
     }, 15_000);
 
     it("heartbeat: re-publishes viewer_join with the SAME viewerId at the injected interval; close publishes the leave", async () => {
