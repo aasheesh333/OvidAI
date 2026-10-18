@@ -57,14 +57,22 @@ export function createNoopQuotaBackend(): QuotaBackend {
  * re-verified at the Task 16 activation gate, the first place a real XFS
  * prjquota volume exists.
  */
-function createXfsQuotaBackend(mountPoint: string): QuotaBackend {
+export function createXfsQuotaBackend(
+  mountPoint: string,
+  exec: (file: string, args: string[]) => Promise<unknown> = execFileAsync,
+): QuotaBackend {
   return {
     kind: "xfs",
     async applyQuota(path: string, projectId: number, hardBytes: number): Promise<void> {
       // 1. Tag the subtree with the project id (inheritable down the tree).
-      await execFileAsync("xfs_io", ["-c", `chproj -r ${projectId}`, path]);
+      //    The recursive flag is `-R` (capital). `-r` is not a chproj option:
+      //    xfs_io rejects it with "invalid option -- 'r'", which made every
+      //    production attach fail on the first real XFS volume (found by the
+      //    Gate-11 functional smoke on 2026-10-18). quota.test.ts pins the
+      //    exact argument so this cannot regress silently.
+      await exec("xfs_io", ["-c", `chproj -R ${projectId}`, path]);
       // 2. Set the project's hard block limit (bytes).
-      await execFileAsync("xfs_quota", [
+      await exec("xfs_quota", [
         "-x",
         "-c",
         `limit -p bhard=${hardBytes} ${projectId}`,

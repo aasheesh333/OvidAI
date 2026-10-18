@@ -6,6 +6,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import {
   cacheProjectId,
   createNoopQuotaBackend,
+  createXfsQuotaBackend,
   selectQuotaBackend,
   workspaceProjectId,
 } from "./quota.js";
@@ -40,6 +41,32 @@ describe("noop backend", () => {
     const backend = createNoopQuotaBackend();
     expect(backend.kind).toBe("noop");
     await expect(backend.applyQuota("/nonexistent/anywhere", 1, 2)).resolves.toBeUndefined();
+  });
+});
+
+describe("xfs backend argv (activation bug pin)", () => {
+  it("tags the subtree with chproj -R, never the invalid -r", async () => {
+    // The first real XFS volume (Gate 11 smoke, 2026-10-18) failed every
+    // attach with `chproj: invalid option -- 'r'`. `-R` is the recursive
+    // flag; pin the exact argv so a lowercase regression fails here instead
+    // of in production.
+    const calls: Array<{ file: string; args: string[] }> = [];
+    const backend = createXfsQuotaBackend("/workspaces", async (file, args) => {
+      calls.push({ file, args });
+    });
+
+    await backend.applyQuota("/workspaces/users/200777/workspace", 200777, 524_288_000);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual({
+      file: "xfs_io",
+      args: ["-c", "chproj -R 200777", "/workspaces/users/200777/workspace"],
+    });
+    expect(calls[0]!.args[1]).not.toContain("chproj -r");
+    expect(calls[1]).toEqual({
+      file: "xfs_quota",
+      args: ["-x", "-c", "limit -p bhard=524288000 200777", "/workspaces"],
+    });
   });
 });
 

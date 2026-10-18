@@ -26,6 +26,25 @@ User=root
 # the remaining ≥6G of the slice; slice MemoryMax=10G and the
 # Global-Constraints envelope arithmetic are unchanged
 MemoryMax=4096M
+# REQUIRED: SandboxManager creates `worker/` and `sandbox-<uid>/` leaf cgroups
+# under THIS unit's cgroup and enables memory/pids/cpu on them. Without
+# delegation systemd leaves the parent slice's cgroup.subtree_control empty,
+# so this cgroup has no controllers available and every write to its own
+# cgroup.subtree_control fails (the worker crash-loops at SandboxManager
+# init). Delegate=yes hands the subtree to the service, which is the
+# documented "leaf-first" model in research §3 TEST C.
+Delegate=yes
+# systemd 255 on this host does not enable any controller on the PARENT slice
+# when a child unit asks for one (observed: ovid.slice has
+# `cpuset cpu io memory pids`, ovid-sandboxes.slice stays empty even though
+# this unit sets MemoryMax). With an empty parent subtree_control this unit's
+# cgroup has NO controllers available, and enabling "+cpu +memory +pids" on it
+# then fails with ENOENT (cgroup v2 returns ENOENT for an unavailable
+# controller) — the worker crash-looped at SandboxManager init. Enable the
+# three controllers the sandbox leaves need on the slice first. cgroupfs is
+# ephemeral, so this must run on every boot: hence ExecStartPre, not a manual
+# one-off.
+ExecStartPre=/bin/sh -c 'echo "+cpu +memory +pids" > /sys/fs/cgroup/ovid-sandboxes.slice/cgroup.subtree_control'
 WorkingDirectory=/opt/ovid-cloud/repo/cloud
 EnvironmentFile=/opt/ovid-cloud/worker.env
 ExecStart=/usr/bin/node apps/worker/dist/main.js

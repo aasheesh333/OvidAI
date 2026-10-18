@@ -62,6 +62,12 @@ RUN set -eux; \
 
 # --- PATH shims (spec §7 layer 2): baked at /usr/local/bin, ahead of
 # --- /usr/bin in the jail PATH ----------------------------------------------
+# Mount points the launcher binds onto. bwrap cannot create them at start-up
+# because the rootfs is mounted read-only, and a missing /workspace fails every
+# exec with "bwrap: Can't mkdir /workspace: Read-only file system" (found by the
+# Gate-11 functional smoke on 2026-10-18 against the r2 image, which shipped
+# without it).
+RUN set -eux; mkdir -p /workspace /root; chmod 755 /workspace; chmod 700 /root
 COPY shims/ /usr/local/bin/
 RUN set -eux; \
     chmod 755 /usr/local/bin/gcc /usr/local/bin/g++ /usr/local/bin/make \
