@@ -1,6 +1,6 @@
 # Task 18 — Agent-core satellites + secondary screens + BYOK escrow UI + `state.dart` strip 2/2
 
-Status: IN PROGRESS (2026-10-18)
+Status: DONE — commit **17128c1** (2026-10-18)
 
 ## Scope
 
@@ -56,11 +56,59 @@ classifier (which lives in `@ovid/shared`); only the Dart copy was removed.
 
 ## Gates
 
-Filled in as the work lands.
+- `flutter analyze`: **No issues found!** (working tree and a clean
+  `git archive HEAD` copy).
+- `test/cloud_byok_ui_test.dart`: **3/3** (upload body is the exact strict
+  server shape; the success row shows no key; `find.textContaining('sk-')`
+  finds nothing; a SharedPreferences dump has nothing key-shaped; the section
+  hides when the flag is off).
+- `test/state_persisted_migration_test.dart`: **3/3** (a pre-strip v1 blob
+  loads without throwing, drops `grants`/compaction/`planPreMode`/
+  `agentAllowedTools`/unknown keys, keeps `planMode` + `planModePending`, and
+  writes `schemaVersion: 2`).
+- Full `flutter test --no-pub`: **1,915 passed / 2 skipped / 0 failed**
+  (JSON reporter, exit 0). Baseline after T17 was 2,660 / 3 / 0; the
+  **−745 passed / −1 skipped** delta is the 69 deleted module-owned test
+  files (hooks, skills, plugin adapters/manifests, compaction, prompt cache,
+  plan-mode engine, grant store, usage-attempt/device-usage, SSRF classifier,
+  model failure, old memory/subagent/permissions/usage screens, plus the
+  removed `AgentService` hook/usage route contracts). No surviving behaviour
+  lost coverage: mixed files were edited, not deleted wholesale.
+- `flutter build apk --debug`: **built successfully**
+  (`build/app/outputs/flutter-apk/app-debug.apk`, exit 0).
+- Rename-proof plugin/MCP grep
+  (`PluginContributionRegistry|PluginManifest|PluginPermissions|PluginAdapter|McpConfigParse|plugin_adapters|plugin_manifest|plugin_registry|plugin_permissions|mcp_config_parse`):
+  **0 hits in `lib/`**.
+- Satellite grep (`HookService|SkillService|CompactionEngine|PromptCache|GrantStore|UsageAttemptStore|ToolUsageStore|SessionLifecycleService|SsrfGuard|ModelFailure|RecoveredImages|ImageResultLocator|SubagentToolPolicy`):
+  **0 hits in `lib/`**.
 
-- `flutter analyze`:
-- `test/cloud_byok_ui_test.dart`:
-- `test/state_persisted_migration_test.dart`:
-- full `flutter test --no-pub`:
-- `flutter build apk --debug`:
-- rename-proof plugin/MCP grep:
+## Carry 2 — capability toggles (answer for T20)
+
+The last plugin-row plumbing died here: `app.plugins` / `PluginItem` were
+already removed in T17, and T18 deleted `plugin_registry.dart`,
+`plugin_manifest.dart`, `plugin_permissions.dart` and `plugin_adapters.dart`
+plus the hook/skill engines that read them. The five built-in capability
+families in `agent_service.dart` (web search, image studio, file read, web
+fetch, code runner) are now added unconditionally; there is **no user-level
+off switch anywhere**. `run_code` is an honest stub (T13 removed on-device
+execution), so it does not matter; web search / web fetch / file read / image
+studio still work, so a user who disabled them in an older build gets them
+back. This is short-lived on the local arm (T19 deletes `agent_service.dart`),
+but the **server-side roster has the same product question**: if the cloud
+roster exposes these unconditionally, the user also loses the ability to turn
+them off there. **T20 must decide whether the server-side roster needs a
+per-capability toggle.** T18 deliberately did not invent one.
+
+## Deliberate deferrals / notes
+
+- `settings_backup_service.dart` still performs the local transcript
+  backup/restore. It is the surviving §13.3 import/export window and is
+  retired by Task 20 once `history_import.dart` ships; shrinking it now would
+  remove the only path the import task consumes.
+- `session_ledger.dart` and `memory_store.dart` are KEPT (import window), as
+  instructed. The memory screen no longer reads `MemoryStore`; only the T20
+  importer will.
+- `presets.dart` keeps the preset roster but drops `planAllowedTools` /
+  `planPolicyFor`; plan mode is UI state only now.
+- `usage_today.dart` is server-only (`UsageToday.resolve` + an empty device
+  baseline); the device journal was deleted.
