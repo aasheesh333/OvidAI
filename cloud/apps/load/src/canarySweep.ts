@@ -11,33 +11,45 @@
  * to fix the emitting site, and the canary is throwaway test material.
  */
 
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** One canary value per secret role. */
 export interface CanarySet {
+  /** 64 hex chars: the shipped code validates `OVID_MASTER_KEY` as AES-256. */
   masterKey: string;
   byokKey: string;
   mintKey: string;
   redisPassword: string;
   dbPassword: string;
+  litellmKey: string;
 }
 
 export type CanaryRole = keyof CanarySet;
 
 /**
- * Environment variable names the sweep populates. They are the variables a
- * leaked-secret bug most plausibly echoes (a stack trace, a debug log, a
- * serialized config); the role-to-name mapping is part of the sweep contract.
+ * The REAL configuration names each role is injected under — the names the
+ * shipped services actually read (see `gateway/src/env.ts`,
+ * `worker/src/main.ts`, `mint/src/env.ts`). The mapping is part of the sweep
+ * contract; do not rename a service variable here without renaming it there.
+ *
+ * Some roles have no standalone environment variable:
+ *  - `byokKey` is a user-supplied plaintext uploaded through `POST /byok`;
+ *  - `redisPassword` / `dbPassword` are embedded in `REDIS_Q_URL` /
+ *    `DATABASE_URL` by the in-process stack mode.
+ * Those roles map to no env name on purpose (an invented
+ * `OVID_CANARY_*` variable with no reader was the original HIGH finding).
  */
-export const CANARY_ENV: Readonly<Record<CanaryRole, string>> = Object.freeze({
-  masterKey: "OVID_MASTER_KEY",
-  byokKey: "OVID_CANARY_BYOK_KEY",
-  mintKey: "OVID_CANARY_MINT_KEY",
-  redisPassword: "REDIS_PASSWORD",
-  dbPassword: "OVID_CANARY_DB_PASSWORD",
-});
+export const CANARY_ENV: Readonly<Record<CanaryRole, readonly string[]>> =
+  Object.freeze({
+    masterKey: ["OVID_MASTER_KEY"],
+    byokKey: [],
+    mintKey: ["OVID_INTERNAL_API_SECRET"],
+    redisPassword: [],
+    dbPassword: [],
+    litellmKey: ["LITELLM_MASTER_KEY", "OVID_LITELLM_MASTER_KEY"],
+  });
 
 export const CANARY_ROLES: readonly CanaryRole[] = Object.freeze([
   "masterKey",
@@ -45,6 +57,7 @@ export const CANARY_ROLES: readonly CanaryRole[] = Object.freeze([
   "mintKey",
   "redisPassword",
   "dbPassword",
+  "litellmKey",
 ]);
 
 /** A non-file corpus, e.g. DB rows or Redis stream entries. */
@@ -72,6 +85,11 @@ export interface CanarySweepOptions {
   corpora?: CanaryCorpus[];
   /** Deterministic override for tests; omitted roles are generated. */
   canaries?: Partial<CanarySet>;
+  /**
+   * Requested-but-unreadable corpora are a FAILURE, not a silent skip.
+   * Without this a typo'd `--log` path yields a vacuous "PASS — zero leaks".
+   */
+  strict?: boolean;
 }
 
 export interface CanaryLeak {
@@ -83,21 +101,43 @@ export interface CanarySweepResult {
   leaks: CanaryLeak[];
   /** Number of corpus locations actually scanned (files + corpora). */
   scanned: number;
+  /** Requested corpus locations that could not be read (strict mode fails). */
+  missing: string[];
   /** The exact canary values injected (never printed by default callers). */
   canaries: CanarySet;
+}
+
+/** Strict mode: a requested corpus that could not be read aborts the sweep. */
+export class CanaryCorpusMissingError extends Error {
+  constructor(public readonly missing: readonly string[]) {
+    super(
+      `canary sweep could not read ${missing.length} requested corpus location(s): ${missing.join(", ")}`,
+    );
+    this.name = "CanaryCorpusMissingError";
+  }
 }
 
 function generatedCanary(): string {
   return `sk-CANARY-${randomUUID()}`;
 }
 
+/**
+ * The master key must satisfy the shipped `^[0-9a-fA-F]{64}$` validator, so
+ * its canary is 64 hex chars rather than the `sk-CANARY-` form. The `c0de`
+ * prefix keeps it recognizable in a leaked log line.
+ */
+function generatedMasterKeyCanary(): string {
+  return `c0de${randomBytes(30).toString("hex")}`;
+}
+
 export function createCanarySet(overrides: Partial<CanarySet> = {}): CanarySet {
   return {
-    masterKey: overrides.masterKey ?? generatedCanary(),
+    masterKey: overrides.masterKey ?? generatedMasterKeyCanary(),
     byokKey: overrides.byokKey ?? generatedCanary(),
     mintKey: overrides.mintKey ?? generatedCanary(),
     redisPassword: overrides.redisPassword ?? generatedCanary(),
     dbPassword: overrides.dbPassword ?? generatedCanary(),
+    litellmKey: overrides.litellmKey ?? generatedCanary(),
   };
 }
 
@@ -162,14 +202,10 @@ export async function runCanarySweep(
 ): Promise<CanarySweepResult> {
   const canaries = createCanarySet(opts.canaries);
   const captures = opts.captures ?? [];
-  const env: Record<string, string> = {
-    ...(opts.env ?? {}),
-    [CANARY_ENV.masterKey]: canaries.masterKey,
-    [CANARY_ENV.byokKey]: canaries.byokKey,
-    [CANARY_ENV.mintKey]: canaries.mintKey,
-    [CANARY_ENV.redisPassword]: canaries.redisPassword,
-    [CANARY_ENV.dbPassword]: canaries.dbPassword,
-  };
+  const env: Record<string, string> = { ...(opts.env ?? {}) };
+  for (const role of CANARY_ROLES) {
+    for (const name of CANARY_ENV[role]) env[name] = canaries[role];
+  }
 
   for (const file of captures) {
     mkdirSync(dirname(file), { recursive: true });
@@ -191,26 +227,42 @@ export async function runCanarySweep(
 
   const leaks: CanaryLeak[] = [];
   const seen = new Set<string>();
+  const missing: string[] = [];
   let scanned = 0;
 
   for (const file of captures) {
     const text = readIfPresent(file);
-    if (text === null) continue;
+    if (text === null) {
+      missing.push(`capture:${file}`);
+      continue;
+    }
     scanned += 1;
     scanText(text, `capture:${file}`, canaries, leaks, seen);
   }
   for (const file of opts.logFiles ?? []) {
     const text = readIfPresent(file);
-    if (text === null) continue;
+    if (text === null) {
+      missing.push(`log:${file}`);
+      continue;
+    }
     scanned += 1;
     scanText(text, `log:${file}`, canaries, leaks, seen);
   }
   for (const corpus of opts.corpora ?? []) {
-    scanned += 1;
-    scanText(await corpus.read(), corpus.where, canaries, leaks, seen);
+    try {
+      const text = await corpus.read();
+      scanned += 1;
+      scanText(text, corpus.where, canaries, leaks, seen);
+    } catch {
+      // A requested corpus that cannot be read is not evidence of safety.
+      missing.push(corpus.where);
+    }
   }
 
-  return { leaks, scanned, canaries };
+  if (opts.strict === true && missing.length > 0) {
+    throw new CanaryCorpusMissingError(missing);
+  }
+  return { leaks, scanned, missing, canaries };
 }
 
 /**
@@ -255,6 +307,22 @@ export function sessionMirrorCorpus(
         "SELECT session_id, seq, type, payload::text AS payload, ts::text AS ts FROM session_event_mirror",
       );
       return JSON.stringify(rows);
+    },
+  };
+}
+
+/**
+ * `byok_keys` corpus — every column of every row (`SELECT *`). The at-rest
+ * pin lives in the e2e security suite; this corpus is the leak sweep's view
+ * of the same rows, including the ciphertext envelope columns.
+ */
+export function byokKeysCorpus(
+  query: (sqlText: string) => Promise<Array<Record<string, unknown>>>,
+): CanaryCorpus {
+  return {
+    where: "byok_keys",
+    async read() {
+      return JSON.stringify(await query("SELECT * FROM byok_keys"));
     },
   };
 }

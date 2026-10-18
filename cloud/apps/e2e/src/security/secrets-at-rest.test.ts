@@ -120,27 +120,71 @@ describe.skipIf(!TEST_DATABASE_URL)("secrets at rest — BYOK escrow (real postg
     return { id: (res.json() as { id: string }).id, statusCode: res.statusCode };
   }
 
-  /** Every column as text, with byte-level escaping (never a JSON projection). */
-  async function rawRow(id: string): Promise<Record<string, string>> {
-    const [row] = await db.$client<Record<string, string>[]>`
-      SELECT
-        id,
-        provider_id,
-        endpoint,
-        coalesce(label, '') AS label,
-        encode(convert_to(wrapped_dek, 'UTF8'), 'escape') AS wrapped_dek,
-        encode(convert_to(iv, 'UTF8'), 'escape') AS iv,
-        encode(convert_to(ciphertext, 'UTF8'), 'escape') AS ciphertext,
-        encode(convert_to(tag, 'UTF8'), 'escape') AS tag,
-        status,
-        coalesce(last_test_at::text, '') AS last_test_at,
-        coalesce(last_test_ok::text, '') AS last_test_ok,
-        created_at::text AS created_at
-      FROM byok_keys
-      WHERE id = ${id}
-    `;
-    return row!;
+  /**
+   * Every column of `byok_keys`, read from the live schema (not a hard-coded
+   * list). A column added later is covered automatically.
+   */
+  async function byokColumnInfo(): Promise<
+    Array<{ column_name: string; data_type: string }>
+  > {
+    return (await db.$client`
+      SELECT column_name, data_type
+      FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'byok_keys'
+      ORDER BY ordinal_position
+    `) as Array<{ column_name: string; data_type: string }>;
   }
+
+  function quoteIdent(name: string): string {
+    return `"${name.replace(/"/g, '""')}"`;
+  }
+
+  /**
+   * Build the escaped projection dynamically. Every column is cast to text
+   * first (timestamptz/bool/nullable), then UTF-8 byte-escaped. `bytea`
+   * columns use `encode(…, 'escape')` directly (convert_to needs text).
+   */
+  function escapedProjection(
+    columns: Array<{ column_name: string; data_type: string }>,
+  ): string {
+    return columns
+      .map(({ column_name, data_type }) => {
+        const ident = quoteIdent(column_name);
+        const escaped =
+          data_type === "bytea"
+            ? `encode(${ident}, 'escape')`
+            : `encode(convert_to(${ident}::text, 'UTF8'), 'escape')`;
+        return `coalesce(${escaped}, '') AS ${ident}`;
+      })
+      .join(",\n        ");
+  }
+
+  /** Every column as escaped text, enumerated from the schema at call time. */
+  async function rawRow(id: string): Promise<Record<string, string>> {
+    const columns = await byokColumnInfo();
+    const sql =
+      `SELECT\n        ${escapedProjection(columns)}\n` +
+      `      FROM byok_keys\n      WHERE id = $1`;
+    const rows = (await db.$client.unsafe(sql, [id])) as Array<
+      Record<string, string>
+    >;
+    return rows[0]!;
+  }
+
+  it("enumerates every byok_keys column from information_schema (user_id included)", async () => {
+    const columns = await byokColumnInfo();
+    const names = columns.map((column) => column.column_name);
+    // The 13th column the hard-coded projection used to omit.
+    expect(names).toContain("user_id");
+    // No duplicates and a complete schema read.
+    expect(new Set(names).size).toBe(names.length);
+    const [count] = (await db.$client`
+      SELECT count(*)::int AS n
+      FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'byok_keys'
+    `) as Array<{ n: number }>;
+    expect(names.length).toBe(count!.n);
+  });
 
   it("escrowed key is ciphertext at the byte level", async () => {
     const uid = testUid("sec-at-rest");
@@ -152,6 +196,9 @@ describe.skipIf(!TEST_DATABASE_URL)("secrets at rest — BYOK escrow (real postg
     const second = await createKey(app, uid, `sk-CANARY-${randomUUID()}`);
 
     const row = await rawRow(first.id);
+    // The projection covers EXACTLY the live schema — no column can escape.
+    const columns = (await byokColumnInfo()).map((column) => column.column_name);
+    expect(Object.keys(row).sort()).toEqual([...columns].sort());
     // Raw escaped bytes of EVERY column — no column may carry the canary.
     for (const [column, value] of Object.entries(row)) {
       expect(value, `column ${column} must not hold the plaintext`).not.toContain(canary);

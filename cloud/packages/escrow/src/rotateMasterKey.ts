@@ -62,6 +62,42 @@ export interface RotateMasterKeyResult {
   failures: RotateFailure[];
 }
 
+/**
+ * The operator-facing truth after a failed run. Phase 1 failures leave the
+ * table unchanged (nothing was written); a phase-2 failure after N successful
+ * writes leaves the table MIXED — N rows under the new key, the rest under the
+ * old one. Saying "table unchanged" in that state is dangerous mid-incident.
+ */
+export interface RotateMasterKeyFailureState {
+  mixed: boolean;
+  rotated: number;
+  remaining: number;
+  failed: number;
+  summary: string;
+  guidance: string;
+}
+
+export function rotationFailureState(
+  result: RotateMasterKeyResult,
+): RotateMasterKeyFailureState {
+  const remaining = Math.max(0, result.total - result.rotated);
+  const mixed = result.rotated > 0;
+  return {
+    mixed,
+    rotated: result.rotated,
+    remaining,
+    failed: result.failures.length,
+    summary: mixed
+      ? `FAIL — rotated ${result.rotated}/${result.total} row(s); ` +
+        `${remaining} row(s) still under the old key; table is MIXED`
+      : `FAIL — 0/${result.total} row(s) rotated; table unchanged (no row was written)`,
+    guidance: mixed
+      ? "Old-key rows are still readable with the OLD key; rotated rows only with the NEW key. " +
+        "Resume the rotation with the same old/new keys or roll back."
+      : "Fix the reported row(s) and re-run; no partial write occurred.",
+  };
+}
+
 function envelopeOf(row: EnvelopeRow) {
   return {
     wrappedDek: row.wrapped_dek,
@@ -229,13 +265,16 @@ function keyFromEnv(name: string): string {
   return value.trim();
 }
 
-export async function runRotateMasterKeyCli(argv: string[]): Promise<number> {
+export async function runRotateMasterKeyCli(
+  argv: string[],
+  rotate: typeof rotateMasterKey = rotateMasterKey,
+): Promise<number> {
   const options = parseArgs(argv);
   const oldKeyHex = keyFromEnv(options.oldKeyEnv);
   const newKeyHex = keyFromEnv(options.newKeyEnv);
   const log = (line: string) => console.log(`rotate-master-key: ${line}`);
 
-  const result = await rotateMasterKey({
+  const result = await rotate({
     databaseUrl: options.databaseUrl,
     oldKeyHex,
     newKeyHex,
@@ -247,9 +286,9 @@ export async function runRotateMasterKeyCli(argv: string[]): Promise<number> {
     console.error(`rotate-master-key: row ${failure.id}: FAIL (${failure.reason})`);
   }
   if (result.failures.length > 0) {
-    console.error(
-      `rotate-master-key: FAIL — ${result.failures.length} row(s) not rotated; table unchanged`,
-    );
+    const state = rotationFailureState(result);
+    console.error(`rotate-master-key: ${state.summary}`);
+    console.error(`rotate-master-key: ${state.guidance}`);
     return 1;
   }
   if (result.dryRun) {
