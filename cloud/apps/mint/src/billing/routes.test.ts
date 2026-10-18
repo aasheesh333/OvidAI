@@ -405,3 +405,84 @@ describe.skipIf(!RUN)("POST /usage billing merge (usage.ts)", () => {
     expect(body).not.toHaveProperty("plan_expires_at");
   });
 });
+
+// ---------------------------------------------------------------------------
+// The REAL deletion fence (P9 final re-review NEW-4)
+//
+// Every route test above injects `deletionFence`, which proves the route calls
+// SOMETHING but not that the production default is wired. This block omits the
+// option so `opts.deletionFence ?? requireNoDeletionFence(deps, uid)` is the
+// code under test, against a real tombstone row.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!RUN)("billing route + the real account-deletion fence (NEW-4)", () => {
+  let db: Db;
+  let redis: Redis;
+  let app: FastifyInstance;
+  let verify: ReturnType<typeof vi.fn>;
+
+  beforeAll(async () => {
+    db = await resetTestDb();
+    redis = await openFlushedRedis();
+    const deps: MintDeps = {
+      db,
+      redis,
+      litellm: {} as never,
+      env: baseEnv({ DATABASE_URL: TEST_DATABASE_URL! }),
+      alerter: async () => {},
+      verifyIdentity: async ({ authorization }) => ({
+        uid: authorization.replace(/^bearer\s+/i, ""),
+        email: null,
+        platform: "android",
+      }),
+    };
+    verify = vi.fn(async () => ({ status: 200, payload: { ok: true } }));
+    app = Fastify({ logger: false });
+    // No fourth argument: the production default fence is what runs.
+    registerBillingRoutes(app, deps, stubBilling({ verify }));
+  }, 60_000);
+
+  afterAll(async () => {
+    await app.close();
+    await closeRedis(redis);
+    await closeDb(db);
+  });
+
+  async function tombstone(uid: string, state: string): Promise<void> {
+    await db.$client`
+      INSERT INTO account_deletions (uid, state, delete_after, record)
+      VALUES (${uid}, ${state}, ${1_700_000_000.5}, ${"{}"}::jsonb)
+      ON CONFLICT (uid) DO UPDATE SET state = ${state}
+    `;
+  }
+
+  it("a pending tombstone fences /billing/verify before any billing work", async () => {
+    const uid = testUid("fence-real");
+    await tombstone(uid, "pending");
+    const res = await app.inject({
+      method: "POST",
+      url: "/billing/verify",
+      headers: { authorization: `Bearer ${uid}`, "x-firebase-appcheck": "x" },
+      payload: { purchase_token: "t", product_id: "ovid_plus_monthly" },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({
+      ok: false,
+      error: { code: "account_deletion_pending" },
+    });
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  it("a cancelled tombstone does not fence (recovery path)", async () => {
+    const uid = testUid("fence-cancelled");
+    await tombstone(uid, "cancelled");
+    const res = await app.inject({
+      method: "POST",
+      url: "/billing/verify",
+      headers: { authorization: `Bearer ${uid}`, "x-firebase-appcheck": "x" },
+      payload: { purchase_token: "t", product_id: "ovid_plus_monthly" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(verify).toHaveBeenCalledTimes(1);
+  });
+});
