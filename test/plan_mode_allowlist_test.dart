@@ -153,7 +153,6 @@ void main() {
         'session_search',
         'list_agents',
         'job_list',
-        'schedule_list',
         'catalog_list_models',
       ]) {
         final out = await call(tool, {'q': 'x', 'query': 'x'});

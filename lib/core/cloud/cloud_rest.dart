@@ -150,6 +150,16 @@ class CloudRestClient {
     return _decode(await _authed('PATCH', _uri(path), body));
   }
 
+  /// DELETE for endpoints that answer 204 with an empty body (P4
+  /// `DELETE /schedules/:id`). A non-2xx answer still maps to
+  /// [CloudApiException]; there is no response body to decode on success.
+  Future<void> delete(String path) async {
+    final response = await _authed('DELETE', _uri(path), null);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw _toError(response);
+    }
+  }
+
   /// PUT with a JSON body. Added for the Studio workspace file write
   /// (`PUT /sessions/:id/workspace/file`); every non-2xx answer maps to
   /// [CloudApiException] exactly like the other verbs.

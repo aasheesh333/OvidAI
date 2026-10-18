@@ -1368,10 +1368,6 @@ class ChatSession {
   /// `planMode=false` and never reaches a plan exit. Persisted.
   String? planPreMode;
 
-  /// Session-local reminders (the reminder scheduler schedule equivalent) — created by
-  /// schedule_create, fired by AgentService's timer.  Persisted.
-  List<Map<String, dynamic>> schedules;
-
   /// Message count at the time of last compaction — re-compact only when
   /// this many NEW messages have arrived since.
   int compactedAtCount;
@@ -1480,7 +1476,6 @@ class ChatSession {
     List<PermissionGrant>? grants,
     List<Message>? messages,
     List<Map<String, String>>? todos,
-    List<Map<String, dynamic>>? schedules,
     DateTime? createdAt,
     this.updatedAt,
     SessionAnalytics? analytics,
@@ -1493,7 +1488,6 @@ class ChatSession {
        grants = grants ?? [],
        messages = messages ?? [],
        todos = todos ?? [],
-       schedules = schedules ?? [],
        createdAt = createdAt ?? DateTime.now(),
        analytics = analytics ?? SessionAnalytics() {
     sandboxId ??= id;
@@ -1548,11 +1542,6 @@ class ChatSession {
             ?.map((t) => Map<String, String>.from(t as Map))
             .toList() ??
         [],
-    schedules:
-        (j['schedules'] as List?)
-            ?.map((t) => Map<String, dynamic>.from(t as Map))
-            .toList() ??
-        [],
     createdAt: j['createdAt'] != null
         ? DateTime.tryParse(j['createdAt'] as String) ?? DateTime.now()
         : DateTime.now(),
@@ -1605,7 +1594,6 @@ class ChatSession {
     if (planMode) 'planMode': planMode,
     if (planModePending != null) 'planModePending': planModePending,
     if (planPreMode != null) 'planPreMode': planPreMode,
-    'schedules': schedules,
     'todos': todos,
     'messages': messages.map((m) => m.toJson()).toList(),
     'createdAt': createdAt.toIso8601String(),
@@ -4313,8 +4301,8 @@ class AppState extends ChangeNotifier {
       session.updatedAt,
       _sessionNestedSignature(session.analytics.toJson()),
       _sessionNestedSignature(session.goal),
+      _sessionNestedSignature(session.compactionState),
       _sessionNestedSignature(session.todos),
-      _sessionNestedSignature(session.schedules),
     ]);
   }
 

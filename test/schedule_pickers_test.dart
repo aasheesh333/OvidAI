@@ -1,38 +1,54 @@
+// Schedule picker helpers + edit-sheet coverage (P8 Task 14). The helpers are
+// unchanged; the sheet now PATCHes a P4 trigger instead of mutating a local
+// task map.
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/schedule_client.dart';
+import 'package:ovid_ai/core/distribution.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/schedule_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'support/schedule_fake.dart';
+
 Future<void> _settle(WidgetTester tester) async {
+  await tester.pump();
   await tester.pump(const Duration(milliseconds: 350));
   await tester.pump(const Duration(milliseconds: 350));
 }
 
 void main() {
   late AppState app;
+  late FakeScheduleGateway fake;
+
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
+    Distribution.thinOverrideForTest = true;
+    ScheduleClient.timeZoneOverrideForTest = 'UTC';
     app = AppState.createForTest();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
-    AgentService.I.schedules.stopped = false;
     app.sessions.add(ChatSession(id: 's', title: 'My work', model: 'm'));
     app.activeSessionId = 's';
+    fake = FakeScheduleGateway([]);
+    ScheduleClient.installForTest(fake.client);
   });
+
   tearDown(() {
-    AgentService.I.debugPauseScheduleTimerForTest(false);
+    Distribution.thinOverrideForTest = null;
+    ScheduleClient.timeZoneOverrideForTest = null;
     AppState.resetTestInstance();
   });
 
-  Future<void> openEdit(WidgetTester tester, Map<String, dynamic> task) async {
+  Future<void> openEdit(
+    WidgetTester tester,
+    Map<String, dynamic> schedule,
+  ) async {
     tester.view.physicalSize = const Size(800, 1400);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    app.sessionById('s')!.schedules.add(task);
+    fake.schedules.add(schedule);
     await tester.pumpWidget(
       const MaterialApp(home: ScheduleScreen(sessionId: 's')),
     );
@@ -64,12 +80,10 @@ void main() {
     tester,
   ) async {
     const stored = '2026-12-01T09:30:00Z';
-    await openEdit(tester, {
-      'id': 'a',
-      'prompt': 'One-off task',
-      'status': 'pending',
-      'fireAt': stored,
-    });
+    await openEdit(tester, scheduleJson(
+      title: 'One-off task',
+      trigger: {'kind': 'at', 'at': stored},
+    ));
     final local = DateTime.parse(stored).toLocal();
     final l10n = tester.element(find.byType(ScheduleScreen));
     final loc = MaterialLocalizations.of(l10n);
@@ -104,13 +118,10 @@ void main() {
   testWidgets('interval uses number + unit and rejects under 5 minutes', (
     tester,
   ) async {
-    await openEdit(tester, {
-      'id': 'b',
-      'prompt': 'Interval task',
-      'status': 'pending',
-      'every': 3600,
-      'fireAt': '2031-04-07T01:00:00Z',
-    });
+    await openEdit(tester, scheduleJson(
+      title: 'Interval task',
+      trigger: {'kind': 'every', 'seconds': 3600},
+    ));
     final value = find.byKey(const ValueKey('schedule-interval-value'));
     expect(tester.widget<TextField>(value).controller!.text, '1');
     expect(find.text('hours'), findsOneWidget);
@@ -124,17 +135,17 @@ void main() {
     await tester.tap(find.text('Save'));
     await _settle(tester);
     expect(find.text('The shortest interval is 5 minutes.'), findsOneWidget);
-    final task = app.sessionById('s')!.schedules.single;
-    expect(task['every'], 3600);
+    expect(fake.patchCalls, 0);
 
     await tester.enterText(value, '5');
     await tester.pump();
-    await tester.runAsync(() async {
-      await tester.tap(find.text('Save'));
-      await app.flushSessionPersistence();
-    });
+    await tester.tap(find.text('Save'));
     await _settle(tester);
-    expect(task['every'], 300);
+    expect(fake.lastPatchBody!['trigger'], {
+      'kind': 'every',
+      'seconds': 300,
+    });
     expect(find.text('Edit schedule'), findsNothing);
+    expect(find.textContaining('Every 5 min'), findsOneWidget);
   });
 }

@@ -111,9 +111,6 @@ void main() {
         model: 'model',
         workspaceFolder: '/private',
         agentState: 'running',
-        schedules: [
-          {'enabled': true, 'prompt': 'run'},
-        ],
         messages: [
           Message(
             role: 'user',

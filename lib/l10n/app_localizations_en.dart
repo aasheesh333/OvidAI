@@ -1023,4 +1023,37 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get sessionDeleteFailed =>
       'The chat could not be deleted and has been restored. Try again.';
+
+  @override
+  String get scheduleCloudEmptyTitle => 'Schedules run in Ovid Cloud';
+
+  @override
+  String get scheduleCloudEmptyMessage =>
+      'Sign in to Ovid Cloud to see and manage scheduled tasks. This build has no on-device scheduler.';
+
+  @override
+  String get scheduleLoadErrorTitle => 'Could not load schedules';
+
+  @override
+  String get scheduleCloudActive => 'Cloud scheduling active';
+
+  @override
+  String get scheduleCloudActiveMessage =>
+      'Scheduled tasks run in Ovid Cloud, even when Ovid is closed. Results appear here and arrive as notifications.';
+
+  @override
+  String get scheduleRanLate => 'ran late';
+
+  @override
+  String get scheduleMissedRun => 'missed run';
+
+  @override
+  String get scheduleCron => 'Cron';
+
+  @override
+  String get scheduleCronLabel => 'Cron expression';
+
+  @override
+  String get scheduleCronHelper =>
+      'Five fields (minute hour day month weekday).';
 }

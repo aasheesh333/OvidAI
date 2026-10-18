@@ -152,7 +152,6 @@ void main() {
     final imported = app.sessions.singleWhere((s) => s.id != 'existing');
     expect(imported.id, startsWith('restored-'));
     expect(imported.sandboxId, imported.id);
-    expect(imported.schedules, isEmpty);
     expect(imported.grants, isEmpty);
     expect(imported.messages.single.content, 'Imported transcript');
     final path = imported.messages.single.attachments.single.path!;

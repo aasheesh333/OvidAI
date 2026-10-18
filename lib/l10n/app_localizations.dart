@@ -1659,6 +1659,66 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'The chat could not be deleted and has been restored. Try again.'**
   String get sessionDeleteFailed;
+
+  /// Schedule screen empty state when the cloud-schedule feature is unavailable in this build.
+  ///
+  /// In en, this message translates to:
+  /// **'Schedules run in Ovid Cloud'**
+  String get scheduleCloudEmptyTitle;
+
+  /// Schedule screen empty state body when cloud schedules are unavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign in to Ovid Cloud to see and manage scheduled tasks. This build has no on-device scheduler.'**
+  String get scheduleCloudEmptyMessage;
+
+  /// Schedule screen error card title when the server list request fails.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not load schedules'**
+  String get scheduleLoadErrorTitle;
+
+  /// Schedule screen status strip headline.
+  ///
+  /// In en, this message translates to:
+  /// **'Cloud scheduling active'**
+  String get scheduleCloudActive;
+
+  /// Schedule screen status strip explanation of server-side scheduling.
+  ///
+  /// In en, this message translates to:
+  /// **'Scheduled tasks run in Ovid Cloud, even when Ovid is closed. Results appear here and arrive as notifications.'**
+  String get scheduleCloudActiveMessage;
+
+  /// Badge on a schedule whose last run fired inside the missed-run grace window.
+  ///
+  /// In en, this message translates to:
+  /// **'ran late'**
+  String get scheduleRanLate;
+
+  /// Badge on a schedule paused because an occurrence was missed beyond the grace window.
+  ///
+  /// In en, this message translates to:
+  /// **'missed run'**
+  String get scheduleMissedRun;
+
+  /// Recurrence choice for a cron trigger.
+  ///
+  /// In en, this message translates to:
+  /// **'Cron'**
+  String get scheduleCron;
+
+  /// Field label for a five-field cron expression.
+  ///
+  /// In en, this message translates to:
+  /// **'Cron expression'**
+  String get scheduleCronLabel;
+
+  /// Helper text under the cron expression field.
+  ///
+  /// In en, this message translates to:
+  /// **'Five fields (minute hour day month weekday).'**
+  String get scheduleCronHelper;
 }
 
 class _AppLocalizationsDelegate

@@ -2,13 +2,6 @@
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <!-- Scheduled tasks fire on time via AlarmManager.setExactAndAllowWhileIdle.
-         SCHEDULE_EXACT_ALARM is user-revocable on Android 12+ (checked with
-         canScheduleExactAlarms, inexact + periodic job fallback when denied);
-         USE_EXACT_ALARM (Android 13+) is granted at install for task/reminder
-         apps. Play builds remove USE_EXACT_ALARM (src/play overlay). -->
-    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <!-- Device permissions the AI agent can request at runtime, each behind
          an in-chat user-consent gate first (Play policy: no surprise prompts). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -110,18 +103,6 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_provider_paths" />
         </provider>
-        <!-- Re-register schedule alarms on time-zone changes. -->
-        <receiver android:name=".ScheduleAlarmReceiver" android:exported="false">
-            <intent-filter>
-                <action android:name="android.intent.action.TIMEZONE_CHANGED"/>
-                <action android:name="android.intent.action.TIME_SET"/>
-            </intent-filter>
-        </receiver>
-        <!-- Periodic safety net for schedules when exact alarms are denied. -->
-        <service
-            android:name=".ScheduleFallbackJob"
-            android:permission="android.permission.BIND_JOB_SERVICE"
-            android:exported="false" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

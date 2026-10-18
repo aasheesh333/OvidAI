@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 
-import '../core/agent_service.dart';
+import '../core/cloud/cloud_rest.dart';
+import '../core/cloud/schedule_client.dart';
 import '../core/diag.dart';
-import '../core/schedule_coordinator.dart';
+import '../core/distribution.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import '../l10n/l10n.dart';
@@ -10,47 +11,32 @@ import 'user_error.dart';
 import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 
-/// Friendly copy for a failed schedule mutation. Known coordinator refusals
-/// get specific copy (and [resumeBackground] when resuming background
-/// execution fixes them); everything else goes through [friendlyError]. The
-/// raw error is logged to [Diag], never shown.
-({String message, bool resumeBackground}) scheduleFailure(
+/// Friendly copy for a failed schedule mutation. P4 errors carry a
+/// user-readable `message` (spec §15), so it is surfaced verbatim; local
+/// validation failures get the generic invalid copy. The raw error is logged
+/// to [Diag], never shown.
+String scheduleFailure(
   AppLocalizations l,
   Object error, [
   StackTrace? stack,
   String log = 'schedule_screen',
 ]) {
   Diag.swallow(log, error, stack);
-  if (error is StateError) {
-    switch (error.message) {
-      case 'Resume background execution first':
-        return (
-          message: l.scheduleErrorResumeBackgroundFirst,
-          resumeBackground: true,
-        );
-      case 'Previous run is still stopping':
-        return (
-          message: l.scheduleErrorPreviousRunStopping,
-          resumeBackground: false,
-        );
-      case 'Pause the task before editing':
-        return (message: l.scheduleErrorPauseBeforeEdit, resumeBackground: false);
-    }
-  }
-  if (error is FormatException) {
-    return (message: l.scheduleErrorInvalid, resumeBackground: false);
-  }
-  return (message: friendlyError(error, l10n: l), resumeBackground: false);
+  if (error is CloudApiException) return error.message;
+  if (error is FormatException) return l.scheduleErrorInvalid;
+  return friendlyError(error, l10n: l);
 }
 
-/// Schedule screen — Aether redesign.
+/// Schedule screen — server-backed (P4 REST).
 ///
-/// Preserves the public widget surface (`ScheduleScreen(sessionId: ...)`),
-/// listens on `AppState.I` + `AgentService.I`, and uses the real
-/// `editSchedule` / `cancelTask` / `resumeTask` task mutations plus the
-/// `AgentService.stopScheduledBackground` / `AgentService.resumeScheduledBackground`
-/// background toggle. Status strings {pending, running, paused, failed,
-/// completed, cancelled} remain the source of truth.
+/// The widget tree is the Aether redesign; the data bindings now come from
+/// [ScheduleClient] (`GET/PATCH/DELETE /schedules`, `GET /schedules/:id/runs`)
+/// instead of the deleted local `ScheduleCoordinator` runtime. Rows are
+/// filtered to [sessionId] because the server list is account-wide.
+///
+/// When `Distribution.cloudSchedules` is false (a build without the thin
+/// client) the local runtime no longer exists, so the screen shows the
+/// cloud-empty state rather than pretending to schedule locally.
 class ScheduleScreen extends StatefulWidget {
   final String sessionId;
   const ScheduleScreen({super.key, required this.sessionId});
@@ -60,99 +46,142 @@ class ScheduleScreen extends StatefulWidget {
 }
 
 class _ScheduleScreenState extends State<ScheduleScreen> {
-  // No periodic ticker: countdown text refreshes on any state change via the
-  // AnimatedBuilder on AppState+AgentService. A tick-based refresh would make
-  // pumpAndSettle in widget tests spin forever by scheduling a new frame
-  // every tick.
+  List<ScheduleDto> _schedules = const <ScheduleDto>[];
+  bool _loading = true;
+  String? _error;
 
-  Future<void> _action(
-    BuildContext context,
-    Future<void> Function() action,
-  ) async {
-    try {
-      await action();
-    } catch (e, st) {
-      if (context.mounted) {
-        final failure = scheduleFailure(
-          context.l10n,
-          e,
-          st,
-          'schedule_screen.background',
-        );
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(failure.message)),
-        );
-      }
+  @override
+  void initState() {
+    super.initState();
+    if (Distribution.cloudSchedules) {
+      _load();
+    } else {
+      _loading = false;
     }
+  }
+
+  Future<void> _load() async {
+    if (!Distribution.cloudSchedules) return;
+    if (mounted) setState(() => _error = null);
+    try {
+      final all = await ScheduleClient.I.list(includeCancelled: true);
+      if (!mounted) return;
+      setState(() {
+        _schedules = all
+            .where((s) => s.sessionId == widget.sessionId)
+            .toList(growable: false);
+        _loading = false;
+      });
+    } catch (e, st) {
+      Diag.swallow('schedule_screen.load', e, st);
+      if (!mounted) return;
+      setState(() {
+        _error = friendlyError(e, l10n: context.l10n);
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _edit(BuildContext context, ScheduleDto schedule) async {
+    await showAetherSheet<void>(
+      context: context,
+      builder: (sheetContext) => _EditScheduleSheet(schedule: schedule),
+    );
+    if (mounted) await _load();
   }
 
   @override
   Widget build(BuildContext context) {
-    final agent = AgentService.I;
-    return AnimatedBuilder(
-      animation: Listenable.merge([AppState.I, agent]),
-      builder: (context, _) {
-        final session = AppState.I.sessionById(widget.sessionId);
-        final tasks = session?.schedules ?? const <Map<String, dynamic>>[];
-        final backgroundStopped = agent.schedules.stopped;
-
-        return Scaffold(
-          backgroundColor: Aether.bg,
-          appBar: AppBar(
-            title: Text('Schedule \u00B7 ${session?.title ?? 'session'}'),
-          ),
-          body: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-            children: [
-              _statusStrip(context, backgroundStopped),
-              const SizedBox(height: 20),
-              const AetherSectionTitle(eyebrow: 'Scheduled tasks'),
-              const SizedBox(height: 12),
-              if (tasks.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.only(top: 32),
-                  child: AetherEmptyState(
-                    icon: Icons.schedule,
-                    title: 'No scheduled tasks',
-                    message:
-                        'Ask the agent to schedule a daily, recurring, or one-off task.',
-                  ),
-                )
-              else
-                for (final task in tasks) ...[
-                  _TaskCard(
-                    key: ValueKey(task['id'] ?? task),
-                    entry: ScheduleEntry(widget.sessionId, task),
-                    onEdit: () => _edit(
-                      context,
-                      ScheduleEntry(widget.sessionId, task),
-                    ),
-                  ),
+    final session = AppState.I.sessionById(widget.sessionId);
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        title: Text('Schedule · ${session?.title ?? 'session'}'),
+      ),
+      body: !Distribution.cloudSchedules
+          ? _cloudUnavailable(context)
+          : RefreshIndicator(
+              onRefresh: _load,
+              child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+                children: [
+                  _statusStrip(context),
+                  const SizedBox(height: 20),
+                  const AetherSectionTitle(eyebrow: 'Scheduled tasks'),
                   const SizedBox(height: 12),
+                  if (_loading)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 32),
+                      child: Center(child: CircularProgressIndicator()),
+                    )
+                  else if (_error != null)
+                    _errorState(context)
+                  else if (_schedules.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 32),
+                      child: AetherEmptyState(
+                        icon: Icons.schedule,
+                        title: 'No scheduled tasks',
+                        message:
+                            'Ask the agent to schedule a daily, recurring, or one-off task.',
+                      ),
+                    )
+                  else
+                    for (final schedule in _schedules) ...[
+                      _TaskCard(
+                        key: ValueKey(schedule.id),
+                        schedule: schedule,
+                        onChanged: _load,
+                        onEdit: () => _edit(context, schedule),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
                 ],
-            ],
-          ),
-        );
-      },
+              ),
+            ),
     );
   }
 
-  Widget _statusStrip(BuildContext context, bool backgroundStopped) {
-    final notes = <String>[];
-    if (!AppState.I.keepAliveEnabled) {
-      notes.add(
-        'Background keep-alive is off. Future tasks may wait until you reopen Ovid.',
-      );
-    }
-    if (!AppState.I.notificationsEnabled) {
-      notes.add(
-        'Notifications are off; background service visibility is unavailable.',
-      );
-    }
-    final headline = backgroundStopped
-        ? 'Background execution paused'
-        : 'Background execution active';
-    final dotColor = backgroundStopped ? Aether.warn : Aether.success;
+  Widget _cloudUnavailable(BuildContext context) {
+    final l = context.l10n;
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(16, 32, 16, 32),
+      children: [
+        AetherEmptyState(
+          icon: Icons.cloud_off,
+          title: l.scheduleCloudEmptyTitle,
+          message: l.scheduleCloudEmptyMessage,
+        ),
+      ],
+    );
+  }
+
+  Widget _errorState(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 24),
+      child: AetherCard(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(context.l10n.scheduleLoadErrorTitle, style: AetherType.title),
+            const SizedBox(height: 6),
+            Text(_error!, style: AetherType.bodyMuted),
+            const SizedBox(height: 12),
+            TextButton.icon(
+              onPressed: _load,
+              icon: const Icon(Icons.refresh),
+              label: Text(context.l10n.actionRetry),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _statusStrip(BuildContext context) {
     return AetherCard(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -160,113 +189,57 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         children: [
           Row(
             children: [
-              AetherStatusDot(color: dotColor, pulsing: !backgroundStopped),
+              AetherStatusDot(color: Aether.success, pulsing: true),
               const SizedBox(width: 10),
-              Expanded(child: Text(headline, style: AetherType.title)),
-            ],
-          ),
-          if (notes.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            for (final note in notes)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('\u2022  ', style: AetherType.caption),
-                    Expanded(child: Text(note, style: AetherType.caption)),
-                  ],
+              Expanded(
+                child: Text(
+                  context.l10n.scheduleCloudActive,
+                  style: AetherType.title,
                 ),
               ),
-          ],
-          const SizedBox(height: 12),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
-              icon: Icon(backgroundStopped ? Icons.play_arrow : Icons.stop),
-              label: Text(backgroundStopped
-                  ? 'Resume background execution'
-                  : 'Stop background execution'),
-              onPressed: () => backgroundStopped
-                  ? _resumeBackground(context)
-                  : _stopBackground(context),
-            ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            context.l10n.scheduleCloudActiveMessage,
+            style: AetherType.caption,
           ),
         ],
       ),
     );
   }
-
-  /// Schedules-only stop: pauses every scheduled task (in every chat) after
-  /// a confirmation stating that scope. In-flight replies keep running; the
-  /// notification's Stop remains the global panic stop.
-  Future<void> _stopBackground(BuildContext context) async {
-    final active = AgentService.I.schedules
-        .entries()
-        .where((e) => ['pending', 'running'].contains(e.task['status']))
-        .length;
-    final l = context.l10n;
-    final ok = await showAetherConfirmDialog(
-      context,
-      title: l.scheduleStopBackgroundTitle,
-      message: l.scheduleStopBackgroundMessage(active),
-      confirmLabel: l.scheduleStopBackgroundConfirm,
-    );
-    if (!ok || !context.mounted) return;
-    await _action(
-      context,
-      () => AgentService.I.stopScheduledBackground(),
-    );
-  }
-
-  Future<void> _resumeBackground(BuildContext context) async {
-    var resumed = 0;
-    await _action(context, () async {
-      resumed = await AgentService.I.resumeScheduledBackground();
-    });
-    if (!context.mounted || resumed == 0) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'Resumed $resumed paused task${resumed == 1 ? '' : 's'}.',
-        ),
-      ),
-    );
-  }
-
-  Future<void> _edit(BuildContext context, ScheduleEntry entry) async {
-    await showAetherSheet<void>(
-      context: context,
-      builder: (sheetContext) => _EditScheduleSheet(entry: entry),
-    );
-  }
 }
 
 /// Owns its own TextEditingController lifecycle so controllers aren't disposed
-/// while the modal route is still animating out and the parent AnimatedBuilder
-/// could rebuild referencing them.
+/// while the modal route is still animating out.
 class _EditScheduleSheet extends StatefulWidget {
-  final ScheduleEntry entry;
-  const _EditScheduleSheet({required this.entry});
+  final ScheduleDto schedule;
+  const _EditScheduleSheet({required this.schedule});
 
   @override
   State<_EditScheduleSheet> createState() => _EditScheduleSheetState();
 }
 
 class _EditScheduleSheetState extends State<_EditScheduleSheet> {
-  late final TextEditingController _prompt;
+  late final TextEditingController _title;
+  late final TextEditingController _description;
 
-  /// Raw value in the coordinator's stored format (HH:mm, seconds, or a
-  /// date/time). The pickers write into it; it is editable directly only
+  /// Raw value in the trigger's stored format (HH:mm, seconds, cron expr, or
+  /// a date/time). The pickers write into it; it is editable directly only
   /// under "Advanced".
   late final TextEditingController _time;
   late final TextEditingController _intervalValue;
   ScheduleIntervalUnit _intervalUnit = ScheduleIntervalUnit.minutes;
   late String _kind;
+
+  /// IANA zone preserved from the original trigger (daily/cron). Null until a
+  /// save needs one, then the device zone is resolved.
+  String? _tz;
   late int _retries;
   late final Map<String, String> _draftTimes;
   String? _error;
-  String? _promptError;
+  String? _titleError;
+  String? _descriptionError;
   String? _timeError;
   bool _saving = false;
 
@@ -276,29 +249,37 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
   @override
   void initState() {
     super.initState();
-    final t = widget.entry.task;
-    _kind = t['dailyAt'] != null
-        ? 'daily_at'
-        : t['every'] != null
-        ? 'every_seconds'
-        : 'at';
-    _prompt = TextEditingController(text: (t['prompt'] as String?) ?? '');
+    final s = widget.schedule;
+    final trigger = s.trigger;
+    _kind = switch (trigger.kind) {
+      'daily_at' => 'daily_at',
+      'every' => 'every_seconds',
+      'cron' => 'cron',
+      _ => 'at',
+    };
+    _tz = trigger.tz;
+    _title = TextEditingController(text: s.title);
+    _description = TextEditingController(text: s.description);
     _draftTimes = {
-      'daily_at': t['dailyAt']?.toString() ?? '',
-      'every_seconds': t['every']?.toString() ?? '',
-      // Stored one-offs are UTC ISO strings ("…Z"); edit them in local time.
-      'at': scheduleLocalText(t['fireAt']?.toString() ?? ''),
+      'daily_at': trigger.kind == 'daily_at' ? (trigger.time ?? '') : '',
+      'every_seconds':
+          trigger.kind == 'every' ? '${trigger.seconds ?? ''}' : '',
+      'cron': trigger.kind == 'cron' ? (trigger.expr ?? '') : '',
+      // Stored one-offs are UTC instants; edit them in local time.
+      'at': trigger.kind == 'at' && trigger.at != null
+          ? formatScheduleLocal(trigger.at!.toLocal())
+          : '',
     };
     _time = TextEditingController(text: _draftTimes[_kind]);
     _intervalValue = TextEditingController();
     _syncIntervalFromRaw();
-    final maxRetries = (t['maxRetries'] as int?) ?? 0;
-    _retries = maxRetries.clamp(0, 3);
+    _retries = s.maxRetries.clamp(0, 3);
   }
 
   @override
   void dispose() {
-    _prompt.dispose();
+    _title.dispose();
+    _description.dispose();
     _time.dispose();
     _intervalValue.dispose();
     super.dispose();
@@ -350,7 +331,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
     final text = _time.text.trim();
     if (text.isEmpty) return null;
     try {
-      return ScheduleCoordinator.parseDate(text).toLocal();
+      return ScheduleClient.parseDate(text).toLocal();
     } on FormatException {
       return null;
     }
@@ -401,6 +382,8 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
 
   Future<void> _save() async {
     if (_saving) return;
+    final title = _title.text.trim();
+    final description = _description.text.trim();
     final time = _time.text.trim();
     String? timeError;
     if (_kind == 'daily_at') {
@@ -414,36 +397,57 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
       } else if (seconds < minScheduleIntervalSeconds) {
         timeError = 'The shortest interval is 5 minutes.';
       }
+    } else if (_kind == 'cron') {
+      if (time.trim().split(RegExp(r'\s+')).length != 5) {
+        timeError = 'Enter a 5-field cron expression.';
+      }
     } else {
       try {
-        ScheduleCoordinator.parseDate(time);
+        ScheduleClient.parseDate(time);
       } on FormatException catch (e) {
         timeError = time.isEmpty ? 'Pick a date and time.' : e.message;
       }
     }
     setState(() {
       _error = null;
-      _promptError = _prompt.text.trim().isEmpty
-          ? 'Enter a task description.'
-          : null;
+      _titleError = title.isEmpty ? 'Enter a title.' : null;
+      _descriptionError =
+          description.isEmpty ? 'Enter a task description.' : null;
       _timeError = timeError;
     });
-    if (_promptError != null || _timeError != null) return;
+    if (_titleError != null || _descriptionError != null || _timeError != null) {
+      return;
+    }
     setState(() => _saving = true);
     try {
-      final value = _kind == 'every_seconds' ? int.parse(time) : time;
-      await AgentService.I.editSchedule(widget.entry, {
-        'prompt': _prompt.text,
-        _kind: value,
-        'max_retries': _retries,
-      });
+      final ScheduleTrigger trigger;
+      switch (_kind) {
+        case 'daily_at':
+          final tz = _tz ?? await ScheduleClient.deviceTimeZone();
+          trigger = ScheduleTrigger.dailyAt(time, tz: tz);
+        case 'every_seconds':
+          trigger = ScheduleTrigger.every(int.parse(time));
+        case 'cron':
+          final tz = _tz ?? await ScheduleClient.deviceTimeZone();
+          trigger = ScheduleTrigger.cron(time, tz: tz);
+        default:
+          trigger = ScheduleTrigger.at(
+            ScheduleClient.parseDate(time).toUtc(),
+          );
+      }
+      await ScheduleClient.I.update(
+        widget.schedule.id,
+        title: title,
+        description: description,
+        trigger: trigger,
+        maxRetries: _retries,
+      );
       if (mounted) Navigator.pop(context);
     } catch (e, st) {
       if (mounted) {
         setState(
           () => _error =
-              scheduleFailure(context.l10n, e, st, 'schedule_screen.edit')
-                  .message,
+              scheduleFailure(context.l10n, e, st, 'schedule_screen.edit'),
         );
       }
     } finally {
@@ -454,6 +458,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
   String _timeLabel() => switch (_kind) {
     'daily_at' => 'Time HH:mm',
     'every_seconds' => 'Interval in seconds (300 or more)',
+    'cron' => 'Cron expression (5 fields)',
     _ => 'Date/time YYYY-MM-DD HH:mm',
   };
 
@@ -498,7 +503,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
             ),
             const SizedBox(height: 4),
             Text(
-              'Repeats every day in device-local time.',
+              'Repeats every day in ${_tz ?? 'the device time zone'}.',
               style: AetherType.caption,
             ),
             ?errorText,
@@ -547,6 +552,21 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
             ),
             const SizedBox(height: 4),
             Text(context.l10n.scheduleMinimumInterval, style: AetherType.caption),
+            ?errorText,
+          ],
+        );
+      case 'cron':
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            AetherField(
+              fieldKey: const ValueKey('schedule-cron'),
+              label: context.l10n.scheduleCronLabel,
+              controller: _time,
+              enabled: !_saving,
+              onChanged: (_) => setState(() => _timeError = null),
+              helper: context.l10n.scheduleCronHelper,
+            ),
             ?errorText,
           ],
         );
@@ -603,11 +623,20 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
             mainAxisSize: MainAxisSize.min,
             children: [
               AetherField(
+                label: 'Title',
+                fieldKey: const ValueKey('schedule-title'),
+                controller: _title,
+                enabled: !_saving,
+                errorText: _titleError,
+                maxLines: 1,
+              ),
+              const SizedBox(height: 12),
+              AetherField(
                 label: 'Task',
                 fieldKey: const ValueKey('schedule-prompt'),
-                controller: _prompt,
+                controller: _description,
                 enabled: !_saving,
-                errorText: _promptError,
+                errorText: _descriptionError,
                 // Keep the primary action reachable on compact viewports.
                 maxLines: 2,
               ),
@@ -618,10 +647,12 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                 spacing: 8,
                 runSpacing: 8,
                 children: [
-                  for (final option in const [
+                  for (final option in [
                     (value: 'at', label: 'One-off'),
                     (value: 'daily_at', label: 'Daily'),
                     (value: 'every_seconds', label: 'Interval'),
+                    if (widget.schedule.trigger.kind == 'cron')
+                      (value: 'cron', label: context.l10n.scheduleCron),
                   ])
                     ChoiceChip(
                       label: Text(option.label),
@@ -665,8 +696,8 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                   onChanged: (_) => setState(() {
                     _timeError = null;
                     if (_kind == 'every_seconds') {
-                          _syncIntervalFromRaw();
-                        }
+                      _syncIntervalFromRaw();
+                    }
                   }),
                   keyboardType: _kind == 'every_seconds'
                       ? TextInputType.number
@@ -675,9 +706,10 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                       : TextInputType.text,
                   helper: switch (_kind) {
                     'daily_at' =>
-                      'Repeats in device-local time. Follows device time zone changes.',
+                      'Repeats in the stored time zone. Follows that zone\'s DST.',
                     'every_seconds' =>
                       'Fixed interval; minimum 300 seconds (5 minutes).',
+                    'cron' => 'Five fields; the server validates the expression.',
                     _ =>
                       'Device-local time unless you include Z or an offset, e.g. +05:30. Past times are due immediately.',
                   },
@@ -751,14 +783,17 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
       case 'daily_at':
         final t = _parseHm(value);
         return t == null
-            ? 'Runs daily at $value in device-local time.'
-            : 'Runs daily at ${l10n.formatTimeOfDay(t)} in device-local time.';
+            ? 'Runs daily at $value (${_tz ?? 'device time zone'}).'
+            : 'Runs daily at ${l10n.formatTimeOfDay(t)} '
+                '(${_tz ?? 'device time zone'}).';
       case 'every_seconds':
         final seconds = int.tryParse(value);
         if (seconds == null) {
           return 'Runs every $value seconds after the next save.';
         }
         return 'Runs every ${describeScheduleInterval(seconds)} after the next save.';
+      case 'cron':
+        return "Runs on cron '$value' (${_tz ?? 'device time zone'}).";
       default:
         final local = _oneOffLocal();
         if (local == null) return 'Runs once at $value.';
@@ -776,7 +811,7 @@ TimeOfDay? _parseHm(String value) {
   return TimeOfDay(hour: int.parse(m[1]!), minute: int.parse(m[2]!));
 }
 
-/// Shortest allowed interval (the coordinator's floor).
+/// Shortest allowed interval (the server's `every` floor).
 const minScheduleIntervalSeconds = 300;
 
 enum ScheduleIntervalUnit {
@@ -817,8 +852,8 @@ String describeScheduleInterval(int seconds) {
   return '$value $label';
 }
 
-/// Local `YYYY-MM-DD HH:mm` (the coordinator reads a value without Z or an
-/// offset as device-local time).
+/// Local `YYYY-MM-DD HH:mm` (the parser reads a value without Z or an offset
+/// as device-local time).
 @visibleForTesting
 String formatScheduleLocal(DateTime local) =>
     '${local.year.toString().padLeft(4, '0')}-${_two(local.month)}-${_two(local.day)} '
@@ -832,21 +867,23 @@ String scheduleLocalText(String stored) {
   if (stored.trim().isEmpty) return '';
   try {
     return formatScheduleLocal(
-      ScheduleCoordinator.parseDate(stored.trim()).toLocal(),
+      ScheduleClient.parseDate(stored.trim()).toLocal(),
     );
   } on FormatException {
     return stored;
   }
 }
 
-/// A card representing a single scheduled task.
+/// A card representing a single server-backed scheduled task.
 class _TaskCard extends StatefulWidget {
-  final ScheduleEntry entry;
+  final ScheduleDto schedule;
+  final Future<void> Function() onChanged;
   final VoidCallback onEdit;
 
   const _TaskCard({
     super.key,
-    required this.entry,
+    required this.schedule,
+    required this.onChanged,
     required this.onEdit,
   });
 
@@ -858,15 +895,14 @@ class _TaskCardState extends State<_TaskCard> {
   bool _expanded = false;
   bool _busy = false;
   String? _feedback;
-  bool _offerResumeBackground = false;
 
   @override
   Widget build(BuildContext context) {
-    final t = widget.entry.task;
-    final status = (t['status'] as String?) ?? 'pending';
-    final prompt = (t['prompt'] as String?) ?? '';
-    final next = _scheduledTime(t);
-    final agent = AgentService.I;
+    final s = widget.schedule;
+    final status = s.status;
+    final next = s.nextRunAt?.toLocal();
+    final title = s.title.trim().isEmpty ? s.description : s.title;
+    final last = s.lastResult;
 
     return AetherCard(
       padding: const EdgeInsets.all(16),
@@ -876,34 +912,67 @@ class _TaskCardState extends State<_TaskCard> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              AetherPill(
-                label: status,
-                color: _statusColor(status),
-                filled: status != 'completed' && status != 'cancelled',
+              Expanded(
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    AetherPill(
+                      label: status,
+                      color: _statusColor(status),
+                      filled: status != 'completed' && status != 'cancelled',
+                    ),
+                    if (last?.ranLate == true)
+                      AetherPill(
+                        key: const ValueKey('schedule-ran-late'),
+                        label: context.l10n.scheduleRanLate,
+                        color: Aether.warn,
+                      ),
+                    if (s.pausedReason == 'missed_beyond_grace')
+                      AetherPill(
+                        key: const ValueKey('schedule-missed-run'),
+                        label: context.l10n.scheduleMissedRun,
+                        color: Aether.warn,
+                      ),
+                  ],
+                ),
               ),
-              const Spacer(),
-              _menu(context, status, agent),
+              _menu(context, s),
             ],
           ),
           const SizedBox(height: 8),
-          Text(prompt.isEmpty ? '(empty)' : prompt,
-              style: AetherType.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+          Text(
+            title.isEmpty ? '(empty)' : title,
+            style: AetherType.title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
           const SizedBox(height: 10),
-          Text(_prettyRecurrence(t), style: AetherType.bodyMuted),
+          Text(_prettyRecurrence(s.trigger), style: AetherType.bodyMuted),
+          if (last != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              _lastResultLine(last),
+              style: AetherType.caption,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
           if (status == 'failed' || status == 'paused') ...[
             const SizedBox(height: 8),
             Text(
-              status == 'failed' ? 'Recovery needed' : 'Paused · recovery available',
-              style: TextStyle(color: _statusColor(status), fontWeight: FontWeight.w600),
+              status == 'failed' ? 'Recovery needed' : _pausedLabel(s),
+              style: TextStyle(
+                color: _statusColor(status),
+                fontWeight: FontWeight.w600,
+              ),
             ),
-            if (t['error'] != null)
-              Text('${t['error']}', style: AetherType.caption),
+            if (last?.message != null && last!.message!.isNotEmpty)
+              Text(last.message!, style: AetherType.caption),
           ],
           const SizedBox(height: 4),
-          Text(
-            _secondary(status, next, t),
-            style: AetherType.bodyMuted,
-          ),
+          Text(_secondary(status, next, last), style: AetherType.bodyMuted),
           if (_busy) ...[
             const SizedBox(height: 8),
             const LinearProgressIndicator(minHeight: 2),
@@ -916,17 +985,6 @@ class _TaskCardState extends State<_TaskCard> {
               liveRegion: true,
               child: Text(_feedback!, style: AetherType.caption),
             ),
-            if (_offerResumeBackground && !_busy)
-              TextButton.icon(
-                icon: const Icon(Icons.play_arrow, size: 18),
-                label: Text(context.l10n.scheduleActionResumeBackground),
-                // Resume background execution, then retry the task resume
-                // the user originally asked for.
-                onPressed: () => _runAction(() async {
-                  await agent.resumeScheduledBackground();
-                  await agent.schedules.resumeTask(widget.entry);
-                }),
-              ),
           ],
           const SizedBox(height: 8),
           Align(
@@ -939,31 +997,32 @@ class _TaskCardState extends State<_TaskCard> {
           ),
           if (_expanded) ...[
             const SizedBox(height: 4),
-            _details(t),
+            _details(s),
           ],
         ],
       ),
     );
   }
 
-  Widget _menu(BuildContext context, String status, AgentService agent) {
+  Widget _menu(BuildContext context, ScheduleDto s) {
+    final status = s.status;
     final items = <PopupMenuEntry<String>>[
       PopupMenuItem<String>(
         value: 'edit',
-        enabled: status != 'running',
+        enabled: !s.isTerminal,
         child: Text('Edit', style: AetherType.body),
       ),
-      if (status == 'pending' || status == 'running')
+      if (status == 'pending')
         PopupMenuItem<String>(
           value: 'pause',
           child: Text('Pause', style: AetherType.body),
         ),
-      if (status == 'paused' || status == 'failed')
+      if (status == 'paused')
         PopupMenuItem<String>(
           value: 'resume',
           child: Text('Resume', style: AetherType.body),
         ),
-      if (status != 'cancelled' && status != 'completed')
+      if (status != 'cancelled')
         PopupMenuItem<String>(
           value: 'cancel',
           child: Text(
@@ -981,34 +1040,34 @@ class _TaskCardState extends State<_TaskCard> {
           case 'edit':
             widget.onEdit();
           case 'pause':
-            _runAction(() => agent.schedules.cancelTask(widget.entry, pause: true));
+            _runAction(() async {
+              await ScheduleClient.I.update(s.id, status: 'paused');
+            });
           case 'resume':
-            _runAction(() => agent.schedules.resumeTask(widget.entry));
+            _runAction(() async {
+              await ScheduleClient.I.update(s.id, status: 'pending');
+            });
           case 'cancel':
-            _confirmCancel(context, status, agent);
+            _confirmCancel(context, s);
         }
       },
     );
   }
 
-  /// Cancelling is irreversible (and stops a running task), so it confirms.
-  Future<void> _confirmCancel(
-    BuildContext context,
-    String status,
-    AgentService agent,
-  ) async {
+  /// Cancelling is irreversible (and stops future runs), so it confirms.
+  Future<void> _confirmCancel(BuildContext context, ScheduleDto s) async {
     final l = context.l10n;
     final ok = await showAetherConfirmDialog(
       context,
       title: l.scheduleCancelTaskTitle,
-      message: status == 'running'
+      message: s.status == 'pending'
           ? l.scheduleCancelTaskRunningMessage
           : l.scheduleCancelTaskMessage,
       confirmLabel: l.scheduleCancelTask,
       cancelLabel: l.scheduleKeepTask,
     );
     if (!ok || !mounted) return;
-    await _runAction(() => agent.schedules.cancelTask(widget.entry));
+    await _runAction(() => ScheduleClient.I.delete(s.id));
   }
 
   Future<void> _runAction(Future<void> Function() action) async {
@@ -1016,43 +1075,36 @@ class _TaskCardState extends State<_TaskCard> {
     setState(() {
       _busy = true;
       _feedback = null;
-      _offerResumeBackground = false;
     });
     try {
       await action();
+      await widget.onChanged();
       if (mounted) setState(() => _feedback = context.l10n.scheduleUpdated);
     } catch (e, st) {
       if (mounted) {
         final l = context.l10n;
         final failure = scheduleFailure(l, e, st, 'schedule_screen.task');
-        setState(() {
-          _feedback = l.scheduleUpdateFailed(failure.message);
-          _offerResumeBackground = failure.resumeBackground;
-        });
+        setState(() => _feedback = l.scheduleUpdateFailed(failure));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  Widget _details(Map<String, dynamic> t) {
-    final status = (t['status'] as String?) ?? 'pending';
-    final prompt = (t['prompt'] as String?) ?? '';
-    final next = _scheduledTime(t);
-    final attempt = t['attempt'] ?? 0;
-    final max = t['maxRetries'] ?? 0;
-    final lastStatus = t['lastStatus'];
-    final lastRunAt =
-        DateTime.tryParse('${t['finishedAt'] ?? t['lastRunAt'] ?? ''}')?.toLocal();
-    final startedAt = DateTime.tryParse('${t['startedAt'] ?? ''}')?.toLocal();
-    final error = t['error'];
-    final raw = _rawSpec(t);
-    final scheduledLabel = next != null
-        ? _fmtInstant(next)
-        : 'Not scheduled';
-    final nextRunLabel = status == 'pending' && next != null
+  Widget _details(ScheduleDto s) {
+    final next = s.nextRunAt?.toLocal();
+    final last = s.lastResult;
+    final finished = last?.finishedAt?.toLocal();
+    final scheduledLabel = next != null ? _fmtInstant(next) : 'Not scheduled';
+    final nextRunLabel = s.status == 'pending' && next != null
         ? _nextRunLabel(next)
-        : _executionLabel(status);
+        : _executionLabel(s.status);
+    final tz = s.trigger.tz;
+    final zoneLabel = tz != null
+        ? '$tz · server-scheduled'
+        : next == null
+        ? 'Unavailable'
+        : '${_zoneLabel(next)} · device-local display';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1060,32 +1112,31 @@ class _TaskCardState extends State<_TaskCard> {
         Text(context.l10n.scheduleDescription, style: AetherType.label),
         const SizedBox(height: 4),
         Text(
-          prompt.isEmpty ? '(empty)' : prompt,
+          s.description.isEmpty ? '(empty)' : s.description,
           style: AetherType.body,
         ),
         const SizedBox(height: 10),
         _detailRow('Scheduled', scheduledLabel),
-        _detailRow('Time zone', next == null
-            ? 'Unavailable'
-            : '${_zoneLabel(next)} · device-local display'),
-        _detailRow('Recurrence', _prettyRecurrence(t)),
+        _detailRow('Time zone', zoneLabel),
+        _detailRow('Recurrence', _prettyRecurrence(s.trigger)),
         _detailRow('Next run', nextRunLabel),
         _detailRow(
           'Last run',
-          lastStatus == null
-              ? (startedAt != null || lastRunAt != null ? 'No result recorded' : 'Never run')
-              : (lastRunAt == null
-                  ? '$lastStatus'
-                  : '$lastStatus \u00B7 ${_fmtInstant(lastRunAt)}'),
+          last == null
+              ? 'Never run'
+              : '${last.status}'
+                  '${finished == null ? '' : ' · ${_fmtInstant(finished)}'}'
+                  '${last.ranLate ? ' · ran late' : ''}',
         ),
-        if (startedAt != null) _detailRow('Started', _fmtInstant(startedAt)),
-        if (lastStatus == null && lastRunAt != null)
-          _detailRow('Finished', _fmtInstant(lastRunAt)),
         _detailRow(
           'Retries',
-          '$attempt/$max \u00B7 pre-execution failures only',
+          'Up to ${s.maxRetries} · pre-execution failures only',
         ),
-        if (error != null) _detailRow('Last error', '$error'),
+        if (last?.message != null && last!.message!.isNotEmpty)
+          _detailRow(
+            last.status == 'failed' ? 'Last error' : 'Last result',
+            last.message!,
+          ),
         const SizedBox(height: 8),
         Text(context.l10n.scheduleRawSpec, style: AetherType.label),
         const SizedBox(height: 4),
@@ -1097,7 +1148,7 @@ class _TaskCardState extends State<_TaskCard> {
             borderRadius: BorderRadius.circular(AetherRadius.rSm),
             border: Border.all(color: Aether.hairline),
           ),
-          child: Text(raw, style: AetherType.mono),
+          child: Text(_rawSpec(s.trigger), style: AetherType.mono),
         ),
       ],
     );
@@ -1110,7 +1161,8 @@ class _TaskCardState extends State<_TaskCard> {
         builder: (context, constraints) {
           final labelText = Text(label, style: AetherType.label);
           final valueText = Text(value, style: AetherType.bodyMuted);
-          if (constraints.maxWidth < 520 || MediaQuery.textScalerOf(context).scale(14) > 20) {
+          if (constraints.maxWidth < 520 ||
+              MediaQuery.textScalerOf(context).scale(14) > 20) {
             return Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Column(
@@ -1136,16 +1188,12 @@ class _TaskCardState extends State<_TaskCard> {
     final diff = next.difference(now);
     if (diff.isNegative) {
       return 'Overdue by ${_fmtDuration(diff.abs())} '
-          '\u00B7 ${_fmtInstant(next)}';
+          '· ${_fmtInstant(next)}';
     }
-    return 'In ${_fmtDuration(diff)} \u00B7 ${_fmtInstant(next)}';
+    return 'In ${_fmtDuration(diff)} · ${_fmtInstant(next)}';
   }
 
-  String _secondary(
-    String status,
-    DateTime? next,
-    Map<String, dynamic> t,
-  ) {
+  String _secondary(String status, DateTime? next, ScheduleLastResult? last) {
     if (status == 'pending' && next != null) {
       final now = DateTime.now();
       final diff = next.difference(now);
@@ -1154,9 +1202,15 @@ class _TaskCardState extends State<_TaskCard> {
       }
       return 'Next in ${_fmtDuration(diff)} · ${_fmtInstant(next)}';
     }
-    final last = t['lastStatus'];
-    return '${_executionLabel(status)}${last != null ? ' · Last run: $last' : ''}';
+    return '${_executionLabel(status)}'
+        '${last != null ? ' · Last run: ${last.status}' : ''}';
   }
+
+  String _pausedLabel(ScheduleDto s) => switch (s.pausedReason) {
+    'missed_beyond_grace' => 'Missed while Ovid was offline · review and resume',
+    'retries_exhausted' => 'Retries exhausted · review and resume',
+    _ => 'Paused · resume to run',
+  };
 
   Color _statusColor(String status) {
     switch (status) {
@@ -1176,13 +1230,15 @@ class _TaskCardState extends State<_TaskCard> {
   }
 }
 
-// Match ScheduleCoordinator's due-time rules: daily calendar occurrences move
-// with the device zone, but an in-flight retry keeps its persisted instant.
-DateTime? _scheduledTime(Map<String, dynamic> t) {
-  if (t['dailyAt'] != null && t['localDate'] != null && (t['attempt'] ?? 0) == 0) {
-    return DateTime.tryParse('${t['localDate']}T${t['dailyAt']}:00')?.toLocal();
-  }
-  return DateTime.tryParse('${t['fireAt'] ?? ''}')?.toLocal();
+String _lastResultLine(ScheduleLastResult last) {
+  final message = (last.message ?? '').trim();
+  final when = last.finishedAt == null
+      ? ''
+      : ' · ${_fmtInstant(last.finishedAt!.toLocal())}';
+  final late = last.ranLate ? ' · ran late' : '';
+  return message.isEmpty
+      ? 'Last run: ${last.status}$late$when'
+      : 'Last run: ${last.status}$late · $message';
 }
 
 String _executionLabel(String status) => switch (status) {
@@ -1203,25 +1259,24 @@ String _zoneLabel(DateTime time) {
   return time.timeZoneName.isEmpty ? offset : '${time.timeZoneName} ($offset)';
 }
 
-String _rawSpec(Map<String, dynamic> t) {
-  if (t['dailyAt'] != null) return 'dailyAt=${t['dailyAt']}';
-  if (t['every'] != null) return 'every=${t['every']}s';
-  if (t['fireAt'] != null) return 'fireAt=${t['fireAt']}';
-  return 'spec=unknown';
-}
+String _rawSpec(ScheduleTrigger trigger) => switch (trigger.kind) {
+  'at' => 'at=${trigger.at?.toUtc().toIso8601String() ?? '—'}',
+  'every' => 'every=${trigger.seconds}s',
+  'daily_at' => 'daily_at=${trigger.time} tz=${trigger.tz}',
+  'cron' => 'cron=${trigger.expr} tz=${trigger.tz}',
+  _ => 'spec=unknown',
+};
 
-String _prettyRecurrence(Map<String, dynamic> t) {
-  if (t['dailyAt'] != null) {
-    return 'Daily \u00B7 ${t['dailyAt']} \u00B7 device-local time';
-  }
-  if (t['every'] != null) {
-    final seconds = (t['every'] as num?)?.toInt() ?? 0;
-    return 'Every ${_fmtInterval(seconds)} \u00B7 fixed interval';
-  }
-  final fireAt = DateTime.tryParse((t['fireAt'] as String?) ?? '')?.toLocal();
-  if (fireAt == null) return 'One-off \u00B7 unknown';
-  return 'One-off \u00B7 ${_fmtInstant(fireAt)}';
-}
+String _prettyRecurrence(ScheduleTrigger trigger) => switch (trigger.kind) {
+  'at' => trigger.at == null
+      ? 'One-off · unknown'
+      : 'One-off · ${_fmtInstant(trigger.at!.toLocal())}',
+  'every' => 'Every ${_fmtInterval(trigger.seconds ?? 0)} · fixed interval',
+  'daily_at' =>
+    'Daily · ${trigger.time ?? '—'} · ${trigger.tz ?? 'unknown zone'}',
+  'cron' => "Cron · '${trigger.expr ?? '—'}' · ${trigger.tz ?? 'unknown zone'}",
+  _ => 'Unknown trigger',
+};
 
 String _fmtInterval(int seconds) {
   if (seconds <= 0) return '0s';

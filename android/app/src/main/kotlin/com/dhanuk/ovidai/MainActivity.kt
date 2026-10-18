@@ -6,7 +6,6 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import android.app.Activity
 import android.app.ActivityManager
-import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -96,13 +95,6 @@ class MainActivity : FlutterActivity() {
             "ovid/html-artifact", HtmlArtifactViewFactory(flutterEngine.dartExecutor.binaryMessenger),
         )
         val nativeChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-        val main = android.os.Handler(android.os.Looper.getMainLooper())
-        AgentNotificationBridge.scheduleHandler = {
-            main.post { nativeChannel.invokeMethod("onScheduleWake", null) }
-        }
-        AgentNotificationBridge.constraintHandler = { message ->
-            main.post { nativeChannel.invokeMethod("onBackgroundConstraint", message) }
-        }
         webViewHandler = OvidWebViewHandler(
             this,
             flutterEngine,
@@ -404,13 +396,7 @@ class MainActivity : FlutterActivity() {
     private fun handleNativeBackground(call: MethodCall, result: MethodChannel.Result): Boolean {
         val app = applicationContext
         when (call.method) {
-            "scheduleAlarm" -> try {
-                BackgroundScheduleState.arm(app, call.argument<Number>("at")?.toLong())
-                result.success(true)
-            } catch (e: Exception) {
-                BackgroundScheduleState.constraint(app, "Alarm unavailable: ${e.message}")
-                result.error("ALARM_UNAVAILABLE", e.message, null)
-            }
+            "timeZoneId" -> result.success(java.util.TimeZone.getDefault().id)
             "notifyConfigure" -> {
                 val sounds = call.argument<Map<String, String>>("sounds") ?: emptyMap()
                 val enabled = call.argument<Map<String, Boolean>>("enabled") ?: emptyMap()
@@ -441,14 +427,6 @@ class MainActivity : FlutterActivity() {
             "notifyOpenAppSettings" -> result.success(
                 launchIntent(OvidNotifications.appNotificationSettingsIntent(app)),
             )
-            "bgSetKeepActive" -> {
-                BackgroundScheduleState.setKeepActive(
-                    app,
-                    call.argument<Boolean>("enabled") ?: false,
-                    call.argument<Boolean>("master") ?: true,
-                )
-                result.success(true)
-            }
             else -> return false
         }
         return true

@@ -2,50 +2,40 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-/// Static pins for the thin-client notification/alarm surface.
+/// Static pins for the thin-client notification surface.
 ///
-/// P8 Task 12 removed the foreground-service keep-alive: runs execute detached
-/// in the cloud, so the manifest must not declare an FGS, a wake lock or boot
-/// restart. What remains is local schedule alarms and the notification display
-/// path fed by FCM. Behaviour is executed under Robolectric (OvidNotifications,
-/// NativeHostRouting, ExactAlarmFallback); these pins keep the manifest and
-/// the source contracts a host test cannot see from drifting.
+/// P8 Task 12 removed the foreground-service keep-alive; P8 Task 14 removed
+/// the local scheduler runtime (alarm receiver, periodic fallback job and the
+/// exact-alarm permissions). Runs execute detached in the cloud, so the
+/// manifest must not declare an FGS, a wake lock, boot restart or local alarm
+/// apparatus. What remains is the notification display path fed by FCM.
+/// Behaviour is executed under Robolectric (OvidNotifications,
+/// NativeHostRouting); these pins keep the manifest and the source contracts
+/// a host test cannot see from drifting.
 void main() {
-  final manifest = File('android/app/src/main/AndroidManifest.xml').readAsStringSync();
+  final manifest =
+      File('android/app/src/main/AndroidManifest.xml').readAsStringSync();
   final play = File('android/app/src/play/AndroidManifest.xml').readAsStringSync();
   String kt(String name) =>
-      File('android/app/src/main/kotlin/com/dhanuk/ovidai/$name.kt').readAsStringSync();
+      File('android/app/src/main/kotlin/com/dhanuk/ovidai/$name.kt')
+          .readAsStringSync();
 
-  String element(String tag, String name) {
-    final open = RegExp('<$tag\\s[^>]*android:name="\\.?$name"[^>]*>')
-        .firstMatch(manifest);
-    expect(open, isNotNull, reason: '$tag $name missing');
-    if (open!.group(0)!.endsWith('/>')) return open.group(0)!;
-    final end = manifest.indexOf('</$tag>', open.end);
-    return manifest.substring(open.start, end + '</$tag>'.length);
-  }
-
-  test('notification and exact-alarm permissions survive; keep-alive ones do not',
-      () {
-    for (final p in [
-      'POST_NOTIFICATIONS',
-      'SCHEDULE_EXACT_ALARM',
-      'USE_EXACT_ALARM',
-      'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
-    ]) {
-      expect(
-        manifest,
-        contains('<uses-permission android:name="android.permission.$p"'),
-        reason: p,
-      );
-    }
-    // P8 Task 12: no foreground service, wake lock or boot-restart apparatus.
+  test('notification permission survives; keep-alive and alarm ones do not', () {
+    expect(
+      manifest,
+      contains(
+        '<uses-permission android:name="android.permission.POST_NOTIFICATIONS"',
+      ),
+    );
     for (final p in [
       'FOREGROUND_SERVICE',
       'FOREGROUND_SERVICE_DATA_SYNC',
       'FOREGROUND_SERVICE_SPECIAL_USE',
       'WAKE_LOCK',
       'RECEIVE_BOOT_COMPLETED',
+      // P8 Task 14: schedules are server-executed; no local alarm runtime.
+      'SCHEDULE_EXACT_ALARM',
+      'USE_EXACT_ALARM',
     ]) {
       expect(
         manifest,
@@ -58,48 +48,44 @@ void main() {
     expect(manifest, isNot(contains('.AgentStopReceiver')));
   });
 
-  test('alarm receiver re-registers on time and zone changes', () {
-    final alarm = element('receiver', 'ScheduleAlarmReceiver');
-    expect(alarm, contains('android.intent.action.TIME_SET'));
-    expect(alarm, contains('android.intent.action.TIMEZONE_CHANGED'));
-    expect(alarm, contains('android:exported="false"'));
-  });
-
-  test('periodic fallback job is declared', () {
-    final job = element('service', 'ScheduleFallbackJob');
-    expect(job, contains('android.permission.BIND_JOB_SERVICE'));
-    expect(job, contains('android:exported="false"'));
-  });
-
-  test('Play overlay drops USE_EXACT_ALARM but keeps the user-granted one', () {
+  test('no local schedule receiver or fallback job is declared', () {
+    expect(manifest, isNot(contains('.ScheduleAlarmReceiver')));
+    expect(manifest, isNot(contains('.ScheduleFallbackJob')));
     expect(
-      play,
-      contains(
-        '<uses-permission android:name="android.permission.USE_EXACT_ALARM" tools:node="remove" />',
-      ),
+      File(
+        'android/app/src/main/kotlin/com/dhanuk/ovidai/ScheduleAlarmReceiver.kt',
+      ).existsSync(),
+      isFalse,
     );
-    expect(play, isNot(contains('SCHEDULE_EXACT_ALARM" tools:node="remove"')));
-    expect(play, isNot(contains('foregroundServiceType')));
+    expect(
+      File(
+        'android/app/src/main/kotlin/com/dhanuk/ovidai/ScheduleFallbackJob.kt',
+      ).existsSync(),
+      isFalse,
+    );
   });
 
-  test('exact alarms with permission check and inexact + job fallback', () {
-    final alarms = kt('ScheduleAlarmReceiver');
-    expect(alarms, contains('setExactAndAllowWhileIdle'));
-    expect(alarms, contains('setAndAllowWhileIdle'));
-    expect(alarms, contains('ScheduleFallbackJob.ensure(context)'));
-    expect(alarms, contains('canScheduleExactAlarms()'));
+  test('Play overlay no longer mentions exact alarms', () {
+    expect(play, isNot(contains('USE_EXACT_ALARM')));
+    expect(play, isNot(contains('SCHEDULE_EXACT_ALARM')));
+    expect(play, isNot(contains('foregroundServiceType')));
   });
 
   test('notification taps carry an app route into Dart', () {
     final activity = kt('MainActivity');
     expect(activity, contains('routeNotificationIntent'));
     expect(activity, contains('"onOpenRoute"'));
-    // P8 Task 12: tap routing is fed by FCM (PushService) instead of the
-    // deleted local run-state notification service.
+    // Tap routing is fed by FCM (PushService) instead of the deleted local
+    // run-state notification service.
     final dart = File('lib/core/cloud/push_service.dart').readAsStringSync();
     expect(dart, contains('onOpenRoute'));
     expect(File('lib/main.dart').readAsStringSync(),
         contains('PushService.I.onOpenRoute = _openRouteFromNotification'));
+  });
+
+  test('the IANA zone channel backs server daily/cron triggers', () {
+    expect(kt('MainActivity'), contains('"timeZoneId"'));
+    expect(kt('MainActivity'), contains('TimeZone.getDefault().id'));
   });
 
   test('notification resources: original chime and a monochrome status icon', () {

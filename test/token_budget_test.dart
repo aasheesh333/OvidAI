@@ -87,7 +87,6 @@ void main() {
       'repo_tree',
       'job_start',
       'job_kill',
-      'schedule_create',
       'todo_write',
       'skill',
       'dispatch_agent',

@@ -507,7 +507,7 @@ void main() {
     },
   );
 
-  for (final field in ['goal', 'schedule']) {
+  for (final field in ['goal', 'compactionState']) {
     for (final toList in [true, false]) {
       test(
         '$field isolated empty ${toList ? 'map to list' : 'list to map'} survives restart',
@@ -520,7 +520,7 @@ void main() {
           if (field == 'goal') {
             live.goal = nested;
           } else {
-            live.schedules.add(nested);
+            live.compactionState = nested;
           }
           await app.flushSessionPersistence();
           nested['value'] = toList ? <dynamic>[] : <String, dynamic>{};
@@ -531,7 +531,7 @@ void main() {
           final restored = app.sessionById(live.id)!;
           final value = field == 'goal'
               ? restored.goal!['value']
-              : restored.schedules.single['value'];
+              : restored.compactionState!['value'];
           expect(value, toList ? isA<List>() : isA<Map>());
           expect(value, isEmpty);
         },
@@ -539,42 +539,25 @@ void main() {
     }
   }
 
-  for (final field in ['schedule', 'todo']) {
-    test(
-      '$field isolated immutable row replacement survives restart',
-      () async {
-        var app = AppState.createForTest();
-        final live = app.activeSession!;
-        if (field == 'schedule') {
-          live.schedules.add(const {'id': 'schedule', 'enabled': false});
-        } else {
-          live.todos.add(const {'task': 'task', 'status': 'pending'});
-        }
-        await app.flushSessionPersistence();
-        if (field == 'schedule') {
-          live.schedules[0] = const {'id': 'schedule', 'enabled': true};
-        } else {
-          live.todos[0] = const {'task': 'task', 'status': 'completed'};
-        }
-        await app.persistSessions();
-        AppState.resetTestInstance();
-        app = AppState.createForTest();
-        await app.loadSessions();
-        final restored = app.sessionById(live.id)!;
-        if (field == 'schedule') {
-          expect(restored.schedules.single, {
-            'id': 'schedule',
-            'enabled': true,
-          });
-        } else {
-          expect(restored.todos.single, {
-            'task': 'task',
-            'status': 'completed',
-          });
-        }
-      },
-    );
-  }
+  test(
+    'todo isolated immutable row replacement survives restart',
+    () async {
+      var app = AppState.createForTest();
+      final live = app.activeSession!;
+      live.todos.add(const {'task': 'task', 'status': 'pending'});
+      await app.flushSessionPersistence();
+      live.todos[0] = const {'task': 'task', 'status': 'completed'};
+      await app.persistSessions();
+      AppState.resetTestInstance();
+      app = AppState.createForTest();
+      await app.loadSessions();
+      final restored = app.sessionById(live.id)!;
+      expect(restored.todos.single, {
+        'task': 'task',
+        'status': 'completed',
+      });
+    },
+  );
 
   test(
     'original pending flush captures unmaterialized parent and descendant deletion',
@@ -834,9 +817,9 @@ void main() {
       session.goal = {
         'nested': {'done': false},
       };
-      session.schedules.add({
+      session.compactionState = {
         'nested': {'enabled': false},
-      });
+      };
       await app.flushSessionPersistence();
       session.messages[0] = Message(
         role: 'assistant',
@@ -849,11 +832,11 @@ void main() {
         '<p>saved</p>',
       );
       (session.goal!['nested'] as Map)['done'] = true;
-      (session.schedules.single['nested'] as Map)['enabled'] = true;
+      (session.compactionState!['nested'] as Map)['enabled'] = true;
       await app.persistSessions();
       final row = await stored(session.id);
       expect(row['goal']['nested']['done'], true);
-      expect((row['schedules'] as List).single['nested']['enabled'], true);
+      expect(row['compactionState']['nested']['enabled'], true);
     },
   );
 

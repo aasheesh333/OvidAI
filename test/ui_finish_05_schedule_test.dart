@@ -1,4 +1,7 @@
-import 'dart:convert';
+// Finish-05 schedule layout coverage, migrated to the server-backed screen
+// (P8 Task 14). Kept: responsive details, every server field, inline edit
+// validation, error copy, and pause/resume/cancel mutations — all against a
+// fake P4 gateway.
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -6,11 +9,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/schedule_client.dart';
+import 'package:ovid_ai/core/distribution.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/schedule_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'support/schedule_fake.dart';
 
 const _description = 'Review the staging deployment and inspect the error '
     'budget before preparing a release summary. Include all unresolved issues, '
@@ -24,17 +30,35 @@ Future<void> _frames(WidgetTester tester) async {
   await tester.pump(const Duration(milliseconds: 350));
 }
 
-Future<void> _mount(
+Future<FakeScheduleGateway> _mount(
   WidgetTester tester, {
   Size size = const Size(1024, 768),
   double scale = 1,
   bool dark = true,
+  Map<String, dynamic>? schedule,
 }) async {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = size;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
   Aether.dark = dark;
+  final fake = FakeScheduleGateway([
+    schedule ??
+        scheduleJson(
+          title: 'Release operations',
+          description: _description,
+          trigger: {'kind': 'every', 'seconds': 3600},
+          maxRetries: 2,
+          nextRunAt: '2025-04-07T09:30:00.000Z',
+          lastResult: lastResultJson(
+            status: 'failed',
+            message: 'Provider unavailable before execution; no external action taken.',
+            ranLate: true,
+            finishedAt: '2025-04-07T09:00:05.000Z',
+          ),
+        ),
+  ]);
+  ScheduleClient.installForTest(fake.client);
   await tester.pumpWidget(MaterialApp(
     theme: Aether.theme(),
     builder: (context, child) => MediaQuery(
@@ -43,16 +67,21 @@ Future<void> _mount(
     ),
     home: const RepaintBoundary(
       key: _captureKey,
-      child: ScheduleScreen(sessionId: 'finish-05'),
+      child: ScheduleScreen(sessionId: 's'),
     ),
   ));
   await _frames(tester);
+  return fake;
 }
 
 Future<void> _reveal(WidgetTester tester, Finder finder) async {
   // Text entry schedules a post-frame caret reveal. Let it finish before
   // scrolling to another control, otherwise it can undo ensureVisible.
   await _frames(tester);
+  if (finder.evaluate().isEmpty) {
+    await tester.scrollUntilVisible(finder, 200);
+    await _frames(tester);
+  }
   await tester.ensureVisible(finder);
   await _frames(tester);
   expect(finder.hitTestable(), findsOneWidget);
@@ -69,43 +98,29 @@ Future<void> _menu(WidgetTester tester, String choice) async {
 
 void main() {
   late AppState app;
-  late Map<String, dynamic> task;
   late bool wasDark;
 
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
     wasDark = Aether.dark;
+    Distribution.thinOverrideForTest = true;
+    ScheduleClient.timeZoneOverrideForTest = 'UTC';
     app = AppState.createForTest();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
-    AgentService.I.schedules.stopped = false;
-    task = {
-      'id': 'saved-task',
-      'prompt': _description,
-      'status': 'pending',
-      'fireAt': '2025-04-07T09:30:00Z',
-      'every': 3600,
-      'timezone': 'fixed-instant',
-      'maxRetries': 2,
-      'attempt': 1,
-      'lastStatus': 'failed',
-      'startedAt': '2025-04-07T09:00:00Z',
-      'finishedAt': '2025-04-07T09:00:05Z',
-      'error': 'Provider unavailable before execution; no external action taken.',
-    };
     app.sessions.add(ChatSession(
-      id: 'finish-05', title: 'Release operations', model: 'm',
-    )..schedules.add(task));
-    app.activeSessionId = 'finish-05';
+      id: 's', title: 'Release operations', model: 'm',
+    ));
+    app.activeSessionId = 's';
   });
 
   tearDown(() {
-    AgentService.I.schedules.stopped = false;
+    Distribution.thinOverrideForTest = null;
+    ScheduleClient.timeZoneOverrideForTest = null;
     Aether.dark = wasDark;
     AppState.resetTestInstance();
   });
 
-  // Catches truncation, fixed-width detail rows and incorrect result field names.
+  // Catches truncation, fixed-width detail rows and incorrect result fields.
   for (final layout in [
     (size: const Size(360, 640), scale: 2.0, dark: true),
     (size: const Size(320, 640), scale: 1.0, dark: false),
@@ -113,7 +128,12 @@ void main() {
   ]) {
     testWidgets('saved details readable at ${layout.size} ${layout.scale}x',
         (tester) async {
-      await _mount(tester, size: layout.size, scale: layout.scale, dark: layout.dark);
+      await _mount(
+        tester,
+        size: layout.size,
+        scale: layout.scale,
+        dark: layout.dark,
+      );
       await _reveal(tester, find.text('Show details'));
       await tester.tap(find.text('Show details'));
       await _frames(tester);
@@ -127,17 +147,24 @@ void main() {
       await _frames(tester);
       await Scrollable.ensureVisible(tester.element(full), alignment: 1);
       await _frames(tester);
-      for (final label in ['Scheduled', 'Time zone', 'Next run', 'Last run', 'Retries', 'Last error', 'Raw spec']) {
+      for (final label in [
+        'Scheduled',
+        'Time zone',
+        'Next run',
+        'Last run',
+        'Retries',
+        'Last error',
+        'Raw spec',
+      ]) {
         await _reveal(tester, find.text(label));
       }
       expect(find.textContaining('Overdue by'), findsWidgets);
       expect(find.textContaining('UTC'), findsWidgets);
-      expect(find.textContaining('failed ·'), findsOneWidget);
+      expect(find.textContaining('failed ·'), findsWidgets);
       expect(find.textContaining('2025'), findsWidgets);
-      expect(find.textContaining('1/2'), findsOneWidget);
-      expect(find.text(task['error'] as String), findsOneWidget);
-      expect(find.textContaining('Every 1 h'), findsWidgets);
-      expect(find.text('Never run'), findsNothing);
+      expect(find.textContaining('Up to 2'), findsOneWidget);
+      expect(find.textContaining('every=3600s'), findsOneWidget);
+      expect(find.text('ran late'), findsOneWidget);
       expect(tester.takeException(), isNull);
 
       if (layout.size.width == 1024 &&
@@ -147,7 +174,8 @@ void main() {
           tester.element(find.text('Hide details')), alignment: 0.2,
         );
         await _frames(tester);
-        final boundary = tester.renderObject<RenderRepaintBoundary>(find.byKey(_captureKey));
+        final boundary =
+            tester.renderObject<RenderRepaintBoundary>(find.byKey(_captureKey));
         await tester.runAsync(() async {
           final image = await boundary.toImage(pixelRatio: 1);
           final data = await image.toByteData(format: ui.ImageByteFormat.png);
@@ -160,52 +188,61 @@ void main() {
     });
   }
 
-  testWidgets('daily due follows local calendar, retry follows stored instant',
-      (tester) async {
-    task.addAll({
-      'dailyAt': '09:30', 'every': null, 'localDate': '2032-06-15',
-      'fireAt': '2031-04-07T01:00:00Z', 'attempt': 0,
-    });
-    await _mount(tester);
-    expect(find.textContaining('Jun 15, 2032 at 9:30 AM'), findsOneWidget);
-    expect(find.textContaining('device-local'), findsOneWidget);
-    task['attempt'] = 1;
-    app.refresh();
-    await _frames(tester);
-    expect(find.textContaining('2032'), findsNothing);
-    expect(find.textContaining('2031'), findsOneWidget);
+  testWidgets('daily trigger renders the server nextRunAt', (tester) async {
+    await _mount(tester, schedule: scheduleJson(
+      title: 'Morning brief',
+      description: 'Summarise the inbox',
+      trigger: {'kind': 'daily_at', 'time': '09:30', 'tz': 'America/New_York'},
+      nextRunAt: '2032-06-15T13:30:00.000Z',
+    ));
+    expect(find.textContaining('Daily'), findsOneWidget);
+    expect(find.textContaining('America/New_York'), findsOneWidget);
+    expect(find.textContaining('2032'), findsWidgets);
   });
 
   testWidgets('paused and terminal tasks do not claim an automatic next run',
       (tester) async {
-    await _mount(tester);
-    for (final status in ['paused', 'failed', 'completed', 'cancelled', 'running']) {
-      task['status'] = status;
-      app.refresh();
+    final fake = await _mount(tester);
+    final row = fake.byId('sc1')!;
+    for (final status in ['paused', 'failed', 'completed', 'cancelled']) {
+      row['status'] = status;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ScheduleScreen(
+            key: ValueKey(status),
+            sessionId: 's',
+          ),
+        ),
+      );
       await _frames(tester);
       expect(find.textContaining('Next in'), findsNothing);
       expect(find.textContaining('Overdue by'), findsNothing);
     }
-    task.remove('lastStatus');
-    task.remove('finishedAt');
-    app.refresh();
+    row['lastResult'] = null;
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: ScheduleScreen(key: ValueKey('no-result'), sessionId: 's'),
+      ),
+    );
+    await _frames(tester);
     await tester.tap(find.text('Show details'));
     await _frames(tester);
-    expect(find.text('No result recorded'), findsOneWidget);
-    expect(find.text('Never run'), findsNothing);
+    expect(find.text('Never run'), findsOneWidget);
     await _reveal(tester, find.byTooltip('Task actions'));
     await tester.tap(find.byTooltip('Task actions'));
     await _frames(tester);
     final edit = tester.widget<PopupMenuItem<String>>(
-      find.ancestor(of: find.text('Edit'), matching: find.byType(PopupMenuItem<String>)),
+      find.ancestor(
+        of: find.text('Edit'),
+        matching: find.byType(PopupMenuItem<String>),
+      ),
     );
     expect(edit.enabled, isFalse);
-    expect(find.text('Pause'), findsOneWidget);
   });
 
   testWidgets('edit sheet supports keyboard, recurrence and inline validation at 2x',
       (tester) async {
-    await _mount(tester, size: const Size(360, 640), scale: 2);
+    final fake = await _mount(tester, size: const Size(360, 640), scale: 2);
     await _menu(tester, 'Edit');
     tester.view.viewInsets = const FakeViewPadding(bottom: 240);
     addTearDown(tester.view.resetViewInsets);
@@ -224,36 +261,35 @@ void main() {
     expect(tester.view.viewInsets.bottom, 240);
     await tester.tap(find.text('Save'));
     await _frames(tester);
-    await _reveal(tester, find.text('Pick a time of day (HH:mm, 00:00 to 23:59).'));
-    expect(task['every'], 3600);
+    await _reveal(
+      tester,
+      find.text('Pick a time of day (HH:mm, 00:00 to 23:59).'),
+    );
+    expect(fake.patchCalls, 0);
     await _reveal(tester, time);
     await tester.enterText(time, '09:45');
     await _reveal(tester, find.text('Save'));
     expect(tester.getBottomRight(find.text('Save')).dy, lessThanOrEqualTo(400));
     expect(tester.view.viewInsets.bottom, 240);
-    await tester.runAsync(() async {
-      await tester.tap(find.text('Save'));
-      await app.flushSessionPersistence();
-    });
+    await tester.tap(find.text('Save'));
     await _frames(tester);
-    expect(task['dailyAt'], '09:45');
-    expect(task['every'], isNull);
-    expect(task['timezone'], 'device-local');
-    expect(task['prompt'], _description);
-    await tester.runAsync(() async {
-      final prefs = await SharedPreferences.getInstance();
-      final saved = prefs.getStringList('ovid_sessions')!
-          .map((raw) => jsonDecode(raw) as Map<String, dynamic>)
-          .singleWhere((session) => session['id'] == 'finish-05');
-      expect((saved['schedules'] as List).single['dailyAt'], '09:45');
+    expect(fake.lastPatchBody!['trigger'], {
+      'kind': 'daily_at',
+      'time': '09:45',
+      'tz': 'UTC',
     });
+    expect(fake.lastPatchBody!['description'], _description);
     expect(find.text('Edit schedule'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
   testWidgets('one-off rejects invalid calendar then persists exact offset instant',
       (tester) async {
-    await _mount(tester);
+    final fake = await _mount(tester, schedule: scheduleJson(
+      title: 'Release operations',
+      description: _description,
+      trigger: {'kind': 'at', 'at': '2025-04-07T09:30:00.000Z'},
+    ));
     await _menu(tester, 'Edit');
     await tester.tap(find.text('One-off'));
     await _frames(tester);
@@ -265,62 +301,41 @@ void main() {
     await tester.tap(find.text('Save'));
     await _frames(tester);
     expect(find.textContaining('Invalid calendar date/time'), findsOneWidget);
-    expect(task['fireAt'], '2025-04-07T09:30:00Z');
+    expect(fake.patchCalls, 0);
     await _reveal(tester, time);
     await tester.enterText(time, '2032-06-15T09:45:30+05:30');
     await _reveal(tester, find.text('Save'));
-    await tester.runAsync(() async {
-      await tester.tap(find.text('Save'));
-      await app.flushSessionPersistence();
-    });
+    await tester.tap(find.text('Save'));
     await _frames(tester);
-    expect(task['fireAt'], '2032-06-15T04:15:30.000Z');
-    expect(task['dailyAt'], isNull);
-    expect(task['every'], isNull);
+    expect(fake.lastPatchBody!['trigger'], {
+      'kind': 'at',
+      'at': '2032-06-15T04:15:30.000Z',
+    });
     expect(find.text('Edit schedule'), findsNothing);
   });
 
-  testWidgets('edit service rejection remains inline without claiming saved',
+  testWidgets('service rejection remains inline without claiming saved',
       (tester) async {
-    await _mount(tester);
+    final fake = await _mount(tester);
     await _menu(tester, 'Edit');
-    task['status'] = 'running'; // Coordinator claimed it while the sheet was open.
+    fake.failPatchStatus = 400;
+    fake.failPatchMessage = 'Schedule is not editable.';
     await _reveal(tester, find.text('Save'));
     await tester.tap(find.text('Save'));
     await _frames(tester);
-    await _reveal(tester, find.text('Pause this task before editing it.'));
+    await _reveal(tester, find.text('Schedule is not editable.'));
     expect(find.textContaining('Bad state'), findsNothing);
     expect(find.text('Edit schedule'), findsOneWidget);
-    expect(task['status'], 'running');
-    expect(task['fireAt'], '2025-04-07T09:30:00Z');
+    expect(fake.byId('sc1')!['status'], 'pending');
   });
 
-  testWidgets('storage failure keeps edits open and restores original schedule',
+  testWidgets('empty title and short interval are rejected, minimum saves',
       (tester) async {
-    await _mount(tester);
+    final fake = await _mount(tester, size: const Size(320, 640), dark: false);
     await _menu(tester, 'Edit');
-    final prompt = find.byKey(const ValueKey('schedule-prompt'));
-    await tester.enterText(prompt, 'Unsaved change');
-    await _reveal(tester, find.text('Save'));
-    app.failNextSessionWriteForTest = true;
-    await tester.tap(find.text('Save'));
-    await _frames(tester);
-    // Raw StateError text is logged, not shown.
-    await _reveal(tester, find.text("That can't be done right now."));
-    expect(find.textContaining('Session storage unavailable'), findsNothing);
-    expect(find.text('Edit schedule'), findsOneWidget);
-    expect(task['prompt'], _description);
-    expect(task['fireAt'], '2025-04-07T09:30:00Z');
-    expect(tester.widget<TextField>(prompt).controller!.text, 'Unsaved change');
-  });
-
-  testWidgets('empty task and short interval are rejected, minimum interval saves',
-      (tester) async {
-    await _mount(tester, size: const Size(320, 640), dark: false);
-    await _menu(tester, 'Edit');
-    final prompt = find.byKey(const ValueKey('schedule-prompt'));
+    final title = find.byKey(const ValueKey('schedule-title'));
     final time = find.byKey(const ValueKey('schedule-time'));
-    await tester.enterText(prompt, '   ');
+    await tester.enterText(title, '   ');
     await _reveal(tester, find.text('Advanced'));
     await tester.tap(find.text('Advanced'));
     await _frames(tester);
@@ -330,76 +345,58 @@ void main() {
     await _reveal(tester, find.text('Save'));
     await tester.tap(find.text('Save'));
     await _frames(tester);
-    await _reveal(tester, find.text('Enter a task description.'));
+    await _reveal(tester, find.text('Enter a title.'));
     await _reveal(tester, find.text('The shortest interval is 5 minutes.'));
-    expect(task['every'], 3600);
-    await _reveal(tester, prompt);
-    await tester.enterText(prompt, 'Check release queue');
+    expect(fake.patchCalls, 0);
+
+    await _reveal(tester, title);
+    await tester.enterText(title, 'Check release queue');
     await _reveal(tester, time);
     await tester.enterText(time, '300');
     await _reveal(tester, find.byIcon(Icons.add));
     await tester.tap(find.byIcon(Icons.add));
     await _reveal(tester, find.text('Save'));
-    await tester.runAsync(() async {
-      await tester.tap(find.text('Save'));
-      await app.flushSessionPersistence();
-    });
+    await tester.tap(find.text('Save'));
     await _frames(tester);
-    expect(task['every'], 300);
-    expect(task['maxRetries'], 3);
-    expect(task['prompt'], 'Check release queue');
-    expect(DateTime.tryParse(task['fireAt'] as String), isNotNull);
+    expect(fake.lastPatchBody!['trigger'], {
+      'kind': 'every',
+      'seconds': 300,
+    });
+    expect(fake.lastPatchBody!['maxRetries'], 3);
+    expect(fake.lastPatchBody!['title'], 'Check release queue');
+    expect(fake.lastPatchBody!['description'], _description);
   });
 
-  testWidgets('pause resume and cancel mutate the saved task through real services',
-      (tester) async {
-    await _mount(tester);
+  testWidgets('pause resume and cancel mutate the saved task', (tester) async {
+    final fake = await _mount(tester, schedule: scheduleJson(
+      title: 'Release operations',
+      description: _description,
+      status: 'pending',
+    ));
+    final row = fake.byId('sc1')!;
+
     for (final action in [
       (label: 'Pause', status: 'paused'),
       (label: 'Resume', status: 'pending'),
-      (label: 'Cancel task', status: 'cancelled'),
     ]) {
       await _reveal(tester, find.byTooltip('Task actions'));
       await tester.tap(find.byTooltip('Task actions'));
       await _frames(tester);
-      if (action.status == 'cancelled') {
-        // Cancel is irreversible, so it confirms first (F-062).
-        await tester.tap(find.text(action.label));
-        await _frames(tester);
-        expect(find.text('Cancel this task?'), findsOneWidget);
-      }
-      await tester.runAsync(() async {
-        await tester.tap(find.text(action.label).last);
-        await app.flushSessionPersistence();
-      });
+      await tester.tap(find.text(action.label));
       await _frames(tester);
-      expect(task['status'], action.status);
+      expect(row['status'], action.status);
       expect(find.text(action.status), findsOneWidget);
-      expect(app.sessionById('finish-05')!.schedules.single['id'], 'saved-task');
     }
+
     await _reveal(tester, find.byTooltip('Task actions'));
     await tester.tap(find.byTooltip('Task actions'));
     await _frames(tester);
-    expect(find.text('Pause'), findsNothing);
-    expect(find.text('Resume'), findsNothing);
-    expect(find.text('Cancel'), findsNothing);
-    expect(find.text('Edit'), findsOneWidget);
-  });
-
-  testWidgets('resume while background is stopped shows copy and inline action',
-      (tester) async {
-    task['status'] = 'paused';
-    AgentService.I.schedules.stopped = true;
-    await _mount(tester);
-    await _menu(tester, 'Resume');
+    await tester.tap(find.text('Cancel task'));
     await _frames(tester);
-    expect(task['status'], 'paused');
-    await _reveal(
-      tester,
-      find.textContaining('Background execution is paused. Resume it'),
-    );
-    expect(find.textContaining('Bad state'), findsNothing);
-    expect(find.textContaining('StateError'), findsNothing);
-    expect(find.widgetWithText(TextButton, 'Resume background'), findsOneWidget);
+    expect(find.text('Cancel this task?'), findsOneWidget);
+    await tester.tap(find.text('Cancel task').last);
+    await _frames(tester);
+    expect(row['status'], 'cancelled');
+    expect(find.text('cancelled'), findsOneWidget);
   });
 }

@@ -1,116 +1,135 @@
-// Aether redesign — Schedule screen widget tests.
+// Aether redesign — Schedule screen widget tests (P8 Task 14).
 //
-// Covers the new premium layout: empty state, task card with status pill,
-// pretty recurrence string, next-run countdown, overdue state, popup-menu
-// actions (edit sheet, pause, resume, cancel) and background execution
-// toggle. Uses the existing test seams (AppState.createForTest,
-// AgentService.debugPauseScheduleTimerForTest) and the real singletons —
-// these are the same seams the legacy schedule_ui_test.dart uses.
+// The screen is server-backed: rows come from ScheduleClient (P4 REST) behind
+// `Distribution.cloudSchedules`. These tests use a fake gateway that mirrors
+// the built routes, so they exercise the real DTO parsing + bindings.
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/schedule_client.dart';
+import 'package:ovid_ai/core/distribution.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/schedule_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const _native = MethodChannel('ovid/native');
+import '../support/schedule_fake.dart';
 
-Future<void> _pumpScreen(WidgetTester tester) async {
+// The AetherStatusDot in the status strip has a looping pulse animation, so
+// pumpAndSettle would spin forever. Advance by a bounded duration instead.
+Future<void> _settle(WidgetTester tester) async {
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 350));
+  await tester.pump(const Duration(milliseconds: 350));
+}
+
+Future<FakeScheduleGateway> _pump(
+  WidgetTester tester,
+  List<Map<String, dynamic>> schedules,
+) async {
+  final fake = FakeScheduleGateway(schedules);
+  ScheduleClient.installForTest(fake.client);
   await tester.pumpWidget(
     const MaterialApp(home: ScheduleScreen(sessionId: 's')),
   );
-  await tester.pump();
-}
-
-// The AetherStatusDot inside the status strip has a looping pulse animation,
-// so pumpAndSettle would spin forever. Advance by a bounded duration instead.
-Future<void> _settle(WidgetTester tester) async {
-  await tester.pump(const Duration(milliseconds: 350));
-  await tester.pump(const Duration(milliseconds: 350));
+  await _settle(tester);
+  return fake;
 }
 
 void main() {
   late AppState app;
 
-  setUp(() async {
-    // Native schedule-alarm calls answer immediately so a Stop's serialized
-    // write never blocks a later Resume.
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(_native, (call) async => true);
+  setUp(() {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
+    Distribution.thinOverrideForTest = true;
+    ScheduleClient.timeZoneOverrideForTest = 'UTC';
     app = AppState.createForTest();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
-    AgentService.I.schedules.stopped = false;
     app.sessions.add(ChatSession(id: 's', title: 'My work', model: 'm'));
     app.activeSessionId = 's';
   });
 
   tearDown(() {
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(_native, null);
-    AgentService.I.schedules.stopped = false;
+    Distribution.thinOverrideForTest = null;
+    ScheduleClient.timeZoneOverrideForTest = null;
     AppState.resetTestInstance();
   });
 
-  testWidgets('renders Aether empty state when no tasks exist',
+  testWidgets('renders the Aether empty state when no tasks exist',
       (tester) async {
-    await _pumpScreen(tester);
+    await _pump(tester, []);
     expect(find.text('No scheduled tasks'), findsOneWidget);
     expect(find.textContaining('Ask the agent'), findsOneWidget);
     expect(find.byIcon(Icons.schedule), findsOneWidget);
-    expect(find.text('Background execution active'), findsOneWidget);
+    expect(find.text('Cloud scheduling active'), findsOneWidget);
   });
 
-  testWidgets('renders status pill, pretty recurrence and next-run countdown',
+  testWidgets('renders rows from the cloud client with status and countdown',
       (tester) async {
-    final s = app.sessionById('s')!;
-    final future = DateTime.now().toUtc().add(const Duration(hours: 2));
-    s.schedules.add({
-      'id': 'a',
-      'prompt': 'Review PR queue',
-      'status': 'pending',
-      'fireAt': future.toIso8601String(),
-      'dailyAt': '09:30',
-      'maxRetries': 1,
-      'attempt': 0,
-    });
-    await _pumpScreen(tester);
+    await _pump(tester, [
+      scheduleJson(
+        title: 'Review PR queue',
+        description: 'Open the queue and summarise',
+        trigger: {'kind': 'daily_at', 'time': '09:30', 'tz': 'UTC'},
+      ),
+    ]);
 
     expect(find.text('pending'), findsOneWidget);
     expect(find.text('Review PR queue'), findsOneWidget);
     expect(find.textContaining('Daily'), findsOneWidget);
     expect(find.textContaining('09:30'), findsOneWidget);
-    // "Next in 2h" (minute remainder may be present; the hour marker is stable).
     expect(find.textContaining('Next in'), findsOneWidget);
   });
 
-  testWidgets('renders overdue state when fireAt is in the past',
+  testWidgets('results feed shows lastResult.message and the ran-late badge',
       (tester) async {
-    final s = app.sessionById('s')!;
-    final past = DateTime.now().toUtc().subtract(const Duration(minutes: 4));
-    s.schedules.add({
-      'id': 'b',
-      'prompt': 'Overdue job',
-      'status': 'pending',
-      'fireAt': past.toIso8601String(),
-    });
-    await _pumpScreen(tester);
-    expect(find.textContaining('Overdue by'), findsOneWidget);
+    await _pump(tester, [
+      scheduleJson(
+        lastResult: lastResultJson(
+          message: 'Posted the digest',
+          ranLate: true,
+        ),
+      ),
+    ]);
+
+    expect(find.text('ran late'), findsOneWidget);
+    expect(find.textContaining('Posted the digest'), findsOneWidget);
+    expect(find.textContaining('Last run: succeeded'), findsOneWidget);
   });
 
-  testWidgets('edit sheet opens via menu and saves through editSchedule',
+  testWidgets('a schedule paused by the missed-run policy shows missed run',
       (tester) async {
-    final s = app.sessionById('s')!;
-    s.schedules.add({
-      'id': 'a',
-      'prompt': 'Original',
-      'status': 'pending',
-      'fireAt': '2026-10-04T09:30:00Z',
-    });
-    await _pumpScreen(tester);
+    await _pump(tester, [
+      scheduleJson(
+        status: 'paused',
+        pausedReason: 'missed_beyond_grace',
+      ),
+    ]);
+
+    expect(find.text('missed run'), findsOneWidget);
+    expect(find.textContaining('Missed while Ovid was offline'), findsOneWidget);
+  });
+
+  testWidgets('pull-to-refresh reloads from the server', (tester) async {
+    final fake = await _pump(tester, [
+      scheduleJson(title: 'First task'),
+    ]);
+    expect(fake.listCalls, 1);
+    expect(find.text('First task'), findsOneWidget);
+
+    fake.schedules.add(scheduleJson(id: 'sc2', title: 'Second task'));
+    await tester.fling(find.byType(ListView), const Offset(0, 320), 1200);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(fake.listCalls, greaterThan(1));
+    expect(find.text('Second task'), findsOneWidget);
+  });
+
+  testWidgets('edit sheet saves through PATCH /schedules/:id', (tester) async {
+    final fake = await _pump(tester, [
+      scheduleJson(title: 'Original', description: 'Original task'),
+    ]);
 
     await tester.tap(find.byIcon(Icons.more_horiz));
     await _settle(tester);
@@ -118,253 +137,138 @@ void main() {
     await _settle(tester);
 
     expect(find.text('Edit schedule'), findsOneWidget);
-    // Task field is the first TextField in the sheet.
-    await tester.enterText(find.byType(TextField).at(0), 'Rewritten task');
+    await tester.enterText(find.byKey(const ValueKey('schedule-title')), 'Rewritten');
+    await tester.enterText(
+      find.byKey(const ValueKey('schedule-prompt')),
+      'Rewritten task',
+    );
     await tester.tap(find.text('Advanced'));
     await _settle(tester);
+    await tester.tap(find.text('One-off'));
+    await tester.pump();
     await tester.enterText(
       find.byKey(const ValueKey('schedule-time')),
-      '2026-12-01T12:00:00Z',
+      '2031-12-01T12:00:00Z',
     );
     await tester.ensureVisible(find.text('Save'));
     await _settle(tester);
     await tester.tap(find.text('Save'));
     await _settle(tester);
-    await tester.pump(const Duration(milliseconds: 400));
 
-    expect(s.schedules.single['prompt'], 'Rewritten task');
-    expect(s.schedules.single['fireAt'], '2026-12-01T12:00:00.000Z');
-    expect(find.text('Rewritten task'), findsOneWidget);
+    expect(fake.patchCalls, 1);
+    expect(fake.lastPatchBody!['title'], 'Rewritten');
+    expect(fake.lastPatchBody!['description'], 'Rewritten task');
+    expect(fake.lastPatchBody!['trigger'], {
+      'kind': 'at',
+      'at': '2031-12-01T12:00:00.000Z',
+    });
+    expect(find.text('Rewritten'), findsOneWidget);
   });
 
-  testWidgets('pause via menu calls cancelTask(pause: true)', (tester) async {
-    final s = app.sessionById('s')!;
-    s.schedules.add({
-      'id': 'a',
-      'prompt': 'A task',
-      'status': 'pending',
-      'fireAt': '2026-12-01T12:00:00Z',
-    });
-    await _pumpScreen(tester);
+  testWidgets('pause and resume PATCH the status', (tester) async {
+    final fake = await _pump(tester, [scheduleJson()]);
+
     await tester.tap(find.byIcon(Icons.more_horiz));
     await _settle(tester);
     await tester.tap(find.text('Pause'));
     await _settle(tester);
-    expect(s.schedules.single['status'], 'paused');
-    expect(s.schedules.single['error'], 'Paused by user');
+    expect(fake.lastPatchBody, {'status': 'paused'});
+    expect(fake.byId('sc1')!['status'], 'paused');
     expect(find.text('paused'), findsOneWidget);
-  });
 
-  testWidgets('resume via menu calls resumeTask', (tester) async {
-    final s = app.sessionById('s')!;
-    s.schedules.add({
-      'id': 'a',
-      'prompt': 'A task',
-      'status': 'paused',
-      'error': 'Paused by user',
-      'fireAt': '2026-12-01T12:00:00Z',
-    });
-    await _pumpScreen(tester);
     await tester.tap(find.byIcon(Icons.more_horiz));
     await _settle(tester);
     await tester.tap(find.text('Resume'));
     await _settle(tester);
-    expect(s.schedules.single['status'], 'pending');
-    expect(s.schedules.single.containsKey('error'), isFalse);
+    expect(fake.lastPatchBody, {'status': 'pending'});
+    expect(fake.byId('sc1')!['status'], 'pending');
   });
 
-  testWidgets('cancel via menu calls cancelTask', (tester) async {
-    final s = app.sessionById('s')!;
-    s.schedules.add({
-      'id': 'a',
-      'prompt': 'A task',
-      'status': 'pending',
-      'fireAt': '2026-12-01T12:00:00Z',
-    });
-    await _pumpScreen(tester);
+  testWidgets('cancel confirms and DELETEs; cancelled history remains',
+      (tester) async {
+    final fake = await _pump(tester, [
+      scheduleJson(title: 'A task'),
+    ]);
+
     await tester.tap(find.byIcon(Icons.more_horiz));
     await _settle(tester);
     await tester.tap(find.text('Cancel task'));
     await _settle(tester);
-    // Cancelling is irreversible, so it confirms first.
     expect(find.text('Cancel this task?'), findsOneWidget);
-    await tester.tap(find.text('Cancel task'));
+    await tester.tap(find.text('Cancel task').last);
     await _settle(tester);
-    expect(s.schedules.single['status'], 'cancelled');
+
+    expect(fake.deleteCalls, 1);
+    expect(fake.byId('sc1')!['status'], 'cancelled');
     expect(find.text('cancelled'), findsOneWidget);
     expect(find.text('A task'), findsOneWidget);
   });
 
-  testWidgets(
-      'expanded details show full description, scheduled timestamp, recurrence, next-run, retries and raw spec',
-      (tester) async {
-    final s = app.sessionById('s')!;
-    final future = DateTime.now().toUtc().add(const Duration(hours: 3));
-    final longPrompt =
-        'Review the staging deployment, inspect error budget, '
-        'summarise release notes, then post to #ovid-release once green.';
-    s.schedules.add({
-      'id': 'a',
-      'prompt': longPrompt,
-      'status': 'pending',
-      'fireAt': future.toIso8601String(),
-      'dailyAt': '09:30',
-      'maxRetries': 2,
-      'attempt': 1,
-      'lastStatus': 'ok',
-      'lastRunAt':
-          DateTime.now().toUtc().subtract(const Duration(hours: 20))
-              .toIso8601String(),
-    });
-    await _pumpScreen(tester);
+  testWidgets('expanded details show the server fields', (tester) async {
+    await _pump(tester, [
+      scheduleJson(
+        title: 'Long task',
+        description: 'A much longer description that must survive expansion.',
+        trigger: {'kind': 'every', 'seconds': 3600},
+        maxRetries: 2,
+        lastResult: lastResultJson(message: 'All clear'),
+      ),
+    ]);
 
-    // Collapsed card ellipsizes the title line but the full description is
-    // only guaranteed once the user expands details.
     await tester.tap(find.text('Show details'));
     await _settle(tester);
 
-    // Full description visible verbatim. The card's title line also renders
-    // the (ellipsized) prompt, so both the title Text and the details Text
-    // are present.
-    expect(find.text(longPrompt), findsNWidgets(2));
-    expect(find.text('Description'), findsOneWidget);
-
-    // Readable local scheduled timestamp — the local year is stable enough.
-    final year = future.toLocal().year.toString();
-    expect(find.textContaining(year), findsWidgets);
-    expect(find.text('Scheduled'), findsOneWidget);
-
-    // Recurrence + next-run + retries + last-run + raw spec rows.
-    expect(find.text('Recurrence'), findsOneWidget);
-    expect(find.text('Next run'), findsOneWidget);
-    expect(find.text('Last run'), findsOneWidget);
-    expect(find.text('Retries'), findsOneWidget);
-    expect(find.text('Raw spec'), findsOneWidget);
-    expect(find.textContaining('1/2'), findsOneWidget);
-    expect(find.textContaining('dailyAt=09:30'), findsOneWidget);
-  });
-
-  testWidgets(
-      'expanded details show overdue label and local timestamp for past fireAt',
-      (tester) async {
-    final s = app.sessionById('s')!;
-    final past = DateTime.now().toUtc().subtract(const Duration(hours: 1));
-    s.schedules.add({
-      'id': 'b',
-      'prompt': 'Catch up on review',
-      'status': 'pending',
-      'fireAt': past.toIso8601String(),
-    });
-    await _pumpScreen(tester);
-    await tester.tap(find.text('Show details'));
-    await _settle(tester);
-    expect(find.textContaining('Overdue by'), findsWidgets);
-    expect(
-      find.textContaining(past.toLocal().year.toString()),
-      findsWidgets,
-    );
-  });
-
-  testWidgets('background Stop pauses schedules', (tester) async {
-    await _pumpScreen(tester);
-    expect(AgentService.I.schedules.stopped, isFalse);
-    await tester.tap(find.text('Stop background execution'));
-    await _settle(tester);
-    expect(find.text('Pause background execution?'), findsOneWidget);
-    await tester.tap(find.text('Pause schedules'));
-    await _settle(tester);
-    expect(AgentService.I.schedules.stopped, isTrue);
-    // The strip now shows the paused state and the Resume affordance.
-    expect(find.text('Background execution paused'), findsOneWidget);
-    expect(find.text('Resume background execution'), findsOneWidget);
-  });
-
-  testWidgets('Stop background confirms first; Cancel keeps the active run',
-      (tester) async {
-    final run = AgentService.I.runBucketForTest('s');
-    run.activeRunId = 'fake-run';
-    addTearDown(() {
-      run.activeRunId = null;
-      run.cancelRequested = false;
-    });
-    await _pumpScreen(tester);
-    await tester.tap(find.text('Stop background execution'));
-    await _settle(tester);
-    expect(find.text('Pause background execution?'), findsOneWidget);
-    expect(find.textContaining('across all chats'), findsOneWidget);
-    await tester.tap(find.text('Cancel'));
-    await _settle(tester);
-    expect(AgentService.I.schedules.stopped, isFalse);
-    expect(AgentService.I.busyFor('s'), isTrue);
-    expect(run.cancelRequested, isFalse);
-
-    // Confirming pauses schedules only: the user's reply keeps running.
-    await tester.tap(find.text('Stop background execution'));
-    await _settle(tester);
-    await tester.tap(find.text('Pause schedules'));
-    await _settle(tester);
-    expect(AgentService.I.schedules.stopped, isTrue);
-    expect(run.cancelRequested, isFalse);
-  });
-
-  testWidgets('Stop then Resume re-pends the tasks Stop paused',
-      (tester) async {
-    final s = app.sessionById('s')!;
-    final future = DateTime.now().toUtc().add(const Duration(hours: 2));
-    s.schedules.add({
-      'id': 'a',
-      'prompt': 'Daily digest',
-      'status': 'pending',
-      'fireAt': future.toIso8601String(),
-    });
-    s.schedules.add({
-      'id': 'b',
-      'prompt': 'Paused by me',
-      'status': 'paused',
-      'error': 'Paused by user',
-      'fireAt': future.toIso8601String(),
-    });
-    await _pumpScreen(tester);
-    await tester.tap(find.text('Stop background execution'));
-    await _settle(tester);
-    await tester.tap(find.text('Pause schedules'));
-    await _settle(tester);
-    expect(s.schedules.first['status'], 'paused');
-
-    await tester.tap(find.text('Resume background execution'));
-    // Resume awaits platform-channel and preferences I/O.
-    for (var i = 0; i < 5; i++) {
-      await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 20)),
-      );
-      await tester.pump();
+    for (final label in [
+      'Description',
+      'Scheduled',
+      'Time zone',
+      'Recurrence',
+      'Next run',
+      'Last run',
+      'Retries',
+      'Raw spec',
+    ]) {
+      expect(find.text(label), findsOneWidget, reason: label);
     }
-    await _settle(tester);
-    expect(AgentService.I.schedules.stopped, isFalse);
-    expect(s.schedules.first['status'], 'pending');
-    expect(s.schedules.first.containsKey('error'), isFalse);
-    // A task the user paused individually stays paused.
-    expect(s.schedules.last['status'], 'paused');
-    expect(find.text('Resumed 1 paused task.'), findsOneWidget);
+    expect(
+      find.text('A much longer description that must survive expansion.'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('every=3600s'), findsOneWidget);
+    expect(find.textContaining('Up to 2'), findsOneWidget);
+    expect(find.text('All clear'), findsOneWidget);
   });
 
-  testWidgets('Cancel task asks first; Keep task leaves it pending',
+  testWidgets('shows the cloud-empty state when cloud schedules are off',
       (tester) async {
-    final s = app.sessionById('s')!;
-    s.schedules.add({
-      'id': 'a',
-      'prompt': 'Keep me',
-      'status': 'pending',
-      'fireAt': '2026-12-01T12:00:00Z',
-    });
-    await _pumpScreen(tester);
-    await tester.tap(find.byIcon(Icons.more_horiz));
+    Distribution.thinOverrideForTest = false;
+    ScheduleClient.installForTest(
+      FakeScheduleGateway(const []).client,
+    );
+    await tester.pumpWidget(
+      const MaterialApp(home: ScheduleScreen(sessionId: 's')),
+    );
     await _settle(tester);
-    await tester.tap(find.text('Cancel task'));
+
+    expect(find.text('Schedules run in Ovid Cloud'), findsOneWidget);
+    expect(find.text('No scheduled tasks'), findsNothing);
+    expect(find.text('Cloud scheduling active'), findsNothing);
+  });
+
+  testWidgets('a failed load offers Retry', (tester) async {
+    final fake = FakeScheduleGateway(<Map<String, dynamic>>[]);
+    fake.failListStatus = 500;
+    ScheduleClient.installForTest(fake.client);
+    await tester.pumpWidget(
+      const MaterialApp(home: ScheduleScreen(sessionId: 's')),
+    );
     await _settle(tester);
-    expect(find.text('Cancel this task?'), findsOneWidget);
-    await tester.tap(find.text('Keep task'));
+
+    expect(find.text('Could not load schedules'), findsOneWidget);
+    fake.failListStatus = null;
+    fake.schedules.add(scheduleJson(title: 'Recovered'));
+    await tester.tap(find.text('Retry'));
     await _settle(tester);
-    expect(s.schedules.single['status'], 'pending');
+    expect(find.text('Recovered'), findsOneWidget);
   });
 }

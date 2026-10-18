@@ -1,41 +1,46 @@
-// Legacy schedule UI coverage, updated for the Aether redesign.
-//
-// The pre-redesign screen exposed inline tooltipped "Edit schedule" /
-// "Cancel schedule" icon buttons and a bare 2026-10-04 timestamp. Those
-// affordances are now a single popup-menu per task card, and the timestamp
-// is rendered as a readable local "Oct 4, 2026 at 9:30 AM" string. These
-// tests have been migrated to the new widgets without deleting coverage:
-// sidebar ordering, rendering of every real status, cancel flow preserving
-// cancelled history, and the edit sheet persisting prompt + fireAt.
+// Legacy schedule UI coverage, migrated to the server-backed screen (P8
+// Task 14). Kept: sidebar ordering/navigation, every real server status,
+// cancel history, and edit persistence — now asserted against the P4 REST
+// client rather than the deleted local task map.
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/schedule_client.dart';
+import 'package:ovid_ai/core/distribution.dart';
 import 'package:ovid_ai/core/state.dart';
-import 'package:ovid_ai/ui/sidebar.dart';
 import 'package:ovid_ai/ui/schedule_screen.dart';
+import 'package:ovid_ai/ui/sidebar.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'support/schedule_fake.dart';
 
 // The redesigned screen has a pulsing status dot; pumpAndSettle would spin
 // forever on it. Advance by a bounded duration instead.
 Future<void> _settle(WidgetTester tester) async {
+  await tester.pump();
   await tester.pump(const Duration(milliseconds: 350));
   await tester.pump(const Duration(milliseconds: 350));
 }
 
 void main() {
   late AppState app;
+  late FakeScheduleGateway fake;
+
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
+    Distribution.thinOverrideForTest = true;
+    ScheduleClient.timeZoneOverrideForTest = 'UTC';
     app = AppState.createForTest();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
-    AgentService.I.schedules.stopped = false;
     app.sessions.add(ChatSession(id: 's', title: 'My work', model: 'm'));
     app.activeSessionId = 's';
+    fake = FakeScheduleGateway([]);
+    ScheduleClient.installForTest(fake.client);
   });
+
   tearDown(() {
-    AgentService.I.schedules.stopped = false;
+    Distribution.thinOverrideForTest = null;
+    ScheduleClient.timeZoneOverrideForTest = null;
     AppState.resetTestInstance();
   });
 
@@ -54,105 +59,93 @@ void main() {
       ),
     );
     await tester.tap(find.text('Schedule'));
-    // Route transition + initial frame; pumpAndSettle would spin on the
-    // pulsing status dot of the destination screen.
     await _settle(tester);
     await _settle(tester);
-    expect(find.text('Schedule \u00B7 My work'), findsOneWidget);
+    expect(find.text('Schedule · My work'), findsOneWidget);
     expect(find.textContaining('Ask the agent'), findsOneWidget);
   });
 
-  testWidgets('renders real statuses, readable date and task actions menu',
+  testWidgets('renders every server status and the task actions menu',
       (tester) async {
-    final s = app.sessionById('s')!;
     for (final status in [
       'pending',
-      'running',
+      'paused',
       'completed',
       'failed',
-      'paused',
+      'cancelled',
     ]) {
-      s.schedules.add({
-        'id': status,
-        'prompt': '$status task',
-        'status': status,
-        'fireAt': '2026-10-04T09:30:00Z',
-      });
+      fake.schedules.add(scheduleJson(
+        id: status,
+        title: '$status task',
+        status: status,
+      ));
     }
     await tester.pumpWidget(
       const MaterialApp(home: ScheduleScreen(sessionId: 's')),
     );
     await _settle(tester);
+
     // The first few cards fit the viewport.
     expect(find.text('pending'), findsOneWidget);
-    expect(find.text('running'), findsOneWidget);
-    // Readable local timestamp (year 2026 is stable across time zones for
-    // 2026-10-04T09:30 UTC).
+    expect(find.text('paused'), findsOneWidget);
     expect(find.textContaining('2026'), findsWidgets);
-    // Scroll the lazy ListView to confirm every status pill is rendered.
-    for (final status in ['completed', 'failed', 'paused']) {
+    for (final status in ['completed', 'failed', 'cancelled']) {
       await tester.scrollUntilVisible(find.text('$status task'), 200);
       expect(find.text(status), findsOneWidget);
     }
-    // Per-task actions menu replaces the old tooltipped icon buttons.
     expect(find.byTooltip('Task actions'), findsWidgets);
   });
 
   testWidgets('cancel retains visible cancelled history', (tester) async {
-    final s = app.sessionById('s')!;
-    s.schedules.add({
-      'id': 'a',
-      'prompt': 'My task',
-      'status': 'pending',
-      'fireAt': '2026-10-04T09:30:00Z',
-    });
+    fake.schedules.add(scheduleJson(title: 'My task'));
     await tester.pumpWidget(
       const MaterialApp(home: ScheduleScreen(sessionId: 's')),
     );
     await _settle(tester);
+
     await tester.tap(find.byIcon(Icons.more_horiz));
     await _settle(tester);
-    // Cancel is irreversible, so it confirms first (F-062).
     await tester.tap(find.text('Cancel task'));
     await _settle(tester);
     await tester.tap(find.text('Cancel task').last);
     await _settle(tester);
-    expect(s.schedules.single['status'], 'cancelled');
+
+    expect(fake.byId('sc1')!['status'], 'cancelled');
     expect(find.text('cancelled'), findsOneWidget);
     expect(find.text('My task'), findsOneWidget);
   });
 
-  testWidgets('editing persists new prompt and time', (tester) async {
-    final s = app.sessionById('s')!;
-    s.schedules.add({
-      'id': 'a',
-      'prompt': 'My task',
-      'status': 'pending',
-      'fireAt': '2026-10-04T09:30:00Z',
-    });
+  testWidgets('editing persists the new title and time', (tester) async {
+    fake.schedules.add(scheduleJson(title: 'My task', description: 'Do it'));
     await tester.pumpWidget(
       const MaterialApp(home: ScheduleScreen(sessionId: 's')),
     );
     await _settle(tester);
+
     await tester.tap(find.byIcon(Icons.more_horiz));
     await _settle(tester);
     await tester.tap(find.text('Edit'));
     await _settle(tester);
     expect(find.text('Edit schedule'), findsOneWidget);
-    await tester.enterText(find.byType(TextField).at(0), 'Updated task');
+    await tester.enterText(find.byKey(const ValueKey('schedule-title')), 'Updated');
     await tester.tap(find.text('Advanced'));
     await _settle(tester);
+    await tester.tap(find.text('One-off'));
+    await tester.pump();
     await tester.enterText(
       find.byKey(const ValueKey('schedule-time')),
-      '2026-12-01T12:00:00Z',
+      '2031-12-01T12:00:00Z',
     );
     await tester.ensureVisible(find.text('Save'));
     await _settle(tester);
     await tester.tap(find.text('Save'));
     await _settle(tester);
-    await tester.pump(const Duration(milliseconds: 400));
-    expect(s.schedules.single['prompt'], 'Updated task');
-    expect(s.schedules.single['fireAt'], '2026-12-01T12:00:00.000Z');
-    expect(find.text('Updated task'), findsOneWidget);
+
+    expect(fake.lastPatchBody!['title'], 'Updated');
+    expect(fake.lastPatchBody!['trigger'], {
+      'kind': 'at',
+      'at': '2031-12-01T12:00:00.000Z',
+    });
+    expect(find.text('Updated'), findsOneWidget);
   });
 }

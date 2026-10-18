@@ -56,15 +56,14 @@ abstract class AgentSurface extends ChangeNotifier {
   void hardStopAll();
 
   /// Starts a turn. The local-only parameters ([freshTurn],
-  /// [expandRefsFor], [scheduledTask]) are accepted for AgentService parity;
-  /// the cloud facade forwards only the prompt and attachments.
+  /// [expandRefsFor]) are accepted for AgentService parity; the cloud facade
+  /// forwards only the prompt and attachments.
   Future<void> runTask(
     String originalPrompt, {
     String? sessionId,
     bool freshTurn = true,
     ChatSession? expandRefsFor,
     List<({String name, String path, int size})>? attachments,
-    Map<String, dynamic>? scheduledTask,
   });
 
   /// Live status line for [sessionId] ("retrying in 9s…"), or null.

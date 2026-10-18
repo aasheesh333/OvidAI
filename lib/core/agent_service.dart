@@ -21,7 +21,6 @@ import 'format.dart';
 import 'model_failure.dart';
 import 'voice_input_service.dart';
 import 'background_notifications.dart';
-import 'schedule_coordinator.dart';
 import 'state.dart';
 import 'usage_attempt.dart';
 import 'usage_attempt_recorder.dart';
@@ -1013,7 +1012,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
       unawaited(restoreRunCheckpoints());
       restoreSubagentHandles();
       _recoverInterruptedRuns();
-      unawaited(initializeSchedules());
     };
     // Composer commands + skills catalog.
     CommandService.I.registerBuiltins();
@@ -1056,13 +1054,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
     McpClientRequests.I.rootsProvider ??= _mcpRoots;
     McpClientRequests.I.samplingApprover ??= _approveMcpSampling;
     McpClientRequests.I.sampler ??= _runMcpSampling;
-  }
-
-  @override
-  void dispose() {
-    _scheduleTimer?.cancel();
-    _scheduleTimer = null;
-    super.dispose();
   }
 
   static final AgentService I = AgentService._();
@@ -1662,11 +1653,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   /// Returns whether a queued continuation was preserved.
   @override
   bool stopRequested({required String sessionId}) {
-    for (final e in schedules.entries().where(
-      (e) => e.sessionId == sessionId && e.task['status'] == 'running',
-    )) {
-      unawaited(schedules.cancelTask(e, pause: true));
-    }
     final r = _runs[sessionId];
     if (r == null) return false;
     // Control mode was removed in P8 Task 13; no overlay/device-action
@@ -8025,60 +8011,6 @@ user which one instead of assuming this one.''';
     {
       'type': 'function',
       'function': {
-        'name': 'schedule_create',
-        'description':
-            'Schedule a task in this session. Supply exactly one: after_seconds, '
-            'at (local YYYY-MM-DD HH:mm or ISO-8601 with offset), every_seconds '
-            '(fixed interval, min 300), daily_at (HH:mm device-local calendar time). '
-            'Runs in background while the runtime is available; Android may delay '
-            'or stop it. Overdue tasks run on reopen. Interrupted executions pause '
-            'for review and are never automatically replayed. max_retries (0–3, '
-            'default 0) only retries failures known to precede execution.',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'prompt': {
-              'type': 'string',
-              'description': 'What to do when the reminder fires',
-            },
-            'after_seconds': {'type': 'integer'},
-            'at': {'type': 'string', 'description': '"YYYY-MM-DD HH:MM"'},
-            'every_seconds': {'type': 'integer'},
-            'daily_at': {'type': 'string'},
-            'max_retries': {'type': 'integer', 'minimum': 0, 'maximum': 3},
-          },
-          'required': ['prompt'],
-        },
-      },
-    },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'schedule_list',
-        'description':
-            'List this session\'s schedules, statuses and next dates.',
-        'parameters': {'type': 'object', 'properties': {}},
-      },
-    },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'schedule_delete',
-        'description':
-            'Delete one reminder by the exact id from schedule_create/'
-            'schedule_list.',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'id': {'type': 'string'},
-          },
-          'required': ['id'],
-        },
-      },
-    },
-    {
-      'type': 'function',
-      'function': {
         'name': 'session_read',
         'description':
             'Read a transcript by session_id, with offset/limit paging. '
@@ -10169,7 +10101,6 @@ user which one instead of assuming this one.''';
     bool freshTurn = true,
     ChatSession? expandRefsFor,
     List<({String name, String path, int size})>? attachments,
-    Map<String, dynamic>? scheduledTask,
   }) async {
     if (_runChainStale || !AppState.I.sessionAccountReady) return;
     final s = sessionId == null
@@ -10209,7 +10140,6 @@ user which one instead of assuming this one.''';
         'run already active for this session — refusing re-entry',
         sessionId: s.id,
       );
-      if (scheduledTask != null) throw StateError('Session is already busy');
       return;
     }
     final provider = AppState.I.providerForSession(s);
@@ -10223,7 +10153,6 @@ user which one instead of assuming this one.''';
           ? 'Add an API key for ${provider.name} before sending a message.'
           : 'The selected provider is not configured correctly.';
       _appendAssistant('Provider setup required: $error', session: s);
-      if (scheduledTask != null) throw StateError(error);
       return;
     }
     if (provider.id == AppState.ovidCloudProviderId &&
@@ -10233,12 +10162,7 @@ user which one instead of assuming this one.''';
           'Ovid Cloud is still connecting your account. Try again in a moment.';
       unawaited(OvidCloudService.I.ensureConnected());
       _appendAssistant('Provider setup required: $error', session: s);
-      if (scheduledTask != null) throw StateError(error);
       return;
-    }
-    if (scheduledTask != null &&
-        (schedules.stopped || scheduledTask['status'] != 'running')) {
-      throw StateError('Scheduled execution stopped before admission');
     }
     final preset = PresetRegistry.byId(s.presetId);
     final route = _RequestRoute(
@@ -10264,7 +10188,6 @@ user which one instead of assuming this one.''';
           freshTurn: freshTurn,
           expandRefsFor: expandRefsFor,
           attachments: attachments,
-          scheduledTask: scheduledTask,
         );
       } finally {
         // Preparation may block/fail/stop before the body owns cleanup.
@@ -10273,8 +10196,8 @@ user which one instead of assuming this one.''';
           notifyListeners();
           _scheduleQueuedContinuation(s.id);
         }
-        // Scheduled runs report through the scheduler's own notification.
-        if (scheduledTask == null && epoch == bucket.runEpoch) {
+        // Scheduled runs report through the server scheduler's notification.
+        if (epoch == bucket.runEpoch) {
           _notifyRunFinished(s, bucket, messagesBefore);
         }
       }
@@ -10334,43 +10257,12 @@ user which one instead of assuming this one.''';
     );
   }
 
-  void _onScheduleResult(
-    ScheduleEntry entry,
-    ScheduleResult result,
-    bool willRetry,
-  ) {
-    if (willRetry) return;
-    final s = AppState.I.sessionById(entry.sessionId);
-    final success = result.status == 'completed';
-    String? summary;
-    if (success && s != null) {
-      summary = s.messages
-          .lastWhere(
-            (m) => m.role == 'assistant' && m.content.trim().isNotEmpty,
-            orElse: () => Message(role: 'assistant', content: ''),
-          )
-          .content;
-    }
-    unawaited(
-      BackgroundNotifier.I.post(
-        OvidNotification.scheduleResult(
-          sessionId: entry.sessionId,
-          prompt: '${entry.task['prompt'] ?? ''}',
-          success: success,
-          summary: summary,
-          error: result.error,
-        ),
-      ),
-    );
-  }
-
   Future<void> _prepareRunTask(
     String originalPrompt,
     _RunCtx ctx, {
     required bool freshTurn,
     ChatSession? expandRefsFor,
     List<({String name, String path, int size})>? attachments,
-    Map<String, dynamic>? scheduledTask,
   }) async {
     final s = ctx.session;
     final bucket = ctx.run;
@@ -10429,7 +10321,6 @@ user which one instead of assuming this one.''';
         // generic failure.
         if (res.blockedReason != null) {
           lastError = 'Prompt blocked by a plugin hook: ${res.blockedReason}';
-          if (scheduledTask != null) _runFor(s.id).lastError = lastError;
           _emit('err', lastError!);
           return;
         }
@@ -10447,10 +10338,6 @@ user which one instead of assuming this one.''';
     // carrying this run's context (bucket + session + provider). Every
     // async continuation — SSE stream handlers, tool dispatch, subagent
     // loops — inherits it, so two runs never see each other's state.
-    if (scheduledTask != null &&
-        (schedules.stopped || scheduledTask['status'] != 'running')) {
-      throw StateError('Scheduled execution stopped during preparation');
-    }
     if (ctx.route.temperature != null) {
       _emitToRun(
         bucket,
@@ -10572,12 +10459,6 @@ can drive there yourself with the device_* tools):
         'ACTIVE GOAL (round ${s.goal!['round']}): "${s.goal!['objective']}". '
         'This user message is a goal round — work toward the objective, then '
         'update_goal with progress. Do not restate the goal; just advance it.',
-      );
-    }
-    if (s.schedules.isNotEmpty) {
-      buf.writeln(
-        'SESSION REMINDERS (${s.schedules.length}): When a [reminder] message '
-        'arrives, treat its prompt as a user request and act on it.',
       );
     }
     if (s.todos.isNotEmpty) {
@@ -11621,7 +11502,6 @@ ${await _agentsMdBlock()}
         // LLM session title (the title generator parity): one cheap background call after
         // the first real exchange — fire-and-forget, heuristic stays on fail.
         unawaited(maybeGenerateSessionTitle(ctx.session));
-        _startScheduleTimer();
         notifyListeners();
         // Queue auto-continue. On a Stop the scheduler already promoted the
         // next message (idempotent, so this is a no-op then); on a normal
@@ -16321,15 +16201,6 @@ ${await _agentsMdBlock()}
       case 'update_goal':
         return _handleUpdateGoal(args);
 
-      case 'schedule_create':
-        return _handleScheduleCreate(args);
-
-      case 'schedule_list':
-        return _handleScheduleList();
-
-      case 'schedule_delete':
-        return _handleScheduleDelete(args);
-
       case 'job_start':
         return await _handleJobStart(args);
 
@@ -17545,8 +17416,6 @@ ${await _agentsMdBlock()}
       case 'memory_save':
       case 'create_goal':
       case 'update_goal':
-      case 'schedule_create':
-      case 'schedule_delete':
         // Page interactions can submit forms/press buy buttons — blocked.
         return roDenied;
       case 'browser_cookies':
@@ -17869,7 +17738,6 @@ ${await _agentsMdBlock()}
             args['delete'] ??
             (args['clear'] == true ? 'clear' : (args['get'] ?? 'all')),
       'create_goal' => args['objective'],
-      'schedule_create' => args['prompt'],
       'memory_save' => args['content'],
       _ => args['path'] ?? args['pattern'] ?? args['file'],
     };
@@ -18006,7 +17874,6 @@ ${await _agentsMdBlock()}
       'ralph' => 'loop',
       'commit' || 'repo_sync' || 'repo_tree' => 'git',
       'create_goal' || 'update_goal' || 'get_goal' => 'goal',
-      'schedule_create' || 'schedule_list' || 'schedule_delete' => 'schedule',
       'memory_save' => 'memory',
       'read_attachment' || 'preview' => 'read',
       _ => 'api',
@@ -18049,9 +17916,6 @@ ${await _agentsMdBlock()}
     'create_goal' => 'Create goal',
     'update_goal' => 'Update goal',
     'get_goal' => 'Goal',
-    'schedule_create' => 'Create reminder',
-    'schedule_list' => 'Reminders',
-    'schedule_delete' => 'Delete reminder',
     'browser_navigate' => 'Navigate',
     'browser_click' => 'Click',
     'browser_type' => 'Type',
@@ -20304,248 +20168,14 @@ ${await _agentsMdBlock()}
               'report to the user.';
   }
 
-  // ── SCHEDULES (the reminder schedule coordinator schedule equivalent) ──
-  Future<String> _handleScheduleCreate(Map<String, dynamic> args) async {
-    final s = _runSession;
-    if (s == null) return 'No active session.';
-    try {
-      final task = schedules.create(args);
-      s.schedules.add(task);
-      try {
-        await _persistSchedules();
-      } catch (_) {
-        s.schedules.remove(task);
-        rethrow;
-      }
-      _schedulesChanged();
-      return 'Schedule ${task['id']} saved — ${task['status']}; next '
-          '${task['fireAt']} (${task['timezone']}). Background timing is best-effort.';
-    } catch (e) {
-      return 'Schedule not created: $e';
-    }
-  }
-
-  String _handleScheduleList() {
-    final s = _runSession;
-    if (s == null || s.schedules.isEmpty) {
-      return 'No reminders in this session.';
-    }
-    return s.schedules
-        .map(
-          (r) =>
-              '${r['id']} — '
-              '${r['status'] ?? 'pending'}; next ${r['fireAt']}; '
-              '${r['dailyAt'] != null
-                  ? 'daily ${r['dailyAt']} device-local'
-                  : r['every'] != null
-                  ? 'every ${r['every']}s'
-                  : 'one-off'}'
-              ' — ${r['prompt']}',
-        )
-        .join('\n');
-  }
-
-  Future<String> _handleScheduleDelete(Map<String, dynamic> args) async {
-    final id = args['id'] as String;
-    final s = _runSession;
-    if (s == null) return 'No active session.';
-    final matches = s.schedules.where((r) => r['id'] == id);
-    if (matches.isEmpty) return 'Schedule $id not found.';
-    await schedules.cancelTask(ScheduleEntry(s.id, matches.first));
-    return 'Schedule $id cancelled';
-  }
-
-  Timer? _scheduleTimer;
-  bool _scheduleTimerPaused = false;
-  bool _schedulesReady = false;
-  Future<void>? _scheduleInitialization;
-  DateTime? _armedSchedule;
-  DateTime? _nativeArmedSchedule;
-  static const _scheduleChannel = MethodChannel('ovid/native');
-
-  late final ScheduleCoordinator schedules = ScheduleCoordinator(
-    entries: () => AppState.I.sessions.expand(
-      (s) => s.schedules.map((t) => ScheduleEntry(s.id, t)),
-    ),
-    clock: DateTime.now,
-    persist: _persistSchedules,
-    isBusy: busyFor,
-    execute: _executeSchedule,
-    cancel: (sid) {
-      final run = _runs[sid];
-      if (run != null) {
-        _queueClear(run);
-        // The coordinator has already marked this task paused/cancelled.
-        // Reuse Control's native cancellation as well as run-tree teardown.
-        stopRequested(sessionId: sid);
-      }
-    },
-    changed: _schedulesChanged,
-    onResult: _onScheduleResult,
-  );
-
-  /// Completes once schedules were recovered (or recovery failed) after the
-  /// sessions loaded. main.dart uses it to settle a headless boot.
-  Future<void> get schedulesSettled => _schedulesSettled.future;
-  final Completer<void> _schedulesSettled = Completer<void>();
-
-  Future<void> _persistSchedules() async {
-    await AppState.I.flushSessionPersistence();
-    if (AppState.I.lastSessionPersistFailed) {
-      throw StateError('Session storage unavailable');
-    }
-  }
-
-  Future<void> initializeSchedules() =>
-      _scheduleInitialization ??= _initializeSchedules();
-
-  Future<void> _initializeSchedules() async {
-    try {
-      await schedules.recover();
-      _schedulesReady = true;
-      await _syncScheduleAlarm(schedules.nextWake);
-      _startScheduleTimer();
-    } catch (e) {
-      Diag.swallow('schedule.recover', e);
-    } finally {
-      if (!_schedulesSettled.isCompleted) _schedulesSettled.complete();
-    }
-  }
-
-  void _schedulesChanged() {
-    AppState.I.refresh();
-    notifyListeners();
-    _startScheduleTimer();
-  }
-
-  /// One deadline, no polling and no model calls when no task is due.
-  void _startScheduleTimer() {
-    if (!_schedulesReady || _scheduleTimerPaused || schedules.dispatching) {
-      return;
-    }
-    final next = schedules.nextWake;
-    if (next == _armedSchedule && (_scheduleTimer?.isActive ?? false)) return;
-    _scheduleTimer?.cancel();
-    _scheduleTimer = null;
-    _armedSchedule = next;
-    if (next != _nativeArmedSchedule) {
-      _nativeArmedSchedule = next;
-      unawaited(_syncScheduleAlarm(next));
-    }
-    if (next == null) return;
-    final delay = next.difference(DateTime.now());
-    _scheduleTimer = Timer(delay.isNegative ? Duration.zero : delay, () {
-      _armedSchedule = null;
-      unawaited(wakeSchedules());
-    });
-  }
-
-  Future<void> _syncScheduleAlarm(DateTime? next) async {
-    try {
-      await _scheduleChannel.invokeMethod('scheduleAlarm', {
-        'at': next?.millisecondsSinceEpoch,
-      });
-    } on MissingPluginException {
-      // Desktop has only the live-process deadline timer.
-    } catch (e) {
-      Diag.swallow('schedule.alarm', e);
-    }
-  }
-
-  Future<void> wakeSchedules() async {
-    if (!_schedulesReady || _scheduleTimerPaused) return;
-    await schedules.tick();
-    _startScheduleTimer();
-  }
-
-  Future<void> stopScheduledBackground() async {
-    // Stop is synchronous up to the persistence await, beating any pending claim.
-    await schedules.stop();
-    await _syncScheduleAlarm(null);
-  }
-
-  /// Resumes background execution and re-pends the tasks Stop paused.
-  /// Returns how many tasks were resumed.
-  Future<int> resumeScheduledBackground() async {
-    final resumed = await schedules.resumeStopped();
-    _schedulesChanged();
-    return resumed;
-  }
-
-  Future<void> editSchedule(
-    ScheduleEntry entry,
-    Map<String, dynamic> args,
-  ) async {
-    if (entry.task['status'] == 'running') {
-      throw StateError('Pause the task before editing');
-    }
-    final replacement = schedules.create(args);
-    replacement['id'] = entry.task['id'];
-    final old = Map<String, dynamic>.of(entry.task);
-    entry.task
-      ..clear()
-      ..addAll(replacement);
-    try {
-      await _persistSchedules();
-    } catch (_) {
-      entry.task
-        ..clear()
-        ..addAll(old);
-      rethrow;
-    }
-    _schedulesChanged();
-  }
-
+  /// Compatibility seam retained until Task 19 deletes AgentService.
+  ///
+  /// The local scheduler runtime is gone (P8 Task 14): schedules execute in
+  /// Ovid Cloud, so there is no local timer to pause. Unrelated suites call
+  /// this in setUp; keeping the no-op avoids touching their files for a
+  /// member that dies with this class.
   @visibleForTesting
-  void debugPauseScheduleTimerForTest(bool paused) {
-    _scheduleTimerPaused = paused;
-    if (paused) {
-      _scheduleTimer?.cancel();
-      _scheduleTimer = null;
-    } else {
-      _startScheduleTimer();
-    }
-  }
-
-  Future<ScheduleResult> _executeSchedule(ScheduleEntry entry) async {
-    final s = AppState.I.sessionById(entry.sessionId);
-    if (s == null) return const ScheduleResult.failed('Session deleted');
-    final provider = AppState.I.providerForSession(s);
-    if (provider == null ||
-        !provider.isConfigured ||
-        s.model.isEmpty ||
-        s.model == 'Select a provider') {
-      return const ScheduleResult.retryable('Provider/model setup required');
-    }
-    if (busyFor(s.id)) {
-      return const ScheduleResult.retryable('Session became busy');
-    }
-    if (schedules.stopped || entry.task['status'] != 'running') {
-      return const ScheduleResult.failed('Stopped before execution');
-    }
-    final delivery =
-        '[schedule ${entry.task['id']} / ${entry.task['runId']} — '
-        'previously scheduled task; apply the normal tool and approval policies:]\n'
-        '${entry.task['prompt']}';
-    // Do NOT yank the user to another chat. Background work stays session-owned.
-    s.messages.add(Message(role: 'user', content: delivery));
-    await _persistSchedules();
-    // Stop can land during the transcript write as well as the claim write.
-    if (schedules.stopped || entry.task['status'] != 'running') {
-      return const ScheduleResult.failed('Stopped before execution');
-    }
-    _runFor(s.id).lastError = null;
-    await runTask(
-      delivery,
-      sessionId: s.id,
-      freshTurn: false,
-      scheduledTask: entry.task,
-    );
-    final error = _runs[s.id]?.lastError;
-    return error == null
-        ? const ScheduleResult.completed()
-        : ScheduleResult.failed(error);
-  }
+  void debugPauseScheduleTimerForTest(bool paused) {}
 
   // ── Subagents ─────────────────────────────────────────────────────────
   // A subagent is a REAL session (own transcript, tool cards, streaming,

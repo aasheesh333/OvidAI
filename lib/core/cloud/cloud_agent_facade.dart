@@ -497,11 +497,10 @@ class CloudAgentFacade extends ChangeNotifier
     bool freshTurn = true,
     ChatSession? expandRefsFor,
     List<({String name, String path, int size})>? attachments,
-    Map<String, dynamic>? scheduledTask,
   }) async {
-    // freshTurn/expandRefsFor/scheduledTask are local-loop concepts; the
-    // cloud run is admitted server-side. They stay in the signature for
-    // AgentSurface parity only.
+    // freshTurn/expandRefsFor are local-loop concepts; the cloud run is
+    // admitted server-side. They stay in the signature for AgentSurface
+    // parity only.
     String? id = _serverId(sessionId);
     if (id == null) {
       _recordError('', 'no_session', 'No chat session is selected.');
