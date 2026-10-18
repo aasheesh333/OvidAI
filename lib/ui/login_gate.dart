@@ -5,13 +5,19 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/account_service.dart';
+import '../core/cloud/cloud_rest.dart';
+import '../core/cloud/history_import.dart';
+import '../core/diag.dart';
 import '../core/firebase_service.dart';
 import '../core/ovid_cloud_service.dart';
 import '../core/play_billing.dart';
+import '../core/session_history_store.dart';
+import '../core/state.dart';
 import '../core/theme.dart';
 import '../core/auth_identity.dart';
 import '../core/legal_links.dart';
 import 'auth_methods.dart';
+import 'history_import_sheet.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/external_link.dart';
 import 'widgets/ovid_mark.dart';
@@ -36,10 +42,20 @@ class LoginGate extends StatefulWidget {
     required this.child,
     this.service,
     this.bindCloud,
+    this.historyImportService,
+    this.historyImportAccount,
   });
   final Widget child;
   final FirebaseService? service;
   final Future<void> Function()? bindCloud;
+
+  /// Test seam for the one-time history import: the service the sheet runs.
+  /// Production builds it over the process singletons.
+  final HistoryImportService? historyImportService;
+
+  /// Test seam for the account whose import markers are checked. Production
+  /// reads [AppState.sessionAccountId] (`firebase:<uid>` / `guest`).
+  final String? historyImportAccount;
 
   /// Test seam: skip the gate entirely (host widget tests pump the shell).
   @visibleForTesting
@@ -173,7 +189,11 @@ class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
           if (!fb.accountReady) {
             return _AccountNotReadyScreen(service: fb);
           }
-          return _PostLoginWelcomeGate(child: widget.child);
+          return _PostLoginWelcomeGate(
+            historyImportService: widget.historyImportService,
+            historyImportAccount: widget.historyImportAccount,
+            child: widget.child,
+          );
         }
         // ── State 2: unauthenticated ──
         return _LoginScreen(service: fb);
@@ -541,8 +561,14 @@ class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
 const _kWelcomedPref = 'ovid_welcomed';
 
 class _PostLoginWelcomeGate extends StatefulWidget {
-  const _PostLoginWelcomeGate({required this.child});
+  const _PostLoginWelcomeGate({
+    required this.child,
+    this.historyImportService,
+    this.historyImportAccount,
+  });
   final Widget child;
+  final HistoryImportService? historyImportService;
+  final String? historyImportAccount;
 
   @override
   State<_PostLoginWelcomeGate> createState() => _PostLoginWelcomeGateState();
@@ -550,8 +576,10 @@ class _PostLoginWelcomeGate extends StatefulWidget {
 
 class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
   bool _checked = false;
+  bool _importChecked = false;
   OverlayEntry? _welcomeEntry;
   Timer? _autoDismiss;
+  Completer<void>? _welcomeClosed;
 
   void _removeWelcome() {
     _autoDismiss?.cancel();
@@ -560,6 +588,9 @@ class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
     _welcomeEntry = null;
     entry?.remove();
     entry?.dispose();
+    final closed = _welcomeClosed;
+    _welcomeClosed = null;
+    if (closed != null && !closed.isCompleted) closed.complete();
   }
 
   @override
@@ -571,7 +602,16 @@ class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
   @override
   void initState() {
     super.initState();
-    _maybeShowWelcome();
+    _startPostLogin();
+  }
+
+  /// The welcome banner and the import sheet both live at the bottom of the
+  /// screen. Run them in order: the import question waits until the welcome
+  /// is gone (auto-dismissed or acknowledged).
+  Future<void> _startPostLogin() async {
+    await _maybeShowWelcome();
+    if (!mounted) return;
+    await _maybeShowHistoryImport();
   }
 
   Future<void> _maybeShowWelcome() async {
@@ -585,10 +625,64 @@ class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
     await prefs.setBool(_kWelcomedPref, true);
     if (!mounted) return;
     setState(() => _checked = true);
+    final closed = _welcomeClosed = Completer<void>();
     // Show the non-modal overlay after the first frame of the app is painted.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _showWelcomeOverlay();
+      if (mounted) {
+        _showWelcomeOverlay();
+      } else if (!closed.isCompleted) {
+        closed.complete();
+      }
     });
+    return closed.future;
+  }
+
+  /// Once per account, ask about importing the pre-cloud transcripts.
+  ///
+  /// Skipped entirely for guests and when either marker is already set. A
+  /// `plan()` failure is logged and ignored: the import is an optional
+  /// migration and must never block the app.
+  Future<void> _maybeShowHistoryImport() async {
+    if (_importChecked || !mounted) return;
+    _importChecked = true;
+
+    final prefs = await SharedPreferences.getInstance();
+    final account =
+        widget.historyImportAccount ?? AppState.I.sessionAccountId;
+    if (account.isEmpty || account == 'guest') return;
+    if (_markerSet(prefs, historyImportDoneMarkerKey(account)) ||
+        _markerSet(prefs, historyImportSkippedMarkerKey(account))) {
+      return;
+    }
+
+    final service = widget.historyImportService ??
+        HistoryImportService(
+          rest: CloudRestClient.I,
+          history: SessionHistoryRepository.I,
+          prefs: prefs,
+          account: account,
+        );
+    final HistoryImportPlan plan;
+    try {
+      plan = await service.plan();
+    } catch (e, st) {
+      Diag.swallow('login_gate.history_import_plan', e, st);
+      return;
+    }
+    if (!mounted) return;
+    if (plan.alreadyImported) return;
+
+    await showHistoryImportSheet(
+      context,
+      service: service,
+      account: account,
+      prefs: prefs,
+    );
+  }
+
+  static bool _markerSet(SharedPreferences prefs, String key) {
+    final value = prefs.get(key);
+    return value == true || value == 'true';
   }
 
   void _showWelcomeOverlay() {
