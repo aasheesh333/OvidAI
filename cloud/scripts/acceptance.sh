@@ -199,8 +199,9 @@ GATE 3 staging-isolation-and-bring-up [${gate3_tag}]
   note: 'guard' explicitly re-proves that prod-valued env is refused;
         'up' also runs the guard internally. The live baseline is captured
         here so gate 8 spans gates 3-7.
-  BLOCKER: staging.sh up builds deploy/Dockerfile.mint, which is absent
-           (P9-T18 not landed) -> gates 3-9 cannot run yet.
+  BLOCKER: none for the build itself — deploy/Dockerfile.mint, ROLLOUT.md
+           and packages/account/tsconfig.check.json all now exist. See the
+           known-blockers list at the end for what still gates the FULL run.
 
 GATE 4 full-suite-and-security [REQUIRED]
   cwd: $CLOUD_DIR
@@ -276,14 +277,14 @@ GATE 10 release-evidence [REQUIRED]
             per-gate output, total duration. Written on failure too.
 
 Known blockers (reported, not worked around):
-  - cloud/deploy/Dockerfile.mint absent (P9-T18) -> staging up cannot build.
-  - cloud/packages/account/tsconfig.check.json absent -> gate 2 fails until
-    the package gets the check config (Task 3 landed before this package).
-  - cloud/deploy/ROLLOUT.md absent (Task 13) -> the R7 citation cannot be
-    added yet.
   - staging.sh does not install the 'sandbox_egress_staging' nft table that
     the Task 8 corpus expects -> the egress group will be SKIPPED and gate 4
-    will (correctly) fail on a box without it.
+    will (correctly) fail on a box without it. This is the ONLY remaining
+    blocker for a full run; install the staging nft table (owner-gated) before
+    running.
+  - CLEARED since this text was first written: Dockerfile.mint, ROLLOUT.md and
+    packages/account/tsconfig.check.json now all exist. Do not defer the run
+    for those.
 
 Dry run complete: nothing was executed, staging was not touched, and no
 evidence file was written.
@@ -631,13 +632,40 @@ gate7_post_check() {
   fi
   grep -qE 'canary-sweep: workload exit=0' "$log" \
     || { echo "CANARY GATE: FAIL — workload did not exit 0"; rc=1; }
+
+  # A sweep that scanned nothing is not a pass. `runCanarySweep` silently skips
+  # a --log path it cannot read, so a missing or empty gateway/worker/mock log
+  # shrinks the corpus without failing anything — the sweep would then report
+  # "PASS — zero leaks" having looked at almost nothing. Require every named
+  # log to exist and be non-empty, and require the scanned count to cover all
+  # three logs plus the two always-present corpora (db mirror + redis).
+  local l
+  for l in "$GATEWAY_LOG" "${STAGING_WORKER_LOG:-/tmp/opencode/ovid-staging-worker.log}" \
+           "${STAGING_MOCK_LOG:-/tmp/opencode/ovid-staging-mock.log}"; do
+    if [[ ! -s "$l" ]]; then
+      echo "CANARY GATE: FAIL — sweep input is missing or empty: $l"
+      echo "  (runCanarySweep skips unreadable --log paths silently, so this would be a blind spot)"
+      rc=1
+    fi
+  done
+  local scanned
+  scanned="$(grep -oE 'canary-sweep: scanned [0-9]+ corpus location\(s\)' "$log" \
+    | tail -1 | grep -oE '[0-9]+' || true)"
+  if [[ -z "$scanned" ]]; then
+    echo "CANARY GATE: FAIL — no 'scanned N corpus location(s)' line"
+    rc=1
+  elif (( scanned < 5 )); then
+    echo "CANARY GATE: FAIL — scanned only $scanned corpus location(s); expected >= 5 (3 logs + db + redis)"
+    rc=1
+  fi
+
   if [[ ! -s "$CANARY_LOAD_JSON" ]]; then
     echo "CANARY GATE: FAIL — canary load JSON missing ($CANARY_LOAD_JSON)"
     rc=1
   else
     node -e "$POSITIVE_DATA_JS" "$CANARY_LOAD_JSON" >>"$log" 2>&1 || rc=1
   fi
-  [[ $rc -eq 0 ]] && echo "CANARY GATE: PASS (zero leaks; workload measured positively)"
+  [[ $rc -eq 0 ]] && echo "CANARY GATE: PASS (zero leaks over $scanned corpus location(s); workload measured positively)"
   return $rc
 }
 
@@ -895,6 +923,12 @@ else
     POST_CHECK=gate8_post_check
     run_gate 8 "live-unaffected" gate8_live
     POST_CHECK=""
+  elif [[ "${GATE3_OK:-0}" -eq 1 ]]; then
+    # staging.sh writes the baseline on a successful gate 3, so this means the
+    # file was lost or the write failed. Recording SKIPPED here would let a
+    # full run exit 0 with live-unaffected never asserted — fail closed.
+    record_gate 8 "live-unaffected" "FAIL" \
+      "gate 3 succeeded but the live baseline ($BASELINE) is missing"
   else
     record_skip 8 "live-unaffected" "no live baseline was captured (staging not started)"
   fi
