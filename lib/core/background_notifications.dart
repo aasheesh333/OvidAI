@@ -5,7 +5,6 @@ import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'diag.dart';
-import 'distribution.dart';
 import 'state.dart';
 
 /// User-facing notifications for work that finishes while Ovid is not on
@@ -395,7 +394,6 @@ class BackgroundNotifier extends ChangeNotifier {
       Diag.swallow('notify.prefs', e);
     }
     await _configure();
-    await syncKeepActive();
   }
 
   Future<void> _configure() async {
@@ -435,22 +433,6 @@ class BackgroundNotifier extends ChangeNotifier {
       await _invoke('notifyOpenChannelSettings', {'channel': channel.key});
     } catch (e) {
       Diag.swallow('notify.channel_settings', e);
-    }
-  }
-
-  /// Tells the native side whether "Keep Ovid active in background" applies
-  /// (boot/update restart and sticky restarts read it without Dart).
-  Future<void> syncKeepActive() async {
-    try {
-      await _invoke('bgSetKeepActive', {
-        'enabled':
-            Distribution.idleKeepAliveAvailable && AppState.I.keepAliveEnabled,
-        'master': AppState.I.notificationsEnabled,
-      });
-    } on MissingPluginException {
-      // Non-Android runtime.
-    } catch (e) {
-      Diag.swallow('notify.keep_active', e);
     }
   }
 

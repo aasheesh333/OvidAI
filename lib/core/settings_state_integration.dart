@@ -233,21 +233,13 @@ extension _SettingsStateIntegration on AppState {
           onStage: () async {},
           onDelete: () async {
             await GitHubService.I.signOut();
-            // Pending MCP OAuth attempts / tokens live in secure storage
-            // (wiped below) and in memory; drop the memory side first so an
-            // in-flight sign-in cannot write a token back.
-            McpService.I.clearAllOAuthState();
             await AppState._secureStorage.deleteAll();
-            // Plugin grants moved to secure storage (PR-5b); drop the
-            // in-process cache too or they keep applying until restart.
-            PluginPermissionStore.forgetCachedGrants();
             for (final provider in providers) {
               provider.apiKey = '';
             }
           },
           onVerifyDeleted: () async =>
               (await AppState._secureStorage.readAll()).isEmpty &&
-              McpService.I.oauthMemoryEmpty &&
               providers.every((provider) => provider.apiKey.isEmpty),
         ),
         ResetStoreKind.preferences: FunctionalResetStore(
@@ -351,27 +343,17 @@ extension _SettingsStateIntegration on AppState {
     AppState._kLastModel,
     AppState._kLastProvider,
     AppState._kRecentModels,
-    AppState._kPluginState,
-    AppState._kCustomPlugins,
-    AppState._kCustomMcpServers,
-    AppState._kRemovedBuiltinSeeds,
-    AppState._kMcpConnectedIntent,
-    AppState._kMarketplaces,
-    AppState._kMarketplaceMerged,
     AppState._kCustomPresets,
     AppState._kPermissionGrants,
   };
-  static const _configurationPrefixes = <String>[
-    AppState._kMcpEnvPrefix,
-    AppState._kMcpHeadersPrefix,
-  ];
+  static const _configurationPrefixes = <String>[];
 
   bool _isConfigurationKey(String key) =>
       _configurationKeys.contains(key) ||
       _configurationPrefixes.any(key.startsWith);
 
-  /// Providers, plugins, MCP servers, custom presets and global grants go
-  /// back to the built-in catalog, in memory and on disk.
+  /// Providers, custom presets and global grants go back to the built-in
+  /// catalog, in memory and on disk.
   Future<void> _resetConfiguration() async {
     final prefs = await SharedPreferences.getInstance();
     for (final key in prefs.getKeys().where(_isConfigurationKey).toList()) {
@@ -379,8 +361,6 @@ extension _SettingsStateIntegration on AppState {
     }
     await prefs.reload();
     providers.clear();
-    plugins.clear();
-    mcpServers.clear();
     _seed();
     PresetRegistry.clearCustom();
     globalPermissionGrants.clear();

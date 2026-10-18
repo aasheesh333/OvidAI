@@ -7,7 +7,6 @@ import '../core/cloud/cloud_ws.dart';
 import '../core/connection_service.dart';
 import '../core/github_service.dart';
 import '../core/firebase_service.dart';
-import '../core/mcp_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'chat_screen.dart';
@@ -272,7 +271,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
         unawaited(WsMultiplexer.I.connectIfNeeded());
         unawaited(ConnectionService.I.probe());
         unawaited(CloudSessionStore.I.flushOutbox());
-        // MCP/plugin services are local until Task 17; keep respawning them.
+        // Reconnect cloud-backed services after resume.
         unawaited(AppState.I.reconnectServicesAfterResume());
         // A secure-storage read that FAILED at cold start is not a sign-out:
         // the token is still on disk and usually readable moments later. Retry
@@ -287,9 +286,8 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
         unawaited(AppState.I.flushSessionPersistence());
         break;
       case AppLifecycleState.detached:
-        // App detached from engine/activity; cleanup MCP without corrupting
-        // persisted runs, and close the cloud link (resume reconnects).
-        unawaited(McpService.I.disconnectAll());
+        // App detached from engine/activity; close the cloud link (resume
+        // reconnects). The WS close is the only teardown needed now.
         unawaited(WsMultiplexer.I.disconnect());
         break;
     }

@@ -37,7 +37,7 @@ void main() {
       '${root.path}/ledger',
     ).create();
     AppState.resetTestInstance();
-    final app = AppState.createForTest(pluginBootActivator: (_, _) async {});
+    final app = AppState.createForTest();
     session = ChatSession(
       id: 'agent-hook-images',
       title: 'Image accounting',

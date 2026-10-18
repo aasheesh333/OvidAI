@@ -396,7 +396,7 @@ Set<PluginCapability> capabilityDelta({
 
 /// Root-level files the runtime itself writes into a plugin's committed
 /// content directory (`kPluginRuntimeManifestFile` /
-/// `kPluginRuntimeActivationFile` in `plugin_runtime.dart`). They are
+/// `kPluginRuntimeActivationFile` in the runtime). They are
 /// app-authored bookkeeping, not plugin content, so they are excluded from
 /// [pluginContentTreeHash] — otherwise staging (approved) and the installed
 /// directory (verified) could never hash alike.

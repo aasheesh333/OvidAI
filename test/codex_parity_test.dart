@@ -106,47 +106,6 @@ API_KEY = "abc123"
   });
 
   group('production wiring reaches the Codex paths', () {
-    test('plugin MCP mounting reads config.toml through the sniffer', () {
-      final src = File('lib/core/state.dart').readAsStringSync();
-      final body = src.substring(
-        src.indexOf('Future<int> mountPluginMcpServers('),
-      );
-      final head = body.substring(0, body.indexOf('var mounted = 0;'));
-      expect(
-        head,
-        contains("'.mcp.json', 'config.toml'"),
-        reason: 'both declaration styles must be tried',
-      );
-      expect(
-        head,
-        contains('parseMcpConfig(raw)'),
-        reason: 'must go through the format sniffer, not a raw jsonDecode',
-      );
-      expect(head, isNot(contains('jsonDecode(raw)')));
-    });
-
-    test('the legacy install allowlist stages Codex files', () {
-      final src = File('lib/core/state.dart').readAsStringSync();
-      final body = src.substring(
-        src.indexOf('static bool _isLegacyPluginContentPath('),
-      );
-      final fn = body.substring(0, body.indexOf('\n  }'));
-      for (final needle in [
-        "relPath == 'config.toml'",
-        "relPath == 'AGENTS.md'",
-        "relPath == '.codex-plugin/plugin.json'",
-        "relPath.startsWith('.agents/')",
-        "relPath.startsWith('.codex/')",
-      ]) {
-        expect(fn, contains(needle), reason: needle);
-      }
-    });
-
-    test('marketplace discovery probes Codex layouts', () {
-      final src = File('lib/core/state.dart').readAsStringSync();
-      expect(src, contains("'.codex-plugin/marketplace.json'"));
-    });
-
     test('Codex workspace roots and the plugin-root variable exist', () {
       final agent = File('lib/core/agent_service.dart').readAsStringSync();
       for (final needle in [
@@ -165,10 +124,6 @@ API_KEY = "abc123"
       // expansion resolves but the child process still cannot see it.
       expect(
         File('lib/core/hook_service.dart').readAsStringSync(),
-        contains("'CODEX_PLUGIN_ROOT': root"),
-      );
-      expect(
-        File('lib/core/mcp_service.dart').readAsStringSync(),
         contains("'CODEX_PLUGIN_ROOT': root"),
       );
     });

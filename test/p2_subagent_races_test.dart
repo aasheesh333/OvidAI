@@ -1,14 +1,10 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/hook_service.dart';
-import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/plugin_registry.dart';
 import 'package:ovid_ai/core/session_lifecycle_service.dart';
@@ -425,109 +421,6 @@ void main() {
       await agent.runTask('parent turn', sessionId: restored.id);
       expect(captured[other.id], isNot(contains(fullResult)));
       expect(captured[root.id], contains(fullResult));
-    },
-  );
-
-  test(
-    'child actually calls inherited plugin MCP; unrelated root cannot execute it',
-    () async {
-      const pid = 'p2/runtime';
-      PluginContributionRegistry.I.register(
-        NormalizedPluginManifest(
-          id: pid,
-          name: 'runtime',
-          version: '1',
-          format: PluginFormat.claudeCode,
-          rootPath: '/plugin',
-        ),
-        activation: PluginActivation.sessionActive,
-        immediateSessionId: root.id,
-      );
-      final server = McpServer(
-        name: 'probe',
-        author: 'test',
-        description: 'probe',
-        category: 'Custom',
-        command: '',
-        custom: true,
-        transport: 'http',
-        url: 'https://mcp.test/rpc',
-        ownerPluginId: pid,
-      );
-      app.mcpServers.add(server);
-      final calls = <Map<String, dynamic>>[];
-      McpService.I.httpClientForTest = MockClient((request) async {
-        final body = jsonDecode(request.body) as Map<String, dynamic>;
-        final method = body['method'];
-        if (method == 'tools/call') calls.add(body);
-        final result = switch (method) {
-          'initialize' => {
-            'protocolVersion': '2024-11-05',
-            'capabilities': {'tools': {}},
-            'serverInfo': {'name': 'probe', 'version': '1'},
-          },
-          'tools/list' => {
-            'tools': [
-              {
-                'name': 'ping',
-                'description': 'probe',
-                'inputSchema': {
-                  'type': 'object',
-                  'properties': {
-                    'input': {'type': 'string'},
-                  },
-                },
-              },
-            ],
-          },
-          'tools/call' => {
-            'content': [
-              {'type': 'text', 'text': 'MCP CHILD RESULT'},
-            ],
-          },
-          _ => <String, dynamic>{},
-        };
-        return http.Response(
-          jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': result}),
-          200,
-        );
-      });
-      addTearDown(() async {
-        await McpService.I.disconnect(server.canonicalId);
-        McpService.I.httpClientForTest = null;
-        PluginContributionRegistry.I.unregisterPlugin(pid);
-      });
-      expect(await McpService.I.connect(server), contains('connected'));
-      String? toolName;
-      AgentService.llmOnceForTest = (p, msgs, session, tools) async {
-        toolName = agent
-            .toolsForTest()
-            .map((t) => (t['function'] as Map)['name'] as String)
-            .firstWhere(
-              (name) => name.startsWith('mcp__') && name.endsWith('__ping'),
-            );
-        final out = await agent.dispatchForTest(toolName!, {
-          'input': session.id,
-        });
-        agent.streamToBubbleForTest(session, out);
-        return {'content': out, 'finish_reason': 'stop'};
-      };
-      final pending = agent.dispatchForTest('dispatch_agent', {
-        'prompt': 'call ping',
-        'label': 'MCP',
-      });
-      AgentService.setRunSessionForTest('');
-      expect(await pending, contains('MCP CHILD RESULT'));
-      final child = app.childrenOf(root.id).single;
-      expect(calls.single['params']['arguments']['input'], child.id);
-      final other = ChatSession(id: 'mcp-other', title: 'Other', model: 'm');
-      app.sessions.add(other);
-      AgentService.setRunSessionForTest(other.id);
-      expect(
-        await agent.dispatchForTest(toolName!, {}),
-        contains('not active'),
-      );
-      expect(calls, hasLength(1));
     },
   );
 

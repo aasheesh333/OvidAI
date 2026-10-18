@@ -73,9 +73,6 @@ class Distribution {
   /// Termux-style on-device Linux sandbox. Removed entirely in P8 Task 13.
   static bool get onDeviceSandboxAvailable => false;
 
-  /// Idle "Ready & Listening" foreground presence after a run ends.
-  static bool get idleKeepAliveAvailable => !play;
-
   /// Device permissions the agent may ask for. Play builds only declare the
   /// ones a shipped feature uses (browser camera/mic/location, voice input,
   /// notifications); asking for an undeclared permission would just fail.

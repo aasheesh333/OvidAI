@@ -302,11 +302,9 @@ void main() {
       expect(calls, isEmpty);
     });
 
-    test('init configures channels and reports keep-active', () async {
+    test('init configures channels', () async {
       await notifier.init();
-      expect(calls.map((c) => c.$1), ['notifyConfigure', 'bgSetKeepActive']);
-      final keep = calls.last.$2 as Map;
-      expect(keep.keys, containsAll(['enabled', 'master']));
+      expect(calls.map((c) => c.$1), ['notifyConfigure']);
     });
   });
 

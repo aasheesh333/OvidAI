@@ -1,12 +1,10 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ovid_ai/core/hook_service.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/plugin_registry.dart';
-import 'package:ovid_ai/core/plugin_runtime.dart';
 
 /// Real-world [CC] plugin compatibility, using the shape of `obra/superpowers`
 /// (the plugin the user tried to install).
@@ -171,24 +169,6 @@ void main() {
     });
   });
 
-  group('hook scripts stay executable (install-time)', () {
-    test('ensureHookScriptsExecutable sets +x on hooks/ and scripts/', () async {
-      final root = Directory.systemTemp.createTempSync('ovid-hook-x-');
-      addTearDown(() => root.deleteSync(recursive: true));
-      File('${root.path}/hooks/run-hook.cmd')
-        ..createSync(recursive: true)
-        ..writeAsStringSync('#!/usr/bin/env bash\nexit 0\n');
-      File('${root.path}/scripts/tool.sh')
-        ..createSync(recursive: true)
-        ..writeAsStringSync('#!/usr/bin/env bash\nexit 0\n');
-
-      await PluginRuntimeManager.ensureHookScriptsExecutable(root);
-
-      bool isExec(String p) => (File(p).statSync().mode & 0x49) != 0;
-      expect(isExec('${root.path}/hooks/run-hook.cmd'), isTrue);
-      expect(isExec('${root.path}/scripts/tool.sh'), isTrue);
-    });
-  });
 
   group('session_start context is surfaced for injection', () {
     test('a CC-shaped hook output becomes the session context', () async {

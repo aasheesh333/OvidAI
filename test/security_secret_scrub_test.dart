@@ -2,7 +2,6 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ovid_ai/core/diag.dart';
 import 'package:ovid_ai/core/secret_scrub.dart';
-import 'package:ovid_ai/core/plugin_runtime.dart';
 
 /// M4: MCP args/url secrets never reach logs, diagnostics or the UI.
 void main() {
@@ -116,14 +115,5 @@ void main() {
       expect(text, contains('x=1'));
     });
 
-    test('startup/status reasons scrub URLs too', () {
-      final reason = redactStartupError(
-        'connect failed: https://bob:pw@mcp.example.com/mcp/'
-        'a1b2c3d4e5f6a7b8c9d0e1f2a3b4/sse',
-      );
-      expect(reason, isNot(contains('bob:pw')));
-      expect(reason, isNot(contains('a1b2c3d4e5f6a7b8c9d0e1f2a3b4')));
-      expect(reason, contains('mcp.example.com'));
-    });
   });
 }

@@ -28,8 +28,6 @@ import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/commands.dart';
 import 'package:ovid_ai/core/connection_service.dart';
 import 'package:ovid_ai/core/distribution.dart';
-import 'package:ovid_ai/core/mcp_service.dart';
-import 'package:ovid_ai/core/native_mcp.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/session_history_store.dart';
 import 'package:ovid_ai/core/skills.dart';
@@ -94,31 +92,6 @@ Future<void> _bindCloud({List<SessionDto> sessions = const []}) async {
 // Local-source seeds
 // ---------------------------------------------------------------------------
 
-class _GateNativeHandler implements NativeMcpHandler {
-  @override
-  Future<Map<String, dynamic>> initialize(Map<String, dynamic> params) async => {
-    'protocolVersion': '2024-11-05',
-    'capabilities': {
-      'tools': <String, dynamic>{},
-    },
-    'serverInfo': {'name': 'gate-native', 'version': '1.0.0'},
-  };
-
-  @override
-  Future<List<McpToolDef>> listTools() async => [
-    McpToolDef(name: 'gate_tool', description: 'A tool behind the gate'),
-  ];
-
-  @override
-  Future<McpRpcResult> callTool(
-    String toolName,
-    Map<String, dynamic> args,
-  ) async => const McpRpcResult.ok({});
-
-  @override
-  Future<void> dispose() async {}
-}
-
 void _seedCommand() {
   CommandService.I.register(
     AgentCommand(
@@ -160,39 +133,6 @@ Future<void> _seedSkill(
     () => SkillService.I.publishSessionCatalog(
       sessionId,
       mounts: [PluginCatalogMount(root.path, manifest)],
-    ),
-  );
-}
-
-Future<void> _seedMcp(WidgetTester tester) async {
-  await tester.runAsync(() async {
-    McpService.I.registerNativeHandler('gate-native', (_) => _GateNativeHandler());
-    final server = McpServer(
-      name: 'gate-native',
-      author: 'test',
-      description: 'Gate test MCP server',
-      category: 'Test',
-      command: '',
-      transport: 'native',
-    );
-    final outcome = await McpService.I.connectOutcome(
-      server,
-      handshakeBudget: const Duration(seconds: 5),
-    );
-    expect(outcome.kind, McpConnectOutcomeKind.ready);
-  });
-}
-
-void _seedPlugin() {
-  AppState.I.plugins.add(
-    PluginItem(
-      name: 'Gate Plugin',
-      author: 'test',
-      description: 'A plugin behind the gate',
-      version: '1.0.0',
-      category: 'Tool',
-      installed: true,
-      enabled: true,
     ),
   );
 }
@@ -249,8 +189,6 @@ void main() {
     Distribution.thinOverrideForTest = null;
     CloudAgentFacade.resetForTest();
     CloudSessionStore.resetForTest();
-    McpService.I.clearNativeHandlers();
-    await McpService.I.disconnectAll();
     SkillService.I.clearRoots();
     AppState.resetTestInstance();
     if (tmp.existsSync()) tmp.deleteSync(recursive: true);
@@ -269,34 +207,6 @@ void main() {
       expect(find.text('COMMANDS'), findsOneWidget);
       expect(find.text('SKILLS'), findsOneWidget);
       expect(find.textContaining('research'), findsOneWidget);
-    });
-
-    testWidgets('MCP tools are offered when execution is on-device', (
-      tester,
-    ) async {
-      _addSession('gate-mcp');
-      _seedCommand();
-      await _seedMcp(tester);
-      await _pumpChat(tester);
-      await _openSlashMenu(tester);
-
-      expect(find.text('COMMANDS'), findsOneWidget);
-      expect(find.text('MCP TOOLS'), findsOneWidget);
-      expect(find.text('gate_tool'), findsOneWidget);
-    });
-
-    testWidgets('Plugins are offered when execution is on-device', (
-      tester,
-    ) async {
-      _addSession('gate-plugin');
-      _seedCommand();
-      _seedPlugin();
-      await _pumpChat(tester);
-      await _openSlashMenu(tester);
-
-      expect(find.text('COMMANDS'), findsOneWidget);
-      expect(find.text('PLUGINS'), findsOneWidget);
-      expect(find.text('Gate Plugin'), findsOneWidget);
     });
 
     testWidgets('Browser header action is absent on the default build', (
@@ -321,8 +231,6 @@ void main() {
       final s = _addSession('gate-thin');
       _seedCommand();
       await _seedSkill(tester, tmp, s.id);
-      await _seedMcp(tester);
-      _seedPlugin();
       await _bindCloud();
       await _pumpChat(tester);
       await _openSlashMenu(tester);

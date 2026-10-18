@@ -22,8 +22,6 @@ import 'usage_attempt_recorder.dart';
 import 'grant_store.dart';
 import 'distribution.dart';
 import 'github_service.dart';
-import 'mcp_service.dart';
-import 'mcp_catalog_tools.dart';
 import 'session_ledger.dart';
 import 'session_search.dart';
 import 'session_lifecycle_service.dart';
@@ -32,17 +30,9 @@ import 'plan_mode.dart';
 import 'hook_service.dart';
 import 'subagent_tools.dart';
 import 'structured_edits.dart';
-import 'mcp_client_requests.dart';
 import 'html_artifact.dart';
-import 'plugin_manifest.dart';
-import 'native_plugin.dart';
-import 'native_plugins/prompt_framework.dart';
-import 'native_plugins/utility_cancellation_bridge.dart';
-import 'plugin_permissions.dart';
 import 'plugin_registry.dart';
 import 'tool_usage_store.dart';
-import 'plugin_runtime.dart';
-import 'plugin_source_resolver.dart';
 import 'skills.dart';
 import 'commands.dart';
 import 'compaction/compaction_checkpoint.dart';
@@ -51,7 +41,6 @@ import 'compaction/compaction_policy.dart';
 import 'model_limits.dart';
 import 'prompt_cache.dart';
 import 'diag.dart';
-import 'secret_scrub.dart';
 import 'ssrf_guard.dart';
 import 'image_studio.dart';
 import 'image_task.dart';
@@ -856,7 +845,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
         );
       }
     };
-    AppState.onRefreshSkills = _skillsChanged;
     // Cold resume: rebuild subagent handles from the persisted lineage
     // after sessions load (the durable descriptor parity).
     AppState.I.onSessionsLoaded = () {
@@ -899,12 +887,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
     // 3. Hooks fired inside a subagent carry its identity (Claude Code
     //    `agent_id` / `agent_type`, main-session `session_id`).
     HookService.agentIdentityResolver = _hookAgentIdentity;
-    // 4. MCP client capabilities: server→client roots / sampling (with user
-    //    approval) are answered through this agent (elicitation is a UI sheet
-    //    wired by the app shell).
-    McpClientRequests.I.rootsProvider ??= _mcpRoots;
-    McpClientRequests.I.samplingApprover ??= _approveMcpSampling;
-    McpClientRequests.I.sampler ??= _runMcpSampling;
   }
 
   static final AgentService I = AgentService._();
@@ -1846,13 +1828,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
         _runs.entries
             .firstWhere((e) => e.value == r, orElse: () => MapEntry('', r))
             .key;
-    if (runKey.isNotEmpty) {
-      try {
-        UtilityCancellationBridge.I.signalStop(runKey);
-      } catch (e) {
-        Diag.swallow('agent_service', e);
-      }
-    }
     for (final j in r.jobs.values.toList()) {
       try {
         j.killed = true;
@@ -3468,333 +3443,12 @@ user which one instead of assuming this one.''';
   }
 
   // ── TOOLS (OpenAI function-calling schema) ────────────────────────────
-  // Dynamic: installed plugins add their own tools.
   static const _repoToolNames = {'repo_sync', 'repo_tree'};
 
-  static String _normTool(String s) => s
-      .toLowerCase()
-      .replaceAll(RegExp(r'[^a-z0-9_]+'), '_')
-      .replaceAll(RegExp(r'^_+|_+$'), '');
-
-  /// Catalog display names carry suffixes the server rows don't
-  /// ('Puppeteer MCP' → server 'Puppeteer', 'Postgres Tools' → 'Postgres').
-  /// Strips one trailing `_mcp`/`_tools` so plugin rows wire to their real
-  /// server instead of silently matching nothing (which used to surface as
-  /// a probe failure after a fake-looking install).
-  @visibleForTesting
-  static String mcpServerKeyForPluginForTest(String pluginName) =>
-      _normTool(pluginName).replaceAll(RegExp(r'(_mcp|_tools)$'), '');
-
-  /// The configured server backing an MCP-category catalog row, if any.
-  /// Public so the plugins UI routes Install to the real server connect.
-  /// Exact normalized names win first (a server literally named 'X MCP'
-  /// still matches row 'X MCP'); otherwise one trailing `_mcp`/`_tools`
-  /// display suffix is forgiven ('Puppeteer MCP' → server 'Puppeteer').
-  static McpServer? mcpServerForPlugin(PluginItem p) {
-    final norm = _normTool(p.name);
-    final stripped = mcpServerKeyForPluginForTest(p.name);
-    for (final s in AppState.I.mcpServers) {
-      final key = _normTool(s.name);
-      if (key == norm || key == stripped) return s;
-    }
-    return null;
-  }
-
-  static bool _mcpOwnerVisible(McpServer server, String sessionId) {
-    final owner = server.ownerPluginId;
-    return owner == null ||
-        PluginContributionRegistry.I.isPluginActiveForSession(owner, sessionId);
-  }
-
-  /// The built-in seed plugins that gate their own dedicated tools
-  /// (web_search, file_read, …). Shared by the capability check and the
-  /// `_tools` roster so the two can never drift apart.
-  static const _seedPluginNames = {
-    'Web Search',
-    'Image Studio',
-    'File Reader',
-    'Web Fetch & Reader',
-    'Code Runner',
-    'RAG Memory',
-    'DeepThink Reasoning',
-    'Sandbox Runtime',
-  };
-
-  /// Whether a source-less catalog row has real executable backing (a gated
-  /// tool family). Rows without backing must never flip installed/enabled —
-  /// that fake success is exactly what later probes red on back navigation.
-  /// Public so the plugins UI and state hydration share the one definition.
-  static bool builtinPluginHasBacking(String name) =>
-      _seedPluginNames.contains(name);
-
-  /// True when [p] actually mounts executable agent capability: a dedicated
-  /// seed tool, an MCP proxy, declared hooks, or precomputed mounted
-  /// skills/commands/agents already discovered by [SkillService]. This is a
-  /// pure in-memory lookup — no blocking filesystem scan and no ".json
-  /// exists" overclaim (a bare plugin.json/hooks.json is not an executable
-  /// action, so it must not claim capability).
-  /// Install a catalog row through the real runtime pipeline using its own
-  /// declared source, returning an honest status message. Shared by
-  /// `agent_install_plugin` and `catalog_add_plugin(source:)` so a row with a
-  /// GitHub source always gets a real install instead of a silent flag flip.
-  Future<String> _installPluginRow(
-    PluginItem row, {
-    PluginSource? source,
-    String? localPath,
-    String? localZipPath,
-  }) async {
-    final app = AppState.I;
-    final runtimeResult = await app.installPlugin(
-      row,
-      source: localPath != null && localPath.isNotEmpty
-          ? LocalFolderPluginSource(localPath)
-          : localZipPath != null && localZipPath.isNotEmpty
-          ? ZipPluginSource(localZipPath)
-          : source,
-      origin: PluginInstallOrigin.agent,
-      sessionId: _runSession?.id,
-    );
-    if (runtimeResult == null) {
-      return 'Plugin "${row.name}": no installable source is declared, so '
-          'nothing was installed.';
-    }
-    if (runtimeResult.status == PluginInstallStatus.failed) {
-      final approval = await _approvePluginInstallAndRetry(
-        row,
-        localPath: localPath,
-        localZipPath: localZipPath,
-        error: runtimeResult.error ?? 'unknown error',
-      );
-      if (approval != null) return approval;
-      return 'install failed: ${runtimeResult.error ?? 'unknown error'}';
-    }
-    final sid = _runSession?.id ?? '';
-    final scopeNote = sid.isEmpty
-        ? 'installed (activates globally after one restart)'
-        : 'installed ✓ — active in this session only (id $sid); activates '
-              'globally after one restart';
-    final parts = <String>[
-      scopeNote,
-      if (runtimeResult.degradedNames.isNotEmpty)
-        'optional dependencies unavailable: '
-            '${runtimeResult.degradedNames.join(', ')}',
-    ];
-    final installedId = row.runtimeId;
-    if (sid.isNotEmpty && installedId != null) {
-      await _fireInstalledPluginSessionStart(sid, installedId);
-    }
-    return 'Plugin "${row.name}" ${parts.join(' · ')} '
-        '(id ${row.runtimeId}).';
-  }
-
-  /// Fire a freshly installed plugin's `session_start` hooks in the
-  /// installing session so its bootstrap context exists immediately.
-  ///
-  /// The generic `session_start` is exactly-once per boot and already ran
-  /// for this session, so a plain re-fire would either no-op or duplicate
-  /// every other plugin's context. Scoping to the new plugin id gives the
-  /// installing session exactly what a fresh session would have received
-  /// from this plugin — and nothing else.
-  Future<void> _fireInstalledPluginSessionStart(
-    String sessionId,
-    String pluginId,
-  ) async {
-    if (sessionId.isEmpty) return;
-    try {
-      await HookService.I.fire(
-        'session_start',
-        sessionId,
-        payload: {
-          'reason': 'created',
-          'pluginInstalled': true,
-          'isSubagent': false,
-          'transcript_path': _transcriptPathFor(sessionId),
-        },
-        model: _runSession?.model,
-        onlyPluginId: pluginId,
-      );
-      await refreshSkills(sessionId: sessionId);
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-  }
-
-  /// Names of the skill/command contributions a legacy plugin row actually
-  /// mounts, used to tell the model what it CAN run instead of faking success.
-  List<String> _pluginActionNames(PluginItem p) {
-    final safeSource = p.source != null
-        ? p.source!.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_')
-        : '';
-    final safeName = _normTool(p.name);
-    final sessionId = _runSession?.id;
-    final mounted = sessionId == null
-        ? SkillService.I.skills
-        : SkillService.I.skillsForSession(sessionId);
-    final names = <String>{};
-    for (final s in mounted) {
-      final matchesSource =
-          safeSource.isNotEmpty && s.path.contains(safeSource);
-      final matchesName =
-          s.path.contains(safeName) || s.name.contains(safeName);
-      if (matchesSource || matchesName) names.add(s.name);
-    }
-    // A registered normalized plugin exposes canonical contribution names.
-    final runtimeId = p.runtimeId;
-    if (runtimeId != null &&
-        PluginContributionRegistry.I.isRegistered(runtimeId)) {
-      for (final c in PluginContributionRegistry.I.toolContributionsForPlugin(
-        runtimeId,
-      )) {
-        names.add(c.name);
-      }
-    }
-    return names.toList()..sort();
-  }
-
-  bool _pluginHasMountedSkillsOrCommands(PluginItem p) {
-    if (!p.installed || !p.enabled) return false;
-    if (_seedPluginNames.contains(p.name)) return true;
-    if (p.category == 'MCP') return true;
-    if (p.hooks.isNotEmpty) return true;
-    if (p.author == 'you') return true;
-
-    final safeSource = p.source != null
-        ? p.source!.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_')
-        : '';
-    final safeName = _normTool(p.name);
-    final sessionId = _runSession?.id;
-    final mounted = sessionId == null
-        ? SkillService.I.skills
-        : SkillService.I.skillsForSession(sessionId);
-    for (final s in mounted) {
-      if (safeSource.isNotEmpty && s.path.contains(safeSource)) return true;
-      if (s.path.contains(safeName) || s.name.contains(safeName)) return true;
-    }
-
-    if (AppState.I.mcpServers.any((s) => s.source == 'plugin:${p.source}')) {
-      return true;
-    }
-
-    return false;
-  }
-
-  /// Tool names a plugin contributes when installed+enabled (for honest
-  /// install reporting). Mirrors the `_tools` gate below.
-  List<String> _pluginToolNames(PluginItem p) {
-    if (!p.installed || !p.enabled) return const [];
-    if (NativePluginRegistry.I.has(p.name)) {
-      final capability = NativePluginRegistry.I.capabilityFor(p.name);
-      if (capability == null) return const [];
-      final slug = NativePluginRegistry.slugify(p.name);
-      return capability.tools.map((t) => 'plugin__${slug}__${t.name}').toList();
-    }
-    if (p.category == 'MCP') {
-      // Task 10: honest parity with the roster gate — the proxy tool only
-      // exists when the plugin's matching MCP server row does (suffix
-      // tolerant, so 'Puppeteer MCP' matches server 'Puppeteer').
-      final hasServer = mcpServerForPlugin(p) != null;
-      return hasServer ? const ['mcp (proxy)'] : const [];
-    }
-    final seed = switch (p.name) {
-      'Web Search' => const ['web_search'],
-      'Image Studio' =>
-        ImageStudio.I.tools
-            .map((t) => (t['function'] as Map)['name'] as String)
-            .toList(),
-      'File Reader' => const ['read_attachment'],
-      'Web Fetch & Reader' => const ['fetch_url'],
-      'Code Runner' => const ['run_code'],
-      'RAG Memory' => const ['memory_search', 'memory_read', 'memory_save'],
-      'DeepThink Reasoning' => const ['reasoning display'],
-      'Sandbox Runtime' => const ['run_shell', 'fs tools'],
-      _ => null,
-    };
-    if (seed != null) return seed;
-    // A REGISTERED normalized manifest (spec §4.4) reports its canonical
-    // contribution tools — the roster never carries the generic collapse
-    // for such a row, so reporting that name would be a lie. Legacy
-    // unregistered rows keep the generic name below.
-    final runtimeId = p.runtimeId;
-    if (runtimeId != null &&
-        PluginContributionRegistry.I.isRegistered(runtimeId)) {
-      return PluginContributionRegistry.I
-          .toolContributionsForPlugin(runtimeId)
-          .map((c) => c.toolName)
-          .toList();
-    }
-    if (_pluginHasMountedSkillsOrCommands(p)) {
-      return ['plugin_${_normTool(p.name)}'];
-    }
-    if (p.author == 'you') {
-      return ['plugin_${_normTool(p.name)}'];
-    }
-    return const [];
-  }
-
-  Map<String, dynamic> _pluginGenericTool(PluginItem p) {
-    final toolName = 'plugin_${_normTool(p.name)}';
-    return {
-      'type': 'function',
-      'function': {
-        'name': toolName,
-        'description':
-            'Execute commands, skills, or workflows provided by the ${p.name} plugin: '
-            '${p.description.isEmpty ? p.name : p.description}',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'action': {
-              'type': 'string',
-              'description':
-                  'Action, command, or skill name to execute from this plugin',
-            },
-            'input': {
-              'type': 'string',
-              'description':
-                  'Optional input text, arguments, or prompt for the action',
-            },
-          },
-          'required': ['action'],
-        },
-      },
-    };
-  }
-
-  /// Roster schema for ONE canonical plugin contribution (spec §4.4): a
-  /// namespaced command/skill/agent tool that replaces the generic
-  /// `plugin_<name>` collapse for normalized manifests. The description
-  /// carries the canonical id so the model (and any chooser UI) can
-  /// address collisions exactly.
-  Map<String, dynamic> _canonicalPluginTool(PluginContribution c) {
-    return {
-      'type': 'function',
-      'function': {
-        'name': c.toolName,
-        'description':
-            'Plugin ${c.kindLabel} "${c.name}" from ${c.pluginId} '
-            '(canonical: ${c.canonicalId})'
-            '${c.description.isEmpty ? '' : ': ${c.description}'}',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'input': {
-              'type': 'string',
-              'description':
-                  'Optional input text, arguments, or prompt for this '
-                  '${c.kindLabel}',
-            },
-          },
-        },
-      },
-    };
-  }
 
   List<Map<String, dynamic>> get _tools {
-    final tools = <Map<String, dynamic>>[...McpCatalogTools.I.toolSpecs];
+    final tools = <Map<String, dynamic>>[];
     final app = AppState.I;
-    // Plugin contributions resolve by the RUNNING session id — never the
-    // foreground session (spec §7 session scoping at roster resolution).
-    final runSessionId = _runSession?.id ?? '';
     // Core agent tools — always available, EXCEPT the repo tools, which are
     // gated on the GitHub-sync toggle below. (They used to be added here and
     // again in the gate, so every request carried two identical
@@ -3831,79 +3485,14 @@ user which one instead of assuming this one.''';
       }
       tools.add(t);
     }
-    // Installed plugin tools — dynamically appended
-    for (final p in app.plugins.where((p) => p.installed && p.enabled)) {
-      if (p.name == 'Web Search') tools.add(_webSearchTool);
-      if (p.name == 'Image Studio') tools.addAll(ImageStudio.I.tools);
-      if (p.name == 'File Reader') tools.add(_fileReadTool);
-      if (p.name == 'Web Fetch & Reader') tools.add(_webFetchTool);
-      if (p.name == 'Code Runner') tools.add(_codeRunnerTool);
-      if (p.category == 'MCP') {
-        final proxy = _mcpProxyTool(p);
-        if (proxy != null) tools.add(proxy);
-      }
-      if (NativePluginRegistry.I.has(p.name)) {
-        final capability = NativePluginRegistry.I.capabilityFor(p.name);
-        if (capability != null) {
-          final slug = NativePluginRegistry.slugify(p.name);
-          for (final tool in capability.tools) {
-            tools.add({
-              'type': 'function',
-              'function': {
-                'name': 'plugin__${slug}__${tool.name}',
-                'description': '[${p.name}] ${tool.description}',
-                'parameters': tool.inputSchema,
-              },
-            });
-          }
-        }
-      }
-      if (!_seedPluginNames.contains(p.name) &&
-          p.category != 'MCP' &&
-          !NativePluginRegistry.I.has(p.name)) {
-        // A REGISTERED normalized manifest is governed by the canonical
-        // registry in EVERY session (spec §4.4/§7): its tools appear only
-        // where the activation is visible (canonical loop below), and the
-        // generic `plugin_<name>` collapse — which serves mounted skill
-        // content to ANY session — must never re-advertise a pending or
-        // other-session plugin. The collapse remains ONLY for unregistered
-        // legacy catalog rows.
-        final runtimeId = p.runtimeId;
-        final registryGoverned =
-            runtimeId != null &&
-            PluginContributionRegistry.I.isRegistered(runtimeId);
-        final isCustom = p.author == 'you';
-        if (runtimeId == null &&
-            (AppState.I.legacyPluginExecutionAllowed || isCustom) &&
-            !registryGoverned &&
-            _pluginHasMountedSkillsOrCommands(p)) {
-          tools.add(_pluginGenericTool(p));
-        }
-      }
-    }
-    // Canonical plugin contribution tools for the RUNNING session
-    // (spec §4.4/§7): namespaced command/skill/agent tools from
-    // registered normalized manifests. Session scope is enforced HERE —
-    // a pending or other-session plugin never enters this roster.
-    for (final c in PluginContributionRegistry.I.toolsForSession(
-      runSessionId,
-    )) {
-      final snapshotReady = SkillService.I.hasSnapshotForSession(runSessionId);
-      final testCompatibility = _runSessionOverrideForTest != null;
-      if ((snapshotReady || !testCompatibility) &&
-          SkillService.I
-                  .resolveForSession(runSessionId, c.canonicalId)
-                  .unique ==
-              null) {
-        continue;
-      }
-      final already = tools.any((t) {
-        final fn = t['function'];
-        return fn is Map && fn['name'] == c.toolName;
-      });
-      if (already) continue;
-      tools.add(_canonicalPluginTool(c));
-    }
+    // Built-in capability families. These used to be gated on seed catalog
+    // rows that died with the local plugin runtime (P8 Task 17); the
+    // capabilities themselves still ship and must stay in the roster.
+    tools.add(_webSearchTool);
+    tools.addAll(ImageStudio.I.tools);
+    tools.add(_fileReadTool);
+    tools.add(_webFetchTool);
+    tools.add(_codeRunnerTool);
     // ── User settings gates (persisted toggles from Settings screen) ──
     // Memory toggle OFF → no memory_search tool; GitHub sync OFF → no
     // repo_sync/repo_tree tools (agent works purely in local workspace).
@@ -3913,108 +3502,6 @@ user which one instead of assuming this one.''';
         if (fn is Map && _repoToolNames.contains(fn['name'])) {
           tools.add(t);
         }
-      }
-    }
-    // ── Real MCP server tools (discovered via tools/list) ──
-    // Each connected MCP server advertises tools with full input schemas.
-    // We inject them as `mcp__<server>__<tool>` so the model can call them
-    // directly with typed arguments instead of the generic mcp_* proxy.
-    final connectedMcpTools = McpService.I.connectedToolEntries;
-    for (final entry in connectedMcpTools) {
-      if (!_mcpOwnerVisible(entry.server, runSessionId)) {
-        continue;
-      }
-      if (entry.server.ownerPluginId != null) {
-        tools.add(entry.toOpenAiTool(canonical: true));
-      }
-      final aliasCount = connectedMcpTools.where((e) {
-        if (e.legacyToolName != entry.legacyToolName) return false;
-        final candidateOwner = e.server.ownerPluginId;
-        return candidateOwner == null ||
-            PluginContributionRegistry.I.isPluginActiveForSession(
-              candidateOwner,
-              runSessionId,
-            );
-      }).length;
-      if (aliasCount == 1) {
-        tools.add(entry.toOpenAiTool(canonical: false));
-      }
-    }
-    // ── Disconnected but configured servers → connect stubs ──
-    // A custom/plugin server the user has configured (but isn't connected
-    // yet) still deserves a tool so the model can request a connect: the
-    // stub's dispatch path reuses the mcp_* proxy, which auto-connects on
-    // first call. Built-in seed servers are skipped (there are dozens; the
-    // model finds them via catalog_list_mcp / agent_install_mcp).
-    for (final s in app.mcpServers) {
-      if (!_mcpOwnerVisible(s, runSessionId)) {
-        continue;
-      }
-      if (!s.custom || McpService.I.isConnected(s.canonicalId)) continue;
-      final safe = _normTool(s.name);
-      final sameAlias = app.mcpServers
-          .where(
-            (candidate) =>
-                candidate.custom &&
-                _mcpOwnerVisible(candidate, runSessionId) &&
-                _normTool(candidate.name) == safe,
-          )
-          .length;
-      final canonicalStub = s.ownerPluginId == null
-          ? 'mcp_$safe'
-          : McpService.providerServerToolName(s);
-      final canonicalCount = app.mcpServers
-          .where(
-            (candidate) =>
-                candidate.custom &&
-                _mcpOwnerVisible(candidate, runSessionId) &&
-                (candidate.ownerPluginId == null
-                        ? 'mcp_${_normTool(candidate.name)}'
-                        : McpService.providerServerToolName(candidate)) ==
-                    canonicalStub,
-          )
-          .length;
-      if (canonicalCount != 1) continue;
-      final already = tools.any((t) {
-        final fn = t['function'];
-        return fn is Map && fn['name'] == canonicalStub;
-      });
-      if (already) continue;
-      tools.add({
-        'type': 'function',
-        'function': {
-          'name': canonicalStub,
-          'description':
-              'The "${s.name}" MCP server (transport: ${s.transport}'
-              '${s.url != null ? ', url: ${scrubUrl(s.url!)}' : ''}) is '
-              'configured but '
-              'not connected. Calling this connects it and runs an action.',
-          'parameters': {
-            'type': 'object',
-            'properties': {
-              'action': {'type': 'string'},
-              'args': {'type': 'object'},
-            },
-            'required': ['action'],
-          },
-        },
-      });
-      if (s.ownerPluginId != null && sameAlias == 1) {
-        tools.add({
-          'type': 'function',
-          'function': {
-            'name': 'mcp_$safe',
-            'description': 'Unique alias for ${s.canonicalId}.',
-            'parameters': {
-              'type': 'object',
-              'properties': {
-                'action': {'type': 'string'},
-                'args': {'type': 'object'},
-              },
-              'required': ['action'],
-            },
-          },
-        });
       }
     }
     // ── Workflow orchestration toggle (Settings) ──
@@ -5580,40 +5067,6 @@ user which one instead of assuming this one.''';
         },
       },
     },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'agent_install_plugin',
-        'description':
-            'Install a plugin by catalog name, or from a GitHub repo with '
-            '`repo: "owner/name"` (no marketplace needed).',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'plugin_name': {'type': 'string'},
-            'repo': {'type': 'string'},
-            'local_path': {'type': 'string'},
-            'local_zip_path': {'type': 'string'},
-          },
-        },
-      },
-    },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'agent_install_mcp',
-        'description':
-            'Connect an MCP server by name. Use when the user asks to add an MCP.',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'server_name': {'type': 'string'},
-          },
-          'required': ['server_name'],
-        },
-      },
-    },
-
     // ── agent-harness catalog management (providers/plugins/MCP/marketplace) ──
     {
       'type': 'function',
@@ -5792,164 +5245,6 @@ user which one instead of assuming this one.''';
         },
       },
     },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'catalog_list_plugins',
-        'description': 'List all plugins with install/enable status.',
-        'parameters': {'type': 'object', 'properties': {}},
-      },
-    },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'catalog_list_mcp',
-        'description': 'List all MCP servers with connection status.',
-        'parameters': {'type': 'object', 'properties': {}},
-      },
-    },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'catalog_add_mcp',
-        'description':
-            'Add a custom MCP server. Use when the user asks '
-            'to add an MCP server not in the catalog. Provide either a '
-            'stdio command + args, or a Streamable-HTTP url (+ headers).',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'name': {'type': 'string'},
-            'command': {
-              'type': 'string',
-              'description': 'e.g. npx, uvx, python3 (stdio only)',
-            },
-            'args': {
-              'type': 'array',
-              'items': {'type': 'string'},
-              'description':
-                  'e.g. ["-y", "@modelcontextprotocol/server-github"]',
-            },
-            'url': {
-              'type': 'string',
-              'description': 'Streamable-HTTP endpoint (http transport)',
-            },
-            'headers': {
-              'type': 'object',
-              'description': 'HTTP auth headers (stored securely)',
-            },
-            'env': {
-              'type': 'object',
-              'description': 'environment variables (stored securely)',
-            },
-          },
-          'required': ['name'],
-        },
-      },
-    },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'catalog_add_plugin',
-        'description':
-            'Add a plugin. With `source` ("owner/repo") it installs from '
-            'GitHub; without, it creates a custom definition.',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'name': {'type': 'string'},
-            'description': {'type': 'string'},
-            'category': {'type': 'string'},
-            'source': {'type': 'string'},
-          },
-          'required': ['name', 'description'],
-        },
-      },
-    },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'catalog_remove_mcp',
-        'description':
-            'Remove a custom MCP server by name (built-in servers can only '
-            'be disconnected).',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'name': {'type': 'string'},
-          },
-          'required': ['name'],
-        },
-      },
-    },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'catalog_set_mcp_timeout',
-        'description':
-            'Adjust the default execution timeout in seconds for an MCP server '
-            '(e.g. increase for slow/heavy tools, decrease for quick ones).',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'server': {
-              'type': 'string',
-              'description': 'Name or canonical id of the MCP server',
-            },
-            'timeout_seconds': {
-              'type': 'integer',
-              'description':
-                  'Execution timeout in seconds (minimum 5, maximum 600)',
-            },
-          },
-          'required': ['server', 'timeout_seconds'],
-        },
-      },
-    },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'catalog_add_marketplace',
-        'description':
-            'Import a plugin marketplace from a GitHub repo (owner/repo with '
-            'a marketplace.json). Use when the user asks to import plugins '
-            'from a GitHub repository.',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'repo': {
-              'type': 'string',
-              'description': 'owner/repo, e.g. acme/widgets',
-            },
-          },
-          'required': ['repo'],
-        },
-      },
-    },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'catalog_configure_plugin',
-        'description':
-            'Configure a native plugin capability (e.g. set API keys or '
-            'settings). Secrets persist securely, other values persist as '
-            'preferences.',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'plugin': {
-              'type': 'string',
-              'description': 'Plugin display name, e.g. JSON Visualizer',
-            },
-            'settings': {
-              'type': 'object',
-              'description': 'Setting key to value map',
-            },
-          },
-          'required': ['plugin', 'settings'],
-        },
-      },
-    },
   ];
 
   // ── Plugin tool definitions (added dynamically when installed) ──
@@ -6032,75 +5327,6 @@ user which one instead of assuming this one.''';
     },
   };
 
-  // MCP proxy — generic tool for an installed MCP plugin. Only offered
-  // while the plugin is installed AND its server actually exists in the
-  // catalog; a removed server must not keep advertising its proxy tool.
-  Map<String, dynamic>? _mcpProxyTool(PluginItem p) {
-    // Suffix-tolerant match so 'Puppeteer MCP' wires to server 'Puppeteer'.
-    final hasServer = mcpServerForPlugin(p) != null;
-    if (!hasServer) return null;
-    final safe = p.name
-        .toLowerCase()
-        .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
-        .replaceAll(RegExp(r'^_|_$'), '');
-    return {
-      'type': 'function',
-      'function': {
-        'name': 'mcp_$safe',
-        'description': '${p.description} (${p.name} MCP)',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'action': {'type': 'string'},
-            'args': {'type': 'object'},
-          },
-          'required': ['action'],
-        },
-      },
-    };
-  }
-
-  /// Task 4: resolve an `mcp_<name>` proxy tool to its configured McpServer
-  /// BY NAME. Tries, in order: exact normalized-key match, a fuzzy name
-  /// containment, then a token-subset match so a proxy key like
-  /// `mcp_gh_list` still finds a server actually named `gh`.
-  McpServer? _resolveMcpProxyServer(String toolName, {String? sessionId}) {
-    final raw = toolName.substring(4);
-    final key = _normTool(raw);
-    final servers = AppState.I.mcpServers
-        .where((s) => _mcpOwnerVisible(s, sessionId ?? _runSession?.id ?? ''))
-        .toList();
-    final encoded = servers
-        .where(
-          (s) =>
-              s.ownerPluginId != null &&
-              McpService.providerServerToolName(s) == toolName,
-        )
-        .toList();
-    if (encoded.length == 1) return encoded.single;
-    if (encoded.length > 1) return null;
-    final canonical = servers
-        .where((s) => _normTool(s.canonicalId) == key)
-        .toList();
-    if (canonical.length == 1) return canonical.single;
-    final exact = servers.where((s) => _normTool(s.name) == key).toList();
-    if (exact.length == 1) return exact.single;
-    if (exact.length > 1) return null;
-    final fuzzy = servers
-        .where(
-          (s) =>
-              _normTool(s.name).contains(key) ||
-              (key.isNotEmpty && key.contains(_normTool(s.name))),
-        )
-        .toList();
-    return fuzzy.length == 1 ? fuzzy.single : null;
-  }
-
-  /// Task 4 test seam: the legacy `mcp_*` proxy's server-name resolution —
-  /// returns the matched server name (or 'not configured').
-  @visibleForTesting
-  Future<String> legacyMcpProxyForTest(String toolName) async =>
-      _resolveMcpProxyServer(toolName)?.name ?? 'not configured';
 
   // ── MAIN LOOP ─────────────────────────────────────────────────────────
 
@@ -7507,19 +6733,17 @@ can drive there yourself with the device_* tools):
     await _refreshSkillRoots(s.id);
     if (_runChainStale || !identical(AppState.I.sessionById(s.id), s)) return;
 
-    if (AppState.I.plugins.any(
-      (p) => p.name == 'Image Studio' && p.installed && p.enabled,
-    )) {
-      try {
-        final headers = await OvidCloudService.I.imageHeaders();
-        if (_runChainStale || !identical(AppState.I.sessionById(s.id), s)) {
-          return;
-        }
-        await ImageStudio.I.ensureFresh(headers);
-      } catch (_) {
-        if (!_runChainStale && identical(AppState.I.sessionById(s.id), s)) {
-          ImageStudio.I.clearCapabilities();
-        }
+    // Image Studio is a built-in capability (the local plugin catalog that
+    // used to gate it is gone in P8 Task 17).
+    try {
+      final headers = await OvidCloudService.I.imageHeaders();
+      if (_runChainStale || !identical(AppState.I.sessionById(s.id), s)) {
+        return;
+      }
+      await ImageStudio.I.ensureFresh(headers);
+    } catch (_) {
+      if (!_runChainStale && identical(AppState.I.sessionById(s.id), s)) {
+        ImageStudio.I.clearCapabilities();
       }
     }
     if (_runChainStale || !identical(AppState.I.sessionById(s.id), s)) return;
@@ -7533,12 +6757,7 @@ can drive there yourself with the device_* tools):
     // heuristics: the token becomes exactly `PlanModePolicy.promptSection` when
     // planning and the empty string when not, reproducing the old `sys`
     // byte-for-byte in both states (so provider prefix caching still hits).
-    final imageGuidance =
-        AppState.I.plugins.any(
-          (p) => p.name == 'Image Studio' && p.installed && p.enabled,
-        )
-        ? '$imageTaskGuidance\n'
-        : '';
+    final imageGuidance = '$imageTaskGuidance\n';
     const planSectionToken = '<<<PLAN_MODE_SECTION>>>';
     final sysTemplate =
         '''
@@ -7833,27 +7052,11 @@ ${await _agentsMdBlock()}
             'msgs': msgs.length,
           }),
         );
-        // PR24 plugin hooks. on_turn_start: fire-and-forget (no stdout
-        // injection). on_pre_request: stdout (≤2 KB) joins THIS request
+        // PR24 plugin hooks. on_pre_request: stdout (≤2 KB) joins THIS request
         // as a system note — a plugin can inject live context (the plugin hook runner
         // agent/pre-step message-injection parity, shell flavor).
-        // Task 8: canonical user_prompt_submit fires ONCE per user prompt
-        // (at runTask entry) — the per-turn firing is kept ONLY for
-        // plugins that declared the legacy on_turn_start map hook.
-        if (HookService.I.hasLegacyMapHookListeners('on_turn_start')) {
-          unawaited(
-            HookService.I.fire(
-              'on_turn_start',
-              s.id,
-              payload: {
-                'turn': turn,
-                'prompt': cleanTruncate(originalPrompt, 400),
-                'transcript_path': _transcriptPathFor(s.id),
-              },
-              model: s.model,
-            ),
-          );
-        }
+        // Canonical user_prompt_submit fires ONCE per user prompt (at runTask
+        // entry); the legacy map-hook firing died with the plugin catalog.
         if (HookService.I.hasHookListeners('pre_request', sessionId: s.id)) {
           final hookRes = await HookService.I.fireDetailed(
             'pre_request',
@@ -8671,62 +7874,6 @@ ${await _agentsMdBlock()}
   String transcriptPathForTest(String sessionId) =>
       _transcriptPathFor(sessionId);
 
-  /// Execute a prompt-backed capability tool through a live model (NP5).
-  ///
-  /// Mirrors the title-generation `_callLlm(..., includeTools: false)`
-  /// pattern: an invisible helper call (no streaming, no tools, no
-  /// transcript writes). Honest failures only — never a fake success.
-  Future<String> runPromptTool(
-    NativePromptCapability cap,
-    String toolName,
-    Map<String, dynamic> args,
-  ) async {
-    final session = _runSession ?? AppState.I.activeSession;
-    final p = _runCtx?.provider ?? AppState.I.providerForSession(session);
-    if (session == null || p == null || !p.isConfigured) {
-      return 'No provider configured for this session.';
-    }
-    final userContent = cap.buildPrompt(toolName, args);
-    // NP5 Task 3 (plan-mandated framework exception): Multi-Model Compare
-    // encodes a `FANOUT:<idA>,<idB>|<prompt>` envelope in its user message.
-    // Fan out here with sequential sub-calls — one per distinct model, at
-    // most 3 — and return `## <model>` sections with per-model failure
-    // lines instead of a single answer.
-    if (userContent.startsWith('FANOUT:')) {
-      return _runPromptFanOut(cap, userContent, session, p);
-    }
-    final msgs = [
-      {'role': 'system', 'content': cap.taskSystemPrompt},
-      {'role': 'user', 'content': userContent},
-    ];
-    final override = promptLlmForTest;
-    final r = override != null
-        ? _normalizePromptFixture(await override(p, msgs, session))
-        : await _callLlm(
-            p,
-            msgs,
-            session,
-            includeTools: false,
-            // Invisible helper call — must never stream into the transcript.
-            streamToTranscript: false,
-            purpose: 'prompt_tool',
-          );
-    if (r == null) {
-      return 'Model call failed: ${lastError ?? 'unknown'}.';
-    }
-    final text = (r['content'] as String? ?? '').trim();
-    if (text.isEmpty) return 'The model returned no text.';
-    return text;
-  }
-
-  // Older test callers supplied wire envelopes. Keep that seam compatible;
-  // production transports already return normalized assistant messages.
-  Map<String, dynamic>? _normalizePromptFixture(Map<String, dynamic>? r) {
-    if (r == null || r.containsKey('content')) return r;
-    final choices = r['choices'] as List?;
-    return {...r, 'content': choices?.firstOrNull?['message']?['content']};
-  }
-
   _RequestRoute _requestRoute(ProviderConfig p, ChatSession session) {
     final ctx = _runCtx;
     if (ctx != null &&
@@ -8737,161 +7884,6 @@ ${await _agentsMdBlock()}
     return _RequestRoute(p, session.model);
   }
 
-  /// Multi-model fan-out for the `FANOUT:` envelope (NP5 Task 3).
-  ///
-  /// [envelope] is `FANOUT:<idA>,<idB>|<prompt>` as built by
-  /// `MultiModelCompareCapability.buildPrompt`. Each requested id resolves
-  /// via `AppState.I.providerById` (falling back to a bare-model-id lookup
-  /// across configured providers); an empty id list falls back to the
-  /// session provider plus the 2 most-recent distinct configured providers
-  /// (never repeated). Sub-calls run sequentially through the same
-  /// `promptLlmForTest ?? _callLlm(..., includeTools: false)` path as
-  /// [runPromptTool]. The result is one `## <model>` section per model with
-  /// honest per-model failure lines and shortfall lines for ids no
-  /// configured provider covers.
-  Future<String> _runPromptFanOut(
-    NativePromptCapability cap,
-    String envelope,
-    ChatSession session,
-    ProviderConfig sessionProvider,
-  ) async {
-    final rest = envelope.substring('FANOUT:'.length);
-    final bar = rest.indexOf('|');
-    final modelsPart = bar < 0 ? rest : rest.substring(0, bar);
-    final prompt = bar < 0 ? '' : rest.substring(bar + 1);
-    if (prompt.trim().isEmpty) {
-      return 'Multi-model compare received an empty prompt.';
-    }
-    final seen = <String>{};
-    final requested = <String>[];
-    for (final part in modelsPart.split(',')) {
-      final id = part.trim();
-      if (id.isEmpty || !seen.add(id)) continue;
-      requested.add(id);
-    }
-    if (requested.length > 3) {
-      return 'Multi-model compare supports at most 3 models '
-          '(got ${requested.length}).';
-    }
-
-    final targets = <({String label, _RequestRoute route})>[];
-    final shortfall = <String>[];
-    if (requested.isEmpty) {
-      targets.add((
-        label: sessionProvider.id,
-        route: _requestRoute(sessionProvider, session),
-      ));
-      for (final recent in AppState.I.recentModels) {
-        if (targets.length >= 3) break;
-        if (recent.providerId == sessionProvider.id) continue;
-        if (targets.any((t) => t.route.providerId == recent.providerId)) {
-          continue;
-        }
-        final rp = AppState.I.providerById(recent.providerId);
-        if (rp == null || !rp.isConfigured) continue;
-        targets.add((label: rp.id, route: _RequestRoute(rp, recent.model)));
-      }
-    } else {
-      for (final id in requested) {
-        // A qualified target preserves provider identity even when several
-        // providers advertise the same bare model ID.
-        final separator = id.indexOf('::');
-        if (separator > 0) {
-          final providerId = id.substring(0, separator);
-          final model = id.substring(separator + 2).trim();
-          final target = AppState.I.providerById(providerId);
-          if (target != null &&
-              target.isConfigured &&
-              model.isNotEmpty &&
-              target.models.contains(model)) {
-            targets.add((label: id, route: _RequestRoute(target, model)));
-          } else {
-            shortfall.add(id);
-          }
-          continue;
-        }
-        final direct = AppState.I.providerById(id);
-        if (direct != null && direct.isConfigured) {
-          final model = direct.id == sessionProvider.id
-              ? _requestRoute(sessionProvider, session).model
-              : direct.selectedModel ?? direct.models.firstOrNull ?? '';
-          if (model.isEmpty) {
-            shortfall.add(id);
-          } else {
-            targets.add((label: id, route: _RequestRoute(direct, model)));
-          }
-          continue;
-        }
-        final matches = AppState.I.providers
-            .where((prov) => prov.isConfigured && prov.models.contains(id))
-            .toList();
-        if (matches.length == 1) {
-          targets.add((label: id, route: _RequestRoute(matches.single, id)));
-        } else if (matches.length > 1) {
-          shortfall.add('$id (ambiguous model; use provider-id::model-id)');
-        } else {
-          shortfall.add(id);
-        }
-      }
-    }
-
-    final override = promptLlmForTest;
-    Future<String> answerFor(_RequestRoute route, String label) async {
-      final target = route.providerCopy();
-      final subMsgs = [
-        {'role': 'system', 'content': cap.taskSystemPrompt},
-        {'role': 'user', 'content': prompt},
-      ];
-      Map<String, dynamic>? r;
-      try {
-        r = override != null
-            ? _normalizePromptFixture(await override(target, subMsgs, session))
-            : await _callLlm(
-                target,
-                subMsgs,
-                session,
-                includeTools: false,
-                // Invisible helper call — must never stream into the
-                // transcript.
-                streamToTranscript: false,
-                route: route,
-                purpose: 'fanout',
-              );
-      } catch (e) {
-        return '## $label\nModel call failed: $e.';
-      }
-      if (r == null) {
-        return '## $label\nModel call failed: ${lastError ?? 'unknown'}.';
-      }
-      final text = (r['content'] as String? ?? '').trim();
-      if (text.isEmpty) return '## $label\nThe model returned no text.';
-      return '## $label\n$text';
-    }
-
-    final sections = <String>[];
-    for (final t in targets) {
-      if (_cancelRequested) {
-        sections.add('## ${t.label}\nModel call cancelled.');
-        break;
-      }
-      sections.add(await answerFor(t.route, t.label));
-    }
-    for (final miss in shortfall) {
-      sections.add('## $miss\nNo configured provider found for "$miss".');
-    }
-    if (sections.isEmpty) {
-      return 'Multi-model compare found no configured provider to run on.';
-    }
-    return sections.join('\n\n');
-  }
-
-  /// Dynamic session title (ChatGPT/Gemini style).
-  ///
-  /// Runs after the first real exchange and replaces the heuristic title with
-  /// an LLM one. Skipped when a title was already generated (persisted flag),
-  /// when the user renamed the session, or when there is no assistant turn
-  /// yet. A failure leaves the heuristic in place and does NOT set the flag,
-  /// so a later run retries.
   Future<void> maybeGenerateSessionTitle(ChatSession s) async {
     if (s.titleGenerated) return;
     if (s.messages.where((m) => m.role == 'assistant').isEmpty) return;
@@ -9086,10 +8078,6 @@ ${await _agentsMdBlock()}
   /// process tools get generous deadlines; local fs reads stay tight; the
   /// catch-all keeps a stuck tool from hanging the run forever.
   Duration _toolTimeoutFor(String name) {
-    final mcpTool = McpService.I.resolveToolName(name);
-    if (mcpTool != null) {
-      return Duration(seconds: mcpTool.server.toolTimeoutS.clamp(5, 600));
-    }
     // Tools that legitimately wait on humans or long jobs are exempt.
     if (name == 'ask_user_question' ||
         name == 'exit_plan_mode' ||
@@ -11027,535 +10015,6 @@ ${await _agentsMdBlock()}
               : 'No matches for "$q2" in memories + this session. (Enable "Share session memory" in Settings to search across chats.)';
         }
         return hits.join('\n');
-      case String() when McpCatalogTools.I.handles(name):
-        return await McpCatalogTools.I.dispatch(name, args);
-      case String() when name.startsWith('mcp__'):
-        // Real discovered MCP tool call: mcp__<server>__<tool>.
-        // The tool schema came from tools/list (McpService.connectedTools).
-        final runSid = _runSession?.id ?? '';
-        final resolved = McpService.I.resolveToolName(
-          name,
-          visible: (server) => _mcpOwnerVisible(server, runSid),
-        );
-        if (resolved == null) {
-          final hidden = McpService.I.resolveToolName(name);
-          if (hidden?.server.ownerPluginId != null) {
-            return _pluginScopeRefusal(
-              hidden!.canonicalId,
-              hidden.server.ownerPluginId!,
-            );
-          }
-          return 'MCP tool "$name" is not connected or its alias is ambiguous.';
-        }
-        if (!_mcpOwnerVisible(resolved.server, runSid)) {
-          return _pluginScopeRefusal(
-            resolved.canonicalId,
-            resolved.server.ownerPluginId!,
-          );
-        }
-        _emit('shell', 'MCP: ${resolved.server.name} → ${resolved.tool.name}');
-        final cleanArgs = Map<String, dynamic>.from(args);
-        final rawTimeout =
-            cleanArgs.remove('_timeout_seconds') ??
-            cleanArgs.remove('_timeout') ??
-            cleanArgs.remove('timeout_seconds');
-        Duration? callTimeout;
-        if (rawTimeout is num && rawTimeout > 0) {
-          callTimeout = Duration(seconds: rawTimeout.toInt().clamp(5, 600));
-        }
-        return await McpService.I.callTool(
-          resolved.server.canonicalId,
-          resolved.tool.name,
-          cleanArgs,
-          timeout: callTimeout,
-          onProgress: _mcpProgressToCard(),
-        );
-      case String() when name.startsWith('mcp_'):
-        final runSid = _runSession?.id ?? '';
-        final resolved = McpService.I.resolveToolName(
-          name,
-          visible: (server) => _mcpOwnerVisible(server, runSid),
-        );
-        if (resolved == null) {
-          final hidden = McpService.I.resolveToolName(name);
-          if (hidden?.server.ownerPluginId != null) {
-            return _pluginScopeRefusal(
-              hidden!.canonicalId,
-              hidden.server.ownerPluginId!,
-            );
-          }
-        }
-        if (resolved != null) {
-          if (!_mcpOwnerVisible(resolved.server, runSid)) {
-            return _pluginScopeRefusal(
-              resolved.canonicalId,
-              resolved.server.ownerPluginId!,
-            );
-          }
-          _emit(
-            'shell',
-            'MCP: ${resolved.server.name} → ${resolved.tool.name}',
-          );
-          final cleanArgs = Map<String, dynamic>.from(args);
-          final rawTimeout =
-              cleanArgs.remove('_timeout_seconds') ??
-              cleanArgs.remove('_timeout') ??
-              cleanArgs.remove('timeout_seconds');
-          Duration? callTimeout;
-          if (rawTimeout is num && rawTimeout > 0) {
-            callTimeout = Duration(seconds: rawTimeout.toInt().clamp(5, 600));
-          }
-          return await McpService.I.callTool(
-            resolved.server.canonicalId,
-            resolved.tool.name,
-            cleanArgs,
-            timeout: callTimeout,
-            onProgress: _mcpProgressToCard(),
-          );
-        }
-        // Real MCP proxy — resolve the matched server BY NAME first, then
-        // connect + call through its real name. (The old code derived
-        // `mcpName` as `substring(4).replaceAll('_', ' ')`, which never
-        // matched the `_running` map's key, so an already-connected server
-        // would still report "not connected" or fail the call.)
-        final action = args['action'] as String? ?? 'execute';
-        final mcpArgs = args['args'] as Map<String, dynamic>? ?? {};
-        final match = _resolveMcpProxyServer(name);
-        if (match == null) {
-          return 'MCP server not configured. Add it in Settings → MCP '
-              'servers (or list servers with catalog_list_mcp).';
-        }
-        if (!_mcpOwnerVisible(match, runSid)) {
-          return _pluginScopeRefusal(match.canonicalId, match.ownerPluginId!);
-        }
-        _emit('shell', 'MCP: ${match.name} → $action');
-        if (!McpService.I.isConnected(match.canonicalId)) {
-          // Strict permission model: an http/sse server dials a network
-          // host — gate it like any other off-allowlist fetch.
-          if (!await _mcpServerHostGrantOk(match, tool: 'mcp_connect')) {
-            return _accessDeniedMessage([
-              'host ${_mcpServerHost(match)}',
-            ], noun: 'host');
-          }
-          final res = await McpService.I.connect(match);
-          if (!res.contains('connected')) return res;
-        }
-        final cleanMcpArgs = Map<String, dynamic>.from(mcpArgs);
-        final rawTimeout =
-            cleanMcpArgs.remove('_timeout_seconds') ??
-            cleanMcpArgs.remove('_timeout') ??
-            cleanMcpArgs.remove('timeout_seconds');
-        Duration? callTimeout;
-        if (rawTimeout is num && rawTimeout > 0) {
-          callTimeout = Duration(seconds: rawTimeout.toInt().clamp(5, 600));
-        }
-        return await McpService.I.callTool(
-          match.canonicalId,
-          action,
-          cleanMcpArgs,
-          timeout: callTimeout,
-          onProgress: _mcpProgressToCard(),
-        );
-      case String() when name.startsWith('plugin__'):
-        // Native plugin capability tool: plugin__<slug>__<tool>.
-        // Placed BEFORE the generic `plugin_` case (mirrors the
-        // `mcp__`-before-`mcp_` ordering): a `plugin__x` name also starts
-        // with `plugin_`, so placing it after would make it dead code.
-        // Slugs like `json_visualizer` contain single `_`, so parse by
-        // stripping the `plugin__` prefix then splitting on DOUBLE
-        // underscore `__`. Tool names must never contain `__`.
-        final rest = name.substring('plugin__'.length);
-        final sep = rest.indexOf('__');
-        if (sep <= 0 || sep + 2 >= rest.length) {
-          return 'Plugin tool "$name" is malformed: expected '
-              'plugin__<plugin_slug>__<tool_name>.';
-        }
-        final slug = rest.substring(0, sep);
-        final toolName = rest.substring(sep + 2);
-        if (toolName.isEmpty || toolName.contains('__')) {
-          return 'Plugin tool "$name" is malformed: expected '
-              'plugin__<plugin_slug>__<tool_name>.';
-        }
-        final capability = NativePluginRegistry.I.capabilityForSlug(slug);
-        if (capability == null) {
-          return 'Plugin tool "$name" not found or plugin is disabled.';
-        }
-        if (!capability.tools.any((t) => t.name == toolName)) {
-          return 'Plugin tool "$name" not found or plugin is disabled.';
-        }
-        final pluginMatch = AppState.I.plugins
-            .where(
-              (p) =>
-                  p.installed &&
-                  p.enabled &&
-                  NativePluginRegistry.slugify(p.name) == slug,
-            )
-            .firstOrNull;
-        if (pluginMatch == null) {
-          return 'Plugin tool "$name" not found or plugin is disabled.';
-        }
-        _emit('shell', 'Native plugin $slug → $toolName');
-        final cleanArgs = Map<String, dynamic>.from(args);
-        if (capability is NativePromptCapability) {
-          return runPromptTool(capability, toolName, cleanArgs);
-        }
-        final runKey = _runSession?.id ?? '';
-        final cancellation = UtilityCancellationBridge.I.open(runKey);
-        try {
-          return await capability.callTool(
-            toolName,
-            cleanArgs,
-            cancellation: cancellation,
-          );
-        } finally {
-          UtilityCancellationBridge.I.close(runKey, cancellation);
-        }
-      case String() when name.startsWith('plugin_'):
-        // Canonical namespaced contribution (spec §4.4) — resolved through
-        // the registry and enforced for the RUNNING session: another
-        // session cannot call a session-scoped plugin by guessing its
-        // canonical name (spec §7). ONLY command/skill/agent kinds execute
-        // here — a guessed hook/MCP tool name (Task 8/9 consumption) falls
-        // through to the honest legacy handling below instead of loading
-        // its declaring file as instruction content.
-        final contribution = PluginContributionRegistry.I
-            .contributionByToolName(name);
-        if (contribution != null && contribution.isRosterTool) {
-          final runSid = _runSession?.id ?? '';
-          if (!PluginContributionRegistry.I.isPluginActiveForSession(
-            contribution.pluginId,
-            runSid,
-          )) {
-            return _pluginScopeRefusal(
-              contribution.canonicalId,
-              contribution.pluginId,
-            );
-          }
-          return await _runPluginContribution(contribution, args);
-        }
-        final toolKey = name.substring(7);
-        final plugin = AppState.I.plugins
-            .where(
-              (p) =>
-                  p.installed &&
-                  p.enabled &&
-                  ((p.runtimeId != null &&
-                          PluginContributionRegistry.I.isRegistered(
-                            p.runtimeId!,
-                          )) ||
-                      (p.runtimeId == null &&
-                          !p.migrationRequired &&
-                          (AppState.I.legacyPluginExecutionAllowed ||
-                              p.author == 'you'))) &&
-                  (_normTool(p.name) == toolKey ||
-                      p.name.toLowerCase() == toolKey),
-            )
-            .firstOrNull;
-        if (plugin == null) {
-          return 'Plugin tool "$name" not found or plugin is disabled.';
-        }
-        // A REGISTERED normalized manifest is governed by the canonical
-        // registry (spec §7): the legacy generic name must not serve
-        // mounted content in sessions where the activation is invisible
-        // (pendingGlobal awaiting its one restart, or sessionActive scoped
-        // to another session). Refuse honestly, naming the canonical
-        // namespace and the activation state.
-        final legacyRuntimeId = plugin.runtimeId;
-        if (legacyRuntimeId != null &&
-            PluginContributionRegistry.I.isRegistered(legacyRuntimeId) &&
-            !PluginContributionRegistry.I.isPluginActiveForSession(
-              legacyRuntimeId,
-              _runSession?.id ?? '',
-            )) {
-          return _registeredPluginScopeRefusal(name, legacyRuntimeId);
-        }
-        if (legacyRuntimeId != null &&
-            PluginContributionRegistry.I.isRegistered(legacyRuntimeId)) {
-          final canonical = PluginContributionRegistry.I
-              .toolContributionsForPlugin(legacyRuntimeId)
-              .map((contribution) => contribution.canonicalId)
-              .join(', ');
-          return 'Plugin tool "$name" uses canonical contributions only: '
-              '${canonical.isEmpty ? '(none)' : canonical}. Nothing was '
-              'executed; call one exact canonical contribution.';
-        }
-        final action =
-            (args['action'] as String? ?? args['command'] as String? ?? '')
-                .trim();
-        if (action.isEmpty) {
-          return 'Plugin "${plugin.name}": no action was specified, so nothing '
-              'was executed. Provide the name of a skill or command this '
-              'plugin mounts.';
-        }
-        final resolved = SkillService.I.resolveAlias(action);
-        if (resolved.isAmbiguous) {
-          return 'Plugin action "$action" is ambiguous: '
-              '${resolved.options.join(', ')}. Nothing was executed.';
-        }
-        var skill = resolved.unique;
-        if (skill != null && plugin.source != null) {
-          final dir = await AppState.I.pluginCacheDirFor(plugin.source!);
-          final roots = [
-            '${dir.path}/commands/',
-            '${dir.path}/skills/',
-            '${dir.path}/agents/',
-          ];
-          if (!roots.any((root) => skill!.path.startsWith(root))) skill = null;
-        } else if (skill != null && plugin.author == 'you') {
-          // Custom user-defined or agent-created plugin: allow executing any
-          // matching user skill or command.
-        } else {
-          skill = null;
-        }
-        if (skill != null) {
-          _emit('think', 'plugin ${plugin.name} executing: ${skill.name}');
-          final input = args['input'] ?? args['arguments'];
-          final inputStr = input != null ? '\n\nArguments: $input' : '';
-          return '<skill_content>\n${skill.content}\n</skill_content>$inputStr';
-        }
-        if (plugin.author == 'you') {
-          // A custom plugin with no mounted skill/command file has nothing to
-          // execute. The old code answered EVERY action with "executed
-          // successfully" and no content — a stub that reports success
-          // regardless of input, so the model believed work happened when
-          // nothing did. Be honest: list what IS available and say nothing ran.
-          final input = args['input'] ?? args['arguments'] ?? '';
-          final available = _pluginActionNames(plugin);
-          return 'Plugin "${plugin.name}": action "$action" is not an '
-              'executable contribution — no skill or command by that name is '
-              'mounted, so nothing was executed.'
-              '${available.isEmpty ? '' : ' Available actions: ${available.join(', ')}.'}'
-              '${input.toString().trim().isNotEmpty ? '\n\nInput received: $input' : ''}';
-        }
-        return 'Plugin "${plugin.name}": no executable skill or command named '
-            '"$action" was found, so nothing was executed.';
-      case 'agent_install_plugin':
-        final pluginName = (args['plugin_name'] as String? ?? '').trim();
-        final repoArg = (args['repo'] as String? ?? '').trim();
-        // Direct GitHub install: `repo: owner/name` needs no catalog row, so
-        // any [CC]/Codex plugin can be installed straight from its repo.
-        final directSource = repoArg.isEmpty
-            ? null
-            : githubPluginSourceFromSourceString(repoArg);
-        if (repoArg.isNotEmpty && directSource == null) {
-          return 'Invalid repo "$repoArg" — expected "owner/name".';
-        }
-        if (pluginName.isEmpty && directSource == null) {
-          return 'agent_install_plugin needs a plugin_name or a repo.';
-        }
-        _emit(
-          'think',
-          'installing plugin: ${directSource != null ? repoArg : pluginName}',
-        );
-        try {
-          final app = AppState.I;
-          PluginItem? match = pluginName.isEmpty
-              ? null
-              : app.plugins
-                    .where(
-                      (p) => p.name.toLowerCase() == pluginName.toLowerCase(),
-                    )
-                    .firstOrNull;
-          if (directSource != null) {
-            // Reuse an existing row for this repo, else create a transient
-            // one so the runtime install has a row to bind to.
-            match ??= app.plugins
-                .where((p) => p.source == directSource.sourceId)
-                .firstOrNull;
-            match ??= PluginItem(
-              name: repoArg,
-              author: directSource.owner,
-              description: 'Installed from $repoArg',
-              version: '1.0',
-              category: 'Tool',
-              source: directSource.sourceId,
-            );
-            if (!app.plugins.contains(match)) app.plugins.add(match);
-          }
-          if (match == null) return 'Plugin not found: $pluginName';
-          final target = match;
-
-          // Task 7 (spec §7): production installs route through the
-          // atomic runtime manager with the agent origin + the RUNNING
-          // session — the plugin is immediately usable ONLY in this
-          // session and promotes globally after exactly one restart.
-          // Task 11: typed source variants (local folder / local zip).
-          final localPath = args['local_path'] as String?;
-          final localZipPath = args['local_zip_path'] as String?;
-          final runtimeResult = await app.installPlugin(
-            target,
-            source: localPath != null && localPath.isNotEmpty
-                ? LocalFolderPluginSource(localPath)
-                : localZipPath != null && localZipPath.isNotEmpty
-                ? ZipPluginSource(localZipPath)
-                : directSource,
-            origin: PluginInstallOrigin.agent,
-            sessionId: _runSession?.id,
-          );
-          if (runtimeResult != null) {
-            if (runtimeResult.status == PluginInstallStatus.failed) {
-              // Agent-path approval: a missing capability grant must surface
-              // an approval card to the user (Approve → persist grant →
-              // retry) instead of failing with no recourse.
-              final approvalResult = await _approvePluginInstallAndRetry(
-                match,
-                localPath: localPath,
-                localZipPath: localZipPath,
-                error: runtimeResult.error ?? 'unknown error',
-              );
-              if (approvalResult != null) return approvalResult;
-              return 'install failed: '
-                  '${runtimeResult.error ?? 'unknown error'}';
-            }
-            final sid = _runSession?.id ?? '';
-            // Exact-scope report (spec §7): agent installs activate
-            // immediately ONLY in the installing session, then promote
-            // globally after one restart — when no running session id
-            // is known the row keeps the pending screen semantics.
-            final pendingOnly = sid.isEmpty;
-            final scopeNote = pendingOnly
-                ? 'installed (pending: activates globally after one '
-                      'restart)'
-                : 'installed ✓ — active in this session only (id $sid); '
-                      'activates globally after one restart';
-            final parts = <String>[
-              scopeNote,
-              if (runtimeResult.degradedNames.isNotEmpty)
-                'optional dependencies unavailable: '
-                    '${runtimeResult.degradedNames.join(', ')}',
-            ];
-            // The installing session gets this plugin's session-start
-            // bootstrap now — otherwise its skills mount but its context
-            // stays empty until a brand-new session.
-            final installedId = target.runtimeId;
-            if (!pendingOnly && installedId != null) {
-              await _fireInstalledPluginSessionStart(sid, installedId);
-            }
-            final displayName = pluginName.isNotEmpty ? pluginName : repoArg;
-            return 'Plugin "$displayName" ${parts.join(' · ')} '
-                '(id ${target.runtimeId}).';
-          }
-
-          target.installed = true;
-          target.enabled = true;
-          app.persistPluginState();
-          app.refresh();
-          _emit('done', 'installed $pluginName');
-
-          // Realtime install (the plugin manager parity): an MCP-category plugin connects
-          // its real server right away, exactly like the Plugins screen
-          // Install button — a flag flip with no live connection would be
-          // a lie to the model.
-          if (target.category == 'MCP') {
-            final server = app.mcpServers
-                .where((s) => s.name == target.name)
-                .firstOrNull;
-            if (server == null) {
-              return 'Plugin "$pluginName" installed, but no MCP server by '
-                  'that name is configured — add it in Plugins → MCP.';
-            }
-            // Strict permission model: gate the network dial for http/sse
-            // servers before connecting.
-            if (!await _mcpServerHostGrantOk(server, tool: 'mcp_connect')) {
-              return _accessDeniedMessage([
-                'host ${_mcpServerHost(server)}',
-              ], noun: 'host');
-            }
-            final msg = await McpService.I.connect(server);
-            server.connected = McpService.I.isConnected(server.canonicalId);
-            app.persistMcpIntent();
-            app.refresh();
-            final tools = McpService.I.connectedTools[server.canonicalId] ?? [];
-            final names = tools.map((t) => t.name).join(', ');
-            return 'Plugin "$pluginName" installed ✓ $msg'
-                '${tools.isEmpty ? '' : ' — tools: $names'}.';
-          }
-
-          // Honest post-install report: what tools does the plugin actually
-          // contribute? (A flag flip that silently adds no tool is a lie.)
-          final toolNames = _pluginToolNames(match);
-          // PR40: fetch the plugin's OWN commands/skills content (Claude
-          // Code marketplace `source: owner/repo` plugins) and mount it —
-          // an install now genuinely adds capability, not just a catalog
-          // row. Best-effort: offline/no-source/empty-repo all degrade to
-          // "0 fetched" rather than failing the install.
-          var fetchedFiles = 0;
-          var mountedMcps = 0;
-          if (target.source != null) {
-            fetchedFiles = await AppState.I.fetchPluginContent(target.source!);
-            if (fetchedFiles > 0) {
-              await refreshSkills(sessionId: _runSession?.id);
-              // P3: a plugin can ship .mcp.json — register its declared
-              // MCP servers so they auto-connect on next launch.
-              mountedMcps = await AppState.I.mountPluginMcpServers(
-                target.source!,
-              );
-              // Task 3: register hooks/hooks.json (matcher + JSON decision
-              // hooks) from the fetched plugin content.
-              await AppState.I.registerPluginHooks(match);
-            }
-          }
-          final parts = <String>[];
-          if (toolNames.isNotEmpty) {
-            parts.add('agent tools: ${toolNames.join(', ')}');
-          }
-          if (fetchedFiles > 0) {
-            parts.add(
-              '$fetchedFiles command/skill file(s) fetched from '
-              '${target.source} — check /-menu for new commands',
-            );
-          }
-          if (mountedMcps > 0) {
-            parts.add(
-              'registered $mountedMcps MCP server(s) from .mcp.json '
-              '(auto-connect intent persisted)',
-            );
-          }
-          if (parts.isEmpty) {
-            return 'Plugin "$pluginName" installed and enabled, but it '
-                'contributes no agent tools or fetchable commands/skills. '
-                'It only appears in the Plugins screen.';
-          }
-          return 'Plugin "$pluginName" installed and enabled ✓ '
-              '${parts.join(' · ')}.';
-        } catch (e) {
-          return 'install failed: $e';
-        }
-      case 'agent_install_mcp':
-        final mcpName2 = args['server_name'] as String;
-        _emit('think', 'installing MCP: $mcpName2');
-        try {
-          final app = AppState.I;
-          final match = app.mcpServers
-              .where((s) => s.name.toLowerCase() == mcpName2.toLowerCase())
-              .firstOrNull;
-          if (match == null) return 'MCP server not found: $mcpName2';
-          // REAL connect — spawns the process, runs the MCP handshake,
-          // discovers tools.  (Previously this only flipped a bool, so
-          // the UI said "connected" but nothing actually ran.)
-          // Strict permission model: gate the network dial for http/sse
-          // servers before connecting.
-          if (!await _mcpServerHostGrantOk(match, tool: 'mcp_connect')) {
-            return _accessDeniedMessage([
-              'host ${_mcpServerHost(match)}',
-            ], noun: 'host');
-          }
-          final res = await McpService.I.connect(match);
-          match.connected = McpService.I.isConnected(match.canonicalId);
-          app.persistMcpIntent();
-          app.refresh();
-          _emit('done', res);
-          final tools = McpService.I.connectedTools[match.canonicalId] ?? [];
-          final names = tools.map((t) => t.name).join(', ');
-          return res.contains('connected')
-              ? '$res${tools.isEmpty ? '' : ' — tools: $names'}. '
-                    'They are available to you now as mcp__<server>__<tool>.'
-              : res;
-        } catch (e) {
-          return 'MCP connect failed: $e';
-        }
-
-      // ─── agent-harness catalog management (providers/plugins/MCP) ──────
       case 'catalog_list_providers':
         _emit('think', 'listing providers');
         final app = AppState.I;
@@ -11726,205 +10185,6 @@ ${await _agentsMdBlock()}
         if (ok != null) return 'Remove failed: $ok';
         _emit('done', 'provider removed: $pid');
         return 'Provider "$pid" removed.';
-
-      case 'catalog_list_plugins':
-        _emit('think', 'listing plugins');
-        final app = AppState.I;
-        return (app.plugins.map(
-          (p) =>
-              '${p.name} — ${p.installed ? 'installed' : 'available'}'
-              '${p.enabled ? ' · enabled' : ''}',
-        )).join('\n');
-
-      case 'catalog_list_mcp':
-        _emit('think', 'listing MCP servers');
-        final app = AppState.I;
-        return (app.mcpServers.map(
-          (s) =>
-              '${s.name} — ${s.connected ? 'connected' : 'disconnected'}'
-              ' · transport: ${s.transport}'
-              // M4: never echo inline credentials back to the model.
-              '${s.url != null ? ' · url: ${scrubUrl(s.url!)}' : ''}'
-              '${s.transport != 'http' ? ' · ${scrubCommandLine(s.command, s.args)}' : ''}',
-        )).join('\n');
-
-      case 'catalog_add_mcp':
-        final name = args['name'] as String;
-        final command = (args['command'] as String?) ?? '';
-        final mArgs =
-            (args['args'] as List?)?.whereType<String>().toList() ?? <String>[];
-        final url = (args['url'] as String?)?.trim();
-        final headers =
-            (args['headers'] as Map?)?.map(
-              (k, v) => MapEntry(k.toString(), v.toString()),
-            ) ??
-            const <String, String>{};
-        final env =
-            (args['env'] as Map?)?.map(
-              (k, v) => MapEntry(k.toString(), v.toString()),
-            ) ??
-            const <String, String>{};
-        // A stdio server is a program the app will run on this device every
-        // time it connects. The model must never register one on its own —
-        // the user approves it, in every mode (security M5).
-        final isStdio = url == null || url.isEmpty;
-        if (isStdio) {
-          // Shown to the user; inline credentials stay out of the dialog
-          // (and of any screenshot of it) — M4.
-          final program = scrubCommandLine(
-            command.isEmpty ? 'npx' : command,
-            mArgs,
-          );
-          final approved = await _askUser(
-            'catalog_add_mcp',
-            'Add local MCP server "$name"',
-            'This MCP server runs a program on this device whenever it '
-                'connects:\n\$ $program',
-            alwaysAsk: true,
-          );
-          if (!approved) {
-            return 'DENIED: the user did not approve adding the local MCP '
-                'server "$name". Nothing was added.';
-          }
-        }
-        _emit('think', 'adding MCP server: $name');
-        AppState.I.addCustomMcpServer(
-          name: name,
-          command: command.isEmpty
-              ? (url != null && url.isNotEmpty ? '' : 'npx')
-              : command,
-          args: mArgs,
-          url: url != null && url.isNotEmpty ? url : null,
-          headers: headers,
-          cwd: args['cwd'] as String?,
-          startupTimeoutS: (args['startup_timeout_s'] as num?)?.toInt(),
-        );
-        if (env.isNotEmpty) {
-          unawaited(AppState.I.setMcpEnv(name, env));
-        }
-        _emit('done', 'MCP server added: $name');
-        return 'MCP server "$name" added (transport: '
-            '${url != null && url.isNotEmpty ? 'http' : 'stdio'}). Connect it '
-            'from the Plugins → MCP section (or ask me to connect it).';
-
-      case 'catalog_add_plugin':
-        final name = args['name'] as String;
-        final desc = args['description'] as String;
-        final category = args['category'] as String? ?? 'Custom';
-        final sourceArg = (args['source'] as String? ?? '').trim();
-        _emit('think', 'creating plugin: $name');
-        AppState.I.addCustomPlugin(
-          name: name,
-          description: desc,
-          category: category,
-          source: sourceArg.isEmpty ? null : sourceArg,
-        );
-        _emit('done', 'plugin created: $name');
-        // A source-bearing row is installable right away — chain the real
-        // install so "add this plugin from GitHub" is one step, not a row
-        // that silently does nothing.
-        if (sourceArg.isNotEmpty) {
-          final created = AppState.I.plugins
-              .where((p) => p.name == name)
-              .firstOrNull;
-          if (created != null) {
-            return await _installPluginRow(created);
-          }
-        }
-        return 'Plugin "$name" created and enabled ✓ — visible in Plugins, '
-            'persists across restarts.';
-
-      case 'catalog_remove_mcp':
-        final name = args['name'] as String;
-        _emit('think', 'removing MCP server: $name');
-        final match = AppState.I.mcpServers
-            .where((s) => s.name.toLowerCase() == name.toLowerCase())
-            .firstOrNull;
-        if (match == null) return 'MCP server not found: $name';
-        if (!match.custom) {
-          return '"$name" is a built-in server — it can be disconnected but not removed.';
-        }
-        await AppState.I.removeMcpServer(match);
-        _emit('done', 'MCP server removed: $name');
-        return 'MCP server "$name" removed.';
-
-      case 'catalog_set_mcp_timeout':
-        final serverName = (args['server'] as String?)?.trim() ?? '';
-        final timeoutSec = (args['timeout_seconds'] as num?)?.toInt() ?? 60;
-        if (serverName.isEmpty) return 'Missing server name.';
-        final clamped = timeoutSec.clamp(5, 600);
-        final server = AppState.I.mcpServers
-            .where(
-              (s) =>
-                  s.name.toLowerCase() == serverName.toLowerCase() ||
-                  s.canonicalId.toLowerCase() == serverName.toLowerCase(),
-            )
-            .firstOrNull;
-        if (server == null) {
-          return 'MCP server not found: $serverName';
-        }
-        server.toolTimeoutS = clamped;
-        if (server.custom) {
-          AppState.I.updateCustomMcpServer(
-            server,
-            command: server.command,
-            args: server.args,
-            url: server.url,
-            transport: server.transport,
-            headers: server.headers,
-            cwd: server.cwd,
-            startupTimeoutS: server.startupTimeoutS,
-            toolTimeoutS: clamped,
-          );
-        }
-        _emit('done', 'MCP ${server.name} timeout set to ${clamped}s');
-        return 'MCP server "${server.name}" tool execution timeout set to ${clamped}s.';
-
-      case 'catalog_add_marketplace':
-        final repo = args['repo'] as String;
-        _emit('think', 'importing marketplace: $repo');
-        final normalized = AppState.I.addMarketplace(repo);
-        final target = normalized ?? AppState.normalizeMarketplace(repo);
-        final msg = await AppState.I.fetchMarketplaceCatalog(target);
-        _emit('done', 'marketplace imported: $target');
-        return msg;
-      case 'catalog_configure_plugin':
-        final pluginArg = (args['plugin'] as String?)?.trim() ?? '';
-        if (pluginArg.isEmpty) return 'Missing plugin name.';
-        final rawSettings = args['settings'];
-        final stringSettings = <String, String>{};
-        if (rawSettings is Map) {
-          for (final entry in rawSettings.entries) {
-            stringSettings[entry.key.toString()] =
-                entry.value?.toString() ?? '';
-          }
-        }
-        if (stringSettings.isEmpty) {
-          return 'No settings provided for "$pluginArg". Nothing was configured.';
-        }
-        final targetCapability =
-            NativePluginRegistry.I.capabilityFor(pluginArg) ??
-            NativePluginRegistry.I.capabilityForSlug(pluginArg) ??
-            NativePluginRegistry.I.capabilityForSlug(
-              NativePluginRegistry.slugify(pluginArg),
-            );
-        if (targetCapability == null) {
-          return 'Plugin "$pluginArg" has no native capability to configure.';
-        }
-        if (targetCapability.configFields.isEmpty) {
-          return 'Plugin "${targetCapability.pluginName}" has no '
-              'configurable settings. Nothing was configured.';
-        }
-        _emit('think', 'configuring plugin: ${targetCapability.pluginName}');
-        // Route through the capability's declared configFields (secret flag)
-        // via capability.configure so a typo'd key doesn't silently land a
-        // secret in prefs: declared secrets persist in secure storage,
-        // everything else in prefs (NativePluginConfigStore contract).
-        await targetCapability.configure(stringSettings);
-        _emit('done', 'plugin configured: ${targetCapability.pluginName}');
-        return 'Plugin "${targetCapability.pluginName}" configured: '
-            '${stringSettings.keys.join(', ')}.';
-      // ─── repo tools (cloud-owned) ────────────────────────────────────────────
 
       case 'repo_sync':
         return 'repo sync runs in Ovid Cloud. The server workspace is already '
@@ -12837,32 +11097,6 @@ ${await _agentsMdBlock()}
     );
   }
 
-  /// The network host an MCP server dials, for http/sse transports — null
-  /// for stdio/native transports (local processes, no host to gate) and
-  /// when the URL carries no host (connect() reports that itself).
-  static String? _mcpServerHost(McpServer server) {
-    final t = server.transport.toLowerCase();
-    if (t != 'http' && t != 'sse') return null;
-    final host = Uri.tryParse(server.url ?? '')?.host ?? '';
-    return host.isEmpty ? null : host;
-  }
-
-  /// Host-grant gate for AGENT-triggered MCP server connects (tool proxy
-  /// auto-connect, plugin/MCP install flows). UI/startup-driven connects
-  /// are deliberately ungated: the user tapped connect themselves (or the
-  /// plugin config did), and the approval dock isn't visible on those
-  /// screens — a prompt there would auto-deny after 5s and break manual
-  /// setup. stdio/native transports spawn local processes; their network
-  /// reach is the plugin sandbox's concern, not a host grant.
-  Future<bool> _mcpServerHostGrantOk(
-    McpServer server, {
-    required String tool,
-  }) async {
-    final host = _mcpServerHost(server);
-    if (host == null) return true;
-    return _checkHostGrant(host, tool: tool);
-  }
-
   Future<bool> _maybeApprove(String tool, String summary, String detail) async {
     final running = _runSession;
     final sessionId = running?.id ?? AppState.I.activeSession?.id;
@@ -13116,13 +11350,6 @@ ${await _agentsMdBlock()}
       case 'catalog_add_provider_model':
       case 'catalog_remove_provider_model':
       case 'catalog_select_model':
-      case 'catalog_add_mcp':
-      case 'catalog_remove_mcp':
-      case 'catalog_add_plugin':
-      case 'catalog_add_marketplace':
-      case 'catalog_configure_plugin':
-      case 'agent_install_plugin':
-      case 'agent_install_mcp':
         return roDenied;
       case 'fs_edit':
         // Only the view subcommand is read-only.
@@ -13138,106 +11365,6 @@ ${await _agentsMdBlock()}
       default:
         return null;
     }
-  }
-
-  /// Agent-path plugin approval (spec §5.1): when a runtime install fails
-  /// for lack of a capability grant, inspect the source, show the user an
-  /// approval card listing the requested capabilities, and — on approval —
-  /// persist the grant (exactly like the Plugins-screen sheet accept) and
-  /// retry once with the approved inspection.
-  ///
-  /// Returns the final message for the model, or null when [error] is not
-  /// an approval failure (the caller keeps its original error).
-  Future<String?> _approvePluginInstallAndRetry(
-    PluginItem match, {
-    String? localPath,
-    String? localZipPath,
-    required String error,
-  }) async {
-    if (!error.contains('approv')) return null;
-    final app = AppState.I;
-    PluginSource? src;
-    if (localPath != null && localPath.isNotEmpty) {
-      src = LocalFolderPluginSource(localPath);
-    } else if (localZipPath != null && localZipPath.isNotEmpty) {
-      src = ZipPluginSource(localZipPath);
-    } else if (match.source != null) {
-      src = githubPluginSourceFromSourceString(match.source!);
-    }
-    if (src == null) return null;
-    PluginInspection inspection;
-    try {
-      inspection = await PluginRuntimeManager.I.inspect(src);
-    } catch (e) {
-      return 'install failed: source resolution failed: $e';
-    }
-    final explanations = explainCapabilities(inspection.manifest);
-    final detail = StringBuffer(
-      'Plugin "${match.name}" (${inspection.manifest.id}) requests:\n',
-    );
-    if (explanations.isEmpty) {
-      detail.writeln('- no special capabilities');
-    } else {
-      for (final e in explanations) {
-        final env = e.environmentNames.isEmpty
-            ? ''
-            : ' (variables: ${e.environmentNames.join(', ')})';
-        final path = e.sourcePath.isEmpty ? '' : ' — ${e.sourcePath}';
-        detail.writeln('- ${e.capability.name}: ${e.reason}$env$path');
-      }
-    }
-    detail.writeln('Approve once for this exact plugin version.');
-    final ok = await _askUser(
-      'agent_install_plugin',
-      'Approve install of "${match.name}"?',
-      detail.toString(),
-    );
-    if (!ok) {
-      inspection.discard();
-      return 'install declined by user: "${match.name}" was not installed.';
-    }
-    await AppState.pluginPermissions.save(
-      PluginPermissionGrant(
-        pluginId: inspection.manifest.id,
-        manifestDigest: pluginManifestDigest(inspection.manifest),
-        capabilities: inferRequestedCapabilities(inspection.manifest),
-        environmentReadNames: {
-          ...inspection.manifest.environmentReadNames,
-          for (final s in inspection.manifest.mcpServers) ...s.envNames,
-        },
-        approvedAt: DateTime.now(),
-        // H2: the approval covers the staged content tree, not just the
-        // manifest.
-        contentTreeHash: PluginPermissionStore.contentTreeHashFor(
-          inspection.manifest.rootPath,
-          reverify: true,
-        ),
-      ),
-    );
-    final retry = await app.installPlugin(
-      match,
-      source: src,
-      inspection: inspection,
-      origin: PluginInstallOrigin.agent,
-      sessionId: _runSession?.id,
-    );
-    if (retry == null || retry.status == PluginInstallStatus.failed) {
-      return 'install failed: ${retry?.error ?? 'unknown error'}';
-    }
-    final sid = _runSession?.id ?? '';
-    final pendingOnly = sid.isEmpty;
-    final scopeNote = pendingOnly
-        ? 'installed (pending: activates globally after one restart)'
-        : 'installed ✓ — active in this session only (id $sid); '
-              'activates globally after one restart';
-    final parts = <String>[
-      scopeNote,
-      if (retry.degradedNames.isNotEmpty)
-        'optional dependencies unavailable: '
-            '${retry.degradedNames.join(', ')}',
-    ];
-    return 'Plugin "${match.name}" ${parts.join(' · ')} '
-        '(id ${match.runtimeId}).';
   }
 
   Future<bool> _askUser(
@@ -15557,21 +13684,13 @@ ${await _agentsMdBlock()}
     } catch (e) {
       Diag.swallow('agent_service', e);
     }
-    final mounts = <PluginCatalogMount>[];
-    for (final runtime in await PluginRuntimeManager.I.activeRuntimes()) {
-      if (!PluginContributionRegistry.I.isPluginActiveForSession(
-        runtime.pluginId,
-        sessionId,
-      )) {
-        continue;
-      }
-      mounts.add(PluginCatalogMount(runtime.contentDir, runtime.manifest));
-    }
+    // Plugin-contributed catalogs died with the local plugin runtime
+    // (P8 Task 17).
     await SkillService.I.publishSessionCatalog(
       sessionId,
       reservation: reservation,
       roots: roots,
-      mounts: mounts,
+      mounts: const [],
     );
   }
 
@@ -15596,26 +13715,6 @@ ${await _agentsMdBlock()}
     } catch (e) {
       Diag.swallow('agent_service', e);
     }
-    if (AppState.I.legacyPluginExecutionAllowed ||
-        _runSessionOverrideForTest != null) {
-      for (final p in AppState.I.plugins) {
-        if (!p.installed ||
-            !p.enabled ||
-            p.runtimeId != null ||
-            p.migrationRequired ||
-            p.source == null) {
-          continue;
-        }
-        try {
-          final dir = await AppState.I.pluginCacheDirFor(p.source!);
-          SkillService.I.addRoot('${dir.path}/commands');
-          SkillService.I.addRoot('${dir.path}/skills');
-          SkillService.I.addRoot('${dir.path}/agents');
-        } catch (e) {
-          Diag.swallow('agent_service', e);
-        }
-      }
-    }
     await SkillService.I.reload();
   }
 
@@ -15626,21 +13725,6 @@ ${await _agentsMdBlock()}
       return;
     }
     await _refreshCompatibilitySkillRoots();
-  }
-
-  Future<void> _skillsChanged(String? pluginId) async {
-    if (pluginId == null) {
-      // A legacy (runtimeId-null) row changed: the global compatibility
-      // catalog feeds the legacy `plugin_<display>` dispatcher, so it must
-      // be rebuilt alongside the per-session runtime snapshots.
-      SkillService.I.invalidateAllSessions();
-      await _refreshCompatibilitySkillRoots();
-    } else {
-      SkillService.I.invalidatePlugin(pluginId);
-    }
-    for (final session in List<ChatSession>.of(AppState.I.sessions)) {
-      await _refreshSkillRoots(session.id);
-    }
   }
 
   /// True when the app holds All Files Access (Android 11+ MANAGE_EXTERNAL
@@ -15759,14 +13843,6 @@ ${await _agentsMdBlock()}
   Future<String> dispatchForTest(String name, Map<String, dynamic> args) =>
       _dispatch(name, args);
 
-  /// Test seams for the MCP sampling approval + completion wiring.
-  @visibleForTesting
-  Future<bool> approveMcpSamplingForTest(McpSamplingRequest req) =>
-      _approveMcpSampling(req);
-  @visibleForTesting
-  Future<Map<String, dynamic>?> runMcpSamplingForTest(McpSamplingRequest req) =>
-      _runMcpSampling(req);
-
   /// PR25 test seam: arm an active tool card (as a real run's _toolStart
   /// would) so edit paths have somewhere to attach the diff.
   @visibleForTesting
@@ -15830,9 +13906,6 @@ ${await _agentsMdBlock()}
       );
     }).toList();
   }
-
-  /// Tool names a plugin contributes when installed+enabled.
-  List<String> pluginToolNames(PluginItem p) => _pluginToolNames(p);
 
   /// Test seam: emit a run event (drives the composer status line).
   @visibleForTesting
@@ -16080,16 +14153,6 @@ ${await _agentsMdBlock()}
       '(plugin $pluginId activation: '
       '${PluginContributionRegistry.I.activationFor(pluginId)?.name ?? 'unregistered'}). '
       'Nothing was executed.';
-
-  /// Honest session-scope refusal for a LEGACY generic tool name targeting
-  /// a registered-but-inactive normalized manifest (spec §7): names the
-  /// canonical namespace and the activation state, executes nothing.
-  String _registeredPluginScopeRefusal(String toolName, String pluginId) =>
-      'Plugin tool "$toolName" belongs to plugin "$pluginId", which is not '
-      'active for this session (activation: '
-      '${PluginContributionRegistry.I.activationFor(pluginId)?.name ?? 'unregistered'}). '
-      'Its canonical contributions live under "plugin:$pluginId/…" and are '
-      'scope-enforced. Nothing was executed.';
 
   /// Short user-facing reason why [isSkillAvailableForSession] is false for
   /// [skill], or `null` when it is available.
@@ -16693,74 +14756,6 @@ ${await _agentsMdBlock()}
   static bool _isAgentContributionTool(String name) =>
       PluginContributionRegistry.I.contributionByToolName(name)?.kind ==
       PluginContributionKind.agent;
-
-  /// MCP `notifications/progress` → the live tool card of the call that
-  /// asked for it (captured now, so a later tool never receives it).
-  void Function(McpProgress) _mcpProgressToCard() {
-    final card = _activeToolMsg;
-    return (p) {
-      if (card == null) return;
-      final pct = p.total != null && p.total! > 0
-          ? ' ${(p.progress / p.total! * 100).clamp(0, 100).round()}%'
-          : ' ${p.progress.toStringAsFixed(p.progress % 1 == 0 ? 0 : 1)}';
-      final line = 'progress$pct${(p.message ?? '').isEmpty ? '' : ' — ${p.message}'}';
-      card.toolSummary = cleanTruncate(line, 140);
-      final detail = '${card.toolDetail ?? ''}$line\n';
-      card.toolDetail = detail.length > 12000
-          ? '…${detail.substring(detail.length - 12000)}'
-          : detail;
-      AppState.I.refresh();
-    };
-  }
-
-  /// MCP `roots/list`: the active session's working folder.
-  List<McpRoot> _mcpRoots(String serverName) {
-    final folder = AppState.I.activeSession?.workspaceFolder;
-    if (folder == null || folder.isEmpty) return const [];
-    return [McpRoot.directory(folder, name: 'workspace')];
-  }
-
-  /// MCP `sampling/createMessage` needs the user's explicit approval — in
-  /// every mode, Full Access included: a server is asking to spend the user's
-  /// model quota with a prompt the user did not write.
-  Future<bool> _approveMcpSampling(McpSamplingRequest req) => _askUser(
-    'mcp_sampling',
-    'MCP server "${req.server}" wants to use your model',
-    'The MCP server "${req.server}" asked Ovid to run a model completion '
-        '(up to ${req.maxTokens} tokens) with this prompt:\n\n'
-        '${req.preview}\n\nApprove only if you trust this server.',
-  );
-
-  /// Run an approved sampling request as an invisible, tool-less completion
-  /// on the active session's provider.
-  Future<Map<String, dynamic>?> _runMcpSampling(McpSamplingRequest req) async {
-    final session = AppState.I.activeSession;
-    final p = session == null ? null : AppState.I.providerForSession(session);
-    if (session == null || p == null || !p.isConfigured) return null;
-    final msgs = <Map<String, dynamic>>[
-      if ((req.systemPrompt ?? '').isNotEmpty)
-        {'role': 'system', 'content': req.systemPrompt},
-      for (final m in req.messages) {'role': m.role, 'content': m.text},
-    ];
-    final override = promptLlmForTest;
-    final r = override != null
-        ? _normalizePromptFixture(await override(p, msgs, session))
-        : await _callLlm(
-            p,
-            msgs,
-            session,
-            includeTools: false,
-            streamToTranscript: false,
-            purpose: 'mcp_sampling',
-          );
-    if (r == null) return null;
-    return {
-      'role': 'assistant',
-      'content': {'type': 'text', 'text': (r['content'] as String? ?? '')},
-      'model': session.model,
-      'stopReason': 'endTurn',
-    };
-  }
 
   /// Resolve a Claude Code subagent definition (a mounted `agents/*.md`
   /// contribution) by [type]: exact name, plugin-scoped `plugin:agent`, or
@@ -18012,20 +16007,12 @@ ${await _agentsMdBlock()}
     }
   }
 
-  /// Shared gates for every image tool: plugin enabled, a session, the run
-  /// and account still current, and a granted output root.
+  /// Shared gates for every image tool: a session, the run and account still
+  /// current, and a granted output root.
   Future<({_ImageCtx? ctx, String? error})> _imagePreflight(String tool) async {
     final app = AppState.I;
     final owner = app.sessionAccountToken;
     final run = _runCtx;
-    if (!app.plugins.any(
-      (p) => p.name == 'Image Studio' && p.installed && p.enabled,
-    )) {
-      return (
-        ctx: null,
-        error: 'Error: enable Image Studio before using image tools.',
-      );
-    }
     final session = _runSession;
     if (session == null) {
       return (ctx: null, error: 'Error: image tools require a session.');
@@ -19071,7 +17058,7 @@ class AgentTool {
 /// Usage tracking for plugin contributions (commands, skills, agents): a
 /// roster call whose model-visible name belongs to a registered plugin is
 /// recorded under that plugin. Other tools (built-ins, MCP — recorded by
-/// McpService itself) are ignored here.
+/// the MCP client itself) are ignored here.
 void _recordPluginToolUsage(
   String toolName,
   Duration elapsed, {

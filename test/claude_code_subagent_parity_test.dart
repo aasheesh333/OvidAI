@@ -2,18 +2,14 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/hook_service.dart';
-import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/plugin_registry.dart';
 import 'package:ovid_ai/core/session_lifecycle_service.dart';
 import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/state.dart';
-import 'package:ovid_ai/core/tool_usage_store.dart';
 // ignore: depend_on_referenced_packages
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 
@@ -370,107 +366,4 @@ void main() {
     );
   });
 
-  group('MCP inside a subagent', () {
-    test(
-      'child calls MCP within its tools scope; usage is attributed',
-      () async {
-        const mcpPid = 'acme/mcp-probe';
-        PluginContributionRegistry.I.register(
-          NormalizedPluginManifest(
-            id: mcpPid,
-            name: 'probe',
-            version: '1',
-            format: PluginFormat.claudeCode,
-            rootPath: '/plugin',
-          ),
-          activation: PluginActivation.sessionActive,
-          immediateSessionId: root.id,
-        );
-        final server = McpServer(
-          name: 'probe',
-          author: 'test',
-          description: 'probe',
-          category: 'Custom',
-          command: '',
-          custom: true,
-          transport: 'http',
-          url: 'https://mcp.test/rpc',
-          ownerPluginId: mcpPid,
-        );
-        app.mcpServers.add(server);
-        McpService.I.httpClientForTest = MockClient((request) async {
-          final body = jsonDecode(request.body) as Map<String, dynamic>;
-          final result = switch (body['method']) {
-            'initialize' => {
-              'protocolVersion': '2025-06-18',
-              'capabilities': {'tools': {}},
-              'serverInfo': {'name': 'probe', 'version': '1'},
-            },
-            'tools/list' => {
-              'tools': [
-                {
-                  'name': 'ping',
-                  'description': 'probe',
-                  'inputSchema': {'type': 'object', 'properties': {}},
-                },
-              ],
-            },
-            'tools/call' => {
-              'content': [
-                {'type': 'text', 'text': 'MCP CHILD RESULT'},
-              ],
-            },
-            _ => <String, dynamic>{},
-          };
-          return http.Response(
-            jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': result}),
-            200,
-          );
-        });
-        addTearDown(() async {
-          await McpService.I.disconnect(server.canonicalId);
-          McpService.I.httpClientForTest = null;
-          PluginContributionRegistry.I.unregisterPlugin(mcpPid);
-        });
-        expect(await McpService.I.connect(server), contains('connected'));
-        final mcpName = rosterNames().firstWhere(
-          (n) => n.startsWith('mcp__') && n.endsWith('__ping'),
-        );
-        final serverSegment = mcpName.substring(
-          0,
-          mcpName.length - '__ping'.length,
-        );
-
-        List<String>? scopedRoster;
-        String? out;
-        AgentService.llmOnceForTest = (p, msgs, session, tools) async {
-          if (session.isSubagent) {
-            scopedRoster = rosterNames();
-            out = await agent.dispatchForTest(mcpName, {});
-          }
-          agent.streamToBubbleForTest(session, out ?? 'x');
-          return {'content': out ?? 'x', 'finish_reason': 'stop'};
-        };
-        // Server-level wildcard grant: `mcp__<server>__*`.
-        await dispatch({
-          'prompt': 'call it',
-          'allowed_tools': ['${serverSegment}__*'],
-        });
-        expect(scopedRoster, contains(mcpName));
-        expect(scopedRoster, isNot(contains('run_shell')));
-        expect(out, contains('MCP CHILD RESULT'));
-        final byAgent = ToolUsageStore.I.agentCalls(kind: ToolUsageKind.mcp);
-        expect(byAgent['general-purpose'], greaterThanOrEqualTo(1));
-
-        // A `tools` list without the MCP tool hides AND refuses it.
-        out = null;
-        await dispatch({
-          'prompt': 'call it again',
-          'allowed_tools': ['Read'],
-        });
-        expect(scopedRoster, isNot(contains(mcpName)));
-        expect(out, contains('outside the tool set'));
-      },
-    );
-  });
 }

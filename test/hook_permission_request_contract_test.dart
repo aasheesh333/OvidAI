@@ -58,7 +58,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
     AppState.resetTestInstance();
-    final app = AppState.createForTest(pluginBootActivator: (_, _) async {});
+    final app = AppState.createForTest();
     root = Directory.systemTemp.createTempSync('hook-permission-');
     app.sessions.add(ChatSession(id: 'a', title: 'A', model: 'test', workspaceFolder: root.path));
     SessionLedger.rootOverrideForTest = Directory('${root.path}/ledger');

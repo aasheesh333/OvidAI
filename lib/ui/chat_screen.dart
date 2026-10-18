@@ -36,8 +36,6 @@ import '../core/url_safety.dart';
 import '../core/agent_service.dart';
 import '../core/connection_service.dart';
 import '../core/commands.dart';
-import '../core/mcp_service.dart';
-import '../core/plugin_registry.dart';
 import '../core/presets.dart';
 import '../core/skills.dart';
 import '../core/composer_drafts.dart';
@@ -6701,65 +6699,6 @@ class _InputBarState extends State<_InputBar> {
             description: s.description.isEmpty ? 'Skill' : s.description,
             hint: '',
             group: 'Skills',
-          ),
-        );
-      }
-    }
-    // Connected MCP server tools — the model can call these, so the composer
-    // should be able to point at them too.
-    // P8 Task 10: hidden on the thin client — the MCP/plugin runtime is dark
-    // there until P5 (these entries die fully in Task 17). Gate on the
-    // execution arm: `Distribution.cloudPlugins` is hardcoded false and would
-    // leave this always visible.
-    if (!Distribution.cloudExecution) {
-      for (final entry in McpService.I.connectedTools.entries) {
-        for (final t in entry.value) {
-          final desc = (t.description ?? '').trim();
-          add(
-            2,
-            '${entry.key} ${t.name}',
-            _SlashSuggestion(
-              icon: Icons.extension_outlined,
-              name: t.name,
-              description: desc.isEmpty
-                  ? 'MCP tool · ${entry.key}'
-                  : '${entry.key} · $desc',
-              hint: '',
-              insert: 'Use the ${entry.key} MCP tool "${t.name}" to ',
-              group: 'MCP tools',
-            ),
-          );
-        }
-      }
-    }
-    // Installed + enabled plugins that add agent tools.
-    // P8 Task 10: same execution-arm gate as the MCP rows (the plugin runtime
-    // is on-device only until P5; `cloudPlugins` is hardcoded false).
-    final sessionId = widget.sessionId ?? '';
-    if (!Distribution.cloudExecution) {
-      for (final p in AppState.I.plugins.where((p) {
-        if (!p.installed || !p.enabled || p.migrationRequired) return false;
-        final runtimeId = p.runtimeId;
-        if (runtimeId != null) {
-          return PluginContributionRegistry.I.isPluginActiveForSession(
-            runtimeId,
-            sessionId,
-          );
-        }
-        return p.source == null || AppState.I.legacyPluginExecutionAllowed;
-      })) {
-        add(
-          3,
-          p.name,
-          _SlashSuggestion(
-            icon: Icons.widgets_outlined,
-            name: p.name,
-            description: p.description.isEmpty
-                ? '${p.category} plugin'
-                : p.description,
-            hint: '',
-            insert: 'Use the ${p.name} plugin to ',
-            group: 'Plugins',
           ),
         );
       }

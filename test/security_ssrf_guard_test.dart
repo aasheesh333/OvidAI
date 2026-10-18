@@ -1,10 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 
-import 'package:ovid_ai/core/native_mcp.dart';
 import 'package:ovid_ai/core/ssrf_guard.dart';
 
 /// M3: the SSRF guard classifies every address family and resolves names,
@@ -114,40 +111,6 @@ void main() {
       resolveTo({'lan.example': ['192.168.1.2']});
       expect(await SsrfGuard.resolvesToMetadataOrLinkLocal('lan.example'),
           isFalse);
-    });
-
-    test('fetch MCP refuses names resolving inside, incl. via redirect', () async {
-      resolveTo({
-        'rebind.example': ['127.0.0.1'],
-        'ok.example': ['93.184.216.34'],
-        'inner.example': ['::ffff:10.1.2.3'],
-      });
-      final requested = <Uri>[];
-      final client = MockClient((req) async {
-        requested.add(req.url);
-        if (req.url.host == 'ok.example') {
-          return http.Response('', 302,
-              headers: {'location': 'http://inner.example/admin'});
-        }
-        return http.Response('reached', 200);
-      });
-      final handler = NativeFetchMcpHandler(httpClient: client);
-      final direct = await handler.callTool('fetch', {
-        'url': 'http://rebind.example/',
-      });
-      expect(direct.isError, isTrue);
-      expect(direct.error, contains('non-public'));
-      final redirected = await handler.callTool('fetch', {
-        'url': 'http://ok.example/',
-      });
-      expect(redirected.isError, isTrue);
-      expect(redirected.error, contains('Blocked redirect'));
-      expect(requested.map((u) => u.host), ['ok.example']);
-      final literal = await handler.callTool('fetch', {
-        'url': 'http://[fd00::1]/',
-      });
-      expect(literal.isError, isTrue);
-      await handler.dispose();
     });
 
   });

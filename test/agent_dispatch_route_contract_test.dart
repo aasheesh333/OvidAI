@@ -7,8 +7,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/hook_service.dart';
-import 'package:ovid_ai/core/native_plugin.dart';
-import 'package:ovid_ai/core/native_plugins/prompt_framework.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/plugin_registry.dart';
 import 'package:ovid_ai/core/presets.dart';
@@ -19,22 +17,6 @@ import 'package:ovid_ai/core/usage_attempt.dart';
 import 'package:ovid_ai/core/usage_attempt_recorder.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
-
-class _Fanout extends NativePromptCapability {
-  @override
-  String get pluginName => 'Fixture fanout';
-  @override
-  String get taskSystemPrompt => 'Compare answers.';
-  @override
-  List<NativePluginConfigField> get configFields => const [];
-  @override
-  List<NativePluginTool> get tools => const [];
-  @override
-  Future<void> configure(Map<String, String> values) async {}
-  @override
-  String buildPrompt(String toolName, Map<String, dynamic> args) =>
-      'FANOUT:chip-model,hidden-model|hello';
-}
 
 class _DelayedConnect extends HttpOverrides {
   final entered = Completer<void>();
@@ -210,24 +192,6 @@ void main() {
     await task;
     expect(requests, isEmpty);
     expect(agent.busyFor(session.id), isFalse);
-  });
-
-  test('fanout inside an admitted run leaves its model and transcript intact', () async {
-    String? result;
-    String? snapshot;
-    submitHook(() async {
-      session.model = 'next-model';
-      result = await agent.runPromptTool(_Fanout(), 'compare', {});
-      snapshot = agent.runBucketForTest(session.id).modelSnapshot;
-      expect(session.messages, isEmpty);
-      return '';
-    });
-    await agent.runTask('first', sessionId: session.id);
-    expect(requests.map((r) => r['model']), ['chip-model', 'hidden-model', 'chip-model']);
-    expect(result, '## chip-model\ndone\n\n## hidden-model\ndone');
-    expect(snapshot, 'chip-model');
-    expect(session.model, 'next-model');
-    expect(session.messages.where((m) => m.role == 'assistant' && m.content == 'done'), hasLength(1));
   });
 
   void addNextProvider() {

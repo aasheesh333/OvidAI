@@ -25,7 +25,7 @@ import 'diag.dart';
 
 /// Legacy note (kept for API stability): SSE-only MCP definitions used to
 /// be rejected with this message before the legacy SSE transport was
-/// implemented in [McpService]. No longer emitted.
+/// implemented in the MCP client. No longer emitted.
 @Deprecated('SSE transport is now supported; this message is not emitted.')
 const String kSseUnsupportedMessage =
     'SSE transport is not supported. Use Streamable HTTP instead: replace '
@@ -537,7 +537,7 @@ Object? _tomlScalar(String value) {
 }
 
 /// Map parsed MCP entries into scrubbed [PluginMcpServer] records. Legacy
-/// SSE (`"type": "sse"`) is accepted — [McpService] speaks the legacy
+/// SSE (`"type": "sse"`) is accepted — the MCP client speaks the legacy
 /// GET /sse + POST /message protocol — though Streamable HTTP remains the
 /// recommended transport for new servers.
 void _addMcp(

@@ -9,9 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ovid_ai/core/hook_service.dart';
 import 'package:ovid_ai/core/plugin_adapters.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
-import 'package:ovid_ai/core/plugin_permissions.dart';
 import 'package:ovid_ai/core/plugin_registry.dart';
-import 'package:ovid_ai/core/plugin_runtime.dart';
 import 'package:ovid_ai/core/secure_store.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -55,7 +53,7 @@ void main() {
     hooks.resetForTest();
     hooks.enabled = true;
     AppState.resetTestInstance();
-    final app = AppState.createForTest(pluginBootActivator: (_, _) async {});
+    final app = AppState.createForTest();
     temp = Directory.systemTemp.createTempSync('wave2-hooks-');
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(const MethodChannel('plugins.flutter.io/path_provider'),
@@ -128,56 +126,6 @@ void main() {
       }
     });
   }
-
-  for (final remove in [false, true]) {
-    test('runtime ${remove ? 'uninstall' : 'disable'} revokes before its first await', () async {
-      final m = await fixture('runtime', {'SessionStart': command('start')});
-      String? envPath;
-      hooks.executorForTest = (_, env) async {
-        envPath = env['CLAUDE_ENV_FILE'];
-        return '{"additionalContext":"owned","hookSpecificOutput":{"env":{"OWNED":"yes"}}}';
-      };
-      await hooks.fire('SessionStart', sid);
-      expect(File(envPath!).existsSync(), isTrue);
-      final pending = remove ? PluginRuntimeManager.I.uninstall(m.id) : PluginRuntimeManager.I.disable(m.id);
-      try {
-        expect(registry.isPluginActiveForSession(m.id, sid), isFalse);
-        expect(File(envPath!).existsSync(), isFalse);
-        expect(hooks.sessionContextFor(sid), isEmpty);
-      } finally { await pending; }
-    });
-  }
-
-  test('persisted runtime disable-enable does not restore unopened old context', () async {
-    final m = await fixture('durable', {'SessionStart': [{
-      'matcher': 'startup', 'hooks': [{'type': 'command', 'command': 'start'}],
-    }]});
-    // Real runtime entry/grant and content layout, not a mocked manager.
-    final content = Directory('${temp.path}/plugin-runtime/${m.id}/1/content')..createSync(recursive: true);
-    final installed = NormalizedPluginManifest.fromJson({...m.toJson(), 'rootPath': content.path});
-    registry.register(installed, activation: PluginActivation.globalActive);
-    final entry = PluginInstallEntry(
-      activation: PluginActivationRecord(pluginId: m.id, state: PluginActivation.globalActive, installedBootEpoch: 0),
-      manifest: installed, contentDir: content.path, version: '1',
-    );
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(kPluginActivationPrefKey, jsonEncode({m.id: jsonEncode(entry.toJson())}));
-    await PluginPermissionStore().save(PluginPermissionGrant(
-      pluginId: m.id, manifestDigest: pluginManifestDigest(installed),
-      capabilities: installed.requestedCapabilities,
-      environmentReadNames: installed.environmentReadNames, approvedAt: DateTime.utc(2026),
-      contentTreeHash: pluginContentTreeHash(installed.rootPath),
-    ));
-    hooks.executorForTest = (_, _) async => '{"additionalContext":"old-boot-context"}';
-    await hooks.fire('SessionStart', sid, payload: {'source': 'startup'});
-    hooks.resetForTest();
-    await PluginRuntimeManager.I.disable(m.id);
-    await PluginRuntimeManager.I.enable(m.id);
-    await hooks.fire('SessionStart', sid, payload: {'source': 'resume'});
-    expect(registry.isPluginActiveForSession(m.id, sid), isTrue);
-    expect(hooks.sessionContextFor(sid), isEmpty);
-    expect((await ovidSecureStorage().readAll()).values.join(), isNot(contains('old-boot-context')));
-  });
 
   test('registration ABA erases owned context and env without an intervening read', () async {
     final m = await fixture('owned', {'SessionStart': command('start'), 'Notification': command('read')});
@@ -307,28 +255,4 @@ void main() {
     );
   });
 
-  test('agent cancellation token is delivered before the fence settles', () async {
-    final m = await fixture('agent-token', {'Stop': agentHook('check')});
-    final entered = Completer<void>();
-    final release = Completer<AgentHookVerdict?>();
-    Future<void>? cancelled;
-    Future<bool>? signal;
-    hooks.agentHookEvaluator = (e) {
-      cancelled = e.cancelled;
-      signal = e.isCancelled;
-      entered.complete();
-      return release.future;
-    };
-    final pending = hooks.fireStop(sid);
-    await entered.future;
-    final uninstall = PluginRuntimeManager.I.uninstall(m.id);
-    try {
-      await cancelled!.timeout(const Duration(seconds: 2));
-      expect(await signal!.timeout(const Duration(seconds: 2)), isTrue);
-      expect((await pending.timeout(const Duration(seconds: 2))).stopAllowed, isTrue);
-    } finally {
-      release.complete(AgentHookVerdict.block('late'));
-      await uninstall;
-    }
-  });
 }

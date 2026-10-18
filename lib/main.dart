@@ -12,14 +12,10 @@ import 'core/studio_drafts.dart';
 import 'core/background_notifications.dart';
 import 'core/composer_drafts.dart';
 import 'core/firebase_service.dart';
-import 'core/mcp_client_requests.dart';
-import 'core/mcp_service.dart';
 import 'core/session_history_store.dart';
 import 'core/theme.dart';
 import 'ui/app_router.dart';
 import 'ui/login_gate.dart';
-import 'ui/mcp_elicitation_sheet.dart';
-import 'ui/mcp_oauth_sheet.dart';
 import 'ui/shell.dart';
 import 'core/share_link_resolver.dart';
 import 'l10n/l10n.dart';
@@ -182,8 +178,6 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // MCP `elicitation/create` → a sheet on the root navigator.
-    McpClientRequests.I.elicitor ??= appMcpElicitor;
     AppState.I.setAccountFeaturesForeground(
       WidgetsBinding.instance.lifecycleState == null ||
           WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
@@ -255,18 +249,9 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     );
   }
 
-  /// Every incoming link: MCP OAuth redirects and chat links are routed
-  /// here; share links keep their dedicated handling in [_openShare].
+  /// Every incoming link: chat links are routed here; share links keep their
+  /// dedicated handling in [_openShare].
   void _onLink(Uri uri) {
-    if (McpService.isMcpOAuthCallback(uri)) {
-      unawaited(
-        handleMcpOAuthRedirect(
-          uri,
-          messenger: appScaffoldMessengerKey.currentState,
-        ),
-      );
-      return;
-    }
     final route = AppRouter.parse(uri);
     if (route is ChatRoute || route is ScheduleRoute) {
       WidgetsBinding.instance.addPostFrameCallback((_) {

@@ -27,7 +27,7 @@
 ///   foreground session.
 ///
 /// Scope of this leaf: registry state + resolution logic ONLY. Install
-/// transactions and activation persistence are Task 7 (`plugin_runtime`);
+/// transactions and activation persistence are Task 7 (the runtime);
 /// hook consumption is Task 8; plugin-owned MCP servers/tools extend this
 /// registry in Task 9. Content execution lives in the caller (the agent
 /// dispatch) — the registry never touches the filesystem or the UI.
@@ -368,7 +368,7 @@ class PluginContributionRegistry {
   }
 
   /// Plugin-owned MCP declarations visible in [sessionId]. Discovery tools
-  /// are added later by McpService, but ownership and activation scope come
+  /// are added later by the MCP client, but ownership and activation scope come
   /// from this canonical ledger entry.
   List<PluginContribution> mcpServersForSession(String sessionId) {
     final out = <PluginContribution>[];

@@ -22,8 +22,8 @@ import 'state.dart' show shellSplitArgs;
 /// ```
 /// Values may use `${VAR}` interpolation like every other config value.
 /// The issued token is stored per-server in secure storage by
-/// [McpService] (never in the config file); see
-/// `McpService.buildMcpAuthorizeUrl` / `exchangeMcpOAuthCode`.
+/// the MCP client (never in the config file); see
+/// `buildMcpAuthorizeUrl` / `exchangeMcpOAuthCode`.
 class McpOAuthConfig {
   final String? authorizationUrl;
   final String? tokenUrl;

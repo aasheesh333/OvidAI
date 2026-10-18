@@ -8,7 +8,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/composer_drafts.dart';
-import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/memory_store.dart';
 import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/secure_store.dart';
@@ -488,7 +487,6 @@ void main() {
     expect(await ToolUsageStore.I.isEmpty(), isTrue);
     expect(await SessionHistoryRepository.I.isEmpty(), isTrue);
     expect(AgentService.I.studioDraftsEmpty, isTrue);
-    expect(McpService.I.oauthMemoryEmpty, isTrue);
   });
 
   test('reset removes keys, configuration, settings, skills, exports, cache and cookies', () async {

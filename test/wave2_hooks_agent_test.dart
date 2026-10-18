@@ -10,7 +10,6 @@ import 'package:ovid_ai/core/hook_service.dart';
 import 'package:ovid_ai/core/plugin_adapters.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/plugin_registry.dart';
-import 'package:ovid_ai/core/plugin_runtime.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/state.dart';
 
@@ -62,7 +61,7 @@ void main() {
     hooks.resetForTest();
     hooks.enabled = true;
     AppState.resetTestInstance();
-    AppState.createForTest(pluginBootActivator: (_, _) async {});
+    AppState.createForTest();
     temp = Directory.systemTemp.createTempSync('wave2-agent-');
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(const MethodChannel('plugins.flutter.io/path_provider'),
@@ -219,32 +218,6 @@ void main() {
     final res = await pending.timeout(const Duration(seconds: 2));
     expect(res.stopAllowed, isTrue);
     release.complete(AgentHookVerdict.block('late'));
-    await Future<void>.delayed(Duration.zero);
-    expect(hooks.isPluginTripped(m.id, sid), isFalse);
-  });
-
-  test('runtime uninstall cancels an in-flight agent evaluation and fences its verdict', () async {
-    final m = await fixture('runtime', {'Stop': agentHook('check')});
-    final entered = Completer<void>();
-    final release = Completer<AgentHookVerdict?>();
-    Future<void>? cancelled;
-    hooks.agentHookEvaluator = (e) {
-      cancelled = e.cancelled;
-      entered.complete();
-      return release.future;
-    };
-    final pending = hooks.fireStop(sid);
-    await entered.future;
-    final uninstall = PluginRuntimeManager.I.uninstall(m.id);
-    try {
-      expect(registry.isPluginActiveForSession(m.id, sid), isFalse);
-      await cancelled!.timeout(const Duration(seconds: 2));
-      final res = await pending.timeout(const Duration(seconds: 2));
-      expect(res.stopAllowed, isTrue);
-    } finally {
-      release.complete(AgentHookVerdict.block('late'));
-      await uninstall;
-    }
     await Future<void>.delayed(Duration.zero);
     expect(hooks.isPluginTripped(m.id, sid), isFalse);
   });

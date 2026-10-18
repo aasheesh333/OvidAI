@@ -46,7 +46,6 @@ void main() {
     app = AppState.createForTest(
       memoryStore: MemoryStore(Directory('${root.path}/memory')),
       workspaceDeleter: (_) async {},
-      pluginBootActivator: (_, _) async {},
     );
     app.suspendCoalescedPersistenceForTest = true;
   });

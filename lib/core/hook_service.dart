@@ -13,7 +13,6 @@ import 'hook_execution_scope.dart';
 import 'hook_context_store.dart';
 import 'plugin_manifest.dart';
 import 'plugin_registry.dart';
-import 'plugin_user_config.dart';
 import 'session_ledger.dart';
 import 'state.dart';
 import 'diag.dart';
@@ -1348,42 +1347,6 @@ class HookService extends ChangeNotifier {
     }
   }
 
-  /// Legacy/CC-native alias keys per canonical event — the reverse of the
-  /// frozen `canonicalHookEvent` map (plugin_adapters.dart). A legacy
-  /// `PluginItem` hook map keyed by any of these still fires when the
-  /// canonical event is requested (migration ruling: old installs keep
-  /// firing). `on_turn_start` is deliberately NOT an alias of
-  /// `user_prompt_submit` here: legacy on_turn_start keeps its historical
-  /// per-turn firing site, while canonical user_prompt_submit fires once
-  /// per prompt at run entry (double-fire otherwise).
-  static const Map<String, List<String>> _legacyEventAliases = {
-    'session_start': ['on_session_start', 'SessionStart'],
-    'session_end': ['SessionEnd'],
-    'pre_request': ['on_pre_request'],
-    'post_request': [],
-    'pre_tool': ['on_pre_tool', 'PreToolUse'],
-    'post_tool': ['on_post_tool', 'PostToolUse', 'PostToolUseFailure'],
-    'user_prompt_submit': ['UserPromptSubmit'],
-    'stop': ['on_turn_end', 'Stop'],
-    'notification': ['Notification'],
-    'pre_compact': ['PreCompact'],
-    'post_compact': ['PostCompact'],
-    'permission_request': ['PermissionRequest'],
-    'subagent_start': ['SubagentStart'],
-    'subagent_end': ['SubagentStop'],
-  };
-
-  /// Candidate legacy-map keys for [eventRaw]/[canonical], in priority
-  /// order (canonical declaration wins over aliases).
-  static List<String> _eventKeyCandidates(String eventRaw, String canonical) {
-    final out = <String>[canonical];
-    if (eventRaw != canonical) out.add(eventRaw);
-    for (final a in _legacyEventAliases[canonical] ?? const <String>[]) {
-      if (!out.contains(a)) out.add(a);
-    }
-    return out;
-  }
-
   /// Display name for a plugin id — strips the internal `legacy:` prefix
   /// so deny reasons and env vars never leak it.
   static String _displayName(String pluginId) =>
@@ -1445,56 +1408,6 @@ class HookService extends ChangeNotifier {
         out.add((pid, h, canonical));
       }
     }
-    if (!AppState.I.legacyPluginExecutionAllowed) return out;
-    for (final p in AppState.I.plugins) {
-      if (p.runtimeId != null || !p.installed || !p.enabled) continue;
-      if (p.migrationRequired) {
-        // Legacy rows are fail-closed on purpose (README: no silent
-        // auto-approval), but that must not look like a broken hook.
-        if (p.hooks.isNotEmpty) {
-          _noteBlocker(
-            'legacy:${p.name}',
-            'Migration required — legacy plugins stay fail-closed until you '
-                'run inspect → approve → install',
-          );
-        }
-        continue;
-      }
-      // Legacy map form — one command per (event, plugin). The map may be
-      // keyed by the canonical name, the fired name, or any legacy/CC
-      // alias of the canonical event; first key present wins.
-      String? cmd;
-      String? matcher;
-      var declared = canonical;
-      for (final key in _eventKeyCandidates(eventRaw, canonical)) {
-        final c = p.hooks[key];
-        if (c == null || c.trim().isEmpty) continue;
-        cmd = c;
-        matcher = p.hookMatchers[key] ?? p.hookMatchers[canonical];
-        declared = key;
-        break;
-      }
-      final ordered = p.pluginHooks.where((h) => h.event == canonical).toList();
-      if (ordered.isNotEmpty) {
-        for (final hook in ordered) {
-          out.add(('legacy:${p.name}', hook, declared));
-        }
-      } else if (cmd != null) {
-        out.add((
-          'legacy:${p.name}',
-          PluginHook(
-            pluginId: 'legacy:${p.name}',
-            event: canonical,
-            ordinal: 0,
-            type: 'command',
-            payload: cmd,
-            matcher: matcher,
-            timeoutS: defaultTimeoutS,
-          ),
-          declared,
-        ));
-      }
-    }
     return out;
   }
 
@@ -1515,24 +1428,6 @@ class HookService extends ChangeNotifier {
     if (!PluginContributionRegistry.I.isRegistered(pluginId)) return false;
     final manifest = PluginContributionRegistry.I.manifestFor(pluginId);
     return manifest != null && manifest.hooks.isNotEmpty;
-  }
-
-  /// Whether any LEGACY `PluginItem` map hook listens for [event] — the
-  /// per-turn `on_turn_start` firing site uses this so a plugin that
-  /// declared the legacy name does not get a second canonical
-  /// user_prompt_submit firing per turn (canonical fires once at runTask
-  /// entry instead).
-  bool hasLegacyMapHookListeners(String event) {
-    if (!enabled || !AppState.I.legacyPluginExecutionAllowed) return false;
-    return AppState.I.plugins.any(
-      (p) =>
-          p.installed &&
-          p.enabled &&
-          p.runtimeId == null &&
-          !p.migrationRequired &&
-          (p.hooks.containsKey(event) ||
-              p.hooks.containsKey(canonicalHookEvent(event) ?? '')),
-    );
   }
 
   // ── Execution core ───────────────────────────────────────────────────
@@ -1827,15 +1722,11 @@ class HookService extends ChangeNotifier {
     final runtime = HookExecutionScope.dependencyRoot(
       PluginContributionRegistry.I.manifestFor(pluginId),
     );
-    // Plugin userConfig parity: saved settings as CLAUDE_PLUGIN_OPTION_<KEY>.
-    final optionEnv = pluginId.startsWith('legacy:')
-        ? const <String, String>{}
-        : await pluginOptionEnvFor(pluginId);
+    // Plugin userConfig substitution died with the local plugin runtime.
     return {
       if (runtime != null) 'NODE_PATH': '$runtime/node/node_modules',
       if (runtime != null) 'PYTHONPATH': '$runtime/python',
       ...sessionEnv,
-      ...optionEnv,
       // Legacy env contract: the DECLARED name (a hook that registered
       // on_turn_start sees "on_turn_start"), never the internal prefix.
       'OVID_HOOK_EVENT': declaredEvent,
@@ -1981,8 +1872,7 @@ class HookService extends ChangeNotifier {
     );
     // Windows-style entrypoints never reach a shell verbatim: prefer the
     // runnable sibling when one exists (fail-open keeps the old string).
-    // `${user_config.<key>}` → the exported CLAUDE_PLUGIN_OPTION_<KEY>.
-    var command = rewriteUserConfigRefsForShell(resolveHookPayload(hook));
+    var command = resolveHookPayload(hook);
     final root = _rootPathFor(hook.pluginId, hook);
     if (root.isNotEmpty) {
       command = expandPluginRoot(command, root);

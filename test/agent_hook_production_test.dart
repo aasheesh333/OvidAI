@@ -43,7 +43,7 @@ void main() {
     hooks.resetForTest();
     hooks.enabled = true;
     AppState.resetTestInstance();
-    AppState.createForTest(pluginBootActivator: (_, _) async {});
+    AppState.createForTest();
     temp = Directory.systemTemp.createTempSync('agent-hook-production-');
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
