@@ -7,6 +7,9 @@
 # Agent working scratch (briefs, reports, ledgers) — local only, never tracked.
 # Tracked design records live under docs/superpowers/ instead.
 .superpowers/
+# pnpm writes task-run state here even when every package installs inside
+# cloud/; it is machine-local bookkeeping, never source.
+/node_modules/
 # Large tool-output dumps and throwaway analysis scripts.
 .spill/
 .scratch/
