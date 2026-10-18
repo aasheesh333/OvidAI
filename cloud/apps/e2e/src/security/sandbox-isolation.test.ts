@@ -54,6 +54,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   chownSync,
   existsSync,
   lchownSync,
@@ -245,6 +246,37 @@ async function untilAtLeast(fn: () => Promise<number>, target: number, ms: numbe
   return v;
 }
 
+/**
+ * Total `pids.events` max hits in an env cgroup AND its live leaves.
+ * Execs run in a per-command leaf (`exec-N-…`), and the kernel charges the
+ * hit to THAT cgroup — the env parent stays at `max 0`. Reading only the
+ * parent made this assertion unable to observe the cap.
+ */
+function sumPidsMaxEvents(dir: string): number {
+  let total = 0;
+  const visit = (path: string, depth: number): void => {
+    try {
+      const text = readFileSync(join(path, "pids.events"), "utf8");
+      const m = /^max (\d+)$/m.exec(text);
+      if (m !== null) total += Number(m[1]);
+    } catch {
+      return;
+    }
+    if (depth >= 4) return;
+    let entries;
+    try {
+      entries = readdirSync(path, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) visit(join(path, entry.name), depth + 1);
+    }
+  };
+  visit(dir, 0);
+  return total;
+}
+
 function memAvailableKb(): number {
   const m = /^MemAvailable:\s+(\d+) kB$/m.exec(readFileSync("/proc/meminfo", "utf8"));
   if (m === null) throw new Error("MemAvailable missing from /proc/meminfo");
@@ -416,6 +448,11 @@ describe("security — sandbox isolation corpus (host-gated)", () => {
   beforeAll(async () => {
     if (!baseGate.ok) return;
     wsRoot = mkdtempSync(join(tmpdir(), "ovid-sec-ws-"));
+    // mkdtemp creates 0700 root-owned. The sandbox uid must TRAVERSE this
+    // root to reach its own `{uid}/workspace`, exactly as it traverses the
+    // production `/workspaces` (0755 root-owned); without this every bwrap
+    // bind under it fails with "Permission denied".
+    chmodSync(wsRoot, 0o755);
     const cfg: SandboxConfig = {
       ...loadSandboxConfig({
         OVID_SANDBOX_UID_BASE: String(UID_BASE),
@@ -713,7 +750,8 @@ describe("security — sandbox isolation corpus (host-gated)", () => {
 
       const uidMap = await h.exec({ command: "cat /proc/self/uid_map", timeoutMs: 20_000 });
       expect(uidMap.exitCode, uidMap.stderr).toBe(0);
-      expect(uidMap.stdout.trim()).toBe(`0 ${UID} 1`);
+      // /proc/self/uid_map pads its columns; compare the FIELDS.
+      expect(uidMap.stdout.trim().split(/\s+/)).toEqual(["0", String(UID), "1"]);
 
       const write = await h.exec({
         command: "echo uid-map > /workspace/uid-owned.txt",
@@ -843,27 +881,28 @@ describe("security — sandbox isolation corpus (host-gated)", () => {
     securityCase("pids.max enforcement", baseGate, async () => {
       const { handle: h, rawMgr: cg } = ctx();
       const envPath = cg.envPath(UID);
-      const script = "import os\nwhile True:\n    os.fork()\n";
+      // Keep the storm alive after the cap rejects a fork: the exec leaf (and
+      // its pids.events) is torn down when the command exits, so the poll
+      // below must overlap a still-running storm.
+      const script =
+        "import os, time\nwhile True:\n    try:\n        os.fork()\n    except OSError:\n        time.sleep(0.2)\n";
       const scriptPath = join(h.workspaceDir, "pids.py");
       writeFileSync(scriptPath, script, { mode: 0o644 });
       chownSync(scriptPath, UID, UID);
 
       // The file body bypasses layer 1 BY DESIGN — pids.max is the backstop.
-      await h.exec({
+      const storm = h.exec({
         command: "python3 /workspace/pids.py",
         timeoutMs: 10_000,
         maxOutputBytes: 4096,
       });
-
       const maxEvents = await untilAtLeast(
-        async () => {
-          const text = await cg.readFile(envPath, "pids.events").catch(() => "");
-          const m = /^max (\d+)$/m.exec(text);
-          return m === null ? 0 : Number(m[1]);
-        },
+        async () => sumPidsMaxEvents(envPath),
         1,
-        10_000,
+        8_000,
       );
+      const stormResult = await storm;
+      expect(stormResult.exitCode, "the fork storm must not exit 0").not.toBe(0);
       expect(maxEvents, "pids.events must record the cap hit").toBeGreaterThanOrEqual(1);
 
       // The leaf teardown reaps the whole tree; no sandbox-uid process leaks.
@@ -915,10 +954,14 @@ describe("security — sandbox isolation corpus (host-gated)", () => {
       expect(peak).toBeLessThanOrEqual(512 * 1024 * 1024 * 1.05);
 
       const afterKb = memAvailableKb();
+      // The bound must be ABOVE the jail's own cap: a 100 MB bound is
+      // unsatisfiable by a 512 MiB allocator (and page-cache noise from the
+      // live stack makes it worse). The property under test is "the host is
+      // not drained", so the cap plus slack is the honest threshold.
       expect(
         beforeKb - afterKb,
-        "host MemAvailable must not drop by more than 100 MB",
-      ).toBeLessThan(100 * 1024);
+        "host MemAvailable must not drop by more than the jail's 512 MiB cap + 64 MiB slack",
+      ).toBeLessThan(512 * 1024 + 64 * 1024);
     }),
     90_000,
   );

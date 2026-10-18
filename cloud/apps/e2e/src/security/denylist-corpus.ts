@@ -99,10 +99,15 @@ const BASES: BaseSpec[] = [
   { id: "kotlinc", command: "kotlinc Main.kt", head: "kotlinc", execution: true },
   { id: "javac", command: "javac Hello.java", head: "javac", execution: true },
   { id: "cargo-build", command: "cargo build", head: "cargo", execution: true },
+  // The lockdown blocks the BINARY, not just the build subcommand: these were
+  // "allowed" before it and are now refused at layer 1.
+  { id: "cargo-test", command: "cargo test", head: "cargo", execution: true },
+  { id: "cargo-version", command: "cargo --version", head: "cargo", execution: true },
   { id: "gcc", command: "gcc hello.c", head: "gcc", execution: true },
   { id: "gpp", command: "g++ hello.cpp", head: "g++", execution: true },
   { id: "make", command: "make", head: "make", execution: true },
   { id: "docker-build", command: "docker build .", head: "docker", execution: true },
+  { id: "docker-ps", command: "docker ps", head: "docker", execution: true },
   { id: "sdkmanager", command: "sdkmanager --list", head: "sdkmanager", execution: true },
   { id: "ndk-build", command: "ndk-build", head: "ndk-build", execution: true },
 ];
@@ -253,9 +258,9 @@ export const ALLOWED_DENYLIST_CORPUS: readonly string[] = [
   'node -e "console.log(\'hi\')"',
   "python3 x.py",
   "pnpm install",
-  "cargo test",
-  "cargo --version",
-  "docker ps",
+  // Heavy toolchains are fully unavailable since the 2026-10-18 lockdown
+  // (founder directive): only the word forms below are allowed, never the
+  // binaries. `cargo test`/`docker ps` moved to the denylist corpus.
   "flutter analyze",
   "flutter test",
   "cat makefile",

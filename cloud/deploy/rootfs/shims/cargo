@@ -1,8 +1,7 @@
 #!/bin/sh
-# cargo — blocks `cargo build` only (spec §7); everything else passes through.
-if [ "${1:-}" = "build" ]; then
-  echo "Heavy native compilation (APK/Gradle/Kotlin builds) is disabled on live cloud workspaces. Use GitHub Actions CI or syntax/lint preview mode instead."
-  exit 126
-fi
-for d in /usr/bin /bin; do [ -x "$d/cargo" ] && exec "$d/cargo" "$@"; done
-echo "cargo: not installed in cloud workspaces" >&2; exit 127
+# cargo — fully unavailable since the 2026-10-18 lockdown (founder
+# directive): the toolchain is refused for EVERY invocation, not just the
+# build subcommand. The layer-1 policy blocks it before exec; this shim is the
+# layer-2 backstop for a shell/file that bypasses layer 1.
+echo "Heavy native compilation (APK/Gradle/Kotlin builds) is disabled on live cloud workspaces. Use GitHub Actions CI or syntax/lint preview mode instead."
+exit 126

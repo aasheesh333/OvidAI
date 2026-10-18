@@ -31,7 +31,22 @@ const ALL_SHIMS = [
 ] as const;
 
 // Unconditional blockers: refuse every invocation (spec §7 denylist).
-const UNCONDITIONAL = ALL_SHIMS.slice(0, 9);
+// cargo and docker joined the list in the 2026-10-18 lockdown: the policy
+// blocks the whole toolchain, not just the `build` subcommand, so the layer-2
+// shims must agree (a `cargo test` fall-through would run a real compiler).
+const UNCONDITIONAL = [
+  "gcc",
+  "g++",
+  "make",
+  "gradle",
+  "gradlew",
+  "kotlinc",
+  "javac",
+  "sdkmanager",
+  "ndk-build",
+  "cargo",
+  "docker",
+] as const;
 
 interface ShimRun {
   status: number | null;
@@ -119,32 +134,18 @@ describe("unconditional blockers", () => {
   });
 });
 
-describe("cargo shim (blocks `cargo build` only)", () => {
-  it("refuses `cargo build`", () => {
-    const r = runShim("cargo", ["build"]);
+describe("cargo/docker shims (fully unavailable since the lockdown)", () => {
+  it.each([
+    ["cargo", "build"],
+    ["cargo", "test"],
+    ["cargo", "--version"],
+    ["docker", "build"],
+    ["docker", "ps"],
+    ["docker", "pull"],
+  ])("%s %s is refused with the pinned copy", (name, sub) => {
+    const r = runShim(name, [sub]);
     expect(r.status).toBe(126);
     expect(r.stdout).toBe(`${REFUSAL_COPY}\n`);
-  });
-
-  it("passes `cargo test` through — real cargo is absent, so 127 not-installed", () => {
-    const r = runShim("cargo", ["test"]);
-    expect(r.status).toBe(127);
-    expect(r.stdout).toBe("");
-    expect(r.stderr).toContain("cargo: not installed in cloud workspaces");
-  });
-});
-
-describe("docker shim (blocks `docker build` only)", () => {
-  it("refuses `docker build`", () => {
-    const r = runShim("docker", ["build", "x"]);
-    expect(r.status).toBe(126);
-    expect(r.stdout).toBe(`${REFUSAL_COPY}\n`);
-  });
-
-  it("does not refuse `docker ps` (may exec the real docker on this host)", () => {
-    const r = runShim("docker", ["ps"]);
-    expect(r.status).not.toBe(126);
-    expect(r.stdout).not.toContain(REFUSAL_COPY);
   });
 });
 
