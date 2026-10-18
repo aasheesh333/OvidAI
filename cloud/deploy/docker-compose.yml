@@ -221,6 +221,14 @@ services:
       OVID_MASTER_KEY: ${OVID_MASTER_KEY}
     ports:
       - "127.0.0.1:${GATEWAY_HOST_PORT:-8082}:8081"
+    # The image runs as uid/gid 1000 (`USER node`), but the mounted
+    # service-account file is 0640 root:ovid-cloud. Without this supplementary
+    # group the Admin SDK cannot read the credential at all, so EVERY
+    # verifyIdToken fails and every authenticated request answers the generic
+    # 401 "Missing or invalid credentials" (found 2026-10-18 against a real
+    # signed-in client). The gid matches /opt/ovid-gateway/firebase-admin.json.
+    group_add:
+      - "1500"
     volumes:
       # Firebase Admin credentials — mount-vs-copy is an owner decision at
       # activation (DEPLOY.md §3); the default bind-mounts the live box's
