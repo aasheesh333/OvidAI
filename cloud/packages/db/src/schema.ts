@@ -427,6 +427,11 @@ export const reports = pgTable(
 // Account-deletion lifecycle records (port of server/account). Retry fields
 // (next_attempt, attempts, fence_owned, …) live inside `record` jsonb in the
 // Python shape; deleteAfter is epoch seconds.
+//
+// Python parity: server/account/schema.sql declares
+// `delete_after double precision` and the lifecycle clock is `time.time()`
+// (fractional). A bigint column rejects those values with SQLSTATE 22P02, so
+// this MUST stay double precision (P9 final review C1).
 export const accountDeletions = pgTable("account_deletions", {
   uid: text("uid").primaryKey(),
   state: text("state").notNull(),
