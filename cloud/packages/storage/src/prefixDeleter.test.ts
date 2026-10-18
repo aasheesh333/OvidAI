@@ -24,7 +24,14 @@ type ListPage = {
   NextContinuationToken?: string;
 };
 
-function fakeClient(pages: ListPage[]): {
+type DeleteResult = {
+  Errors?: Array<{ Key?: string; Code?: string; Message?: string }>;
+};
+
+function fakeClient(
+  pages: ListPage[],
+  deleteResults: DeleteResult[] = [],
+): {
   client: PrefixDeleteClient;
   lists: ListObjectsV2Command[];
   deletes: DeleteObjectsCommand[];
@@ -32,6 +39,7 @@ function fakeClient(pages: ListPage[]): {
   const lists: ListObjectsV2Command[] = [];
   const deletes: DeleteObjectsCommand[] = [];
   let index = 0;
+  let deleteIndex = 0;
   const client: PrefixDeleteClient = {
     async send(command: unknown) {
       if (command instanceof ListObjectsV2Command) {
@@ -40,7 +48,7 @@ function fakeClient(pages: ListPage[]): {
       }
       if (command instanceof DeleteObjectsCommand) {
         deletes.push(command);
-        return {};
+        return deleteResults[deleteIndex++] ?? {};
       }
       throw new Error("unexpected command");
     },
@@ -95,6 +103,17 @@ describe("createR2PrefixDeleter (H2)", () => {
     await expect(
       createR2PrefixDeleter(cfg, client).deletePrefix("users/u1/"),
     ).rejects.toThrow(/continuation token/);
+  });
+
+  it("throws on a per-key DeleteObjects error instead of checkpointing (NEW-2)", async () => {
+    // S3 returns HTTP 200 with a populated Errors array for partial failures.
+    const { client } = fakeClient(
+      [{ Contents: [{ Key: "users/u1/a" }, { Key: "users/u1/b" }], IsTruncated: false }],
+      [{ Errors: [{ Key: "users/u1/b", Code: "AccessDenied", Message: "denied" }] }],
+    );
+    await expect(
+      createR2PrefixDeleter(cfg, client).deletePrefix("users/u1/"),
+    ).rejects.toThrow(/AccessDenied.*users\/u1\/b/);
   });
 
   it("builds from env only when all four R2 vars are present", () => {

@@ -173,6 +173,14 @@ export interface KeyAdmin {
 /** mint.py pins a 20 s LiteLLM admin timeout; a hung delete must not pin a uid. */
 const KEY_ADMIN_TIMEOUT_MS = 20_000;
 
+/** LiteLLM `/key/list` page size — the documented maximum. */
+const KEY_LIST_PAGE_SIZE = 100;
+
+/** A finite, non-negative count from a list response, or null when absent. */
+function countField(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
 export function createHttpKeyAdmin(
   baseUrl: string,
   masterKey: string,
@@ -198,38 +206,73 @@ export function createHttpKeyAdmin(
     keyBlock: (key) => post("/key/block", { key }),
     keyDelete: (keys) => post("/key/delete", { keys }),
     async listKeys(userId: string): Promise<string[]> {
-      const url = new URL("/key/list", baseUrl);
-      url.searchParams.set("user_id", userId);
-      let res: Response;
-      try {
-        res = await fetchImpl(url, {
-          method: "GET",
-          headers: { authorization: `Bearer ${masterKey}` },
-          signal: AbortSignal.timeout(KEY_ADMIN_TIMEOUT_MS),
-        });
-      } catch {
-        throw new Error("key list failed");
-      }
-      if (!ok(res.status)) throw new Error("key list failed");
-      let body: unknown;
-      try {
-        body = await res.json();
-      } catch {
-        return [];
-      }
-      const raw = (body as { keys?: unknown } | null)?.keys;
-      if (!Array.isArray(raw)) return [];
+      // P9 final re-review NEW-1: the deployed LiteLLM defaults to
+      // page=1&size=10, so a single request silently hides every key after
+      // the first ten (including the old/orphaned one this cleanup exists to
+      // revoke). Walk every page and stop on the server-reported bounds, a
+      // short page, or an empty page.
       const tokens: string[] = [];
-      for (const item of raw) {
-        if (typeof item === "string" && item !== "") {
-          tokens.push(item);
-        } else if (item !== null && typeof item === "object") {
-          // Some LiteLLM versions return full key objects; accept either the
-          // hashed `token` or a plain `key` field.
-          const record = item as Record<string, unknown>;
-          const token = record.token ?? record.key;
-          if (typeof token === "string" && token !== "") tokens.push(token);
+      let page = 1;
+      let previousSignature: string | null = null;
+      for (;;) {
+        const url = new URL("/key/list", baseUrl);
+        url.searchParams.set("user_id", userId);
+        url.searchParams.set("page", String(page));
+        url.searchParams.set("size", String(KEY_LIST_PAGE_SIZE));
+        let res: Response;
+        try {
+          res = await fetchImpl(url, {
+            method: "GET",
+            headers: { authorization: `Bearer ${masterKey}` },
+            signal: AbortSignal.timeout(KEY_ADMIN_TIMEOUT_MS),
+          });
+        } catch {
+          throw new Error("key list failed");
         }
+        if (!ok(res.status)) throw new Error("key list failed");
+        let body: unknown;
+        try {
+          body = await res.json();
+        } catch {
+          // NEW-3: a malformed 200 is a list failure, not "no keys". A blind
+          // finalize here would leave live credentials behind.
+          throw new Error("key list failed");
+        }
+        const raw = (body as { keys?: unknown } | null)?.keys;
+        if (!Array.isArray(raw)) throw new Error("key list failed");
+
+        // A server that ignores `page` would return page 1 forever. Stop and
+        // fail the attempt (which retries) rather than spin.
+        const signature = JSON.stringify(raw);
+        if (previousSignature !== null && signature === previousSignature) {
+          throw new Error("key list pagination did not advance");
+        }
+        previousSignature = signature;
+
+        for (const item of raw) {
+          if (typeof item === "string" && item !== "") {
+            tokens.push(item);
+          } else if (item !== null && typeof item === "object") {
+            // Some LiteLLM versions return full key objects; accept either the
+            // hashed `token` or a plain `key` field.
+            const record = item as Record<string, unknown>;
+            const token = record.token ?? record.key;
+            if (typeof token === "string" && token !== "") tokens.push(token);
+          }
+        }
+
+        const record = (body ?? {}) as Record<string, unknown>;
+        const totalPages = countField(record.total_pages);
+        const totalCount = countField(record.total_count);
+        if (totalPages !== null) {
+          if (page >= totalPages) break;
+        } else if (totalCount !== null) {
+          if (page * KEY_LIST_PAGE_SIZE >= totalCount) break;
+          if (raw.length < KEY_LIST_PAGE_SIZE) break;
+        } else if (raw.length < KEY_LIST_PAGE_SIZE) {
+          break;
+        }
+        page += 1;
       }
       return tokens;
     },
@@ -429,6 +472,14 @@ export function createCloudCleanup(deps: CloudCleanupDeps): CloudCleanup {
       // checkpoint is written only after success). Re-assert every child
       // delete here so a concurrent write between an earlier checkpoint and
       // `DELETE FROM users` cannot wedge the deletion on an FK forever.
+      //
+      // NEW-5: the re-assertions and `DELETE FROM users` are NOT atomic
+      // (the per-UID advisory lock fences lifecycle mutations, not gateway
+      // writes). A write landing after the last child delete can still fail
+      // this step — by design that is self-healing: `data:sql` is checkpointed
+      // only on success, so the next attempt re-runs this whole stage, and
+      // backoff is 60·2^min(attempts-1,6) capped at 3600 s. Do not "fix" this
+      // by retrying the stage in a tight loop.
       name: "sql",
       run: async (uid, ctx) => {
         // Re-assert the session-owned scope FIRST (the FK that used to wedge).

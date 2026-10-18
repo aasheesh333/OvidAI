@@ -256,11 +256,65 @@ describe("createHttpKeyAdmin", () => {
     expect(await admin.listKeys("u1")).toEqual(["tok-a", "tok-b", "tok-c"]);
     expect(calls).toEqual([
       {
-        url: "https://litellm.invalid/key/list?user_id=u1",
+        url: "https://litellm.invalid/key/list?user_id=u1&page=1&size=100",
         method: "GET",
         auth: "Bearer sk-master",
       },
     ]);
+  });
+
+  it("walks every page of /key/list (25 keys across 3 pages) (NEW-1)", async () => {
+    const pages = [
+      Array.from({ length: 10 }, (_, i) => `tok-${i}`),
+      Array.from({ length: 10 }, (_, i) => `tok-${10 + i}`),
+      Array.from({ length: 5 }, (_, i) => `tok-${20 + i}`),
+    ];
+    const seen: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      const page = Number(url.searchParams.get("page"));
+      expect(url.searchParams.get("size")).toBe("100");
+      seen.push(`page=${page}`);
+      return new Response(
+        JSON.stringify({ keys: pages[page - 1], total_pages: 3, total_count: 25 }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    const admin = createHttpKeyAdmin("https://litellm.invalid", "sk", fetchImpl);
+
+    expect(await admin.listKeys("u1")).toEqual([...pages[0]!, ...pages[1]!, ...pages[2]!]);
+    // Removing pagination would return only the first ten keys.
+    expect(seen).toEqual(["page=1", "page=2", "page=3"]);
+  });
+
+  it("uses total_count when total_pages is absent (NEW-1)", async () => {
+    const first = Array.from({ length: 100 }, (_, i) => `tok-${i}`);
+    const second = Array.from({ length: 50 }, (_, i) => `tok-${100 + i}`);
+    const seen: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const page = Number(new URL(String(input)).searchParams.get("page"));
+      seen.push(`page=${page}`);
+      return new Response(
+        JSON.stringify({
+          keys: page === 1 ? first : second,
+          total_count: 150,
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    const admin = createHttpKeyAdmin("https://litellm.invalid", "sk", fetchImpl);
+
+    expect(await admin.listKeys("u1")).toEqual([...first, ...second]);
+    expect(seen).toEqual(["page=1", "page=2"]);
+  });
+
+  it("fails rather than looping when the server ignores page (NEW-1)", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ keys: ["tok-a"], total_pages: 3 }), {
+        status: 200,
+      })) as typeof fetch;
+    const admin = createHttpKeyAdmin("https://litellm.invalid", "sk", fetchImpl);
+    await expect(admin.listKeys("u1")).rejects.toThrow(/did not advance/);
   });
 
   it("fails loudly when the key list cannot be read (never finalize blind)", async () => {
@@ -273,6 +327,18 @@ describe("createHttpKeyAdmin", () => {
       return new Response("{}", { status: 404 });
     }) as typeof fetch);
     await expect(notFound.listKeys("u1")).rejects.toThrow("key list failed");
+  });
+
+  it("fails loudly on a malformed or non-array key list (NEW-3)", async () => {
+    const unparseable = createHttpKeyAdmin("https://litellm.invalid", "sk", (async () => {
+      return new Response("not json", { status: 200 });
+    }) as typeof fetch);
+    await expect(unparseable.listKeys("u1")).rejects.toThrow("key list failed");
+
+    const nonArray = createHttpKeyAdmin("https://litellm.invalid", "sk", (async () => {
+      return new Response(JSON.stringify({ keys: "nope" }), { status: 200 });
+    }) as typeof fetch);
+    await expect(nonArray.listKeys("u1")).rejects.toThrow("key list failed");
   });
 });
 

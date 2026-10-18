@@ -10,8 +10,9 @@
  * Semantics:
  * - Lists every page under `prefix` (including a nested/continuation token)
  *   and deletes in ≤1000-key batches (the S3 DeleteObjects cap).
- * - `Quiet: true` keeps responses small; any failed key surfaces in the
- *   command error and fails the cleanup stage (retried by the lifecycle).
+ * - `Quiet: true` keeps responses small; a per-key `Errors` entry (S3 returns
+ *   HTTP 200 even for partial failures) throws so the cleanup stage fails and
+ *   retries instead of checkpointing a prefix that still has objects.
  * - A prefix with no objects is a no-op (idempotent replay after a crash).
  * - No key is logged; the caller passes a user-scoped prefix.
  */
@@ -29,6 +30,8 @@ export interface PrefixDeleteClient {
     Contents?: Array<{ Key?: string }>;
     IsTruncated?: boolean;
     NextContinuationToken?: string;
+    /** Per-key failures; S3 returns these with an HTTP 200. */
+    Errors?: Array<{ Key?: string; Code?: string; Message?: string }>;
   }>;
 }
 
@@ -71,12 +74,24 @@ export function createR2PrefixDeleter(
           .filter((key): key is string => typeof key === "string" && key !== "")
           .map((key) => ({ Key: key }));
         for (let start = 0; start < keys.length; start += DELETE_BATCH) {
-          await s3.send(
+          const deleted = await s3.send(
             new DeleteObjectsCommand({
               Bucket: cfg.bucket,
               Delete: { Objects: keys.slice(start, start + DELETE_BATCH), Quiet: true },
             }),
           );
+          // P9 final re-review NEW-2: DeleteObjects reports partial failures
+          // (AccessDenied, transient) in `Errors` while still returning HTTP
+          // 200. Surface the first one so the stage is retried, not
+          // checkpointed with objects left under the user prefix.
+          const errors = deleted.Errors ?? [];
+          if (errors.length > 0) {
+            const first = errors[0]!;
+            throw new Error(
+              `R2 DeleteObjects failed for ${errors.length} object(s): ` +
+                `${first.Code ?? "unknown"} ${first.Key ?? "unknown-key"}`,
+            );
+          }
         }
         continuationToken = listed.IsTruncated === true ? listed.NextContinuationToken : undefined;
         if (listed.IsTruncated === true && continuationToken === undefined) {
