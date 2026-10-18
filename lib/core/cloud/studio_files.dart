@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import 'cloud_rest.dart';
+import '../studio_drafts.dart' show kStudioEditHardCap;
 
 /// P7 workspace file API — reconciled against the BUILT gateway routes
 /// (`cloud/apps/gateway/src/routes/workspace.ts`) and the shared wire types
@@ -20,12 +21,20 @@ import 'cloud_rest.dart';
 ///    body `{path, contentUtf8}` → `{path,sizeBytes,sha256}` (202
 ///    `{status:'hydrating'}` while a cold workspace warms).
 ///
-/// The server has NO If-Match/baseline field (the PUT body schema is strict),
-/// so the baseline contract is enforced client-side: [writeFile] re-reads the
-/// file and compares its sha256 with the caller's baseline before the PUT.
-/// A mismatch — or a genuine server 409 — surfaces as a
-/// [CloudApiException] with `code == 'baseline_mismatch'`, which the Studio
-/// client routes into the editor's conflict-resolution path.
+/// The server has NO If-Match/baseline field (the PUT body schema is strict:
+/// `cloud/packages/shared/src/workspace.ts:172-183`), so the baseline contract
+/// is enforced CLIENT-SIDE ONLY: [writeFile] re-reads the file and compares
+/// its sha256 with the caller's baseline before the PUT. A mismatch surfaces
+/// as a [CloudApiException] with `code == 'baseline_mismatch'`, which the
+/// Studio client routes into the editor's conflict-resolution path.
+///
+/// KNOWN RACE (not closed): the GET → compare → PUT sequence is TOCTOU. An
+/// agent write landing after the comparison GET and before the PUT is
+/// silently overwritten; no 409 is produced and the editor reports "Saved".
+/// Closing it needs a server-side precondition: add an `ifMatchSha256` (or
+/// `baselineHash`) field to the strict PUT schema, reject with 409 when the
+/// current bytes differ, and keep the client-side pre-check only as a fast
+/// path. Until then this is a best-effort guard, not an atomic compare-and-set.
 
 /// One node of the server's manifest tree.
 ///
@@ -235,7 +244,24 @@ class StudioFilesClient {
       query: <String, String>{'path': path},
     );
     final downloadUrl = json['downloadUrl'];
+    final declaredSize = (json['sizeBytes'] as num?)?.toInt();
     if (downloadUrl is String && downloadUrl.isNotEmpty) {
+      // A redirect response declares sizeBytes BEFORE the body is fetched.
+      // Files above the edit hard cap only ever render the "too large"
+      // placeholder, so do not pull megabytes (or 100 MB) off object storage
+      // just to discard them.
+      if (declaredSize != null && declaredSize > kStudioEditHardCap) {
+        return StudioFileRead(
+          path: (json['path'] as String?) ?? path,
+          sizeBytes: declaredSize,
+          contentType:
+              (json['contentType'] as String?) ?? 'application/octet-stream',
+          encoding: 'binary',
+          content: '',
+          sha256: '',
+          redirectUrl: downloadUrl,
+        );
+      }
       final response = await _http.get(Uri.parse(downloadUrl));
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw CloudApiException(
@@ -247,7 +273,7 @@ class StudioFilesClient {
       final bytes = response.bodyBytes;
       return StudioFileRead(
         path: (json['path'] as String?) ?? path,
-        sizeBytes: (json['sizeBytes'] as num?)?.toInt() ?? bytes.length,
+        sizeBytes: declaredSize ?? bytes.length,
         contentType: (json['contentType'] as String?) ?? 'application/octet-stream',
         encoding: 'binary',
         content: utf8.decode(bytes, allowMalformed: true),
@@ -281,8 +307,13 @@ class StudioFilesClient {
   /// [baselineHash] is the sha256 captured when the buffer was opened (or the
   /// sha256 the previous successful PUT returned). When supplied, the current
   /// remote bytes are re-read and compared first; a mismatch throws a 409
-  /// `baseline_mismatch` WITHOUT writing. A genuine server 409 is mapped the
-  /// same way.
+  /// `baseline_mismatch` WITHOUT writing.
+  ///
+  /// This is NOT atomic: see the KNOWN RACE note on the library. The built
+  /// server sends no 409 for a workspace write (the only worker 409 is
+  /// `not_warm`, retried and collapsed to 503), so this synthetic conflict is
+  /// the only one the client can surface. A real fix is a server-side
+  /// `If-Match`/baseline field in the PUT schema.
   Future<StudioWriteResult> writeFile(
     String sessionId,
     String path,

@@ -255,7 +255,12 @@ class StudioRemoteClient extends ChangeNotifier {
       return;
     }
     final read = await _files.readFileDetailed(sessionId, path);
-    final guard = _guardForContent(read.content);
+    // A redirect response that exceeded the hard cap was not downloaded
+    // (`StudioFilesClient.readFileDetailed`); its declared size still selects
+    // the too-large placeholder here.
+    final guard = read.sizeBytes > kStudioEditHardCap
+        ? StudioFileGuard.tooLarge(read.sizeBytes)
+        : _guardForContent(read.content);
     if (guard != null) {
       state.guards[path] = guard;
       state.fileBuffer[path] = '';
@@ -468,6 +473,11 @@ class StudioRemoteClient extends ChangeNotifier {
   }
 
   /// Reset hook: forget every in-memory bucket and its persisted drafts.
+  ///
+  /// Buckets are reset IN PLACE (the map is not cleared) so widgets that hold
+  /// `tabsFor(sessionId)` keep observing the same [ValueNotifier] after a
+  /// reset; dropping the map left them listening to a notifier no later
+  /// `_stateFor` would ever update again.
   void clearAll() {
     for (final state in _sessions.values) {
       state.fileBuffer.clear();
@@ -479,9 +489,11 @@ class StudioRemoteClient extends ChangeNotifier {
       state.conflicts.clear();
       state.conflictHashes.clear();
       state.guards.clear();
+      state.snapshot = null;
+      state.treeLoading = false;
+      state.treeError = null;
       state.tabs.value = StudioTabsState.empty;
     }
-    _sessions.clear();
     unawaited(_drafts.deleteAll('editor_'));
     notifyListeners();
   }

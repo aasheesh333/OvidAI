@@ -103,28 +103,6 @@ class StudioPaneViewport extends StatelessWidget {
   );
 }
 
-/// Pulls the `done / total` pair out of a sync progress line.
-///
-/// The old sync reported `synced 25 / 400 files` every 25 files; Studio
-/// never passed the callback, so a multi-minute serial fetch of up to 400
-/// files showed only an 11px spinner. Returns null for lines that carry no
-/// progress (tree fetch, the final "repo synced ✓" line).
-/// The `(done, total)` pair from a progress line, or null when it carries none.
-({int done, int total})? parseSyncCounts(String line) {
-  final m = RegExp(r'(\d+)\s*/\s*(\d+)').firstMatch(line);
-  if (m == null) return null;
-  final done = int.tryParse(m.group(1)!);
-  final total = int.tryParse(m.group(2)!);
-  if (done == null || total == null || total <= 0) return null;
-  return (done: done, total: total);
-}
-
-double? parseSyncFraction(String line) {
-  final counts = parseSyncCounts(line);
-  if (counts == null) return null;
-  return _clamp(counts.done / counts.total, 0.0, 1.0);
-}
-
 /// Resolved Studio geometry for one layout pass.
 ///
 /// Built from the constraints of the region that actually holds the

@@ -166,25 +166,6 @@ void main() {
     });
   });
 
-  group('sync progress parsing', () {
-    test('reads the done/total pair out of RepoCache.onLine text', () {
-      expect(parseSyncFraction('synced 25 / 400 files'), closeTo(0.0625, 1e-9));
-      expect(parseSyncFraction('synced 400 / 400 files'), 1.0);
-      expect(parseSyncFraction('synced 0 / 12 files'), 0.0);
-    });
-
-    test('returns null for lines that carry no progress', () {
-      expect(parseSyncFraction('fetching tree of o/r …'), isNull);
-      expect(parseSyncFraction('repo synced ✓ 12 files in memory'), isNull);
-      expect(parseSyncFraction('synced 5 / 0 files'), isNull);
-      expect(parseSyncFraction(''), isNull);
-    });
-
-    test('never returns a fraction outside 0..1', () {
-      expect(parseSyncFraction('synced 900 / 400 files'), 1.0);
-    });
-  });
-
   group('shared sheet scaffold is consistent', () {
     test('one corner radius for every Studio bottom sheet', () {
       expect(studioSheetRadius, isNot(equals(18)),

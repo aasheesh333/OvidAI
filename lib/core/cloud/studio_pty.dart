@@ -32,6 +32,21 @@ import 'cloud_ws.dart';
 ///
 /// A short microtask settle window lets a live chunk that raced the snapshot
 /// arrive before the first emit, so the repaint still wins.
+/// ## Cross-talk prevention (one shared socket, many terminals)
+///
+/// Every channel listens to the SAME `WsMultiplexer.rawServerFrames` stream,
+/// and the wire carries no client request id: `pty_open{sessionId,cols,rows}`
+/// is answered by `pty_opened{ptyId,sessionId}` (see
+/// `cloud/apps/gateway/src/ws.ts` `handlePtyOpen`). Two channels opening
+/// concurrently would otherwise both adopt the first ack and share one shell.
+///
+/// The gateway processes frames strictly in arrival order (`ws.ts` chains
+/// `processFrame`), so ack order equals request order. Channels therefore
+/// share a per-multiplexer FIFO open queue: a channel ignores every pty frame
+/// until it is the head of the queue and has claimed its OWN `pty_opened`, and
+/// it drops any later frame whose `ptyId` is not the one it claimed. A closed
+/// channel keeps its queue slot until its ack/error arrives, then releases the
+/// pty, so its ack is never mis-adopted by the next tab.
 class CloudPtyChannel extends ChangeNotifier {
   CloudPtyChannel({
     required this.sessionId,
@@ -54,6 +69,8 @@ class CloudPtyChannel extends ChangeNotifier {
       _onFrame,
       onError: (Object error) => debugPrint('cloud pty: frame error: $error'),
     );
+    _scopeFor(_ws).enqueue(sessionId, this);
+    _openPending = true;
     unawaited(_send(<String, Object?>{
       'op': 'pty_open',
       'sessionId': sessionId,
@@ -61,6 +78,14 @@ class CloudPtyChannel extends ChangeNotifier {
       'rows': rows,
     }));
   }
+
+  /// Per-[WsMultiplexer] open-order registry. The queue is the only client-
+  /// side correlation available on the built wire (there is no tabId/nonce).
+  static final Expando<_PtyOpenScope> _scopes =
+      Expando<_PtyOpenScope>('CloudPtyChannel.openScopes');
+
+  static _PtyOpenScope _scopeFor(WsMultiplexer ws) =>
+      _scopes[ws] ??= _PtyOpenScope();
 
   final String sessionId;
   final String tabId;
@@ -81,8 +106,18 @@ class CloudPtyChannel extends ChangeNotifier {
   bool _attached = false;
   bool _truncated = false;
   bool _closed = false;
+  bool _openPending = false;
+  Timer? _openTimeout;
   int? _exitCode;
   CloudWsError? _error;
+
+  /// Latest size requested before the pty existed. `pty_open` already carried
+  /// the constructor dimensions, so this is a resize to replay once the ack
+  /// arrives (it must not be dropped).
+  (int, int)? _pendingResize;
+
+  /// Incomplete trailing UTF-8 sequence carried between wire chunks.
+  List<int> _utf8Carry = const <int>[];
 
   /// Writes issued before `pty_opened` arrives are queued (the gateway needs
   /// the ptyId).
@@ -133,7 +168,16 @@ class CloudPtyChannel extends ChangeNotifier {
     _cols = cols;
     _rows = rows;
     final ptyId = _ptyId;
-    if (ptyId == null) return; // sent with pty_open dimensions on open
+    if (ptyId == null) {
+      // `pty_open` was already sent in the constructor; queue the latest size
+      // and replay it on `pty_opened` instead of losing it.
+      _pendingResize = (cols, rows);
+      return;
+    }
+    _sendResize(ptyId, cols, rows);
+  }
+
+  void _sendResize(String ptyId, int cols, int rows) {
     unawaited(_send(<String, Object?>{
       'op': 'pty_resize',
       'ptyId': ptyId,
@@ -158,9 +202,24 @@ class CloudPtyChannel extends ChangeNotifier {
       } catch (_) {
         // Best effort: the socket may already be gone.
       }
+      await _sub?.cancel();
+      _sub = null;
+    } else if (!_openPending) {
+      await _sub?.cancel();
+      _sub = null;
+    } else if (_sendOverride == null) {
+      // Wait for our ack so a sibling tab cannot adopt it, but do not leak the
+      // subscription (and the queue slot) forever if the socket dies. The
+      // timer is skipped under the test send seam (the fake owns the ack).
+      _openTimeout = Timer(const Duration(seconds: 35), () {
+        _scopeFor(_ws).queueFor(sessionId).remove(this);
+        unawaited(_sub?.cancel());
+        _sub = null;
+      });
     }
-    await _sub?.cancel();
-    _sub = null;
+    // If the open is still in flight the subscription stays alive just long
+    // enough to consume OUR ack (and close that pty). Dropping it here would
+    // let the next tab adopt this channel's pty.
     if (!_output.isClosed) await _output.close();
   }
 
@@ -188,24 +247,24 @@ class CloudPtyChannel extends ChangeNotifier {
   }
 
   void _onFrame(Map<String, dynamic> frame) {
-    if (_closed) return;
     final op = frame['op'];
     final ptyId = frame['ptyId'];
-    if (ptyId is String && _ptyId != null && ptyId != _ptyId) return;
+
+    if (op == 'pty_opened') {
+      _adoptOpened(ptyId, frame['sessionId']);
+      return;
+    }
+    if (op == 'error') {
+      _onErrorFrame(frame, ptyId);
+      return;
+    }
+    if (_closed) return;
+
+    // A channel that has not claimed its own pty ignores EVERY other pty
+    // frame. Before this guard, a second tab rendered the first tab's output.
+    if (_ptyId == null || ptyId != _ptyId) return;
 
     switch (op) {
-      case 'pty_opened':
-        if (frame['sessionId'] != sessionId) return;
-        if (_ptyId == null) {
-          _ptyId = ptyId is String ? ptyId : null;
-          _opened = true;
-          final queued = List<List<int>>.from(_queuedWrites);
-          _queuedWrites.clear();
-          for (final bytes in queued) {
-            if (_ptyId != null) _sendInput(_ptyId!, bytes);
-          }
-          notifyListeners();
-        }
       case 'pty_attached':
         _attached = true;
         _truncated = frame['truncated'] == true;
@@ -224,13 +283,104 @@ class CloudPtyChannel extends ChangeNotifier {
       case 'pty_exit':
         _exitCode = (frame['exitCode'] as num?)?.toInt();
         notifyListeners();
-      case 'error':
-        _error = CloudWsError(
-          (frame['code'] as String?) ?? 'internal',
-          (frame['message'] as String?) ?? 'Terminal error.',
-        );
-        notifyListeners();
     }
+  }
+
+  /// Claims a `pty_opened` only when this channel is the oldest outstanding
+  /// open for the session (the gateway acks in request order).
+  void _adoptOpened(Object? ptyId, Object? frameSession) {
+    if (frameSession != sessionId) return;
+    if (_ptyId != null) return;
+    final scope = _scopeFor(_ws);
+    final queue = scope.queueFor(sessionId);
+    if (ptyId is String && scope.owners.containsKey(ptyId)) {
+      // The same broadcast frame reaches every channel; once one of them has
+      // claimed it, the rest must not adopt it too.
+      return;
+    }
+    if (queue.isEmpty || !identical(queue.first, this)) return;
+    if (ptyId is! String || ptyId.isEmpty) {
+      _failOpen('The terminal did not report an id.');
+      return;
+    }
+    queue.removeAt(0);
+    scope.owners[ptyId] = this;
+    _ptyId = ptyId;
+    _opened = true;
+    _openPending = false;
+    _openTimeout?.cancel();
+    _openTimeout = null;
+
+    final pendingResize = _pendingResize;
+    _pendingResize = null;
+    if (pendingResize != null) {
+      _sendResize(ptyId, pendingResize.$1, pendingResize.$2);
+    }
+
+    if (_closed) {
+      // The tab was closed while its open was in flight: release the pty and
+      // stop listening. The ack is consumed, so no sibling tab can adopt it.
+      unawaited(_send(<String, Object?>{'op': 'pty_close', 'ptyId': ptyId})
+          .catchError((_) {}));
+      unawaited(_sub?.cancel());
+      _sub = null;
+      return;
+    }
+
+    final queued = List<List<int>>.from(_queuedWrites);
+    _queuedWrites.clear();
+    for (final bytes in queued) {
+      _sendInput(ptyId, bytes);
+    }
+    notifyListeners();
+  }
+
+  /// Routes an `error` frame. A bound channel only takes errors for its own
+  /// pty. An unbound channel takes an open failure only when it is the head
+  /// of the session's open queue (so a sibling's failure is not misreported).
+  void _onErrorFrame(Map<String, dynamic> frame, Object? ptyId) {
+    final scope = _scopeFor(_ws);
+    final bound = _ptyId;
+    if (bound != null) {
+      if (ptyId is String && ptyId != bound) return;
+      if (ptyId == null) {
+        final frameSession = frame['sessionId'];
+        if (frameSession is String && frameSession != sessionId) return;
+      }
+    } else {
+      final queue = scope.queueFor(sessionId);
+      if (queue.isEmpty || !identical(queue.first, this)) return;
+      final frameSession = frame['sessionId'];
+      if (frameSession is String && frameSession != sessionId) return;
+      if (ptyId is String) {
+        final owner = scope.owners[ptyId];
+        if (owner != null && !identical(owner, this)) return;
+      }
+      queue.removeAt(0);
+      _openPending = false;
+      _openTimeout?.cancel();
+      _openTimeout = null;
+    }
+    if (_closed) {
+      if (bound == null) {
+        unawaited(_sub?.cancel());
+        _sub = null;
+      }
+      return;
+    }
+    _error = CloudWsError(
+      (frame['code'] as String?) ?? 'internal',
+      (frame['message'] as String?) ?? 'Terminal error.',
+    );
+    notifyListeners();
+  }
+
+  void _failOpen(String message) {
+    final queue = _scopeFor(_ws).queueFor(sessionId);
+    queue.remove(this);
+    _openPending = false;
+    _error = CloudWsError('internal', message);
+    if (!_closed) notifyListeners();
   }
 
   // -------------------------------------------------------------------------
@@ -293,7 +443,37 @@ class CloudPtyChannel extends ChangeNotifier {
   }
 
   void _appendText(List<int> bytes) {
-    _text.write(utf8.decode(bytes, allowMalformed: true));
+    // The wire splits chunks at PTY_WIRE_MAX_BYTES (16 KiB) on arbitrary byte
+    // boundaries, so a multi-byte UTF-8 character can straddle two chunks.
+    // Decoding each chunk independently renders U+FFFD for both halves; carry
+    // the incomplete tail and prepend it to the next chunk instead.
+    final all = _utf8Carry.isEmpty
+        ? bytes
+        : <int>[..._utf8Carry, ...bytes];
+    var cut = all.length;
+    // A trailing sequence is incomplete when its lead byte is within the last
+    // four bytes and fewer than `need` bytes remain.
+    for (var i = all.length - 1; i >= 0 && i >= all.length - 4; i--) {
+      final b = all[i];
+      if ((b & 0xC0) == 0x80) continue; // continuation byte
+      final need = b < 0x80
+          ? 1
+          : (b & 0xE0) == 0xC0
+              ? 2
+              : (b & 0xF0) == 0xE0
+                  ? 3
+                  : (b & 0xF8) == 0xF0
+                      ? 4
+                      : 1; // invalid lead: let allowMalformed handle it
+      if (i + need > all.length) cut = i;
+      break;
+    }
+    _utf8Carry = cut < all.length
+        ? List<int>.of(all.sublist(cut))
+        : const <int>[];
+    if (cut > 0) {
+      _text.write(utf8.decode(all.sublist(0, cut), allowMalformed: true));
+    }
     // The server's ring is 256 KB; keep a little headroom so a long-lived tab
     // cannot grow without bound.
     const cap = 512 * 1024;
@@ -304,4 +484,19 @@ class CloudPtyChannel extends ChangeNotifier {
         ..write(current.substring(current.length - 256 * 1024));
     }
   }
+}
+
+/// The open-order registry shared by every channel on one multiplexer.
+class _PtyOpenScope {
+  final Map<String, List<CloudPtyChannel>> _queues =
+      <String, List<CloudPtyChannel>>{};
+
+  /// ptyId → the channel that claimed it (used to route an unbound error).
+  final Map<String, CloudPtyChannel> owners = <String, CloudPtyChannel>{};
+
+  List<CloudPtyChannel> queueFor(String sessionId) =>
+      _queues.putIfAbsent(sessionId, () => <CloudPtyChannel>[]);
+
+  void enqueue(String sessionId, CloudPtyChannel channel) =>
+      queueFor(sessionId).add(channel);
 }

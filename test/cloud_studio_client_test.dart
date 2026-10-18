@@ -366,4 +366,178 @@ void main() {
       );
     });
   });
+
+  group('CloudPtyChannel correlation and text decoding', () {
+    late StreamController<Map<String, dynamic>> frames;
+    late List<Map<String, dynamic>> sent;
+    late WsMultiplexer ws;
+
+    WsMultiplexer idleWs() => WsMultiplexer(
+          mintTicket: () async => 'ticket',
+          heartbeatInterval: const Duration(hours: 1),
+          pongTimeout: const Duration(hours: 1),
+        );
+
+    CloudPtyChannel channel(String tabId) => CloudPtyChannel(
+          sessionId: _session,
+          tabId: tabId,
+          ws: ws,
+          settleWindow: Duration.zero,
+          rawFramesOverride: frames.stream,
+          sendOverride: (frame) async => sent.add(frame),
+        );
+
+    setUp(() {
+      frames = StreamController<Map<String, dynamic>>.broadcast();
+      sent = <Map<String, dynamic>>[];
+      ws = idleWs();
+    });
+
+    tearDown(() async {
+      await frames.close();
+    });
+
+    Future<void> flush() async {
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    test('two channels on one socket claim DISTINCT ptys and never cross-talk',
+        () async {
+      final one = channel('t1');
+      final two = channel('t2');
+      addTearDown(one.close);
+      addTearDown(two.close);
+
+      // The gateway processes frames in arrival order, so the first ack
+      // belongs to the first request.
+      frames.add({'op': 'pty_opened', 'ptyId': 'p1', 'sessionId': _session});
+      await flush();
+      expect(one.ptyId, 'p1');
+      expect(two.ptyId, isNull,
+          reason: 'tab 2 must not adopt tab 1\'s ack');
+
+      // Before tab 2 has its own pty, tab 1's output must not leak into it.
+      frames.add({
+        'op': 'pty_output',
+        'ptyId': 'p1',
+        'offset': 0,
+        'data': base64Encode(utf8.encode('TAB-ONE-OUTPUT')),
+      });
+      await flush();
+      expect(one.text, 'TAB-ONE-OUTPUT');
+      expect(two.text, isEmpty,
+          reason: 'an unclaimed channel must ignore every pty frame');
+
+      frames.add({'op': 'pty_opened', 'ptyId': 'p2', 'sessionId': _session});
+      await flush();
+      expect(two.ptyId, 'p2');
+
+      frames.add({
+        'op': 'pty_output',
+        'ptyId': 'p2',
+        'offset': 0,
+        'data': base64Encode(utf8.encode('TAB-TWO-OUTPUT')),
+      });
+      await flush();
+      expect(one.text, 'TAB-ONE-OUTPUT');
+      expect(two.text, 'TAB-TWO-OUTPUT');
+
+      two.write(utf8.encode('two\n'));
+      await flush();
+      expect(
+        sent.where((f) => f['op'] == 'pty_input').last['ptyId'],
+        'p2',
+        reason: 'input must go to the tab that owns it',
+      );
+    });
+
+    test('a closed pending channel consumes its ack so the next tab is clean',
+        () async {
+      final one = channel('t1');
+      final two = channel('t2');
+      addTearDown(two.close);
+      await one.close(); // closed before its pty_opened arrived
+
+      frames.add({'op': 'pty_opened', 'ptyId': 'p1', 'sessionId': _session});
+      await flush();
+      expect(one.ptyId, 'p1');
+      expect(two.ptyId, isNull);
+      expect(
+        sent.where((f) => f['op'] == 'pty_close').single,
+        {'op': 'pty_close', 'ptyId': 'p1'},
+      );
+
+      frames.add({'op': 'pty_opened', 'ptyId': 'p2', 'sessionId': _session});
+      await flush();
+      expect(two.ptyId, 'p2');
+    });
+
+    test('resize before pty_opened is queued and replayed', () async {
+      final c = channel('t1');
+      addTearDown(c.close);
+
+      c.resize(100, 30);
+      expect(sent.where((f) => f['op'] == 'pty_resize'), isEmpty,
+          reason: 'the gateway needs the ptyId');
+
+      frames.add({'op': 'pty_opened', 'ptyId': 'p1', 'sessionId': _session});
+      await flush();
+      expect(
+        sent.where((f) => f['op'] == 'pty_resize').single,
+        {'op': 'pty_resize', 'ptyId': 'p1', 'cols': 100, 'rows': 30},
+      );
+    });
+
+    test('a multi-byte character split across wire chunks is not mangled',
+        () async {
+      final c = channel('t1');
+      addTearDown(c.close);
+      frames.add({'op': 'pty_opened', 'ptyId': 'p1', 'sessionId': _session});
+      await flush();
+
+      // 'é' is C3 A9; the ring split may land between the two bytes.
+      final bytes = utf8.encode('é');
+      frames.add({
+        'op': 'pty_output',
+        'ptyId': 'p1',
+        'offset': 0,
+        'data': base64Encode(bytes.sublist(0, 1)),
+      });
+      frames.add({
+        'op': 'pty_output',
+        'ptyId': 'p1',
+        'offset': 1,
+        'data': base64Encode(bytes.sublist(1)),
+      });
+      await flush();
+
+      expect(c.text, 'é');
+      expect(c.text, isNot(contains('�')));
+    });
+
+    test('a 4-byte emoji split 2/2 across chunks survives', () async {
+      final c = channel('t1');
+      addTearDown(c.close);
+      frames.add({'op': 'pty_opened', 'ptyId': 'p1', 'sessionId': _session});
+      await flush();
+
+      final bytes = utf8.encode('🚀');
+      frames.add({
+        'op': 'pty_output',
+        'ptyId': 'p1',
+        'offset': 0,
+        'data': base64Encode(bytes.sublist(0, 2)),
+      });
+      frames.add({
+        'op': 'pty_output',
+        'ptyId': 'p1',
+        'offset': 2,
+        'data': base64Encode(bytes.sublist(2)),
+      });
+      await flush();
+
+      expect(c.text, '🚀');
+    });
+  });
 }

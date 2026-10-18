@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../core/cloud/studio_files.dart';
@@ -41,86 +42,20 @@ class StudioTreeNode {
   String toString() => 'StudioTreeNode($path, dir=$isDirectory, d=$depth)';
 }
 
-List<String> _segments(String path) =>
-    path.split('/').where((s) => s.isNotEmpty).toList();
-
 String _leaf(String path) => path.substring(path.lastIndexOf('/') + 1);
 
-/// Builds the flattened, depth-annotated row list for [paths], revealing the
-/// children of every directory in [expandedDirs].
-///
-/// Pure so the directory rules are pinned without a widget pump. Rows come out
-/// in display order: within a level, directories first, then case-insensitive
-/// by name.
-List<StudioTreeNode> buildStudioTree(
-  Iterable<String> paths,
+/// Flattens the server's nested manifest tree into rows, revealing the
+/// children of every directory in [expandedDirs]. Empty directories and
+/// directory rollups from a pruned manifest are preserved: the server's tree
+/// is authoritative (unlike the deleted path-set heuristic).
+List<StudioTreeNode> flattenStudioTree(
+  FileNode? root,
   Set<String> expandedDirs,
 ) {
   assert(() {
     debugStudioTreeBuilds++;
     return true;
   }());
-  final dirs = <String>{};
-  final files = <String>{};
-  for (final raw in paths) {
-    final segs = _segments(raw);
-    if (segs.isEmpty) continue;
-    for (var i = 1; i < segs.length; i++) {
-      dirs.add(segs.sublist(0, i).join('/'));
-    }
-    files.add(segs.join('/'));
-  }
-  // A path that is also somebody's directory prefix is a directory. Git cannot
-  // produce that, but an agent-created buffer can, and picking "file" there
-  // would hide the subtree.
-  files.removeWhere(dirs.contains);
-
-  final isDir = <String, bool>{
-    for (final d in dirs) d: true,
-    for (final f in files) f: false,
-  };
-
-  final byParent = <String, List<String>>{};
-  for (final p in isDir.keys) {
-    final i = p.lastIndexOf('/');
-    (byParent[i < 0 ? '' : p.substring(0, i)] ??= <String>[]).add(p);
-  }
-  int compare(String a, String b) {
-    final ad = isDir[a]!, bd = isDir[b]!;
-    if (ad != bd) return ad ? -1 : 1;
-    final byName = _leaf(a).toLowerCase().compareTo(_leaf(b).toLowerCase());
-    return byName != 0 ? byName : a.compareTo(b);
-  }
-
-  for (final siblings in byParent.values) {
-    siblings.sort(compare);
-  }
-
-  final out = <StudioTreeNode>[];
-  void walk(String parent, int depth) {
-    for (final p in byParent[parent] ?? const <String>[]) {
-      final directory = isDir[p]!;
-      out.add(StudioTreeNode(
-        path: p,
-        name: _leaf(p),
-        isDirectory: directory,
-        depth: depth,
-      ));
-      if (directory && expandedDirs.contains(p)) walk(p, depth + 1);
-    }
-  }
-
-  walk('', 0);
-  return out;
-}
-
-/// Flattens the server's nested manifest tree into rows. Unlike
-/// [buildStudioTree] this keeps empty directories and directory rollups from a
-/// pruned manifest.
-List<StudioTreeNode> flattenStudioTree(
-  FileNode? root,
-  Set<String> expandedDirs,
-) {
   if (root == null) return const <StudioTreeNode>[];
   final out = <StudioTreeNode>[];
   void walk(FileNode node, int depth) {
@@ -147,7 +82,7 @@ List<StudioTreeNode> flattenStudioTree(
   return out;
 }
 
-/// [buildStudioTree] call counter for rebuild-scope tests (debug builds only).
+/// [flattenStudioTree] call counter for rebuild-scope tests (debug only).
 @visibleForTesting
 int debugStudioTreeBuilds = 0;
 
@@ -168,6 +103,7 @@ class _StudioFileTreeState extends State<StudioFileTree> {
   final Set<String> _loading = <String>{};
 
   Object? _treeKey;
+  Set<String> _expandedAtBuild = const <String>{};
   List<StudioTreeNode> _tree = const [];
 
   String get _sid => widget.sessionId ?? AppState.I.activeSession?.id ?? '';
@@ -175,8 +111,15 @@ class _StudioFileTreeState extends State<StudioFileTree> {
 
   List<StudioTreeNode> _nodes() {
     final snapshot = _remote.snapshotFor(_sid);
-    if (identical(snapshot, _treeKey)) return _tree;
+    // The snapshot's IDENTITY does not change when the user expands a folder,
+    // so the expansion set is part of the cache key. Keying on the snapshot
+    // alone made a tap flip the chevron but never render the children.
+    if (identical(snapshot, _treeKey) &&
+        setEquals(_expanded, _expandedAtBuild)) {
+      return _tree;
+    }
     _treeKey = snapshot;
+    _expandedAtBuild = Set<String>.of(_expanded);
     return _tree = flattenStudioTree(snapshot?.root, _expanded);
   }
 
@@ -184,9 +127,14 @@ class _StudioFileTreeState extends State<StudioFileTree> {
   void initState() {
     super.initState();
     // Opening the tree is the explicit refresh: the manifest is the <100 ms
-    // SLA path on the server.
+    // SLA path on the server. StudioScreen already refreshes the manifest on
+    // open; only fetch here when the tree is used standalone (tests) or the
+    // screen's refresh has not started yet. This keeps one GET per open.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _remote.syncStudioTabs(_sid);
+      if (!mounted) return;
+      if (_remote.snapshotFor(_sid) == null && !_remote.treeLoading(_sid)) {
+        _remote.syncStudioTabs(_sid);
+      }
     });
   }
 

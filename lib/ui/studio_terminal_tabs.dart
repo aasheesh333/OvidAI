@@ -54,21 +54,45 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
   final List<_TerminalSession> _terms = [];
   int _active = 0;
 
+  /// The session every existing tab is bound to. StudioScreen switches the
+  /// active session in place, so a stale binding would send input to the
+  /// previous session's shell.
+  late String _sessionId;
+
   String get _sid => widget.sessionId ?? AppState.I.activeSession?.id ?? '';
 
   @override
   void initState() {
     super.initState();
+    _sessionId = _sid;
     _addTerminal();
   }
 
+  @override
+  void didUpdateWidget(StudioTerminalTabs oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final next = _sid;
+    if (next == _sessionId) return;
+    // Rebind every terminal to the new session. Keeping the old channels
+    // would leave the visible tabs typing into the previous workspace.
+    _sessionId = next;
+    for (final t in _terms) {
+      t.dispose();
+    }
+    _terms
+      ..clear()
+      ..add(_newTerminal());
+    _active = 0;
+  }
+
+  _TerminalSession _newTerminal() => _TerminalSession(
+        sessionId: _sessionId,
+        tabId: 'tab-${_terms.length}-${DateTime.now().microsecondsSinceEpoch}',
+      );
+
   void _addTerminal() {
-    final index = _terms.length;
     setState(() {
-      _terms.add(_TerminalSession(
-        sessionId: _sid,
-        tabId: 'tab-$index-${DateTime.now().microsecondsSinceEpoch}',
-      ));
+      _terms.add(_newTerminal());
       _active = _terms.length - 1;
     });
   }
@@ -79,10 +103,7 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
     setState(() {
       _terms.removeAt(i);
       if (_terms.isEmpty) {
-        _terms.add(_TerminalSession(
-          sessionId: _sid,
-          tabId: 'tab-0-${DateTime.now().microsecondsSinceEpoch}',
-        ));
+        _terms.add(_newTerminal());
         _active = 0;
       } else if (_active >= _terms.length) {
         _active = _terms.length - 1;
@@ -236,6 +257,17 @@ class _TerminalSession {
   final input = TextEditingController();
   final scroll = ScrollController();
 
+  /// Last size sent to the channel (dedupes layout-driven resize calls).
+  int appliedCols = 0;
+  int appliedRows = 0;
+
+  void resizeTo(int cols, int rows) {
+    if (cols == appliedCols && rows == appliedRows) return;
+    appliedCols = cols;
+    appliedRows = rows;
+    channel.resize(cols, rows);
+  }
+
   void dispose() {
     channel.dispose();
     input.dispose();
@@ -307,34 +339,59 @@ class _TerminalPaneState extends State<_TerminalPane> {
         return Column(
           children: [
             Expanded(
-              child: Semantics(
-                label: 'Terminal output',
-                container: true,
-                child: SelectionArea(
-                  child: SingleChildScrollView(
-                    controller: t.scroll,
-                    padding: const EdgeInsets.all(12),
-                    child: SizedBox(
-                      width: double.infinity,
-                      child: Text(
-                        text.isEmpty
-                            ? 'Cloud terminal — commands run in the Ovid '
-                                'workspace.\n'
-                            : text,
-                        style: TextStyle(
-                          fontFamily: Aether.mono,
-                          fontFamilyFallback: kStudioMonoFallback,
-                          fontSize: kStudioMinFontSize,
-                          height: 1.6,
-                          color: text.isEmpty
-                              ? Aether.textFaint
-                              : Aether.textMuted,
+              // The pane's real cell grid: the PTY must not keep the 80x24
+              // constructor default on a phone. `Text` uses 12px at height
+              // 1.6; a monospace advance is ~0.6em. Resize is deduped per
+              // terminal and replayed by the channel if the pty is not open
+              // yet.
+              child: LayoutBuilder(builder: (context, constraints) {
+                final usableWidth =
+                    (constraints.maxWidth - 24).clamp(1.0, double.infinity);
+                final usableHeight =
+                    (constraints.maxHeight - 24).clamp(1.0, double.infinity);
+                final cols = (usableWidth / (kStudioMinFontSize * 0.6))
+                    .floor()
+                    .clamp(20, 500)
+                    .toInt();
+                final rows =
+                    (usableHeight / (kStudioMinFontSize * 1.6)).floor().clamp(
+                          4,
+                          500,
+                        ).toInt();
+                if (cols != t.appliedCols || rows != t.appliedRows) {
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted) t.resizeTo(cols, rows);
+                  });
+                }
+                return Semantics(
+                  label: 'Terminal output',
+                  container: true,
+                  child: SelectionArea(
+                    child: SingleChildScrollView(
+                      controller: t.scroll,
+                      padding: const EdgeInsets.all(12),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: Text(
+                          text.isEmpty
+                              ? 'Cloud terminal — commands run in the Ovid '
+                                  'workspace.\n'
+                              : text,
+                          style: TextStyle(
+                            fontFamily: Aether.mono,
+                            fontFamilyFallback: kStudioMonoFallback,
+                            fontSize: kStudioMinFontSize,
+                            height: 1.6,
+                            color: text.isEmpty
+                                ? Aether.textFaint
+                                : Aether.textMuted,
+                          ),
                         ),
                       ),
                     ),
                   ),
-                ),
-              ),
+                );
+              }),
             ),
             if (channel.error != null)
               Container(
