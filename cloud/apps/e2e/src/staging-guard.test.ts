@@ -37,20 +37,37 @@ interface GuardResult {
   stderr: string;
 }
 
-/** Write the shipped example + `overrides` (last assignment wins) and run guard. */
-function runGuard(overrides: Record<string, string> = {}): GuardResult {
+interface GuardOptions {
+  overrides?: Record<string, string>;
+  /** Example-file lines whose `KEY=` assignment is deleted before running. */
+  remove?: string[];
+  /** Extra process environment (e.g. STAGING_ENV_FILE). */
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Write the shipped example (optionally with lines removed) + `overrides`
+ * (last assignment wins) and run guard. `remove` is how the omission probes
+ * (H1) prove a variable cannot silently fall back to a live default.
+ */
+function runGuardWith(options: GuardOptions = {}): GuardResult {
+  const { overrides = {}, remove = [], env } = options;
   const dir = mkdtempSync(join(tmpdir(), "ovid-staging-guard-"));
   TEMP_DIRS.push(dir);
   const file = join(dir, ".env.staging");
+  const body = EXAMPLE_BODY.split("\n")
+    .filter((line) => !remove.some((key) => line.startsWith(`${key}=`)))
+    .join("\n");
   const extra = Object.entries(overrides)
     .map(([key, value]) => `${key}=${value}`)
     .join("\n");
-  writeFileSync(file, `${EXAMPLE_BODY}\n${extra}\n`, "utf8");
+  writeFileSync(file, `${body}\n${extra}\n`, "utf8");
 
   try {
     const stdout = execFileSync("bash", [SCRIPT, "guard", "--env-file", file], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, ...env },
     });
     return { status: 0, stdout, stderr: "" };
   } catch (error) {
@@ -61,6 +78,11 @@ function runGuard(overrides: Record<string, string> = {}): GuardResult {
       stderr: err.stderr ?? "",
     };
   }
+}
+
+/** Write the shipped example + `overrides` (last assignment wins) and run guard. */
+function runGuard(overrides: Record<string, string> = {}): GuardResult {
+  return runGuardWith({ overrides });
 }
 
 function expectRejected(result: GuardResult, variable: string): void {
@@ -125,6 +147,113 @@ describe("staging.sh guard — production isolation", () => {
     expectRejected(
       runGuard({ MINT_BASE_URL: "http://127.0.0.1:4000" }),
       "MINT_BASE_URL",
+    );
+  });
+
+  // ── H1: OVID_CGROUP_BASE is required and EXACT ──────────────────────────
+  it("H1: rejects an env with OVID_CGROUP_BASE omitted (no live-default fallback)", () => {
+    // Omitting the variable used to pass; config.ts then fell back to the
+    // LIVE `ovid-sandboxes.slice/ovid-worker.service`. Mutation-load-bearing:
+    // removing require_var from the guard makes this exit 0.
+    expectRejected(
+      runGuardWith({ remove: ["OVID_CGROUP_BASE"] }),
+      "OVID_CGROUP_BASE",
+    );
+  });
+
+  it("H1: rejects a sibling cgroup path under the staging slice (exact, not prefix)", () => {
+    // The old prefix check accepted any `ovid-sandboxes-staging.slice/*`.
+    expectRejected(
+      runGuard({
+        OVID_CGROUP_BASE: "ovid-sandboxes-staging.slice/other.service",
+      }),
+      "OVID_CGROUP_BASE",
+    );
+    // The live default itself must never be accepted.
+    expectRejected(
+      runGuard({
+        OVID_CGROUP_BASE: "ovid-sandboxes.slice/ovid-worker.service",
+      }),
+      "OVID_CGROUP_BASE",
+    );
+  });
+
+  // ── H2: normalize first; reject `..` traversal ──────────────────────────
+  it("H2: rejects the exact cgroup traversal string into the live worker", () => {
+    // posixpath.normpath(...) == ovid-sandboxes.slice/ovid-worker.service
+    // (the LIVE path); the old prefix check accepted it.
+    expectRejected(
+      runGuard({
+        OVID_CGROUP_BASE:
+          "ovid-sandboxes-staging.slice/../ovid-sandboxes.slice/ovid-worker.service",
+      }),
+      "OVID_CGROUP_BASE",
+    );
+  });
+
+  it("H2: rejects the exact fs-storage traversal string into live user storage", () => {
+    // normpath(...) == /workspaces/users/storage (the LIVE storage root);
+    // the old prefix check accepted it.
+    expectRejected(
+      runGuard({
+        OVID_FS_STORAGE_ROOT:
+          "/workspaces-staging/../../workspaces/users/storage",
+      }),
+      "OVID_FS_STORAGE_ROOT",
+    );
+    // Same rule for the workspace root itself.
+    expectRejected(
+      runGuard({
+        OVID_WORKSPACES_ROOT: "/workspaces-staging/../workspaces/users",
+      }),
+      "OVID_WORKSPACES_ROOT",
+    );
+  });
+
+  it("H2: accepts a path whose normalized form is the staging literal", () => {
+    // Normalization is the gate, not byte equality: `//` and `/./` collapse
+    // to the pinned staging root and remain safe.
+    const result = runGuard({
+      OVID_FS_STORAGE_ROOT: "/workspaces-staging//./storage",
+    });
+    expect(result.status).toBe(0);
+  });
+
+  // ── H3: OVID_BROWSER_STATE_DIR is guarded ───────────────────────────────
+  it("H3: rejects the live browser-state dir, traversal, and omission", () => {
+    expectRejected(
+      runGuard({ OVID_BROWSER_STATE_DIR: "/opt/ovid-cloud/browser-states" }),
+      "OVID_BROWSER_STATE_DIR",
+    );
+    expectRejected(
+      runGuard({
+        OVID_BROWSER_STATE_DIR:
+          "/workspaces-staging/../workspaces/users/browser-states",
+      }),
+      "OVID_BROWSER_STATE_DIR",
+    );
+    expectRejected(
+      runGuardWith({ remove: ["OVID_BROWSER_STATE_DIR"] }),
+      "OVID_BROWSER_STATE_DIR",
+    );
+  });
+
+  // ── M3: compose hardcodes env_file; reject non-default overrides ────────
+  it("M3: rejects a non-default STAGING_ENV_FILE override", () => {
+    // `--env-file` only controls interpolation; service `env_file:` is
+    // hardcoded, so a validated override would not be the loaded file.
+    expectRejected(
+      runGuardWith({ env: { STAGING_ENV_FILE: "/tmp/other-staging.env" } }),
+      "STAGING_ENV_FILE",
+    );
+  });
+
+  it("M3: rejects a non-default STAGING_MINT_ENV_FILE override", () => {
+    expectRejected(
+      runGuardWith({
+        env: { STAGING_MINT_ENV_FILE: "/tmp/other-staging.mint.env" },
+      }),
+      "STAGING_MINT_ENV_FILE",
     );
   });
 });

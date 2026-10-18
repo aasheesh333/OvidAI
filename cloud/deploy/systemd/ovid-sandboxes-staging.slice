@@ -1,0 +1,26 @@
+# Ovid cloud STAGING sandbox parent slice — P10 Task 1 (review L3/L10).
+# OWNER-GATED artifact: install it only for the maintenance-window load run
+# (P10 Task 5); never install it from a task agent on the live box.
+#
+# Shape mirrors the live `ovid-sandboxes.slice` (CPUQuota + MemoryMax +
+# MemorySwapMax) but with a SMALLER staging budget so a runaway load run
+# cannot consume the live stack's 10 G / 600% share of the 22 GB box.
+#
+# The staging worker's cgroup base is pinned exactly by staging.sh guard:
+#   OVID_CGROUP_BASE=ovid-sandboxes-staging.slice/ovid-staging-worker.service
+# `cgroups.init()` creates that cgroup (and its `worker` leaf) below this
+# slice; the kernel applies the slice's limits to every descendant, so the
+# plain host worker process and its jail envs are capped even though the
+# worker is not itself a systemd service.
+#
+# Budget: 6 G of the box's 22 G (live outside-slice ~9.4 G + live slice 10 G
+# = ~19.4 G; see spec §9). 2 of 8 cores. Task 5 must verify the cap is
+# actually enforced (read the slice's memory.max and observe per-slice OOM)
+# before trusting the load run.
+[Unit]
+Description=Ovid STAGING sandbox parent slice (P10 load-run cap; protects the live stack)
+
+[Slice]
+CPUQuota=200%
+MemoryMax=6G
+MemorySwapMax=0

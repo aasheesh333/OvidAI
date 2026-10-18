@@ -18,9 +18,13 @@
 #   • gateway 127.0.0.1:18082. Every published port is loopback-only.
 #   • the host-run staging worker (staging.sh worker-start) uses
 #     /workspaces-staging, uid base 220000 and its own file-service port.
-#   • the mock LiteLLM is the ONE non-loopback listener (0.0.0.0:14000) so
-#     the gateway container can reach it over the docker bridge at
-#     172.17.0.1:14000; the host firewall must keep 14000 closed externally.
+#   • TWO host non-loopback listeners, both firewall-denied externally:
+#     the mock LiteLLM (0.0.0.0:14000) so the gateway container can reach it
+#     over the docker bridge at 172.17.0.1:14000, and the host-run staging
+#     worker's internal file service (0.0.0.0:18093, see
+#     apps/worker/src/main.ts). The host firewall (ufw per HARDENING) must
+#     keep BOTH 14000 and 18093 unreachable from outside; every staging
+#     *published* port stays 127.0.0.1-only.
 #
 # Safe dry validation (no side effects):
 #   docker compose --env-file .env.staging.example \
@@ -170,7 +174,12 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.gateway
     restart: unless-stopped
-    env_file: [.env.staging]
+    # `required: false` lets `staging.sh down` tear down even after the
+    # operator has removed the env file (L1). `up` still refuses to run
+    # without it: staging.sh validates the file before compose is invoked.
+    env_file:
+      - path: .env.staging
+        required: false
     environment:
       HOST: 0.0.0.0
       PORT: "8081"
@@ -198,6 +207,14 @@ services:
     pids_limit: 256
     read_only: true
     tmpfs: [/tmp]
+    volumes:
+      # M4: the gateway's fs storage backend
+      # (OVID_FS_STORAGE_ROOT=/workspaces-staging/storage) must be writable
+      # despite read_only: true. A bind mount (not a named volume) keeps the
+      # host worker and the container on the SAME files. staging.sh
+      # worker-start chowns it to uid 1000 (the image's `node` user) when run
+      # as root; mount ownership propagates through the bind.
+      - /workspaces-staging/storage:/workspaces-staging/storage
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     healthcheck:
@@ -221,7 +238,12 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.mint
     restart: unless-stopped
-    env_file: [.env.staging.mint]
+    # `required: false` lets `staging.sh down` tear down even after the
+    # operator has removed the env file (L1). `up` still refuses to run
+    # without it: staging.sh validates the file before compose is invoked.
+    env_file:
+      - path: .env.staging.mint
+        required: false
     environment:
       HOST: 0.0.0.0
       PUBLIC_PORT: "8091"

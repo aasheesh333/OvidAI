@@ -231,16 +231,26 @@ grace 24 h (run late, flag `ran_late`); recurring grace ≤6 h → `runNow` if �
 
 "Concurrent" = connected users with live sessions. Assumed profile: 30–50 agent runs in
 flight; ~80% of run wall-time is LLM streaming (near-zero CPU); 10–20 sandboxes executing
-commands at any instant. Memory envelope: host+Docker+systemd 2 GB, Postgres 3 GB,
-Redis-Q 1.5 GB (`mem_limit 1536m` / `maxmemory 1400mb`), Redis-C 0.5 GB, LiteLLM 1 GB,
-Caddy+misc 0.5 GB, gateway container 1 GB, worker systemd unit **`MemoryMax=4096M`**
-(worker proper ~2 GB + browser pool ~2 GB — 4 live Tier-2 contexts ≤600 MB + the Tier-1
-Lightpanda pool + chromium fallback; planned peak ≈1.3 GB, hard ceiling 2 GB) ⇒
-**non-sandbox ceilings ≈12 GB** (P2's envelope; caps are ceilings, not reservations —
-jails are ~2 MB resident per the P2 spike; P10 Task 5 measures the real envelope).
-Sandbox slice `ovid-sandboxes.slice` **`MemoryMax=10G`, `MemorySwapMax=0`** (P2's shipped
-artifact); 24 × 512 MB worst case binds at the 10 G slice first (per-env OOM, host
-protected) ⇒ `OVID_MAX_ACTIVE_SANDBOXES=24` (P2's env name; was 32). Per-jail caps
+commands at any instant. Memory envelope — two tiers, because the worker unit is
+INSIDE the sandbox slice, not a non-sandbox line item. Outside the slice:
+host+Docker+systemd 2 GB, Postgres 3 GB, Redis-Q 1.5 GB (`mem_limit 1536m` /
+`maxmemory 1400mb`), Redis-C **384 MiB ≈ 0.375 GB** (the landed `mem_limit: 384m`;
+the earlier 0.5 GB figure was a pre-landing estimate), LiteLLM 1 GB, Caddy+misc
+0.5 GB, gateway container 1 GB ⇒ **9.375 GB ≈ 9.4 GB outside the slice**
+(sum: 2 + 3 + 1.5 + 0.375 + 1 + 0.5 + 1 = 9.375). The worker systemd unit
+**`MemoryMax=4096M`** is a CHILD of `ovid-sandboxes.slice`
+(`Slice=ovid-sandboxes.slice`; worker proper ~2 GB + browser pool ~2 GB — 4 live
+Tier-2 contexts ≤600 MB + the Tier-1 Lightpanda pool + chromium fallback; planned
+peak ≈1.3 GB, hard ceiling 2 GB), so its 4 GB is counted INSIDE the 10 G slice
+and must NOT be added to the 9.4 GB. Sandbox slice `ovid-sandboxes.slice`
+**`MemoryMax=10G`, `MemorySwapMax=0`** (P2's shipped artifact) ⇒ **total
+worst-case ceiling = 9.375 + 10 = 19.375 GB ≈ 19.4 GB on the 22 GB box, leaving
+≈2.6 GB headroom** (22 − 19.375). Caps are ceilings, not reservations — jails
+are ~2 MB resident per the P2 spike; P10 Task 5 measures the real envelope. The
+slice budget is shared: with the worker unit at its 4 GB cap, jail envs can bind
+at ≈6 GB (≈12 × 512 MB jails) before the slice's 10 GB; the 24 × 512 MB worst
+case is a slice-level bound, and per-env OOM protects the host ⇒
+`OVID_MAX_ACTIVE_SANDBOXES=24` (P2's env name; was 32). Per-jail caps
 unchanged: `memory.max=512M`, `memory.swap.max=0`, `pids.max=64`,
 `cpu.max="100000 100000"`. CPU: `ovid-sandboxes.slice` **`CPUQuota=600%`** (was 1000%;
 6 of 8 cores, leaving ~2 for gateway/DB/browser/LiteLLM). Browser knobs (P6 landed

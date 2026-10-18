@@ -53,7 +53,9 @@ usage: staging.sh <command> [options]
   down [-v]                        stop the staging compose project (named
                                    volumes are kept unless -v)
   mock-start | mock-stop           start/stop the Task-4 mock LiteLLM on
-                                   0.0.0.0:14000 (the one non-loopback bind)
+                                   0.0.0.0:14000 (one of two host
+                                   non-loopback listeners; the other is the
+                                   worker file service on 0.0.0.0:18093)
   worker-start [--env K=V ...]     start the host staging worker (root is
                                    required for bwrap/cgroups)
   worker-stop [graceful|kill]      stop the host staging worker
@@ -66,7 +68,9 @@ usage: staging.sh <command> [options]
                                    snapshot or unchanged assertion
   help                             this text
 
-Env overrides: STAGING_ENV_FILE, STAGING_MINT_ENV_FILE.
+Env overrides: STAGING_ENV_FILE / STAGING_MINT_ENV_FILE are accepted ONLY at
+their default paths (cloud/deploy/.env.staging[.mint]); any other value is
+rejected because compose hardcodes those `env_file:` paths.
 EOF
 }
 
@@ -83,9 +87,86 @@ load_env_file() {
   set +a
 }
 
+# L2: stop paths must honour a custom pidfile from the env file, but must
+# still work when the file is already gone. Source it when present, else fall
+# back to the built-in default.
+load_env_if_present() {
+  if [[ -f "$ENV_FILE" ]]; then
+    load_env_file "$ENV_FILE"
+    return 0
+  fi
+  log "env file $ENV_FILE missing — using default pidfiles"
+  return 1
+}
+
+# L2: never signal a reused/unrelated PID. Prove the live process is the one
+# this script started (cmdline +, for the worker, its cwd) before killing it.
+verify_pid_identity() {
+  local pid="$1" kind="$2" cmdline cwd
+  [[ "$pid" =~ ^[0-9]+$ ]] \
+    || guard_fail "$kind-stop" "pidfile contains a non-numeric pid ('$pid')"
+  cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  case "$kind" in
+    worker)
+      [[ "$cmdline" == *"dist/main.js"* ]] \
+        || guard_fail "worker-stop" "pid $pid is not the staging worker (cmdline: '${cmdline:-<unreadable>}') — refusing to signal"
+      cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+      [[ "$cwd" == "$CLOUD_DIR/apps/worker" ]] \
+        || guard_fail "worker-stop" "pid $pid cwd '$cwd' is not $CLOUD_DIR/apps/worker — refusing to signal"
+      ;;
+    mock)
+      [[ "$cmdline" == *"mockServer.js"* && "$cmdline" == *"--port 14000"* ]] \
+        || guard_fail "mock-stop" "pid $pid is not the staging mock LiteLLM (cmdline: '${cmdline:-<unreadable>}') — refusing to signal"
+      ;;
+    *)
+      guard_fail "$kind-stop" "unknown process kind"
+      ;;
+  esac
+}
+
 require_var() {
   local name="$1"
   [[ -n "${!name:-}" ]] || guard_fail "$name" "is required"
+}
+
+# Lexically normalize a path-like value without touching the filesystem:
+# collapse duplicate slashes and drop "." segments. ".." is rejected by
+# require_exact_path BEFORE this runs, so traversal can never survive it.
+normalize_path() {
+  local value="$1" out="" segment absolute=0
+  local -a parts=()
+  [[ "$value" == /* ]] && absolute=1
+  local IFS=/
+  read -r -a parts <<< "$value"
+  for segment in "${parts[@]}"; do
+    [[ -z "$segment" || "$segment" == "." ]] && continue
+    out="${out:+$out/}$segment"
+  done
+  if (( absolute )); then
+    printf '/%s' "$out"
+  else
+    printf '%s' "$out"
+  fi
+}
+
+# Require VAR to be present and, after lexical normalization, EXACTLY the
+# expected staging literal. Two independent gates:
+#   1. ".." anywhere is rejected outright (H2 — no normalization may climb
+#      from a staging prefix into a live path);
+#   2. the normalized value must equal the expected literal (H1 — omission
+#      or a sibling path cannot fall back to a live default/prefix).
+# One helper for every path-like variable, so a future variable cannot
+# reintroduce the prefix-matching bug.
+require_exact_path() {
+  local name="$1" expected="$2" value normalized expected_norm
+  require_var "$name"
+  value="${!name}"
+  [[ "$value" != *".."* ]] \
+    || guard_fail "$name" "must not contain '..' path traversal (got '$value')"
+  normalized="$(normalize_path "$value")"
+  expected_norm="$(normalize_path "$expected")"
+  [[ "$normalized" == "$expected_norm" ]] \
+    || guard_fail "$name" "must be exactly '$expected' after path normalization (got '$value' -> '$normalized')"
 }
 
 # postgres://user:pass@host:port/db -> DB_USER / DB_HOST / DB_PORT / DB_NAME
@@ -133,6 +214,19 @@ http_hostport() {
 
 guard_env_file() {
   local file="$1"
+
+  # M3: the compose services hardcode `env_file: [.env.staging]` /
+  # `[.env.staging.mint]`; `--env-file` only affects interpolation. A
+  # validated STAGING_ENV_FILE override therefore would NOT be the file the
+  # containers load. Rejecting the override (instead of interpolating it)
+  # keeps one source of truth: the validated file is always the loaded file.
+  if [[ -n "${STAGING_ENV_FILE:-}" && "$STAGING_ENV_FILE" != "$DEFAULT_ENV_FILE" ]]; then
+    guard_fail "STAGING_ENV_FILE" "must be the default $DEFAULT_ENV_FILE (compose hardcodes env_file: .env.staging); got '$STAGING_ENV_FILE'"
+  fi
+  if [[ -n "${STAGING_MINT_ENV_FILE:-}" && "$STAGING_MINT_ENV_FILE" != "$DEFAULT_MINT_ENV_FILE" ]]; then
+    guard_fail "STAGING_MINT_ENV_FILE" "must be the default $DEFAULT_MINT_ENV_FILE (compose hardcodes env_file: .env.staging.mint); got '$STAGING_MINT_ENV_FILE'"
+  fi
+
   load_env_file "$file"
 
   require_var NODE_ENV
@@ -213,9 +307,10 @@ guard_env_file() {
   fi
 
   # ── sandbox identity: distinct root + uid block + cgroup branch ──
-  require_var OVID_WORKSPACES_ROOT
-  [[ "$OVID_WORKSPACES_ROOT" == "/workspaces-staging" ]] \
-    || guard_fail "OVID_WORKSPACES_ROOT" "must be /workspaces-staging (got '$OVID_WORKSPACES_ROOT'); prod is /workspaces/users"
+  # H1: OVID_CGROUP_BASE is REQUIRED and exact. Omission would fall back to
+  # config.ts's LIVE default (`ovid-sandboxes.slice/ovid-worker.service`);
+  # a prefix check would also admit traversal (H2). One literal only.
+  require_exact_path OVID_WORKSPACES_ROOT "/workspaces-staging"
   require_var OVID_SANDBOX_UID_BASE
   [[ "$OVID_SANDBOX_UID_BASE" == "220000" ]] \
     || guard_fail "OVID_SANDBOX_UID_BASE" "must be 220000 (staging range 220000-229999; got '$OVID_SANDBOX_UID_BASE'); prod is 200000"
@@ -223,22 +318,17 @@ guard_env_file() {
     [[ "$OVID_SANDBOX_UID_MAX" == "229999" ]] \
       || guard_fail "OVID_SANDBOX_UID_MAX" "must be 229999 (got '$OVID_SANDBOX_UID_MAX')"
   fi
-  if [[ -n "${OVID_CGROUP_BASE:-}" ]]; then
-    [[ "$OVID_CGROUP_BASE" != "ovid-sandboxes.slice/ovid-worker.service" ]] \
-      || guard_fail "OVID_CGROUP_BASE" "must not be the live worker's cgroup path"
-    [[ "$OVID_CGROUP_BASE" == "ovid-sandboxes-staging.slice/"* ]] \
-      || guard_fail "OVID_CGROUP_BASE" "must live under ovid-sandboxes-staging.slice (got '$OVID_CGROUP_BASE')"
-  fi
+  require_exact_path OVID_CGROUP_BASE "ovid-sandboxes-staging.slice/ovid-staging-worker.service"
 
   # ── storage: staging-local fs only; never the prod R2 bucket ──
   if [[ -n "${OVID_STORAGE_BACKEND:-}" ]]; then
     [[ "$OVID_STORAGE_BACKEND" == "fs" ]] \
       || guard_fail "OVID_STORAGE_BACKEND" "staging must use the fs backend (got '$OVID_STORAGE_BACKEND'); never the live R2 bucket"
   fi
-  if [[ -n "${OVID_FS_STORAGE_ROOT:-}" ]]; then
-    [[ "$OVID_FS_STORAGE_ROOT" == "/workspaces-staging/"* ]] \
-      || guard_fail "OVID_FS_STORAGE_ROOT" "must live under /workspaces-staging (got '$OVID_FS_STORAGE_ROOT')"
-  fi
+  # H2/H3: exact literals, normalized, with ".." rejected. The fs root must
+  # match the compose gateway's writable bind mount (docker-compose.staging.yml).
+  require_exact_path OVID_FS_STORAGE_ROOT "/workspaces-staging/storage"
+  require_exact_path OVID_BROWSER_STATE_DIR "/workspaces-staging/browser-states"
   local r2var
   for r2var in OVID_R2_ACCOUNT_ID OVID_R2_ACCESS_KEY_ID OVID_R2_SECRET_ACCESS_KEY OVID_R2_BUCKET; do
     if [[ -n "${!r2var:-}" ]]; then
@@ -427,7 +517,17 @@ live_assert_unchanged() {
 # ── compose / wait helpers ─────────────────────────────────────────────────
 
 compose() {
-  docker compose --env-file "$ENV_FILE" -p "$PROJECT" -f "$COMPOSE_FILE" "$@"
+  # L1: teardown must work when the env file is missing. `--env-file` only
+  # controls interpolation and Docker fails before doing anything if the path
+  # does not exist, so omit it when absent. (Service `env_file:` entries are
+  # `required: false` in the compose file for the same reason; `up` still
+  # validates the file first via guard_env_file.)
+  local args=(compose)
+  if [[ -f "$ENV_FILE" ]]; then
+    args+=(--env-file "$ENV_FILE")
+  fi
+  args+=(-p "$PROJECT" -f "$COMPOSE_FILE")
+  docker "${args[@]}" "$@"
 }
 
 wait_for_mint_projection() {
@@ -579,7 +679,15 @@ cmd_worker_start() {
 
   local pidfile="${STAGING_WORKER_PIDFILE:-/tmp/opencode/ovid-staging-worker.pid}"
   local logfile="${STAGING_WORKER_LOG:-/tmp/opencode/ovid-staging-worker.log}"
-  mkdir -p "$(dirname "$pidfile")" "$(dirname "$logfile")" "$OVID_WORKSPACES_ROOT"
+  mkdir -p "$(dirname "$pidfile")" "$(dirname "$logfile")" \
+    "$OVID_WORKSPACES_ROOT" "$OVID_FS_STORAGE_ROOT" "$OVID_BROWSER_STATE_DIR"
+  # M4: the staging gateway bind-mounts $OVID_FS_STORAGE_ROOT writable but
+  # runs as `USER node` (uid 1000). A bind source created by Docker is
+  # root-owned, so hand the shared directory to uid/gid 1000 when we are root.
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    chown 1000:1000 "$OVID_FS_STORAGE_ROOT" 2>/dev/null || true
+    chmod 0775 "$OVID_FS_STORAGE_ROOT" 2>/dev/null || true
+  fi
 
   if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
     die "staging worker already running (pid $(cat "$pidfile"))"
@@ -609,6 +717,9 @@ cmd_worker_stop() {
   if [[ $# -gt 0 ]]; then mode="$1"; fi
   case "$mode" in graceful|kill) ;; *) die "worker-stop mode must be graceful or kill (got '$mode')" ;; esac
 
+  # L2: source the env file so a custom STAGING_WORKER_PIDFILE is honoured
+  # (start and stop must agree); missing file is tolerated.
+  load_env_if_present || true
   local pidfile="${STAGING_WORKER_PIDFILE:-/tmp/opencode/ovid-staging-worker.pid}"
   live_check before || log "WARNING: live stack pre-check failed; continuing worker stop"
   if [[ ! -f "$pidfile" ]]; then
@@ -622,6 +733,9 @@ cmd_worker_stop() {
     rm -f "$pidfile"
     return 0
   fi
+
+  # L2: verify identity before signalling (stale/reused PID protection).
+  verify_pid_identity "$pid" worker
 
   if [[ "$mode" == "kill" ]]; then
     kill -9 "$pid" 2>/dev/null || true
@@ -680,6 +794,9 @@ cmd_mock_start() {
 }
 
 cmd_mock_stop() {
+  # L2: honour a custom STAGING_MOCK_PIDFILE from the env file, and verify
+  # the PID is the staging mock before signalling.
+  load_env_if_present || true
   local pidfile="${STAGING_MOCK_PIDFILE:-/tmp/opencode/ovid-staging-mock.pid}"
   if [[ ! -f "$pidfile" ]]; then
     log "no mock pidfile at $pidfile — nothing to stop"
@@ -688,6 +805,7 @@ cmd_mock_stop() {
   local pid
   pid="$(cat "$pidfile")"
   if kill -0 "$pid" 2>/dev/null; then
+    verify_pid_identity "$pid" mock
     kill -TERM "$pid" 2>/dev/null || true
     local deadline=$((SECONDS + 10))
     while kill -0 "$pid" 2>/dev/null; do
