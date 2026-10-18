@@ -215,16 +215,32 @@ describe("checkCommandPolicy — pinned matching rules", () => {
     expect(checkCommandPolicy("cat assembleRelease-notes").allowed).toBe(true);
   });
 
-  it("applies the positional rules to flutter/cargo/docker only", () => {
+  it("applies the positional rule to flutter build", () => {
     expect(checkCommandPolicy("flutter build apk").allowed).toBe(false);
     expect(checkCommandPolicy("flutter build appbundle --release").allowed).toBe(false);
     expect(checkCommandPolicy("flutter build ios").allowed).toBe(false);
-    expect(checkCommandPolicy("cargo build --release").allowed).toBe(false);
-    expect(checkCommandPolicy("docker build -t x .").allowed).toBe(false);
-    // Pass-through forms the spec §7 explicitly allows.
+    // A non-build flutter subcommand stays allowed.
     expect(checkCommandPolicy("flutter analyze").allowed).toBe(true);
-    expect(checkCommandPolicy("cargo test").allowed).toBe(true);
-    expect(checkCommandPolicy("docker ps").allowed).toBe(true);
+  });
+
+  it("blocks cargo and docker outright (founder directive 2026-10-18)", () => {
+    // The directive promotes these from "build is blocked" to "the toolchain
+    // is not available in a user sandbox at all": cargo compiles, and a
+    // container runtime inside a jail is an escape surface.
+    for (const cmd of [
+      "cargo build --release",
+      "cargo test",
+      "cargo run",
+      "cargo --version",
+      "docker build -t x .",
+      "docker ps",
+      "docker image pull x",
+      "docker image rm x",
+      "podman ps",
+      "kubectl get pods",
+    ]) {
+      expect(checkCommandPolicy(cmd).allowed, cmd).toBe(false);
+    }
   });
 
   it("blocks both fork-bomb forms", () => {
@@ -253,10 +269,10 @@ describe("checkCommandPolicy — pinned matching rules", () => {
     expect(checkCommandPolicy("gcc $(echo -O2) x.c").allowed).toBe(false);
   });
 
-  it("docker build is also matched at word[2] — docker image build (F3)", () => {
+  it("every docker form is refused, including word[2] aliases (F3 + directive)", () => {
     expect(checkCommandPolicy("docker image build .").allowed).toBe(false);
-    expect(checkCommandPolicy("docker image pull x")).toEqual({ allowed: true });
-    expect(checkCommandPolicy("docker image rm x").allowed).toBe(true);
+    expect(checkCommandPolicy("docker image pull x").allowed).toBe(false);
+    expect(checkCommandPolicy("docker image rm x").allowed).toBe(false);
   });
 
   it("first match wins and reports the offending segment text", () => {

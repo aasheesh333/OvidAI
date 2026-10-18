@@ -25,5 +25,10 @@ table inet ovid_sandbox {
 		meta skuid 200000-209999 ip daddr @blocked_v4 counter drop
 		meta skuid 200000-209999 ip6 daddr @blocked_v6 counter drop
 		meta skuid 200000-209999 ip daddr 203.0.113.7 counter drop
+
+		# sandbox uids 200000-209999 — outbound allow-list, then deny the remainder
+		meta skuid 200000-209999 tcp dport { 53, 80, 443 } counter accept
+		meta skuid 200000-209999 udp dport { 53 } counter accept
+		meta skuid 200000-209999 counter drop
 	}
 }

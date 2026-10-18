@@ -24,6 +24,17 @@ export interface EgressConfig {
    */
   browserUidRange?: [number, number];
   /**
+   * Outbound TCP ports a sandbox/browser uid may reach. Everything else is
+   * dropped (founder directive 2026-10-18: a compromised or prompt-injected
+   * agent must not be able to send mail, brute-force SSH, mine, or dial a
+   * tunnel endpoint). Default [80, 443, 53].
+   */
+  egressTcpPorts?: number[];
+  /**
+   * Outbound UDP ports a sandbox/browser uid may reach. Default [53] (DNS).
+   */
+  egressUdpPorts?: number[];
+  /**
    * Internal-endpoint IPv4 cidrs the browser uid must still reach. Loopback
    * 127.0.0.0/8 is ALWAYS allowed for the browser range (LiteLLM :4000 and
    * the pg/mint proxies live there) and is not configurable here — entries
@@ -137,6 +148,23 @@ function validateTable(name: string): void {
  *     browser range. The sandbox section is byte-identical whether or not a
  *     browser section is present.
  */
+/**
+ * Port lists are rendered into an nft set literal, so anything that is not a
+ * plain port number could inject rule text. Bounded to 1..65535, sorted and
+ * de-duplicated for a deterministic ruleset.
+ */
+function normalizePorts(name: string, ports: number[]): number[] {
+  const out = new Set<number>();
+  for (const port of ports) {
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`OVID egress: ${name} must contain port numbers 1-65535, got ${JSON.stringify(port)}`);
+    }
+    out.add(port);
+  }
+  if (out.size === 0) throw new Error(`OVID egress: ${name} must not be empty`);
+  return [...out].sort((a, b) => a - b);
+}
+
 export function renderNftRuleset(cfg: EgressConfig): string {
   const table = cfg.table ?? DEFAULT_EGRESS_TABLE;
   validateTable(table);
@@ -152,12 +180,22 @@ export function renderNftRuleset(cfg: EgressConfig): string {
   const [uidA, uidB] = cfg.uidRange;
   const sk = `${uidA}-${uidB}`;
 
+  const tcpPorts = normalizePorts("egressTcpPorts", cfg.egressTcpPorts ?? [80, 443, 53]);
+  const udpPorts = normalizePorts("egressUdpPorts", cfg.egressUdpPorts ?? [53]);
+  const tcpSet = `{ ${tcpPorts.join(", ")} }`;
+  const udpSet = `{ ${udpPorts.join(", ")} }`;
+
   const chain: string[] = [
     "",
     `\t\t# sandbox uids ${sk} — internal nets and this host's public IP are blocked`,
     `\t\tmeta skuid ${sk} ip daddr @blocked_v4 counter drop`,
     `\t\tmeta skuid ${sk} ip6 daddr @blocked_v6 counter drop`,
     `\t\tmeta skuid ${sk} ip daddr ${cfg.ownPublicIp} counter drop`,
+    "",
+    `\t\t# sandbox uids ${sk} — outbound allow-list, then deny the remainder`,
+    `\t\tmeta skuid ${sk} tcp dport ${tcpSet} counter accept`,
+    `\t\tmeta skuid ${sk} udp dport ${udpSet} counter accept`,
+    `\t\tmeta skuid ${sk} counter drop`,
   ];
 
   if (cfg.browserUidRange !== undefined) {
@@ -189,6 +227,11 @@ export function renderNftRuleset(cfg: EgressConfig): string {
       `\t\tmeta skuid ${bk} ip daddr @blocked_v4 counter drop`,
       `\t\tmeta skuid ${bk} ip6 daddr @blocked_v6 counter drop`,
       `\t\tmeta skuid ${bk} ip daddr ${cfg.ownPublicIp} counter drop`,
+      "",
+      `\t\t# browser uids ${bk} — outbound allow-list, then deny the remainder`,
+      `\t\tmeta skuid ${bk} tcp dport ${tcpSet} counter accept`,
+      `\t\tmeta skuid ${bk} udp dport ${udpSet} counter accept`,
+      `\t\tmeta skuid ${bk} counter drop`,
     );
   }
 

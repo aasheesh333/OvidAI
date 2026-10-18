@@ -218,6 +218,15 @@ GATE 4 full-suite-and-security [REQUIRED]
       secrets-at-rest
   note: this gate MUST follow gate 3. The sandbox corpus requires staging up.
 
+GATE 4b security-regressions [REQUIRED when the worker env is present]
+  cwd: $CLOUD_DIR
+  command: bash scripts/security-regressions.sh   (with /opt/ovid-cloud/worker.env)
+  asserts: tunnels/proxies/scanners/miners and heavy toolchains are refused;
+           outbound 22/25/7844/3333 dropped and 443 allowed; a package
+           postinstall never executes; host /etc/shadow and other users'
+           workspaces are unreadable; metadata + RFC1918 egress dropped.
+           Needs root, bwrap, cgroups, the rootfs and the nft rules.
+
 GATE 5 load-smoke10 [${gate5_tag}]
   cwd: $CLOUD_DIR
   command: node apps/load/dist/cli.js load --profile smoke10 --target staging
@@ -463,6 +472,29 @@ gate4_tests() {
 SECURITY_SUMMARY="<not run>"
 SECURITY_RAN=""
 SECURITY_SKIPPED=""
+
+# Gate 4b — user-sandbox security regressions (founder directive 2026-10-18).
+# Runs inside a REAL jail through the shipped SandboxManager: refused binaries,
+# dropped outbound ports, blocked package scripts, cross-user/host file denial,
+# metadata + RFC1918 egress. Needs the worker env (bwrap/cgroups/rootfs/nft).
+gate4b_security() {
+  ( set -a; source /opt/ovid-cloud/worker.env; set +a
+    bash "$CLOUD_DIR/scripts/security-regressions.sh" )
+}
+
+gate4b_post_check() {
+  local log="$1"
+  local rc=0
+  grep -qE '^security regressions: [0-9]+ passed, 0 failed' "$log" \
+    || { echo "SECURITY REGRESSION GATE: FAIL — no all-pass summary line"; rc=1; }
+  if grep -q '^\[FAIL\]' "$log"; then
+    echo "SECURITY REGRESSION GATE: FAIL — one or more boundary checks failed"
+    grep '^\[FAIL\]' "$log" || true
+    rc=1
+  fi
+  [[ $rc -eq 0 ]] && echo "SECURITY REGRESSION GATE: PASS (sandbox boundary holds)"
+  return $rc
+}
 
 gate4_post_check() {
   local log="$1"
@@ -965,6 +997,10 @@ else
   else
     POST_CHECK=gate4_post_check
     run_gate 4 "full-suite-and-security" gate4_tests
+    POST_CHECK=""
+
+    POST_CHECK=gate4b_post_check
+    run_gate 4b "security-regressions" gate4b_security
     POST_CHECK=""
   fi
 

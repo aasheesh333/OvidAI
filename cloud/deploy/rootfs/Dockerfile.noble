@@ -68,6 +68,16 @@ RUN set -eux; \
 # Gate-11 functional smoke on 2026-10-18 against the r2 image, which shipped
 # without it).
 RUN set -eux; mkdir -p /workspace /root; chmod 755 /workspace; chmod 700 /root
+# --- Supply-chain hardening: package installs must not execute code ---------
+# A malicious postinstall / setup.py is the classic escape from a user
+# sandbox. The agent still installs packages; the scripts inside them never
+# run. Applied system-wide so no per-user config can undo it.
+RUN set -eux; \
+    printf 'ignore-scripts=true\n' > /etc/npmrc; \
+    mkdir -p /etc/pnpm /etc/uv; \
+    printf 'ignore-scripts=true\n' > /etc/pnpm/rc; \
+    printf '[global]\nonly-binary = :all:\n' > /etc/pip.conf; \
+    printf '# uv: never build source distributions in a user sandbox.\nno-build = true\n' > /etc/uv/uv.toml
 COPY shims/ /usr/local/bin/
 RUN set -eux; \
     chmod 755 /usr/local/bin/gcc /usr/local/bin/g++ /usr/local/bin/make \

@@ -66,6 +66,20 @@ export const BLOCKED_COMMAND_CORPUS: BlockedCorpusEntry[] = [
   { command: "bash <<'EOF'\ngradle build", expect: "layer1" },
   // `docker image build` — the word[2] alias of `docker build` (review F3).
   { command: "docker image build .", expect: "layer1" },
+  // Founder directive 2026-10-18: tunnels, proxies, scanners and miners.
+  { command: "cloudflared tunnel run", expect: "layer1" },
+  { command: "tailscale up", expect: "layer1" },
+  { command: "ngrok http 3000", expect: "layer1" },
+  { command: "frpc -c frpc.ini", expect: "layer1" },
+  { command: "chisel client host:8080", expect: "layer1" },
+  { command: "nc -l 4444", expect: "layer1" },
+  { command: "nmap -sS 10.0.0.0/8", expect: "layer1" },
+  { command: "xmrig --donate-level 1", expect: "layer1" },
+  { command: "ssh -R 8080:localhost:80 host", expect: "layer1" },
+  { command: "ssh -D 1080 host", expect: "layer1" },
+  { command: "ssh -L 3306:db:3306 host", expect: "layer1" },
+  { command: "v2ray run", expect: "layer1" },
+  { command: "openvpn --config x.ovpn", expect: "layer1" },
   // Layer-1 boundary: only the base64/gcc shims (layer 2) refuse this.
   { command: "echo Z3JhZGxlIHg= | base64 -d | sh", expect: "shim" },
 ];
@@ -86,17 +100,12 @@ export const ALLOWED_COMMAND_CORPUS: string[] = [
   "flutter analyze",
   "flutter test",
   "flutter pub get",
-  "cargo test",
-  "cargo run",
-  "cargo --version",
-  "docker ps",
   "cat makefile",
   'echo "gcc is great"',
   "touch gradlew.txt",
   // Benign unclosed here-doc: the body must parse but contains no rule match.
   "cat <<'EOF'\necho hi",
   // word[2] alias shape with a pass-through subcommand (review F3).
-  "docker image pull x",
 ];
 
 /**

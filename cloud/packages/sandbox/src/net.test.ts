@@ -52,7 +52,33 @@ describe("renderNftRuleset — sandbox range", () => {
     expect(rs).toContain("meta skuid 200000-209999 ip daddr @blocked_v4 counter drop");
     expect(rs).toContain("meta skuid 200000-209999 ip6 daddr @blocked_v6 counter drop");
     expect(rs).toContain("meta skuid 200000-209999 ip daddr 203.0.113.7 counter drop");
-    expect(dropLines(rs).length).toBe(3);
+    // 3 network blocks + the catch-all deny that closes the outbound allow-list.
+    expect(dropLines(rs).length).toBe(4);
+  });
+
+  it("sandbox outbound is allow-listed to 80/443/53 and denies everything else", () => {
+    // Founder directive 2026-10-18: no SMTP, SSH, torrent, tunnel or mining
+    // ports from a sandbox. The allow-list is explicit and the final rule
+    // denies whatever it did not accept.
+    const rs = renderNftRuleset(BASE);
+    expect(rs).toContain("meta skuid 200000-209999 tcp dport { 53, 80, 443 } counter accept");
+    expect(rs).toContain("meta skuid 200000-209999 udp dport { 53 } counter accept");
+    expect(rs).toContain("meta skuid 200000-209999 counter drop");
+    // The catch-all must come AFTER the accepts or it would shadow them.
+    const lines = rs.split("\n");
+    const firstAccept = lines.findIndex((l) => l.includes("tcp dport { 53, 80, 443 }"));
+    const catchAll = lines.findIndex((l) =>
+      l.trim() === "meta skuid 200000-209999 counter drop",
+    );
+    expect(firstAccept).toBeGreaterThan(-1);
+    expect(catchAll).toBeGreaterThan(firstAccept);
+  });
+
+  it("rejects an out-of-range or empty port list (it is rendered into nft)", () => {
+    expect(() => renderNftRuleset({ ...BASE, egressTcpPorts: [0] })).toThrow(/egressTcpPorts/);
+    expect(() => renderNftRuleset({ ...BASE, egressTcpPorts: [70000] })).toThrow(/egressTcpPorts/);
+    expect(() => renderNftRuleset({ ...BASE, egressTcpPorts: [] })).toThrow(/egressTcpPorts/);
+    expect(() => renderNftRuleset({ ...BASE, egressUdpPorts: [1.5] })).toThrow(/egressUdpPorts/);
   });
 
   it("regex sweep: NO line containing `drop` lacks the skuid key", () => {
@@ -118,10 +144,16 @@ describe("renderNftRuleset — sandbox range", () => {
     expect(custom).toContain("delete table inet ovid_test_t");
   });
 
-  it("without a browser range there are NO accept rules at all", () => {
+  it("without a browser range the only accepts are the sandbox port allow-list", () => {
     const rs = renderNftRuleset(BASE);
-    // `policy accept;` ends with ';'; only browser-section rules end in `accept`.
-    expect(rs.match(/accept$/gm)).toBeNull();
+    const accepts = (rs.match(/^.*accept$/gm) ?? []).map((l) => l.trim());
+    // Two, both keyed to the sandbox uids: tcp 53/80/443 and udp 53.
+    expect(accepts).toEqual([
+      "meta skuid 200000-209999 tcp dport { 53, 80, 443 } counter accept",
+      "meta skuid 200000-209999 udp dport { 53 } counter accept",
+    ]);
+    // No browser-uid accept leaked in.
+    expect(rs).not.toContain("meta skuid 230000");
   });
 
   it("rejects a non-IPv4 own public IP (the rule keys on `ip daddr`)", () => {
@@ -168,7 +200,7 @@ describe("renderNftRuleset — browser range (gap G2, allow-internal-then-drop)"
     const dropIdxs = lines
       .map((l, i) => (/\bskuid 230000-230099\b/.test(l) && /\bdrop\b/.test(l) ? i : -1))
       .filter((i) => i >= 0);
-    expect(dropIdxs.length).toBe(3);
+    expect(dropIdxs.length).toBe(4);
     for (const d of dropIdxs) {
       expect(v4Loopback, "127/8 accept must precede every browser deny rule").toBeLessThan(d);
       expect(v6Loopback, "::1 accept must precede every browser deny rule").toBeLessThan(d);
@@ -209,7 +241,8 @@ describe("renderNftRuleset — browser range (gap G2, allow-internal-then-drop)"
     const without = skuidLines(renderNftRuleset(BASE), "200000-209999");
     const withBrowser = skuidLines(renderNftRuleset(BROWSER), "200000-209999");
     expect(withBrowser).toEqual(without);
-    expect(without.length).toBe(3);
+    // 3 network blocks + 2 port accepts + the catch-all deny.
+    expect(without.length).toBe(6);
   });
 
   it("an overlapping browser range throws, naming BOTH ranges", () => {
@@ -415,12 +448,16 @@ describe("renderCli — env contract (gap G4: rules key on the CONFIGURED range)
     });
     expect(ranged).toContain("meta skuid 230000-230099 ip daddr 10.1.2.3/32 accept");
     expect(ranged).toContain("meta skuid 230000-230099 ip daddr 172.20.0.0/16 accept");
-    // OVID_BROWSER_EGRESS_ALLOW without a browser uid is inert: no accept rules
-    expect(
-      renderCli({ OVID_PUBLIC_IP: "203.0.113.7", OVID_BROWSER_EGRESS_ALLOW: "10.1.2.3/32" }).match(
-        /accept$/gm,
-      ),
-    ).toBeNull();
+    // OVID_BROWSER_EGRESS_ALLOW without a browser uid is inert: the only
+    // accepts are the sandbox port allow-list, none of them browser-keyed.
+    const inert = renderCli({
+      OVID_PUBLIC_IP: "203.0.113.7",
+      OVID_BROWSER_EGRESS_ALLOW: "10.1.2.3/32",
+    });
+    const inertAccepts = (inert.match(/^.*accept$/gm) ?? []).map((l) => l.trim());
+    expect(inertAccepts).toHaveLength(2);
+    expect(inertAccepts.every((l) => l.startsWith("meta skuid 200000-209999 "))).toBe(true);
+    expect(inert).not.toContain("meta skuid 230000");
   });
 
   it("browser env overlapping the configured sandbox range → throws naming both ranges", () => {

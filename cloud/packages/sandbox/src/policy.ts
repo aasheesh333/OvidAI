@@ -309,15 +309,86 @@ export function splitShellSegments(command: string): string[][] {
 
 /** Spec §7 layer-1 denylist — matched on the head word's basename, exactly. */
 const DENYLIST = new Set([
+  // ── Heavy native toolchains (spec §7: no in-sandbox builds) ─────────────
   "gradle",
   "gradlew",
   "kotlinc",
   "javac",
   "gcc",
   "g++",
+  "cc",
+  "c++",
+  "clang",
+  "clang++",
+  "ld",
   "make",
+  "cmake",
+  "ninja",
+  "cargo",
+  "rustc",
+  "go",
   "sdkmanager",
   "ndk-build",
+  "docker",
+  "podman",
+  "kubectl",
+  // ── Reverse tunnels / remote access (founder directive 2026-10-18) ──────
+  // A prompt-injected agent must never expose a port on this VPS or hand
+  // shell access to a third party. Layer 1 refuses the binary by name; the
+  // nftables egress rules below close the ports these tools dial.
+  "cloudflared",
+  "tailscale",
+  "tailscaled",
+  "ngrok",
+  "frp",
+  "frpc",
+  "frps",
+  "bore",
+  "localtunnel",
+  "lt",
+  "rathole",
+  "chisel",
+  "tmate",
+  "ttyd",
+  "gotty",
+  "autossh",
+  "sshd",
+  // ── Proxies / VPN / anonymisers ─────────────────────────────────────────
+  "netcat",
+  "nc",
+  "ncat",
+  "nc.openbsd",
+  "nc.traditional",
+  "socat",
+  "proxychains",
+  "proxychains4",
+  "3proxy",
+  "squid",
+  "shadowsocks",
+  "ss-local",
+  "ss-server",
+  "v2ray",
+  "xray",
+  "sing-box",
+  "wireguard-go",
+  "wg",
+  "wg-quick",
+  "openvpn",
+  "tor",
+  // ── Network scanning ────────────────────────────────────────────────────
+  "nmap",
+  "masscan",
+  "zmap",
+  "hydra",
+  "sqlmap",
+  // ── Crypto miners ───────────────────────────────────────────────────────
+  "xmrig",
+  "minerd",
+  "cpuminer",
+  "ethminer",
+  "nbminer",
+  "lolminer",
+  "phoenixminer",
 ]);
 
 /** Leading words stripped before matching: wrappers (and VAR= assignments). */
@@ -392,6 +463,16 @@ function matchSegment(segment: Segment): PolicyVerdict | null {
   // either of the first two post-head positions).
   if (head === "docker" && rest[1] === "build") {
     return { allowed: false, matched: "docker build", segment: text };
+  }
+
+  // ssh is allowed for git, but its port-forwarding / proxy modes are the
+  // tunnel primitive the directive forbids: -R (reverse), -L (local forward),
+  // -D (SOCKS proxy), -w (tun device). Any of those refuses the segment.
+  if (head === "ssh") {
+    const forward = rest.find((w) => /^-[A-Za-z]*[RLDw]/.test(w));
+    if (forward !== undefined) {
+      return { allowed: false, matched: `ssh ${forward}`, segment: text };
+    }
   }
 
   // Gradle task names as any word of the segment.
