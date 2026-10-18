@@ -113,7 +113,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       const rows = await db.$client.unsafe("SELECT status, last_error FROM runs WHERE id = $1", [
         runId,
       ]);
-      const row = rows[0] as { status: string; last_error: string | null };
+      const row = rows[0] as unknown as { status: string; last_error: string | null };
       return { status: row.status, lastError: row.last_error };
     }
 

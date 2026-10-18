@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import { users as usersRepo, type Db } from "@ovid/db";
 import type { Redis } from "ioredis";
 import { INTERNAL_MINT_PATH, signInternalRequest } from "@ovid/shared";
@@ -115,7 +115,7 @@ describe.skipIf(!RUN)("internal mint route (admin listener only)", () => {
   function mintInternal(
     body: unknown,
     opts: { secret?: string; timestamp?: number; uidForSignature?: string } = {},
-  ): ReturnType<FastifyInstance["inject"]> {
+  ): Promise<LightMyRequestResponse> {
     const uid =
       opts.uidForSignature ??
       (typeof body === "object" && body !== null && "uid" in body

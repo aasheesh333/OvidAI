@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import type { FastifyInstance } from "fastify";
 import { createDb, migrate, type Db } from "@ovid/db";
 import type { EventLog, SystemBus } from "@ovid/events";
 import {
@@ -25,6 +24,9 @@ import { buildGateway, createTestVerifier } from "@ovid/gateway";
  */
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+
+/** The e2e package does not depend on fastify directly; derive its app type. */
+type GatewayApp = ReturnType<typeof buildGateway>;
 
 const MASTER_KEY_HEX = "ab7d31c4e59f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071829";
 const OTHER_MASTER_KEY_HEX =
@@ -51,7 +53,7 @@ const noopSystemBus: SystemBus = {
 
 describe.skipIf(!TEST_DATABASE_URL)("secrets at rest — BYOK escrow (real postgres)", () => {
   let db: Db;
-  const apps: FastifyInstance[] = [];
+  const apps: GatewayApp[] = [];
   const uids: string[] = [];
 
   beforeAll(async () => {
@@ -71,7 +73,7 @@ describe.skipIf(!TEST_DATABASE_URL)("secrets at rest — BYOK escrow (real postg
     await db.$client.end({ timeout: 5 });
   });
 
-  function makeApp(crypto: EnvelopeCrypto = createEnvelopeCrypto(MASTER_KEY_HEX)): FastifyInstance {
+  function makeApp(crypto: EnvelopeCrypto = createEnvelopeCrypto(MASTER_KEY_HEX)): GatewayApp {
     // Only the outermost seams are stubs; Postgres and the envelope crypto are
     // real. The BYOK routes never touch queues/tickets/keys/mint/events.
     const app = buildGateway({
@@ -99,7 +101,7 @@ describe.skipIf(!TEST_DATABASE_URL)("secrets at rest — BYOK escrow (real postg
   }
 
   async function createKey(
-    app: FastifyInstance,
+    app: GatewayApp,
     uid: string,
     apiKey: string,
   ): Promise<{ id: string; statusCode: number }> {

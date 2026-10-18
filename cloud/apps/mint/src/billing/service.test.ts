@@ -305,7 +305,9 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
       env: testEnv(),
       verifyIdentity,
       projection: { publishUserTier: async () => {} },
-      setTier: async (u, tier, expiresAt) => sink.push({ uid: u, tier, expiresAt }),
+      setTier: async (u, tier, expiresAt) => {
+        sink.push({ uid: u, tier, expiresAt });
+      },
       store,
       api: play,
       clock: () => now,

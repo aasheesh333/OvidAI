@@ -282,7 +282,8 @@ describe.skipIf(!TEST_REDIS_URL)("startWorkerPtyBridge (real redis)", () => {
       rows: 30,
       replyChannel: replies.channel,
     });
-    const reply = await replies.next();
+    // The reply channel only carries reply frames (tap is channel-agnostic).
+    const reply = (await replies.next()) as PtyReplyMsg;
     return { ptyId, sessionId, reply };
   }
 

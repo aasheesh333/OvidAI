@@ -8,6 +8,7 @@ import type { MintDeps } from "../app.js";
 import { HttpContractError } from "../app.js";
 import { registerMintRoutes } from "../mintRoutes.js";
 import { resetModelCatalogProjectionForTests } from "../catalog.js";
+import { defaultCard } from "./capabilities.js";
 import type { LiteLlmAdmin } from "../litellmAdmin.js";
 import type { MintEnv } from "../env.js";
 import { createAdmission } from "./admission.js";
@@ -350,7 +351,7 @@ function makeDeps(): {
 interface Harness {
   app: FastifyInstance;
   ledger: FakeLedger;
-  service: LiteLlmImageService;
+  service: LiteLlmImageService | null;
   calls: Call[];
   state: { freeCap: number; keySpend: number; admissionCalls: number };
   clock: { now: number };
@@ -419,8 +420,27 @@ async function makeHarness(
   return { app, ledger, service, calls, state, clock, deps, keyInfo, redis };
 }
 
-function eqMoney(actual: string, expected: string): void {
+function eqMoney(actual: string | Decimal, expected: string): void {
   expect(money(actual).equals(new Decimal(expected))).toBe(true);
+}
+
+/** A complete capability card; tests override only the fields they exercise. */
+function imageCard(over: Partial<ImageCard> = {}): ImageCard {
+  return {
+    ...defaultCard("image-a"),
+    slug: "ovid-image:img-aaaaaa",
+    sizes: {
+      native: ["1024x1024"],
+      aspect_ratios: ["1:1"],
+      source: "declared",
+      confidence: 0.9,
+    },
+    operations: {
+      generate: { supported: true, source: "declared", confidence: 0.9 },
+      edit: { supported: true, source: "declared", confidence: 0.9 },
+    },
+    ...over,
+  };
 }
 
 beforeEach(() => {
@@ -428,13 +448,7 @@ beforeEach(() => {
 });
 
 describe("default routing fidelity", () => {
-  const card: ImageCard = {
-    model: "image-a",
-    slug: "ovid-image:img-aaaaaa",
-    sizes: { native: ["1024x1024"] },
-    operations: { generate: { supported: true }, edit: { supported: true } },
-    aspect_ratios: ["1:1"],
-  };
+  const card: ImageCard = imageCard();
 
   it("accepts requirements.operation with routing.py's matrix", () => {
     expect(taskFromRequest("generate", { requirements: { operation: "variations" } }).operation).toBe(
@@ -997,18 +1011,7 @@ describe("images HTTP surface", () => {
         }) as typeof fetch,
       },
     );
-    const cards: ImageCard[] = [
-      {
-        model: "image-a",
-        slug: "ovid-image:img-aaaaaa",
-        sizes: { native: ["1024x1024"] },
-        operations: {
-          generate: { supported: true },
-          edit: { supported: true },
-        },
-        edit_transport: "direct",
-      },
-    ];
+    const cards: ImageCard[] = [imageCard({ edit_transport: "direct" })];
     const h = await makeHarness(() => successResponse(), {
       backends: [
         {
@@ -1055,15 +1058,7 @@ describe("images HTTP surface", () => {
         }) as typeof fetch,
       },
     );
-    const cards: ImageCard[] = [
-      {
-        model: "image-a",
-        slug: "ovid-image:img-aaaaaa",
-        sizes: { native: ["1024x1024"] },
-        operations: { generate: { supported: true }, edit: { supported: true } },
-        edit_transport: "direct",
-      },
-    ];
+    const cards: ImageCard[] = [imageCard({ edit_transport: "direct" })];
     const h = await makeHarness(() => successResponse(), {
       backends: [
         {
@@ -1109,15 +1104,7 @@ describe("images HTTP surface", () => {
             jsonResponse(401, { error: { message: "provider secret" } })) as typeof fetch,
         },
       );
-      const cards: ImageCard[] = [
-        {
-          model: "image-a",
-          slug: "ovid-image:img-aaaaaa",
-          sizes: { native: ["1024x1024"] },
-          operations: { generate: { supported: true }, edit: { supported: true } },
-          edit_transport: "direct",
-        },
-      ];
+      const cards: ImageCard[] = [imageCard({ edit_transport: "direct" })];
       const h = await makeHarness(() => successResponse(), {
         backends: [
           {
@@ -1166,15 +1153,7 @@ describe("images HTTP surface", () => {
         }) as unknown as typeof fetch,
       },
     );
-    const cards: ImageCard[] = [
-      {
-        model: "image-a",
-        slug: "ovid-image:img-aaaaaa",
-        sizes: { native: ["1024x1024"] },
-        operations: { generate: { supported: true }, edit: { supported: true } },
-        edit_transport: "direct",
-      },
-    ];
+    const cards: ImageCard[] = [imageCard({ edit_transport: "direct" })];
     const h = await makeHarness(() => successResponse(), {
       backends: [
         {
@@ -1201,14 +1180,7 @@ describe("images HTTP surface", () => {
   });
 
   it("changes catalog_hash when a card changes and honours a stale ETag", async () => {
-    const cards: ImageCard[] = [
-      {
-        model: "image-a",
-        slug: "ovid-image:img-aaaaaa",
-        sizes: { native: ["1024x1024"] },
-        operations: { generate: { supported: true }, edit: { supported: true } },
-      },
-    ];
+    const cards: ImageCard[] = [imageCard()];
     const h = await makeHarness(() => successResponse(), {
       backends: [{ model: "image-a", sizes: ["1024x1024"], edit: true }],
       cards,
@@ -1229,7 +1201,7 @@ describe("images HTTP surface", () => {
     const stale = await get('"other"');
     expect(stale.statusCode).toBe(200);
 
-    cards[0]!.operations.edit = { supported: false };
+    cards[0]!.operations.edit = { supported: false, source: "declared", confidence: 0.9 };
     const after = await get();
     expect(after.statusCode).toBe(200);
     expect(after.json().catalog_hash).not.toBe(before.json().catalog_hash);

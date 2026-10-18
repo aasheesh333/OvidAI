@@ -10,10 +10,9 @@ import {
   users,
   type Db,
   type ScheduleRow,
-  type ScheduleTrigger,
 } from "@ovid/db";
 import type { EventLog, SystemBus } from "@ovid/events";
-import type { SystemEvent } from "@ovid/shared";
+import type { ScheduleTrigger, SystemEvent } from "@ovid/shared";
 import {
   AGENT_RUN_JOB_NAME,
   SCHEDULE_FIRE_JOB_NAME,

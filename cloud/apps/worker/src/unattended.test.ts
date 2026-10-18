@@ -161,7 +161,7 @@ describe("unattendedTimeoutPolicy (P4 Task 10 P3 seam)", () => {
   it("unattended → the pinned 120 s default-deny; attended → the env value", () => {
     const policy = unattendedTimeoutPolicy(hook, 500);
     expect(policy).toBeDefined();
-    expect(policy!(req, { unattended: true })).toBe(120_000);
-    expect(policy!(req, { unattended: false })).toBe(500);
+    expect(policy!(req, { unattended: true, runId: "run-1" })).toBe(120_000);
+    expect(policy!(req, { unattended: false, runId: "run-1" })).toBe(500);
   });
 });

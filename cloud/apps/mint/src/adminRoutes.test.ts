@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { plansRepo, users as usersRepo, type Db } from "@ovid/db";
 import type { Redis } from "ioredis";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import type { MintDeps } from "./app.js";
 import { buildMintApps, HttpContractError } from "./app.js";
 import { requireAdmin } from "./adminRoutes.js";
@@ -133,7 +133,7 @@ describe.skipIf(!RUN)("/admin JSON API + console (adminRoutes.ts)", () => {
     url: string,
     payload?: unknown,
     headers: Record<string, string> = {},
-  ): ReturnType<FastifyInstance["inject"]> {
+  ): Promise<LightMyRequestResponse> {
     return adminApp.inject({
       method: method as "GET" | "POST",
       url,

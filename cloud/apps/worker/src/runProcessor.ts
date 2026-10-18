@@ -185,15 +185,15 @@ export interface RunDeps {
   defaultModel: string;
   /**
    * P2 Task 12: the sandbox the run's tools execute in, and the tool roster.
-   * Both REQUIRED — main.ts wires them (composition root). The P1 spine e2e
-   * (apps/e2e spine.test.ts) constructs the pre-P2 shape and must stay green
-   * UNMODIFIED, so the processor carries a documented runtime guard: when
-   * either is absent it runs the v0 tool-less loop unchanged (no attach, no
-   * system prompt, no tools param). main.ts always wires both; the guard
-   * exists solely for that legacy harness.
+   * main.ts (composition root) always wires both. They are OPTIONAL in the
+   * type because the processor carries a documented runtime guard for the
+   * pre-P2 shape: when either is absent it runs the v0 tool-less loop
+   * unchanged (no attach, no system prompt, no tools param). The P1 spine e2e
+   * (apps/e2e spine.test.ts) constructs exactly that legacy shape and must
+   * stay green unmodified.
    */
-  sandbox: SandboxManager;
-  tools: ToolRegistry;
+  sandbox?: SandboxManager;
+  tools?: ToolRegistry;
   sleep?: (ms: number) => Promise<void>;
   /**
    * P10 Task 2: per-chunk SSE idle deadline (ms). No delta for this long ⇒
@@ -854,7 +854,8 @@ export function createAgentRunProcessor(
     // ---- P2 Task 12 / P3 Task 16: attach + engine over the P2 machinery ----
     let handle: SandboxHandle | undefined;
     try {
-      handle = await deps.sandbox.attach(userId, {
+      // `useTools` above guarantees both are present (legacy path returned).
+      handle = await deps.sandbox!.attach(userId, {
         tier: job.data.tier === "free" ? "free" : "pro",
       });
 
@@ -957,7 +958,7 @@ export function createAgentRunProcessor(
       defaultModel: deps.defaultModel,
       registry: withUnknownToolFallback(
         createCoreToolRegistry(
-          adaptAgentTools(deps.tools.tools, {
+          adaptAgentTools(deps.tools!.tools, {
             sandbox: attached,
             emitEvent: (type, payload) => compatEmit(type, payload),
           }),
@@ -974,7 +975,7 @@ export function createAgentRunProcessor(
       skills: NOOP_SKILLS,
       // Non-null so the sandbox-backed P2 roster is advertised. Spill is
       // disabled: P2's caps stay byte-for-byte (the P2 suite pins them).
-      sandbox: createSandboxPort(deps.sandbox),
+      sandbox: createSandboxPort(deps.sandbox!),
       windowTokens: DEFAULT_WINDOW_TOKENS,
       maxToolRounds: MAX_TOOL_ROUNDS,
       systemPromptOverride: SYSTEM_PROMPT_V1,

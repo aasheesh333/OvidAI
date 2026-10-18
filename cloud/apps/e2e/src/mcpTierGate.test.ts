@@ -542,7 +542,12 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)("MCP tier gate (router-le
     const workspaceRoot = await mkdtemp(join(tmpdir(), "mcp-tier-workspace-"));
 
     // -- real redis bus; approvals are answered automatically --------------
-    const realBus = createRedisSystemBus(redis);
+    // ioredis's `Redis` is structurally compatible with the narrow
+    // `SystemRedis` port at runtime; the event-listener variance differs in
+    // the type system only.
+    const realBus = createRedisSystemBus(
+      redis as unknown as Parameters<typeof createRedisSystemBus>[0],
+    );
     const autoBus: UserSystemBus = {
       publish: (uidValue, event) => realBus.publish(uidValue, event),
       async request() {

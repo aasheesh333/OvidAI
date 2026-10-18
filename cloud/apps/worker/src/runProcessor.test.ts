@@ -271,7 +271,11 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         "SELECT status, attempts, last_error FROM runs WHERE id = $1",
         [runId],
       );
-      const row = rows[0] as { status: string; attempts: number; last_error: string | null };
+      const row = rows[0] as unknown as {
+        status: string;
+        attempts: number;
+        last_error: string | null;
+      };
       return { status: row.status, attempts: row.attempts, lastError: row.last_error };
     }
 
@@ -2084,7 +2088,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         textTurn("done"),
       ]);
       const processor = createFullAgentRunProcessor(
-        makeFullDeps(sse.url, sbx.manager, {
+        makeFullDeps(sse.url, createSandboxPort(sbx.manager, { tier: "free" }), {
           sandboxForTier: (tier) => {
             tierCalls.push(tier);
             return createSandboxPort(sbx.manager, { tier });

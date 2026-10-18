@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import { users as usersRepo, type Db } from "@ovid/db";
 import type { Redis } from "ioredis";
 import type { MintDeps } from "./app.js";
@@ -103,7 +103,7 @@ describe.skipIf(!RUN)("public mint endpoints (mintRoutes.ts)", () => {
     deps.mintLock = { pollMs: 1, polls: 2 };
   });
 
-  function mint(uid: string, extra: Record<string, string> = {}): ReturnType<FastifyInstance["inject"]> {
+  function mint(uid: string, extra: Record<string, string> = {}): Promise<LightMyRequestResponse> {
     return app.inject({
       method: "POST",
       url: "/mint",

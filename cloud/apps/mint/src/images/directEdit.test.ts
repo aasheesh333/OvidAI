@@ -62,7 +62,7 @@ describe("DirectEdit (port of directedit.py)", () => {
       fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
         seen.push({ url: String(url), init: init ?? {} });
         return response(302, {});
-      }) as typeof fetch,
+      }) as unknown as typeof fetch,
     });
 
     expect(direct.target({ model: `openai/${MODEL}`, api_base: BASE })).toEqual({
@@ -112,7 +112,7 @@ describe("DirectEdit (port of directedit.py)", () => {
       fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
         seen.push({ url: String(url), init: init ?? {} });
         return response(200, { data: [] });
-      }) as typeof fetch,
+      }) as unknown as typeof fetch,
     });
 
     await direct.post(

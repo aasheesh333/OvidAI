@@ -13,10 +13,9 @@ import {
   users,
   type Db,
   type ScheduleRow,
-  type ScheduleTrigger,
 } from "@ovid/db";
 import { createRedisEventLog, type EventLog, type SystemBus } from "@ovid/events";
-import type { SessionEvent, SystemEvent } from "@ovid/shared";
+import type { ScheduleTrigger, SessionEvent, SystemEvent } from "@ovid/shared";
 import type { Notifier } from "./notify.js";
 import { sweepStaleRuns } from "./staleRuns.js";
 import {

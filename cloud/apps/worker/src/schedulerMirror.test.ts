@@ -19,10 +19,9 @@ import {
   users,
   type Db,
   type ScheduleRow,
-  type ScheduleTrigger,
 } from "@ovid/db";
 import type { SystemBus } from "@ovid/events";
-import type { SystemEvent } from "@ovid/shared";
+import type { ScheduleTrigger, SystemEvent } from "@ovid/shared";
 import { createQueues, type QueueServices } from "@ovid/queue";
 import { loadWorkerEnv } from "./main.js";
 import { createScheduleFireProcessor, resyncScheduleMirror } from "./schedulerMirror.js";
