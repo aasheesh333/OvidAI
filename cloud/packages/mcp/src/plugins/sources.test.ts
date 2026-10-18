@@ -16,6 +16,7 @@ import {
   MAX_PASTE_BYTES,
   MAX_PAYLOAD_BYTES,
   PASTE_PLUGIN_PUBLISHER,
+  PASTE_PLUGIN_VERSION,
   PluginSourceError,
   createSourceResolver,
 } from "./sources.js";
@@ -535,6 +536,10 @@ describe("createSourceResolver — paste", () => {
       // publisher it failed as invalid_source before any job could enqueue.
       const manifest = await adaptPlugin(resolved.stagingDir);
       expect(manifest.pluginId).toBe("mcp/demo-tools");
+      // HIGH-1: a paste must emit a SAFE_VERSION-valid version; the
+      // installer rejects "" with invalid_plugin.
+      expect(manifest.version).toBe(PASTE_PLUGIN_VERSION);
+      expect(manifest.version).not.toBe("");
       expect(manifest.mcpServers.map((server) => server.name)).toEqual(["fetch"]);
     } finally {
       await resolved.discard();

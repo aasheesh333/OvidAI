@@ -184,6 +184,37 @@ describe.skipIf(!TEST_DATABASE_URL)("MCP agent tools (canonical roster seam)", (
     await db?.$client.end({ timeout: 5 });
   });
 
+  it("MEDIUM-1: threads the run's sampler into RunContext (samplerFor and ctx.sampler)", async () => {
+    const seen: { sampler?: unknown }[] = [];
+    const fakeRouter = {
+      async listTools() {
+        return [
+          { name: "mcp__x__y", description: "y", inputSchema: { type: "object" } },
+        ];
+      },
+      async resolveTool(_uid: string, _name: string, runCtx: { sampler?: unknown }) {
+        seen.push(runCtx);
+        return { serverId: "s1", name: "mcp__x__y" };
+      },
+      async callTool() {
+        return { text: "ok", isError: false };
+      },
+    } as unknown as McpRouter;
+
+    const sampler = async () => null;
+    // (a) provider closes over the active run.
+    const viaProvider = createMcpToolProvider(fakeRouter, { samplerFor: () => sampler });
+    const [toolA] = await viaProvider.tools("u");
+    await toolA!.execute({}, { uid: "u", sessionId: "s", runId: "r" });
+    expect(seen[0]!.sampler).toBe(sampler);
+
+    // (b) P3 passes it on the per-call context.
+    const provider = createMcpToolProvider(fakeRouter);
+    const [toolB] = await provider.tools("u");
+    await toolB!.execute({}, { uid: "u", sessionId: "s", runId: "r", sampler });
+    expect(seen[1]!.sampler).toBe(sampler);
+  });
+
   it("tools() returns sorted canonical McpAgentTool registrations; specs() mirrors them", async () => {
     const router = makeRouter();
     try {

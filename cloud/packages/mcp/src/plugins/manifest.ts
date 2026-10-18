@@ -9,11 +9,18 @@
 // consulted at adaptation time — `${VAR}` stays literal for the credential
 // gate) and only env NAMES travel in envNames.
 //
+// LOW-2 scope note: the "no secrets in plaintext columns" invariant covers
+// USER secrets (`${user_config.x}` values, sealed in config_sealed) and
+// credentials embedded in a URL (rejected at parse time — configParse.ts).
+// A plugin author who hardcodes a literal token in its own bundle is
+// committing a secret to the plugin's published content; that value is part
+// of the plugin tree/manifest, not a user credential, and is not sealed.
+//
 // D5 removed the device-era capabilities (sessionRead/sessionWrite/
 // deviceControl): a declaration naming them is stripped with a warning.
 
 import { createHash } from "node:crypto";
-import { stat as statFile } from "node:fs/promises";
+import { readFile, stat as statFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ImportedMcp } from "../configParse.js";
 import { adaptClaudeCode } from "./adapters/claudeCode.js";
@@ -186,7 +193,7 @@ function projectMcp(c: PluginMcpServerContribution): unknown {
  * migrateable instead of silently invalidating every stored approval
  * (Dart kManifestDigestSchemaVersion parity).
  */
-const DIGEST_SCHEMA_VERSION = 1;
+const DIGEST_SCHEMA_VERSION = 2;
 
 /**
  * sha256 over the canonical JSON of contributions + capabilities + envNames.
@@ -196,11 +203,22 @@ const DIGEST_SCHEMA_VERSION = 1;
  * so are `warnings` (advisory, parser-volatile — hashing them re-digested
  * every installed plugin on a parser update, the Dart regression pinned in
  * test/plugin_digest_stability_test.dart).
+ *
+ * `contentDigest` (MEDIUM-3): the metadata projection alone binds names,
+ * descriptions and PATHS, not the bytes of `commands/*.md`, skills or
+ * agents. A plugin author could therefore change prompt content after
+ * approval without a new digest. Callers pass `pluginContentDigest(m)` so
+ * the grant is bound to the contribution file contents too. Optional for
+ * pure-metadata callers (tests/tools that never touch a tree).
  */
-export function pluginManifestDigest(m: NormalizedPluginManifest): string {
+export function pluginManifestDigest(
+  m: NormalizedPluginManifest,
+  contentDigest?: string,
+): string {
   const projection = {
     digestSchemaVersion: DIGEST_SCHEMA_VERSION,
     pluginId: m.pluginId,
+    contentDigest: contentDigest ?? null,
     commands: m.commands.map((c) => [c.name, c.description ?? null, c.file]),
     skills: m.skills.map((s) => [s.name, s.description ?? null, s.file]),
     agents: m.agents.map((a) => [a.name, a.description ?? null, a.file]),
@@ -211,6 +229,38 @@ export function pluginManifestDigest(m: NormalizedPluginManifest): string {
   };
   return `sha256:${createHash("sha256")
     .update(canonicalJson(projection), "utf8")
+    .digest("hex")}`;
+}
+
+/**
+ * sha256 over every contribution file's bytes (MEDIUM-3), folded into
+ * `pluginManifestDigest` so a stored grant stops covering a plugin whose
+ * prompt/skill/agent content changed without any metadata change. Missing
+ * files hash as `null` (the probe phase reports them as degraded; the digest
+ * still binds their absence).
+ *
+ * Contribution files only: MCP server config and hook commands are already
+ * covered by the metadata projection.
+ */
+export async function pluginContentDigest(
+  m: NormalizedPluginManifest,
+): Promise<string> {
+  const files = new Set<string>();
+  for (const c of m.commands) files.add(c.file);
+  for (const s of m.skills) files.add(s.file);
+  for (const a of m.agents) files.add(a.file);
+
+  const entries: [string, string | null][] = [];
+  for (const file of [...files].sort()) {
+    try {
+      const bytes = await readFile(join(m.rootPath, file));
+      entries.push([file, createHash("sha256").update(bytes).digest("hex")]);
+    } catch {
+      entries.push([file, null]);
+    }
+  }
+  return `sha256:${createHash("sha256")
+    .update(canonicalJson(entries), "utf8")
     .digest("hex")}`;
 }
 

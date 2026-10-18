@@ -7,7 +7,7 @@
  * another suite sharing the dev redis. FLUSHDB is never used.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { ConnectionOptions, Job, Worker } from "bullmq";
 import {
   createPluginInstallsWorker,
@@ -83,10 +83,16 @@ describe("pluginInstallJobSchema", () => {
 });
 
 describe("PLUGIN_INSTALLS constants", () => {
-  it("pins the queue name, job name and attempts:1 default", () => {
+  it("pins the queue name, job name and the attempts:1 + removal defaults", () => {
     expect(PLUGIN_INSTALLS).toBe("plugin-installs");
     expect(PLUGIN_INSTALL_JOB_NAME).toBe("plugin-install");
-    expect(PLUGIN_INSTALL_JOB_DEFAULTS).toEqual({ attempts: 1 });
+    // HIGH-2: removal is load-bearing — BullMQ dedupes a stable jobId across
+    // completed/failed states, so without these a reinstall is a silent no-op.
+    expect(PLUGIN_INSTALL_JOB_DEFAULTS).toEqual({
+      attempts: 1,
+      removeOnComplete: true,
+      removeOnFail: true,
+    });
   });
 });
 
@@ -114,6 +120,15 @@ describe.skipIf(!TEST_REDIS_URL)("plugin-installs queue against real redis", () 
   beforeEach(async () => {
     // Only this suite's prefixed keys — never FLUSHDB (shared dev redis).
     await queues.pluginInstalls!.obliterate({ force: true });
+  });
+
+  afterEach(async () => {
+    // One worker per test: two live workers on the same queue would race for
+    // the same job and make the reinstall assertion non-deterministic.
+    if (worker !== undefined) {
+      await worker.close();
+      worker = undefined;
+    }
   });
 
   afterAll(async () => {
@@ -201,6 +216,59 @@ describe.skipIf(!TEST_REDIS_URL)("plugin-installs queue against real redis", () 
     });
     const stored = await queues.pluginInstalls!.getJob(payload.installId);
     expect(stored?.opts.attempts).toBe(1);
+    expect(stored?.opts.removeOnComplete).toBe(true);
+    expect(stored?.opts.removeOnFail).toBe(true);
+  });
+
+  it("HIGH-2: re-adding the SAME jobId after completion runs the processor again", async () => {
+    // The gateway uses the stable row id as the job id, and `plugins.upsert`
+    // keeps that id on reinstall/upgrade. Without removeOnComplete the second
+    // add returned the retained completed job and the processor ran once.
+    const runs: string[] = [];
+    let completed = 0;
+    let wake: (() => void) | undefined;
+
+    worker = createPluginInstallsWorker(
+      connection,
+      async (job) => {
+        runs.push(job.data.installId);
+      },
+      { prefix: QUEUE_PREFIX },
+    );
+    worker.on("completed", () => {
+      completed += 1;
+      wake?.();
+      wake = undefined;
+    });
+
+    const awaitCompletions = async (n: number): Promise<void> => {
+      const deadline = Date.now() + 5_000;
+      while (completed < n) {
+        if (Date.now() > deadline) {
+          throw new Error(`timed out waiting for ${n} plugin-install completions`);
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          setTimeout(resolve, 100);
+        });
+      }
+    };
+
+    const payload = jobPayload({ installId: "stable-row-id" });
+    await queues.pluginInstalls!.add(PLUGIN_INSTALL_JOB_NAME, payload, {
+      jobId: payload.installId,
+    });
+    await awaitCompletions(1);
+
+    // The completed record was removed, so the same jobId can be added again.
+    expect(await queues.pluginInstalls!.getJob(payload.installId)).toBeUndefined();
+    await queues.pluginInstalls!.add(PLUGIN_INSTALL_JOB_NAME, payload, {
+      jobId: payload.installId,
+    });
+    await awaitCompletions(2);
+
+    expect(runs).toEqual([payload.installId, payload.installId]);
+    expect(completed).toBe(2);
   });
 
   it("the worker threads the caller's prefix so jobs meet", async () => {

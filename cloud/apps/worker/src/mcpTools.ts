@@ -33,6 +33,7 @@ import {
   PRO_REQUIRED_MESSAGE,
   ProRequiredError,
   adaptPlugin,
+  isSafePluginVersion,
   parseMcpConfig,
   type McpRouter,
   type McpServerSummary,
@@ -40,6 +41,8 @@ import {
   type PluginInstallJob,
   type PluginSourceInput,
   type RunContext,
+  type SamplingRequest,
+  type SamplingResult,
   type SourceResolver,
 } from "@ovid/mcp";
 import { pluginSourceInputSchema } from "@ovid/shared";
@@ -61,6 +64,13 @@ export interface McpToolContext {
   uid: string;
   sessionId: string;
   runId: string;
+  /**
+   * MEDIUM-1: the active run's model sampler (ONE completion call, no retry
+   * layer). P3's roster passes it per call; `createMcpToolProvider`'s
+   * `samplerFor` option is the alternative when the provider closes over the
+   * run instead.
+   */
+  sampler?: (req: SamplingRequest) => Promise<SamplingResult | null>;
 }
 
 export interface McpAgentTool {
@@ -80,6 +90,17 @@ export interface McpToolProvider {
   specs(uid: string): Promise<ModelToolSpec[]>;
 }
 
+/**
+ * MEDIUM-1: optional run-binding. P3 may either pass `sampler` on the
+ * per-call `McpToolContext` or have the provider close over the active run
+ * (`samplerFor`); both are threaded into the router's `RunContext`.
+ */
+export interface McpToolProviderOptions {
+  samplerFor?: (
+    ctx: McpToolContext,
+  ) => ((req: SamplingRequest) => Promise<SamplingResult | null>) | undefined;
+}
+
 function byName(a: { name: string }, b: { name: string }): number {
   return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
 }
@@ -88,8 +109,18 @@ function toolResult(content: string, isError = false): ToolResult {
   return isError ? { content, isError: true } : { content, isError: false };
 }
 
-function runContext(ctx: McpToolContext): RunContext {
-  return { sessionId: ctx.sessionId, runId: ctx.runId };
+function runContext(
+  ctx: McpToolContext,
+  samplerFor?: McpToolProviderOptions["samplerFor"],
+): RunContext {
+  // MEDIUM-1: the router's sampling handler reads `RunContext.sampler`.
+  // Without this the server's sampling/createMessage always returned null.
+  const sampler = samplerFor?.(ctx) ?? ctx.sampler;
+  return {
+    sessionId: ctx.sessionId,
+    runId: ctx.runId,
+    ...(sampler !== undefined ? { sampler } : {}),
+  };
 }
 
 function errorMessage(err: unknown): string {
@@ -108,13 +139,18 @@ function gatedOrRethrow(err: unknown): ToolResult {
   throw err;
 }
 
-function toolForListing(router: McpRouter, uid: string, listing: McpToolListing): McpAgentTool {
+function toolForListing(
+  router: McpRouter,
+  uid: string,
+  listing: McpToolListing,
+  opts: McpToolProviderOptions,
+): McpAgentTool {
   return {
     name: listing.name,
     description: listing.description ?? `MCP tool ${listing.name}`,
     parameters: listing.inputSchema ?? { type: "object", properties: {} },
     async execute(args, ctx) {
-      const runCtx = runContext(ctx);
+      const runCtx = runContext(ctx, opts.samplerFor);
       try {
         // Never guess: resolve first, then dispatch through the router (the
         // router re-reads the tier at every gate point).
@@ -131,10 +167,15 @@ function toolForListing(router: McpRouter, uid: string, listing: McpToolListing)
   };
 }
 
-export function createMcpToolProvider(router: McpRouter): McpToolProvider {
+export function createMcpToolProvider(
+  router: McpRouter,
+  opts: McpToolProviderOptions = {},
+): McpToolProvider {
   async function listTools(uid: string): Promise<McpAgentTool[]> {
     const listings = await router.listTools(uid);
-    return [...listings].sort(byName).map((listing) => toolForListing(router, uid, listing));
+    return [...listings]
+      .sort(byName)
+      .map((listing) => toolForListing(router, uid, listing, opts));
   }
 
   const provider: McpToolProvider = {
@@ -331,10 +372,11 @@ export function parsePluginSource(raw: string): PluginSourceInput {
 async function canonicalPluginId(
   resolver: Pick<SourceResolver, "resolve">,
   source: PluginSourceInput,
-): Promise<string> {
+): Promise<{ pluginId: string; version: string }> {
   const resolved = await resolver.resolve(source);
   try {
-    return (await adaptPlugin(resolved.stagingDir)).pluginId;
+    const manifest = await adaptPlugin(resolved.stagingDir);
+    return { pluginId: manifest.pluginId, version: manifest.version };
   } finally {
     await resolved.discard().catch(() => {
       // discard is idempotent/best-effort; identity was already read.
@@ -457,10 +499,21 @@ export function createCatalogTools(deps: CatalogToolDeps): McpAgentTool[] {
         // heuristic — the installer refuses any mismatch. A source that
         // cannot be resolved/adapted is a validation error (never enqueued).
         let pluginId: string;
+        let version: string;
         try {
-          pluginId = await canonicalPluginId(resolver, source);
+          const identity = await canonicalPluginId(resolver, source);
+          pluginId = identity.pluginId;
+          version = identity.version;
         } catch (err) {
           return toolResult(`invalid_source: ${errorMessage(err)}`, true);
+        }
+        // HIGH-1: the installer rejects an empty/path-unsafe version with
+        // `invalid_plugin`; refuse it here instead of enqueueing a doomed job.
+        if (!isSafePluginVersion(version)) {
+          return toolResult(
+            `invalid_source: the plugin manifest has no usable version ("${version}")`,
+            true,
+          );
         }
 
         const installId = randomUUID();
@@ -468,7 +521,7 @@ export function createCatalogTools(deps: CatalogToolDeps): McpAgentTool[] {
         await pluginsRepo.upsert(db, {
           userId: ctx.uid,
           pluginId,
-          version: "0.0.0",
+          version,
           source: source as unknown as Record<string, unknown>,
           status: "queued",
         });

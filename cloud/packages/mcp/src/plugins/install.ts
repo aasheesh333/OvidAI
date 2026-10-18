@@ -54,7 +54,7 @@ import type { EncryptedEnvelope, EnvelopeCrypto } from "../crypto.js";
 import { APPROVAL_TIMEOUT_MS, type UserSystemBus } from "../systemBus.js";
 import type { SandboxSpawner } from "../transports/stdio.js";
 import { WORKSPACE_ROOT, type WorkspaceFiles } from "../workspace.js";
-import { adaptPlugin, pluginManifestDigest, ManifestError, type NormalizedPluginManifest, type PluginCapability } from "./manifest.js";
+import { adaptPlugin, pluginContentDigest, pluginManifestDigest, ManifestError, type NormalizedPluginManifest, type PluginCapability } from "./manifest.js";
 import { inferRequestedCapabilities } from "./capabilities.js";
 import { CAPABILITY_EXPLANATIONS, grantCovers, type PluginGrantInput } from "./grants.js";
 import {
@@ -79,6 +79,14 @@ export interface PluginInstallJob {
   pluginId: string;
   mode: "install" | "uninstall";
   source?: PluginSourceInput;
+  /**
+   * HIGH-3: the gateway no longer resolves the source (it must never
+   * download/extract untrusted archives in the API process). When true, the
+   * worker processor resolves the source, derives the canonical id/version,
+   * and adopts the provisional `pending/<installId>` row onto that id before
+   * calling the installer.
+   */
+  needsIdentity?: boolean;
 }
 
 /**
@@ -175,6 +183,24 @@ export const MV_TIMEOUT_MS = 30_000;
 const SAFE_PLUGIN_ID = /^[a-z0-9][a-z0-9-_.]*\/[a-z0-9][a-z0-9-_.]*$/;
 const SAFE_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_INSTALL_ID = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
+
+/**
+ * HIGH-1: the enqueue/claim paths must apply the SAME version gate the
+ * installer applies. An empty or path-unsafe version is a doomed job
+ * (`invalid_plugin`), so callers reject it before enqueueing/claiming.
+ */
+export function isSafePluginVersion(version: string): boolean {
+  return (
+    SAFE_VERSION.test(version) && version.length <= MAX_VERSION_LENGTH
+  );
+}
+
+/** Same gate for the canonical `publisher/name` id. */
+export function isSafePluginId(pluginId: string): boolean {
+  return (
+    SAFE_PLUGIN_ID.test(pluginId) && pluginId.length <= MAX_PLUGIN_ID_LENGTH
+  );
+}
 
 /**
  * Length bounds for values that become jail path segments or row keys (M5).
@@ -297,6 +323,12 @@ interface InstallerDbRepos {
       },
     ): Promise<void>;
     remove(db: Db, id: string, uid: string): Promise<boolean>;
+    /**
+     * Every active/degraded row across all users (MEDIUM-2 rehydration).
+     * The worker registry is in-memory, so a restart must rebuild it from
+     * the persisted rows.
+     */
+    listActive(db: Db): Promise<PluginDbRow[]>;
   };
   pluginGrants: {
     put(db: Db, input: {
@@ -407,6 +439,13 @@ export interface InstallerDeps {
 export function createPluginInstaller(deps: InstallerDeps): {
   install(job: PluginInstallJob): Promise<PluginInstallOutcome>;
   uninstall(job: PluginInstallJob): Promise<void>;
+  /**
+   * MEDIUM-2: rebuild the in-memory contribution registry from the persisted
+   * `active`/`degraded` plugin rows. Called once at worker boot; returns the
+   * number of rows rehydrated. Per-row failures are logged and skipped (one
+   * corrupt row must not keep every other plugin dark).
+   */
+  rehydrate(): Promise<number>;
 } {
   const { db, crypto, systemBus, resolver, registry } = deps;
   const files = deps.sandbox.files;
@@ -563,7 +602,10 @@ export function createPluginInstaller(deps: InstallerDeps): {
         await progress(uid, job.installId, pluginId, "failed", "invalid_plugin");
         return { status: "failed", pluginId, version, probeFailures: [], reason: "invalid_plugin" };
       }
-      const digest = pluginManifestDigest(manifest);
+      const digest = pluginManifestDigest(
+        manifest,
+        await pluginContentDigest(manifest),
+      );
       await progress(uid, job.installId, pluginId, "normalized", "manifest adapted");
 
       const activeDir = pluginDir(pluginId, version);
@@ -823,5 +865,32 @@ export function createPluginInstaller(deps: InstallerDeps): {
     await r.pluginGrants.remove(db, uid, pluginId);
   }
 
-  return { install, uninstall };
+  async function rehydrate(): Promise<number> {
+    const r = await dbRepos();
+    const rows = await r.plugins.listActive(db);
+    let rehydrated = 0;
+    for (const row of rows) {
+      try {
+        const stored = row.manifest as unknown as NormalizedPluginManifest | null;
+        if (stored === null || typeof stored !== "object") continue;
+        // The persisted manifest keeps `${user_config.x}` refs; rebuild the
+        // runtime view from the sealed config, exactly as install step ⑦.
+        const config = await sealedUserConfig(row);
+        const runtimeManifest = substituteUserConfig(
+          { ...stored, rootPath: row.contentDir ?? stored.rootPath },
+          config,
+        );
+        registry.register(contributionsFromManifest(runtimeManifest, row.userId));
+        rehydrated += 1;
+      } catch (err) {
+        console.error(
+          `[plugin-install] rehydrate failed for ${row.pluginId} (${row.userId}); skipping:`,
+          err,
+        );
+      }
+    }
+    return rehydrated;
+  }
+
+  return { install, uninstall, rehydrate };
 }

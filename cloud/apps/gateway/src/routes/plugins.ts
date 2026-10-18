@@ -1,12 +1,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { newId, plugins as pluginsRepo, users, type PluginRow } from "@ovid/db";
-import {
-  adaptPlugin,
-  createSourceResolver,
-  PRO_REQUIRED_MESSAGE,
-  type SourceResolver,
-} from "@ovid/mcp";
+import { PRO_REQUIRED_MESSAGE } from "@ovid/mcp";
 import {
   PLUGIN_INSTALL_JOB_NAME,
   type PluginInstallJob,
@@ -23,11 +18,14 @@ import { isUuid, notFound, sendError, zodBadRequest } from "./http.js";
 /**
  * Plugin routes (P5 Task 15).
  *
- *  - Install/uninstall are Pro features, re-read at REQUEST time (a downgrade
- *    takes effect on the next call).
- *  - POST /install computes the canonical `publisher/name` at enqueue: the
- *    Task-14 installer re-derives it from the manifest and refuses a mismatch
- *    (`plugin_id_mismatch`), so the row and the job carry the same id.
+ *  - Install is a Pro feature, re-read at REQUEST time (a downgrade takes
+ *    effect on the next call). Uninstall/config stay available to a
+ *    downgraded user so they can clean up or reconfigure an install (LOW-1).
+ *  - POST /install NEVER resolves the source (HIGH-3): the gateway must not
+ *    download or extract untrusted archives in the 1 GB API process. It
+ *    creates a provisional `pending/<installId>` row and enqueues
+ *    `needsIdentity: true`; the WORKER resolves the source, derives the
+ *    canonical `publisher/name`, and adopts the row onto that id.
  *  - The row is created `queued` here; the worker processor claims it
  *    (`installing`) and owns every later transition, including `rolled_back`.
  *  - PATCH /config seals values under `plugins:{id}`. Neither the manifest
@@ -49,44 +47,6 @@ const configBodySchema = z
   .strict();
 
 const PLUGIN_NOT_FOUND = "Plugin not found.";
-
-/**
- * Resolver used to stage a source ONCE at enqueue so the row/job carry the
- * same canonical `publisher/name` the Task-14 installer re-derives from the
- * manifest. A source heuristic (owner/repo, package slug, `paste/<label>`)
- * produced ids the installer refuses with `plugin_id_mismatch`.
- *
- * Lazily constructed so importing this module stays side-effect free; the
- * resolver reads GITHUB_API_TOKEN from the environment on first use.
- */
-let sourceResolver: Pick<SourceResolver, "resolve"> | undefined;
-
-function pluginSourceResolver(): Pick<SourceResolver, "resolve"> {
-  sourceResolver ??= createSourceResolver();
-  return sourceResolver;
-}
-
-/**
- * Derive the canonical plugin id the SAME way the installer will: stage the
- * source with the runtime resolver and adapt its manifest. Mirrors the
- * worker's catalog-tool enqueue path (mcpTools.ts `canonicalPluginId`).
- *
- * The staging tree is discarded immediately — this call only reads identity;
- * the install transaction resolves the source again.
- */
-async function canonicalPluginId(
-  resolver: Pick<SourceResolver, "resolve">,
-  source: PluginSourceInput,
-): Promise<string> {
-  const resolved = await resolver.resolve(source);
-  try {
-    return (await adaptPlugin(resolved.stagingDir)).pluginId;
-  } finally {
-    await resolved.discard().catch(() => {
-      // discard is idempotent/best-effort; identity was already read.
-    });
-  }
-}
 
 /** Non-secret source projection stored on the row and served in DTOs. */
 function sourceLabel(source: PluginSourceInput): string {
@@ -191,30 +151,19 @@ export function registerPluginRoutes(app: FastifyInstance, deps: GatewayDeps): v
 
     const source = parsed.data.source;
 
-    // Canonical id from the MANIFEST (never a source heuristic): the
-    // installer re-derives identity from the same manifest and refuses a
-    // mismatch (`plugin_id_mismatch`). An unresolvable/adapt-failing source
-    // is a 400 and enqueues NOTHING — no row, no job.
-    let pluginId: string;
-    try {
-      pluginId = await canonicalPluginId(pluginSourceResolver(), source);
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      return sendError(
-        reply,
-        400,
-        "invalid_source",
-        `The plugin source could not be resolved: ${reason}`,
-      );
-    }
-    if (pluginId === "" || pluginId === "/" || pluginId.split("/").some((s) => s === "")) {
-      return sendError(reply, 400, "invalid_source", "The plugin source has no usable identity.");
-    }
+    // HIGH-3: no source resolution here — the gateway must not fetch or
+    // extract untrusted archives. The worker derives the canonical id and
+    // adopts this provisional row. `installId` doubles as the row id and the
+    // BullMQ job id (fresh per request — HIGH-2).
+    const installId = newId();
+    const provisionalPluginId = `pending/${installId}`;
 
-    // Carry 3: the row exists (status queued) BEFORE the job is enqueued.
+    // LOW-3: create the row, then enqueue. If the enqueue throws (redis
+    // outage) the row is terminalized instead of being stranded `queued`.
     const row = await pluginsRepo.upsert(deps.db, {
+      id: installId,
       userId: uid,
-      pluginId,
+      pluginId: provisionalPluginId,
       version: "pending",
       source: { kind: source.kind, label: sourceLabel(source) },
       status: "queued",
@@ -223,14 +172,26 @@ export function registerPluginRoutes(app: FastifyInstance, deps: GatewayDeps): v
     const job: PluginInstallJob = {
       installId: row.id,
       userId: uid,
-      pluginId,
+      pluginId: provisionalPluginId,
       mode: "install",
       source,
+      needsIdentity: true,
     };
-    await queue.add(PLUGIN_INSTALL_JOB_NAME, job, {
-      jobId: row.id,
-      priority: tier === "free" ? 2 : 1,
-    });
+    try {
+      await queue.add(PLUGIN_INSTALL_JOB_NAME, job, {
+        jobId: row.id,
+        priority: tier === "free" ? 2 : 1,
+      });
+    } catch (err) {
+      await pluginsRepo.setStatus(deps.db, row.id, uid, "failed");
+      const reason = err instanceof Error ? err.message : String(err);
+      return sendError(
+        reply,
+        503,
+        "unavailable",
+        `The plugin install could not be queued: ${reason}`,
+      );
+    }
 
     const body: PluginInstallResponse = { installId: row.id, status: "queued" };
     return reply.code(202).send(body);
@@ -293,10 +254,23 @@ export function registerPluginRoutes(app: FastifyInstance, deps: GatewayDeps): v
       pluginId: row.pluginId,
       mode: "uninstall",
     };
-    await queue.add(PLUGIN_INSTALL_JOB_NAME, job, {
-      jobId: installId,
-      priority: tier === "free" ? 2 : 1,
-    });
+    try {
+      await queue.add(PLUGIN_INSTALL_JOB_NAME, job, {
+        jobId: installId,
+        priority: tier === "free" ? 2 : 1,
+      });
+    } catch (err) {
+      // LOW-3: no job exists, so restore the row rather than leave it
+      // `uninstalling` forever.
+      await pluginsRepo.setStatus(deps.db, row.id, uid, row.status);
+      const reason = err instanceof Error ? err.message : String(err);
+      return sendError(
+        reply,
+        503,
+        "unavailable",
+        `The plugin uninstall could not be queued: ${reason}`,
+      );
+    }
 
     const body: PluginInstallResponse = { installId, status: "queued" };
     return reply.code(202).send(body);

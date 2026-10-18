@@ -916,6 +916,8 @@ export const mcpOauthFlows = {
 };
 
 export interface PluginUpsert {
+  /** Explicit row id (the gateway's installId); generated when absent. */
+  id?: string;
   userId: string;
   pluginId: string;
   version: string;
@@ -944,7 +946,7 @@ export const plugins = {
    */
   async upsert(db: Db, input: PluginUpsert): Promise<PluginRow> {
     const values = {
-      id: newId(),
+      id: input.id ?? newId(),
       userId: input.userId,
       pluginId: input.pluginId,
       version: input.version,
@@ -1002,6 +1004,91 @@ export const plugins = {
       .where(and(eq(pluginsTable.userId, uid), eq(pluginsTable.pluginId, pluginId)))
       .limit(1);
     return row ?? null;
+  },
+
+  /**
+   * Every `active`/`degraded` row across users — the worker-boot rehydration
+   * scan (MEDIUM-2). The contribution registry is in-memory, so a restart
+   * must rebuild it from these rows.
+   */
+  async listActive(db: Db): Promise<PluginRow[]> {
+    return db
+      .select()
+      .from(pluginsTable)
+      .where(inArray(pluginsTable.status, ["active", "degraded"]))
+      .orderBy(asc(pluginsTable.installedAt), asc(pluginsTable.id));
+  },
+
+  /**
+   * HIGH-3: re-key a gateway-created provisional `pending/<installId>` row to
+   * the canonical `publisher/name` the WORKER derived from the source.
+   *
+   * The row id is preserved so the `installId` returned to the client keeps
+   * resolving. A reinstall/upgrade already has a canonical row: its
+   * install-time state (installedAt, sealed config, prior version/manifest)
+   * is copied onto the provisional row before the old row is removed, so a
+   * failed upgrade can still restore the prior install verbatim.
+   *
+   * Returns null when the provisional row does not exist (stale job).
+   */
+  async adopt(
+    db: Db,
+    input: { id: string; userId: string; pluginId: string },
+  ): Promise<PluginRow | null> {
+    return db.transaction(async (tx) => {
+      const [provisional] = await tx
+        .select()
+        .from(pluginsTable)
+        .where(
+          and(
+            eq(pluginsTable.id, input.id),
+            eq(pluginsTable.userId, input.userId),
+          ),
+        )
+        .limit(1);
+      if (provisional === undefined) return null;
+      if (provisional.pluginId === input.pluginId) return provisional;
+
+      const [existing] = await tx
+        .select()
+        .from(pluginsTable)
+        .where(
+          and(
+            eq(pluginsTable.userId, input.userId),
+            eq(pluginsTable.pluginId, input.pluginId),
+          ),
+        )
+        .limit(1);
+
+      if (existing !== undefined && existing.id !== provisional.id) {
+        // Carry the prior install's identity + sealed state onto the
+        // provisional row, then drop the old row (unique (user, plugin)).
+        await tx
+          .update(pluginsTable)
+          .set({
+            installedAt: existing.installedAt,
+            version: existing.version,
+            source: existing.source,
+            status: existing.status,
+            contentDir: existing.contentDir,
+            manifest: existing.manifest,
+            probeFailures: existing.probeFailures,
+            configSealed: existing.configSealed,
+            updatedAt: new Date(),
+          })
+          .where(eq(pluginsTable.id, provisional.id));
+        await tx
+          .delete(pluginsTable)
+          .where(eq(pluginsTable.id, existing.id));
+      }
+
+      const [adopted] = await tx
+        .update(pluginsTable)
+        .set({ pluginId: input.pluginId, updatedAt: new Date() })
+        .where(eq(pluginsTable.id, provisional.id))
+        .returning();
+      return adopted ?? null;
+    });
   },
 
   /** Ownership-scoped status transition (installer/prober write path). */

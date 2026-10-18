@@ -24,10 +24,11 @@ import { pluginGrants, plugins } from "../../../db/src/repos.js";
 import { users } from "../../../db/src/schema.js";
 import { createEnvelopeCrypto } from "../crypto.js";
 import type { UserSystemBus } from "../systemBus.js";
-import { adaptPlugin, pluginManifestDigest } from "./manifest.js";
+import { adaptPlugin, pluginContentDigest, pluginManifestDigest } from "./manifest.js";
 import { inferRequestedCapabilities } from "./capabilities.js";
 import { createContributionRegistry } from "./registry.js";
 import type { ContributionRegistry } from "./registry.js";
+import { createSourceResolver, PASTE_PLUGIN_VERSION } from "./sources.js";
 import {
   createPluginInstaller,
   pluginDir,
@@ -445,7 +446,7 @@ async function seedCoveringGrant(uid: string, fixtureDir: string, allowDependenc
     pluginId: manifest.pluginId,
     capabilities: [...inferRequestedCapabilities(manifest)],
     envNames: manifest.envNames,
-    manifestDigest: pluginManifestDigest(manifest),
+    manifestDigest: pluginManifestDigest(manifest, await pluginContentDigest(manifest)),
     allowDependencyScripts,
   });
 }
@@ -612,7 +613,9 @@ describe.skipIf(!TEST_DATABASE_URL)("plugin installer (atomic transaction)", () 
     // The grant now carries the NEW digest.
     const m2 = await adaptPlugin(second);
     const grant = await pluginGrants.get(db, uid, "acme/demo");
-    expect(grant!.manifestDigest).toBe(pluginManifestDigest(m2));
+    expect(grant!.manifestDigest).toBe(
+      pluginManifestDigest(m2, await pluginContentDigest(m2)),
+    );
   });
 
   it("deps: npm install --ignore-scripts by default; without the flag on an allowDependencyScripts approval; failure → rolled_back, staging gone, prior row untouched", async () => {
@@ -1115,5 +1118,107 @@ describe.skipIf(!TEST_DATABASE_URL)("plugin installer (atomic transaction)", () 
     const req = w.bus.requests[0]!;
     const capabilities = req.payload.capabilities as { name: string; explanation: string }[];
     for (const cap of capabilities) expect(cap.explanation.length).toBeGreaterThan(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // HIGH-1 / MEDIUM-2 / MEDIUM-3 — cross-task regressions
+  // -------------------------------------------------------------------------
+
+  it("HIGH-1: the REAL paste resolver → real adapter → real installer installs (version emitted)", async () => {
+    // No fake resolver and no fake manifest: a regression that drops the
+    // version back to "" fails here with `invalid_plugin`.
+    const uid = await seedUser("pro");
+    const files = new FakeFiles();
+    const bus = new FakeBus();
+    const registry = createContributionRegistry();
+    const installer = createPluginInstaller({
+      db,
+      crypto,
+      systemBus: bus,
+      resolver: createSourceResolver(),
+      sandbox: {
+        files,
+        spawner: {
+          spawn: async () => {
+            throw new Error("install transaction never spawns long-running processes");
+          },
+        },
+      },
+      registry,
+      approvalTimeoutMs: 200,
+    });
+    installers.push(installer);
+
+    const out = await installer.install({
+      installId: `install-${testUid("paste")}`,
+      userId: uid,
+      pluginId: "mcp/pasted-demo",
+      mode: "install",
+      source: {
+        kind: "paste",
+        label: "Pasted Demo",
+        config: JSON.stringify({
+          mcpServers: { demo: { command: "npx", args: ["demo-mcp"] } },
+        }),
+      },
+    });
+
+    expect(out.status).toBe("active");
+    expect(out.reason).toBeUndefined();
+    expect(out.version).toBe(PASTE_PLUGIN_VERSION);
+    const row = await plugins.getByPluginId(db, uid, "mcp/pasted-demo");
+    expect(row!.status).toBe("active");
+    expect(row!.version).toBe(PASTE_PLUGIN_VERSION);
+  });
+
+  it("MEDIUM-3: editing a contribution file body after approval forces re-approval", async () => {
+    const fixture = await writeFixture(BASE_FILES);
+    const uid = await seedUser("pro");
+    const w = await makeInstallerFor(uid, () => fixture);
+
+    const out1 = await w.install();
+    expect(out1.status).toBe("active");
+    expect(w.bus.requests.length).toBe(1);
+
+    // Same metadata/paths, changed prompt bytes: the content digest must
+    // differ so the stored grant no longer covers the plugin.
+    await writeFile(join(fixture, "commands/foo.md"), "# foo CHANGED\n");
+
+    const out2 = await w.install();
+    expect(out2.status).toBe("active");
+    expect(w.bus.requests.length).toBe(2);
+  });
+
+  it("MEDIUM-2: rehydrate rebuilds the contribution registry from active rows", async () => {
+    const w = await makeHarness(BASE_FILES);
+    const out = await w.install();
+    expect(out.status).toBe("active");
+    const expected = w.registry.list({ userId: w.uid }).length;
+    expect(expected).toBeGreaterThan(0);
+
+    // A fresh process: empty registry, same DB/disk.
+    const registry2 = createContributionRegistry();
+    const { resolver } = fakeResolver(() => "");
+    const installer2 = createPluginInstaller({
+      db,
+      crypto,
+      systemBus: new FakeBus(),
+      resolver,
+      sandbox: {
+        files: new FakeFiles(),
+        spawner: {
+          spawn: async () => {
+            throw new Error("rehydrate never spawns");
+          },
+        },
+      },
+      registry: registry2,
+      approvalTimeoutMs: 200,
+    });
+    installers.push(installer2);
+
+    const rehydrated = await installer2.rehydrate();
+    expect(rehydrated).toBeGreaterThanOrEqual(1);
+    expect(registry2.list({ userId: w.uid })).toHaveLength(expected);
   });
 });

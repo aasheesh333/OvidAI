@@ -190,6 +190,8 @@ export interface PluginInstallJob {
   pluginId: string;
   mode: "install" | "uninstall";
   source?: PluginSourceInput;
+  /** HIGH-3: worker resolves the source identity before installing. */
+  needsIdentity?: boolean;
 }
 
 export const pluginInstallJobSchema: z.ZodType<PluginInstallJob> = z.object({
@@ -198,6 +200,7 @@ export const pluginInstallJobSchema: z.ZodType<PluginInstallJob> = z.object({
   pluginId: z.string().min(1).max(200),
   mode: z.enum(["install", "uninstall"]),
   source: pluginSourceInputSchema.optional(),
+  needsIdentity: z.boolean().optional(),
 });
 
 /**
@@ -207,8 +210,21 @@ export const pluginInstallJobSchema: z.ZodType<PluginInstallJob> = z.object({
  * retry would re-run a rollback against an already-terminal row. A crashed
  * job is never redelivered; the processor terminalizes the row it can, and
  * the gateway's status surface is the recovery signal.
+ *
+ * HIGH-2 (fix round): BullMQ dedupes on `jobId` for a job key in ANY state,
+ * including completed/failed. REST installs use the stable row id as the job
+ * id, and `plugins.upsert` keeps that id across reinstalls/upgrades — so
+ * without removal the second install returned the retained completed job,
+ * the worker never ran, and the row sat `queued` while the old version
+ * stayed live. Same lesson (and same remedy) as the storage queues above:
+ * dedupe is only needed while a job is waiting/active, so drop the record as
+ * soon as it settles.
  */
-export const PLUGIN_INSTALL_JOB_DEFAULTS = { attempts: 1 } as const;
+export const PLUGIN_INSTALL_JOB_DEFAULTS = {
+  attempts: 1,
+  removeOnComplete: true,
+  removeOnFail: true,
+} as const;
 
 /**
  * P4 Task 6 — the scheduler's back-reference riding an agent-run job: which

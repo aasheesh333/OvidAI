@@ -15,6 +15,13 @@ export class ConfigParseError extends Error {
   }
 }
 
+/**
+ * LOW-4: an imported static `oauth` block is INFORMATIONAL. The cloud OAuth
+ * flow always performs RFC 9728/8414 discovery + RFC 7591 DCR and ignores
+ * these fields (`oauth/flow.ts`); the block is still parsed/sealed so it is
+ * not silently dropped from the import surface, but it does not configure
+ * the flow. Wire it into `discoverOAuthConfig` before treating it as config.
+ */
 export interface McpOAuthConfigInput {
   authorizationUrl?: string;
   tokenUrl?: string;
@@ -216,6 +223,27 @@ function rejectDuplicateNames(entries: ImportedMcp[]): ImportedMcp[] {
   return entries;
 }
 
+/**
+ * LOW-2: a URL carrying `user:password@` is a literal credential. Imported
+ * configs persist in plaintext columns (`mcp_servers.config`,
+ * `plugins.manifest`), so refuse the shape instead of silently storing it.
+ * Unparseable / placeholder-only URLs are left to the transport layer.
+ */
+function rejectUrlUserinfo(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.username !== "" || parsed.password !== "") {
+      throw new ConfigParseError(
+        "MCP server URL must not embed credentials (user:password@host); use headers or user_config instead",
+      );
+    }
+  } catch (err) {
+    if (err instanceof ConfigParseError) throw err;
+    // Not a URL we can parse (e.g. `${VAR}` placeholder) — leave it.
+  }
+  return url;
+}
+
 function importedFromJson(
   name: string,
   v: Record<string, unknown>,
@@ -247,7 +275,7 @@ function importedFromJson(
       : undefined;
 
   const rawUrl = typeof v.url === "string" ? v.url.trim() : "";
-  const url = rawUrl !== "" ? interpolateMcpValue(rawUrl, env) : undefined;
+  const url = rawUrl !== "" ? rejectUrlUserinfo(interpolateMcpValue(rawUrl, env)) : undefined;
 
   const rawExplicit =
     typeof v.transport === "string"
@@ -538,7 +566,10 @@ function importedFromToml(
   env: Record<string, string>,
 ): ImportedMcp {
   const rawUrl = a.url;
-  const url = rawUrl !== undefined && rawUrl !== "" ? interpolateMcpValue(rawUrl, env) : undefined;
+  const url =
+    rawUrl !== undefined && rawUrl !== ""
+      ? rejectUrlUserinfo(interpolateMcpValue(rawUrl, env))
+      : undefined;
   const command =
     a.command !== undefined && a.command.trim() !== ""
       ? interpolateMcpValue(a.command, env)

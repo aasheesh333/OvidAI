@@ -378,4 +378,28 @@ command = "x"
     expect(out).toHaveLength(1);
     expect(out[0]?.command).toBe("x");
   });
+
+  it("LOW-2: rejects URL userinfo credentials (never persist them in plaintext)", () => {
+    const json = JSON.stringify({
+      mcpServers: { s: { url: "https://user:pass@example.com/mcp" } },
+    });
+    expect(() => parseMcpConfig(json, { env: {} })).toThrow(
+      /must not embed credentials/,
+    );
+    const toml = `[mcp_servers.s]\nurl = "https://user:pass@example.com/mcp"\n`;
+    expect(() => parseMcpConfig(toml, { env: {} })).toThrow(
+      /must not embed credentials/,
+    );
+
+    // Header-based credentials remain the supported shape.
+    const ok = JSON.stringify({
+      mcpServers: {
+        s: {
+          url: "https://example.com/mcp",
+          headers: { Authorization: "Bearer ${TOKEN}" },
+        },
+      },
+    });
+    expect(parseMcpConfig(ok, { env: {} })).toHaveLength(1);
+  });
 });

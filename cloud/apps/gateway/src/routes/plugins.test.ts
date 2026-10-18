@@ -7,7 +7,6 @@ import {
   pluginDtoSchema,
   pluginInstallResponseSchema,
   type PluginDto,
-  type PluginSourceInput,
 } from "@ovid/shared";
 import { buildGateway } from "../app.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
@@ -23,75 +22,11 @@ import {
 } from "../test/stubs.js";
 
 /**
- * The install route derives the canonical id by STAGING the source and
- * adapting its manifest (the installer re-derives the same id). Tests must
- * never hit the network, so `createSourceResolver` is replaced with a stub
- * that writes a minimal manifest; the real `adaptPlugin` still runs. Paste
- * sources use the REAL resolver (no egress) so the gateway covers the
- * paste→manifest→canonical-id path end to end.
+ * HIGH-3: the install route no longer resolves/stages the source at all —
+ * no `createSourceResolver` mock is needed because the gateway never fetches.
+ * The worker processor owns identity resolution (tested in
+ * apps/worker/src/pluginInstallProcessor.test.ts).
  */
-vi.mock("@ovid/mcp", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@ovid/mcp")>();
-  const actualResolver = actual.createSourceResolver;
-  return {
-    ...actual,
-    createSourceResolver: () => ({
-      async resolve(input: PluginSourceInput) {
-        if (input.kind === "paste") {
-          // Real paste resolution (local files only): proves the emitted
-          // manifest adapts instead of failing as invalid_source.
-          return actualResolver().resolve(input);
-        }
-        if (input.kind === "github" && input.owner === "missing") {
-          throw new Error("GitHub tree request failed (404)");
-        }
-        const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
-        const { tmpdir } = await import("node:os");
-        const { join } = await import("node:path");
-        const dir = await mkdtemp(join(tmpdir(), "ovid-gateway-plugin-"));
-
-        let author = "mcp";
-        let name = "plugin";
-        switch (input.kind) {
-          case "github":
-            author = input.owner;
-            name = input.repo;
-            // A source whose manifest identity deliberately differs from the
-            // owner/repo heuristic the old route used.
-            if (input.repo === "canonical-mismatch") {
-              author = "Acme Corp";
-              name = "Real Plugin";
-            }
-            break;
-          case "npm": {
-            const [scope, unscoped] = input.package.split("/");
-            if (scope!.startsWith("@") && unscoped !== undefined) {
-              author = scope!.slice(1);
-              name = unscoped;
-            } else {
-              name = input.package;
-            }
-            break;
-          }
-          case "zip":
-            author = "zip";
-            name = "plugin";
-            break;
-        }
-
-        await writeFile(join(dir, "plugin.json"), JSON.stringify({ name, author }), "utf8");
-        return {
-          stagingDir: dir,
-          bytes: 0,
-          provenance: { kind: input.kind },
-          discard: async () => {
-            await rm(dir, { recursive: true, force: true });
-          },
-        };
-      },
-    }),
-  };
-});
 
 // Plugin routes (P5 Task 15): tier gate at request time, queued-row + job
 // enqueue against the plugin-installs queue (fake queue, real priority rule),
@@ -194,25 +129,29 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway plugin routes (real postgres)", ()
     expect(answer.status).toBe("queued");
 
     // The plugins row exists with status queued (the worker moves it on).
+    // HIGH-3: identity is NOT resolved here — the row is provisional and the
+    // worker adopts it onto the canonical id.
+    const provisional = `pending/${answer.installId}`;
     const rows = (await db.$client.unsafe(
       "SELECT id, plugin_id, status, source FROM plugins WHERE user_id = $1",
       [uid],
     )) as { id: string; plugin_id: string; status: string; source: Record<string, unknown> }[];
     expect(rows.length).toBe(1);
     expect(rows[0]!.id).toBe(answer.installId);
-    expect(rows[0]!.plugin_id).toBe("acme/sample-plugin"); // canonical at enqueue
+    expect(rows[0]!.plugin_id).toBe(provisional);
     expect(rows[0]!.status).toBe("queued");
 
-    // The enqueued job (canonical pluginId — install() enforces the match).
+    // The enqueued job carries the provisional id + needsIdentity: true.
     expect(adds.length).toBe(1);
     const add = adds[0]!;
     expect(add.name).toBe("plugin-install");
     expect(add.data).toEqual({
       installId: answer.installId,
       userId: uid,
-      pluginId: "acme/sample-plugin",
+      pluginId: provisional,
       mode: "install",
       source,
+      needsIdentity: true,
     });
     expect(add.opts.priority).toBe(1); // pro
     expect(add.opts.jobId).toBe(answer.installId);
@@ -227,7 +166,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway plugin routes (real postgres)", ()
     const items = (list.json() as unknown[]).map((i) => pluginDtoSchema.parse(i));
     expect(items.length).toBe(1);
     expect(items[0]!.id).toBe(answer.installId);
-    expect(items[0]!.pluginId).toBe("acme/sample-plugin");
+    expect(items[0]!.pluginId).toBe(provisional);
     expect(items[0]!.status).toBe("queued");
     expect(items[0]!.source).toEqual({ kind: "github", label: "acme/sample-plugin" });
 
@@ -240,30 +179,41 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway plugin routes (real postgres)", ()
     expect(pluginDtoSchema.parse(one.json()).id).toBe(answer.installId);
   });
 
-  it("derives the enqueued id from the adapted manifest, not the source shape", async () => {
-    const uid = testUid("plg-canon");
+  it("HIGH-3: install enqueues without fetching or staging untrusted sources", async () => {
+    const uid = testUid("plg-nofetch");
     await seedTier(uid, "pro");
-    // The stub's manifest says "Acme Corp"/"Real Plugin"; the old heuristic
-    // would have enqueued "acme/canonical-mismatch" and the installer would
-    // refuse it with plugin_id_mismatch.
-    const source = {
-      kind: "github" as const,
-      owner: "acme",
-      repo: "canonical-mismatch",
-    };
-    const res = await install(uid, source);
-    expect(res.statusCode).toBe(202);
-
-    const add = adds.at(-1)!;
-    expect(add.data.pluginId).toBe("acme-corp/real-plugin");
-    const rows = (await db.$client.unsafe(
-      "SELECT plugin_id FROM plugins WHERE user_id = $1",
-      [uid],
-    )) as { plugin_id: string }[];
-    expect(rows.map((row) => row.plugin_id)).toEqual(["acme-corp/real-plugin"]);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      const source = { kind: "zip" as const, url: "https://untrusted.test/plugin.zip" };
+      const res = await install(uid, source);
+      expect(res.statusCode).toBe(202);
+      // No gateway-side egress: the worker resolves the source.
+      expect(fetchSpy).not.toHaveBeenCalled();
+      const add = adds.at(-1)!;
+      expect(add.data.source).toEqual(source);
+      expect(add.data.needsIdentity).toBe(true);
+      expect(add.data.pluginId).toMatch(/^pending\//);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
-  it("paste source resolves to its canonical mcp/<label> id and enqueues", async () => {
+  it("enqueues any schema-valid source; unresolvable sources fail in the worker, not at enqueue", async () => {
+    const uid = testUid("plg-late");
+    await seedTier(uid, "pro");
+    const res = await install(uid, { kind: "github", owner: "missing", repo: "nope" });
+    // HIGH-3: the gateway cannot know the source is unresolvable without
+    // fetching it; the job is queued and the worker terminalizes the row.
+    expect(res.statusCode).toBe(202);
+    expect(adds.at(-1)!.data.needsIdentity).toBe(true);
+    const rows = (await db.$client.unsafe(
+      "SELECT status FROM plugins WHERE user_id = $1",
+      [uid],
+    )) as { status: string }[];
+    expect(rows).toEqual([{ status: "queued" }]);
+  });
+
+  it("paste source is enqueued with a provisional id (identity resolved by the worker)", async () => {
     const uid = testUid("plg-paste");
     await seedTier(uid, "pro");
     const source = {
@@ -273,25 +223,8 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway plugin routes (real postgres)", ()
     };
     const res = await install(uid, source);
     expect(res.statusCode).toBe(202);
-    expect(adds.at(-1)!.data.pluginId).toBe("mcp/my-tools");
-  });
-
-  it("unresolvable source → 400 invalid_source; enqueues nothing and writes no row", async () => {
-    const uid = testUid("plg-unres");
-    await seedTier(uid, "pro");
-    const before = adds.length;
-    const res = await install(uid, { kind: "github", owner: "missing", repo: "nope" });
-    expect(res.statusCode).toBe(400);
-    const body = res.json() as { error: { code: string; message: string } };
-    expect(body.error.code).toBe("invalid_source");
-    expect(body.error.message).toContain("could not be resolved");
-
-    expect(adds.length).toBe(before); // no job
-    const rows = (await db.$client.unsafe(
-      "SELECT id FROM plugins WHERE user_id = $1",
-      [uid],
-    )) as { id: string }[];
-    expect(rows).toEqual([]); // no queued row either
+    expect(adds.at(-1)!.data.pluginId).toMatch(/^pending\//);
+    expect(adds.at(-1)!.data.needsIdentity).toBe(true);
   });
 
   it("DELETE enqueues uninstall; a pro-downgraded FREE user gets priority 2 (tier read at request time)", async () => {
@@ -317,7 +250,9 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway plugin routes (real postgres)", ()
     expect(add.data.mode).toBe("uninstall");
     expect(add.data.installId).toBe(answer.installId);
     expect(add.data.installId).not.toBe(installId); // a NEW transaction id
-    expect(add.data.pluginId).toBe("acme/tools"); // scoped npm name → publisher/name
+    // The row was still provisional (the worker never ran), so the uninstall
+    // job carries that id; an active row would carry its canonical id.
+    expect(add.data.pluginId).toBe(`pending/${installId}`);
     expect(add.data.userId).toBe(uid);
     expect(add.data.source).toBeUndefined();
     expect(add.opts.priority).toBe(2); // free at request time
@@ -412,6 +347,46 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway plugin routes (real postgres)", ()
       headers: authHeaders(uid),
     });
     expect(missing.statusCode).toBe(404);
+  });
+
+  it("LOW-3: an enqueue failure terminalizes the row instead of stranding it queued", async () => {
+    const uid = testUid("plg-enqfail");
+    await seedTier(uid, "pro");
+    const throwing = {
+      ...stubQueues().queues,
+      pluginInstalls: {
+        add: async () => {
+          throw new Error("redis down");
+        },
+      },
+    } as unknown as QueueServices;
+    const app2 = buildGateway({
+      system: stubSystemBus(),
+      db,
+      queues: throwing,
+      verifier: stubVerifier(),
+      tickets: stubTickets(),
+      keys: stubKeys(),
+      mint: stubMint(),
+      events: noopEvents,
+      crypto,
+    });
+    try {
+      const res = await app2.inject({
+        method: "POST",
+        url: "/cloud/v1/plugins/install",
+        headers: authHeaders(uid),
+        payload: { source: { kind: "github", owner: "acme", repo: "boom" } },
+      });
+      expect(res.statusCode).toBe(503);
+      const rows = (await db.$client.unsafe(
+        "SELECT status FROM plugins WHERE user_id = $1",
+        [uid],
+      )) as { status: string }[];
+      expect(rows).toEqual([{ status: "failed" }]);
+    } finally {
+      await app2.close();
+    }
   });
 
   it("install/config on a gateway composed without the queue/crypto → 503 unavailable", async () => {

@@ -171,7 +171,11 @@ async function createCustom(
   if (imported.headers !== undefined && Object.keys(imported.headers).length > 0) {
     secrets.headers = imported.headers;
   }
-  if (imported.oauth !== undefined) secrets.oauth = imported.oauth;
+  if (imported.oauth !== undefined) {
+    // LOW-4: sealed for round-trip fidelity only — the OAuth flow always
+    // performs discovery + DCR and does not consume a static client block.
+    secrets.oauth = imported.oauth;
+  }
 
   let row: McpServerRow;
   try {

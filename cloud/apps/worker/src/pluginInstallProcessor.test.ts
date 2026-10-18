@@ -5,9 +5,12 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Db } from "@ovid/db";
 import type { PluginInstallJob } from "@ovid/queue";
-import type { PluginInstallOutcome } from "@ovid/mcp";
+import type { PluginInstallOutcome, PluginSourceInput } from "@ovid/mcp";
 import {
   createPluginInstallProcessor,
   PLUGIN_INSTALL_OUTCOME_STATUS,
@@ -59,6 +62,19 @@ function fakeRepo(rows: Row[] = []): {
           }
         }
         throw new Error(`no row ${id} for ${uid}`);
+      },
+      async adopt(_db, input) {
+        const provisional = [...byKey.values()].find(
+          (r) => r.id === input.id && r.userId === input.userId,
+        );
+        if (provisional === undefined) return null;
+        if (provisional.pluginId === input.pluginId) {
+          return { id: provisional.id, status: provisional.status };
+        }
+        byKey.delete(`${provisional.userId}/${provisional.pluginId}`);
+        provisional.pluginId = input.pluginId;
+        byKey.set(`${provisional.userId}/${provisional.pluginId}`, provisional);
+        return { id: provisional.id, status: provisional.status };
       },
     },
   };
@@ -244,5 +260,155 @@ describe("createPluginInstallProcessor", () => {
     await expect(process({ data: job({ mode: "uninstall" }) })).resolves.toBeUndefined();
     expect(logged.some((m) => m.includes("uninstall"))).toBe(true);
     expect(rows.get("user-a/acme/demo")!.status).toBe("failed");
+  });
+
+  // -------------------------------------------------------------------------
+  // HIGH-3: worker-side identity resolution + row adoption
+  // -------------------------------------------------------------------------
+
+  async function pasteFixture(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "processor-identity-"));
+    await writeFile(
+      join(dir, "plugin.json"),
+      JSON.stringify({ name: "Demo Tools", author: "mcp", version: "1.2.3" }),
+      "utf8",
+    );
+    return dir;
+  }
+
+  function resolverOf(dir: string) {
+    const discarded: string[] = [];
+    return {
+      discarded,
+      resolver: {
+        async resolve(_input: PluginSourceInput) {
+          return {
+            stagingDir: dir,
+            async discard() {
+              discarded.push(dir);
+            },
+          };
+        },
+      },
+    };
+  }
+
+  it("HIGH-3: needsIdentity resolves the source, adopts the provisional row, and installs the canonical id", async () => {
+    const dir = await pasteFixture();
+    try {
+      const { repo, rows, statuses } = fakeRepo([
+        {
+          id: "install-1",
+          userId: "user-a",
+          pluginId: "pending/install-1",
+          status: "queued",
+        },
+      ]);
+      const seen: PluginInstallJob[] = [];
+      const { resolver, discarded } = resolverOf(dir);
+      const process = createPluginInstallProcessor({
+        db: DB,
+        plugins: repo,
+        resolver,
+        logError: () => {},
+        installer: installerOf({
+          install: async (j) => {
+            seen.push(j);
+            return { status: "active", pluginId: j.pluginId, probeFailures: [] };
+          },
+        }),
+      });
+
+      await process({
+        data: job({ pluginId: "pending/install-1", needsIdentity: true }),
+      });
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.pluginId).toBe("mcp/demo-tools");
+      expect(rows.get("user-a/mcp/demo-tools")!.status).toBe("active");
+      expect(rows.has("user-a/pending/install-1")).toBe(false);
+      expect(statuses).toEqual(["installing", "active"]);
+      expect(discarded).toEqual([dir]); // staging discarded after identity read
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("HIGH-3: a resolution failure terminalizes the provisional row and never calls the installer", async () => {
+    const { repo, rows } = fakeRepo([
+      {
+        id: "install-1",
+        userId: "user-a",
+        pluginId: "pending/install-1",
+        status: "queued",
+      },
+    ]);
+    let called = false;
+    const process = createPluginInstallProcessor({
+      db: DB,
+      plugins: repo,
+      resolver: {
+        async resolve() {
+          throw new Error("zip download failed (500)");
+        },
+      },
+      logError: () => {},
+      installer: installerOf({
+        install: async () => {
+          called = true;
+          return { status: "active", pluginId: "acme/demo", probeFailures: [] };
+        },
+      }),
+    });
+
+    await process({
+      data: job({ pluginId: "pending/install-1", needsIdentity: true }),
+    });
+
+    expect(called).toBe(false);
+    expect(rows.get("user-a/pending/install-1")!.status).toBe("failed");
+  });
+
+  it("HIGH-1: an unsafe/empty resolved version terminalizes the row as failed (never installs)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "processor-badversion-"));
+    try {
+      // No version → adaptNative defaults to "" (the HIGH-1 regression shape).
+      await writeFile(
+        join(dir, "plugin.json"),
+        JSON.stringify({ name: "No Version", author: "mcp" }),
+        "utf8",
+      );
+      const { repo, rows } = fakeRepo([
+        {
+          id: "install-1",
+          userId: "user-a",
+          pluginId: "pending/install-1",
+          status: "queued",
+        },
+      ]);
+      let called = false;
+      const { resolver } = resolverOf(dir);
+      const process = createPluginInstallProcessor({
+        db: DB,
+        plugins: repo,
+        resolver,
+        logError: () => {},
+        installer: installerOf({
+          install: async () => {
+            called = true;
+            return { status: "active", pluginId: "mcp/no-version", probeFailures: [] };
+          },
+        }),
+      });
+
+      await process({
+        data: job({ pluginId: "pending/install-1", needsIdentity: true }),
+      });
+
+      expect(called).toBe(false);
+      expect(rows.get("user-a/pending/install-1")!.status).toBe("failed");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

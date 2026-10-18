@@ -501,9 +501,20 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       "[worker] plugin-installs worker not started — OVID_MASTER_KEY is not set",
     );
   } else {
+    // MEDIUM-2: the contribution registry is in-memory; rebuild it from the
+    // persisted active/degraded rows so a restart does not take every
+    // installed plugin dark until each user reinstalls.
+    const rehydrated = await mcpRuntime.installer.rehydrate();
+    console.log(`[worker] rehydrated ${rehydrated} installed plugin(s)`);
+
     const processPluginInstall = createPluginInstallProcessor({
       db,
       installer: mcpRuntime.installer,
+      // HIGH-3: gateway-enqueued jobs carry a provisional id; the worker
+      // resolves the untrusted source and adopts the row onto the canonical
+      // id. The resolver is the same SSRF-guarded instance the installer
+      // uses.
+      resolver: mcpRuntime.resolver,
     });
     pluginInstallsWorker = createPluginInstallsWorker(
       { url: cfg.redisQUrl },

@@ -88,6 +88,17 @@ export interface SourceResolver {
  */
 export const PASTE_PLUGIN_PUBLISHER = "mcp";
 
+/**
+ * Version emitted for a pasted config. A paste has no version of its own;
+ * `0.0.0` is the documented placeholder the agent enqueue path already uses
+ * (`mcpTools.ts` row upsert) and satisfies the installer's SAFE_VERSION
+ * (`^[A-Za-z0-9][A-Za-z0-9._-]*$`) — the empty string does NOT, which made
+ * every paste install fail with `invalid_plugin`. Content integrity is bound
+ * by the manifest + contribution-content digest, not by this tag, so a fixed
+ * placeholder is safe across re-pastes.
+ */
+export const PASTE_PLUGIN_VERSION = "0.0.0";
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -592,6 +603,10 @@ export function createSourceResolver(deps: SourceResolverDeps = {}): SourceResol
         // carry no author of their own, so use the documented generic-MCP
         // publisher (Dart GenericMcpAdapter parity: `mcp/<sourceId>`).
         author: PASTE_PLUGIN_PUBLISHER,
+        // Required by the installer's SAFE_VERSION gate (HIGH-1): a paste has
+        // no version of its own, so emit the documented placeholder rather
+        // than an empty string the installer rejects.
+        version: PASTE_PLUGIN_VERSION,
         mcpServers: servers,
       },
       null,

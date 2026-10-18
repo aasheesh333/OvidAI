@@ -65,6 +65,8 @@ export {
   MAX_METADATA_BYTES,
   MAX_PASTE_BYTES,
   MAX_PAYLOAD_BYTES,
+  PASTE_PLUGIN_PUBLISHER,
+  PASTE_PLUGIN_VERSION,
   type PluginProvenance,
   type ResolvedSource,
   type SourceResolver,
@@ -93,6 +95,7 @@ export {
   canonicalContributionId,
   canonicalHookEvent,
   isCloudHookEvent,
+  pluginContentDigest,
   pluginManifestDigest,
   type CloudHookEvent,
   type NormalizedPluginManifest,
@@ -126,6 +129,8 @@ export {
 // workspace dependency can be declared).
 export {
   createPluginInstaller,
+  isSafePluginId,
+  isSafePluginVersion,
   pluginDir,
   pluginStagingDir,
   NPM_INSTALL_TIMEOUT_MS,

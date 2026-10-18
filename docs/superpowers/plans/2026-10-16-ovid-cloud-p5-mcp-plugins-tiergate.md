@@ -998,3 +998,23 @@ export function createCatalogTools(deps: CatalogToolDeps): McpAgentTool[];
 - Descriptor port volume (16 services × 2–4 tools) is mechanical but large; T6 is the longest task — a reviewer may split descriptor data from engine if the diff is unwieldy (engine tests gate correctness either way).
 - `mcp_oauth_flows` on Postgres (not Redis) is deliberate: one-use atomicity via conditional UPDATE, durable across gateway restarts mid-flow; TTL cleanup piggybacks on `consume` (expired rows ignored; a maintenance sweep is P10's).
 - The system channel's Redis pub/sub on redis-q adds no eviction risk (pub/sub is not stored), but every attached uid holds one subscriber connection — the hub shares one per uid across sockets (pinned in T10).
+
+---
+
+## AMENDMENT (P5 final whole-branch review, MEDIUM-4) — `@ovid/plugins` landed location
+
+The plan's Architecture/Goal and T12/T14 file lists name a second workspace
+package, `@ovid/plugins`. It was NOT split out: the wave merger landed the
+source resolver, archive validation, manifest normalization/adapters,
+capability grants, contribution registry and install transaction under
+`cloud/packages/mcp/src/plugins/**`, re-exported from the `@ovid/mcp` barrel
+(`cloud/packages/mcp/src/index.ts`). The shared wire contract correctly lives
+in `cloud/packages/shared/src/plugins.ts`.
+
+Accepted amendment: the deliverable is satisfied at the landed location.
+`pnpm --filter @ovid/plugins build|test` is NOT a valid gate for this wave
+(it matches no project); CI must filter `@ovid/mcp` instead. The split
+remains a wave-merger carry (it is blocked on converting `@ovid/mcp`'s
+computed dynamic `@ovid/db` imports into a declared workspace dependency,
+which would create a cycle if the plugin tree moved to its own package
+before that conversion).
