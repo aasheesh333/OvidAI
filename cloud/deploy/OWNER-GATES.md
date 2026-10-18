@@ -115,7 +115,7 @@ window (IB)?
 | **IB — installed base** | `/cloud/*` is additive; Python routes stay live; a forced-update wave runs at `T + ____ weeks`. | Requires a compat-matrix test row (old-build routes healthy while both stacks are live) added to `cloud/scripts/acceptance.sh` or run as a documented manual gate **before** R5-IB. That row is not in the landed script today. |
 | **Defer** | No branch chosen. | Blocks R3/R5/R6. R0–R2 can still proceed; R4's content is branch-independent but it still follows R3. |
 
-`Answer: ______`  (CB / IB / defer; if IB, forced-update wave T + ____ weeks)
+`Answer: **CB — clean break**` (founder, 2026-10-18). ~7 dev users and billing was never live; no installed-base migration. The min-version gate is still NOT shipped, so enforcement waits for that hook — the decision is the branch, not the mechanism.
 
 ### Q2 — launch point / Play deadline
 
@@ -137,7 +137,7 @@ internal and closed-track durations.
 | Play deadline (hard date, if any) | ______ |
 | Crash-rate abort threshold | ______ % |
 
-`Answer: ______`  (record the five inputs above; no store submission happens without this)
+`Answer: **same-machine staging → direct cutover**` (founder, 2026-10-18). The five rollout inputs (internal-track duration, closed-track size, first-submission date, Play deadline, crash threshold) were NOT supplied and remain required before R5.
 
 ### Q3 — staging story
 
@@ -149,7 +149,7 @@ internal and closed-track durations.
 | **SM — same machine** | Staging uses the loopback-only ports on this VPS: gateway `127.0.0.1:18082`, Postgres 15432, redis-q 16379, mint 18091/18092, mock LiteLLM `0.0.0.0:14000`. | This is what Tasks 1–12 actually used. It requires a maintenance window: the 100-user run competes for the same 8 cores and will starve concurrent work. `staging.sh live-check` is the live-unaffected guard. |
 | **2M — second machine** | The compose file is location-transparent; `.env.staging` URLs and the nftables uid-range install change. | Before trusting it, run the Task 5 smoke (`load --profile smoke10`) and the Task 6 chaos `all` scenario set **once on the second machine**, and record the reports. No production Caddy/DNS change either way. Costs a second host. |
 
-`Answer: ______`  (SM / 2M; if 2M, host: ______)
+`Answer: **SM — same machine**` (founder, 2026-10-18). Smoke + load run on this VPS under container/systemd isolation, then Caddy flip. No second host.
 
 ### Q6 — collaboration v2
 
@@ -161,7 +161,7 @@ internal and closed-track durations.
 | **B — cut entirely** | No collab tables; remove `/s/{token}/{invite}` and the invite parameter; keep the `collab_message`/`collab_participant` report enum values for client compatibility; remove the `server/collaboration` decommission line (never deployed). | One commit; less surface. The shipped client currently gates collab execution OFF and shows a read-only message. |
 | **Defer / flag-off** | Keep the shipped default: collab execution is flag-gated OFF (`Distribution.cloudExecution`), read-only message. Reversible in P8 Task 20. | P9 Conditional Section A must not dispatch. Users see read-only collaboration. |
 
-`Answer: ______`  (A / B / defer)
+`Answer: **defer**` (founder, 2026-10-18) — collaboration v2 is post-launch; single-user workspace stability first. Collab execution stays flag-OFF.
 
 ### Q7 — Dart/Flutter SDK in cloud workspaces
 
@@ -174,7 +174,7 @@ can run those toolchains in cloud workspaces?
 | **Exclude (current state)** | The pinned rootfs has Node, pnpm, uv/Python, git and basic tools; `cloud/deploy/rootfs/versions.env` contains no Dart/Flutter. | Users cannot run `dart`/`flutter` in cloud workspaces. No image growth. |
 | **Add later / on demand** | Separate opt-in layer or a later rootfs revision. | More work later; does not block launch. |
 
-`Answer: ______`  (include / exclude / add later)
+`Answer: **exclude**` (founder, 2026-10-18). No Dart/Flutter SDK in the rootfs. Heavy native builds (`flutter build`, `dart compile`) stay BLOCKED; a read-only analysis-only mount may be reconsidered later, never a writable toolchain.
 
 ### Q8 — warm-disk budget
 
@@ -187,7 +187,7 @@ the considered 12, or something larger?
 | **12 GB** | 24 admitted Free sessions × 500 MB = 12 GB, so every admitted Free session can stay warm; LRU then triggers mainly for Pro (2 GB) workspaces or disk pressure. | Less churn. Fits the 32 GB `/workspaces` volume and the 193 GB disk with the documented headroom; coordinate with `BACKUP_MIN_FREE_MB=2048` and the 80 % disk alert. |
 | **16 GB+** | Larger warm cache. | Crowds per-user stores, backups, and the live production stack sharing the box. Not recommended by the P7 budget math. |
 
-`Answer: ______`  (8 / 12 / other)
+`Answer: **per-user XFS quota 256–512 MB**` (founder, 2026-10-18), on the reasoning that pnpm/uv caches are hardlinked and inactive workspaces zstd-evict to R2. Applied to Free (`OVID_WORKSPACE_QUOTA_MB=500`). **Pro is still 2048 MB** — the directive names one range, and lowering Pro's quota contradicts the paid "extended storage" promise; needs an explicit confirm. `OVID_MAX_WARM_GB` stays 8.
 
 ### Decision log
 
@@ -196,12 +196,17 @@ Q6/Q7/Q8 to the same log.
 
 | Date | Gate | Answer | Signed by |
 |---|---|---|---|
-| | Q1 | | |
-| | Q2 | | |
-| | Q3 | | |
-| | Q6 | | |
-| | Q7 | | |
-| | Q8 | | |
+| 2026-10-18 | Q1 | CB — clean break | founder |
+| 2026-10-18 | Q2 | same-machine staging → direct cutover (five rollout inputs still required) | founder |
+| 2026-10-18 | Q3 | SM — same machine | founder |
+| 2026-10-18 | Q6 | defer (collab v2 post-launch) | founder |
+| 2026-10-18 | Q7 | exclude Dart/Flutter SDK; heavy builds stay blocked | founder |
+| 2026-10-18 | Q8 | per-user XFS quota 256–512 MB (Free 500 applied; Pro 2048 needs confirm); warm cap 8 | founder |
+| 2026-10-18 | Browser per-host consent (gate 17) | auto-allow read/navigation; confirm only on sensitive auth/payment submits | founder |
+| 2026-10-18 | Event-log retention | Redis 24 h; R2 archive 30 days | founder |
+| 2026-10-18 | Capability toggles | Free = built-in singleton MCPs only; Paid = custom MCPs + extended concurrency | founder |
+| 2026-10-18 | Browser memory / concurrency | shared Chromium + isolated contexts; browser pool 6–8 GB; target 800–1000 concurrent via 80% background/Lightpanda + 20% live browser | founder |
+| 2026-10-18 | R0 | enable now | founder |
 | | R0 blocking state confirmed | | |
 
 **Owner signature:** ______________________________  **Date:** ______________
@@ -628,7 +633,7 @@ The on-device client enforced a USER-CONSENT boundary the server does not have:
 | **A. Re-implement server-side** | The session records its approved host set; a page-acting tool whose live host is not in it raises an approval through the existing P3 approvals machinery | Restores the on-device guarantee. Costs a per-tool host probe and an approval round-trip on host change. |
 | **B. Accept egress-only** | The tool call itself is the user's consent boundary; nftables + SSRF are the safety net | Simpler and arguably fine now that the browser is server-side and the user watches tool calls. But it IS a reduction from the on-device build — say so in the spec rather than leaving it implicit. |
 
-`Answer: ______` (A / B)
+`Answer: **neither — a third policy**` (founder, 2026-10-18): auto-allow standard read/navigation; require explicit user confirmation/takeover only on sensitive auth/payment submits. This is narrower than A (not every host) and stronger than B (sensitive actions are gated). Implementation note: the server has no per-host grant concept today, so this lands as an approval on page-acting tools whose target is a login/payment form — a P3 approval, not a host allowlist.
 
 ---
 
@@ -1029,7 +1034,7 @@ disagree, and only you can pick which is the product requirement:
 | **B. Implement the spec** | Change `DEFAULT_MAX_LEN` to a 24 h / 50 MB policy | Needs a size- or age-based trim (not a fixed count) and a re-derived redis-q memory budget: at 50 MB × concurrent sessions the 1400 MB `noeviction` ceiling is the binding constraint. |
 | **C. Defer** | Ship A, revisit after the 100-user run produces real per-session event counts | Reasonable if the load run will answer it empirically. |
 
-`Answer: ______` (A / B / C — and if B, the memory budget owner)
+`Answer: **B, bounded by time and size**` (founder, 2026-10-18): active Redis stream TTL **24 h**, archived compressed logs in R2 **30 days**. This is the spec's 24 h policy with an explicit R2 archive tier; the redis-q memory budget must be re-derived from real per-session counts (the 100-user run produces them).
 
 Manual trim (only if a stream family is at the memory ceiling; this mutates
 live data and must use the shipped retention):
