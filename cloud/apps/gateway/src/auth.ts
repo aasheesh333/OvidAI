@@ -34,6 +34,14 @@ declare module "fastify" {
 }
 
 const BEARER_PREFIX = "Bearer ";
+
+/** Firebase's error code + message, for the server log only (never the client). */
+function describeAuthError(err: unknown): string {
+  const e = err as { code?: unknown; message?: unknown; errorInfo?: { code?: unknown } };
+  const code = e?.errorInfo?.code ?? e?.code;
+  const message = typeof e?.message === "string" ? e.message : String(err);
+  return code === undefined ? message : `${String(code)}: ${message}`;
+}
 const APP_CHECK_HEADER = "x-firebase-appcheck";
 
 // One generic envelope for every auth failure — missing header, bad scheme,
@@ -68,13 +76,21 @@ export function createFirebaseVerifier(app: App): Verifier {
     }
     services ??= { auth: getAuth(app), appCheck: getAppCheck(app) };
     let decoded: DecodedIdToken;
+    // The CLIENT always receives the one generic envelope (alg/kid/expiry
+    // details are an oracle we must not leak). The SERVER log, however, must
+    // say WHICH half failed and why: an operator debugging "Missing or
+    // invalid credentials" otherwise cannot tell a stale client from an
+    // App Check misconfiguration from an IAM problem. These messages carry
+    // only Firebase's error code/message — never the token.
     try {
       decoded = await services.auth.verifyIdToken(idToken);
+    } catch (err) {
+      throw new UnauthenticatedError(`id token rejected: ${describeAuthError(err)}`);
+    }
+    try {
       await services.appCheck.verifyToken(appCheckToken);
-    } catch {
-      // Swallow the verification error on purpose: alg/kid/expiry details are
-      // an oracle we must not leak. The hook turns this into the generic 401.
-      throw new UnauthenticatedError("token verification failed");
+    } catch (err) {
+      throw new UnauthenticatedError(`app check rejected: ${describeAuthError(err)}`);
     }
     return {
       uid: decoded.uid,
