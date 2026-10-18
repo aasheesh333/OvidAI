@@ -396,7 +396,7 @@ export const workerKillScenario: ChaosScenario<Prepared> = {
         : evaluateWorkerProcessIdentity(readProcessIdentity(workerPid));
 
     // Arm BEFORE sending: the run's first LLM request snapshots this gate.
-    const gate = ctx.mockArm({
+    const gate = await ctx.mockArm({
       deltas: ["kill-held-a", "kill-held-b", "kill-held-c"],
       chunkDelayMs: 0,
       gateAfterDeltas: 1,
@@ -638,7 +638,7 @@ export const workerKillScenario: ChaosScenario<Prepared> = {
     // A fresh run after the restart must complete normally: the recovery is
     // not just "the sweeper wrote a row".
     try {
-      ctx.mockArm({
+      await ctx.mockArm({
         deltas: ["fresh-ok"],
         chunkDelayMs: 0,
         gateAfterDeltas: null,

@@ -34,8 +34,11 @@ describe("redis-q queue prefix matches the running stack (H2)", () => {
       /createQueues\(\{ url: cfg\.redisQUrl \}, \{ withPluginInstalls: true \}\)/,
     );
     expect(worker).toMatch(/createQueues\(\s*\{ url: cfg\.redisQUrl \},/);
+    // The call may carry trailing OPTIONS (the concurrency unlock added a
+    // per-run `{ concurrency }` third argument); the shape that matters is
+    // the connection object plus the processor, with no `prefix`.
     expect(worker).toMatch(
-      /createAgentRunsWorker\(\{ url: cfg\.redisQUrl \}, processor\)/,
+      /createAgentRunsWorker\(\s*\{ url: cfg\.redisQUrl \},\s*processor,/,
     );
 
     // A `prefix` in any of these calls would move jobs off BullMQ's default

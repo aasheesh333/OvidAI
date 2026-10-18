@@ -205,7 +205,7 @@ GATE 3 staging-isolation-and-bring-up [${gate3_tag}]
 
 GATE 4 full-suite-and-security [REQUIRED]
   cwd: $CLOUD_DIR
-  command: pnpm -r test
+  command: pnpm -r --workspace-concurrency=1 test   (serial: db suites DROP the schema)
   env: TEST_DATABASE_URL=<staging DATABASE_URL>
        TEST_REDIS_URL=<staging REDIS_Q_URL>
        OVID_ROOTFS=${OVID_ROOTFS:-/opt/ovid-rootfs/current}
@@ -466,7 +466,42 @@ gate4_tests() {
   export OVID_TEST_QUEUE_PREFIX="${OVID_TEST_QUEUE_PREFIX:-ovid-accept-$DATE_UTC-$$}"
   export OVID_ROOTFS="${OVID_ROOTFS:-/opt/ovid-rootfs/current}"
   export OVID_STAGING_NFT_TABLE="${OVID_STAGING_NFT_TABLE:-sandbox_egress_staging}"
-  pnpm -r test
+
+  # A DEDICATED Redis for the suite while the staging worker is live.
+  # The worker's internal terminal machinery PSUBSCRIBEs `pty:ctl:*` on the
+  # staging Redis and answers ANY ptyId (a random uuid is no protection), so
+  # the gateway's pty-bridge tests receive foreign replies — "unexpected reply
+  # for open", "terminal no longer exists". Pub/sub is NOT db-scoped, so only
+  # a separate server isolates them. In CI (--quick, no staging worker) the
+  # caller's TEST_REDIS_URL is used unchanged.
+  local test_redis="" test_redis_port=""
+  if [[ -n "${STAGING_WORKER_PIDFILE:-}" && -r "${STAGING_WORKER_PIDFILE:-/nonexistent}" ]] \
+     && kill -0 "$(cat "$STAGING_WORKER_PIDFILE" 2>/dev/null || echo 0)" 2>/dev/null \
+     && command -v docker >/dev/null 2>&1; then
+    test_redis="ovid-accept-redis-$$"
+    cleanup_test_redis() { docker rm -f "$test_redis" >/dev/null 2>&1 || true; }
+    trap cleanup_test_redis EXIT
+    if docker run -d --name "$test_redis" -p 127.0.0.1::6379 redis:7-alpine >/dev/null 2>&1; then
+      for _ in $(seq 1 100); do
+        if docker exec "$test_redis" redis-cli ping >/dev/null 2>&1; then break; fi
+        sleep 0.1
+      done
+      test_redis_port="$(docker port "$test_redis" 6379/tcp | head -n 1 | sed 's/.*://')"
+      if [[ -n "$test_redis_port" ]]; then
+        export TEST_REDIS_URL="redis://127.0.0.1:$test_redis_port"
+        echo "gate 4: dedicated test Redis on 127.0.0.1:$test_redis_port"
+      fi
+    else
+      echo "gate 4: WARN — could not start the dedicated test Redis; using $TEST_REDIS_URL" >&2
+      cleanup_test_redis
+    fi
+  fi
+
+  # SERIAL on purpose: packages/db's suites DROP and re-migrate the shared
+  # schema, so a parallel workspace run races packages/mcp and packages/storage
+  # ("relation messages already exists" / "plugins does not exist"). The whole
+  # suite is under a minute, so serial costs little and is deterministic.
+  pnpm -r --workspace-concurrency=1 test
 }
 
 SECURITY_SUMMARY="<not run>"

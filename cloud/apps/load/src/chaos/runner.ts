@@ -86,7 +86,8 @@ export interface StagingHandles {
 export interface ChaosContext {
   staging: StagingHandles;
   env: Record<string, string>;
-  mockArm(script: MockLlmScript): { release(): void };
+  /** Arms the NEXT-request script; await before sending the run. */
+  mockArm(script: MockLlmScript): Promise<{ release(): void }>;
   liveCheckPoint(): Promise<LiveSnapshot>;
   report: ReportWriter;
 }

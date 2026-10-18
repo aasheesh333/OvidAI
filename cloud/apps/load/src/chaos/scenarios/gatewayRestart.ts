@@ -266,7 +266,7 @@ export const gatewayRestartScenario: ChaosScenario<Prepared> = {
     const tag = `gateway-${Date.now().toString(36)}`;
 
     // Arm BEFORE sending: every run's first LLM request snapshots this gate.
-    const gate = ctx.mockArm({
+    const gate = await ctx.mockArm({
       deltas: ["held-a", "held-b", "held-c"],
       chunkDelayMs: 0,
       gateAfterDeltas: 1,

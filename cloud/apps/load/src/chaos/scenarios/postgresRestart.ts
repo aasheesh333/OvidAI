@@ -151,7 +151,7 @@ export const postgresRestartScenario: ChaosScenario<Prepared> = {
     const databaseUrl = ctx.env.STAGING_DATABASE_URL ?? "";
     const tag = `postgres-${Date.now().toString(36)}`;
 
-    const gate = ctx.mockArm({
+    const gate = await ctx.mockArm({
       deltas: ["db-held-a", "db-held-b"],
       chunkDelayMs: 0,
       gateAfterDeltas: 1,

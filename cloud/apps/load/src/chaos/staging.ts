@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
-import { createConnection } from "node:net";
 import { dirname, resolve } from "node:path";
 import {
   captureLiveSnapshot,
@@ -13,19 +12,22 @@ import {
   type ScenarioResult,
   type StagingHandles,
 } from "./runner.js";
-import { startMockLlmServer, type MockLlmServer } from "../mockServer.js";
+import type { MockLlmScript } from "../mockServer.js";
 
 /**
  * The staging implementation of the chaos handles.
  *
  * Everything mutating goes through `cloud/scripts/staging.sh` (Task 1's
  * supported entry point) or the staging compose project; the chaos runner
- * never composes the stack itself. The one exception is the gated mock: the
- * long-running `staging.sh mock-start` process has no control channel, so
- * when a scenario needs `mockArm()` this module stops that process (the
- * existing `mock-stop` subcommand) and runs the SAME `startMockLlmServer` in
- * this process on 0.0.0.0:14000, where `arm()` is directly reachable. On
- * close the displaced staging mock is restored with `mock-start`.
+ * never composes the stack itself.
+ *
+ * The gated mock is driven over its DOCUMENTED HTTP control surface
+ * (`POST /_control/arm`, `POST /_control/release`) rather than by displacing
+ * the process. Both staging shapes — the compose `mock-llm` service and the
+ * `staging.sh mock-start` host process — run the same server and expose it.
+ * Displacing the service (the previous approach) broke key provisioning: the
+ * mint reaches LiteLLM at `mock-llm:14000` inside the compose network, so a
+ * stopped service made every NEW account fail with `key_not_minted`.
  */
 
 export interface FileReportWriterOptions {
@@ -125,32 +127,6 @@ function requirePidfileSync(path: string): string | null {
   }
 }
 
-function portInUse(port: number): Promise<boolean> {
-  return new Promise((resolvePromise) => {
-    const socket = createConnection({ host: "127.0.0.1", port });
-    const done = (inUse: boolean): void => {
-      socket.destroy();
-      resolvePromise(inUse);
-    };
-    socket.setTimeout(500);
-    socket.once("connect", () => done(true));
-    socket.once("timeout", () => done(false));
-    socket.once("error", () => done(false));
-  });
-}
-
-async function waitForPortFree(port: number, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!(await portInUse(port))) return;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
-  }
-  throw new Error(
-    `chaos: port ${port} is still in use — cannot start the controllable gated mock ` +
-      "(stop the process holding it, or run `staging.sh mock-stop`)",
-  );
-}
-
 export interface StagingContextOptions {
   scriptPath?: string;
   /** Defaults to `<cloud>/deploy/.env.staging` (staging.sh's own default). */
@@ -160,8 +136,8 @@ export interface StagingContextOptions {
   reportPath?: string;
   reportHeader?: string;
   captureLive?: () => Promise<LiveSnapshot>;
-  mockPort?: number;
-  mockBindHost?: string;
+  /** Base URL of the staging mock; defaults to STAGING_MOCK_LLM_URL. */
+  mockBaseUrl?: string;
 }
 
 export interface StagingContext extends ChaosContext {
@@ -176,8 +152,6 @@ export async function createStagingContext(
   const envFile = opts.envFile ?? process.env.STAGING_ENV_FILE ?? resolve(cloudDir, "deploy/.env.staging");
   const composeFile =
     opts.composeFile ?? resolve(cloudDir, "deploy/docker-compose.staging.yml");
-  const mockPort = opts.mockPort ?? 14000;
-  const mockBindHost = opts.mockBindHost ?? "0.0.0.0";
 
   const env = parseEnv(await execText("bash", [script, "env"]));
   for (const required of ["STAGING_GATEWAY_URL", "STAGING_REDIS_Q_URL"]) {
@@ -239,65 +213,56 @@ export async function createStagingContext(
     },
   };
 
-  let mock: MockLlmServer | undefined;
-  let displacedStagingMock = false;
   let closed = false;
+  // The mock is armed over HTTP; nothing here owns or displaces it.
+  const mockBaseUrl = (
+    opts.mockBaseUrl ??
+    env.STAGING_MOCK_LLM_URL ??
+    "http://127.0.0.1:14000"
+  ).replace(/\/+$/, "");
 
-  async function restoreStagingMock(): Promise<void> {
-    if (!displacedStagingMock) return;
-    displacedStagingMock = false;
-    await execText("bash", [script, "mock-start"]).catch(() => {});
-  }
-
-  async function ensureMock(): Promise<MockLlmServer> {
-    if (mock !== undefined) return mock;
-    // The staging mock started by `staging.sh mock-start` has no arm()
-    // channel. Stop it (existing subcommand) and own the port ourselves.
-    displacedStagingMock = pidAlive(mockPidfile);
-    try {
-      await execText("bash", [script, "mock-stop"]);
-    } catch {
-      // no pidfile / already stopped — the port check below decides
+  /**
+   * Arm the next-request script through the mock's control surface. ASYNC on
+   * purpose: the caller must await it before sending the run, because the
+   * run's first LLM request snapshots the armed script (never a race).
+   */
+  async function mockArm(script_: MockLlmScript): Promise<{ release(): void }> {
+    const res = await fetch(`${mockBaseUrl}/_control/arm`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(script_),
+    });
+    if (!res.ok) {
+      throw new Error(`chaos: mock arm failed (HTTP ${res.status})`);
     }
-    try {
-      await waitForPortFree(mockPort, 10_000);
-      mock = await startMockLlmServer({ port: mockPort, bindHost: mockBindHost });
-      return mock;
-    } catch (err) {
-      // M7: never leave staging's own mock stopped because our replacement
-      // could not start. The context is never returned in this path, so
-      // close() would not run.
-      await restoreStagingMock();
-      throw err;
-    }
+    const body = (await res.json()) as { gateId?: unknown };
+    const gateId = typeof body.gateId === "string" ? body.gateId : null;
+    if (gateId === null) throw new Error("chaos: mock arm returned no gateId");
+    return {
+      release() {
+        // Fire-and-forget: every scenario waits on the RUN's observable
+        // progress after releasing, so a release landing a few ms late
+        // cannot change an assertion (and a failed release just leaves the
+        // gate armed until the next scenario arms again).
+        void fetch(`${mockBaseUrl}/_control/release`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ gateId }),
+        }).catch(() => {});
+      },
+    };
   }
-
-  // Start eagerly: `mockArm` is synchronous by contract, and a gated run's
-  // first LLM request must observe the armed script (never a race).
-  await ensureMock();
 
   return {
     staging,
     env,
-    mockArm(script_) {
-      if (mock === undefined) {
-        throw new Error("chaos: gated mock is not running");
-      }
-      return mock.arm(script_);
-    },
+    mockArm,
     liveCheckPoint: opts.captureLive ?? (() => captureLiveSnapshot()),
     report,
     async close() {
       // Idempotent: the CLI's finally and a SIGINT handler may both call it.
-      if (closed) return;
+      // Nothing to restore: the staging mock was never displaced.
       closed = true;
-      if (mock !== undefined) {
-        await mock.close().catch(() => {});
-        mock = undefined;
-      }
-      // Restore the staging stack's own mock for later gates/runs, whether
-      // close was reached normally or from an exception path.
-      await restoreStagingMock();
     },
   };
 }

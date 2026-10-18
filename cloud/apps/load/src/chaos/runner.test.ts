@@ -74,7 +74,7 @@ function fakeContext(snapshots: LiveSnapshot[] = []): {
   const ctx: ChaosContext = {
     staging: fakeStaging(),
     env: {},
-    mockArm: () => ({ release: () => {} }),
+    mockArm: async () => ({ release: () => {} }),
     async liveCheckPoint() {
       const snapshot = snapshots[Math.min(index, snapshots.length - 1)] ?? healthySnapshot();
       index += 1;

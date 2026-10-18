@@ -99,5 +99,7 @@ jobs:
       # the deploy path runs before executing the tests.
       - name: Migrate the test database
         run: node packages/db/dist/migrate-cli.js "$TEST_DATABASE_URL"
+      # SERIAL: packages/db's suites DROP and re-migrate the shared schema, so
+      # a parallel workspace run races packages/mcp/storage on the same DB.
       - name: Test
-        run: pnpm -r test
+        run: pnpm -r --workspace-concurrency=1 test

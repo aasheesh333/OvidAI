@@ -42,7 +42,10 @@ if [[ -z "${OVID_ROOTFS:-}" || ! -d "$OVID_ROOTFS" ]]; then
 fi
 
 UID_BASE="${OVID_SANDBOX_UID_BASE:-200000}"
-SCRATCH_UID=$((UID_BASE + 777))
+# MUST be exported: the node harness reads it from the environment, and a
+# plain shell variable made Number(undefined) → NaN → RangeError, so this gate
+# had never actually run a single check.
+export SCRATCH_UID=$((UID_BASE + 777))
 
 # One node process owns the jail for all checks; it prints one line per check
 # so bash can score them without re-parsing node output.
