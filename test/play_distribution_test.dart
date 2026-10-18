@@ -1,7 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/distribution.dart';
 
 /// Google Play build gates (docs/play/PLAY_COMPLIANCE_AUDIT.md).
@@ -13,7 +13,7 @@ void main() {
       Distribution.playOverrideForTest = play;
       expect(Distribution.controlModeAvailable, isFalse);
       expect(Distribution.onDeviceSandboxAvailable, isFalse);
-      expect(modeOptionsForPicker(), isNot(contains(AgentMode.control)));
+      expect(AgentMode.values.map((m) => m.name), isNot(contains('control')));
       expect(modeOptionsForPicker(), contains(AgentMode.auto));
     }
   });

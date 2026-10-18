@@ -9,7 +9,6 @@ import '../core/firebase_service.dart';
 import '../core/session_history_store.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
-import '../core/agent_service.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
 import '../core/cloud/cloud_session_store.dart';
@@ -76,11 +75,9 @@ class _SessionRowKey extends ValueKey<String> {
   const _SessionRowKey(super.value);
 }
 
-/// P8 Task 10 — the sidebar's dual-path binding (the same pattern
-/// chat_screen uses): the thin client reads busy/title state off the cloud
-/// facade, the default build off `AgentService.I`. Both arms stay compiled.
-AgentSurface get _agent =>
-    Distribution.cloudExecution ? CloudAgentFacade.I : AgentService.I;
+/// P8 Task 19 — the facade is the only agent implementation, so the sidebar
+/// reads busy/title state straight off it.
+AgentSurface get _agent => CloudAgentFacade.I;
 
 /// The sidebar's list state: root-session rows, most recent activity first
 /// (F-046), plus the active id.
@@ -95,7 +92,7 @@ class SidebarSessions {
 /// Narrow view of [AppState] for the session list. It recomputes the row
 /// summaries on each [AppState] notification but only notifies its own
 /// listeners when membership, order, a title/model/icon or the active chat
-/// changed. Busy dots are per row ([AgentService.busyListenable]).
+/// changed. Busy dots are per row ([CloudAgentFacade.busyListenable]).
 class SidebarSessionsNotifier extends ValueNotifier<SidebarSessions> {
   SidebarSessionsNotifier() : super(_compute()) {
     AppState.I.addListener(sync);

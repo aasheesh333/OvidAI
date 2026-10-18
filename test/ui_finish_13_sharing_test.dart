@@ -10,7 +10,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/cloud_usage_store.dart';
 import 'package:ovid_ai/core/conversation_share_service.dart';
 import 'package:ovid_ai/core/github_service.dart';
@@ -504,7 +503,6 @@ void main() {
     Aether.dark = dark;
     AppState.resetTestInstance();
     final app = AppState.createForTest();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     OvidCloudService.idTokenOverrideForTest = () async => 'fixture';
     var requests = 0;
     OvidCloudService.httpClientFactoryForTest = () => MockClient((_) async {
@@ -516,7 +514,6 @@ void main() {
       store.release();
       OvidCloudService.idTokenOverrideForTest = null;
       OvidCloudService.httpClientFactoryForTest = null;
-      AgentService.I.debugPauseScheduleTimerForTest(false);
       AppState.resetTestInstance();
     });
     await tester.pumpWidget(_host(CloudUsageStatus(store: store), layout.$2));

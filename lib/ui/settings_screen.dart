@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import '../core/agent_service.dart';
 import '../core/distribution.dart';
 import '../core/cloud/byok_client.dart';
 import '../core/app_info.dart';
@@ -1427,20 +1426,19 @@ class _ContextModelScreen extends StatelessWidget {
           final model = s?.model ?? '';
           // Model window (what "Auto" means) vs the window compaction really
           // uses: the override only ever shrinks it (min(override, model)).
-          final autoWindow = AgentService.contextWindowFor(
+          final autoWindow = ModelLimits.contextWindowFor(
             model,
             s?.providerId,
           );
-          final effectiveWindow = s == null
-              ? AgentService.effectiveContextWindow(
-                  app.contextWindowOverride,
-                  autoWindow,
-                )
-              : AgentService.contextWindowForSession(s);
-          final overrideApplies = s == null
-              ? app.contextWindowOverride > 0 &&
-                    app.contextWindowOverride < autoWindow
-              : AgentService.contextOverrideAppliesTo(s);
+          final sessionWindow = s == null
+              ? autoWindow
+              : ModelLimits.contextWindowFor(s.model, s.providerId);
+          final effectiveWindow = ModelLimits.effectiveContextWindow(
+            app.contextWindowOverride,
+            sessionWindow,
+          );
+          final overrideApplies = app.contextWindowOverride > 0 &&
+              app.contextWindowOverride < sessionWindow;
           final overrideTooBig = app.contextWindowOverride > autoWindow;
           final measuredLimits = ModelLimits.label(model, s?.providerId);
           final limitSource = measuredLimits == null

@@ -25,6 +25,18 @@ String _trim(double v) {
   return s.endsWith('.0') ? s.substring(0, s.length - 2) : s;
 }
 
+/// Boundary-aware truncation that never strands a half-cut character or a
+/// dangling ellipsis inside a word. Returns text no longer than [max].
+String cleanTruncate(String text, int max) {
+  if (text.length <= max) return text;
+  final cut = text.substring(0, max);
+  // Avoid cutting inside a surrogate pair.
+  final safe = cut.codeUnits.last >= 0xD800 && cut.codeUnits.last <= 0xDBFF
+      ? cut.substring(0, cut.length - 1)
+      : cut;
+  return '$safe…';
+}
+
 /// Compact human-readable duration: `0.4s`, `12s`, `9m 27s`, `2h 5m`.
 /// Never emits unreadable raw seconds like `567s`.
 String formatCompactDuration(Duration d) {

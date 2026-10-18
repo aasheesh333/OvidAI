@@ -17,7 +17,8 @@ import '../core/distribution.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
 import '../core/cloud/cloud_session_store.dart';
-import '../core/cloud/models.dart' show OutboxEntry;
+import '../core/cloud/models.dart';
+import '../core/model_limits.dart';
 import 'content_report_sheet.dart';
 import '../core/format.dart';
 import '../core/voice_input_service.dart';
@@ -33,7 +34,6 @@ import 'chat_layout.dart';
 import 'html_artifact_view.dart';
 import 'link_safety.dart';
 import '../core/url_safety.dart';
-import '../core/agent_service.dart';
 import '../core/connection_service.dart';
 import '../core/commands.dart';
 import '../core/presets.dart';
@@ -50,6 +50,10 @@ import '../core/session_artifacts.dart';
 import '../l10n/l10n.dart';
 import 'widgets/chat_tool_visuals.dart';
 import 'widgets/code_highlight.dart';
+
+/// Composer/attachment cap. The local service owned this constant; it is a
+/// plain UI limit now that the thin client uploads to the server.
+const _maxChatAttachments = 20;
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
@@ -93,13 +97,8 @@ class _ChatTextScaler extends TextScaler {
   int get hashCode => Object.hash(inherited, zoom);
 }
 
-/// P8 Task 10 — the dual-path binding every member access goes through.
-/// The thin client binds to the cloud facade, the default build keeps
-/// `AgentService.I`; BOTH arms stay compiled (Global Constraints: dies in
-/// pieces — the deletion waves start at Task 12). Later screen tasks reuse
-/// this exact pattern.
-AgentSurface get _agent =>
-    Distribution.cloudExecution ? CloudAgentFacade.I : AgentService.I;
+/// P8 Task 19 — the cloud facade is the only agent implementation.
+AgentSurface get _agent => CloudAgentFacade.I;
 
 class ChatTranscript extends StatefulWidget {
   final ChatSession session;
@@ -430,7 +429,10 @@ class _StatsLine extends StatelessWidget {
         // footer ring — % of THIS model's context window in use,
         // measured from the last billed promptTokens (exact) or the
         // chars/4 heuristic fallback.
-        final window = AgentService.contextWindowForSession(s);
+        final window = ModelLimits.effectiveContextWindow(
+          AppState.I.contextWindowOverride,
+          ModelLimits.contextWindowFor(s.model, s.providerId),
+        );
         final used = analytics.contextTokens > 0
             ? analytics.contextTokens
             : _agent.measuredContextTokens(s);
@@ -1018,12 +1020,8 @@ class _ChatScreenState extends State<ChatScreen>
   @override
   void initState() {
     super.initState();
-    // An approval UI is now mounted: tool approval cards are answerable.
-    // (AgentService.approvalUiReady gates the fail-closed grace in _askUser.)
-    // Counted, not a bool: during a navigation overlap this screen's initState
-    // can run before the outgoing one's dispose, and a plain flag would be
-    // cleared by that dispose while a visible UI is still here to answer.
-    AgentService.markApprovalUiMounted();
+    // The local approval gate (and its UI-mounted counter) died with the
+    // retired service; server approvals are resolved by the facade.
     _input.addListener(_recordDraftEdit);
     _scroll.addListener(_onScroll);
     _fallbackNotice = AppState.I.ovidCloudModelFallbackNotice
@@ -1117,8 +1115,6 @@ class _ChatScreenState extends State<ChatScreen>
   @override
   void dispose() {
     _fallbackNotice?.removeListener(_showModelFallbackNotice);
-    // One fewer approval UI able to answer.
-    AgentService.markApprovalUiDisposed();
     unawaited(ComposerDraftStore.I.flush());
     _scroll.dispose();
     _input.dispose();
@@ -1588,14 +1584,14 @@ class _ChatScreenState extends State<ChatScreen>
                                                 // produced-files channel (the
                                                 // `hostDirOf` share action
                                                 // below is unreachable there).
-                                                final produced =
-                                                    Distribution.cloudExecution
-                                                        ? const <({
-                                                            String path,
-                                                            int size
-                                                          })>[]
-                                                        : AgentService
-                                                            .I.producedFiles;
+                                                // Produced files are a
+                                                // local-workspace concept and
+                                                // the thin client has none
+                                                // (P8 Task 19).
+                                                final produced = const <({
+                                                  String path,
+                                                  int size
+                                                })>[];
                                                 final showProduced =
                                                     !typing &&
                                                     produced.isNotEmpty;
@@ -4095,7 +4091,7 @@ class _DetailBodyState extends State<_DetailBody> {
   @override
   Widget build(BuildContext context) {
     final m = widget.m;
-    final kind = AgentService.toolIcon(m.toolName ?? '');
+    final kind = toolIconFor(m.toolName ?? '');
     final detail = m.toolDetail!.trimRight();
     final lines = const LineSplitter().convert(detail);
     final capped = !_expandedAll && lines.length > _cap;
@@ -5095,30 +5091,9 @@ class _ProducedFilesCard extends StatelessWidget {
                     size: 17,
                     color: Aether.textMuted,
                   ),
-                  onPressed: () async {
-                    // P8 Task 10: no local host directory on the thin client
-                    // — this card is never built there (produced files are a
-                    // local-workspace concept), so the call site is dead on
-                    // the cloud path; kept compiled for the default build.
-                    if (Distribution.cloudExecution) return;
-                    final dir = await AgentService.I.hostDirOf(f.path);
-                    if (!sheetCtx.mounted) return;
-                    if (dir == null) {
-                      ScaffoldMessenger.of(sheetCtx).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            '${_base(f.path)} is repo-only — not on local disk.',
-                          ),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                      return;
-                    }
-                    final hostPath = '$dir/${_base(f.path)}';
-                    await showNativeShare(
-                      sheetCtx,
-                      () => NativeShare.file(hostPath),
-                    );
+                  onPressed: () {
+                    // Produced files live server-side on the thin client
+                    // (P8 Task 19): there is no local host path to share.
                   },
                 ),
                 onTap: () {
@@ -5747,7 +5722,7 @@ class _MessageView extends StatelessWidget {
     String? error;
     if (input!.text.isNotEmpty || pending.isNotEmpty) {
       error = 'Finish the current draft before editing a message.';
-    } else if (m.attachments.length > AgentService.maxAttachments ||
+    } else if (m.attachments.length > _maxChatAttachments ||
         m.attachments.any((a) => a.path == null || a.path!.isEmpty)) {
       error =
           'The original attachments cannot be restored. The message has been kept.';
@@ -6222,7 +6197,7 @@ class _AttachmentChip extends StatelessWidget {
                 AttachmentTileData(name: a.name, size: a.size, path: a.path),
             ],
             staging: staging,
-            max: AgentService.maxAttachments,
+            max: _maxChatAttachments,
             onOpenImage: (path) => _openFullscreenImage(context, File(path)),
             onRemove: (a) {
               if (AppState.I.activeSessionId == sessionId && a.path != null) {
@@ -6461,7 +6436,6 @@ class _InputBarState extends State<_InputBar> {
   /// inside build on every composer rebuild, freezing typing in large
   /// workspaces. Now one folder is listed at a time, asynchronously, after a
   /// short debounce and capped at [_mentionFileCap] entries.
-  static const _mentionFileCap = 500;
   static const _mentionFileDebounce = Duration(milliseconds: 120);
   String? _mentionFilesKey;
   ({String root, List<FileSystemEntity> entries})? _mentionFiles;
@@ -6496,40 +6470,12 @@ class _InputBarState extends State<_InputBar> {
     ChatSession parent,
     List<String> leading,
   ) async {
-    var root = '';
-    final entries = <FileSystemEntity>[];
-    // P8 Task 10: no local workspace on the thin client — `@file:` rows
-    // never list (the workspaceRootFor call site dies with the on-device
-    // workspace; kept compiled for the default build).
-    if (Distribution.cloudExecution) {
-      if (!mounted || key != _mentionFilesPendingKey) return;
-      setState(() {
-        _mentionFilesKey = key;
-        _mentionFiles = (root: root, entries: entries);
-        _mentionFilesPendingKey = null;
-      });
-      return;
-    }
-    try {
-      final ws = AgentService.I.workspaceRootFor(parent);
-      root = ws.path;
-      // Descent: walk the leading segments as directories (depth cap 3).
-      var dir = ws;
-      for (var i = 0; i < leading.length && i < 3; i++) {
-        final next = Directory('${dir.path}/${leading[i]}');
-        if (await next.exists()) dir = next;
-      }
-      await for (final e in dir.list(recursive: false)) {
-        entries.add(e);
-        if (entries.length >= _mentionFileCap) break;
-      }
-    } catch (_) {
-      // Workspace not ready — files just don't appear.
-    }
+    // The thin client has no local workspace (P8 Task 19), so `@file:` rows
+    // never list. Resolve the state row so the menu stops loading.
     if (!mounted || key != _mentionFilesPendingKey) return;
     setState(() {
       _mentionFilesKey = key;
-      _mentionFiles = (root: root, entries: entries);
+      _mentionFiles = (root: '', entries: const <FileSystemEntity>[]);
       _mentionFilesPendingKey = null;
     });
   }
@@ -7538,8 +7484,8 @@ class _TypingBubble extends StatelessWidget {
 }
 
 /// web-IDE QueueDock — a strip above the input bar showing queued messages
-/// with edit/remove actions. Shown only when [AgentService.queuedMessages]
-/// is non-empty.
+/// with edit/remove actions. Shown only when the facade reports queued
+/// messages.
 /// web-IDE GoalBar — the session goal as a strip above the composer dock:
 /// objective, round chip, status; edit / pause / resume / clear actions.
 /// Renders only while an unfinished goal exists (a `complete` goal is
@@ -8456,8 +8402,8 @@ class _ApprovalDockState extends State<_ApprovalDock> {
   // The scope toggle and the "deny with a note" dialog were removed on
   // 2026-09-24: the card is now exactly Deny / Allow / Always Allow, and
   // grants are per mode + per session by construction, so there is no scope to
-  // pick. `AgentService.approve(false, note:)` still exists for programmatic
-  // callers.
+  // pick. `CloudAgentFacade.approveRequest(..., note:)` remains the
+  // programmatic path.
 
   /// Taps that land this soon after a NEW request replaces the card are
   /// ignored: a double-tap on Allow, or a tap aimed at the previous card,
@@ -9023,14 +8969,9 @@ class _StudioFolderChip extends StatelessWidget {
         if (!isStudio) return const SizedBox.shrink();
 
         final folder = (s?.workspaceFolder ?? '').trim();
-        // P8 Task 10: no connected local repo on the thin client — the chip
-        // falls back to the pinned-folder/sandbox label (the sessionRepoFull
-        // call site dies with the on-device repo registry; kept compiled for
-        // the default build).
-        final repo = (Distribution.cloudExecution
-                ? ''
-                : AgentService.I.sessionRepoFull ?? '')
-            .trim();
+        // The thin client has no connected local repo (P8 Task 19); the chip
+        // falls back to the pinned-folder/sandbox label.
+        final repo = ''.trim();
         final hasFolder = folder.isNotEmpty;
         final hasRepo = repo.isNotEmpty;
         // The REPO NAME wins. The folder branch used to come first, and for a

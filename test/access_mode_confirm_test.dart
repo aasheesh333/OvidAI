@@ -2,10 +2,28 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
+import 'package:ovid_ai/core/cloud/cloud_rest.dart';
+import 'package:ovid_ai/core/cloud/cloud_ws.dart';
+import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
+
+class _OkRest extends CloudRestClient {
+  _OkRest() : super(headers: CloudHeaders.forTest(), restBase: 'http://test');
+
+  @override
+  Future<SessionDto> patchSession(String id,
+          {String? title, String? mode}) async =>
+      SessionDto(
+        id: id,
+        title: title,
+        mode: mode ?? 'auto',
+        createdAt: DateTime.utc(2026, 10, 18),
+        updatedAt: DateTime.utc(2026, 10, 18),
+      );
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -14,9 +32,21 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     AppState.resetTestInstance();
+    CloudAgentFacade.resetForTest();
+    CloudAgentFacade.installForTest(
+      CloudAgentFacade(
+        rest: _OkRest(),
+        ws: WsMultiplexer(
+          mintTicket: () async => 'ticket',
+          socketFactory: (_) async =>
+              throw UnimplementedError('no socket in this test'),
+          heartbeatInterval: const Duration(hours: 1),
+        ),
+        store: null,
+      ),
+    );
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     debugResetFullAccessConfirmations();
     session = ChatSession(
       id: 'mode-confirm',
@@ -29,12 +59,9 @@ void main() {
       ..clear()
       ..add(session);
     app.activeSessionId = session.id;
-    AgentService.I.clearQueueForTest();
-    AgentService.I.pendingApproval = null;
   });
 
   tearDown(() {
-    AgentService.I.clearQueueForTest();
     debugResetFullAccessConfirmations();
     AppState.resetTestInstance();
   });
@@ -83,7 +110,7 @@ void main() {
 
     // Back to General (no confirmation needed), then Full Access again:
     // already confirmed for this session and nothing is running.
-    AgentService.I.setMode(AgentMode.auto, sessionId: session.id);
+    CloudAgentFacade.I.setMode(AgentMode.auto, sessionId: session.id);
     AppState.I.refresh();
     await tester.pumpAndSettle();
     await pickFullAccess(tester);
@@ -100,7 +127,7 @@ void main() {
       planMode: true,
     );
     AppState.I.sessions.add(other);
-    AgentService.I.setMode(AgentMode.studio, sessionId: session.id);
+    CloudAgentFacade.I.setMode(AgentMode.studio, sessionId: session.id);
     expect(session.mode, AgentMode.studio.name);
     expect(other.mode, AgentMode.auto.name);
     expect(other.planMode, isTrue);

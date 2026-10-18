@@ -3,7 +3,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
@@ -381,7 +381,6 @@ void main() {
       AppState.resetTestInstance();
       final app = AppState.createForTest();
       app.seenWelcomeVersion = AppState.welcomeVersion;
-      AgentService.I.debugPauseScheduleTimerForTest(true);
       session = ChatSession(
         id: 'attachment-tiles',
         title: 'Chat',
@@ -403,11 +402,11 @@ void main() {
         ..clear()
         ..add(session);
       app.activeSessionId = session.id;
-      AgentService.I.clearAttachment();
+      CloudAgentFacade.I.clearAttachment();
     });
 
     tearDown(() {
-      AgentService.I.clearAttachment();
+      CloudAgentFacade.I.clearAttachment();
       AppState.resetTestInstance();
     });
 
@@ -456,10 +455,18 @@ void main() {
     testWidgets('composer shows staged files as one compact row', (
       tester,
     ) async {
-      AgentService.I.pendingAttachments.addAll([
-        (name: 'pic.jpg', path: '/w/pic.jpg', size: 3000),
-        (name: _longPdf, path: '/w/r.pdf', size: 1258291),
-      ]);
+      CloudAgentFacade.I.stageAttachmentForTest(
+        session.id,
+        name: 'pic.jpg',
+        path: '/w/pic.jpg',
+        size: 3000,
+      );
+      CloudAgentFacade.I.stageAttachmentForTest(
+        session.id,
+        name: _longPdf,
+        path: '/w/r.pdf',
+        size: 1258291,
+      );
       await pumpChat(tester, scale: 2);
       expect(tester.takeException(), isNull);
       final row = find.byKey(const ValueKey('composer-attachments-scroll'));
@@ -467,7 +474,7 @@ void main() {
       expect(tester.getSize(row).height, lessThanOrEqualTo(72));
       await tester.tap(find.byTooltip('Remove attachment $_longPdf'));
       await tester.pump();
-      expect(AgentService.I.pendingAttachments.map((a) => a.name), ['pic.jpg']);
+      expect(CloudAgentFacade.I.pendingAttachments.map((a) => a.name), ['pic.jpg']);
     });
   });
 }

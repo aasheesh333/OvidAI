@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/session_history_store.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -59,8 +58,6 @@ void main() {
     await SessionHistoryRepository.I.resetForTest();
   });
 
-  setUpAll(() => AgentService.I.debugPauseScheduleTimerForTest(true));
-  tearDownAll(() => AgentService.I.debugPauseScheduleTimerForTest(false));
 
   Future<void> pumpSidebar(WidgetTester tester) async {
     tester.view.physicalSize = const Size(400, 1200);

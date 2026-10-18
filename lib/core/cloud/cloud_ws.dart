@@ -54,8 +54,8 @@ const int _outboundQueueMax = 32;
 // CloudSessionEvent — the BUILT SessionEvent shape (shared/src/events.ts)
 // ---------------------------------------------------------------------------
 
-/// One session event off the wire. Deliberately NOT named `SessionEvent`:
-/// `agent_service.dart` owns that name until Task 19 moves it.
+/// One session event off the wire. Named `CloudSessionEvent` to keep the
+/// wire event distinct from transcript/UI event types.
 class CloudSessionEvent {
   const CloudSessionEvent({
     required this.sessionId,

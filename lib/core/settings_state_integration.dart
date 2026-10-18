@@ -242,15 +242,16 @@ extension _SettingsStateIntegration on AppState {
           onStage: () async {},
           onDelete: () async {
             // In-memory owners first, so a debounced flush cannot write a
-            // draft back after its file is gone.
-            AgentService.I.clearStudioStateForReset();
+            // draft back after its file is gone. Studio state now lives in
+            // StudioRemoteClient / StudioDraftStore (P8 Task 19 re-point).
+            StudioRemoteClient.I.clearAll();
             await ComposerDraftStore.I.clearAll();
             // Studio editor drafts and legacy uncommitted drafts share
             // the same app-private record directory.
             await StudioDraftStore.I.deleteAll('');
           },
           onVerifyDeleted: () async =>
-              AgentService.I.studioDraftsEmpty &&
+              StudioRemoteClient.I.noDrafts &&
               await ComposerDraftStore.I.isEmpty() &&
               await StudioDraftStore.I.isEmpty(),
         ),
@@ -426,7 +427,7 @@ extension _SettingsStateIntegration on AppState {
     _accountLifecycle.fenceSynchronously();
     _cancelPersistDebounce();
     try {
-      AgentService.I.sessionAccountChanged();
+      CloudAgentFacade.resetAccountStateIfInstalled();
       refresh();
       await _persistWriteInFlight;
       await _featureBinding;

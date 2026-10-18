@@ -333,7 +333,7 @@ class _StudioEditorState extends State<StudioEditor> {
   /// caret and scroll position instead of re-deriving them from the buffer.
   ///
   /// Dirty flags, baselines and conflicts are NOT kept here: they live in the
-  /// session's Studio bucket in [AgentService] so they survive this widget
+  /// session's Studio bucket in the Studio client so they survive this widget
   /// (Android back, folder-panel toggle, tree taps — F-071/F-072).
   final Map<_BufferKey, TextEditingController> _buffers = {};
   final Map<_BufferKey, String?> _cacheContents = {};

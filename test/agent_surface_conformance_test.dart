@@ -1,17 +1,15 @@
 // P8 Task 8 — AgentSurface conformance.
 //
-// The seam exists so Task 10 can bind chat_screen to `AgentSurface` and swap
-// AgentService ↔ CloudAgentFacade behind `Distribution.cloudExecution`. That
-// only works if BOTH implementations satisfy the interface, and if the
-// interface's signatures are the ones AgentService actually has (the plan's
-// Step 4 ruling: the surface conforms to AgentService, never vice versa).
+// The seam exists so chat_screen binds to `AgentSurface` while the
+// implementation is swapped behind `Distribution.cloudExecution`. Task 19
+// retired the local service, so `CloudAgentFacade` is now the only
+// implementation and its conformance is the whole contract.
 //
-// The `final AgentSurface surface = …` assignments below are the real
+// The `final AgentSurface surface = …` assignment below is the real
 // compile-time check; the expects are the runtime belt-and-suspenders the
 // brief asks for.
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/cloud/agent_surface.dart';
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
@@ -19,11 +17,6 @@ import 'package:ovid_ai/core/cloud/cloud_ws.dart';
 import 'package:ovid_ai/core/distribution.dart';
 
 void main() {
-  test('AgentService implements AgentSurface', () {
-    final AgentSurface surface = AgentService.I;
-    expect(surface, same(AgentService.I));
-  });
-
   test('CloudAgentFacade implements AgentSurface', () {
     final facade = CloudAgentFacade(
       rest: CloudRestClient(

@@ -4,7 +4,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/ovid_cloud_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -23,7 +22,6 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     AppState.resetTestInstance();
     AppState.createForTest();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     OvidCloudService.idTokenOverrideForTest = () async => 'fake-id-token';
   });
 
@@ -31,7 +29,6 @@ void main() {
     OvidCloudService.idTokenOverrideForTest = null;
     OvidCloudService.appCheckTokenProvider = null;
     OvidCloudService.httpClientFactoryForTest = null;
-    AgentService.I.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
   });
 

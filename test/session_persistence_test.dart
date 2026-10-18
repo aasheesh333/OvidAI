@@ -143,7 +143,7 @@ void main() {
       await app.flushSessionPersistenceForTest();
       app.sessionEncodeCountsForTest.clear();
 
-      // AgentService stamps elapsedMs on the live bubble after streaming.
+      // The server stamps elapsedMs on the live bubble after streaming.
       active.messages.first.elapsedMs = 4321;
       app.persistSessions();
       await app.flushSessionPersistenceForTest();
@@ -164,7 +164,7 @@ void main() {
       await app.flushSessionPersistenceForTest();
       app.sessionEncodeCountsForTest.clear();
 
-      // AgentService attaches workspace files to the last user message.
+      // The server attaches workspace files to the last user message.
       active.messages.first.attachments = [
         MessageAttachment(name: 'notes.txt', size: 12),
       ];

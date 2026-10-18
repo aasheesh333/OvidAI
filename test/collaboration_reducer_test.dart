@@ -373,7 +373,6 @@ void main() {
     // executor). The import allowlist below is the primary guard; these
     // patterns make the intent explicit and catch fully-qualified references.
     final forbiddenImports = <RegExp>[
-      RegExp(r'agent_service'),
       RegExp(r'(^|/)state\.dart$'),
       RegExp(r'mcp'),
       RegExp(r'plugin'),
@@ -386,7 +385,6 @@ void main() {
       RegExp(r'^package:flutter'),
     ];
     final forbiddenIdentifiers = <RegExp>[
-      RegExp(r'\bAgentService\b'),
       RegExp(r'\bAppState\b'),
       RegExp(r'\bProcess\b'),
       RegExp(r'\bHttpClient\b'),

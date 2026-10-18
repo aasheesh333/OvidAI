@@ -3,9 +3,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../core/agent_service.dart';
-import '../core/distribution.dart';
-import '../core/state.dart';
 import '../core/theme.dart';
 import '../core/url_safety.dart';
 
@@ -248,21 +245,10 @@ Widget safeMarkdownImage(Uri uri, String? title, String? alt) {
 File? _workspaceImageFile(String rawPath) {
   final p = Uri.decodeComponent(rawPath).replaceAll('\\', '/');
   if (p.isEmpty || p.startsWith('/') || p.startsWith('~')) return null;
-  final segments = p.split('/').where((s) => s.isNotEmpty && s != '.');
-  if (segments.any((s) => s == '..')) return null;
-  final session = AppState.I.activeSession;
-  if (session == null) return null;
-  // P8 Task 10: no local workspace on the thin client — a workspace-relative
-  // image path never resolves there (the `workspaceRootFor` call site dies
-  // with the on-device workspace; kept compiled for the default build).
-  if (Distribution.cloudExecution) return null;
-  try {
-    final root = AgentService.I.workspaceRootFor(session).path;
-    final rootNorm = root.endsWith('/') ? root : '$root/';
-    return File('$rootNorm${segments.join('/')}');
-  } catch (_) {
-    return null;
-  }
+  // The thin client has no local workspace (P8 Task 19): a workspace-relative
+  // image path never resolves. Server artifacts render through their R2 URL
+  // instead (the retired local service's `workspaceRootFor` died with it).
+  return null;
 }
 
 class _CappedImage extends StatelessWidget {

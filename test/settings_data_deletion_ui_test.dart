@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/settings_actions.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -88,7 +87,6 @@ void main() {
       FlutterSecureStorage.setMockInitialValues({});
       AppState.resetTestInstance();
       AppState.createForTest();
-      AgentService.I.debugPauseScheduleTimerForTest(true);
     });
 
     tearDown(() async {
@@ -102,7 +100,6 @@ void main() {
         const MethodChannel('ovid/native'),
         null,
       );
-      AgentService.I.debugPauseScheduleTimerForTest(false);
       AppState.resetTestInstance();
       await root.delete(recursive: true);
     });

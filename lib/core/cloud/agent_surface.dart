@@ -1,38 +1,33 @@
 /// The `AgentSurface` seam (P8 Task 8).
 ///
-/// The ONE interface `chat_screen.dart` binds to when Task 10 swaps
-/// `AgentService.I` for `CloudAgentFacade.I` behind
-/// `Distribution.cloudExecution`. Both implementations satisfy it:
+/// The ONE interface the thin-client UI binds to. `CloudAgentFacade` is its
+/// only implementation: P8 Task 19 deleted the retired local execution stack.
 ///
-///  * `AgentService` — the local execution stack (implements this additively;
-///    its body is untouched until the Task 12+ deletion waves);
-///  * `CloudAgentFacade` — the thin client (REST + WS projection).
-///
-/// Signatures are copied from the LIVE `agent_service.dart` members at the
-/// anchors the plan measured. The surface conforms to AgentService, not the
+/// Signatures were copied from the live local service's members at the
+/// anchors the plan measured. The surface conforms to that contract, not the
 /// other way around (plan Task 8 Step 4) — when they disagree, this file is
 /// wrong.
 ///
 /// COVERAGE (review round 1, I-1): the plan's "20 of the measured 26"
-/// premise counted only DIRECT `AgentService.I.<member>` chains. chat_screen
-/// also aliases the singleton at 9 sites and calls further members through
-/// those aliases (queue dock, context meter, @-mention subagents, browser
-/// header). Those are on this surface too, so Task 10's mechanical swap does
-/// not strand the queue/context/subagent paths on the local service.
+/// premise counted only DIRECT singleton member chains. chat_screen also
+/// aliased the singleton at 9 sites and calls further members through those
+/// aliases (queue dock, context meter, @-mention subagents, browser header).
+/// Those are on this surface too, so the Task 10 mechanical swap did not
+/// strand the queue/context/subagent paths.
 ///
-/// Deliberately NOT on the surface (their call sites die in Tasks 10/13/18):
+/// Deliberately NOT on the surface (their call sites died in Tasks 10/13/18):
 /// `requestBatteryExemption`, `workspaceRootFor`, `skillUnavailableReason`,
-/// `sessionRepoFull`, `hostDirOf`, `isSkillAvailableForSession` (skills die
-/// in Task 18), and the legacy no-arg `approve` (its two chat_screen sites
-/// are re-pointed onto [approveRequest] in Task 10).
+/// `sessionRepoFull`, `hostDirOf`, `isSkillAvailableForSession`, and the
+/// legacy no-arg `approve` (its two chat_screen sites were re-pointed onto
+/// [approveRequest] in Task 10).
 library;
 
 import 'package:flutter/foundation.dart';
 
-import '../agent_service.dart';
 import '../state.dart';
+import 'models.dart';
 
-/// The AgentService-shaped surface consumed by the thin-client UI.
+/// The cloud-shaped surface consumed by the thin-client UI.
 abstract class AgentSurface extends ChangeNotifier {
   /// The foreground session's access mode.
   AgentMode get mode;
@@ -46,8 +41,7 @@ abstract class AgentSurface extends ChangeNotifier {
   /// Per-session busy flag for list rows.
   ValueListenable<bool> busyListenable(String sessionId);
 
-  /// Stops [sessionId]'s run. AgentService returns whether a queued
-  /// continuation survived; the cloud facade returns whether a live run was
+  /// Stops [sessionId]'s run. The facade returns whether a live run was
   /// found and a cancel posted (queueing is server-side there). Callers that
   /// only need the side effect can ignore the value.
   bool stopRequested({required String sessionId});
@@ -56,8 +50,8 @@ abstract class AgentSurface extends ChangeNotifier {
   void hardStopAll();
 
   /// Starts a turn. The local-only parameters ([freshTurn],
-  /// [expandRefsFor]) are accepted for AgentService parity; the cloud facade
-  /// forwards only the prompt and attachments.
+  /// [expandRefsFor]) are accepted for backward compatibility; the cloud
+  /// facade forwards only the prompt and attachments.
   Future<void> runTask(
     String originalPrompt, {
     String? sessionId,
@@ -106,9 +100,9 @@ abstract class AgentSurface extends ChangeNotifier {
   /// Clears every staged file (after send).
   void clearAttachment();
 
-  /// Live background jobs for [sessionId]. The record shape is the LIVE
-  /// AgentService signature (`agent_service.dart` jobsFor); the plan sketch
-  /// said `List<BgJob>`, but conformance to AgentService wins (Step 4).
+  /// Live background jobs for [sessionId]. The record shape is the surface's
+  /// `jobsFor` signature; the plan sketch said `List<BgJob>`, but the
+  /// contract wins (Step 4).
   List<({int id, String name, String state, int elapsedSec, int outChars})>
       jobsFor(String sessionId);
 

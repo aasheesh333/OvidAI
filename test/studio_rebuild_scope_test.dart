@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/studio_remote_client.dart';
 import 'package:ovid_ai/core/studio_drafts.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -83,7 +83,7 @@ void main() {
     debugStudioTreeBuilds = 0;
     StudioEditorDebug.lineIndexBuilds = 0;
     for (var i = 0; i < 100; i++) {
-      AgentService.I.refreshNow();
+      CloudAgentFacade.I.notifyListeners();
       await tester.pump();
     }
     expect(debugStudioTreeBuilds, lessThanOrEqualTo(1));

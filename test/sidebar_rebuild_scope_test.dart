@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/sidebar.dart';
@@ -26,7 +26,6 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     AppState.resetTestInstance();
     AppState.createForTest();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     AppState.I.sessions.clear();
     AppState.I.activeSessionId = null;
   });
@@ -89,8 +88,7 @@ void main() {
     SessionTileDebug.reset();
     for (var token = 0; token < 200; token++) {
       live.content += ' t$token';
-      AgentService.I.liveBubbleTicks.value++;
-      AgentService.I.refreshNow();
+      CloudAgentFacade.I.notifyListeners();
       await tester.pump();
     }
     // ≤ 1 build per token is the budget; the narrow listenables give 0.
@@ -124,15 +122,12 @@ void main() {
     await pumpSidebar(tester);
     SessionTileDebug.reset();
 
-    final run = AgentService.I.runBucketForTest('perf-3');
-    run.activeRunId = 'run-1';
-    AgentService.I.refreshNow();
+    CloudAgentFacade.I.setActiveRunForTest('perf-3', 'run-1');
     await tester.pump();
     expect(find.text('running'), findsOneWidget);
     expect(tileBuilds(), 0);
 
-    run.activeRunId = null;
-    AgentService.I.refreshNow();
+    CloudAgentFacade.I.setActiveRunForTest('perf-3', null);
     await tester.pump();
     expect(find.text('running'), findsNothing);
     expect(tileBuilds(), 0);

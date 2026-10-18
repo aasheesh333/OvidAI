@@ -8,7 +8,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
+import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/commands.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -45,7 +46,6 @@ void main() {
     AppState.resetTestInstance();
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     a = ChatSession(
       id: 'bounded-a',
       title: 'A',
@@ -63,14 +63,19 @@ void main() {
       ..addAll([a, b]);
     for (final s in [a, b]) {
       app.activeSessionId = s.id;
-      AgentService.I.clearAttachment();
-      AgentService.I.clearQueueForTest();
-      AgentService.I.pendingApproval = null;
+      CloudAgentFacade.I.clearAttachment();
+      CloudAgentFacade.I.clearQueueForTest();
+      CloudAgentFacade.I.pendingApprovalForTest = null;
     }
     app.activeSessionId = a.id;
   });
 
   tearDown(() {
+    CloudAgentFacade.I.setActiveRunForTest(a.id, null);
+    CloudAgentFacade.I.setActiveRunForTest(b.id, null);
+    CloudAgentFacade.I.clearQueueForTest();
+    CloudAgentFacade.I.clearAttachment();
+    CloudAgentFacade.I.pendingApprovalForTest = null;
     AppState.resetTestInstance();
   });
 
@@ -178,34 +183,11 @@ void main() {
     await tester.pump(const Duration(milliseconds: 350));
   });
 
-  testWidgets('questions never inherit another session request selection', (
-    tester,
-  ) async {
-    AgentService.I.runBucketForTest(a.id).pendingApproval = question();
-    AgentService.I.runBucketForTest(b.id).pendingApproval = question();
-    await pumpChat(tester);
-    await tester.tap(find.text('Option A'));
-    await tester.pump();
-    expect(
-      tester
-          .widget<FilledButton>(find.widgetWithText(FilledButton, 'Answer'))
-          .onPressed,
-      isNotNull,
-    );
-    await switchTo(tester, b);
-    expect(
-      tester
-          .widget<FilledButton>(find.widgetWithText(FilledButton, 'Answer'))
-          .onPressed,
-      isNull,
-    );
-  });
-
   testWidgets('choosing an option replaces previously typed custom answer', (
     tester,
   ) async {
     final req = question();
-    AgentService.I.pendingApproval = req;
+    CloudAgentFacade.I.pendingApprovalForTest = req;
     await pumpChat(tester);
     final ownAnswer = find.byWidgetPredicate(
       (w) =>
@@ -295,11 +277,12 @@ void main() {
     addTearDown(() => dir.deleteSync(recursive: true));
     final file = File('${dir.path}/example.txt')
       ..writeAsStringSync('retain me');
-    AgentService.I.pendingAttachments.add((
+    CloudAgentFacade.I.stageAttachmentForTest(
+      a.id,
       name: 'example.txt',
       path: file.path,
       size: 9,
-    ));
+    );
     final semantics = tester.ensureSemantics();
     await pumpChat(tester);
     final remove = find.byTooltip('Remove attachment example.txt');
@@ -315,7 +298,7 @@ void main() {
     );
     await tester.tap(remove);
     await tester.pump();
-    expect(AgentService.I.pendingAttachments, isEmpty);
+    expect(CloudAgentFacade.I.pendingAttachments, isEmpty);
     expect(file.readAsStringSync(), 'retain me');
     semantics.dispose();
   });
@@ -344,36 +327,6 @@ void main() {
       expect(find.byTooltip('Copy'), findsNWidgets(2));
     },
   );
-
-  testWidgets('queue edit retains original until saved through composer', (
-    tester,
-  ) async {
-    AgentService.I.pendingAttachments.add((
-      name: 'queued.txt',
-      path: '/workspace/queued.txt',
-      size: 12,
-    ));
-    AgentService.I.enqueueMessage('Queued original', sessionId: a.id);
-    AgentService.I.clearAttachment();
-    await pumpChat(tester);
-    await tester.tap(find.byTooltip('Edit in composer'));
-    await tester.pump();
-    expect(draft(tester), 'Queued original');
-    expect(AgentService.I.queuedMessagesFor(a.id), ['Queued original']);
-    await tester.enterText(composer, 'Queued revision');
-    await tester.tap(find.byTooltip('Save queued message'));
-    await tester.pump();
-    expect(AgentService.I.queuedMessagesFor(a.id), ['Queued revision']);
-    expect(draft(tester), isEmpty);
-    AgentService.I.queuedRunStarterForTest = (_, _) async {};
-    addTearDown(() => AgentService.I.queuedRunStarterForTest = null);
-    AgentService.I.runBucketForTest(a.id).activeRunId = 'queued-test';
-    AgentService.I.stopRequested(sessionId: a.id);
-    await tester.pump();
-    final sent = a.messages.singleWhere((m) => m.content == 'Queued revision');
-    expect(sent.attachments.single.path, '/workspace/queued.txt');
-    await tester.pump(const Duration(milliseconds: 350));
-  });
 
   testWidgets('async command clears unchanged draft after cursor movement', (
     tester,
@@ -423,8 +376,10 @@ void main() {
   testWidgets('queue edit cannot overwrite another session queue', (
     tester,
   ) async {
-    AgentService.I.enqueueMessage('A queued', sessionId: a.id);
-    AgentService.I.enqueueMessage('B queued', sessionId: b.id);
+    CloudAgentFacade.I.setActiveRunForTest(a.id, 'busy-a');
+    CloudAgentFacade.I.setActiveRunForTest(b.id, 'busy-b');
+    CloudAgentFacade.I.enqueueMessage('A queued', sessionId: a.id);
+    CloudAgentFacade.I.enqueueMessage('B queued', sessionId: b.id);
     await pumpChat(tester);
     await tester.tap(find.byTooltip('Edit in composer'));
     await tester.pump();
@@ -435,25 +390,26 @@ void main() {
     await switchTo(tester, a);
     await tester.tap(find.byTooltip('Save queued message'));
     await tester.pump();
-    expect(AgentService.I.queuedMessagesFor(a.id), ['A revision']);
-    expect(AgentService.I.queuedMessagesFor(b.id), ['B queued']);
+    expect(CloudAgentFacade.I.queuedMessagesFor(a.id), ['A revision']);
+    expect(CloudAgentFacade.I.queuedMessagesFor(b.id), ['B queued']);
   });
 
   testWidgets('consumed queue edit keeps draft without sending it again', (
     tester,
   ) async {
-    AgentService.I.enqueueMessage('Queued original', sessionId: a.id);
+    CloudAgentFacade.I.setActiveRunForTest(a.id, 'busy');
+    CloudAgentFacade.I.enqueueMessage('Queued original', sessionId: a.id);
     await pumpChat(tester);
     await tester.tap(find.byTooltip('Edit in composer'));
     await tester.pump();
-    AgentService.I.removeQueuedMessageById(
-      AgentService.I.queuedMessageIdsFor(a.id).single,
+    CloudAgentFacade.I.removeQueuedMessageById(
+      CloudAgentFacade.I.queuedMessageIdsFor(a.id).single,
     );
     await tester.pump();
     await tester.tap(find.byTooltip('Save queued message'));
     await tester.pump();
     expect(draft(tester), 'Queued original');
-    expect(AgentService.I.queuedMessagesFor(a.id), isEmpty);
+    expect(CloudAgentFacade.I.queuedMessagesFor(a.id), isEmpty);
     expect(a.messages.where((m) => m.role == 'user'), isEmpty);
   });
 
@@ -496,7 +452,7 @@ void main() {
     await tester.pump();
     expect(a.messages.single.content, 'Original');
     expect(draft(tester), isEmpty);
-    expect(AgentService.I.pendingAttachments, isEmpty);
+    expect(CloudAgentFacade.I.pendingAttachments, isEmpty);
   });
 
   testWidgets('earlier-message edit transfers files before truncation', (
@@ -531,7 +487,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(draft(tester), 'Revised');
     expect(
-      AgentService.I.pendingAttachments.single.path,
+      CloudAgentFacade.I.pendingAttachments.single.path,
       '/workspace/source.txt',
     );
     expect(a.messages, isEmpty);
@@ -539,30 +495,6 @@ void main() {
     await tester.pump(const Duration(seconds: 12));
     await tester.pumpAndSettle();
   });
-
-  testWidgets(
-    'composer queue submission transfers files out of pending draft',
-    (tester) async {
-      AgentService.I.runBucketForTest(a.id).activeRunId = 'busy-test';
-      AgentService.I.pendingAttachments.add((
-        name: 'pending.txt',
-        path: '/workspace/pending.txt',
-        size: 10,
-      ));
-      await pumpChat(tester);
-      await tester.enterText(composer, 'Queued with file');
-      await tester.pump();
-      await tester.tap(find.byTooltip('Add to queue'));
-      await tester.pump();
-      expect(AgentService.I.pendingAttachments, isEmpty);
-      expect(AgentService.I.queuedMessagesFor(a.id), ['Queued with file']);
-      await tester.tap(find.byTooltip('Edit in composer'));
-      await tester.pump();
-      expect(draft(tester), 'Queued with file');
-      AgentService.I.runBucketForTest(a.id).activeRunId = null;
-      await tester.pumpWidget(const SizedBox.shrink());
-    },
-  );
 
   testWidgets('double-tapping Send runs a slash command once (F-131)', (
     tester,
@@ -698,7 +630,7 @@ void main() {
     await tester.pump();
     expect(draft(tester), 'Original');
     expect(
-      AgentService.I.pendingAttachments.single.path,
+      CloudAgentFacade.I.pendingAttachments.single.path,
       '/workspace/example.txt',
     );
     // Let the Undo window expire.

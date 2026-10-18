@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/conversation_share_sheet.dart';
 import 'package:ovid_ai/ui/sidebar.dart';
@@ -13,7 +12,6 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       AppState.resetTestInstance();
       final app = AppState.createForTest();
-      AgentService.I.debugPauseScheduleTimerForTest(true);
       addTearDown(() {
         AppState.resetTestInstance();
       });

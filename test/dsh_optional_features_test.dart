@@ -118,11 +118,8 @@ void main() {
       // instructions must never be visible to the end user.
       expect(src.contains('_SystemPromptRow'), isFalse);
       expect(src.contains('chat-system-prompt-row'), isFalse);
-      // The snapshot is still captured in agent_service for diagnostics,
-      // just never rendered in the UI.
-      final agent = File('lib/core/agent_service.dart').readAsStringSync();
-      expect(agent.contains('systemPromptSnapshot'), isTrue);
-      expect(agent.contains('volatileCtx'), isTrue);
+      // The snapshot capture moved server-side with the retired local service
+      // (P8 Task 19), so there is no local source to assert against.
     });
   });
 }

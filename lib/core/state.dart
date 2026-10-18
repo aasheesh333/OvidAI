@@ -11,7 +11,8 @@ import 'package:flutter/widgets.dart' show Brightness, WidgetsBinding;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'agent_service.dart' show AgentService;
+import 'cloud/cloud_agent_facade.dart';
+import 'cloud/studio_remote_client.dart';
 import 'firebase_service.dart';
 import 'cloud_app_check.dart';
 import 'github_service.dart';
@@ -33,7 +34,6 @@ import 'settings_actions.dart';
 import 'settings_backup_service.dart';
 import 'presets.dart';
 import 'reset_coordinator.dart';
-import 'distribution.dart';
 import 'collaboration/production.dart';
 import 'diag.dart';
 
@@ -736,9 +736,9 @@ class ChatSession {
 
   /// Per-session agent access mode (the session policy gate per-conversation mode parity).
   /// One of 'safe' (Read-Only), 'auto' (General), 'drive' (Full Access),
-  /// 'studio' (Studio), or 'control' (Control). Parallel sessions keep
-  /// INDEPENDENT modes — no cross-session mode bleed. Persisted with the
-  /// session.
+  /// or 'studio' (Studio). 'control' was retired (spec D5). Parallel
+  /// sessions keep INDEPENDENT modes — no cross-session mode bleed.
+  /// Persisted with the session.
   String mode;
 
   /// Agent preset — a named composition of a tool roster + a persona
@@ -1172,7 +1172,7 @@ Directory localWorkspaceDirFor(String id) {
   // path on disk and remains the single source of truth for tool cwd.
   //
   // The provider is installed by the AppState constructor. It is null during
-  // the very first AgentService construction (AppState's own singleton is
+  // the very first local-workspace resolution (AppState's own singleton is
   // still initializing), in which case scratch space is the only safe answer.
   final pinned = AppState.workspaceDirProvider?.call(id);
   if (pinned != null) return pinned;
@@ -1306,8 +1306,8 @@ class AppState extends ChangeNotifier {
     _singleton._bindSettingsActions();
     // ignore: invalid_use_of_visible_for_testing_member
     ComposerDraftStore.I.resetForTest();
-    // ignore: invalid_use_of_visible_for_testing_member
-    AgentService.resetTitleStateForTest();
+    // Title generation is server-owned on the thin client (the local
+    // title state died with the retired service).
   }
 
   AppState._({
@@ -1413,15 +1413,11 @@ class AppState extends ChangeNotifier {
     required String model,
     required List<Map<String, dynamic>> messages,
   }) async {
-    if (Distribution.cloudExecution) {
-      _appendCollabReadOnlyNotice();
-      throw StateError(kCollaborationReadOnlyNotice);
-    }
-    return AgentService.I.completeCollaborationTurn(
-      providerId: providerId,
-      model: model,
-      messages: messages,
-    );
+    // Local provider execution died with the retired local service (P8 Task 19).
+    // Live collaboration replies are server-owned; the thin client cannot
+    // call a user's provider from this device.
+    _appendCollabReadOnlyNotice();
+    throw StateError(kCollaborationReadOnlyNotice);
   }
 
   void _appendCollabReadOnlyNotice() {
@@ -1587,7 +1583,7 @@ class AppState extends ChangeNotifier {
     sessions.clear();
     activeSessionId = null;
     _accountLifecycle.fenceSynchronously();
-    AgentService.I.sessionAccountChanged();
+    CloudAgentFacade.resetAccountStateIfInstalled();
     final cleanup = _SessionCleanup(() async {
       if (!identical(token, _sessionAccountToken)) return;
       try {
@@ -1889,9 +1885,8 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _mountRuntimeSkills() async {
-    for (final session in List<ChatSession>.of(sessions)) {
-      await AgentService.I.refreshSkills(sessionId: session.id);
-    }
+    // Skills are mounted server-side on the thin client (P8 Tasks 17/19);
+    // the local skill runtime is gone, so the startup stage is a no-op.
   }
 
   Future<bool> _maybeFinishSessionRestore() async {
@@ -1904,7 +1899,8 @@ class AppState extends ChangeNotifier {
         !_skillMountSucceeded) {
       return false;
     }
-    await AgentService.I.restoreRunCheckpoints();
+    // Run checkpoints were a local-loop resume mechanism; the server owns
+    // run lifecycle now, so there is nothing local to restore.
     onSessionsLoaded?.call();
     _sessionRestoreFinished = true;
     // Dispatch the CAPTURED boot-active root, not whatever is active now.
@@ -3362,7 +3358,7 @@ class AppState extends ChangeNotifier {
         Diag.swallow('history.deleteAll', e);
       }
       await ComposerDraftStore.I.clearAll();
-      AgentService.I.clearStudioStateForReset();
+      StudioRemoteClient.I.clearAll();
       await StudioDraftStore.I.deleteAll('');
       _clearDeferredSessions();
       for (final s in List.of(sessions)) {
@@ -4498,7 +4494,7 @@ class AppState extends ChangeNotifier {
     persistSessions();
   }
 
-  /// Set by AgentService at startup — drops the deleted session's run
+  /// Set by the cloud facade at startup — drops the deleted session's run
   /// (avoids a circular import; parallel runs for other sessions live on).
   void Function(String sessionId)? onSessionDeleted;
 
@@ -5153,10 +5149,10 @@ class AppState extends ChangeNotifier {
 
 
   // ── Per-session repo selection (Studio) ─────────────────────────────
-  /// Repo bound to a session.  Falls back to [fallback] (the global
-  /// AgentService.repoFull — passed by the caller to avoid a circular
-  /// import) when the session has no repo of its own, then to the persisted
-  /// [lastRepoFull] so agent tools resolve after a restart.
+  /// Repo bound to a session.  Falls back to [fallback] (the caller's
+  /// global default — passed to avoid a circular import) when the session
+  /// has no repo of its own, then to the persisted [lastRepoFull] so agent
+  /// tools resolve after a restart.
   String? getRepoForSession(String sessionId, {String? fallback}) {
     final session = sessions.where((s) => s.id == sessionId).firstOrNull;
     return session?.repo ?? fallback ?? lastRepoFull;
@@ -5174,8 +5170,8 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Branch bound to a session.  Falls back to [fallback] (the global
-  /// AgentService.branch) then to the persisted [lastBranch]; the repo binding
+  /// Branch bound to a session.  Falls back to [fallback] (the caller's
+  /// global default) then to the persisted [lastBranch]; the repo binding
   /// is the pair `(repo, branch)`, so a null branch means `main`.
   String getBranchForSession(String sessionId, {String? fallback}) {
     final session = sessions.where((s) => s.id == sessionId).firstOrNull;

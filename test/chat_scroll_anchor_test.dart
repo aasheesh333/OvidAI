@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
@@ -24,7 +24,6 @@ void main() {
     AppState.resetTestInstance();
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     app.sessions.clear();
     app.activeSessionId = null;
   });
@@ -165,7 +164,7 @@ void main() {
       final app = AppState.I;
       final live = _msg('', role: 'assistant', thinking: true);
       app.activeSession!.messages.add(live);
-      AgentService.I.setActiveRunForTest(app.activeSession!.id, 'run-live');
+      CloudAgentFacade.I.setActiveRunForTest(app.activeSession!.id, 'run-live');
       app.refresh();
       await tester.pump();
 
@@ -186,7 +185,7 @@ void main() {
         reason: 'an at-bottom user must keep following a live in-place stream',
       );
 
-      AgentService.I.setActiveRunForTest(app.activeSession!.id, null);
+      CloudAgentFacade.I.setActiveRunForTest(app.activeSession!.id, null);
     },
   );
 
@@ -210,7 +209,7 @@ void main() {
       final app = AppState.I;
       final live = _msg('', role: 'assistant', thinking: true);
       app.activeSession!.messages.add(live);
-      AgentService.I.setActiveRunForTest(app.activeSession!.id, 'run-live');
+      CloudAgentFacade.I.setActiveRunForTest(app.activeSession!.id, 'run-live');
       app.refresh();
       await tester.pump();
       for (var i = 0; i < 20; i++) {
@@ -226,7 +225,7 @@ void main() {
             'bottom',
       );
 
-      AgentService.I.setActiveRunForTest(app.activeSession!.id, null);
+      CloudAgentFacade.I.setActiveRunForTest(app.activeSession!.id, null);
     },
   );
 

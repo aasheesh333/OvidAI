@@ -1,13 +1,49 @@
 import 'package:flutter/material.dart';
 
-import '../../core/agent_service.dart';
 import '../../core/theme.dart';
 import '../../l10n/l10n.dart';
+
+/// Row presentation per tool — icon + how to title it. Moved verbatim from
+/// the retired local service (P8 Task 19); the server's tool names are the
+/// contract this taxonomy describes.
+String toolIconFor(String toolName) {
+  if (toolName.startsWith('fs_') || toolName.startsWith('file_')) {
+    return toolName.contains('edit') || toolName.contains('write')
+        ? 'edit'
+        : 'read';
+  }
+  return switch (toolName) {
+    'multi_edit' || 'notebook_edit' => 'edit',
+    'run_shell' => 'terminal',
+    'run_code' => 'code',
+    'job_start' || 'job_kill' || 'job_list' || 'job_output' => 'terminal',
+    'web_search' ||
+    'fs_grep' ||
+    'fs_glob' ||
+    'session_search' ||
+    'memory_search' => 'search',
+    'fetch_url' => 'web',
+    'generate_image' ||
+    'edit_image' ||
+    'edit_images' ||
+    'resize_image' ||
+    'crop_image' => 'sparkle',
+    'render_html' => 'code',
+    'dispatch_agent' => 'agent',
+    'workflow' => 'workflow',
+    'ralph' => 'loop',
+    'commit' || 'repo_sync' || 'repo_tree' => 'git',
+    'create_goal' || 'update_goal' || 'get_goal' => 'goal',
+    'memory_save' => 'memory',
+    'read_attachment' => 'read',
+    _ => 'api',
+  };
+}
 
 /// Claude-Code-style tool-row visuals: one glyph per tool family and a
 /// status badge (spinner / check / cross) at the end of the row.
 ///
-/// The family comes from [AgentService.toolIcon] (the agent's own taxonomy)
+/// The family comes from [toolIconFor] (the agent's own taxonomy)
 /// with two UI refinements it does not distinguish: image tools get an image
 /// glyph instead of the generic sparkle, and MCP / plugin tools get a plug.
 String chatToolFamily(String toolName) {
@@ -22,7 +58,7 @@ String chatToolFamily(String toolName) {
   if (toolName == 'read_image' || toolName == 'screenshot') return 'image';
   // The agent buckets every `fs_*` tool as read/edit; grep/glob are searches.
   if (toolName == 'fs_grep' || toolName == 'fs_glob') return 'search';
-  final kind = AgentService.toolIcon(toolName);
+  final kind = toolIconFor(toolName);
   if (kind == 'sparkle') return 'image';
   return kind;
 }

@@ -6,7 +6,8 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
+import 'package:ovid_ai/core/cloud/studio_remote_client.dart';
 import 'package:ovid_ai/core/composer_drafts.dart';
 import 'package:ovid_ai/core/memory_store.dart';
 import 'package:ovid_ai/core/presets.dart';
@@ -314,8 +315,8 @@ void main() {
     final entered = Completer<void>();
     final release = Completer<void>();
     final token = app.sessionAccountToken;
-    AgentService.I.setActiveRunForTest('existing', 'active-before-reset');
-    expect(AgentService.I.busyFor('existing'), true);
+    CloudAgentFacade.I.setActiveRunForTest('existing', 'active-before-reset');
+    expect(CloudAgentFacade.I.busyFor('existing'), true);
     final write = SettingsActions.persist('pending-setting', true, () async {
       entered.complete();
       await release.future;
@@ -329,7 +330,7 @@ void main() {
     });
     expect(identical(app.sessionAccountToken, token), false);
     expect(app.sessionAccountReady, false);
-    expect(AgentService.I.busyFor('existing'), false);
+    expect(CloudAgentFacade.I.busyFor('existing'), false);
     await Future<void>.delayed(Duration.zero);
     expect(finished, false);
     release.complete();
@@ -471,7 +472,7 @@ void main() {
     expect(await ComposerDraftStore.I.isEmpty(), isTrue);
     expect(await StudioDraftStore.I.isEmpty(), isTrue);
     expect(await SessionHistoryRepository.I.isEmpty(), isTrue);
-    expect(AgentService.I.studioDraftsEmpty, isTrue);
+    expect(StudioRemoteClient.I.noDrafts, isTrue);
   });
 
   test('reset removes keys, configuration, settings, skills, exports, cache and cookies', () async {

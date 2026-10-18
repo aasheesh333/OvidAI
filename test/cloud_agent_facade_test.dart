@@ -1,7 +1,7 @@
 // P8 Task 8 — CloudAgentFacade.
 //
 // The facade composes the landed pieces (Task 5 REST, Task 6 multiplexer,
-// Task 7 projector) behind the AgentService-shaped AgentSurface seam. Every
+// Task 7 projector) behind the AgentSurface seam. Every
 // assertion below is behavioural: what goes on the wire, what the projection
 // shows, and how run state settles — never an internal field.
 //
@@ -18,7 +18,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart' show AgentMode;
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/cloud_ws.dart';
@@ -607,7 +606,7 @@ void main() {
         () async {
       final h = await _build();
       // The dock's per-row actions resolve the foreground session, exactly
-      // like AgentService's active-bucket semantics.
+      // like the retired local service's active-bucket semantics.
       AppState.I.activeSessionId = 's1';
       addTearDown(() => AppState.I.activeSessionId = null);
       await h.facade.runTask('first', sessionId: 's1');

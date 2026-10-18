@@ -95,7 +95,7 @@ class _AtomicAccountFile {
 }
 
 /// Runs one AI turn on THIS device's own provider/model/key and returns the
-/// reply text. Injected (AgentService in production) so this owner never
+/// reply text. Injected by the caller in production so this owner never
 /// imports an agent runtime; remote events can never invoke it.
 typedef CollaborationTurnRunner =
     Future<String> Function({

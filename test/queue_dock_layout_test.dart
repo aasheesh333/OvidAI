@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
@@ -20,13 +20,11 @@ void main() {
     AppState.resetTestInstance();
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     app.sessions.clear();
     app.activeSessionId = null;
   });
 
   tearDown(() {
-    AgentService.I.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
   });
 
@@ -57,8 +55,9 @@ void main() {
       MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
     );
     await tester.pump();
+    CloudAgentFacade.I.setActiveRunForTest(session.id, 'queue-test');
     for (final text in queued) {
-      AgentService.I.enqueueMessage(text, sessionId: session.id);
+      CloudAgentFacade.I.enqueueMessage(text, sessionId: session.id);
     }
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));

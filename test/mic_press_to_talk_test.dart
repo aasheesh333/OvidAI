@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -51,7 +50,6 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     app.sessions.clear();
     app.activeSessionId = null;
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     voice.availabilityOverrideForTest = null;
     voice.startOverrideForTest = null;
     voice.stopOverrideForTest = null;
@@ -63,8 +61,6 @@ void main() {
     voice.startOverrideForTest = null;
     voice.stopOverrideForTest = null;
     voice.ensureMicrophonePermissionForTest = null;
-    AgentService.llmOnceForTest = null;
-    AgentService.setRunSessionForTest('');
     AppState.resetTestInstance();
   });
 
@@ -116,10 +112,6 @@ void main() {
     voice.availabilityOverrideForTest = true;
     voice.startOverrideForTest = (onResult) {
       onResult('hello world', true);
-    };
-    AgentService.llmOnceForTest = (p, msgs, session, includeTools) async {
-      AgentService.I.streamToBubbleForTest(session, 'ok');
-      return {'role': 'assistant', 'content': 'ok', 'finish_reason': 'stop'};
     };
 
     await tester.pumpWidget(

@@ -7,7 +7,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/auth_providers.dart';
 import 'package:ovid_ai/core/cloud_app_check.dart';
 import 'package:ovid_ai/core/firebase_service.dart';
@@ -37,7 +36,6 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     AppState.resetTestInstance();
     AppState.createForTest();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     OvidCloudService.idTokenOverrideForTest = () async => 'firebase-id-token';
     appCheckCalls.clear();
     sdkToken = 'play-integrity-attestation';
@@ -58,7 +56,6 @@ void main() {
     OvidCloudService.idTokenOverrideForTest = null;
     OvidCloudService.appCheckTokenProvider = null;
     OvidCloudService.httpClientFactoryForTest = null;
-    AgentService.I.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
   });
 

@@ -10,7 +10,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:ovid_ai/core/account_service.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/auth_identity.dart';
 import 'package:ovid_ai/core/auth_phone_flow.dart';
 import 'package:ovid_ai/core/auth_providers.dart';
@@ -159,7 +158,6 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     AppState.resetTestInstance();
     AppState.createForTest();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     OvidCloudService.idTokenOverrideForTest = () async => 'account-test-token';
     OvidCloudService.httpClientFactoryForTest = () => MockClient(
       (_) async => http.Response(jsonEncode({
@@ -177,7 +175,6 @@ void main() {
   tearDown(() {
     OvidCloudService.idTokenOverrideForTest = null;
     OvidCloudService.httpClientFactoryForTest = null;
-    AgentService.I.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
     Aether.dark = originalDark;
   });

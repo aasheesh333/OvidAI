@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/html_artifact.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -14,7 +13,6 @@ void main() {
     AppState.resetTestInstance();
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     app.sessions.clear();
     app.activeSessionId = null;
   });

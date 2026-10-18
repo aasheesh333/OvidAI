@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart';
 
 /// One named agent preset (the tool gate agent-presets parity): a tool-roster
 /// composition plus a persona preamble. A session joins a preset; the
-/// tool gate in AgentService consults the roster on every run so the
+/// tool gate in the retired local service consulted the roster on every run so the
 /// model only ever sees (and bills for) the tools the preset allows.
 @immutable
 class AgentPreset {
@@ -194,7 +194,7 @@ class PresetRegistry {
   /// Plan preset: the research-first planning policy (opencode `plan`
   /// agent parity). Selecting it turns on plan mode (and the Read-Only
   /// coupling). G4: the dispatch gate and the model-visible roster now read
-  /// the SAME policy object — while plan mode is on, `AgentService._tools`
+  /// the SAME policy object — while plan mode is on, the retired service's tool roster
   /// withholds everything [PlanModePolicy] refuses, so the model is never
   /// offered a tool the gate would reject. G5: set [planAllowedTools] on a
   /// custom preset to author your own plan policy.

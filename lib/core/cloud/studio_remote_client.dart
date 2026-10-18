@@ -9,7 +9,7 @@ import 'cloud_rest.dart';
 import 'studio_files.dart';
 
 /// One session's Studio tab view — the shape the editor/tree widgets bind to
-/// (the `_SessionStudio` field set moved out of AgentService).
+/// (the per-session Studio field set moved out of the retired local service).
 @immutable
 class StudioTabsState {
   const StudioTabsState({
@@ -123,7 +123,7 @@ class _SessionStudioState {
 }
 
 /// Remote Studio state (P8 Task 15): the `_SessionStudio` bucket moved out of
-/// `AgentService` and bound to the P7 workspace file API.
+/// the retired local service and bound to the P7 workspace file API.
 ///
 /// One bucket per server session id. Buffers, baselines, dirty/conflict state
 /// and open tabs live here so the editor, tree and screen can all bind to the

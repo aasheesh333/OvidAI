@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
@@ -23,12 +22,10 @@ void main() {
     recentFile = File('${tempDir.path}/recent_models.json');
     AppState.recentModelsFileOverrideForTest = recentFile;
     AppState.resetTestInstance();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
   });
 
   tearDown(() async {
     AppState.recentModelsFileOverrideForTest = null;
-    AgentService.I.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
     if (tempDir.existsSync()) {
       tempDir.deleteSync(recursive: true);

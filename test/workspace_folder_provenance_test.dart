@@ -106,45 +106,7 @@ void main() {
     });
   });
 
-  group('the system prompt tells the truth about who chose the folder', () {
-    final src = File('lib/core/agent_service.dart').readAsStringSync();
-
-    test('the "the user pinned this chat" branch is gated on the flag', () {
-      // The false claim must only be reachable when the flag is set. The
-      // ternary may wrap its `?` onto the next line — gate on the shape,
-      // not the exact line-breaking.
-      expect(
-        src,
-        contains(RegExp(r':\s*s\.workspaceFolderPinned\s*\?')),
-      );
-      expect(src, contains('The user pinned this chat to the folder above'));
-    });
-
-    test('an inherited folder gets honest wording instead', () {
-      expect(src, contains('Working folder (inherited):'));
-      expect(
-        src,
-        contains('it was NOT\nchosen for this chat'),
-      );
-      expect(src, contains('do not announce this location'));
-      expect(src, contains('do\nnot claim the user selected it'));
-      expect(
-        src,
-        contains('do not present yourself as working in a\nparticular repo'),
-      );
-      // The folder still governs file work — provenance honesty must not
-      // quietly weaken the sandbox rule.
-      expect(
-        src,
-        contains('It is still where all\nfile work happens'),
-      );
-    });
-
-    test('the inherited branch asks instead of assuming', () {
-      expect(
-        src,
-        contains('ask the\nuser which one instead of assuming this one'),
-      );
-    });
-  });
+  // The system-prompt provenance wording lived in the retired local service
+  // (P8 Task 19); the server now owns the prompt, so there is no local source
+  // to pin.
 }

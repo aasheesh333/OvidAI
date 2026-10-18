@@ -1,11 +1,25 @@
-/// Wire DTOs for the Ovid Cloud thin client (P8 Task 5).
+/// Wire DTOs for the Ovid Cloud thin client (P8 Task 5), plus the surviving
+/// agent-surface value types (P8 Task 19).
 ///
 /// Every shape mirrors the BUILT server contract exactly (camelCase JSON):
 /// `cloud/packages/shared/src/rest.ts` for the DTOs, plus the built
 /// `GET /health` wire shape `{status, checks:{db, redisQ}}`
 /// (cloud/apps/gateway/src/routes/health.ts). The server is the contract —
 /// when this file and the server disagree, fix this file.
+///
+/// The value types at the bottom (`AgentMode`, `ApprovalRequest`,
+/// `UserQuestion`, `QuestionOption`, `BgJob`, `SubagentInfo`) moved here from
+/// the retired local service in Task 19. They are the shapes
+/// `AgentSurface` and the UI exchange; the local execution stack that used
+/// to define them is gone.
 library;
+
+import 'dart:async' show Completer;
+import 'dart:io' show Process;
+
+import 'package:flutter/material.dart' show Color, IconData, Icons;
+
+import '../theme.dart' show Aether;
 
 /// `SessionDto` (rest.ts). `mode` is "safe" | "auto" | "drive" | "studio"
 /// (spec D5 — "control" was retired; never re-add it).
@@ -325,4 +339,217 @@ class CloudRunState {
   final int? retryNextBackoffMs;
   final String? lastErrorCode;
   final String? lastErrorMessage;
+}
+
+/// A queued message removed by `AgentSurface.takeQueuedMessages`.
+typedef QueuedMessageSnapshot = ({
+  int id,
+  String text,
+  bool userReferences,
+  bool nextDispatch,
+  List<({String name, String path, int size})> attachments,
+});
+
+/// ═══════════════════════════════════════════════════════════════════
+/// AGENT ACCESS MODES (web-IDE style)
+/// ───────────────────────────────────────────────────────────────────
+/// READ-ONLY → asks user before every action (shell/write/commit all)
+/// GENERAL   → shell + browser free; asks for file writes & commits
+/// FULL      → sab kuch free, no confirmation (Codex full-send)
+/// STUDIO    → general + full Studio access: files edit, terminal, repo
+///             sync free; sirf publish/commit confirm karta hai
+///
+/// `control` was retired in P8 Task 13 (spec D5) and removed from the enum
+/// in Task 19; never re-add it.
+/// ═══════════════════════════════════════════════════════════════════
+enum AgentMode { safe, auto, drive, studio }
+
+extension AgentModeX on AgentMode {
+  String get label => switch (this) {
+    AgentMode.safe => 'Read-Only',
+    AgentMode.auto => 'General',
+    AgentMode.drive => 'Full Access',
+    AgentMode.studio => 'Studio',
+  };
+  String get hint => switch (this) {
+    AgentMode.safe =>
+      'Read-only. Asks for permission before every shell, browser, or write action.',
+    AgentMode.auto =>
+      'Runs shell and browser freely. Asks before pushing to the repo.',
+    AgentMode.drive =>
+      'Full autonomous — kuch bhi, kahin bhi, no confirmation.',
+    AgentMode.studio =>
+      'Studio mode — files edit, terminal run, repo access free. '
+          'Asks for confirmation before publishing or committing.',
+  };
+  IconData get icon => switch (this) {
+    AgentMode.safe => Icons.visibility_outlined,
+    AgentMode.auto => Icons.tune_outlined,
+    AgentMode.drive => Icons.rocket_launch_outlined,
+    AgentMode.studio => Icons.code_rounded,
+  };
+  Color get color => switch (this) {
+    AgentMode.safe => Aether.success,
+    AgentMode.auto => Aether.accent,
+    AgentMode.drive => Aether.warn,
+    AgentMode.studio => const Color(0xFF9B7EDE),
+  };
+}
+
+/// The modes every picker offers. Read-Only stays reachable internally —
+/// legacy sessions persisted as `safe` keep working and
+/// `/permission read-only` stays functional — but it is never a direct
+/// pick: the read-only policy is selected through the `plan` preset.
+List<AgentMode> modeOptionsForPicker() => AgentMode.values
+    .where((m) => m != AgentMode.safe)
+    .toList(growable: false);
+
+class ApprovalRequest {
+  final String tool;
+  final String summary;
+  final String detail;
+  final Completer<bool> completer = Completer<bool>();
+  // ── ask_user_question extension (the question gate user-questions seam) ──
+  /// When non-null, the UI renders structured questions instead of
+  /// approve/deny.  The completer resolves true when the user submits
+  /// answers; [answers] holds the question-id → answer map.
+  final List<UserQuestion>? questions;
+  final Map<String, String> answers = {};
+
+  /// Plan text without the surrounding framing prose, for the plan-review
+  /// card (the card must not re-parse [detail] to find it).
+  final String? planBody;
+
+  /// Free-text note the user attached when refusing (e.g. "Chat about it"),
+  /// handed back to the model so it can revise instead of guessing.
+  String? note;
+
+  /// When true the approval card offers a third "Always allow" action that
+  /// remembers the tool for the rest of the session. Only plain tool
+  /// approvals set this — destructive commands, plugin installs, device
+  /// permissions, questions and plan reviews never do.
+  final bool allowAlways;
+
+  /// Set by the UI; persistence happens back in the requesting run's context.
+  bool remember = false;
+
+  /// AgentMode name of the run that raised this prompt, captured at creation.
+  ///
+  /// `approveAlways` runs from the UI, OUTSIDE any run zone, so reading the
+  /// `mode` getter there would resolve to whichever session happens to be
+  /// foreground — and tag the grant with the wrong mode. Capturing it on the
+  /// request is what makes per-mode grants correct with parallel sessions.
+  final String modeName;
+
+  ApprovalRequest({
+    required this.tool,
+    required this.summary,
+    required this.detail,
+    this.questions,
+    this.planBody,
+    this.allowAlways = false,
+    this.modeName = '',
+  });
+}
+
+/// One structured question for ask_user_question — Gemini-web style.
+class UserQuestion {
+  final String id;
+  final String question;
+  final String? header;
+  final List<QuestionOption> options;
+  final bool multi;
+  UserQuestion({
+    required this.id,
+    required this.question,
+    this.header,
+    this.options = const [],
+    this.multi = false,
+  });
+}
+
+class QuestionOption {
+  final String label;
+  final String? description;
+  const QuestionOption({required this.label, this.description});
+}
+
+/// Background job (the process manager ctx.jobs equivalent) — a running Process with a
+/// name, output buffer, and lifecycle state.
+class BgJob {
+  final int id;
+  final String name;
+  final String command;
+  Process? process;
+  bool started = false;
+  bool finished = false;
+  bool killed = false;
+  int? exitCode;
+  final DateTime startedAt = DateTime.now();
+  final StringBuffer output = StringBuffer();
+  BgJob({required this.id, required this.name, required this.command});
+
+  Duration get elapsed => DateTime.now().difference(startedAt);
+  String get state => killed
+      ? 'stopping'
+      : (!started
+            ? 'pending'
+            : !finished
+            ? 'running'
+            : 'done');
+}
+
+/// A dispatched subagent, tracked by the parent that spawned it.
+///
+/// The child is a REAL `ChatSession` (its own transcript, tool cards, live
+/// streaming and workspace), so opening it shows exactly what the child did
+/// instead of an opaque "subagent finished" line. This object is just the
+/// parent-side handle: lifecycle, follow-up inbox, and the reported result.
+class SubagentInfo {
+  final String id;
+  final String label;
+  final String sessionId;
+  final String parentSessionId;
+  final AgentMode parentMode;
+  final String prompt;
+
+  /// Follow-up instructions queued by `send_message` (FIFO inbox).
+  final List<String> messages = [];
+  final Set<int> userReferenceMessages = {};
+  bool interrupted = false;
+  bool finished = false;
+  String result = '';
+
+  /// True when started via `run_in_background` — such children deliver a
+  /// settlement notice to the parent when they end (the subagent coordinator parity); foreground
+  /// children return their result as the tool result instead.
+  final bool background;
+  final DateTime startedAt = DateTime.now();
+  DateTime? finishedAt;
+
+  /// [CC] `agent_type`: the definition name (`general-purpose` for an
+  /// ad-hoc dispatch, `plugin:agent` for a plugin-shipped agent). Hooks
+  /// receive it and SubagentStart/SubagentStop matchers filter on it.
+  String agentType;
+
+  /// `hookSpecificOutput.additionalContext` returned by SubagentStart hooks —
+  /// added to the subagent's context before its first prompt.
+  String startContext = '';
+
+  SubagentInfo({
+    required this.id,
+    required this.label,
+    required this.sessionId,
+    required this.parentSessionId,
+    required this.parentMode,
+    required this.prompt,
+    this.background = false,
+    this.agentType = 'general-purpose',
+  });
+
+  String get state => finished
+      ? (interrupted ? 'stopped' : 'finished')
+      : (interrupted ? 'stopping' : 'running');
+
+  Duration get elapsed => (finishedAt ?? DateTime.now()).difference(startedAt);
 }

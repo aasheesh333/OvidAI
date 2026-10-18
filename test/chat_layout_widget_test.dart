@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_layout.dart';
@@ -16,8 +16,6 @@ void main() {
     AppState.resetTestInstance();
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
-    // The reminder tick runs forever; pause it so widget teardown is clean.
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     app.sessions.clear();
     app.activeSessionId = null;
   });
@@ -46,7 +44,7 @@ void main() {
     );
     app.sessions.add(session);
     app.activeSessionId = session.id;
-    AgentService.I.clearAttachment();
+    CloudAgentFacade.I.clearAttachment();
 
     await tester.pumpWidget(
       MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
@@ -94,15 +92,14 @@ void main() {
       tester,
     ) async {
       await pumpChatAt(tester, width);
-      AgentService.I.pendingAttachments.addAll([
-        for (var i = 0; i < 20; i++)
-          (
-            name: 'very-long-attachment-filename-$i.txt',
-            path: '/work/$i.txt',
-            size: 20000,
-          ),
-      ]);
-      AgentService.I.emitForTest('attach', 'staged');
+      for (var i = 0; i < 20; i++) {
+        CloudAgentFacade.I.stageAttachmentForTest(
+          AppState.I.activeSession!.id,
+          name: 'very-long-attachment-filename-$i.txt',
+          path: '/work/$i.txt',
+          size: 20000,
+        );
+      }
       await tester.pump();
       final scroll = find.byKey(const ValueKey('composer-attachments-scroll'));
       expect(scroll, findsOneWidget);
@@ -117,7 +114,7 @@ void main() {
       await tester.drag(scroll, const Offset(-1000, 0));
       await tester.pumpAndSettle();
       expect(scrollable.position.pixels, greaterThan(0));
-      AgentService.I.clearAttachment();
+      CloudAgentFacade.I.clearAttachment();
       await tester.pump();
       expect(scroll, findsNothing);
       expect(tester.takeException(), isNull);

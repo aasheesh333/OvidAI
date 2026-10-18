@@ -3,13 +3,11 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
-import 'agent_service.dart';
-
 /// App-level connectivity signal (the connection monitor brand/connection parity): a tiny
 /// reachability probe that never blocks the UI and drives the sidebar
 /// chip, the shell's offline banner and the composer's Send button. No new
-/// dependency — reuses HttpShim against a fast, public, CDN-hosted endpoint
-/// that answers 204 with no body.
+/// dependency — a plain `HttpClient` GET against a fast, public,
+/// CDN-hosted endpoint that answers 204 with no body.
 ///
 /// Semantics:
 ///   online   — last probe answered within the deadline
@@ -78,12 +76,30 @@ class ConnectionService extends ChangeNotifier {
   static const offlineRecheckInterval = Duration(seconds: 30);
 
   static Future<bool> _defaultReach() async {
-    final r = await HttpShim.get(
-      Uri.parse(_probeUrl),
-      timeout: const Duration(seconds: 4),
-      maxResponseBytes: 1024,
-    );
-    return r.status == 204 || r.status == 200;
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 4);
+    try {
+      final request = await client
+          .getUrl(Uri.parse(_probeUrl))
+          .timeout(const Duration(seconds: 4));
+      // Deliberately no redirect guard: the probe target is a FIXED public
+      // CDN URL that answers directly. HttpShim's redirect/SSRF policy
+      // existed for arbitrary agent fetches and died with the local service;
+      // re-implementing it here would add surface for no reachability gain.
+      final response =
+          await request.close().timeout(const Duration(seconds: 4));
+      // Drain at most 1 KiB so an unexpected body can never grow the probe.
+      var read = 0;
+      await for (final chunk in response.timeout(const Duration(seconds: 4))) {
+        read += chunk.length;
+        if (read >= 1024) break;
+      }
+      return response.statusCode == 204 || response.statusCode == 200;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close(force: true);
+    }
   }
 
   final Future<bool> Function() _reach;

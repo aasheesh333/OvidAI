@@ -3,7 +3,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/providers_screen.dart';
@@ -23,7 +22,6 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     freshApp();
   });
 
@@ -31,7 +29,6 @@ void main() {
     providerModelsHttpClientForTest = null;
     fetchProviderModelsForTest = null;
     AppState.resetTestInstance();
-    AgentService.I.debugPauseScheduleTimerForTest(false);
   });
 
   ProviderConfig addProvider({List<String>? models}) {

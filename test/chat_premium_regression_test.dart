@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
+import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
@@ -23,17 +24,16 @@ void main() {
       ..add(ChatSession(id: sid, title: 'Chat regression', model: 'm'));
     app.activeSessionId = sid;
     app.sendWhileBusy = 'queue';
-    AgentService.I.debugPauseScheduleTimerForTest(true);
-    AgentService.I.clearQueueForTest();
-    AgentService.I.clearAttachment();
-    AgentService.I.runBucketForTest(sid).activeRunId = null;
-    AgentService.I.pendingApproval = null;
+    CloudAgentFacade.I.clearQueueForTest();
+    CloudAgentFacade.I.clearAttachment();
+    CloudAgentFacade.I.setActiveRunForTest(sid, null);
+    CloudAgentFacade.I.pendingApprovalForTest = null;
   });
 
   tearDown(() {
-    AgentService.I.runBucketForTest(sid).activeRunId = null;
-    AgentService.I.pendingApproval = null;
-    AgentService.I.clearQueueForTest();
+    CloudAgentFacade.I.setActiveRunForTest(sid, null);
+    CloudAgentFacade.I.pendingApprovalForTest = null;
+    CloudAgentFacade.I.clearQueueForTest();
     AppState.resetTestInstance();
   });
 
@@ -79,7 +79,7 @@ void main() {
   testWidgets('Stop stays reachable with a draft and busy action follows setting', (
     tester,
   ) async {
-    AgentService.I.runBucketForTest(sid).activeRunId = 'fixture-run';
+    CloudAgentFacade.I.setActiveRunForTest(sid, 'fixture-run');
     final semantics = tester.ensureSemantics();
     await mount(tester);
     await tester.enterText(composer, 'Keep my draft');
@@ -93,7 +93,7 @@ void main() {
     expect(find.byTooltip('Stop session').hitTestable(), findsOneWidget);
     await tester.tap(find.byTooltip('Stop session'));
     await tester.pump();
-    expect(AgentService.I.busyFor(sid), isFalse);
+    expect(CloudAgentFacade.I.busyFor(sid), isFalse);
     expect(tester.widget<TextField>(composer).controller!.text, 'Keep my draft');
     expect(tester.takeException(), isNull);
     semantics.dispose();
@@ -105,10 +105,11 @@ void main() {
   ) async {
     await mount(tester);
     await tester.enterText(composer, 'Keep until approved');
+    CloudAgentFacade.I.setActiveRunForTest(sid, 'busy');
     for (var i = 0; i < 6; i++) {
-      AgentService.I.enqueueMessage('Queued $i', sessionId: sid);
+      CloudAgentFacade.I.enqueueMessage('Queued $i', sessionId: sid);
     }
-    AgentService.I.pendingApproval = ApprovalRequest(
+    CloudAgentFacade.I.pendingApprovalForTest = ApprovalRequest(
       tool: 'shell',
       summary: 'Approval needed',
       detail: 'Review this command',

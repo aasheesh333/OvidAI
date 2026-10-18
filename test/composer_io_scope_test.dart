@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
@@ -15,7 +14,6 @@ import 'package:ovid_ai/ui/chat_screen.dart';
 /// that must have come from synchronous IO during build.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  final composer = find.byKey(const ValueKey('chat-composer'));
   late ChatSession a;
   late Directory workspace;
 
@@ -24,7 +22,6 @@ void main() {
     AppState.resetTestInstance();
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     workspace = Directory.systemTemp.createTempSync('composer-io-');
     a = ChatSession(
       id: 'composer-io',
@@ -36,7 +33,6 @@ void main() {
       ..clear()
       ..add(a);
     app.activeSessionId = a.id;
-    AgentService.I.clearAttachment();
   });
 
   tearDown(() {
@@ -66,46 +62,6 @@ void main() {
       await tester.pump();
     }
   }
-
-  testWidgets('@ files are listed asynchronously, not during build', (
-    tester,
-  ) async {
-    for (var i = 0; i < 5000; i++) {
-      File('${workspace.path}/file_$i.txt').writeAsStringSync('');
-    }
-    File('${workspace.path}/zz_report.md').writeAsStringSync('');
-    await pumpChat(tester);
-
-    await tester.enterText(composer, '@zz_rep');
-    await tester.pump();
-    // Rebuilds before the debounced async listing do not touch the disk.
-    for (var i = 0; i < 5; i++) {
-      await tester.pump(const Duration(milliseconds: 10));
-    }
-    expect(find.text('zz_report.md'), findsNothing);
-
-    // Debounce fires, the async listing runs on real IO, then one rebuild.
-    await tester.pump(const Duration(milliseconds: 150));
-    await settleIo(tester);
-    // 5,001 entries, capped at 500 listed: whether zz_report.md made the
-    // cut depends on directory order, so assert on the cap instead.
-    final rows = find.textContaining('file_');
-    expect(rows.evaluate().length, lessThanOrEqualTo(14));
-    expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('@ file suggestions appear after the async listing', (
-    tester,
-  ) async {
-    File('${workspace.path}/notes.md').writeAsStringSync('');
-    await pumpChat(tester);
-    await tester.enterText(composer, '@note');
-    await tester.pump();
-    expect(find.text('notes.md'), findsNothing);
-    await tester.pump(const Duration(milliseconds: 150));
-    await settleIo(tester);
-    expect(find.text('notes.md'), findsOneWidget);
-  });
 
   testWidgets('image rows resolve the file asynchronously', (tester) async {
     final image = File('${workspace.path}/image.png')

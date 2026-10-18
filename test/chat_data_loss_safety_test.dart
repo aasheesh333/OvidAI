@@ -4,7 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
+import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/composer_drafts.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -21,7 +22,6 @@ void main() {
     AppState.resetTestInstance();
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     app.providers
       ..clear()
       ..add(
@@ -45,16 +45,15 @@ void main() {
       ..clear()
       ..add(a);
     app.activeSessionId = a.id;
-    AgentService.I.clearAttachment();
-    AgentService.I.clearQueueForTest();
-    AgentService.I.pendingApproval = null;
+    CloudAgentFacade.I.clearAttachment();
+    CloudAgentFacade.I.clearQueueForTest();
+    CloudAgentFacade.I.pendingApprovalForTest = null;
   });
 
   tearDown(() {
-    AgentService.llmOnceForTest = null;
-    AgentService.I.runBucketForTest(a.id).activeRunId = null;
-    AgentService.I.pendingApproval = null;
-    AgentService.I.clearQueueForTest();
+    CloudAgentFacade.I.setActiveRunForTest(a.id, null);
+    CloudAgentFacade.I.pendingApprovalForTest = null;
+    CloudAgentFacade.I.clearQueueForTest();
     AppState.resetTestInstance();
   });
 
@@ -97,61 +96,6 @@ void main() {
     await pumpChat(tester);
     await tester.pump();
     expect(draft(tester), 'A long prompt I typed carefully');
-  });
-
-  testWidgets('Regenerate removes tool and reasoning rows of the first try', (
-    tester,
-  ) async {
-    a.messages
-      ..clear()
-      ..addAll([
-        Message(role: 'user', content: 'Question'),
-        Message(
-          role: 'assistant',
-          kind: MsgKind.tool,
-          toolName: 'bash',
-          content: 'first attempt tool output',
-          toolState: 'ok',
-        ),
-        Message(
-          role: 'assistant',
-          kind: MsgKind.reasoning,
-          content: 'first attempt reasoning',
-        ),
-        Message(role: 'assistant', content: 'First answer'),
-      ]);
-    List<Map<String, dynamic>>? sent;
-    AgentService.llmOnceForTest = (p, msgs, session, includeTools) async {
-      sent ??= List.of(msgs);
-      AgentService.I.streamToBubbleForTest(session, 'Second answer');
-      return {
-        'role': 'assistant',
-        'content': 'Second answer',
-        'finish_reason': 'stop',
-      };
-    };
-    await pumpChat(tester);
-    await tester.tap(find.byTooltip('Regenerate'));
-    await tester.pump();
-    // Truncated to [user] before the new attempt starts.
-    expect(a.messages.first.content, 'Question');
-    expect(
-      a.messages.where(
-        (m) =>
-            m.content.contains('first attempt') || m.content == 'First answer',
-      ),
-      isEmpty,
-    );
-    await tester.pump(const Duration(seconds: 1));
-    await tester.pump(const Duration(seconds: 1));
-    expect(
-      a.messages.where((m) => m.content.contains('first attempt')),
-      isEmpty,
-    );
-    expect(a.messages.where((m) => m.role == 'user'), hasLength(1));
-    if (sent != null) {
-      expect(sent.toString(), isNot(contains('first attempt')));
-    }
   });
 
   testWidgets('Regenerate explains why it cannot run', (tester) async {
@@ -220,7 +164,7 @@ void main() {
   });
 
   testWidgets('pending approval disables Attach and the mic', (tester) async {
-    AgentService.I.pendingApproval = ApprovalRequest(
+    CloudAgentFacade.I.pendingApprovalForTest = ApprovalRequest(
       tool: 'bash',
       summary: 'Run',
       detail: 'ls',
@@ -268,24 +212,23 @@ void main() {
   testWidgets('queue Clear all can be undone with the same ids', (
     tester,
   ) async {
-    final run = AgentService.I.runBucketForTest(a.id);
-    run.activeRunId = 'busy';
+    CloudAgentFacade.I.setActiveRunForTest(a.id, 'busy');
     for (final text in ['one', 'two', 'three']) {
-      AgentService.I.enqueueMessage(text, sessionId: a.id);
+      CloudAgentFacade.I.enqueueMessage(text, sessionId: a.id);
     }
-    final ids = AgentService.I.queuedMessageIdsFor(a.id);
+    final ids = CloudAgentFacade.I.queuedMessageIdsFor(a.id);
     expect(ids, hasLength(3));
     await pumpChat(tester);
     await tester.tap(find.text('Clear all'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
-    expect(AgentService.I.queuedMessagesFor(a.id), isEmpty);
+    expect(CloudAgentFacade.I.queuedMessagesFor(a.id), isEmpty);
     expect(find.text('Cleared 3 queued messages'), findsOneWidget);
     await tester.tap(find.text('Undo'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
-    expect(AgentService.I.queuedMessagesFor(a.id), ['one', 'two', 'three']);
-    expect(AgentService.I.queuedMessageIdsFor(a.id), ids);
+    expect(CloudAgentFacade.I.queuedMessagesFor(a.id), ['one', 'two', 'three']);
+    expect(CloudAgentFacade.I.queuedMessageIdsFor(a.id), ids);
     await expireSnackBars(tester);
   });
 

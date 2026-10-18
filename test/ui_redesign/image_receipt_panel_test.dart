@@ -3,7 +3,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/image_studio.dart';
 import 'package:ovid_ai/core/ovid_cloud_service.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -54,7 +53,6 @@ void main() {
   ) async {
     AppState.resetTestInstance();
     AppState.createForTest();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     OvidCloudService.idTokenOverrideForTest = () async => 'test-id-token';
     // Server usage fetch fails so the hero header falls back to local state.
     OvidCloudService.httpClientFactoryForTest = () =>
@@ -62,7 +60,6 @@ void main() {
     addTearDown(() {
       OvidCloudService.idTokenOverrideForTest = null;
       OvidCloudService.httpClientFactoryForTest = null;
-      AgentService.I.debugPauseScheduleTimerForTest(false);
       AppState.resetTestInstance();
     });
 

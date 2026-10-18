@@ -1,4 +1,4 @@
-/// `CloudAgentFacade` — the AgentService-shaped client over Ovid Cloud
+/// `CloudAgentFacade` — the cloud client over Ovid Cloud
 /// (P8 Task 8).
 ///
 /// Composes the landed client pieces behind the [AgentSurface] seam:
@@ -21,7 +21,6 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
-import '../agent_service.dart';
 import '../connection_service.dart';
 import '../state.dart';
 import 'agent_surface.dart';
@@ -31,7 +30,7 @@ import 'cloud_ws.dart';
 import 'event_projection.dart';
 import 'models.dart';
 
-/// AgentService-shaped facade over the cloud REST + WS surface.
+/// Cloud facade over the REST + WS surface.
 class CloudAgentFacade extends ChangeNotifier
     implements AgentSurface, CloudTranscriptSink {
   CloudAgentFacade({
@@ -84,10 +83,66 @@ class CloudAgentFacade extends ChangeNotifier
   @visibleForTesting
   static void resetForTest() => _instance = null;
 
+  /// Drops every in-memory per-account cache on an account switch or a full
+  /// data reset. This is the surviving owner of the reset guarantee the
+  /// retired local service's `sessionAccountChanged` provided: projections,
+  /// subscriptions, queued sends, staged attachments, optimistic modes and
+  /// error surfaces must never leak into the next account.
+  void resetAccountState() {
+    if (_disposed) return;
+    for (final state in _sessions.values) {
+      unawaited(state.subscription?.cancel());
+      state.projection.dispose();
+    }
+    _sessions.clear();
+    for (final notifier in _busyNotifiers.values) {
+      notifier.dispose();
+    }
+    _busyNotifiers.clear();
+    for (final notifier in _tickNotifiers.values) {
+      notifier.dispose();
+    }
+    _tickNotifiers.clear();
+    _queues.clear();
+    _draining.clear();
+    _attachments.clear();
+    _modes.clear();
+    _errors.clear();
+    _errorResetsAt.clear();
+    _modePatches.clear();
+    _activeRunForTest.clear();
+    pendingApprovalForTest = null;
+    _lastHardStop = null;
+    notifyListeners();
+  }
+
+  /// Account-scoped reset that never constructs the facade just to clear it.
+  static void resetAccountStateIfInstalled() =>
+      _instance?.resetAccountState();
+
   final Map<String, _SessionCloudState> _sessions =
       <String, _SessionCloudState>{};
   final Map<String, ValueNotifier<bool>> _busyNotifiers =
       <String, ValueNotifier<bool>>{};
+
+  /// Stable live-bubble tick notifiers, created on first UI bind WITHOUT
+  /// subscribing to the socket. A transcript binds before any run exists;
+  /// [_stateFor] forwards the projection's ticks into this notifier once the
+  /// session actually subscribes.
+  final Map<String, ValueNotifier<int>> _tickNotifiers =
+      <String, ValueNotifier<int>>{};
+
+  ValueNotifier<int> _tickNotifierFor(String id) =>
+      _tickNotifiers.putIfAbsent(id, () => ValueNotifier<int>(0));
+
+  /// Test-only busy overrides, mirroring the retired local service's
+  /// `setActiveRunForTest` seam. Empty in production.
+  final Map<String, bool> _activeRunForTest = <String, bool>{};
+
+  /// Test-only pending approval, mirroring the retired local service's
+  /// settable `pendingApproval`. Null in production until P3 approval events
+  /// land.
+  ApprovalRequest? pendingApprovalForTest;
 
   /// Optimistic per-session mode (server id → mode) until the PATCH settles.
   /// Absent means "no explicit pick yet" — the persisted session mode is the
@@ -96,7 +151,7 @@ class CloudAgentFacade extends ChangeNotifier
 
   /// The facade's composer queue per server session. The cloud has no
   /// client-side steering channel yet: a queued row is held here and sent as
-  /// the next run when the current one terminalizes (AgentService's
+  /// the next run when the current one terminalizes (the retired local service's
   /// continuation semantics). Task 9's outbox owns OFFLINE persistence; this
   /// queue is the in-memory, online path.
   final Map<String, List<_QueuedCloudMessage>> _queues =
@@ -174,6 +229,10 @@ class CloudAgentFacade extends ChangeNotifier
     }
 
     projection.addListener(() => _onProjectionChanged(serverId, state));
+    final ticks = _tickNotifierFor(serverId);
+    projection.liveBubbleTicks.addListener(
+      () => ticks.value = projection.liveBubbleTicks.value,
+    );
 
     state.subscription = _ws.subscribe(serverId).listen(
           (CloudSessionEvent event) {
@@ -377,14 +436,14 @@ class CloudAgentFacade extends ChangeNotifier
 
   /// The mode a session already has before any optimistic pick: an explicit
   /// `_modes` entry wins, else the persisted `ChatSession.mode`, else auto.
-  /// Control is skipped — retired server-side (spec D5).
+  /// Control was retired server-side (spec D5) and no longer exists in the
+  /// enum.
   AgentMode _persistedModeFor(String? localId, String serverId) {
     final session = AppState.I.sessionById(serverId) ??
         (localId == null ? null : AppState.I.sessionById(localId)) ??
         AppState.I.activeSession;
     final persisted = session?.mode;
     for (final candidate in AgentMode.values) {
-      if (candidate == AgentMode.control) continue;
       if (candidate.name == persisted) return candidate;
     }
     return AgentMode.auto;
@@ -395,12 +454,24 @@ class CloudAgentFacade extends ChangeNotifier
     final localId = sessionId ?? AppState.I.activeSessionId;
     final id = _serverId(localId);
     if (id == null) return;
-    // I-3: the effective pre-pick mode is the revert target. Capturing the
-    // persisted mode here (not defaulting to auto) is what stops a failed
-    // PATCH from shadowing a non-auto session mode.
+    // I-3: the effective pre-pick mode is the revert target. Capture it
+    // BEFORE the optimistic session-row write below.
     final previousExplicit = _modes[id];
     final previousEffective =
         previousExplicit ?? _persistedModeFor(localId, id);
+    // Mirror the retired local service: an explicit mode pick persists on the
+    // session row and ends plan mode. An unknown id still PATCHes (the facade
+    // is addressable by server id even when no local row exists).
+    final session = AppState.I.sessionById(localId ?? '') ??
+        AppState.I.sessionById(id);
+    if (session != null) {
+      if (session.planMode || session.planModePending != null) {
+        session.planMode = false;
+        session.planModePending = null;
+      }
+      session.mode = m.name;
+      unawaited(AppState.I.persistSessions());
+    }
     _modes[id] = m;
     _notify();
     final op = _patchMode(id, previousExplicit, previousEffective, m);
@@ -441,6 +512,13 @@ class CloudAgentFacade extends ChangeNotifier
       // persisted mode shows through again (rather than pinning auto).
       _modes.remove(serverId);
     }
+    // The session row was updated optimistically; restore it with the
+    // effective pre-pick mode.
+    final session = AppState.I.sessionById(serverId);
+    if (session != null) {
+      session.mode = previousEffective.name;
+      unawaited(AppState.I.persistSessions());
+    }
     // Assert the effective value is what it was before the pick.
     assert((_modes[serverId] ?? previousEffective) == previousEffective);
   }
@@ -453,6 +531,7 @@ class CloudAgentFacade extends ChangeNotifier
   bool busyFor(String sessionId) {
     final id = _serverId(sessionId);
     if (id == null) return false;
+    if (_activeRunForTest[id] == true) return true;
     final state = _sessions[id];
     if (state == null) return false;
     // A run the projection has seen is unambiguously busy — unless the
@@ -487,7 +566,10 @@ class CloudAgentFacade extends ChangeNotifier
   ValueListenable<int> liveBubbleTicksFor(String sessionId) {
     final id = _serverId(sessionId);
     if (id == null) return _orphanTicks;
-    return _stateFor(id).projection.liveBubbleTicks;
+    // Do NOT create/subscribe the session state here: a mounted transcript
+    // binds this before any run, and subscribing would open a socket (and a
+    // reconnect timer) for every rendered session.
+    return _tickNotifierFor(id);
   }
 
   @override
@@ -595,6 +677,12 @@ class CloudAgentFacade extends ChangeNotifier
   bool stopRequested({required String sessionId}) {
     final id = _serverId(sessionId);
     if (id == null) return false;
+    // Test-seam busy state (see [setActiveRunForTest]) settles like a real
+    // stop: there is no server run to cancel.
+    if (_activeRunForTest.remove(id) == true) {
+      _notify();
+      return true;
+    }
     final state = _sessions[id];
     if (state == null ||
         state.runState.runId == null ||
@@ -666,7 +754,8 @@ class CloudAgentFacade extends ChangeNotifier
   // -------------------------------------------------------------------------
 
   @override
-  ApprovalRequest? get pendingApproval => null; // P3: approval_* events
+  ApprovalRequest? get pendingApproval =>
+      pendingApprovalForTest; // P3: approval_* events
 
   @override
   List<({String sessionId, String title, ApprovalRequest request})>
@@ -699,9 +788,12 @@ class CloudAgentFacade extends ChangeNotifier
   @override
   List<({String name, String path, int size})> get pendingAttachments {
     final id = _serverId(null);
-    return id == null
-        ? const []
-        : List.unmodifiable(_attachments[id] ?? const []);
+    if (id == null) return <({String name, String path, int size})>[];
+    // Mutable by contract: the surviving composer/edit paths stage a message's
+    // existing attachments by adding to this list (the retired local service
+    // exposed the same mutable view).
+    return _attachments.putIfAbsent(
+        id, () => <({String name, String path, int size})>[]);
   }
 
   @override
@@ -745,6 +837,43 @@ class CloudAgentFacade extends ChangeNotifier
     final id = _serverId(null);
     if (id == null) return;
     _attachments[id]?.clear();
+    _notify();
+  }
+
+  /// Test seam: stage an attachment without touching the filesystem. The
+  /// retired local service exposed its mutable staging list; the facade keeps
+  /// staging private, so UI tests use this instead.
+  @visibleForTesting
+  void stageAttachmentForTest(
+    String sessionId, {
+    required String name,
+    required String path,
+    required int size,
+  }) {
+    final id = _serverId(sessionId) ?? sessionId;
+    _attachments
+        .putIfAbsent(id, () => <({String name, String path, int size})>[])
+        .add((name: name, path: path, size: size));
+    _notify();
+  }
+
+  /// Test seam: clear every in-memory composer queue.
+  @visibleForTesting
+  void clearQueueForTest() {
+    _queues.clear();
+    _draining.clear();
+    _notify();
+  }
+
+  /// Test seam: mark [sessionId] busy without a live WS run.
+  @visibleForTesting
+  void setActiveRunForTest(String sessionId, String? runId) {
+    final id = _serverId(sessionId) ?? sessionId;
+    if (runId == null) {
+      _activeRunForTest.remove(id);
+    } else {
+      _activeRunForTest[id] = true;
+    }
     _notify();
   }
 
@@ -864,7 +993,7 @@ class CloudAgentFacade extends ChangeNotifier
     final entry = queue.removeAt(index);
     queue.insert(0, entry);
     _notify();
-    // Stop promotes the queue head (AgentService parity). The drain runs on
+    // Stop promotes the queue head (local-queue parity). The drain runs on
     // the terminal event, so the row starts as soon as the run settles.
     stopRequested(sessionId: resolved);
   }
@@ -1121,9 +1250,17 @@ class CloudAgentFacade extends ChangeNotifier
   TranscriptProjection? projectionForTest(String sessionId) =>
       _sessions[_serverId(sessionId) ?? sessionId]?.projection;
 
+  /// Forces the session state (cache seed + WS subscription) without a send.
+  /// The production UI no longer triggers this from a plain transcript bind
+  /// (see [liveBubbleTicksFor]); runs and cache loads still do.
+  @visibleForTesting
+  void subscribeForTest(String sessionId) {
+    _stateFor(_serverId(sessionId) ?? sessionId);
+  }
+
   // -------------------------------------------------------------------------
   // Task 10 — the chat rewire's read surface (cloud-only; the default build
-  // renders ChatSession.messages straight from AgentService).
+  // renders ChatSession.messages straight from the server projection).
   // -------------------------------------------------------------------------
 
   /// The live transcript list chat_screen renders under
@@ -1197,6 +1334,10 @@ class CloudAgentFacade extends ChangeNotifier
       notifier.dispose();
     }
     _busyNotifiers.clear();
+    for (final notifier in _tickNotifiers.values) {
+      notifier.dispose();
+    }
+    _tickNotifiers.clear();
     _queues.clear();
     _orphanTicks.dispose();
     super.dispose();

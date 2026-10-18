@@ -596,7 +596,7 @@ void main() {
       addTearDown(facade.dispose);
 
       // Triggers _stateFor → seed the projection + WS cursor → subscribe.
-      facade.liveBubbleTicksFor('srv-1');
+      facade.subscribeForTest('srv-1');
       await pumpEventQueue();
 
       final frames = <Map<String, dynamic>>[

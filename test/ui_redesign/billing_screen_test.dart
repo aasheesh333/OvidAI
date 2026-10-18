@@ -5,7 +5,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/ovid_cloud_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/billing_screen.dart';
@@ -51,7 +50,6 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     AppState.resetTestInstance();
     AppState.createForTest();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     OvidCloudService.idTokenOverrideForTest = () async => 'test-id-token';
     // Default: user is on Free. Tests that need a different tier override
     // the client factory individually.
@@ -63,7 +61,6 @@ void main() {
   tearDown(() {
     OvidCloudService.idTokenOverrideForTest = null;
     OvidCloudService.httpClientFactoryForTest = null;
-    AgentService.I.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
   });
 

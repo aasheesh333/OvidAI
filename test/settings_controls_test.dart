@@ -3,7 +3,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/model_limits.dart';
 import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -21,14 +21,12 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     AppState.resetTestInstance();
     app = AppState.createForTest();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     PresetRegistry.clearCustom();
   });
 
   tearDown(() {
     NotificationPermissionAccess.reset();
     PresetRegistry.clearCustom();
-    AgentService.I.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
   });
 
@@ -161,12 +159,24 @@ void main() {
     test('never exceeds the model window', () async {
       final s = session('gpt-4o');
       await app.setContextWindowOverride(1000000);
-      expect(AgentService.contextWindowForSession(s), 128000);
-      expect(AgentService.contextOverrideAppliesTo(s), isFalse);
+      expect(
+        ModelLimits.effectiveContextWindow(
+          app.contextWindowOverride,
+          ModelLimits.contextWindowFor(s.model, s.providerId),
+        ),
+        128000,
+      );
+      expect(app.contextWindowOverride < ModelLimits.contextWindowFor(s.model, s.providerId), isFalse);
       await app.setContextWindowOverride(32768);
-      expect(AgentService.contextWindowForSession(s), 32768);
-      expect(AgentService.contextOverrideAppliesTo(s), isTrue);
-      expect(AgentService.effectiveContextWindow(0, 128000), 128000);
+      expect(
+        ModelLimits.effectiveContextWindow(
+          app.contextWindowOverride,
+          ModelLimits.contextWindowFor(s.model, s.providerId),
+        ),
+        32768,
+      );
+      expect(app.contextWindowOverride < ModelLimits.contextWindowFor(s.model, s.providerId), isTrue);
+      expect(ModelLimits.effectiveContextWindow(0, 128000), 128000);
     });
 
     testWidgets('a 32K override shows "(override)"', (tester) async {

@@ -14,12 +14,12 @@
 // Probes were run 2026-09-23 against the keys in the provider catalog.
 //
 // Anything NOT observed is deliberately absent. A model id missing here
-// falls through to `AgentService._contextWindows` and then to
-// `defaultContextWindow`, so an unmeasured model can never be credited
-// with capacity nobody confirmed. Where two gateways publish different
-// numbers for the same bare id (`glm-5.2` is 990,000 tokens on Fiqstr and
-// 1,000,000 on Inferhub), each gateway gets its own row and the shared
-// table only keeps values they agree on.
+// falls through to [ModelLimits.contextWindowFor]'s keyword table and then to
+// [ModelLimits.defaultContextWindow], so an unmeasured model can never be
+// credited with capacity nobody confirmed. Where two gateways publish
+// different numbers for the same bare id (`glm-5.2` is 990,000 tokens on
+// Fiqstr and 1,000,000 on Inferhub), each gateway gets its own row and the
+// shared table only keeps values they agree on.
 class ModelLimits {
   const ModelLimits._();
 
@@ -358,4 +358,76 @@ class ModelLimits {
       : n >= 1000
           ? '${(n / 1000).toStringAsFixed(n % 1000 == 0 ? 0 : 1)}K'
           : '$n';
+
+  // -------------------------------------------------------------------------
+  // Context-window resolution (moved verbatim from the retired local service,
+  // P8 Task 19). These are pure model math, not execution state.
+  // -------------------------------------------------------------------------
+
+  /// default when the model doesn't declare a window: 1,000,000 tokens.
+  static const defaultContextWindow = 1000000;
+
+  static const _contextWindows = <(String, int)>[
+    // NVIDIA NIM keyword fallbacks. The exact ids are measured in
+    // ModelLimits (NIM's own 400s); these bare-family rows only catch
+    // hand-typed variants. nemotron-3.5-lightning-30b and -3-super both
+    // answered "maximum context length is 1000000" when probed — the old
+    // 32768/262144 guesses were wrong and are corrected here.
+    ('nemotron-3.5-lightning-30b', 1000000),
+    ('nemotron-3-nano', 1000000),
+    ('nemotron-3-super', 1000000),
+    ('nemotron', 131072), // safe default for unknown nemotron variants
+    ('gemini-2.5-pro', 1048576),
+    ('gemini-2.5-flash', 1048576),
+    ('gemini-2.0-flash', 1048576),
+    ('gemini', 1048576),
+    ('gpt-4.1', 1048576),
+    ('grok-4', 256000),
+    ('grok', 256000),
+    ('claude-opus-4', 200000),
+    ('claude-sonnet-4', 200000),
+    ('claude-3-7', 200000),
+    ('claude-3-5', 200000),
+    ('claude', 200000),
+    ('o3', 200000),
+    ('o4', 200000),
+    ('deepseek-v4', 1048576),
+    ('deepseek', 128000),
+    ('qwen3', 1048576),
+    ('qwen2.5', 131072),
+    ('qwen', 131072),
+    ('gpt-oss-120b', 131072),
+    ('gpt-4o', 128000),
+    ('gpt', 128000),
+    ('llama-4', 1048576),
+    ('llama-3.3-70b', 128000),
+    ('llama-3', 128000),
+    ('llama', 128000),
+    ('mistral-large', 128000),
+    ('mistral', 128000),
+    ('kimi', 262144),
+    ('glm', 131072),
+    ('codestral', 262144),
+    ('sonar', 127072),
+  ];
+
+  /// Context window (tokens) for [model].
+  ///
+  /// Order: numbers the provider itself published or spelled out in an error
+  /// ([ModelLimits] — measured live against every catalog provider; pass
+  /// [providerId] so a gateway's own numbers beat another vendor's route with
+  /// the same name) → the keyword table above → [defaultContextWindow].
+  static int contextWindowFor(String model, [String? providerId]) {
+    final measured = inputTokens(model, providerId);
+    if (measured != null && measured > 0) return measured;
+    final m = model.split('·').first.trim().toLowerCase();
+    for (final (key, window) in _contextWindows) {
+      if (m.contains(key)) return window;
+    }
+    return defaultContextWindow;
+  }
+
+  /// `min(override, modelWindow)`; a non-positive override means auto.
+  static int effectiveContextWindow(int override, int modelWindow) =>
+      override > 0 && override < modelWindow ? override : modelWindow;
 }

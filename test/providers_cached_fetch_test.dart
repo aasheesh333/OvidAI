@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/providers_screen.dart';
@@ -14,13 +13,11 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
-    AgentService.I.debugPauseScheduleTimerForTest(true);
   });
 
   tearDown(() {
     fetchProviderModelsForTest = null;
     AppState.resetTestInstance();
-    AgentService.I.debugPauseScheduleTimerForTest(false);
   });
 
   testWidgets('explicit fetch updates only its expanded provider cache', (

@@ -12,15 +12,14 @@
 //     shows the server message VERBATIM plus a resets countdown, and the
 //     composed draft survives dismissing the error.
 //
-// The default (flag false) arm is covered by the existing chat suites, which
-// run untouched against AgentService.
+// The thin arm is covered here; the facade is the only agent implementation
+// since Task 19 deleted the local service.
 
 import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
@@ -244,18 +243,16 @@ void main() {
     Distribution.thinOverrideForTest = true;
     // The local engine must never be consulted; pausing its timer keeps the
     // assertion below safe to make without pending-timer noise.
-    AgentService.I.debugPauseScheduleTimerForTest(true);
   });
 
   tearDown(() async {
-    AgentService.I.debugPauseScheduleTimerForTest(false);
     Distribution.thinOverrideForTest = null;
     CloudAgentFacade.resetForTest();
     CloudSessionStore.resetForTest();
     AppState.resetTestInstance();
   });
 
-  testWidgets('typing + Send calls runTask on the FACADE, never AgentService',
+  testWidgets('typing + Send calls runTask on the FACADE, never the local service',
       timeout: const Timeout(Duration(seconds: 60)), (tester) async {
     final h = await _bind();
     addTearDown(() async {
@@ -272,7 +269,7 @@ void main() {
     expect(h.rest.sent.single.content, 'hello cloud');
     expect(h.rest.sent.single.clientMsgId, matches(RegExp(r'^[0-9a-f]{32}$')));
     // The local engine never ran.
-    expect(AgentService.I.busyFor('srv-1'), isFalse);
+    expect(CloudAgentFacade.I.busyFor('srv-1'), isFalse);
     // The optimistic user row renders from the facade projection.
     expect(find.textContaining('hello cloud'), findsWidgets);
     await h.close();
@@ -388,7 +385,7 @@ void main() {
     );
     // Nothing was sent and the local engine never ran.
     expect(h.rest.sent, isEmpty);
-    expect(AgentService.I.busyFor('srv-1'), isFalse);
+    expect(CloudAgentFacade.I.busyFor('srv-1'), isFalse);
 
     // The composed draft is still present after the error row is dismissed.
     await tester.tap(find.byKey(const ValueKey('cloud-error-dismiss')));

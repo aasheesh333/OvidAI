@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
 
-import '../core/agent_service.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
-import '../core/distribution.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import '../l10n/l10n.dart';
@@ -13,10 +11,8 @@ import 'session_actions.dart';
 import 'trajectory_screen.dart';
 import 'usage_screen.dart';
 
-/// P8 Task 10 — the shared dual-path binding (same pattern as
-/// chat_screen/sidebar).
-AgentSurface get _agent =>
-    Distribution.cloudExecution ? CloudAgentFacade.I : AgentService.I;
+/// P8 Task 19 — the cloud facade is the only agent implementation.
+AgentSurface get _agent => CloudAgentFacade.I;
 
 /// Items of the chat header's ⋮ menu.
 enum ChatMenuAction {

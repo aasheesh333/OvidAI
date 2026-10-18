@@ -3,7 +3,7 @@
 /// Folds the multiplexer's (already seq-deduped) [CloudSessionEvent] stream
 /// for ONE session into the existing KEPT transcript model (`Message` /
 /// `MsgKind`, lib/core/state.dart) — the thin client's replacement for
-/// AgentService's in-process streaming pipeline. Task 8's `CloudAgentFacade`
+/// the retired local service's in-process streaming pipeline. Task 8's `CloudAgentFacade`
 /// creates one [TranscriptProjection] + [EventTranscriptProjector] per
 /// session and feeds it from `WsMultiplexer.subscribe(sessionId)`; the
 /// projector itself does no routing and no I/O.
@@ -15,7 +15,7 @@
 /// | `run_started{runId}` | busy=true, activeRunId, live `streaming` bubble, statusLine cleared |
 /// | `message_delta{runId,text}` | epoch-gated append into the bubble's content + [TranscriptProjection.liveBubbleTicks] tick |
 /// | `message_completed{messageId,content}` | bubble REPLACED by the server-authoritative text Message; activeRunId cleared (the double-apply guard) |
-/// | `run_started_retry{attempt,nextBackoffMs}` | the composer status line; stays busy; the failed attempt's partial is DISCARDED and a fresh empty bubble re-armed (ruling 1 — AgentService `_discardLiveAttempt` parity) |
+/// | `run_started_retry{attempt,nextBackoffMs}` | the composer status line; stays busy; the failed attempt's partial is DISCARDED and a fresh empty bubble re-armed (ruling 1 — parity with the retired local service's `_discardLiveAttempt`) |
 /// | `run_failed{code,message?}` | busy=false, error fields, turn-tail row |
 /// | `run_completed{runId}` | busy=false, statusLine cleared |
 /// | `system_note` | turn-tail row |
@@ -43,7 +43,7 @@ import 'cloud_ws.dart';
 /// The transcript + run-status state for ONE cloud session, folded from
 /// session events. Structural transcript changes (append / replace / settle /
 /// seed) notify listeners; per-delta content growth does NOT — it publishes
-/// through [liveBubbleTicks] instead, exactly like AgentService's live-bubble
+/// through [liveBubbleTicks] instead, exactly like the retired local service's live-bubble
 /// tick, so a streaming token repaints only the tail row, never every widget
 /// listening to this notifier.
 class TranscriptProjection extends ChangeNotifier {
@@ -51,7 +51,7 @@ class TranscriptProjection extends ChangeNotifier {
   final List<Message> messages = <Message>[];
 
   /// Ticks once per accepted `message_delta` so only the live tail bubble
-  /// repaints. Replaces AgentService.liveBubbleTicksFor (Task 8).
+  /// repaints. Replaces the retired local service's liveBubbleTicksFor (Task 8).
   final ValueNotifier<int> liveBubbleTicks = ValueNotifier<int>(0);
 
   bool _busy = false;
@@ -184,7 +184,7 @@ class TranscriptProjection extends ChangeNotifier {
   }
 
   /// Settles the live streaming bubble: one with partial content is promoted
-  /// to a settled text row (the partial output stays visible — AgentService
+  /// to a settled text row (the partial output stays visible — the retired local service
   /// stopped-turn parity), an empty one is removed outright. A `thinking:`
   /// row must NEVER be left shimmering after a terminal event.
   void _settleLiveBubble() {
@@ -207,8 +207,8 @@ class TranscriptProjection extends ChangeNotifier {
   /// would swallow the next attempt's whole stream (`message_delta` drops
   /// when no bubble is tracked). No-op when no run is in flight.
   ///
-  /// Controller ruling 1 (fix round 1): AgentService `_discardLiveAttempt`
-  /// parity (agent_service.dart:12960, called before every retry at :13698).
+  /// Controller ruling 1 (fix round 1): the retired local service's `_discardLiveAttempt`
+  /// parity (it discarded the partial before every retry).
   void _resetLiveBubble(Message fresh) {
     final live = _liveBubble;
     if (live == null) return;
@@ -343,7 +343,7 @@ class EventTranscriptProjector {
     if (live == null) return; // no bubble (missed run_started): nowhere to fold
     live.content = live.content + text;
     // Per-token publication: the tick repaints ONLY the live tail row
-    // (AgentService liveBubbleTicks parity) — no notifyListeners here.
+    // (live-bubble-tick parity) — no notifyListeners here.
     target.liveBubbleTicks.value++;
   }
 

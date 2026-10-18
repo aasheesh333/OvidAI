@@ -3,7 +3,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
-import '../core/agent_service.dart';
+import '../core/cloud/cloud_agent_facade.dart';
+import '../core/cloud/models.dart';
 import '../core/cloud/studio_files.dart';
 import '../core/cloud/studio_remote_client.dart';
 import '../core/github_service.dart';
@@ -257,7 +258,7 @@ class _StudioScreenState extends State<StudioScreen> {
                     onDecision: (a, ok) {
                       // Bound to the request the banner rendered: a stale tap
                       // must never resolve the NEXT pending approval.
-                      if (!AgentService.I.approveRequest(a, ok)) return;
+                      if (!CloudAgentFacade.I.approveRequest(a, ok)) return;
                       if (!ok) {
                         showStudioToast(context, 'Declined ${a.tool}');
                       }
@@ -882,9 +883,9 @@ class _ApprovalBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: AgentService.I,
+      animation: CloudAgentFacade.I,
       builder: (context, _) {
-        final a = AgentService.I.pendingApproval;
+        final a = CloudAgentFacade.I.pendingApproval;
         if (a == null || a.questions != null || a.planBody != null) {
           return const SizedBox.shrink();
         }

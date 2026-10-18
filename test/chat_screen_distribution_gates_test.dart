@@ -19,7 +19,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
@@ -142,13 +141,11 @@ void main() {
     AppState.resetTestInstance();
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     Distribution.thinOverrideForTest = null;
     tmp = Directory.systemTemp.createTempSync('distribution-gates-');
   });
 
   tearDown(() async {
-    AgentService.I.debugPauseScheduleTimerForTest(false);
     Distribution.thinOverrideForTest = null;
     CloudAgentFacade.resetForTest();
     CloudSessionStore.resetForTest();

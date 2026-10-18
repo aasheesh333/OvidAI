@@ -5,7 +5,8 @@ import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
-import 'agent_service.dart';
+import 'cloud/cloud_agent_facade.dart';
+import 'cloud/models.dart';
 import 'presets.dart';
 import 'session_ledger.dart';
 import 'state.dart';
@@ -47,7 +48,13 @@ class AgentCommand {
 
 class CommandService {
   CommandService._();
-  static final CommandService I = CommandService._();
+  static CommandService? _instance;
+
+  /// The process-wide registry, initialized with the built-in commands on
+  /// first use. The retired local service used to do this in its constructor
+  /// (P8 Task 19); lazy initialization keeps the registry usable from tests
+  /// and from the first composer keystroke without a boot-order dependency.
+  static CommandService get I => _instance ??= (CommandService._()..registerBuiltins());
 
   final Map<String, AgentCommand> _commands = {};
 
@@ -79,7 +86,7 @@ class CommandService {
     return cmd.handler(parsed.args);
   }
 
-  /// Register the built-in commands (called once from AgentService ctor).
+  /// Register the built-in commands (called once at app start).
   void registerBuiltins() {
     register(
       AgentCommand(
@@ -148,7 +155,7 @@ class CommandService {
           // PR26/C5: /compact is idle-only (busy|changed error codes)
           // — compacting under a live run would race the loop's own
           // compaction + rewrite history it is iterating.
-          if (AgentService.I.busyFor(s.id)) {
+          if (CloudAgentFacade.I.busyFor(s.id)) {
             return const CommandResult(
               feedback:
                   'Session is busy — /compact runs on an idle chat '
@@ -171,7 +178,7 @@ class CommandService {
         description:
             'Enter plan mode (research-first, read-only); /plan off exits',
         handler: (args) async {
-          final agent = AgentService.I;
+          final agent = CloudAgentFacade.I;
           if (args.trim().toLowerCase() == 'off') {
             agent.planMode = false;
             return const CommandResult(feedback: 'Plan mode off.');
@@ -223,13 +230,22 @@ class CommandService {
                   '${PresetRegistry.all.map((p) => p.id).join(', ')}.',
             );
           }
-          // Mid-chat switching is safe: the tool gate and the persona block
-          // are both built per run, so the new roster applies from the
-          // next message. Blocking it made /preset a no-op on every real
-          // chat. The `plan` preset additionally owns plan + read-only;
-          // any other preset clears that coupling.
+          // Mid-chat switching is safe: the preset is a UI/session policy
+          // applied from the next message. The local tool roster it used to
+          // drive died with the local service (P8 Task 19); the cloud
+          // roster is server-owned. The `plan` preset still owns plan +
+          // read-only; any other preset clears that coupling.
           final hadMessages = s.messages.isNotEmpty;
-          await AgentService.I.applyPreset(match);
+          final agent = CloudAgentFacade.I;
+          s.presetId = match.id;
+          if (match.id == 'plan') {
+            agent.planMode = true;
+            if (s.mode != AgentMode.safe.name) s.mode = AgentMode.safe.name;
+          } else {
+            agent.planMode = false;
+          }
+          await app.persistSessions();
+          app.refresh();
           return CommandResult(
             feedback:
                 'Preset → ${match.id} (${match.label}) — '
@@ -279,10 +295,10 @@ class CommandService {
     register(
       AgentCommand(
         name: 'permission',
-        hint: '[general|studio|full-access|control]',
+        hint: '[general|studio|full-access]',
         description: 'Show or set what the agent may do in this chat',
         handler: (args) async {
-          final agent = AgentService.I;
+          final agent = CloudAgentFacade.I;
           final raw = args.trim().toLowerCase().replaceAll('_', '-');
           // First token is the preset; anything after it is a flag
           // (currently only `confirm` for full access).
@@ -304,11 +320,6 @@ class CommandService {
                   '${modeOptionsForPicker().map(_permName).join(', ')}.',
             );
           }
-          if (target == AgentMode.control) {
-            return const CommandResult(
-              feedback: 'Control mode was removed in this build.',
-            );
-          }
           if (target == AgentMode.drive && !flags.contains('confirm')) {
             // Strong modes are opt-in with an explicit acknowledgement rather
             // than a single word.
@@ -319,7 +330,7 @@ class CommandService {
                   'that risk.',
             );
           }
-          agent.mode = target;
+          agent.setMode(target);
           return CommandResult(feedback: 'Permission → ${target.label}');
         },
       ),

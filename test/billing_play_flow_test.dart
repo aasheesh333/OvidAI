@@ -6,7 +6,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:in_app_purchase/in_app_purchase.dart';
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/ovid_cloud_service.dart';
 import 'package:ovid_ai/core/play_billing.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -50,7 +49,6 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     AppState.resetTestInstance();
     AppState.createForTest();
-    AgentService.I.debugPauseScheduleTimerForTest(true);
     OvidCloudService.I.resetUpgradeAvailabilityForTest();
     OvidCloudService.idTokenOverrideForTest = () async => 'billing-test-token';
     usage = _usage();
@@ -75,7 +73,6 @@ void main() {
     billing.dispose();
     OvidCloudService.idTokenOverrideForTest = null;
     OvidCloudService.httpClientFactoryForTest = null;
-    AgentService.I.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
   });
 
