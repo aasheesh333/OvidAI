@@ -16,7 +16,8 @@ describe("loadBrowserEngineConfig defaults", () => {
     const cfg = loadBrowserEngineConfig(bareEnv());
     expect(cfg.maxLiveBrowsers).toBe(4);
     expect(cfg.tier1FallbackContexts).toBe(2);
-    expect(cfg.idleEvictMs).toBe(180_000);
+    // Muse ephemeral step leases: a context freezes after 15 s idle.
+    expect(cfg.idleEvictMs).toBe(15_000);
     expect(cfg.maxTier1Processes).toBe(8);
     expect(cfg.tier1TimeoutMs).toBe(20_000);
     expect(cfg.maxActiveScreencasts).toBe(3);
@@ -32,7 +33,23 @@ describe("loadBrowserEngineConfig defaults", () => {
     expect(cfg.lightpandaBin).toBeNull();
     expect(cfg.allowHosts).toEqual([]);
     expect(cfg.ownPublicIp).toBeNull();
-    expect(cfg.chromiumArgs).toEqual(["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]);
+    // Resource diet: a small V8 heap, two renderers, no background work.
+    expect(cfg.blockHeavyResources).toBe(true);
+    expect(cfg.chromiumArgs).toEqual([
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--js-flags=--max-old-space-size=96",
+      "--renderer-process-limit=2",
+      "--disable-extensions",
+      "--disable-background-networking",
+      "--disable-component-update",
+      "--disable-default-apps",
+      "--disable-sync",
+      "--mute-audio",
+      "--no-first-run",
+      "--no-default-browser-check",
+    ]);
     // No dedicated uid in dev/test by default; production refuses this.
     expect(cfg.egressUid).toBeNull();
     expect(cfg.browserUidRange).toBeNull();

@@ -68,6 +68,22 @@ const opening = new Map<string, Promise<SessionBrowser>>();
  * state, acquire the pool's live context for this session, register it (which
  * instruments tab 0), and notify the bridge.
  */
+/**
+ * The last http(s) URL each session was on. The pool freezes a live context
+ * after 15 s of inactivity (Muse ephemeral step leases), which closes the
+ * page; storageState restores cookies/localStorage but NOT the current URL,
+ * so without this the next step would open on about:blank and the agent would
+ * have to navigate again. Re-navigating here keeps eviction transparent.
+ * Entries are tiny (one string per session) and are overwritten on each step.
+ */
+const lastUrls = new Map<string, string>();
+
+function rememberUrl(sessionId: string, url: string): void {
+  if (url.startsWith("http://") || url.startsWith("https://")) {
+    lastUrls.set(sessionId, url);
+  }
+}
+
 export async function ensureSession(ops: SessionOps, ctx: BrowserToolContext): Promise<SessionBrowser> {
   const existing = ops.registry.get(ctx.sessionId);
   if (existing) {
@@ -96,6 +112,17 @@ export async function ensureSession(ops: SessionOps, ctx: BrowserToolContext): P
       handle,
     });
     ops.notifyState?.(ctx.sessionId);
+    // Ephemeral-lease restore: a context that was frozen mid-session comes
+    // back on the page it was showing. Best-effort — a dead URL must not turn
+    // a tool call into an error, the caller's own navigation still applies.
+    const previous = lastUrls.get(ctx.sessionId);
+    if (previous !== undefined) {
+      try {
+        await handle.page.goto(previous, { waitUntil: "domcontentloaded", timeout: 15_000 });
+      } catch {
+        // Unreachable now: the next explicit navigate replaces it.
+      }
+    }
     return session;
   })();
 
@@ -154,7 +181,12 @@ export async function withSession<T>(
   const session = await ensureSession(deps, ctx);
   deps.registry.touch(ctx.sessionId);
   const page = session.tabs[session.activeIndex] ?? session.handle.page;
-  return fn(session, page);
+  try {
+    return await fn(session, page);
+  } finally {
+    // Remember where the step left the tab so an idle freeze can restore it.
+    rememberUrl(ctx.sessionId, page.url());
+  }
 }
 
 /**

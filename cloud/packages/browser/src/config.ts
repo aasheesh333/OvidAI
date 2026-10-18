@@ -17,7 +17,13 @@ export interface BrowserEngineConfig {
   maxLiveBrowsers: number;
   /** MAX_TIER1_FALLBACK_CONTEXTS, default 2 */
   tier1FallbackContexts: number;
-  /** BROWSER_IDLE_EVICT_MS, default 180_000 */
+  /**
+   * BROWSER_IDLE_EVICT_MS — how long a live context may sit untouched before
+   * the pool freezes it (storageState flushed, context closed). Default
+   * 15_000: Muse-style ephemeral step leases, so a context exists only while
+   * a step or a manual takeover is running. The engine re-navigates to the
+   * session's last URL on the next step, so eviction is transparent.
+   */
   idleEvictMs: number;
   /** MAX_TIER1_PROCESSES, default 8 */
   maxTier1Processes: number;
@@ -36,6 +42,12 @@ export interface BrowserEngineConfig {
   allowHosts: string[];
   /** OVID_PUBLIC_IP (SSRF self-block; P2 nftables uses the same value) */
   ownPublicIp: string | null;
+  /**
+   * Abort media/font requests and known ad/tracker hosts at the context
+   * layer (OVID_BROWSER_BLOCK_HEAVY_RESOURCES=0 disables). Cuts per-context
+   * memory and CPU enough to run many more live contexts on the same box.
+   */
+  blockHeavyResources: boolean;
   chromiumArgs: string[];
   /**
    * OVID_BROWSER_EGRESS_UID — the dedicated uid every browser process
@@ -208,7 +220,7 @@ export function loadBrowserEngineConfig(raw: NodeJS.ProcessEnv): BrowserEngineCo
   return {
     maxLiveBrowsers: positiveInt(raw, "MAX_LIVE_BROWSERS") ?? 4,
     tier1FallbackContexts: positiveInt(raw, "MAX_TIER1_FALLBACK_CONTEXTS") ?? 2,
-    idleEvictMs: positiveInt(raw, "BROWSER_IDLE_EVICT_MS") ?? 180_000,
+    idleEvictMs: positiveInt(raw, "BROWSER_IDLE_EVICT_MS") ?? 15_000,
     maxTier1Processes: positiveInt(raw, "MAX_TIER1_PROCESSES") ?? 8,
     tier1TimeoutMs: positiveInt(raw, "TIER1_TIMEOUT_MS") ?? 20_000,
     maxActiveScreencasts: positiveInt(raw, "MAX_ACTIVE_SCREENCASTS") ?? 3,
@@ -227,7 +239,26 @@ export function loadBrowserEngineConfig(raw: NodeJS.ProcessEnv): BrowserEngineCo
       .map((h) => h.trim())
       .filter((h) => h !== ""),
     ownPublicIp: optionalString(raw, "OVID_PUBLIC_IP"),
-    chromiumArgs: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+    blockHeavyResources: (raw.OVID_BROWSER_BLOCK_HEAVY_RESOURCES ?? "1") !== "0",
+    // Resource diet (Muse ephemeral-lease model): a small V8 heap, at most
+    // two renderers, no extensions/background networking/media. The per-
+    // context cost measured ~240 MB before; the diet plus the 15 s lease is
+    // what makes 60-100 simultaneous contexts fit instead of 4.
+    chromiumArgs: [
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--js-flags=--max-old-space-size=96",
+      "--renderer-process-limit=2",
+      "--disable-extensions",
+      "--disable-background-networking",
+      "--disable-component-update",
+      "--disable-default-apps",
+      "--disable-sync",
+      "--mute-audio",
+      "--no-first-run",
+      "--no-default-browser-check",
+    ],
     egressUid: browserUid.uid,
     browserUidRange: browserUid.range,
     sandboxUidRange,

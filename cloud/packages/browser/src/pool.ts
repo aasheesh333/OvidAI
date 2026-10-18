@@ -230,13 +230,70 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
   // Context creation — the pinned research §4.1 hygiene bundle
   // -------------------------------------------------------------------------
 
-  function newPinnedContext(b: Browser, storageState: StorageState | null | undefined): Promise<BrowserContext> {
-    return b.newContext({
+  /**
+   * Hosts that are pure tracking/ads. Matched by suffix so a subdomain
+   * (e.g. `www.googletagmanager.com`) is covered by its parent.
+   */
+  const TRACKER_HOSTS = [
+    "doubleclick.net",
+    "googletagmanager.com",
+    "googlesyndication.com",
+    "google-analytics.com",
+    "adservice.google.com",
+    "facebook.net",
+    "connect.facebook.net",
+    "scorecardresearch.com",
+    "hotjar.com",
+    "segment.io",
+    "mixpanel.com",
+    "sentry.io",
+  ];
+
+  /**
+   * Resource diet (Muse ephemeral-lease model). Media and fonts are the two
+   * heaviest categories that a page can load without changing what the agent
+   * reads, and ad/tracker hosts cost CPU and memory for nothing. Documents,
+   * scripts, stylesheets, XHR/fetch and images stay: the agent's DOM reads
+   * and screenshots depend on them.
+   *
+   * Aborted requests are logged nowhere on purpose — a blocked ad must not
+   * look like a page failure in the agent's network view.
+   */
+  async function applyResourceDiet(context: BrowserContext): Promise<void> {
+    if (!cfg.blockHeavyResources) return;
+    await context.route("**/*", (route) => {
+      const request = route.request();
+      const type = request.resourceType();
+      if (type === "media" || type === "font") {
+        return route.abort();
+      }
+      let host: string;
+      try {
+        host = new URL(request.url()).hostname.toLowerCase();
+      } catch {
+        return route.continue();
+      }
+      for (const blocked of TRACKER_HOSTS) {
+        if (host === blocked || host.endsWith(`.${blocked}`)) {
+          return route.abort();
+        }
+      }
+      return route.continue();
+    });
+  }
+
+  async function newPinnedContext(
+    b: Browser,
+    storageState: StorageState | null | undefined,
+  ): Promise<BrowserContext> {
+    const context = await b.newContext({
       storageState: storageState ?? undefined,
       viewport: { width: cfg.screencast.width, height: cfg.screencast.height },
       ignoreHTTPSErrors: false,
       serviceWorkers: "block",
     });
+    await applyResourceDiet(context);
+    return context;
   }
 
   async function createLiveHandle(sessionId: string, storageState: StorageState | null | undefined): Promise<LiveHandle> {

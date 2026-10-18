@@ -192,7 +192,42 @@ VERDICT: REGRESSION — peak exceeds the planned-peak alarm; investigate before 
 The production-host numbers are consistent with the dev-box capture
 (base 303 vs 298 MB; peak 1392 vs 1376 MB; per-context delta ~243 vs
 ~240 MB) — the finding is REPRODUCIBLE, not a dev-box artifact. Status:
-**investigate-first gate, unresolved.** The same levers apply
+**investigate-first gate, unresolved.**
+
+**MUSE EPHEMERAL STEP-LEASE + RESOURCE DIET (2026-10-18, founder directive).**
+Implemented in `packages/browser`:
+
+- **15 s idle freeze** (`BROWSER_IDLE_EVICT_MS`, default now 15 000): a live
+  context exists only while a step runs or the user is in takeover. On freeze
+  the engine captures `storageState`, flushes it through persistence, closes
+  the context, and releases the pool slot. The session's last http(s) URL is
+  remembered and re-navigated on the next step, so eviction is transparent.
+- **Resource diet** (`OVID_BROWSER_BLOCK_HEAVY_RESOURCES`, default on):
+  `context.route` aborts `media` and `font` requests plus a tracker-host list
+  (doubleclick, googletagmanager, google-analytics, facebook, hotjar, …);
+  documents, scripts, stylesheets, XHR/fetch and images stay.
+- **Chromium flags**: `--js-flags=--max-old-space-size=96`,
+  `--renderer-process-limit=2`, `--disable-extensions`,
+  `--disable-background-networking`, `--disable-component-update`,
+  `--disable-sync`, `--mute-audio`, `--no-first-run`. Verified on the live
+  process (`ps` shows both flags).
+- **Cap raised** to `MAX_LIVE_BROWSERS=24` in both the production worker env
+  and staging.
+
+**Honest measurement (same bench, after the diet):** 302/554/792/1028/1272 MB,
+60 s peak **1391 MB** — unchanged from 1392 MB. The bench fixture is a
+synthetic heavy DOM with no fonts, media or trackers, so the diet has nothing
+to block there; the per-context floor is DOM/renderer-bound, not network-
+bound. The diet's win shows on real pages, and the 15 s lease means a busy
+100-user box holds only the contexts that are mid-step.
+
+**Consequence for the 800-1000 target:** at ~240 MB per heavy context, a
+6-8 GB browser share supports **24-32 simultaneous contexts**, not 60-100.
+60+ requires ~60-100 MB/context, which the founder's own estimate assumes for
+light pages — true for Lightpanda/HTTP work, not for a fully rendered
+Chromium page. The 800-1000 user target therefore rests on the 80/20 mix
+(background/Lightpanda vs live browser), not on 100 concurrent Chromium
+contexts on this box. The same levers apply
 (`MAX_LIVE_BROWSERS` 4→3 ≈ −1 context ≈ −240 MB at this load; the fixture
 question is the owner's). Per the §(c) budget math the hard ceiling still
 holds at 4 contexts (1392 + tier-1/lightpanda ≤ ~700 MB vs 2048 MB), but
