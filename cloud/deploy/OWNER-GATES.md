@@ -250,8 +250,8 @@ steps or skip a gate.
 | 9 | §11 step 7 — fill `worker.env` | Every `CHANGE_ME`; see §4 for matching secrets. | `[OWNER]` |
 | 10 | §11 step 7 — enable worker + nft unit | The first moment the host worker consumes the queue. | `[OWNER]` |
 | 11 | §11 step 8 — functional smoke | Real session, `run_shell`, `write_file`, WS events, PTY, HARDENING H rows. | `[OWNER]` |
-| 12 | Lightpanda install | Pinned 1.0.1 binary; without `OVID_LIGHTPANDA_BIN` tier-1 silently skips. | `[OWNER]` |
-| 13 | Chromium install | Pinned Chromium 156.0.8078.4 into the shared browser root. | `[OWNER]` |
+| 12 | Lightpanda install — **DONE 2026-10-18** | Pinned 1.0.1 sha256-verified at `/opt/ovid-browsers/lightpanda-1.0.1/lightpanda`; `lightpanda version` → 1.0.1, including as uid 230000. | `[OWNER]` (done) |
+| 13 | Chromium install — **DONE 2026-10-18** | `chromium-1248` + `chromium_headless_shell-1248` at `/opt/ovid-browsers/ms-playwright`; both report 156.0.8078.4 and execute as uid 230000 (traversal + exec verified). | `[OWNER]` (done) |
 | 14 | Browser gated suites + memory bench | Re-prove Lightpanda 1.0.1 and measure the chromium tree on this box before activation. | `[OWNER]` |
 | 15 | Browser egress uid **wiring** | Code fix landed (`469d3f9`): browsers now drop to uid 230000 with no root fallback. Remaining owner work is host state — set the uid in worker.env, re-run `install-nft.sh`, confirm `/opt/ovid-browsers` is traversable by 230000, then verify `ps` + `nft`. See 3.13. | `[OWNER]` |
 | 16 | R0 hardening A / B / C / E / F / G | Hard gate before real users; independent of the P2 order, but E+G batch into the activation window and C runs last. | `[OWNER]` |
