@@ -177,7 +177,7 @@ not touched.
 ```
 $ TEST_DATABASE_URL='postgres://postgres:ovid@127.0.0.1:5433/ovid_load_t4_round2' \
   TEST_REDIS_URL='redis://127.0.0.1:6390/7' \
-  OVID_TEST_QUEUE_PREFIX='ovid-load-t4-full2' \
+  OVID_TEST_QUEUE_PREFIX='ovid-load-t4-final' \
   pnpm --filter @ovid/load test
  Test Files  12 passed (12)
       Tests  177 passed (177)
@@ -186,7 +186,7 @@ $ TEST_DATABASE_URL='postgres://postgres:ovid@127.0.0.1:5433/ovid_load_t4_round2
 Exact integration evidence line from that run:
 
 ```
-load integration: runsStarted=55 runsCompleted=55 delivery.p95=3ms samples=260 integrity={"lostEvents":0,"duplicateEvents":0,"gapsVsMirror":0} floor.p95=0.061459999999897263ms pending=0 schedules.created=1 spike.runs=5 spike.held=5 spike.drainMs=0
+load integration: runsStarted=55 runsCompleted=55 delivery.p95=5ms samples=260 integrity={"lostEvents":0,"duplicateEvents":0,"gapsVsMirror":0} floor.p95=0.09263100000043778ms pending=0 schedules.created=1 spike.runs=5 spike.held=5 spike.drainMs=0
 ```
 
 The `spike.drainMs=0` is accompanied by the explicit report note that the
