@@ -266,3 +266,142 @@ regression.
 5. `Distribution.cloudExecution` branches unrelated to `AgentService` were
    left for Task 20's flag collapse.
 6. No new local execution path or capability was added.
+
+## Fix round 1 — over-deleted coverage
+
+The T15 HIGH-3 class: four whole files were deleted even though only some of
+their tests covered retired local-loop behaviour. Restored below, ported to the
+surviving `CloudAgentFacade` surface. Nothing was re-added to `lib/` beyond
+three small, real facade gaps found by the ported assertions.
+
+### `test/session_analytics_test.dart` — 2 restored, 1 dropped
+
+- Restored verbatim: "session analytics are isolated and persist through JSON"
+  and "analytics accumulates each completed model request". `ChatSession`
+  and `SessionAnalytics` survive (`lib/core/state.dart`).
+- Dropped: "pricing estimates known models and refuses unknown models" —
+  `estimatedCostForModel` died with the local service; pricing is the
+  server's `/usage` authority.
+
+### `test/queue_ids_test.dart` — 9 restored, 0 dropped
+
+All nine cases ported to the facade queue (`queuedMessagesFor`,
+`queuedMessageIdsFor`, `removeQueuedMessageById`, `editQueuedMessageById`,
+`quickSendQueuedMessage`, `clearQueueForTest`):
+
+- distinct stable ids; delete by id (no re-indexing); edit by id (ids
+  preserved); quick-send no-op for unknown id/empty queue; idle-session
+  quick-send steers but keeps the queue; edit-to-composer contract.
+- "steer by id" maps onto `quickSendQueuedMessage(id)` — the retired
+  `steerQueuedMessageById` no longer exists. On the test busy seam the stop
+  resolves without a server run, so the steered order is what remains; the
+  comment in the file says so.
+- "ids survive a stop-and-continue" and "quick send … promotes it on stop"
+  drive a real fake `CloudRestClient` + fake WS socket. The facade drains the
+  queue head on the run's terminal event, so the tests emit
+  `run_started` → `run_completed`, gate the promoted POST, and emit the
+  promoted run's `run_started` so the facade does not recursively drain the
+  remainder in the same pass. Assertions are unchanged: head promoted, rest
+  keep their ids and order.
+- Sessions are keyed by server id; with `store: null` the local id passes
+  through, so `ChatSession.id` is the queue key (no store seeding needed).
+- The `setActiveRunForTest` seam marks a session busy so enqueueing does not
+  immediately drain — the surviving analogue of the retired
+  `setRunSessionForTest`.
+
+### `test/approval_dock_safety_test.dart` — 4 restored, 1 group dropped
+
+- Restored: stale-tap never resolves request B, double-tap guard, 40-line
+  detail reachable, 48dp tap targets at 320dp/1.3x. `_ApprovalDock` still
+  exists and reads `CloudAgentFacade.pendingApproval`.
+- `AgentService.I.pendingApproval = x` became
+  `CloudAgentFacade.I.pendingApprovalForTest = x`; the facade is installed in
+  `setUp` and disposed/reset in `tearDown`; the retired
+  `debugPauseScheduleTimerForTest`/queue resets were removed (the facade's
+  `clearQueueForTest` is used).
+- Dropped: the `AgentService request-bound approvals` group (retired service
+  semantics).
+- The tests use a test-only `CloudAgentFacade` subclass for the two approval
+  entry points. Production's P3 approval path is inert (`approveRequest`
+  returns false), so a double is needed to observe *which* request a tap
+  reaches. It is request-bound exactly like the retired service: a stale tap
+  carrying an older request does not resolve anything.
+
+### `test/composer_attachments_test.dart` — 10 restored, 6 dropped
+
+Restored:
+
+1. the 21st file is rejected with a limit explanation;
+2. concurrent selections reserve slots (adapted: the facade stages source
+   paths, not copies, so the assertion counts 20 staged entries rather than
+   unique paths);
+3. same-name files keep both contents and stay in the session, including
+   per-session isolation (adapted to distinct source files, because the cloud
+   path stages the source path);
+4. removing one same-name attachment keeps the other;
+5. picked filename cannot escape the workspace;
+6. picker completion stays with its originating session (asserts the
+   originating session's staged path; the facade does not copy into a local
+   workspace);
+7. failed send preserves composer attachments (fake REST throws
+   `CloudApiException`);
+8. accepted send clears only the sent snapshot;
+9. stored paths survive reload (pure `Message.fromJson`; the
+   `buildRequestMessages`/`read_image` tail is gone — request assembly is
+   server-side);
+10. path-only metadata updates are written to session storage (same
+    adaptation: the final request-builder assertion was dropped).
+
+Dropped (retired local run loop / local workspace):
+
+- "provider setup rejection leaves attachments available" — provider
+  selection is server-owned; there is no local setup step.
+- "cancelled send preserves its attachments" — the cloud send is one POST;
+  there is no client-side provider call to cancel mid-flight.
+- "successful send persists exact paths that tools can resolve" — local
+  `dispatchForTest`/request assembly are gone.
+- "attached image path supports vision without raising the image cap" — local
+  `read_image`/vision message assembly is gone.
+- "queued composer references and attachment snapshots travel together" —
+  facade queue rows are id+text only; `takeQueuedMessages` synthesizes empty
+  attachment lists and `userReferences: true`, and reference expansion is
+  server-side. Expressing this would require inventing production queue API.
+- "busy send carries attachments; queued provider failure" — local run loop
+  and `llmOnceForTest`.
+
+### Facade gaps found by the ported assertions (fixed)
+
+1. **20-file cap missing** — `attachFile` accepted unlimited files. Added
+   `_maxAttachments = 20` plus a per-session reservation counter taken before
+   the first `await`, so concurrent picker bursts cannot all pass the check
+   (the retired service's `_attachmentCopies` contract). The error text is the
+   same "up to 20 files per message" explanation.
+2. **Filename-escape validation missing** — added the retired service's
+   rejection of empty/`.`/`..` names and names containing `/`, `\` or NUL,
+   returning `invalid attachment filename`.
+3. **Accepted send cleared ALL staged attachments** — `runTask` did
+   `_attachments.remove(id)`, dropping files staged while the POST was in
+   flight. It now removes only the sent snapshot (multiset match on
+   name+path+size) and keeps later picks for the next message.
+
+No other gap surfaced; no assertion was weakened.
+
+### Gates (exact output)
+
+```
+$ flutter analyze --no-pub
+No issues found! (ran in 20.3s)
+
+$ flutter test --no-pub test/session_analytics_test.dart test/queue_ids_test.dart \
+    test/approval_dock_safety_test.dart test/composer_attachments_test.dart
+... +25: All tests passed!
+
+$ flutter test --no-pub --reporter compact
+01:47 +1724 ~2: All other tests passed!        # exit 0, 2 skipped
+
+$ grep -rn "AgentService\|agent_service" lib/ test/
+(empty)
+```
+
+Full-suite count: 1,724 passed / 2 skipped / 0 failed (baseline 1,701 total
+including the 2 skipped; the four files add 25 tests).

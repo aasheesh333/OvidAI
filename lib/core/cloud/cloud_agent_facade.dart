@@ -106,6 +106,7 @@ class CloudAgentFacade extends ChangeNotifier
     _queues.clear();
     _draining.clear();
     _attachments.clear();
+    _attachmentReservations.clear();
     _modes.clear();
     _errors.clear();
     _errorResetsAt.clear();
@@ -167,6 +168,17 @@ class CloudAgentFacade extends ChangeNotifier
   final Map<String, List<({String name, String path, int size})>>
       _attachments =
       <String, List<({String name, String path, int size})>>{};
+
+  /// Composer cap (the retired local service's `maxAttachments`; the UI's
+  /// `_maxChatAttachments` is the same 20). Enforced here so a picker burst
+  /// cannot stage past it.
+  static const int _maxAttachments = 20;
+
+  /// In-flight `attachFile` calls per session. The count check and the
+  /// reservation happen before the first await, so concurrent picks cannot
+  /// all pass the limit together (the retired service's
+  /// `_attachmentCopies`).
+  final Map<String, int> _attachmentReservations = <String, int>{};
 
   /// REST/WS failures with no projection row yet (mode PATCH, send, stream
   /// errors). Keyed by server session id.
@@ -658,7 +670,20 @@ class CloudAgentFacade extends ChangeNotifier
         state.runState = CloudRunState(runId: response.runId, busy: true);
         state.queuedBehindActiveRun = queuedBehindActiveRun;
       }
-      _attachments.remove(id);
+      // Clear only the snapshot this send carried. A file staged while the
+      // POST was in flight belongs to the NEXT message and must survive
+      // (the retired local service's `_acknowledgeAttachments` contract).
+      final live = _attachments[id];
+      if (live != null) {
+        for (final sent in staged) {
+          final index = live.indexWhere((a) =>
+              a.name == sent.name &&
+              a.path == sent.path &&
+              a.size == sent.size);
+          if (index >= 0) live.removeAt(index);
+        }
+        if (live.isEmpty) _attachments.remove(id);
+      }
       // A freshly accepted send clears any stale recorded error (mode PATCH
       // failures, a previous 402) — Task 10's composer decides draft
       // acceptance on `runState.lastErrorCode == null`.
@@ -807,21 +832,52 @@ class CloudAgentFacade extends ChangeNotifier
   }) async {
     final id = _serverId(sessionId);
     if (id == null) return 'Select a chat before attaching files.';
-    int size;
-    try {
-      size = await File(sourcePath).length();
-    } catch (_) {
-      return 'file not found: $fileName';
+    final pending = _attachments.putIfAbsent(
+        id, () => <({String name, String path, int size})>[]);
+    if (pending.length + (_attachmentReservations[id] ?? 0) >=
+        _maxAttachments) {
+      return 'You can attach up to 20 files per message. Remove a file first.';
     }
-    if (size > 25 * 1024 * 1024) {
-      return 'File is larger than the 25 MB cloud attachment limit.';
-    }
-    _attachments
-        .putIfAbsent(
-            id, () => <({String name, String path, int size})>[])
-        .add((name: fileName, path: sourcePath, size: size));
+    // Reserve the slot BEFORE the first await: the picker stages a burst of
+    // files concurrently, and a count check after `File.length()` would let
+    // every call pass.
+    _attachmentReservations[id] = (_attachmentReservations[id] ?? 0) + 1;
     _notify();
-    return null;
+    try {
+      if (fileName.isEmpty ||
+          fileName == '.' ||
+          fileName == '..' ||
+          fileName.contains('/') ||
+          fileName.contains('\\') ||
+          fileName.contains('\u0000')) {
+        return 'invalid attachment filename';
+      }
+      int size;
+      try {
+        size = await File(sourcePath).length();
+      } catch (_) {
+        return 'file not found: $fileName';
+      }
+      if (size > 25 * 1024 * 1024) {
+        return 'File is larger than the 25 MB cloud attachment limit.';
+      }
+      // Re-read the map after the await: a send that settled during the
+      // picker call may have removed this session's staged snapshot.
+      _attachments
+          .putIfAbsent(
+              id, () => <({String name, String path, int size})>[])
+          .add((name: fileName, path: sourcePath, size: size));
+      _notify();
+      return null;
+    } finally {
+      final remaining = (_attachmentReservations[id] ?? 1) - 1;
+      if (remaining <= 0) {
+        _attachmentReservations.remove(id);
+      } else {
+        _attachmentReservations[id] = remaining;
+      }
+      _notify();
+    }
   }
 
   @override
