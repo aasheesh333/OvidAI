@@ -238,7 +238,7 @@ steps or skip a gate.
 | # | Gate | Why it is here in the order | Owner |
 |---|---|---|---|
 | 0 | ~~Quiet tree + lockfile regeneration~~ **DONE** | Landed in `873d993`; a scratch `pnpm install --frozen-lockfile --offline` exits 0 with "Lockfile is up to date". Nothing to run. See §7. | — |
-| 1 | bwrap probe → fill `MECHANISM.md` DECISION | Decides `OVID_SANDBOX_LAUNCH` (`setuid` vs `rootmap`) before the worker env is written. | `[OWNER]` |
+| 1 | bwrap probe → fill `MECHANISM.md` DECISION — **DONE 2026-10-18** | Branch a passed: unprivileged bwrap as uid 200000, `uid_map` `0 200000 1`, host file owner 200000, no AppArmor denial. S5 (ctty) and S6 (cpu.max ratio 0.49) pass. **`DECISION: setuid`** — no AppArmor profile, no rootmap launcher. The run also found and fixed a usrmerge bug in the probe itself. | `[OWNER]` (done) |
 | 2 | R1 compose spine, or an explicit P2-only decision | §11 steps 5–7 assume the compose spine (gateway, redis-q, proxies) is up. If activating P2-only with the gateway absent, record that decision in the log. | `[OWNER]` |
 | 2a | R2 credentials: bucket, token, both env blocks, verified — **DONE 2026-10-18** | Bucket `ovid-cloud` (APAC, Standard, no public URL, no CORS); token `ovid-cloud-worker` = Object Read & Write, **scoped to that bucket only**, TTL Forever; 7-day multipart-abort lifecycle rule enabled; `verify-r2.mjs` 7/7 `[ok]` and `r2.live.test.ts` 10/10 green against the real bucket. Repo `cloud/deploy/.env` filled 0600. **Remaining:** copy the block into the live `/opt/ovid-cloud/worker.env` (gate 9). See §5. | `[OWNER]` (done) |
 | 3 | §11 step 2 — rootfs install | The jail filesystem must exist before the worker can boot. Current artifact `ubuntu-noble-min-20261017-r2` is already built. | `[OWNER]` |
@@ -267,7 +267,24 @@ went with it is also zero and CI now enforces it. See §7 for the proofs.
 
 **Start at Gate 1 (the bwrap probe).**
 
-### 3.2 Gate 1 — bwrap probe (fills `MECHANISM.md` DECISION)
+### 3.2 Gate 1 — bwrap probe (fills `MECHANISM.md` DECISION) — **DONE 2026-10-18**
+
+**Result: `DECISION: setuid` (branch a).** Unprivileged bwrap as uid 200000
+works with no AppArmor profile and no rootmap launcher: inside the jail
+`uid=0`, `uid_map` is `0 200000 1`, and the file the jail writes is owned by
+200000 on the host. No AppArmor denial appeared in dmesg. S5 (controlling
+terminal + `stty size 24 80`) and S6 (`cpu.max` 50000/100000 → ratio 0.49)
+both pass. Evidence: `cloud/deploy/sandbox/MECHANISM.md`, log
+`/tmp/ovid-probe-final2.log`.
+
+The first run failed all three branches with
+`bwrap: execvp /bin/sh: No such file or directory` — a probe bug, not a host
+one: Ubuntu 24.04 is usrmerge, so `/bin`, `/sbin`, `/lib`, `/lib64` are
+symlinks into `/usr` and `--ro-bind /bin /bin` does not reconstruct them.
+The probe now binds `/usr` and recreates the symlinks (commit `31e3674`).
+Production is unaffected — the real invocation binds a complete rootfs at `/`.
+
+<details><summary>Original run instructions (kept for re-runs)</summary>
 
 Run from the repo root (`/opt/ovid-cloud/repo`):
 
@@ -283,12 +300,13 @@ profile. Expected gate: exactly one branch passes; the log shows
 `touch` file owned by 200000 on the host. Fill the `DECISION:` line from the
 log.
 
-**Rootmap consequence (record it now).** If the probe selects
+**Rootmap consequence (no longer applicable).** Had the probe selected
 `DECISION: rootmap`, `createRootmapLauncher` in
-`cloud/packages/sandbox/src/launcher.ts` is a **throwing stub**
-(`"rootmap launcher pending MECHANISM.md decision"`). §11 step 7 cannot enable
-the worker until that launcher is implemented and tested. `setuid` is the
-working default.
+`cloud/packages/sandbox/src/launcher.ts` is a throwing stub and §11 step 7
+could not enable the worker until it was implemented. The host chose
+`setuid`, so the working default stands.
+
+</details>
 
 ### 3.3 Gate 2 — R1 compose spine (or P2-only decision)
 
