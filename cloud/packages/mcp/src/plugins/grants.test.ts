@@ -10,9 +10,9 @@ import {
   CAPABILITY_EXPLANATIONS,
   capabilityDelta,
   grantCovers,
-  type PluginCapability,
   type PluginGrantInput,
 } from "./grants.js";
+import type { PluginCapability } from "./manifest.js";
 
 const BASE_CAPS: PluginCapability[] = [
   "workspaceRead",

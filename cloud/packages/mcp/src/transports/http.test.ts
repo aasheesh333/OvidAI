@@ -73,7 +73,7 @@ describe("createHttpTransport", () => {
   it("initialize round-trip captures Mcp-Session-Id and echoes it on later requests", async () => {
     await startFixture(
       recording((msg, res) => {
-        if (msg.method === "initialize") {
+        if ("method" in msg && msg.method === "initialize") {
           res.writeHead(200, {
             "content-type": "application/json",
             "mcp-session-id": "sess-42",
@@ -207,13 +207,13 @@ describe("createHttpTransport", () => {
   it("404 on a remembered session throws McpSessionExpiredError", async () => {
     await startFixture(
       recording((msg, res) => {
-        if (msg.method === "initialize") {
+        if ("method" in msg && msg.method === "initialize") {
           res.writeHead(200, {
             "content-type": "application/json",
             "mcp-session-id": "sess-9",
           });
           res.end(
-            JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-06-18" } }),
+            JSON.stringify({ jsonrpc: "2.0", id: "id" in msg ? msg.id : 1, result: { protocolVersion: "2025-06-18" } }),
           );
         } else {
           res.writeHead(404);

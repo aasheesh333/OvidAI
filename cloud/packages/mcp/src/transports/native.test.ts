@@ -27,6 +27,7 @@ function makeCtx(): McpCallContext {
 class RecordingHandler implements NativeMcpHandler {
   readonly calls: string[] = [];
   lastCtx: McpCallContext | undefined;
+  dispose?: () => Promise<void>;
 
   async initialize(params: Record<string, unknown>): Promise<Record<string, unknown>> {
     this.calls.push(`initialize:${JSON.stringify(params)}`);

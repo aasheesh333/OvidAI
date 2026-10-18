@@ -117,7 +117,14 @@ export interface UserSystemBus {
    * ({kind, payload} only) keep working (F9 ruling: that publisher is a
    * structural subset of THIS interface, declared once here).
    */
-  publish(uid: string, event: Omit<SystemEventEnvelope, "ts"> & { ts?: string }): Promise<void>;
+  publish(
+    uid: string,
+    event: Omit<SystemEventEnvelope, "ts" | "id" | "requiresResponse"> & {
+      id?: string;
+      ts?: string;
+      requiresResponse?: boolean;
+    },
+  ): Promise<void>;
   /**
    * Publishes {id, kind, requiresResponse: true, payload} on sys:{uid}:out
    * and resolves with the matching {id, payload} from sys:{uid}:in; a

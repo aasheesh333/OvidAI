@@ -405,7 +405,7 @@ describe("createSourceResolver — zip", () => {
       { name: "lib/a.js", data: Buffer.from("export {};\n"), method: 8 },
     ]);
     const { fetchImpl } = fakeFetch([
-      ["https://example.test/plugin.zip", () => new Response(archive)],
+      ["https://example.test/plugin.zip", () => new Response(new Uint8Array(archive))],
     ]);
 
     const progress: number[] = [];

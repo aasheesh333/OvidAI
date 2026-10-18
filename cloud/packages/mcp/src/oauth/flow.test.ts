@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, migrate } from "../../../db/src/client.js";
 import { mcpOauthFlows, mcpOauthTokens, mcpServers } from "../../../db/src/repos.js";
@@ -67,7 +67,7 @@ class FixtureAS {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 
-  async #handle(req: Parameters<Parameters<typeof createServer>[0]>[0], res: Parameters<Parameters<typeof createServer>[0]>[1]): Promise<void> {
+  async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
     const body = Buffer.concat(chunks).toString("utf8");
@@ -194,7 +194,7 @@ describe("buildAuthorizeUrl", () => {
   it("omits scope/resource when unset; throws without clientId or authorizationUrl", () => {
     const url = new URL(
       buildAuthorizeUrl(
-        { authorizationUrl: "https://as.example/authorize", tokenUrl: "https://as.example/token", clientId: "client-1", scopes: [] },
+        { authorizationUrl: "https://as.example/authorize", tokenUrl: "https://as.example/token", clientId: "client-1", scopes: [], discovered: false },
         { state: "s", codeChallenge: "c", redirectUri: "https://cb.example/cb" },
       ),
     );
@@ -203,13 +203,13 @@ describe("buildAuthorizeUrl", () => {
 
     expect(() =>
       buildAuthorizeUrl(
-        { authorizationUrl: "https://as.example/authorize", tokenUrl: "t", scopes: [] },
+        { authorizationUrl: "https://as.example/authorize", tokenUrl: "t", scopes: [], discovered: false },
         { state: "s", codeChallenge: "c", redirectUri: "https://cb.example/cb" },
       ),
     ).toThrow(/no client_id/);
     expect(() =>
       buildAuthorizeUrl(
-        { authorizationUrl: "", tokenUrl: "t", clientId: "c", scopes: [] },
+        { authorizationUrl: "", tokenUrl: "t", clientId: "c", scopes: [], discovered: false },
         { state: "s", codeChallenge: "c", redirectUri: "https://cb.example/cb" },
       ),
     ).toThrow(/no authorization_url/);

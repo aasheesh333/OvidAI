@@ -28,11 +28,13 @@ const UID = "mcp-sysbus-user";
 
 /** Loose structural stand-in for the ioredis client the harness needs. */
 interface TestRedis {
-  publish(channel: string, message: string): Promise<unknown>;
-  subscribe(channel: string): Promise<unknown>;
+  publish(channel: string, message: string): Promise<number>;
+  subscribe(channel: string): Promise<number>;
   on(event: string, listener: (...args: never[]) => void): unknown;
+  off(event: string, listener: (...args: never[]) => void): unknown;
   duplicate(): TestRedis;
   quit(): Promise<unknown>;
+  disconnect(): void;
   pubsub(command: "NUMSUB", channel: string): Promise<unknown>;
 }
 

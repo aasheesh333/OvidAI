@@ -331,8 +331,8 @@ describe("handler never throws", () => {
 });
 
 describe("createNotificationHandler", () => {
-  function sink(): { sink: NotificationSink; logs: { server: string; level: string }[]; progress: { server: string; token: string }[] } {
-    const logs: { server: string; level: string }[] = [];
+  function sink(): { sink: NotificationSink; logs: Parameters<NotificationSink["log"]>[0][]; progress: { server: string; token: string }[] } {
+    const logs: Parameters<NotificationSink["log"]>[0][] = [];
     const progress: { server: string; token: string }[] = [];
     const s: NotificationSink = {
       log: (e) => logs.push(e),

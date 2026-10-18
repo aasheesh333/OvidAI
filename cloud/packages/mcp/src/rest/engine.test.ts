@@ -34,7 +34,7 @@ interface Call {
   init?: RequestInit;
 }
 
-function fakeFetch(status = 200, body: string | Uint8Array = "ok"): { calls: Call[]; impl: GuardedFetch } {
+function fakeFetch(status = 200, body: string | Uint8Array<ArrayBuffer> = "ok"): { calls: Call[]; impl: GuardedFetch } {
   const calls: Call[] = [];
   const nullBodyStatus = status === 204 || status === 205 || status === 304;
   const impl: GuardedFetch = async (url, init) => {

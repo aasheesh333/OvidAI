@@ -71,11 +71,11 @@ describe("createSseTransport", () => {
       sseServerWithEndpoint((msg, res) => {
         res.writeHead(202);
         res.end();
-        if (msg.method === "initialize" && sseRes !== undefined) {
+        if ("method" in msg && msg.method === "initialize" && sseRes !== undefined) {
           sseRes.write(
             `event: message\ndata: ${JSON.stringify({
               jsonrpc: "2.0",
-              id: msg.id,
+              id: "id" in msg ? msg.id : 1,
               result: { protocolVersion: "2024-11-05" },
             })}\n\n`,
           );
