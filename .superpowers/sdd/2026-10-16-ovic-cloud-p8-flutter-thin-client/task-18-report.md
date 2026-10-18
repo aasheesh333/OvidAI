@@ -23,7 +23,7 @@ Status: DONE — commit **17128c1** (2026-10-18)
    rename-proof terms.
 2. **Capability toggles** — decision recorded at the end of this report.
 
-## Deleted (core, 28 files)
+## Deleted (core, 27 files)
 
 `mcp_config_parse.dart`, `plugin_manifest.dart`, `plugin_registry.dart`,
 `plugin_permissions.dart`, `plugin_adapters.dart`, `hook_service.dart`,
