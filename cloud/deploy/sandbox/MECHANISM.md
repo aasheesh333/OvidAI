@@ -1,7 +1,8 @@
 # MECHANISM.md — Ovid sandbox host-mechanism decision record (P2 Task 1)
 
-**Status: SKELETON — awaiting the owner-gated host run (plan Steps 3–4).**
-**Host:** vm-mtx87lmp · **Filled by:** owner, from the probe log
+**Status: DECIDED — probe run 2026-10-18 on this host.**
+**Host:** vm-mtx87lmp · **Filled by:** controller from the probe log
+(`/tmp/ovid-probe-final2.log`), owner-authorized run.
 **Probe:** `cloud/deploy/sandbox/sandbox-probe.sh` · **Branch-b artifact:** `cloud/deploy/sandbox/ovid-sandbox.apparmor`
 
 ## How to run the probe (owner-gated)
@@ -42,49 +43,72 @@ If **all** of a/b/c fail: STOP — escalate to the owner before any later task
 
 ### S0 — environment
 
-- `uname -r`: _<pending>_
-- `kernel.unprivileged_userns_clone`: _<pending>_
-- `user.max_user_namespaces`: _<pending>_
-- `kernel.apparmor_restrict_unprivileged_userns`: _<pending>_
-- `aa-status` (head): _<pending>_
-- cgroup fs type: _<pending>_
+- `uname -r`: `6.8.0-136-generic`
+- `kernel.unprivileged_userns_clone`: `1`
+- `user.max_user_namespaces`: `93703`
+- `kernel.apparmor_restrict_unprivileged_userns`: `1`
+- `aa-status` (head): module loaded, **119 profiles loaded, 24 in enforce**
+  (`/usr/bin/man`, `/usr/lib/snapd/snap-confine`, …)
+- cgroup fs type: `cgroup2fs`
+- cgroup root `subtree_control`: `cpuset cpu io memory hugetlb pids rdma misc`
 
 ### S1 — bwrap
 
-- bwrap version installed: _<pending>_ (candidate on this box: `0.9.0-1ubuntu0.3`)
+- bwrap: `/usr/bin/bwrap` **0.9.0-1ubuntu0.3** (already installed; not added
+  by this run)
 
 ### S2 — spec-shaped jail (root / uid 200000)
 
-- Root run: rc / `id` output / `uid_map` / host owner of `probe`: _<pending>_
-- uid-200000 run: rc / `id` output / `uid_map` / host owner of `probe`: _<pending>_
-- dmesg AppArmor evidence on failure: _<pending>_
+- Root run: **rc=0**, `uid=0 gid=0 groups=0`, `uid_map` = `0 0 1`,
+  host owner of `probe` = **0**
+- uid-200000 run: **rc=0**, `uid=0 gid=0 groups=0`, `uid_map` =
+  **`0 200000 1`**, host owner of `probe` = **200000**
+- dmesg AppArmor evidence: **none** — the branch-a run produced no denial.
 
-### S3 — branch b retry (only if S2-uid200000 failed)
+### S3 — branch b retry (not taken)
 
-- Profile installed at `/etc/apparmor.d/ovid-sandbox`: _<pending>_
-- `aa-status` ovid-sandbox line: _<pending>_
-- Retry result: _<pending>_
+Branch a passed, so the AppArmor profile was not installed. `aa-status` shows
+no `ovid-sandbox` profile loaded.
 
-### S4 — branch c smoke (only if S3 also failed)
+### S4 — branch c smoke (not taken)
 
-- Map-writer mechanics observed (what the Task 7 launcher must implement):
-  _<pending>_
-- Ownership proof (`stat -c %u` of the jail's `touch` = 200000): _<pending>_
+Branch a passed, so the rootmap map-writer was not exercised.
 
 ### S5 — ctty sanity (bwrap `--new-session` on a pty)
 
-- Output (`/dev/pts/N` line + `stty size`): _<pending>_
-- Result: _<pending>_ (node-pty-specific confirmation lands in Task 9)
+- Output: `tty` → `/dev/console`; `stty size` → **`24 80`**
+- Result: **PASS**. The jail uses `--dev /dev` (a minimal devtmpfs), so the
+  pty slave node is not visible inside it and the controlling terminal
+  resolves to `/dev/console`; the load-bearing evidence is `stty size`
+  returning the geometry set on the probe's pty. Node-pty-specific
+  confirmation still lands in Task 9.
+- Probe bug found and fixed by this run: the assertion demanded `/dev/pts/N`
+  (unreachable with `--dev /dev`) and did not strip the pty's CRLF.
 
 ### S6 — cpu.max throttling (research open item)
 
-- Capped iterations / uncapped iterations / ratio (expect ≈ 0.50): _<pending>_
-- Result: _<pending>_
+- Capped 794 / uncapped 1633 iterations → **ratio 0.49** (expected ≈ 0.50)
+- `cpu.max` after run: `50000 100000`
+- Result: **PASS**
 
-### Full log excerpt
+### Probe defects found and fixed by this run
 
-_<pending — paste the tee'd log (or its path under /tmp/ovid-probe-*.log)>_
+The first run failed **all three branches** with
+`bwrap: execvp /bin/sh: No such file or directory`. The cause was the probe,
+not the host: Ubuntu 24.04 is usrmerge, so `/bin`, `/sbin`, `/lib` and
+`/lib64` are symlinks into `/usr`, and `--ro-bind /bin /bin` does not
+reconstruct them. The probe now binds `/usr` and recreates the four symlinks
+(`--symlink usr/bin /bin`, …). Production is unaffected: the real invocation
+binds a complete rootfs at `/` (`packages/sandbox/src/invocation.ts:71`).
 
-## Decision (filled ONLY by the owner's Step-4 run)
+### Full log
 
-DECISION:
+`/tmp/ovid-probe-final2.log` (the earlier failed run:
+`/tmp/ovid-probe-20261018T061341.log`).
+
+## Decision (from the owner-authorized Step-4 run, 2026-10-18)
+
+DECISION: **setuid** (branch a — unprivileged bwrap as uid 200000, no
+AppArmor profile, no rootmap). `OVID_SANDBOX_LAUNCH=setuid` is the correct
+production value on this host; the branch-b profile and the branch-c launcher
+are NOT needed.

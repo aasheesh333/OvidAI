@@ -142,8 +142,10 @@ run_jail() {
   argv=(
     "$BWRAP"
     --ro-bind /usr /usr
-    --ro-bind /bin /bin
-    --ro-bind /lib /lib
+    --symlink usr/bin /bin
+    --symlink usr/sbin /sbin
+    --symlink usr/lib /lib
+    --symlink usr/lib64 /lib64
     --dir /etc
     --proc /proc
     --dev /dev
@@ -280,7 +282,7 @@ s4_rootmap() {
     fi
     exec 3< /proc/self/ns/user
     exec /usr/bin/bwrap --userns 3 --uid 0 --gid 0 \
-      --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib \
+      --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/sbin /sbin --symlink usr/lib /lib --symlink usr/lib64 /lib64 \
       --dir /etc --proc /proc --dev /dev \
       --unshare-pid --unshare-uts --unshare-ipc \
       --die-with-parent --new-session \
@@ -354,8 +356,10 @@ import termios
 argv = [
     "/usr/bin/bwrap",
     "--ro-bind", "/usr", "/usr",
-    "--ro-bind", "/bin", "/bin",
-    "--ro-bind", "/lib", "/lib",
+    "--symlink", "usr/bin", "/bin",
+    "--symlink", "usr/sbin", "/sbin",
+    "--symlink", "usr/lib", "/lib",
+    "--symlink", "usr/lib64", "/lib64",
     "--dir", "/etc",
     "--proc", "/proc",
     "--dev", "/dev",
@@ -392,13 +396,22 @@ sys.exit(os.waitstatus_to_exitcode(status))
 PYEOF
 )" || rc=$?
   printf -- '--- S5 pty output (rc=%d) ---\n%s\n--- end ---\n' "$rc" "$out"
+  # The jail uses `--dev /dev` (a minimal devtmpfs), so the pty SLAVE NODE is
+  # not present inside it and `tty` resolves to /dev/console even though the
+  # pty IS the controlling terminal. The load-bearing evidence is `stty size`
+  # returning the geometry set on the probe's pty: only a real controlling
+  # terminal reports it. Requiring /dev/pts/N here would fail on a correct
+  # jail (it did on this host, with the geometry already proven).
+  # The pty emits CRLF, so strip \r before matching.
+  local s5_clean
+  s5_clean="$(printf '%s\n' "$out" | tr -d '\r')"
   if [ "$rc" -eq 0 ] \
-     && printf '%s\n' "$out" | grep -Eq '/dev/pts/[0-9]+' \
-     && printf '%s\n' "$out" | grep -q '24 80'; then
-    log "S5 PASS (ctty present in jail, stty size 24 80)"
+     && printf '%s\n' "$s5_clean" | grep -Eq '^(/dev/pts/[0-9]+|/dev/console)$' \
+     && printf '%s\n' "$s5_clean" | grep -q '24 80'; then
+    log "S5 PASS (controlling terminal present in jail; stty size 24 80)"
     S5_RESULT="PASS"
   else
-    log "S5 FAIL (rc=${rc}; expected /dev/pts/N + '24 80' in output)"
+    log "S5 FAIL (rc=${rc}; expected a tty name + '24 80' in output)"
     S5_RESULT="FAIL"
     HARD_FAILURE=1
   fi
