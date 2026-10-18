@@ -290,6 +290,9 @@ void main() {
       }
 
       expect(find.text('GitHub connected'), findsOneWidget);
+      // P8 Task 15: the done view now says "connected for this session" —
+      // the old "repos ready in Studio" copy described local cloning, which
+      // moved server-side.
       expect(
         find.text('@octocat — connected for this session'),
         findsOneWidget,
@@ -299,8 +302,9 @@ void main() {
       await frames(tester);
       expect(find.byType(GithubLoginSheet), findsNothing);
       expect(GitHubService.I.token, 'tok');
-      // P8 Task 15: the GitHub token is memory-only — never persisted
-      // client-side.
+      // P8 Task 15: the token is MEMORY-ONLY by design — it must never reach
+      // secure storage (or any local file). This assertion is the security
+      // pin: a regression that re-persists the credential fails here.
       expect(
         await const FlutterSecureStorage().read(key: 'ovid_github_token'),
         isNull,

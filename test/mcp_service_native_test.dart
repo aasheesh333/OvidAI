@@ -274,10 +274,11 @@ void main() {
       });
       McpService.I.httpClientForTest = mockClient;
 
-      // Save the token in GitHubService. P8 Task 15 made the token
-      // memory-only, so seed it through the test seam instead of secure
-      // storage.
+      // Save token in GitHubService. P8 Task 15: the credential is
+      // memory-only (never secure storage), so the test seam seeds the
+      // in-memory token instead of a persisted one.
       GitHubService.I.setTokenForTest('gho_secret_test_token');
+      await GitHubService.I.initialize();
       expect(GitHubService.I.isLoggedIn, isTrue);
 
       final outcomeAuth = await McpService.I.connectOutcome(
