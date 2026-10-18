@@ -155,11 +155,11 @@ class CommandService {
                   '(queue it as a message instead).',
             );
           }
-          // PR29: compactNow returns an HONEST status line — the old
-          // forceCompact path silently did nothing on short/already-
-          // compacted chats while the command claimed success.
-          final status = await AgentService.I.compactNow(s, p, focus: args);
-          return CommandResult(feedback: status);
+          // Local compaction died with the agent-core satellite strip
+          // (P8 Task 18); Ovid Cloud compacts server-side.
+          return const CommandResult(
+            feedback: 'Context compaction is managed by Ovid Cloud.',
+          );
         },
       ),
     );

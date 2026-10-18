@@ -2,12 +2,11 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
-import '../core/agent_service.dart';
 import '../core/diag.dart';
 import '../core/native_share.dart';
 import '../core/session_artifacts.dart';
-import '../core/state.dart';
 import '../core/theme.dart';
 import '../l10n/l10n.dart';
 import 'html_artifact_view.dart';
@@ -30,17 +29,9 @@ const int artifactPreviewMaxBytes = 512 * 1024;
 String? resolveArtifactHostPath(SessionArtifact a) {
   final path = a.path;
   if (path == null || path.isEmpty) return null;
-  if (path.startsWith('/')) return path;
-  try {
-    final session = AppState.I.sessionById(a.sessionId);
-    if (session == null) return null;
-    final root = AgentService.I.workspaceRootFor(session).path;
-    final rel = path.startsWith('./') ? path.substring(2) : path;
-    return '$root/$rel';
-  } catch (e) {
-    Diag.swallow('artifact.resolvePath', e);
-    return null;
-  }
+  // Cloud artifacts are R2 URLs (see [SessionArtifact.url]); only an
+  // absolute local path (legacy upload) is readable from disk.
+  return path.startsWith('/') ? path : null;
 }
 
 IconData artifactIcon(ArtifactKind kind) => switch (kind) {
@@ -95,6 +86,11 @@ Future<void> openArtifactPreview(
 /// Shares the artifact file through the system sheet (FileProvider), or
 /// explains why it cannot.
 Future<void> shareArtifact(BuildContext context, SessionArtifact a) async {
+  final url = a.url;
+  if (url != null && url.isNotEmpty) {
+    await showNativeShare(context, () => NativeShare.link(url));
+    return;
+  }
   final host = resolveArtifactHostPath(a);
   if (host == null || !File(host).existsSync()) {
     ScaffoldMessenger.of(
@@ -108,6 +104,19 @@ Future<void> shareArtifact(BuildContext context, SessionArtifact a) async {
 Future<void> _openWith(BuildContext context, SessionArtifact a) async {
   final messenger = ScaffoldMessenger.of(context);
   final l10n = context.l10n;
+  final url = a.url;
+  if (url != null && url.isNotEmpty) {
+    final opened = await launchUrl(
+      Uri.parse(url),
+      mode: LaunchMode.externalApplication,
+    );
+    if (!opened) {
+      messenger.showSnackBar(
+        SnackBar(content: Text(l10n.artifactNotOnDevice)),
+      );
+    }
+    return;
+  }
   final host = resolveArtifactHostPath(a);
   if (host == null || !File(host).existsSync()) {
     messenger.showSnackBar(SnackBar(content: Text(l10n.artifactNotOnDevice)));
@@ -145,9 +154,23 @@ class ArtifactThumb extends StatelessWidget {
       ),
     );
     if (artifact.kind != ArtifactKind.image) return glyph;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final url = artifact.url;
+    if (url != null && url.isNotEmpty) {
+      return ClipRRect(
+        borderRadius: radius,
+        child: Image.network(
+          url,
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+          cacheWidth: (size * dpr).round(),
+          errorBuilder: (_, _, _) => glyph,
+        ),
+      );
+    }
     final host = resolveArtifactHostPath(artifact);
     if (host == null) return glyph;
-    final dpr = MediaQuery.devicePixelRatioOf(context);
     return ClipRRect(
       borderRadius: radius,
       child: Image.file(
@@ -258,7 +281,7 @@ class ArtifactPreviewScreen extends StatefulWidget {
   State<ArtifactPreviewScreen> createState() => _ArtifactPreviewScreenState();
 }
 
-enum _PreviewState { image, text, html, tooLarge, missing, binary }
+enum _PreviewState { image, text, html, tooLarge, missing, binary, remote }
 
 class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
   late final String? _host = resolveArtifactHostPath(widget.artifact);
@@ -276,7 +299,11 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
     final a = widget.artifact;
     if (a.html != null) return _PreviewState.html;
     final host = _host;
-    if (host == null) return _PreviewState.missing;
+    if (host == null) {
+      return (a.url ?? '').isEmpty
+          ? _PreviewState.missing
+          : _PreviewState.remote;
+    }
     final f = File(host);
     try {
       if (!f.existsSync()) return _PreviewState.missing;
@@ -306,33 +333,11 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
     );
   }
 
-  Future<void> _openInStudio() async {
-    final a = widget.artifact;
-    final messenger = ScaffoldMessenger.of(context);
-    final l10n = context.l10n;
-    final ok = await AgentService.I.openWorkspaceFileInStudio(a.path!);
-    if (!mounted) return;
-    if (!ok) {
-      messenger.showSnackBar(SnackBar(content: Text(l10n.artifactNotOnDevice)));
-      return;
-    }
-    // P8 Task 13: Studio is down until the remote Studio client lands
-    // (Task 15); the on-device sandbox that backed it was removed.
-    messenger.showSnackBar(
-      const SnackBar(content: Text(kStudioMovesToCloudMessage)),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final a = widget.artifact;
     final canShare = a.html == null && _state != _PreviewState.missing;
-    final inWorkspace =
-        a.origin == ArtifactOrigin.generated &&
-        a.path != null &&
-        !a.isAbsolute &&
-        a.sessionId == AppState.I.activeSessionId;
     final meta = [
       artifactKindLabel(context, a.kind),
       if ((_size ?? a.size ?? 0) > 0) formatArtifactSize(_size ?? a.size!),
@@ -380,24 +385,18 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
               icon: const Icon(Icons.ios_share_rounded, size: 19),
               onPressed: () => shareArtifact(context, a),
             ),
-          if (canShare || inWorkspace)
+          if (canShare)
             PopupMenuButton<String>(
               tooltip: l10n.chatMenuMore,
               icon: const Icon(Icons.more_vert_rounded, size: 20),
               onSelected: (v) {
                 if (v == 'open') _openWith(context, a);
-                if (v == 'studio') _openInStudio();
               },
               itemBuilder: (_) => [
                 if (canShare)
                   PopupMenuItem(
                     value: 'open',
                     child: Text(l10n.artifactOpenWith),
-                  ),
-                if (inWorkspace)
-                  PopupMenuItem(
-                    value: 'studio',
-                    child: Text(l10n.artifactOpenInStudio),
                   ),
               ],
             ),
@@ -446,6 +445,34 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
           ),
         );
       case _PreviewState.binary:
+        return AetherEmptyState(
+          icon: artifactIcon(a.kind),
+          title: l10n.artifactNoPreviewTitle,
+          message: l10n.artifactNoPreviewBody,
+          action: AetherSecondaryButton(
+            label: l10n.artifactOpenWith,
+            onPressed: () => _openWith(context, a),
+          ),
+        );
+      case _PreviewState.remote:
+        if (a.kind == ArtifactKind.image) {
+          return Center(
+            key: const ValueKey('artifact-preview-image'),
+            child: InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 5,
+              child: Image.network(
+                a.url!,
+                cacheWidth: Aether.imageCacheWidth(context),
+                errorBuilder: (_, _, _) => Icon(
+                  Icons.broken_image_outlined,
+                  size: 48,
+                  color: Aether.textFaint,
+                ),
+              ),
+            ),
+          );
+        }
         return AetherEmptyState(
           icon: artifactIcon(a.kind),
           title: l10n.artifactNoPreviewTitle,

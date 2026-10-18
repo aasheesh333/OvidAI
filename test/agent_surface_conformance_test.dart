@@ -72,8 +72,8 @@ void main() {
       expect(Distribution.cloudSchedules, isTrue);
       expect(Distribution.cloudBrowser, isTrue);
       expect(Distribution.cloudPlugins, isFalse, reason: 'dark until P5');
-      expect(Distribution.cloudByok, isFalse,
-          reason: 'dark until the P9 escrow endpoints');
+      expect(Distribution.cloudByok, isTrue,
+          reason: 'the P9 escrow endpoints are built');
 
       Distribution.thinOverrideForTest = false;
       expect(Distribution.thinClient, isFalse);

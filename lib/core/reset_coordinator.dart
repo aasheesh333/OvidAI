@@ -10,7 +10,6 @@ enum ResetStoreKind {
   search('search'),
   ledger('ledger'),
   memory('memory'),
-  usage('usage'),
   account('account'),
   imageReceipts('image-receipts'),
   shares('shares'),
@@ -30,9 +29,7 @@ enum ResetStoreKind {
   // The default WebView cookie jar.
   cookies('cookies'),
   // Unsent composer drafts and unsaved Studio editor / repo drafts.
-  drafts('drafts'),
-  // Per-tool / MCP / plugin usage rollups.
-  toolUsage('tool-usage');
+  drafts('drafts');
 
   const ResetStoreKind(this.id);
   final String id;

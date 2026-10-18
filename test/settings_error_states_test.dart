@@ -1,30 +1,10 @@
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/l10n/l10n.dart';
 import 'package:ovid_ai/ui/settings_screen.dart';
-
-class _ThrowingPicker extends FilePicker {
-  @override
-  Future<FilePickerResult?> pickFiles({
-    String? dialogTitle,
-    String? initialDirectory,
-    FileType type = FileType.any,
-    List<String>? allowedExtensions,
-    Function(FilePickerStatus)? onFileLoading,
-    bool allowCompression = true,
-    int compressionQuality = 30,
-    bool allowMultiple = false,
-    bool withData = false,
-    bool withReadStream = false,
-    bool lockParentWindow = false,
-    bool readSequential = false,
-  }) async =>
-      throw PlatformException(code: 'unknown_path', message: 'no picker');
-}
 
 const _pathProvider = MethodChannel('plugins.flutter.io/path_provider');
 
@@ -44,7 +24,6 @@ void main() {
   });
 
   tearDown(() async {
-    refreshSkillsForTest = null;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_pathProvider, null);
     await root.delete(recursive: true);
@@ -55,40 +34,6 @@ void main() {
       expect(find.textContaining(raw), findsNothing, reason: raw);
     }
   }
-
-  testWidgets('refreshSkills throwing shows an error with Retry', (
-    tester,
-  ) async {
-    var calls = 0;
-    refreshSkillsForTest = () async {
-      calls++;
-      if (calls == 1) throw StateError('skills index locked');
-    };
-    await tester.pumpWidget(const MaterialApp(home: SkillsScreen()));
-    await tester.pumpAndSettle();
-    expect(find.byType(CircularProgressIndicator), findsNothing);
-    expect(find.textContaining(l.skillsLoadFailed), findsOneWidget);
-    expectNoRawText();
-    await tester.tap(find.text(l.actionRetry));
-    await tester.pumpAndSettle();
-    expect(calls, 2);
-    expect(find.text(l.actionRetry), findsNothing);
-    expect(find.textContaining(l.skillsLoadFailed), findsNothing);
-  });
-
-  testWidgets('skill upload picker failure reports instead of crashing', (
-    tester,
-  ) async {
-    FilePicker.platform = _ThrowingPicker();
-    refreshSkillsForTest = () async {};
-    await tester.pumpWidget(const MaterialApp(home: SkillsScreen()));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Upload .md skill'));
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-    expect(find.text(l.skillsUploadFailed(l.errorDevice)), findsOneWidget);
-    expectNoRawText();
-  });
 
   testWidgets('storage measurement failure shows — and Retry, not 0 B', (
     tester,

@@ -155,17 +155,4 @@ void main() {
     expect(s.workspaceFolder, isNull,
         reason: 'a child must never move the parent\'s workspace');
   });
-
-  test('plan mode refuses it (not in the research allowlist)', () async {
-    s.planMode = true;
-    AgentService.directoryPickerForTest = (title) async => real.path;
-
-    final out = await AgentService.I.dispatchForTest(
-      'request_working_folder',
-      {},
-    );
-
-    expect(out, contains('PLAN MODE'));
-    expect(s.workspaceFolder, isNull);
-  });
 }

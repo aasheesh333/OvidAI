@@ -283,7 +283,9 @@ void main() {
         final prefs = await SharedPreferences.getInstance();
         final raw = prefs
             .getStringList('ovid_sessions')!
-            .firstWhere((r) => r.startsWith('{"id":"other",'));
+            .firstWhere(
+              (r) => (jsonDecode(r) as Map<String, dynamic>)['id'] == 'other',
+            );
         expect(((jsonDecode(raw) as Map)['messages'] as List), hasLength(3));
       },
     );
@@ -369,7 +371,10 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       final activeRaw = prefs
           .getStringList('ovid_sessions')!
-          .singleWhere((raw) => raw.startsWith('{"id":"${active.id}",'));
+          .singleWhere(
+            (raw) =>
+                (jsonDecode(raw) as Map<String, dynamic>)['id'] == active.id,
+          );
       final bootstrap =
           jsonDecode(prefs.getString('ovid_session_bootstrap_v1')!)
               as Map<String, dynamic>;

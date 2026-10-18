@@ -9,39 +9,21 @@ import 'package:flutter/services.dart';
 import 'package:flutter/material.dart' show IconData, Icons, Color;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:path_provider/path_provider.dart';
 
 import '../core/theme.dart';
 import 'format.dart';
-import 'model_failure.dart';
 import 'voice_input_service.dart';
 import 'background_notifications.dart';
 import 'state.dart';
-import 'usage_attempt.dart';
-import 'usage_attempt_recorder.dart';
-import 'grant_store.dart';
 import 'distribution.dart';
 import 'github_service.dart';
 import 'session_ledger.dart';
 import 'session_search.dart';
-import 'session_lifecycle_service.dart';
 import 'presets.dart';
-import 'plan_mode.dart';
-import 'hook_service.dart';
-import 'subagent_tools.dart';
-import 'structured_edits.dart';
 import 'html_artifact.dart';
-import 'plugin_registry.dart';
-import 'tool_usage_store.dart';
-import 'skills.dart';
 import 'commands.dart';
-import 'compaction/compaction_checkpoint.dart';
-import 'compaction/compaction_ledger.dart';
-import 'compaction/compaction_policy.dart';
 import 'model_limits.dart';
-import 'prompt_cache.dart';
 import 'diag.dart';
-import 'ssrf_guard.dart';
 import 'image_studio.dart';
 import 'image_task.dart';
 import 'ovid_cloud_service.dart';
@@ -815,6 +797,137 @@ typedef QueuedMessageSnapshot = ({
 /// Non-stream fallback: choices[0].message.* with reasoning_content support.
 
 ///                  ← tool results loop back to model till final answer
+/// Lexical POSIX path normalization (the grant_store helper's surviving pure
+/// utility, re-homed here when the local grant store died in P8 Task 18).
+String _normalizePath(String raw, {String base = '/'}) {
+  var value = raw.trim().replaceAll('\\', '/');
+  if (value.startsWith('~/') || value == '~') {
+    value = '/home/user${value.length > 1 ? value.substring(1) : ''}';
+  }
+  if (!value.startsWith('/')) {
+    final b = base.endsWith('/') ? base.substring(0, base.length - 1) : base;
+    value = '$b/$value';
+  }
+  final parts = <String>[];
+  for (final seg in value.split('/')) {
+    if (seg.isEmpty || seg == '.') continue;
+    if (seg == '..') {
+      if (parts.isNotEmpty) parts.removeLast();
+      continue;
+    }
+    parts.add(seg);
+  }
+  return '/${parts.join('/')}';
+}
+
+/// Lower-cased host without port/brackets (the grant_store helper's surviving
+/// pure utility, re-homed here when the local grant store died).
+String _normalizeHost(String raw) {
+  var h = raw.trim().toLowerCase();
+  if (h.startsWith('[')) {
+    final end = h.indexOf(']');
+    if (end > 0) h = h.substring(1, end);
+  } else {
+    final colon = h.lastIndexOf(':');
+    if (colon > 0 && h.indexOf(':') == colon) {
+      h = h.substring(0, colon);
+    }
+  }
+  if (h.endsWith('.') && h.length > 1) h = h.substring(0, h.length - 1);
+  return h;
+}
+
+/// Cache read/write token counts from any supported usage shape (the
+/// prompt_cache helper's surviving pure utility).
+({int read, int write}) _parseCacheUsage(Map<String, dynamic>? u) {
+  int? asInt(Object? v) => v is num ? v.toInt() : null;
+  if (u == null) return (read: 0, write: 0);
+  final d = u['prompt_tokens_details'];
+  final details = d is Map ? d : const {};
+  final read =
+      asInt(u['cache_read_tokens']) ??
+      asInt(u['cache_read_input_tokens']) ??
+      asInt(details['cached_tokens']) ??
+      asInt(u['prompt_cache_hit_tokens']) ??
+      0;
+  final write =
+      asInt(u['cache_write_tokens']) ??
+      asInt(u['cache_creation_input_tokens']) ??
+      asInt(details['cache_write_tokens']) ??
+      asInt(details['cache_creation_tokens']) ??
+      asInt(u['cache_creation_tokens']) ??
+      0;
+  return (read: read < 0 ? 0 : read, write: write < 0 ? 0 : write);
+}
+
+/// Input-side cost with provider cache multipliers (the prompt_cache helper's
+/// surviving pure utility).
+double _cacheInputCost({
+  required String model,
+  required double pricePerMTok,
+  required int inputTokens,
+  int cacheRead = 0,
+  int cacheWrite = 0,
+  bool ttl1h = false,
+}) {
+  final m = model.toLowerCase();
+  final (readRate, write5m, write1h) = m.contains('claude')
+      ? (0.1, 1.25, 2.0)
+      : m.contains('deepseek')
+      ? (0.1, 1.0, 1.0)
+      : m.contains('gemini')
+      ? (0.25, 1.0, 1.0)
+      : (0.5, 1.0, 1.0);
+  final read = cacheRead.clamp(0, inputTokens);
+  final write = cacheWrite.clamp(0, inputTokens - read);
+  final fresh = inputTokens - read - write;
+  final wm = ttl1h ? write1h : write5m;
+  return (fresh + read * readRate + write * wm) / 1e6 * pricePerMTok;
+}
+
+/// Volatile-row marker used by the Anthropic converter (the prompt_cache
+/// helper's surviving pure utility).
+bool _isVolatileRow(Map row) => row['_volatile'] == true;
+
+/// Compact identifying args of a tool call (path/command/url/...) for the
+/// transcript's tool card. Re-homed from the compaction ledger when local
+/// compaction died in P8 Task 18.
+String _toolInputRecord(Map<String, dynamic> args) {
+  const keys = [
+    'path', 'file', 'command', 'cmd', 'url', 'query', 'queries', 'pattern',
+    'prompt', 'message', 'selector', 'old_path', 'new_path', 'from', 'to',
+    'server', 'agent', 'subagent_type', 'objective', 'mode', 'cwd', 'repo',
+    'branch', 'name',
+  ];
+  final out = <String, dynamic>{};
+  for (final k in keys) {
+    final v = args[k];
+    if (v == null) continue;
+    if (v is List) {
+      out[k] = [for (final x in v.take(8)) '$x'.length > 200 ? '$x'.substring(0, 200) : '$x'];
+    } else if (v is String) {
+      out[k] = v.length > 300 ? v.substring(0, 300) : v;
+    } else if (v is num || v is bool) {
+      out[k] = v;
+    }
+  }
+  for (final k in const ['content', 'file_text', 'new_str', 'code']) {
+    final v = args[k];
+    if (v is String) out['${k}_chars'] = v.length;
+  }
+  return jsonEncode(out);
+}
+
+/// User-facing failure notice for a run that exhausted its retries. Local
+/// provider diagnostics were stripped in P8 Task 18; the notice stays plain,
+/// honest and actionable.
+String _modelFailureTranscript(String error) {
+  final detail = error.trim();
+  return '⚠️ The model request failed.\n\n'
+      'Retry. If it continues, review the provider details below.'
+      '${detail.isEmpty ? '' : '\n\nDetails: $detail'}';
+}
+
 class AgentService extends ChangeNotifier implements AgentSurface {
   AgentService._() {
     // Deleted sessions lose their run; all others keep running in parallel.
@@ -825,25 +938,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
       dropSessionRun(sessionId);
       _busyNotifiers.remove(sessionId);
       _liveTicksBySession.remove(sessionId);
-      SkillService.I.dropSession(sessionId);
-      if (HookService.I.hasHookListeners('session_end', sessionId: sessionId)) {
-        unawaited(
-          HookService.I.fire(
-            'session_end',
-            sessionId,
-            payload: {
-              'deleted': true,
-              // Claude Code's SessionEnd matchers key on `reason`
-              // (clear | logout | prompt_input_exit | other). Deleting a chat
-              // discards the conversation, which is CC's `clear`; without a
-              // reason the subject resolved to '' and every SessionEnd matcher
-              // was permanently dead (audit 2026-09-29).
-              'reason': 'clear',
-              'transcript_path': _transcriptPathFor(sessionId),
-            },
-          ),
-        );
-      }
     };
     // Cold resume: rebuild subagent handles from the persisted lineage
     // after sessions load (the durable descriptor parity).
@@ -854,61 +948,12 @@ class AgentService extends ChangeNotifier implements AgentSurface {
     };
     // Composer commands + skills catalog.
     CommandService.I.registerBuiltins();
-    // Plugin/MCP parity wiring (once at init):
-    // 1. Prompt-type hooks are evaluated through the agent's own model —
-    //    a quiet, non-streaming completion (never touches the transcript).
-    //    Null/throw fails open (HookService treats it as "no verdict").
-    HookService.I.promptHookEvaluator =
-        (String prompt, Map<String, dynamic> context) async {
-          try {
-            return await _evaluatePromptHookQuietly(prompt, context);
-          } catch (_) {
-            return null; // fail open
-          }
-        };
-    // The tool-capable agent-hook evaluator (HookService's `agentHookEvaluator`
-    // field) stays null in production on purpose. Wiring it safely needs a
-    // bounded, cancellable, publication-free tool loop plus an approval channel
-    // addressable to a specific evaluation — none of which the current dispatch
-    // path provides (`_dispatch` publishes run accounting/ledger/chat text, and
-    // `_askUser` parks approvals on the active session's bucket). See
-    // docs/superpowers/audits/2026-10-06-agent-hooks-closure.md and
-    // docs/superpowers/audits/2026-10-06-partial-closure.md §C. Agent hooks
-    // therefore fail open with an honest ledger note; they must never fall back
-    // to the prompt evaluator above.
-    // 2. User-initiated stops always win over Stop-hook vetoes. This is the
-    //    run bucket's passive cancel flag — never stopRequested() itself
-    //    (that method PERFORMS the stop).
-    HookService.I.userStopChecker = (sid) =>
-        _runs[sid]?.cancelRequested ?? false;
     // Run state also changes on paths that only refresh AppState; keep the
     // per-session busy notifiers in step with those too.
     AppState.I.addListener(_syncBusyNotifiers);
-    // 3. Hooks fired inside a subagent carry its identity (Claude Code
-    //    `agent_id` / `agent_type`, main-session `session_id`).
-    HookService.agentIdentityResolver = _hookAgentIdentity;
   }
 
   static final AgentService I = AgentService._();
-
-  UsageAttemptRecorder? _usageAttemptRecorder;
-
-  UsageAttemptRecorder get _attemptRecorder =>
-      _usageAttemptRecorder != null &&
-          identical(
-            _usageAttemptRecorder!.owner,
-            AppState.I.sessionAccountToken,
-          )
-      ? _usageAttemptRecorder!
-      : (_usageAttemptRecorder = UsageAttemptRecorder(
-          owner: AppState.I.sessionAccountToken,
-          write: (attempt, {owner}) =>
-              AppState.I.recordUsageAttempt(attempt, owner: owner),
-        ));
-
-  @visibleForTesting
-  void resetUsageAttemptRecorderForTest({UsageAttemptRecorder? recorder}) =>
-      _usageAttemptRecorder = recorder;
 
   /// The agent mode that applies to the current execution context.
   ///
@@ -942,9 +987,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
     // An explicit mode set means the plan preset no longer owns the
     // session's read-only mode: clear the remembered pre-plan mode so a
     // later plan exit cannot override the user's choice (e.g. `/permission
-    // full-access` while planning). `applyPreset` and `_releasePlanOwnedMode`
-    // write `s.mode` directly, so they are unaffected.
-    s.planPreMode = null;
+    // full-access` while planning).
     AppState.I.persistSessions();
   }
 
@@ -986,19 +1029,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
       roots.add((await _sessionWorkDir()).path);
     } catch (e) {
       Diag.swallow('agent_service', e);
-    }
-    final sid = _runSession?.id ?? AppState.I.activeSession?.id;
-    if (sid != null && sid.isNotEmpty) {
-      try {
-        for (final g in _grantStoreFor(sid).grantsFor(sid, mode: mode.name)) {
-          if (g.isDeny || !g.recursive || g.kind != PermissionGrant.kindPath) {
-            continue;
-          }
-          if (g.value.isNotEmpty) roots.add(g.value);
-        }
-      } catch (e) {
-        Diag.swallow('agent_service', e);
-      }
     }
     // Plan mode NARROWS this set, never widens it (2026-09-29).
     //
@@ -1071,11 +1101,8 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   static const _runCtxKey = #ovidAgentRunCtx;
   static const _permissionDispatchCtxKey = #ovidAgentPermissionDispatchCtx;
 
-  // HookService suppresses re-entrant blocking events by session/event key.
-  // Queue permission-bearing dispatches so two tool calls cannot cause one
-  // call to observe the other's in-flight hook. The dispatch context remains
-  // per invocation; the queue only protects the hook/approval transaction.
-  Future<void> _permissionDispatchTail = Future<void>.value();
+  // The local hook runtime died in P8 Task 18. The dispatch context remains
+  // per invocation so approvals and account fences stay isolated.
 
   /// The per-run execution context active in the current async Zone.
   /// Tests may pin one via [setRunCtxForTest] (no Zone needed).
@@ -1238,14 +1265,8 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   /// read-only coupling in step. An immediate apply also clears any queued
   /// transition, so the queue and the live value can never disagree.
   void _applyPlanModeNow(ChatSession s, bool v) {
-    final wasPlan = s.planMode;
     s.planMode = v;
     s.planModePending = null;
-    // Every plan-mode exit releases the read-only mode the plan policy
-    // introduced (approval of exit_plan_mode, `/plan off`, the composer Plan
-    // chip). An independent `/permission read-only` session has planMode=false
-    // and never reaches this path.
-    if (!v && wasPlan) _releasePlanOwnedMode(s);
     AppState.I.persistSessions();
   }
 
@@ -1266,26 +1287,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   /// Test seam (G2): run the turn-boundary application without a live turn.
   @visibleForTesting
   void applyPendingPlanModeForTest(ChatSession s) => _applyPendingPlanMode(s);
-
-  /// Restores the access mode the `plan` preset overrode when it entered
-  /// plan mode. When no pre-mode was recorded the plan-owned read-only is
-  /// released to `auto` instead of leaving the session locked. This covers
-  /// both the entry-order case (`/plan` set `planMode` first, so the plan
-  /// preset introduced safe without a recorded pre-mode) and the legacy
-  /// persisted state (`planMode=true, mode=safe, planPreMode=null` from the
-  /// round-1 bug). An independent `/permission read-only` session has
-  /// `planMode=false` and never reaches a plan exit, so it is never touched.
-  void _releasePlanOwnedMode(ChatSession s) {
-    final pre = s.planPreMode;
-    s.planPreMode = null;
-    if (pre != null) {
-      s.mode = AgentMode.values.any((m) => m.name == pre)
-          ? pre
-          : AgentMode.auto.name;
-      return;
-    }
-    if (s.mode == AgentMode.safe.name) s.mode = AgentMode.auto.name;
-  }
 
   bool get cancelRequested => _runResolved.cancelRequested;
   bool get _cancelRequested => _runResolved.cancelRequested;
@@ -1872,6 +1873,13 @@ class AgentService extends ChangeNotifier implements AgentSurface {
     _transcriptPathCache.clear();
   }
 
+  void _forgetToolDecisions(String sessionId) {
+    _alwaysAllowedTools.removeWhere(
+      (k, _) => k == sessionId || k.startsWith('$sessionId|'),
+    );
+    _deniedApprovals.remove(sessionId);
+  }
+
   void dropSessionRun(String sessionId) {
     if (_runs[sessionId]?.controlRun == true) {
       stopRequested(sessionId: sessionId);
@@ -2404,22 +2412,15 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   /// plan-mode jail both ask this, so they cannot drift apart about what
   /// "inside the workspace" means.
   Future<String> sessionWorkspaceRoot() async {
-    final rs = _runSession;
-    final sid = rs?.id ?? AppState.I.activeSession?.id;
     final m = mode;
     final workDir = await _sessionWorkDir();
     if (m == AgentMode.studio) {
       return workDir.path;
     }
     if (m == AgentMode.drive) return '';
-    // One authoritative root per mode. Control is jailed to the session
-    // directory like General and Read-Only; it used to be exempt, which let a
-    // Control session touch anything on the device with no prompt.
-    return permissionWorkspaceRoot(
-      modeName: m.name,
-      sessionWorkDir: workDir.path,
-      sessionId: sid,
-    );
+    // One authoritative root per mode: the session workspace. The local
+    // grant store died with the server-side permission model (P8 Task 18).
+    return workDir.path;
   }
 
   /// The directory PLAN mode is jailed to, in EVERY access mode.
@@ -2443,7 +2444,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   Future<String> planModeRoot() async {
     final forced = planModeRootForTest;
     if (forced != null && forced.trim().isNotEmpty) {
-      return normalizeGrantPath(forced.trim());
+      return _normalizePath(forced.trim());
     }
     final root = await sessionWorkspaceRoot();
     if (root.isNotEmpty) return _canonicalFsPath(root);
@@ -3142,7 +3143,6 @@ user which one instead of assuming this one.''';
       // for the next turn.
       s.planMode = false;
       s.planModePending = null;
-      _releasePlanOwnedMode(s);
     }
     if (pinned != null) {
       _writeMode(pinned, m);
@@ -3174,14 +3174,6 @@ user which one instead of assuming this one.''';
     // so a Control exit here must hide the overlay itself.
     final wasControl = s.mode == AgentMode.control.name;
     if (preset.id == 'plan') {
-      // Record ownership whenever the plan preset is the one INTRODUCING
-      // safe read-only — independent of whether planMode was already true
-      // (e.g. `/plan` entered first). An already-safe session keeps its
-      // mode and records no pre-mode; a later plan exit releases it to
-      // `auto` (see `_releasePlanOwnedMode`).
-      if (s.mode != AgentMode.safe.name && s.planPreMode == null) {
-        s.planPreMode = s.mode;
-      }
       // Through the setter: immediate when idle, queued when a turn is open
       // (G2). The setter also owns the plan-owned read-only release below.
       planMode = true;
@@ -3309,103 +3301,6 @@ user which one instead of assuming this one.''';
   /// The session approvals attach to (public for the Permissions screen).
   ChatSession? get currentSession => _runSession;
 
-  /// Revokes a session-scoped grant, persists the session, and refreshes —
-  /// the Settings → Permissions revoke action. [session] names the chat the
-  /// grant belongs to (the Permissions screen lists every chat, F-110);
-  /// without it the grant's own [PermissionGrant.sessionId] is used, then
-  /// the current session.
-  Future<void> revokeSessionPermissionGrant(
-    PermissionGrant grant, {
-    ChatSession? session,
-  }) async {
-    final s =
-        session ??
-        AppState.I.sessions
-            .where((c) => c.id == grant.sessionId)
-            .firstOrNull ??
-        _runSession;
-    if (s == null) return;
-    s.grants.removeWhere((g) => g.kind == grant.kind && g.value == grant.value);
-    await AppState.I.persistSessions();
-    notifyListeners();
-  }
-
-  /// Removes every remembered decision of [session]: its file and website
-  /// grants AND its in-memory tool "Always allow" / denial memory.
-  Future<void> revokeAllSessionDecisions(ChatSession session) async {
-    session.grants.clear();
-    _forgetToolDecisions(session.id);
-    await AppState.I.persistSessions();
-    notifyListeners();
-  }
-
-  /// Removes every remembered decision in every chat (Permissions screen
-  /// "Revoke all").
-  Future<void> revokeAllRememberedDecisions() async {
-    for (final s in AppState.I.sessions) {
-      s.grants.clear();
-    }
-    _alwaysAllowedTools.clear();
-    _deniedApprovals.clear();
-    await AppState.I.persistSessions();
-    notifyListeners();
-  }
-
-  void _forgetToolDecisions(String sessionId) {
-    _alwaysAllowedTools.removeWhere(
-      (k, _) => k == sessionId || k.startsWith('$sessionId|'),
-    );
-    _deniedApprovals.remove(sessionId);
-  }
-
-  /// Tool names the user chose "Always allow" for in [sessionId] (F-109).
-  /// In-memory only: they end with the process or the session's run.
-  Set<String> alwaysAllowedToolsFor(String sessionId) => {
-    for (final e in _alwaysAllowedTools.entries)
-      if (e.key == sessionId || e.key.startsWith('$sessionId|')) ...e.value,
-  };
-
-  /// Remembered denials of [sessionId]: approvals the user (or the timeout)
-  /// denied, which are refused again without asking until revoked.
-  List<RememberedToolDenial> rememberedDenialsFor(String sessionId) => [
-    for (final key in _deniedApprovals[sessionId] ?? const <String>{})
-      RememberedToolDenial.fromKey(key),
-  ];
-
-  /// Session ids holding any in-memory tool decision.
-  Set<String> get sessionsWithToolDecisions => {
-    for (final k in _alwaysAllowedTools.keys)
-      if (_alwaysAllowedTools[k]!.isNotEmpty) k.split('|').first,
-    for (final e in _deniedApprovals.entries)
-      if (e.value.isNotEmpty) e.key,
-  };
-
-  /// Forgets "Always allow" for [tool] in [sessionId]: the next call asks
-  /// again. True when something was removed.
-  bool revokeAlwaysAllowedTool(String sessionId, String tool) {
-    var removed = false;
-    for (final e in _alwaysAllowedTools.entries) {
-      if (e.key == sessionId || e.key.startsWith('$sessionId|')) {
-        removed = e.value.remove(tool) || removed;
-      }
-    }
-    _alwaysAllowedTools.removeWhere((_, v) => v.isEmpty);
-    if (removed) notifyListeners();
-    return removed;
-  }
-
-  /// Forgets a remembered denial: the next identical request asks again.
-  bool revokeRememberedDenial(String sessionId, RememberedToolDenial denial) {
-    final set = _deniedApprovals[sessionId];
-    final removed = set?.remove(denial.key) ?? false;
-    if (set != null && set.isEmpty) _deniedApprovals.remove(sessionId);
-    if (removed) notifyListeners();
-    return removed;
-  }
-
-  /// Test seam: records "Always allow" for [tool] in [sessionId] exactly as
-  /// an approved "Always allow" card does.
-  @visibleForTesting
   void rememberAlwaysAllowForTest(String sessionId, String tool) {
     _alwaysAllowedTools
         .putIfAbsent(_alwaysAllowKey(sessionId, mode.name), () => {})
@@ -3522,51 +3417,11 @@ user which one instead of assuming this one.''';
             final name = fn is Map ? fn['name'] as String? : null;
             return name != null && PresetRegistry.allows(preset, name);
           }).toList();
-    // ── Plan-mode roster projection (G4) ──
-    // Plan mode used to be a dispatch gate only: the model was still OFFERED
-    // every tool, called the refused ones, and spent tokens being told no. The
-    // roster and the gate now read the SAME policy object (G5-resolved), so the
-    // model is never shown a tool the gate would refuse and the two enforcement
-    // points cannot drift apart. `exit_plan_mode` stays in the roster because
-    // it is on the allowlist.
-    final planGated = planMode
-        ? gated.where((t) {
-            final fn = t['function'];
-            final name = fn is Map ? fn['name'] as String? : null;
-            return name != null &&
-                PlanModePolicy.allows(
-                  name,
-                  policy: PresetRegistry.planPolicyFor(preset),
-                );
-          }).toList()
-        : gated;
-    // ── Subagent roster projection (Claude Code tool scoping) ──
-    // A child sees only what its definition grants: its `tools` allowlist
-    // (empty = inherit all, incl. MCP), minus `disallowedTools`, minus the
-    // spawn tools and user-facing tools — whatever the definition lists. The
-    // dispatch gate (`_subagentToolBlock`) reads the SAME policy object.
-    final runningChild = _runSession;
-    final childGated = runningChild != null && runningChild.isSubagent
-        ? () {
-            final policy = SubagentToolPolicy.fromStored(
-              runningChild.agentAllowedTools,
-            );
-            return planGated.where((t) {
-              final fn = t['function'];
-              final name = fn is Map ? fn['name'] as String? : null;
-              return name != null &&
-                  policy.allows(
-                    name,
-                    isAgentContribution: _isAgentContributionTool(name),
-                  );
-            }).toList();
-          }()
-        : planGated;
     // Request-time schema compactor: shrink only the PROSE (description
     // fields). Names, parameter names, types, enums, required and defaults
     // are never touched, so every tool stays fully callable and every
     // feature keeps working — the payload just carries less redundant text.
-    return childGated.map(_compactTool).toList();
+    return gated.map(_compactTool).toList();
   }
 
   /// Budgets for the request-time tool-schema compactor (characters).
@@ -5576,23 +5431,6 @@ user which one instead of assuming this one.''';
     return o < contextWindowFor(effectiveModelForSession(s), s.providerId);
   }
 
-  /// default policy: compact when the measured request envelope reaches
-  /// 80% of the model's contextWindow; retain the newest 16% verbatim.
-  static const _compactThresholdRatio = 0.8;
-  static const _compactRetainRatio = 0.16;
-
-  /// Absolute auto-compaction trigger (tokens): sessions on huge windows
-  /// compact once past this size instead of growing unboundedly toward 80%
-  /// of 1M. Small-window models are unaffected (their 80% fires first).
-  static const _compactAbsoluteThresholdTokens = 100000;
-
-  /// Manual `/compact` retention: an explicit user request keeps only the
-  /// newest slice verbatim (bounded by messages AND tokens), unlike
-  /// auto-compaction which retains 16% of the model window. A 349-message
-  /// session the auto floor can never touch still folds on demand.
-  static const _manualCompactRetainMessages = 24;
-  static const _manualCompactRetainTokens = 8000;
-
   /// token-meter heuristic: 4 chars ≈ 1 token, +4 tokens of
   /// role/framing overhead per message.
   static int estimateMessageTokens(String text) => text.length ~/ 4 + 4;
@@ -5632,7 +5470,7 @@ user which one instead of assuming this one.''';
         // [inputTokens] is the total prompt; cache reads/writes are billed
         // at provider multipliers (local ESTIMATE; server spend is
         // authoritative).
-        return PromptCache.inputCost(
+        return _cacheInputCost(
               model: m,
               pricePerMTok: entry.value.$1,
               inputTokens: inputTokens,
@@ -5655,15 +5493,7 @@ user which one instead of assuming this one.''';
     if (billed != null && billed > 0) return billed;
     var t =
         estimateMessageTokens(systemPrompt) + 256; // + tools header ballpark
-    // PR26/C2: skip the compacted span — those rows are already folded
-    // into s.compactedSummary; counting them kept the pressure ring high
-    // (and re-triggered compaction) after a successful compact. The
-    // summary's own tokens are approximated by its char length.
-    final start = s.compactedAtCount.clamp(0, s.messages.length);
-    if (s.compactedSummary != null) {
-      t += estimateMessageTokens(s.compactedSummary!);
-    }
-    for (final m in s.messages.skip(start)) {
+    for (final m in s.messages) {
       t +=
           estimateMessageTokens(m.content) +
           estimateMessageTokens(m.toolDetail ?? '');
@@ -5695,12 +5525,7 @@ user which one instead of assuming this one.''';
     const proseBudget = 4000;
     const toolBudget = 1500;
     final out = <Map<String, dynamic>>[];
-    // Compacted span skip (PR18/C1): rows below compactedAtCount are
-    // already folded into s.compactedSummary — replaying them would
-    // re-send everything compaction just removed (and the summary
-    // injection below already carries the content forward).
-    final start = s.compactedAtCount.clamp(0, s.messages.length);
-    for (final m in s.messages.skip(start)) {
+    for (final m in s.messages) {
       if (m.kind == MsgKind.compact) continue;
       if (m.kind == MsgKind.reasoning && !AppState.I.showReasoning) {
         continue;
@@ -5753,17 +5578,6 @@ user which one instead of assuming this one.''';
   /// a logged lock). Workflow fan-out + parallel children could interleave
   /// two compactions on the SAME session — the second would summarize a
   /// span the first already folded (double-fold corruption).
-  final Set<String> _compacting = <String>{};
-
-  Future<void> _maybeCompact(ChatSession s, ProviderConfig p) async {
-    if (!_compacting.add(s.id)) return; // already compacting this session
-    try {
-      await _maybeCompactLocked(s, p);
-    } finally {
-      _compacting.remove(s.id);
-    }
-  }
-
   /// PR29: the ONE request-assembly used everywhere a request is built
   /// from session state (initial assembly, overflow rebuild, budget
   /// boundary). framing parity:
@@ -5785,18 +5599,6 @@ user which one instead of assuming this one.''';
     final memory = AppState.I.memoryContext(s.id);
     return [
       {'role': 'system', 'content': sys},
-      if (s.compactedSummary != null && s.compactedSummary!.isNotEmpty)
-        {
-          'role': 'user',
-          'content':
-              'This is an automatically generated checkpoint condensing an '
-              'earlier span of the conversation to free up context. Treat '
-              'the captured context as established background and build on '
-              'it without restating it. Continue the task directly from '
-              'the messages that follow, without acknowledging this '
-              'checkpoint.\n\n<compacted-summary>\n${s.compactedSummary}\n'
-              '</compacted-summary>',
-        },
       // Staged attachments note — the files are in the session workspace.
       if (atts.isNotEmpty)
         {
@@ -5804,452 +5606,10 @@ user which one instead of assuming this one.''';
           'content': _attachmentContext(_attachmentMetadata(atts)),
         },
       ..._replayHistory(s, fullTextMessages: fullTextMessages),
-      if (memory.isNotEmpty)
-        PromptCache.markVolatile({'role': 'user', 'content': memory}),
+      if (memory.isNotEmpty) {'role': 'user', 'content': memory},
       if (volatile.trim().isNotEmpty)
-        PromptCache.markVolatile({
-          'role': 'system',
-          'content': volatile.trim(),
-        }),
+        {'role': 'system', 'content': volatile.trim()},
     ];
-  }
-
-  /// summarization (PR29): the summarizer call REPLAYS the span
-  /// verbatim — same content the model already saw (content + tool
-  /// cards' toolDetail). Lossless compaction: the model writes ONLY the
-  /// narrative (decisions / current work / next steps / context) and merges
-  /// the PRIOR narrative — user messages and the work log are preserved
-  /// deterministically by [CompactionEngine], never re-summarised.
-  Future<String?> _summarizeCompactSpan(
-    ProviderConfig p,
-    ChatSession s,
-    int from,
-    int cutoff, {
-    String? focus,
-    CompactionLedger? ledger,
-  }) async {
-    final custom = compactionSummarizerForTest;
-    if (custom != null) return custom(s, from, cutoff);
-    final span = s.messages.sublist(from, cutoff);
-    final replay = StringBuffer();
-    for (final m in span) {
-      if (m.kind == MsgKind.compact) continue;
-      final who = m.role == 'user' ? 'User' : 'Assistant';
-      final tool = m.kind == MsgKind.tool ? '[tool ${m.toolName}] ' : '';
-      replay.writeln('$who: $tool${m.content}');
-      final d = (m.toolDetail ?? '').trim();
-      if (d.isNotEmpty) {
-        replay.writeln('  [tool output] ${cleanTruncate(d, 2000)}');
-      }
-    }
-    final prior = CompactionEngine.priorNarrative(s);
-    // F4: reject a summary that does not shrink its source — retry once
-    // with a stricter instruction, then accept whatever came back.
-    final spanTokens = span.fold<int>(
-      0,
-      (a, m) =>
-          a +
-          estimateMessageTokens(m.content) +
-          estimateMessageTokens(m.toolDetail ?? ''),
-    );
-    for (var attempt = 0; attempt < 2; attempt++) {
-      final summary = await _callLlm(
-        p,
-        [
-          {
-            'role': 'system',
-            'content': CompactionEngine.summarizerSystemPrompt(
-              strict: attempt > 0,
-            ),
-          },
-          {
-            'role': 'user',
-            'content': CompactionEngine.summarizerUserPrompt(
-              replay: replay.toString(),
-              priorNarrative: prior,
-              ledger: ledger ?? CompactionEngine.ledgerFor(s, from, cutoff),
-              focus: focus,
-            ),
-          },
-        ],
-        s,
-        includeTools: false,
-        purpose: 'compaction',
-        // Invisible helper call — must never stream into the transcript.
-        streamToTranscript: false,
-      );
-      if (summary == null || summary['content'] == null) continue;
-      final text = summary['content'] as String;
-      if (text.trim().isEmpty) continue;
-      if (estimateMessageTokens(text) < spanTokens || attempt > 0) {
-        return text;
-      }
-    }
-    return null;
-  }
-
-  /// Summarise `[compactedAtCount, cutoff)` and apply the checkpoint. A
-  /// summariser failure never drops context: the deterministic checkpoint
-  /// (verbatim user messages + work log + prior narrative) is applied anyway.
-  Future<({String status, bool modelSummary})> _compactSpan(
-    ChatSession s,
-    ProviderConfig p,
-    int cutoff, {
-    required bool forced,
-    String? focus,
-  }) async {
-    final from = s.compactedAtCount;
-    final ledger = CompactionEngine.ledgerFor(s, from, cutoff);
-    String? narrative;
-    try {
-      narrative = await _summarizeCompactSpan(
-        p,
-        s,
-        from,
-        cutoff,
-        focus: focus,
-        ledger: ledger,
-      );
-    } catch (e) {
-      _emit('think', 'compaction summary failed ($e) — deterministic only');
-    }
-    final status = _applyCompaction(
-      s,
-      from,
-      cutoff,
-      narrative,
-      forced: forced,
-      focus: focus,
-      ledger: ledger,
-    );
-    return (
-      status: status,
-      modelSummary: narrative != null && narrative.trim().isNotEmpty,
-    );
-  }
-
-  /// Apply a successful compaction: fold [from, cutoff) into the summary,
-  /// write the visible "Context compacted" event row. Returns the human
-  /// status line.
-  String _applyCompaction(
-    ChatSession s,
-    int from,
-    int cutoff,
-    String? narrative, {
-    required bool forced,
-    String? focus,
-    CompactionLedger? ledger,
-  }) {
-    // Task 8 (spec §8.1): compaction hooks — pre_compact before the span
-    // is folded, post_compact after (fire-and-forget observe).
-    if (HookService.I.hasHookListeners('pre_compact', sessionId: s.id)) {
-      unawaited(
-        HookService.I.fire(
-          'pre_compact',
-          s.id,
-          payload: {
-            'from': from,
-            'cutoff': cutoff,
-            'forced': forced,
-            // Claude Code matchers for PreCompact are `manual` | `auto`, and
-            // `trigger` is the field buildHookStdinJson documents — without it
-            // the matcher subject was empty and such hooks never fired.
-            'trigger': forced ? 'manual' : 'auto',
-            'transcript_path': _transcriptPathFor(s.id),
-          },
-          model: s.model,
-        ),
-      );
-    }
-    final shadowed = cutoff - from;
-    final shadowedTok = s.messages
-        .sublist(from, cutoff)
-        .fold<int>(
-          0,
-          (a, m) =>
-              a +
-              estimateMessageTokens(m.content) +
-              estimateMessageTokens(m.toolDetail ?? ''),
-        );
-    final l = ledger ?? CompactionEngine.ledgerFor(s, from, cutoff);
-    final ck = CompactionEngine.finalize(
-      l,
-      state: CheckpointState.of(
-        s,
-        retainedMessages: s.messages.length - cutoff,
-      ),
-      windowTokens: contextWindowForSession(s),
-      folded: shadowed,
-      narrative: narrative,
-      focus: focus,
-    );
-    final summary = ck.text;
-    s.compactedSummary = summary;
-    s.compactionState = l.toJson();
-    s.compactedAtCount = cutoff;
-    s.messages.insert(
-      cutoff,
-      Message(
-        role: 'assistant',
-        kind: MsgKind.compact,
-        content: forced
-            ? 'Context force-pruned · $shadowed message${shadowed == 1 ? '' : 's'} '
-                  '(overflow recovery) · ${ck.preservedLine}'
-            : 'Context compacted · $shadowed message${shadowed == 1 ? '' : 's'} '
-                  '(~${_fmtK(shadowedTok)} tokens) · ${ck.preservedLine}',
-        toolDetail: summary,
-        toolState: 'ok',
-      ),
-    );
-    AppState.I.persistSessions();
-    if (HookService.I.hasHookListeners('post_compact', sessionId: s.id)) {
-      unawaited(
-        HookService.I.fire(
-          'post_compact',
-          s.id,
-          payload: {
-            'from': from,
-            'cutoff': cutoff,
-            'folded': shadowed,
-            'forced': forced,
-            'trigger': forced ? 'manual' : 'auto',
-            'transcript_path': _transcriptPathFor(s.id),
-          },
-          model: s.model,
-        ),
-      );
-    }
-    return forced
-        ? 'force-pruned $shadowed message(s) (~${_fmtK(shadowedTok)} tokens)'
-        : 'compacted $shadowed message(s) (~${_fmtK(shadowedTok)} tokens '
-              'folded into the checkpoint)';
-  }
-
-  /// F3 (the tool-result pruner): rewrites oversized tool-detail bodies in
-  /// the session into spill-file rows (head + marker + tail) BEFORE a
-  /// compaction decides it needs to summarize. Returns the number of tool
-  /// messages that were spilled. Runs only when measured ≥ threshold —
-  /// below-pressure step checks never prune).
-  Future<int> _pruneOversizedToolDetailsBeforeCompact(
-    ChatSession s,
-    int threshold,
-  ) async {
-    var pruned = 0;
-    // Ceiling per tool output: same spirit as the runtime 12 KB trim.
-    const oversizeChars = 8000;
-    for (final m in s.messages) {
-      if (m.kind != MsgKind.tool) continue;
-      final detail = m.toolDetail ?? '';
-      if (detail.length < oversizeChars) continue;
-      final newDetail = await spillToolOutput(
-        m.toolName ?? 'tool',
-        detail,
-        cap: 4000,
-      );
-      if (newDetail.length < detail.length) {
-        m.toolDetail = newDetail;
-        pruned++;
-      }
-    }
-    return pruned;
-  }
-
-  Future<void> _maybeCompactLocked(ChatSession s, ProviderConfig p) async {
-    final window = contextWindowForSession(s);
-    final ratioThreshold = (window * _compactThresholdRatio).floor();
-    // Size-aware trigger: the lower of 80%-of-window and the absolute
-    // floor, so huge-window sessions compact in time instead of growing
-    // toward 800k tokens. Small windows keep their exact old behavior.
-    final threshold = ratioThreshold < _compactAbsoluteThresholdTokens
-        ? ratioThreshold
-        : _compactAbsoluteThresholdTokens;
-    final measured = measuredContextTokens(s, systemPrompt: 'x' * 4000);
-    if (measured < threshold) return;
-
-    // F3 (the tool-result pruner ovid-compaction-tool-result-pruner parity): BEFORE spending an
-    // LLM summarization call, rewrite oversized TOOL results out of the
-    // foldable span into spill refs (head/marker/tail). Cost-free, model-
-    // free; if the pressure drops below threshold afterward, summarize
-    // nothing at all — note: "pruner rewrites oversized tool results before
-    // range selection… skips summarization when pressure becomes safe".
-    final pruned = await _pruneOversizedToolDetailsBeforeCompact(s, threshold);
-    if (pruned > 0) {
-      final after = measuredContextTokens(s, systemPrompt: 'x' * 4000);
-      _emit(
-        'think',
-        'context pruned: $pruned oversized tool output(s) spilled to disk '
-            '(~${((after / window) * 100).toStringAsFixed(0)}% now)',
-      );
-      if (after < threshold) return; // note: no summarization needed.
-    }
-
-    // Select the compactable span [compactedAtCount, cutoff): retain the
-    // newest ~16% of the window verbatim (the compaction policy retainRatio), keeping at
-    // least 6 recent messages.  Never split the last user message from
-    // its tool/reasoning/answer run.
-    // Scale the retain down when the absolute trigger fired: retaining
-    // 16% of 1M (160k) while measured is ~100k would swallow the whole
-    // session and fold nothing.
-    var retain = (window * _compactRetainRatio).floor();
-    final scaled = (measured * 0.25).floor();
-    if (scaled < retain) retain = scaled;
-    var tail = 0;
-    var cutoff = s.messages.length;
-    while (cutoff > s.compactedAtCount) {
-      final m = s.messages[cutoff - 1];
-      if (tail >= retain &&
-          s.messages.length - cutoff >= 6 &&
-          cutoff - s.compactedAtCount >= 4) {
-        break;
-      }
-      tail +=
-          estimateMessageTokens(m.content) +
-          estimateMessageTokens(m.toolDetail ?? '');
-      cutoff--;
-    }
-    // Never cut inside a turn's tool run (lossless compaction policy).
-    cutoff = CompactionPolicy.snapCutoff(
-      s.messages,
-      s.compactedAtCount,
-      cutoff,
-      minFold: 4,
-    );
-    if (cutoff - s.compactedAtCount < 4) return; // nothing worth compacting
-    _emit(
-      'think',
-      'context pressure '
-          '~${((measured / window) * 100).toStringAsFixed(0)}% of '
-          '${(window / 1000).toStringAsFixed(0)}K window — compacting…',
-    );
-    try {
-      final r = await _compactSpan(s, p, cutoff, forced: false);
-      _emit('think', 'context compacted ✓ (${r.status})');
-    } catch (e) {
-      // Compaction failure is non-fatal — continue with full history.
-      _emit('think', 'compaction skipped: $e');
-    }
-  }
-
-  /// Hard context-overflow recovery — `agent/request-error`
-  /// `CONTEXT_WINDOW_EXCEEDED` recovery: the provider rejected the request
-  /// as too long.  Force a compaction with a MINIMAL retained tail (one
-  /// quarter of the usual retain budget) and let the caller retry once.
-  Future<void> forceCompact(ChatSession s, ProviderConfig p) async {
-    if (!_compacting.add(s.id)) return; // PR26/C3: one compaction at a time
-    try {
-      await _forceCompactLocked(s, p);
-    } finally {
-      _compacting.remove(s.id);
-    }
-  }
-
-  /// PR29: manual `/compact` (the compaction command `compactNow()` parity). Unlike
-  /// [forceCompact] (the EMERGENCY overflow path with minimal retention),
-  /// this uses the STANDARD retention policy and — critically — RETURNS
-  /// an honest human status line instead of letting the command lie
-  /// "Session compacted." when nothing happened (short history, already
-  /// fully compacted, busy lock, or a summarizer failure are all reported).
-  Future<String> compactNow(
-    ChatSession s,
-    ProviderConfig p, {
-    String focus = '',
-  }) async {
-    if (!_compacting.add(s.id)) {
-      return 'Compaction is already running in this chat.';
-    }
-    try {
-      // Manual retention policy: keep the newest slice verbatim (bounded
-      // by BOTH message count and tokens), always at least 6 recent
-      // messages. An explicit user request must fold even when the
-      // session sits far below the auto-compaction retain floor.
-      var tail = 0;
-      var cutoff = s.messages.length;
-      while (cutoff > s.compactedAtCount) {
-        final m = s.messages[cutoff - 1];
-        final retained = s.messages.length - cutoff;
-        if (retained >= 6 &&
-            (tail >= _manualCompactRetainTokens ||
-                retained >= _manualCompactRetainMessages) &&
-            cutoff - s.compactedAtCount >= 4) {
-          break;
-        }
-        tail +=
-            estimateMessageTokens(m.content) +
-            estimateMessageTokens(m.toolDetail ?? '');
-        cutoff--;
-      }
-      cutoff = CompactionPolicy.snapCutoff(
-        s.messages,
-        s.compactedAtCount,
-        cutoff,
-        minFold: 4,
-      );
-      final foldable = cutoff - s.compactedAtCount;
-      if (foldable < 4) {
-        final left = s.messages.length - s.compactedAtCount;
-        return left <= 0
-            ? 'Nothing to compact — this chat is already fully compacted.'
-            : 'Nothing to compact yet — only $left message(s) after the '
-                  'last checkpoint (need ≥4 foldable + retained tail).';
-      }
-      _emit('think', 'manual /compact — folding $foldable message(s)…');
-      try {
-        final r = await _compactSpan(
-          s,
-          p,
-          cutoff,
-          forced: false,
-          focus: focus.trim().isEmpty ? null : focus.trim(),
-        );
-        return r.modelSummary
-            ? 'Session compacted — ${r.status}. View the checkpoint row '
-                  'in the transcript.'
-            : 'Session compacted from the transcript only — the model '
-                  'returned no summary, so every user message and the work '
-                  'log were kept verbatim (${r.status}).';
-      } catch (e) {
-        return 'Compaction failed: ${e.toString().split('\n').first} '
-            '— history is untouched.';
-      }
-    } finally {
-      _compacting.remove(s.id);
-    }
-  }
-
-  Future<void> _forceCompactLocked(ChatSession s, ProviderConfig p) async {
-    final window = contextWindowForSession(s);
-    final retain = (window * _compactRetainRatio / 4).floor();
-    var tail = 0;
-    var cutoff = s.messages.length;
-    while (cutoff > s.compactedAtCount) {
-      final m = s.messages[cutoff - 1];
-      if (tail >= retain && s.messages.length - cutoff >= 4) break;
-      tail += estimateMessageTokens(m.content);
-      cutoff--;
-    }
-    cutoff = CompactionPolicy.snapCutoff(
-      s.messages,
-      s.compactedAtCount,
-      cutoff,
-      minFold: 2,
-    );
-    if (cutoff - s.compactedAtCount < 2) return;
-    _emit('think', 'provider rejected (context too long) — force pruning…');
-    await _maybeCompactForceSpan(s, p, cutoff);
-  }
-
-  Future<void> _maybeCompactForceSpan(
-    ChatSession s,
-    ProviderConfig p,
-    int cutoff,
-  ) async {
-    if (cutoff - s.compactedAtCount < 2) return;
-    try {
-      await _compactSpan(s, p, cutoff, forced: true);
-      _emit('think', 'context force-pruned ✓ — retrying the request');
-    } catch (e) {
-      _emit('think', 'force compaction failed: $e');
-    }
   }
 
   /// Subagent tool policy.
@@ -6276,12 +5636,10 @@ user which one instead of assuming this one.''';
     'ralph',
   };
 
+  static const _spawnTools = {'dispatch_agent', 'workflow', 'ralph'};
+
   String? _subagentToolBlock(ChatSession child, String name) {
-    final isAgentContribution = _isAgentContributionTool(name);
-    if (SubagentToolPolicy.isSpawnTool(
-      name,
-      isAgentContribution: isAgentContribution,
-    )) {
+    if (_spawnTools.contains(name)) {
       return 'SUBAGENT: a subagent cannot start another subagent ("$name"). '
           'Do the work yourself with the tools you have, or report back to '
           'the parent agent with what you need.';
@@ -6290,11 +5648,6 @@ user which one instead of assuming this one.''';
       return 'SUBAGENT: "$name" is not available to a subagent (no user is '
           'watching this session). Decide yourself, or report back to the '
           'parent agent with what you need.';
-    }
-    final policy = SubagentToolPolicy.fromStored(child.agentAllowedTools);
-    if (!policy.allows(name, isAgentContribution: isAgentContribution)) {
-      return 'SUBAGENT: "$name" is outside the tool set your definition '
-          'grants (${policy.describe()}). Use only those tools.';
     }
     return null;
   }
@@ -6498,42 +5851,6 @@ user which one instead of assuming this one.''';
       AppState.I.persistSessions();
     }
 
-    // Task 8 (spec §8.1): user_prompt_submit — ONCE per user prompt, at
-    // run entry (canonical replacement for the per-turn on_turn_start).
-    // Claude Code parity (audit 2026-09-25): a UserPromptSubmit hook's
-    // `hookSpecificOutput.additionalContext` (or plain stdout) is INJECTED
-    // into the prompt, not discarded. We await it so the context is ready
-    // before the first LLM call, and extract it the same way session_start
-    // context is extracted. (Blocking via exit 2 is still observe-only here.)
-    _userPromptContext.remove(s.id);
-    if (HookService.I.hasHookListeners('user_prompt_submit', sessionId: s.id)) {
-      try {
-        final res = await HookService.I.fireDetailed(
-          'user_prompt_submit',
-          s.id,
-          payload: {
-            'prompt': cleanTruncate(originalPrompt, 400),
-            'transcript_path': _transcriptPathFor(s.id),
-          },
-          model: ctx.route.model,
-        );
-        if (_runChainStale) return;
-        final hookContext = HookService.extractHookContext(res.output);
-        if (hookContext.isNotEmpty) _userPromptContext[s.id] = hookContext;
-        // CLAUDE CODE PARITY (audit 2026-09-25): a UserPromptSubmit hook that
-        // exits 2 BLOCKS the prompt — the run must not reach the model. The
-        // hook's stderr is the reason, so surface it verbatim instead of a
-        // generic failure.
-        if (res.blockedReason != null) {
-          lastError = 'Prompt blocked by a plugin hook: ${res.blockedReason}';
-          _emit('err', lastError!);
-          return;
-        }
-      } catch (e) {
-        Diag.swallow('agent_service.user_prompt_submit', e);
-      }
-    }
-
     // Stop during initialization/hooks invalidates this admitted generation.
     final childOwner = Zone.current[#subagentRunOwner];
     if (childOwner is SubagentInfo && childOwner.interrupted) return;
@@ -6728,9 +6045,6 @@ can drive there yourself with the device_* tools):
     }
     _emit('think', 'planning with ${s.model} · ${mode.label} mode');
 
-    // Ensure skills are scanned for this session's workspace BEFORE the
-    // system prompt is assembled.
-    await _refreshSkillRoots(s.id);
     if (_runChainStale || !identical(AppState.I.sessionById(s.id), s)) return;
 
     // Image Studio is a built-in capability (the local plugin catalog that
@@ -6880,14 +6194,13 @@ YOU ARE A SUBAGENT.
 Your parent agent dispatched you with the task below; you do NOT see the
 parent chat's history, so work only from what you were given. You are
 unattended: ask_user_question, exit_plan_mode and request_permission are
-blocked${s.agentAllowedTools.isEmpty ? '' : ', and you may only use these tools: ${SubagentToolPolicy.fromStored(s.agentAllowedTools).describe()}'}. You cannot start other subagents.
+blocked. You cannot start other subagents.
 Decide for yourself, finish the task, and end with ONE final message that is
 your report to the parent: what you did, what you found, and any file paths
 or commands that matter. Keep it tight — the parent reads only that message.
 For mid-task updates that should not wait (an early finding, a blocker), call
 report(content) — it reaches the parent as its next-step context.''' : ''}
 ${_presetPersona(s).isEmpty ? '' : '\nAGENT PRESET (${s.presetId}): ${_presetPersona(s)}\n'}
-${SkillService.I.catalogBlockForSession(s.id).isEmpty ? '' : '\n${SkillService.I.catalogBlockForSession(s.id)}'}
 ${AppState.I.replyLanguageHint().isEmpty ? '' : '${AppState.I.replyLanguageHint()}\n'}
 ${await _agentsMdBlock()}
 ''';
@@ -6900,19 +6213,7 @@ ${await _agentsMdBlock()}
     // (this builder is async) rather than guessed, and a resolver failure falls
     // back to the generic wording — a planning agent must never be blocked by a
     // path lookup.
-    String planBriefing = '';
-    if (planMode) {
-      String? root;
-      try {
-        root = await planModeRoot();
-      } catch (_) {
-        root = null;
-      }
-      planBriefing = PlanModePolicy.promptSectionFor(
-        root: root,
-        modeName: mode.name,
-      );
-    }
+    const String planBriefing = '';
     Future<String> buildSys() async =>
         '${sysTemplate.replaceAll(planSectionToken, planBriefing)}\n\n${await workspaceContext()}';
 
@@ -6927,7 +6228,6 @@ ${await _agentsMdBlock()}
     // Pre-step pressure check: measure the envelope against 80% of THIS
     // model's context window (1M default) — works for every provider and
     // every model incl. custom BYOK routes, 256K and 1M windows alike.
-    await _maybeCompact(s, p);
 
     // Capture the assembled system prompt for this turn so the user can
     // inspect exactly what the model was told (context visibility parity).
@@ -7052,60 +6352,6 @@ ${await _agentsMdBlock()}
             'msgs': msgs.length,
           }),
         );
-        // PR24 plugin hooks. on_pre_request: stdout (≤2 KB) joins THIS request
-        // as a system note — a plugin can inject live context (the plugin hook runner
-        // agent/pre-step message-injection parity, shell flavor).
-        // Canonical user_prompt_submit fires ONCE per user prompt (at runTask
-        // entry); the legacy map-hook firing died with the plugin catalog.
-        if (HookService.I.hasHookListeners('pre_request', sessionId: s.id)) {
-          final hookRes = await HookService.I.fireDetailed(
-            'pre_request',
-            s.id,
-            payload: {
-              'turn': turn,
-              'transcript_path': _transcriptPathFor(s.id),
-            },
-            model: s.model,
-          );
-          if (_runChainStale) break;
-          // Surface hook systemMessages as system notes on this request.
-          for (final sm in hookRes.systemMessages) {
-            msgs.insert(0, {'role': 'system', 'content': '[plugin hook]\n$sm'});
-          }
-          if (hookRes.output.isNotEmpty) {
-            msgs.insert(0, {
-              'role': 'system',
-              'content':
-                  '[plugin hook context — on_pre_request]\n${hookRes.output}',
-            });
-          }
-          // A prompt-hook "block" on an observe event cannot halt the run —
-          // run policy: surface it as a visible note and continue.
-          if (hookRes.promptBlockReason != null) {
-            _emit(
-              'think',
-              'a plugin hook flagged this request: '
-                  '${hookRes.promptBlockReason} — continuing (observe-only)',
-            );
-          }
-        }
-        // SessionStart context (real [CC] plugins inject a skill here, e.g.
-        // `obra/superpowers`). The hook ran once at session start; its
-        // extracted context is standing for the session and rides at the
-        // front of every request, before per-request hook notes.
-        // UserPromptSubmit hook context (audit 2026-09-25): stands for this
-        // prompt's run, injected ahead of the request like session context.
-        final promptCtx = _userPromptContext[s.id];
-        if (promptCtx != null && promptCtx.isNotEmpty) {
-          msgs.insert(0, {
-            'role': 'system',
-            'content': '[user_prompt_submit hook]\n$promptCtx',
-          });
-        }
-        final sessionCtx = HookService.I.sessionContextFor(s.id);
-        if (sessionCtx.isNotEmpty) {
-          msgs.insert(0, {'role': 'system', 'content': sessionCtx});
-        }
         // Queued messages join EVERY model request of this run, including
         // the first (the rest of the queue after a continuation promoted its
         // head) and any continue path (nudges, retries, compaction).
@@ -7118,23 +6364,6 @@ ${await _agentsMdBlock()}
         final requestId = _logicalRequestId();
         var msg = await _callLlm(p, msgs, s, requestId: requestId);
         if (_runChainStale) break;
-        // Task 8 (spec §8.1): post_request — observe-only hook after every
-        // LLM response (fire-and-forget; output is never injected).
-        if (msg != null &&
-            HookService.I.hasHookListeners('post_request', sessionId: s.id)) {
-          unawaited(
-            HookService.I.fire(
-              'post_request',
-              s.id,
-              payload: {
-                'turn': turn,
-                'reply': cleanTruncate((msg['content'] as String?) ?? '', 400),
-                'transcript_path': _transcriptPathFor(s.id),
-              },
-              model: s.model,
-            ),
-          );
-        }
         if (msg == null && _looksLikeContextOverflow(lastError)) {
           // context-overflow recovery (C1 fixed): the provider rejected
           // the request as too long → force-prune the oldest span, then
@@ -7143,7 +6372,6 @@ ${await _agentsMdBlock()}
           // old message, growing the request instead of shrinking it.
           if (!overflowRecovered) {
             overflowRecovered = true;
-            await forceCompact(s, p);
             if (_runChainStale) break;
             // PR29: rebuild from the compacted history using the SAME
             // assembly as the initial request (the checkpoint framer checkpoint framing) —
@@ -7217,7 +6445,7 @@ ${await _agentsMdBlock()}
           // Cache accounting: OpenAI-compatible providers report
           // prompt_tokens_details.{cached_tokens} (DeepSeek-style
           // cache_read/cache_write also parsed).
-          final cacheUse = PromptCache.parseUsage(u);
+          final cacheUse = _parseCacheUsage(u);
           _runResolved.cacheReadTokens += cacheUse.read;
           _runResolved.cacheWriteTokens += cacheUse.write;
           // Context breakdown heuristic (system/tools/messages).
@@ -7252,7 +6480,7 @@ ${await _agentsMdBlock()}
             ct,
             cacheReadTokens: cacheUse.read,
             cacheWriteTokens: cacheUse.write,
-            cacheTtl1h: AppState.I.promptCacheTtl1h,
+            cacheTtl1h: false,
           );
           s.recordAnalytics(
             inputTokens: pt,
@@ -7312,7 +6540,7 @@ ${await _agentsMdBlock()}
           // Exhausted: never leave a partial bubble next to the error notice.
           _discardLiveAttempt(s);
           _emit('err', err);
-          _appendAssistant(ModelFailure.fromError(err).transcript, session: s);
+          _appendAssistant(_modelFailureTranscript(err), session: s);
           lastRunElapsedMs = DateTime.now()
               .difference(_runStart ?? DateTime.now())
               .inMilliseconds;
@@ -7379,50 +6607,6 @@ ${await _agentsMdBlock()}
             continue;
           }
           _finalizeLive();
-          // Blocking Stop gate (plugin/MCP parity): Stop hooks may veto
-          // the stop, in which case the model loop CONTINUES instead of
-          // settling. A user-initiated stop always wins — fireStop
-          // short-circuits to allow without running any hook when the
-          // run's cancel flag is set.
-          // Claude Code: `Stop` fires only for the MAIN agent. A subagent's
-          // natural stop is gated by `SubagentStop` in _runSubagentSession.
-          final stopResult = s.isSubagent
-              ? const HookStopResult.allow()
-              : await HookService.I.fireStop(
-                  s.id,
-                  payload: {
-                    'turn': turn,
-                    'steps': ctx.run.steps,
-                    'stop_hook_active': ctx.run.stopHookActive,
-                    'last_assistant_message': msg['content'] ?? '',
-                    'transcript_path': _transcriptPathFor(s.id),
-                  },
-                  model: s.model,
-                  userStopRequested: ctx.run.cancelRequested,
-                );
-          if (!s.isSubagent) ctx.run.stopHookActive = !stopResult.stopAllowed;
-          if (!stopResult.stopAllowed) {
-            // Vetoed — re-enter the model loop. The final answer is already
-            // in the transcript; keep it in the request too so the next
-            // turn sees the full conversation instead of a gap.
-            msgs.add({'role': 'assistant', 'content': msg['content'] ?? ''});
-            final vetoBy = stopResult.vetoedByPlugin;
-            _emit(
-              'think',
-              'stop vetoed by ${vetoBy ?? 'plugin'}'
-                  '${stopResult.vetoReason != null ? ': ${stopResult.vetoReason}' : ''}'
-                  ' — continuing the run',
-            );
-            msgs.add({
-              'role': 'user',
-              'content':
-                  '[system] A plugin hook vetoed the end of this run'
-                  '${stopResult.vetoReason != null ? ' (reason: ${stopResult.vetoReason})' : ''}. '
-                  'Continue working on the task; do not repeat your last '
-                  'message verbatim.',
-            });
-            continue;
-          }
           _emit('done', 'completed');
           break;
         }
@@ -7461,7 +6645,7 @@ ${await _agentsMdBlock()}
           final toolMsg = _silentTools.contains(name)
               ? null
               : _toolStart(name, _toolArgSummary(name, args));
-          toolMsg?.toolInput = CompactionLedger.toolInputRecord(name, args);
+          toolMsg?.toolInput = _toolInputRecord(args);
           String result;
           try {
             if (argError != null) {
@@ -7582,23 +6766,6 @@ ${await _agentsMdBlock()}
         // compact history and nudge the model to keep going. Task completion
         // is still the only real bound.
         if (budgetBoundary) {
-          final preCompact = s.compactedAtCount;
-          await _maybeCompact(s, p);
-          // PR29: if the boundary compaction actually folded a span, the
-          // IN-FLIGHT request must be REBUILT from the compacted history —
-          // appending the nudge to the old array would keep sending every
-          // pre-checkpoint row (auto-compaction that never shrinks the
-          // request was the reported "compaction not working" bug).
-          if (s.compactedAtCount > preCompact) {
-            msgs
-              ..clear()
-              ..addAll(requestMessages());
-            _emit(
-              'think',
-              'context compacted — request rebuilt '
-                  '(${msgs.length} rows)',
-            );
-          }
           msgs.add({
             'role': 'user',
             'content':
@@ -7667,10 +6834,8 @@ ${await _agentsMdBlock()}
             'llmMs': pinned.llmMs,
           }),
         );
-        // PR24: on_turn_end — the blocking Stop gate now lives at the natural
-        // stop point inside the turn loop (a veto re-enters the model loop),
-        // so the run-end finally no longer fires 'stop'. Call exactly one of
-        // fireStop/fire per HookService contract.
+        // The local Stop-hook gate died with the plugin runtime (P8 Task 18);
+        // the turn loop settles directly.
         // LLM session title (the title generator parity): one cheap background call after
         // the first real exchange — fire-and-forget, heuristic stays on fail.
         unawaited(maybeGenerateSessionTitle(ctx.session));
@@ -7786,48 +6951,6 @@ ${await _agentsMdBlock()}
     ChatSession session,
   )?
   promptLlmForTest;
-
-  /// Quiet model completion for prompt-type plugin hooks (wired as
-  /// [HookService.promptHookEvaluator] once at init). The hook's rule text
-  /// plus event context goes in as a single user message; the returned
-  /// string is parsed by [HookService.parsePromptHookDecision]. Always
-  /// invisible: `streamToTranscript: false`, no tools, no transcript
-  /// writes. Null (or a throw) fails open — the hook is skipped.
-  ///
-  /// Runs outside any run zone: [_callLlm] → `_callLlmOnce` touches no
-  /// run-zone state, so a hook evaluated mid-run cannot disturb the live
-  /// generation. HookService's own recursion guard prevents a hook from
-  /// re-firing its own event while evaluating.
-  Future<String?> _evaluatePromptHookQuietly(
-    String prompt,
-    Map<String, dynamic> context,
-  ) async {
-    try {
-      final sessionId = context['session'] as String?;
-      final session = sessionId != null
-          ? AppState.I.sessionById(sessionId)
-          : null;
-      final s = session ?? AppState.I.activeSession;
-      if (s == null) return null;
-      final p = AppState.I.providerForSession(s);
-      if (p == null) return null;
-      final r = await _callLlm(
-        p,
-        [
-          {'role': 'user', 'content': prompt},
-        ],
-        s,
-        includeTools: false,
-        // Invisible helper call — must never stream into the transcript.
-        streamToTranscript: false,
-        purpose: 'hook',
-      ).timeout(const Duration(seconds: 120));
-      final text = (r?['content'] as String?)?.trim();
-      return (text == null || text.isEmpty) ? null : text;
-    } catch (_) {
-      return null; // fail open
-    }
-  }
 
   /// Warmed per-session transcript paths for hook payloads.
   ///
@@ -8249,115 +7372,17 @@ ${await _agentsMdBlock()}
   }) async {
     requestId ??= _logicalRequestId();
     if (purpose == 'agent' && session.isSubagent) purpose = 'children';
-    final attempt = llmOnceForTest == null
-        ? await _attemptRecorder.begin(
-            requestId: requestId,
-            provider: p.id,
-            requestedModel: route?.model ?? p.selectedModel ?? 'unknown',
-            purpose: purpose,
-            sessionId: session.id,
-            runId: _runResolved.runKey,
-          )
-        : null;
-    if (llmOnceForTest == null && attempt == null) {
-      // A missing prepared row must remain visible without changing provider
-      // behavior; the recorder exposes the bounded storage result for callers.
-      _emit('think', 'usage accounting incomplete (request not captured)');
-    }
-    try {
-      final result = await _callLlmOnceTransport(
-        p,
-        msgs,
-        session,
-        includeTools: includeTools,
-        streamToTranscript: streamToTranscript,
-        dropReasoningEffort: dropReasoningEffort,
-        route: route,
-        requestId: requestId,
-        purpose: purpose,
-        attempt: attempt,
-      );
-      final transportOutcome = result?['_attemptOutcome'] as String?;
-      result?.remove('_attemptOutcome');
-      if (attempt != null) {
-        final served = transportOutcome != 'failed' && result != null;
-        await _completeUsageAttempt(
-          attempt,
-          outcome: transportOutcome == 'failed'
-              ? UsageOutcome.failed
-              : result != null
-              ? UsageOutcome.succeeded
-              : (_cancelRequested || _runChainStale
-                    ? UsageOutcome.cancelled
-                    : UsageOutcome.failed),
-          reportedModel: result?['reportedModel'] as String?,
-          usage: (result?['usage'] as Map?)?.cast<String, dynamic>(),
-          // Gateways that drop `stream_options` send no usage block; the
-          // journal then keeps a labelled local estimate (same chars/4
-          // heuristic as the run meter) instead of "unavailable".
-          estimatedInput: served ? _estimateRequestTokens(msgs) : null,
-          estimatedOutput: served ? _estimateReplyTokens(result) : null,
-        );
-      }
-      return result;
-    } catch (_) {
-      if (attempt != null) {
-        await _completeUsageAttempt(
-          attempt,
-          outcome: _cancelRequested || _runChainStale
-              ? UsageOutcome.cancelled
-              : UsageOutcome.failed,
-        );
-      }
-      rethrow;
-    }
-  }
-
-  static int _estimateRequestTokens(List<Map<String, dynamic>> msgs) =>
-      msgs.fold<int>(0, (a, m) {
-        final c = m['content'];
-        return a + estimateMessageTokens(c is String ? c : '');
-      });
-
-  static int _estimateReplyTokens(Map<String, dynamic> msg) =>
-      estimateMessageTokens((msg['content'] as String?) ?? '') +
-      estimateMessageTokens((msg['reasoning_content'] as String?) ?? '');
-
-  Future<void> _completeUsageAttempt(
-    UsageAttemptHandle attempt, {
-    required UsageOutcome outcome,
-    String? reportedModel,
-    Map<String, dynamic>? usage,
-    int? estimatedInput,
-    int? estimatedOutput,
-  }) async {
-    unawaited(
-      attempt
-          .complete(
-            outcome: outcome,
-            reportedModel: reportedModel,
-            usage: usage,
-            estimatedInput: estimatedInput,
-            estimatedOutput: estimatedOutput,
-          )
-          .then<void>((_) {
-            if (!attempt.captureResult.captured) {
-              _emit(
-                'think',
-                'usage accounting incomplete (storage unavailable)',
-              );
-            }
-          }),
+    return _callLlmOnceTransport(
+      p,
+      msgs,
+      session,
+      includeTools: includeTools,
+      streamToTranscript: streamToTranscript,
+      dropReasoningEffort: dropReasoningEffort,
+      route: route,
+      requestId: requestId,
+      purpose: purpose,
     );
-  }
-
-  void _captureUsageUpdate(
-    UsageAttemptHandle? attempt, {
-    Map<String, dynamic>? usage,
-    String? reportedModel,
-  }) {
-    if (attempt == null) return;
-    unawaited(attempt.updateUsage(usage: usage, reportedModel: reportedModel));
   }
 
   String _logicalRequestId() =>
@@ -8373,7 +7398,6 @@ ${await _agentsMdBlock()}
     _RequestRoute? route,
     required String requestId,
     required String purpose,
-    UsageAttemptHandle? attempt,
   }) async {
     final owner = _TransportOwner(
       _runResolved,
@@ -8400,7 +7424,6 @@ ${await _agentsMdBlock()}
         includeTools: includeTools,
         streamToTranscript: streamToTranscript,
         route: route,
-        attempt: attempt,
       );
     }
     HttpClient? client;
@@ -8451,17 +7474,7 @@ ${await _agentsMdBlock()}
         // never send token counts, leaving the Usage screen at zero.
         'stream_options': {'include_usage': true},
       };
-      var toolList = includeTools ? _tools : const <Map<String, dynamic>>[];
-      if (includeTools) {
-        final shaped = PromptCache.applyOpenAi(
-          caps: _promptCacheCaps(p, modelId),
-          messages: msgs,
-          tools: toolList,
-          ttl1h: AppState.I.promptCacheTtl1h,
-        );
-        toolList = shaped.tools;
-        body['messages'] = shaped.messages;
-      }
+      final toolList = includeTools ? _tools : const <Map<String, dynamic>>[];
       if (toolList.isNotEmpty) body['tools'] = toolList;
       if (effort != null && !dropReasoningEffort) {
         body['reasoning_effort'] = effort;
@@ -8482,7 +7495,6 @@ ${await _agentsMdBlock()}
       transportWatch.start();
       ttftWatch.start();
       req.add(bodyBytes);
-      attempt?.markTransmitted();
 
       // Total stream deadline — user-configurable in Settings (default 2 min).
       // ── NEVER-STOP semantics: the deadline is per-CHUNK IDLE, not total ──
@@ -8543,9 +7555,7 @@ ${await _agentsMdBlock()}
             requestId: requestId,
             purpose: purpose,
           );
-          return fallback == null
-              ? null
-              : {...fallback, '_attemptOutcome': 'failed'};
+          return fallback;
         }
         // ── Auto-fallback for providers that reject tool schemas ──
         // Many compatible endpoints (older OpenRouter models, some
@@ -8589,16 +7599,11 @@ ${await _agentsMdBlock()}
             purpose: purpose,
             requestId: requestId,
           );
-          return fallback == null
-              ? null
-              : {...fallback, '_attemptOutcome': 'failed'};
+          return fallback;
         }
-        lastError = ModelFailure.httpError(
-          res.statusCode,
-          p.name,
-          modelId,
-          txt,
-        );
+        lastError =
+            'HTTP ${res.statusCode} ${p.name} · $modelId\n'
+            '${txt.length > 180 ? txt.substring(0, 180) : txt}';
         _emit(
           'err',
           'LLM ${res.statusCode}: ${txt.substring(0, txt.length.clamp(0, 300))}',
@@ -8656,12 +7661,7 @@ ${await _agentsMdBlock()}
         final u = j['usage'];
         if (u is Map<String, dynamic>) {
           usage = u;
-          _captureUsageUpdate(
-            attempt,
-            usage: usage,
-            reportedModel: reportedModel,
-          );
-        }
+          }
         final choices = j['choices'] as List?;
         if (choices == null || choices.isEmpty) continue;
         final choice = choices[0] as Map<String, dynamic>;
@@ -8744,7 +7744,6 @@ ${await _agentsMdBlock()}
       return null;
     } finally {
       if (transportWatch.isRunning) transportWatch.stop();
-      attempt?.setTransportElapsed(transportWatch.elapsedMilliseconds);
       owner.release();
       client?.close(force: true);
     }
@@ -9040,7 +8039,7 @@ ${await _agentsMdBlock()}
   ) {
     {
       final role = m['role'];
-      if (role == 'system' && !(volatileAsUser && PromptCache.isVolatile(m))) {
+      if (role == 'system' && !(volatileAsUser && _isVolatileRow(m))) {
         final c = m['content'];
         if (c is String && c.trim().isNotEmpty) {
           if (system.isNotEmpty) system.write('\n\n');
@@ -9118,17 +8117,6 @@ ${await _agentsMdBlock()}
     List<Map<String, dynamic>> tools,
   ) => _anthropicTools(tools);
 
-  /// Prompt-cache capability for [p] serving [modelId] (see [PromptCache]).
-  PromptCacheCaps _promptCacheCaps(ProviderConfig p, String modelId) =>
-      PromptCache.resolve(
-        globalEnabled: AppState.I.promptCachingEnabled,
-        override: p.promptCache,
-        format: p.effectiveApiFormat,
-        model: modelId,
-        baseUrl: p.baseUrl,
-        isOvidCloud: p.id == AppState.ovidCloudProviderId,
-      );
-
   List<Map<String, dynamic>> _anthropicTools(List<Map<String, dynamic>> tools) {
     final out = <Map<String, dynamic>>[];
     for (final t in tools) {
@@ -9151,7 +8139,6 @@ ${await _agentsMdBlock()}
     // See [_callLlm]: false keeps helper calls out of the transcript.
     bool streamToTranscript = true,
     required _RequestRoute route,
-    UsageAttemptHandle? attempt,
   }) async {
     final owner = _TransportOwner(
       _runResolved,
@@ -9189,13 +8176,10 @@ ${await _agentsMdBlock()}
           : raw;
       final effort = effMatch?.group(1)?.toLowerCase();
 
-      final caps = includeTools
-          ? _promptCacheCaps(p, modelId)
-          : const PromptCacheCaps(PromptCacheMode.none);
       final sourceToOut = <int>[];
       final converted = _anthropicRequestMessages(
         msgs,
-        volatileAsUser: caps.marks,
+        volatileAsUser: false,
         sourceToOut: sourceToOut,
       );
       final maxOut = AppState.I.maxOutputTokens;
@@ -9208,25 +8192,9 @@ ${await _agentsMdBlock()}
         if (converted.system.isNotEmpty) 'system': converted.system,
         'messages': converted.messages,
       };
-      var toolList = includeTools
-          ? _anthropicTools(
-              caps.stable ? PromptCache.canonicalTools(_tools) : _tools,
-            )
+      final toolList = includeTools
+          ? _anthropicTools(_tools)
           : const <Map<String, dynamic>>[];
-      if (caps.marks) {
-        final shaped = PromptCache.applyAnthropic(
-          caps: caps,
-          system: converted.system,
-          source: msgs,
-          converted: converted.messages,
-          sourceToOut: sourceToOut,
-          tools: toolList,
-          ttl1h: AppState.I.promptCacheTtl1h,
-        );
-        toolList = shaped.tools;
-        body['messages'] = shaped.messages;
-        if (shaped.system != null) body['system'] = shaped.system;
-      }
       if (toolList.isNotEmpty) body['tools'] = toolList;
       if (effort == 'high') {
         body['thinking'] = {'type': 'enabled', 'budget_tokens': 4096};
@@ -9245,7 +8213,6 @@ ${await _agentsMdBlock()}
       transportWatch.start();
       ttftWatch.start();
       req.add(bodyBytes);
-      attempt?.markTransmitted();
 
       final idleBudget = Duration(seconds: AppState.I.responseTimeoutSec);
       final res = await req.close().timeout(
@@ -9268,12 +8235,9 @@ ${await _agentsMdBlock()}
         final txt = utf8.decode(data, allowMalformed: true);
         if (!owner.current) return null;
         client.close(force: true);
-        lastError = ModelFailure.httpError(
-          res.statusCode,
-          p.name,
-          modelId,
-          txt,
-        );
+        lastError =
+            'HTTP ${res.statusCode} ${p.name} · $modelId\n'
+            '${txt.length > 180 ? txt.substring(0, 180) : txt}';
         _emit(
           'err',
           'LLM ${res.statusCode}: ${txt.substring(0, txt.length.clamp(0, 300))}',
@@ -9325,12 +8289,7 @@ ${await _agentsMdBlock()}
               }
               if (m['usage'] is Map) {
                 usage = Map<String, dynamic>.from(m['usage'] as Map);
-                _captureUsageUpdate(
-                  attempt,
-                  usage: _normalizeAnthropicUsage(usage),
-                  reportedModel: reportedModel,
-                );
-              }
+                }
             }
           case 'content_block_start':
             final idx = (j['index'] as num?)?.toInt() ?? 0;
@@ -9387,12 +8346,7 @@ ${await _agentsMdBlock()}
                 merged[e.key.toString()] = e.value;
               }
               usage = merged;
-              _captureUsageUpdate(
-                attempt,
-                usage: _normalizeAnthropicUsage(usage),
-                reportedModel: reportedModel,
-              );
-            }
+              }
           case 'error':
             final err = j['error'];
             lastError = err is Map
@@ -9433,7 +8387,6 @@ ${await _agentsMdBlock()}
       return null;
     } finally {
       if (transportWatch.isRunning) transportWatch.stop();
-      attempt?.setTransportElapsed(transportWatch.elapsedMilliseconds);
       owner.release();
       client?.close(force: true);
     }
@@ -9463,48 +8416,16 @@ ${await _agentsMdBlock()}
 
   // ── TOOL DISPATCH (with mode-based approvals) ─────────────────────────
   Future<String> _dispatch(String name, Map<String, dynamic> args) {
-    // The queue only exists to keep HookService's per-session re-entrancy
-    // guard from fail-opening a concurrent call's blocking hook. Without a
-    // blocking listener there is nothing to protect, and queueing would make
-    // dispatch asynchronous (children no longer reserved synchronously) and
-    // serialize every tool call behind long-running ones. A dispatch nested
-    // inside another dispatch (a foreground child's tool call) must not wait
-    // for its own ancestor, or it deadlocks.
-    final nested = _permissionDispatchCtx != null;
-    if (nested || !_dispatchNeedsPermissionQueue()) {
-      return runZoned(
-        () => _dispatchInContext(name, args),
-        zoneValues: {
-          _permissionDispatchCtxKey: _PermissionDispatchContext(
-            AppState.I.sessionAccountToken,
-          ),
-        },
-      );
-    }
-    final previous = _permissionDispatchTail;
-    final current = () async {
-      await previous;
-      // Capture ownership after waiting: a queued call must never inherit an
-      // account token that was current when it was submitted.
-      final permissionCtx = _PermissionDispatchContext(
-        AppState.I.sessionAccountToken,
-      );
-      return runZoned(
-        () => _dispatchInContext(name, args),
-        zoneValues: {_permissionDispatchCtxKey: permissionCtx},
-      );
-    }();
-    _permissionDispatchTail = current.then<void>((_) {}, onError: (_) {});
-    return current;
-  }
-
-  /// Whether a dispatch for the current run session could fire a blocking
-  /// hook (pre_tool / permission_request) that the re-entrancy guard in
-  /// HookService would otherwise share with a concurrent dispatch.
-  bool _dispatchNeedsPermissionQueue() {
-    final sid = _runSession?.id ?? '';
-    return HookService.I.hasHookListeners('pre_tool', sessionId: sid) ||
-        HookService.I.hasHookListeners('permission_request', sessionId: sid);
+    // Hook listeners died with the plugin runtime (P8 Task 18); dispatch is
+    // always synchronous and each call owns its permission context.
+    return runZoned(
+      () => _dispatchInContext(name, args),
+      zoneValues: {
+        _permissionDispatchCtxKey: _PermissionDispatchContext(
+          AppState.I.sessionAccountToken,
+        ),
+      },
+    );
   }
 
   Future<String> _dispatchInContext(
@@ -9531,87 +8452,6 @@ ${await _agentsMdBlock()}
           'tool': name,
         }),
       );
-    }
-    // PR39: on_pre_tool — a GATING hook (Claude Code PreToolUse parity).
-    // Awaited (not fire-and-forget like every other hook event) because a
-    // plugin may DENY the call outright; exit code 2 short-circuits the
-    // whole dispatch before _dispatchInner ever runs, same enforcement
-    // point a real security-relevant hook needs.
-    if (HookService.I.hasHookListeners(
-      'pre_tool',
-      sessionId: ledgerSid ?? '',
-    )) {
-      final gate = await HookService.I.fireGate(
-        'pre_tool',
-        ledgerSid ?? '',
-        payload: {
-          'tool': name,
-          'args': args,
-          'transcript_path': _transcriptPathFor(ledgerSid ?? ''),
-        },
-        model: _runSession?.model,
-      );
-      if (_runChainStale || !AppState.I.sessionAccountReady) {
-        return 'Cancelled: session account changed.';
-      }
-      // A hook may rewrite the tool args without blocking — apply the
-      // rewrite BEFORE dispatch (pre_tool only).
-      if (gate.updatedInput != null) {
-        args = <String, dynamic>{...args, ...gate.updatedInput!};
-      }
-      // CLAUDE CODE PARITY (audit 2026-09-25): `permissionDecision:"allow"`
-      // means the plugin has already decided, so the ordinary user prompt for
-      // THIS call is skipped. Deliberately narrow — the destructive-command
-      // confirmation and plan mode's "asks nothing" rule are checked first in
-      // _maybeApprove, so a hook allow cannot widen either.
-      if (gate.bypassPermission) {
-        _permissionDispatchCtx?.hookAllowBypass = true;
-      }
-      if (gate.decision == HookDecision.deny) {
-        // Reuses the existing "DENIED" prefix contract (same UI 'stopped'
-        // state + ledger 'ok: false' as a user-declined approval) — a
-        // hook deny and a user deny are the same shape of outcome to the
-        // model and to the chat UI.
-        final msg =
-            'DENIED by hook (${gate.deniedByPlugin}): '
-            '${gate.reason}';
-        if (ledgerSid != null) {
-          unawaited(
-            SessionLedger.I.append(ledgerSid, 'tool_end', {
-              'tool': name,
-              'ms': sw.elapsedMilliseconds,
-              'ok': false,
-              'deniedBy': 'hook',
-            }),
-          );
-        }
-        return msg;
-      }
-      if (gate.decision == HookDecision.ask) {
-        // The hook defers to the user — route through the normal
-        // permission prompt (the WS5 approval UI). A "no" becomes the
-        // standard user-denial shape.
-        final ok = await _maybeApprove(
-          name,
-          'Hook "${gate.decidedByPlugin ?? 'plugin'}" asked for a decision',
-          gate.reason ??
-              'A plugin hook asked you to decide whether this tool call '
-                  'may run.',
-        );
-        if (!ok) {
-          if (ledgerSid != null) {
-            unawaited(
-              SessionLedger.I.append(ledgerSid, 'tool_end', {
-                'tool': name,
-                'ms': sw.elapsedMilliseconds,
-                'ok': false,
-                'deniedBy': 'user',
-              }),
-            );
-          }
-          return 'DENIED by user';
-        }
-      }
     }
     try {
       late final String res;
@@ -9643,12 +8483,6 @@ ${await _agentsMdBlock()}
       if (_runChainStale || !AppState.I.sessionAccountReady) {
         return 'Cancelled: session account changed.';
       }
-      _recordPluginToolUsage(
-        name,
-        sw.elapsed,
-        ok: !res.startsWith('DENIED') && !_looksLikeToolError(res),
-        error: _looksLikeToolError(res) ? cleanTruncate(res, 200) : null,
-      );
       if (ledgerSid != null) {
         unawaited(
           SessionLedger.I.append(ledgerSid, 'tool_end', {
@@ -9658,37 +8492,8 @@ ${await _agentsMdBlock()}
           }),
         );
       }
-      // CLAUDE CODE PostToolUse (master plan Phase 2.1): AWAITED, with the
-      // full `tool_input` and the untruncated `tool_response` on stdin. The
-      // tool already ran, so a hook can only shape what the model sees:
-      // `decision:"block"` + reason and exit-2 stderr are appended to the
-      // result, `additionalContext` is added, `updatedToolOutput` replaces it.
-      if (HookService.I.hasHookListeners(
-        'post_tool',
-        sessionId: ledgerSid ?? '',
-      )) {
-        final failed = res.startsWith('DENIED') || _looksLikeToolError(res);
-        final post = await HookService.I.firePostTool(
-          ledgerSid ?? '',
-          payload: {
-            'tool': name,
-            'args': args,
-            'tool_response': res,
-            'duration_ms': sw.elapsedMilliseconds,
-            'ms': sw.elapsedMilliseconds,
-            'ok': !failed,
-            'is_error': failed,
-            // Legacy bounded preview for env-payload consumers.
-            'result': cleanTruncate(res, 400),
-            'transcript_path': _transcriptPathFor(ledgerSid ?? ''),
-          },
-          model: _runSession?.model,
-        );
-        return post.apply(res);
-      }
       return res;
     } catch (e) {
-      _recordPluginToolUsage(name, sw.elapsed, ok: false, error: '$e');
       if (ledgerSid != null) {
         unawaited(
           SessionLedger.I.append(ledgerSid, 'tool_end', {
@@ -9697,28 +8502,6 @@ ${await _agentsMdBlock()}
             'ok': false,
             'error': '$e',
           }),
-        );
-      }
-      if (HookService.I.hasHookListeners(
-        'post_tool',
-        sessionId: ledgerSid ?? '',
-      )) {
-        // PostToolUseFailure — awaited like PostToolUse; observe-only here
-        // because the exception is rethrown to the caller.
-        await HookService.I.firePostTool(
-          ledgerSid ?? '',
-          payload: {
-            'tool': name,
-            'args': args,
-            'ms': sw.elapsedMilliseconds,
-            'duration_ms': sw.elapsedMilliseconds,
-            'ok': false,
-            'is_error': true,
-            // Exceptions may embed credentials or operational arguments.
-            'error': 'Tool execution failed',
-            'transcript_path': _transcriptPathFor(ledgerSid ?? ''),
-          },
-          model: _runSession?.model,
         );
       }
       rethrow;
@@ -9756,13 +8539,6 @@ ${await _agentsMdBlock()}
     if (selfSourceTargets.isNotEmpty) {
       final selfSourceBlock = await _selfSourceBlockAsync(selfSourceTargets);
       if (selfSourceBlock != null) return selfSourceBlock;
-    }
-    if (planMode && !_isPlanModeAllowedTool(name)) {
-      return 'PLAN MODE ACTIVE: "$name" is a mutating tool. Plan mode is the '
-          'research phase — read, search and inspect with the allowlisted '
-          'tools (file_read, fs_glob, fs_grep, run_shell for read-only '
-          'commands, git_log, …), write the plan out as a message, then call '
-          'exit_plan_mode. Execution tools unlock once the user approves.';
     }
     // ── Plan mode: path tools stay inside the working directory ──
     // Reading is allowed while planning, but not reading ANYWHERE: the owner's
@@ -10239,9 +9015,9 @@ ${await _agentsMdBlock()}
       case 'fs_edit':
         return await _handleFsEdit(args);
       case 'multi_edit':
-        return await _handleMultiEdit(args);
       case 'notebook_edit':
-        return await _handleNotebookEdit(args);
+        return 'Structured notebook/multi-file edits are not available in '
+            'this build. Use fs_edit or file_write.';
 
       case 'fs_glob':
         return await _handleFsGlob(args);
@@ -10253,7 +9029,7 @@ ${await _agentsMdBlock()}
         return await _handleTodoWrite(args);
 
       case 'skill':
-        return await _handleSkill(args);
+        return 'Skills are managed server-side in Ovid Cloud.';
 
       case 'send_message':
         return await _handleSendMessage(args);
@@ -10407,41 +9183,6 @@ ${await _agentsMdBlock()}
         return await _dispatch('file_read', args);
       case 'repo_write':
         return await _dispatch('file_write', args);
-    }
-    // Explicit canonical §4.4 id call (e.g. from a chooser): session scope
-    // is enforced before anything executes — an out-of-scope plugin can
-    // never be called by guessing its canonical name (spec §7).
-    final canonical = PluginContributionRegistry.I.contributionByCanonicalId(
-      name,
-    );
-    if (canonical != null && canonical.isRosterTool) {
-      final runSid = _runSession?.id ?? '';
-      if (!PluginContributionRegistry.I.isPluginActiveForSession(
-        canonical.pluginId,
-        runSid,
-      )) {
-        return _pluginScopeRefusal(canonical.canonicalId, canonical.pluginId);
-      }
-      return await _runPluginContribution(canonical, args);
-    }
-    // Bare alias of registered plugin contributions (spec §4.4): aliases
-    // resolve only when unique for the RUNNING session; an ambiguous alias
-    // returns the exact canonical option list and executes NOTHING.
-    final alias = PluginContributionRegistry.I.resolveAlias(
-      name,
-      sessionId: _runSession?.id ?? '',
-    );
-    if (alias.isAmbiguous) {
-      final choices = alias.matches
-          .map((c) => '${c.canonicalId} (tool: ${c.toolName})')
-          .join(', ');
-      return '"$name" is ambiguous — ${alias.matches.length} plugin '
-          'contributions share this alias: $choices. Nothing was executed. '
-          'Call one canonical tool by its exact name.';
-    }
-    final aliasHit = alias.unique;
-    if (aliasHit != null) {
-      return await _runPluginContribution(aliasHit, args);
     }
     return 'unknown tool';
   }
@@ -10654,26 +9395,6 @@ ${await _agentsMdBlock()}
   // skips app prompts. This sits alongside _alwaysAllowedTools (which
   // remembers TOOL names per session); grants remember PATHS and HOSTS.
 
-  /// Live GrantStore view for [sessionId]: THAT SESSION's grants only.
-  ///
-  /// STRICTLY PER-SESSION (2026-09-24, owner requirement). This used to also
-  /// merge `AppState.globalPermissionGrants` into every lookup, so a single
-  /// "Always Allow" recorded with the old "All sessions" scope (or written by
-  /// any older build) silently granted that path or host in EVERY session
-  /// forever. An approval is a decision about ONE conversation: allowing a path
-  /// in session A must never let session B reach it without asking.
-  ///
-  /// Legacy global grants are therefore NOT consulted. They are inert on disk;
-  /// the Permissions screen offers to remove them.
-  GrantStore _grantStoreFor(String? sessionId) {
-    final s = sessionId == null ? null : AppState.I.sessionById(sessionId);
-    return GrantStore(
-      sessionGrants: {
-        if (s != null) s.id: List<PermissionGrant>.from(s.grants),
-      },
-    );
-  }
-
   /// Resolves [rel] against the permission-model workspace root. Returns the
   /// absolute path when access is allowed, null when denied:
   /// * inside the root → allowed, no prompt;
@@ -10690,28 +9411,16 @@ ${await _agentsMdBlock()}
     required String tool,
     void Function(String refusal)? onRefusal,
   }) async {
-    final rs = _runSession;
-    final sid = rs?.id ?? AppState.I.activeSession?.id;
     final m = mode;
     final workDir = await _sessionWorkDir();
     // Studio bound workspace: the session workspace directory. The local
     // repo registry is gone (P8 Task 15); the cloud workspace owns the
     // server-side checkout.
     var root = workDir.path;
-    if (m != AgentMode.studio && m != AgentMode.drive) {
-      // One authoritative root per mode. Control is jailed to the session
-      // directory like General and Read-Only; it used to be exempt here, which
-      // let a Control session touch anything on the device with no prompt.
-      root = permissionWorkspaceRoot(
-        modeName: m.name,
-        sessionWorkDir: workDir.path,
-        sessionId: sid,
-      );
-    }
     // Canonicalize symlinks (best-effort) before matching: the grant check
     // must see the REAL location, not the lexical one.
     final canonicalRoot = await _canonicalFsPath(root);
-    final abs = normalizeGrantPath(rel, base: canonicalRoot);
+    final abs = _normalizePath(rel, base: canonicalRoot);
     final canonicalAbs = await _canonicalFsPath(abs);
     // App-private storage and other chats' attachments are refused in EVERY
     // mode and never prompt — checked on the canonical target, so a symlink
@@ -10729,15 +9438,8 @@ ${await _agentsMdBlock()}
       // out of prompts. Control is no longer exempt (see the root above).
       return canonicalAbs;
     }
-    final store = _grantStoreFor(sid);
-    if (store.isPathDenied(sid, canonicalAbs, mode: m.name)) return null;
     final inside = containedPath(Directory(canonicalRoot), canonicalAbs);
     if (inside != null) return inside;
-    // Safe (read-only) still prompts: the user explicitly approves each
-    // outside path — the old silent hard refusal is gone.
-    if (store.isPathGranted(sid, canonicalAbs, mode: m.name)) {
-      return canonicalAbs;
-    }
     final ok = await _askUser(
       'grant:path:$canonicalAbs',
       'Access outside the workspace',
@@ -10783,7 +9485,7 @@ ${await _agentsMdBlock()}
       try {
         final resolved = await File(dir).resolveSymbolicLinks();
         if (tail.isEmpty) return resolved;
-        return normalizeGrantPath('$resolved/${tail.join('/')}');
+        return _normalizePath('$resolved/${tail.join('/')}');
       } catch (_) {
         final idx = dir.lastIndexOf('/');
         if (idx <= 0) return abs;
@@ -10804,8 +9506,6 @@ ${await _agentsMdBlock()}
     Iterable<String> rels, {
     required String tool,
   }) async {
-    final rs = _runSession;
-    final sid = rs?.id ?? AppState.I.activeSession?.id;
     final m = mode;
     // One resolver for "the workspace of this session" — the plan jail uses
     // the same authority, so the two can never disagree.
@@ -10817,21 +9517,15 @@ ${await _agentsMdBlock()}
     final canonicalRoot = await _canonicalFsPath(root);
     final resolved = <String, String>{};
     final outside = <String>[];
-    final store = _grantStoreFor(sid);
     for (final rel in rels) {
-      final abs = normalizeGrantPath(rel, base: canonicalRoot);
+      final abs = _normalizePath(rel, base: canonicalRoot);
       final canonicalAbs = await _canonicalFsPath(abs);
       if (await _resolverPrivateRefusal(canonicalAbs, canonicalRoot) != null) {
         return null;
       }
-      if (m != AgentMode.drive &&
-          store.isPathDenied(sid, canonicalAbs, mode: m.name)) {
-        return null;
-      }
       // Control is NOT a free pass here (it was): only Full Access is.
       if (containedPath(Directory(canonicalRoot), canonicalAbs) != null ||
-          m == AgentMode.drive ||
-          store.isPathGranted(sid, canonicalAbs, mode: m.name)) {
+          m == AgentMode.drive) {
         resolved[rel] = canonicalAbs;
       } else {
         outside.add(canonicalAbs);
@@ -10974,7 +9668,7 @@ ${await _agentsMdBlock()}
   /// servers and local MCP servers are a real workflow, and loopback is already
   /// handled by `defaultAllowedHosts`.
   static bool isMetadataOrLinkLocalHost(String rawHost) {
-    final h = normalizeGrantHost(rawHost);
+    final h = _normalizeHost(rawHost);
     if (h.isEmpty) return false;
     if (h == 'metadata.google.internal' ||
         h == 'metadata' ||
@@ -11048,9 +9742,8 @@ ${await _agentsMdBlock()}
   }
 
   Future<bool> _checkHostGrant(String rawHost, {required String tool}) async {
-    final host = normalizeGrantHost(rawHost);
+    final host = _normalizeHost(rawHost);
     if (host.isEmpty) return false;
-    if (defaultAllowedHosts.contains(host)) return true;
     // SSRF (2026-09-24): cloud-metadata and link-local endpoints are refused in
     // EVERY mode, including Full Access. `drive` returned true for every host,
     // so a prompt-injected model could fetch
@@ -11060,11 +9753,6 @@ ${await _agentsMdBlock()}
     if (isMetadataOrLinkLocalHost(host)) {
       return false;
     }
-    // …and not via a DNS name that RESOLVES there either (M3): any resolved
-    // link-local/metadata address refuses, in every mode.
-    if (await SsrfGuard.resolvesToMetadataOrLinkLocal(host)) {
-      return false;
-    }
     final m = mode;
     // Full Access is the only mode that skips the host gate. Control used to
     // as well, which meant a Control session could reach any host on the
@@ -11072,12 +9760,6 @@ ${await _agentsMdBlock()}
     // device tools do not touch the network, so jailing it here costs the mode
     // nothing and closes a real hole.
     if (m == AgentMode.drive) return true;
-    final sid = _runSession?.id ?? AppState.I.activeSession?.id;
-    final store = _grantStoreFor(sid);
-    if (store.isHostDenied(sid, host, mode: m.name)) return false;
-    if (store.isHostGranted(sid, host, mode: m.name)) {
-      return true;
-    }
     // Plan mode asks NOTHING: an ungranted host is refused instead of raising a
     // card. Research happens inside the workspace; reaching a new host belongs
     // to the build phase (or to a mode where asking the user is acceptable).
@@ -11104,57 +9786,6 @@ ${await _agentsMdBlock()}
     if (mode != AgentMode.drive &&
         (_deniedApprovals[sessionId]?.contains(approvalKey) ?? false)) {
       return false;
-    }
-
-    // Task 8 (spec §8.2): permission_request is a BLOCKING hook event —
-    // a plugin may deny the approval before the user is ever asked
-    // (exit 2 / JSON block). Fail-open on any hook failure: a broken
-    // hook must never wedge the run (same stance as the pre_tool gate).
-    if (!(_permissionDispatchCtx?.permissionRewriteReplay ?? false) &&
-        HookService.I.hasHookListeners(
-          'permission_request',
-          sessionId: sessionId ?? '',
-        )) {
-      final gate = await HookService.I.fireGate(
-        'permission_request',
-        sessionId ?? '',
-        payload: {
-          'tool': tool,
-          'summary': summary,
-          'detail': detail,
-          'transcript_path': _transcriptPathFor(sessionId ?? ''),
-        },
-        model: running?.model,
-      );
-      // Deny short-circuits before the user is ever asked. `ask` falls
-      // through to the normal approval prompt below — it IS the ask.
-      if (gate.decision == HookDecision.deny) {
-        if (sessionId != null) {
-          await SessionLedger.I.append(sessionId, 'approval', {
-            'tool': tool,
-            'ok': false,
-            'deniedBy': 'hook',
-            'plugin': gate.deniedByPlugin,
-          });
-        }
-        _emit(
-          'think',
-          'DENIED by hook (${gate.deniedByPlugin}): ${gate.reason}',
-        );
-        return false;
-      }
-      if (gate.decision == HookDecision.allow && gate.updatedInput != null) {
-        if (_runChainStale || !AppState.I.sessionAccountReady) {
-          return false;
-        }
-        throw _PermissionRewriteSignal(gate.updatedInput!);
-      }
-      // PermissionRequest `allow` approves the ordinary prompt just like a
-      // pre-tool allow. Destructive and plan-mode checks below still run
-      // before this per-call flag can take effect.
-      if (gate.bypassPermission) {
-        _permissionDispatchCtx?.hookAllowBypass = true;
-      }
     }
 
     Future<bool> askAndAudit(
@@ -11316,7 +9947,7 @@ ${await _agentsMdBlock()}
     // canonical §4.4 spelling (`plugin:<pid>/command:<name>`) of the SAME
     // plugin call must inherit the identical gate — one call, two
     // spellings, one policy.
-    if (name.startsWith('plugin_') || _isCanonicalPluginCall(name)) {
+    if (name.startsWith('plugin_')) {
       return roDenied;
     }
     switch (name) {
@@ -11423,26 +10054,6 @@ ${await _agentsMdBlock()}
     );
     pendingApproval = req;
     notifyListeners();
-    // Task 8 (spec §8.1): notification — observe hook for user-facing
-    // prompts (approval docks, questions, plan reviews).
-    if (HookService.I.hasHookListeners(
-      'notification',
-      sessionId: _runSession?.id ?? '',
-    )) {
-      unawaited(
-        HookService.I.fire(
-          'notification',
-          _runSession?.id ?? '',
-          payload: {
-            'kind': 'approval',
-            'tool': t,
-            'summary': cleanTruncate(s, 200),
-            'transcript_path': _transcriptPathFor(_runSession?.id ?? ''),
-          },
-          model: _runSession?.model,
-        ),
-      );
-    }
     // The approval dock is a small non-modal card above the input — easy
     // to miss while reading the chat stream. A missed approval used to
     // wedge the run (and lock the composer) for the tool's full budget
@@ -11485,37 +10096,7 @@ ${await _agentsMdBlock()}
       if (!ok && pathTargets.isEmpty && hostTargets.isEmpty) {
         _deniedApprovals.putIfAbsent(session.id, () => {}).add(denialKey);
       }
-      final store = GrantStore(sessionGrants: {session.id: session.grants});
-      for (final target in pathTargets.entries) {
-        if (ok) {
-          store.addPathGrant(
-            session.id,
-            target.key,
-            mode: req.modeName,
-            recursive: target.value,
-            decision: req.remember
-                ? PermissionGrant.decisionAlways
-                : PermissionGrant.decisionAllow,
-          );
-        } else {
-          store.addPathDeny(
-            session.id,
-            target.key,
-            mode: req.modeName,
-            recursive: target.value,
-          );
-        }
-      }
-      for (final host in hostTargets) {
-        if (!ok) {
-          store.addHostDeny(session.id, host, mode: req.modeName);
-        } else if (req.remember) {
-          store.addHostGrant(session.id, host, mode: req.modeName);
-        }
-      }
-      if (pathTargets.isNotEmpty || hostTargets.isNotEmpty) {
-        await AppState.I.persistSessions();
-      } else if (ok && req.remember) {
+      if (ok && req.remember && pathTargets.isEmpty && hostTargets.isEmpty) {
         _alwaysAllowedTools
             .putIfAbsent(_alwaysAllowKey(session.id, req.modeName), () => {})
             .add(t);
@@ -11991,136 +10572,6 @@ ${await _agentsMdBlock()}
   }
 
 
-
-  /// Claude Code `MultiEdit`: sequential, all-or-nothing exact replacements
-  /// on one file (see [applyMultiEdit]). Same gates as `fs_edit`.
-  Future<String> _handleMultiEdit(Map<String, dynamic> args) async {
-    final path = (args['file_path'] ?? args['path'])?.toString() ?? '';
-    if (path.isEmpty) return 'multi_edit: file_path is required';
-    final List<TextEdit> edits;
-    try {
-      edits = TextEdit.parseList(args['edits']);
-    } on StructuredEditException catch (e) {
-      return 'multi_edit: ${e.message}';
-    }
-    return _applyStructuredEdit(
-      tool: 'multi_edit',
-      path: path,
-      allowCreate: edits.first.oldString.isEmpty,
-      transform: (current) => applyMultiEdit(current, edits),
-      describe: (before, after) =>
-          'MULTI-EDIT $path:\n${edits.length} edit(s), '
-          '${before?.length ?? 0} → ${after.length} chars',
-      doneLabel: '${edits.length} edit(s)',
-    );
-  }
-
-  /// Claude Code `NotebookEdit`: one cell of an `.ipynb` (see
-  /// [applyNotebookEdit]). Same gates as `fs_edit`.
-  Future<String> _handleNotebookEdit(Map<String, dynamic> args) async {
-    final path =
-        (args['notebook_path'] ?? args['file_path'] ?? args['path'])
-            ?.toString() ??
-        '';
-    if (path.isEmpty) return 'notebook_edit: notebook_path is required';
-    if (!path.toLowerCase().endsWith('.ipynb')) {
-      return 'notebook_edit: "$path" is not a .ipynb notebook — use fs_edit '
-          'or multi_edit for other files.';
-    }
-    final NotebookEditMode editMode;
-    try {
-      editMode = parseNotebookEditMode(args['edit_mode']);
-    } on StructuredEditException catch (e) {
-      return 'notebook_edit: ${e.message}';
-    }
-    return _applyStructuredEdit(
-      tool: 'notebook_edit',
-      path: path,
-      transform: (current) => applyNotebookEdit(
-        current ??
-            (throw const StructuredEditException('notebook does not exist')),
-        cellId: args['cell_id']?.toString(),
-        newSource: args['new_source']?.toString() ?? '',
-        cellType: args['cell_type']?.toString(),
-        mode: editMode,
-      ),
-      describe: (_, _) =>
-          'NOTEBOOK ${editMode.name.toUpperCase()} $path'
-          '${args['cell_id'] == null ? '' : ' cell ${args['cell_id']}'}',
-      doneLabel: '${editMode.name} cell',
-    );
-  }
-
-  /// Shared write path for whole-file structured edits: repo cache or host
-  /// workspace resolution, read-before-write and CAS freshness gates, the
-  /// strict path-permission model, the approval prompt, Studio draft sync,
-  /// the disk mirror and the diff card — exactly the `fs_edit str_replace`
-  /// contract. [transform] throwing [StructuredEditException] writes nothing.
-  Future<String> _applyStructuredEdit({
-    required String tool,
-    required String path,
-    required String Function(String? current) transform,
-    required String Function(String? before, String after) describe,
-    required String doneLabel,
-    bool allowCreate = false,
-  }) async {
-    final rs = _runSession;
-    final sid = rs?.sandboxId ?? rs?.id ?? 'default';
-    String refused(StructuredEditException e) =>
-        '$tool: ${e.message} — nothing was changed in $path.';
-    String notObserved() =>
-        'FS_NOT_OBSERVED: read "$path" first (file_read or fs_edit view), '
-        'then edit it.';
-
-    final resolved = await _resolveFsPath(path, gateTool: tool);
-    if (resolved.denied) return _accessDeniedMessage([path], noun: 'path');
-    final host = resolved.path;
-    if (host == null || !File(host).existsSync()) {
-      if (!allowCreate) return 'file not found: $path';
-      final safe = await _resolveGrantedPath(path, tool: tool);
-      if (safe == null) return _accessDeniedMessage([path], noun: 'path');
-      final String created;
-      try {
-        created = transform(null);
-      } on StructuredEditException catch (e) {
-        return refused(e);
-      }
-      final ok = await _maybeApprove(tool, path, describe(null, created));
-      if (!ok) return 'DENIED by user';
-      _readPathsFor(sid).add(path);
-      return await _writeWorkspaceFile(path, created, toolLabel: 'created');
-    }
-    if (!_readPathsFor(sid).contains(path)) return notObserved();
-    final hf = File(host);
-    if (_fsCheckFresh(path, hf) == false) {
-      return 'FS_STALE_VERSION: "$path" changed since you last read it. '
-          'Read it again, then retry the edit against the new content.';
-    }
-    final String content;
-    try {
-      content = await hf.readAsString();
-    } on FileSystemException {
-      return '$tool: "$path" is not valid UTF-8 — edit it with a shell '
-          'command that keeps its encoding. Nothing was changed.';
-    }
-    final String updated;
-    try {
-      updated = transform(content);
-    } on StructuredEditException catch (e) {
-      return refused(e);
-    }
-    final ok = await _maybeApprove(tool, path, describe(content, updated));
-    if (!ok) return 'DENIED by user';
-    if (!(_permissionDispatchCtx?.accountCurrent ?? true)) {
-      return 'Cancelled: session account changed.';
-    }
-    hf.writeAsStringSync(updated);
-    _fsMarkObserved(path, hf);
-    _recordProduced(path, updated.length);
-    _emit('file', 'edited $path');
-    _attachDiffCard(path, content, updated);
-    return 'edited $path ✓ ($tool: $doneLabel)';
-  }
 
   Future<String> _handleFsEdit(Map<String, dynamic> args) async {
     final cmd = args['command'] as String;
@@ -12947,24 +11398,6 @@ ${await _agentsMdBlock()}
 
   // ── WAVE 2 HANDLERS — plan mode, background jobs, session events ────
 
-  /// G7: the allowlist now lives in [PlanModePolicy] — ONE definition, shared
-  /// by the dispatch gate, the roster projection and the prompt briefing, so
-  /// they cannot drift apart. Kept as a named alias for the test seam and for
-  /// the gate's readability. See the module for the full rationale, including
-  /// the opencode-parity decision to allow `run_shell`.
-  static const Set<String> _planModeAllowedTools = PlanModePolicy.allowedTools;
-
-  /// True when [name] may run while planning under the ACTIVE preset's plan
-  /// policy (G5: a custom preset may author its own; otherwise the built-in
-  /// [PlanModePolicy.allowedTools] applies). Anything unlisted — including
-  /// plugin/MCP contributions and any tool added later — is refused.
-  bool _isPlanModeAllowedTool(String name) => PlanModePolicy.allows(
-    name,
-    policy: PresetRegistry.planPolicyFor(
-      PresetRegistry.byId(_runSession?.presetId ?? 'standard'),
-    ),
-  );
-
   static const selfSourcePackage = 'com.dhanuk.ovidai';
 
   static const List<String> _selfSourceMarkers = [
@@ -12990,9 +11423,9 @@ ${await _agentsMdBlock()}
 
   @visibleForTesting
   static bool isOvidSelfSourcePath(String raw) {
-    final path = normalizeGrantPath(raw);
+    final path = _normalizePath(raw);
     if (path.isEmpty) return false;
-    for (final root in _installRoots.map(normalizeGrantPath)) {
+    for (final root in _installRoots.map(_normalizePath)) {
       if (path == root || path.startsWith('$root/')) {
         final rest = path == root ? '' : path.substring(root.length + 1);
         if (!rest.startsWith('files/sessions/') &&
@@ -13044,10 +11477,10 @@ ${await _agentsMdBlock()}
     final s = _runSession;
     if (s == null) return const [];
     final raw = (await AppState.I.workspaceDirForSession(s.sandboxId ?? s.id)).path;
-    final canonical = await _canonicalFsPath(normalizeGrantPath(raw));
+    final canonical = await _canonicalFsPath(_normalizePath(raw));
     // A workspace dir that resolves to an install root itself (or above it)
     // would exempt everything — never honor that.
-    if (_installRoots.map(normalizeGrantPath).any(
+    if (_installRoots.map(_normalizePath).any(
       (r) => r == canonical || r.startsWith('$canonical/'),
     )) {
       return const [];
@@ -13063,7 +11496,7 @@ ${await _agentsMdBlock()}
     final own = s == null ? null : Uri.encodeComponent(s.id);
     for (final root in roots) {
       if (root.isEmpty) continue;
-      final base = '${normalizeGrantPath(root)}/.attachments/';
+      final base = '${_normalizePath(root)}/.attachments/';
       if (!canonicalAbs.startsWith(base)) continue;
       final owner = canonicalAbs.substring(base.length).split('/').first;
       if (owner.isEmpty) continue; // the .attachments dir itself
@@ -13076,7 +11509,7 @@ ${await _agentsMdBlock()}
   /// the session workspace, then symlinks are resolved.
   Future<String> _canonicalToolPath(String raw) async {
     final base = await _canonicalFsPath((await _sessionWorkDir()).path);
-    return _canonicalFsPath(normalizeGrantPath(raw, base: base));
+    return _canonicalFsPath(_normalizePath(raw, base: base));
   }
 
   /// Returns the refusal for an app-private [canonicalAbs], or null when it
@@ -13120,7 +11553,7 @@ ${await _agentsMdBlock()}
     for (final raw in flagged) {
       // Source-tree markers are refused regardless of location.
       var markers = 0;
-      final lexical = normalizeGrantPath(raw);
+      final lexical = _normalizePath(raw);
       for (final marker in _selfSourceMarkers) {
         if (lexical.contains(marker)) markers++;
       }
@@ -13151,7 +11584,7 @@ ${await _agentsMdBlock()}
   static Set<String> shellPathsOutsideRoot(String cmd, String root) {
     final out = <String>{};
     if (root.isEmpty) return out;
-    final jail = normalizeGrantPath(root);
+    final jail = _normalizePath(root);
     final prefixes = _jailPrefixes(jail);
     for (final raw in _jailPathCandidates(cmd)) {
       // Strip a leading `NAME=` / `--flag=` so the path inside it is judged on
@@ -13164,8 +11597,8 @@ ${await _agentsMdBlock()}
           : raw;
       if (tok.length < 2) continue;
       final abs = tok.startsWith('/')
-          ? normalizeGrantPath(tok)
-          : normalizeGrantPath(tok, base: jail);
+          ? _normalizePath(tok)
+          : _normalizePath(tok, base: jail);
       if (_jailExemptSystemRoots.any(abs.startsWith)) continue;
       if (prefixes.any((p) => abs == p || abs.startsWith('$p/'))) continue;
       out.add(tok);
@@ -13366,23 +11799,6 @@ ${await _agentsMdBlock()}
   }
 
   /// Test seam for the plan-mode allowlist.
-  @visibleForTesting
-  static Set<String> get planModeAllowedToolsForTest => _planModeAllowedTools;
-
-  /// True when [name] is the canonical §4.4 spelling
-  /// (`plugin:<pid>/command:<name>`, `…/skill:…`, `…/agent:…`) of a
-  /// REGISTERED roster contribution. That spelling is advertised in every
-  /// canonical roster description, so it passes the same plan/Read-Only
-  /// gates as its `plugin_` tool-name spelling — two spellings of one
-  /// plugin call are never gated differently. Hook/MCP ledger entries
-  /// (Task 8/9) never execute through the canonical head, so they never
-  /// trip the gates.
-  static bool _isCanonicalPluginCall(String name) {
-    if (!name.startsWith('plugin:')) return false;
-    final c = PluginContributionRegistry.I.contributionByCanonicalId(name);
-    return c != null && c.isRosterTool;
-  }
-
   /// PR38: does [cmd] plausibly trigger a native (C/C++) build step?
   /// Heuristic, not exhaustive — a false negative just means the compiler
   /// installs lazily on the NEXT matching command instead of this one;
@@ -13623,109 +12039,9 @@ ${await _agentsMdBlock()}
   bool canAdmitSubagentForTest() =>
       _liveSubagentsOf(_runSession?.id ?? '') < _maxConcurrentSubagents;
 
-  // ── Skills (reusable instruction bundles) ─────────────────────────────
-  Future<void> _refreshSkillRoots(String sessionId) async {
-    final reservation = SkillService.I.reserveSessionCatalog(sessionId);
-    final override = skillCatalogInputsForTest;
-    if (override != null) {
-      final inputs = await override(sessionId);
-      await SkillService.I.publishSessionCatalog(
-        sessionId,
-        reservation: reservation,
-        roots: inputs.roots,
-        mounts: inputs.mounts,
-      );
-      return;
-    }
-    final roots = <String>[];
-    final session = AppState.I.sessionById(sessionId);
-    if (session == null) {
-      await SkillService.I.publishSessionCatalog(
-        sessionId,
-        reservation: reservation,
-      );
-      return;
-    }
-    // Global user skills (Settings → Skills upload) — visible in EVERY
-    // session so the agent can use them in any chat.
-    try {
-      final docs = await getApplicationDocumentsDirectory();
-      roots.add('${docs.path}/skills');
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-    try {
-      final pinned = session.workspaceFolder;
-      final work =
-          pinned != null &&
-              pinned.trim().isNotEmpty &&
-              Directory(pinned).existsSync()
-          ? Directory(pinned)
-          : await AppState.I.workspaceDirForSession(session.sandboxId ?? session.id);
-      roots.addAll([
-        '${work.path}/.dsh/skills',
-        '${work.path}/.agents/skills',
-        '${work.path}/agents',
-        '${work.path}/.agents',
-        // Project-local [CC] and Codex conventions: a repo checked out into
-        // the workspace can carry its own skills/commands/agents, exactly as
-        // it would for the real harnesses.
-        '${work.path}/.claude/skills',
-        '${work.path}/.claude/commands',
-        '${work.path}/.claude/agents',
-        // Codex got only `skills` here, so a repo carrying `.codex/commands`
-        // or `.codex/agents` exposed nothing while its `.claude/` equivalent
-        // worked. Same convention, same treatment.
-        '${work.path}/.codex/skills',
-        '${work.path}/.codex/commands',
-        '${work.path}/.codex/prompts',
-        '${work.path}/.codex/agents',
-      ]);
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-    // Plugin-contributed catalogs died with the local plugin runtime
-    // (P8 Task 17).
-    await SkillService.I.publishSessionCatalog(
-      sessionId,
-      reservation: reservation,
-      roots: roots,
-      mounts: const [],
-    );
-  }
-
-  @visibleForTesting
-  static Future<SkillCatalogInputs> Function(String sessionId)?
-  skillCatalogInputsForTest;
-
-  Future<void> _refreshCompatibilitySkillRoots() async {
-    SkillService.I.clearRoots();
-    try {
-      final docs = await getApplicationDocumentsDirectory();
-      SkillService.I.addRoot('${docs.path}/skills');
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-    try {
-      final work = await _sessionWorkDir();
-      SkillService.I.addRoot('${work.path}/.dsh/skills');
-      SkillService.I.addRoot('${work.path}/.agents/skills');
-      SkillService.I.addRoot('${work.path}/agents');
-      SkillService.I.addRoot('${work.path}/.agents');
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-    await SkillService.I.reload();
-  }
-
-  /// Public test/UI seam: re-scan skill roots now (Settings → Skills).
-  Future<void> refreshSkills({String? sessionId}) async {
-    if (sessionId != null) {
-      await _refreshSkillRoots(sessionId);
-      return;
-    }
-    await _refreshCompatibilitySkillRoots();
-  }
+  /// Public test/UI seam: skills moved server-side (P8 Task 18). Kept as a
+  /// no-op so the Settings → Skills removal can land without a second edit.
+  Future<void> refreshSkills({String? sessionId}) async {}
 
   /// True when the app holds All Files Access (Android 11+ MANAGE_EXTERNAL
   /// STORAGE) — needed to write inside arbitrary user-pinned folders.
@@ -13852,40 +12168,6 @@ ${await _agentsMdBlock()}
     final m = _toolStart(toolName, 'test');
     _activeToolMsg = m; // _toolStart already sets it; keep explicit.
   }
-
-  /// PR29 test seams: compaction lock + direct _maybeCompact access.
-  @visibleForTesting
-  bool compactingAddForTest(String id) => _compacting.add(id);
-
-  @visibleForTesting
-  void compactingRemoveForTest(String id) => _compacting.remove(id);
-
-  @visibleForTesting
-  Future<void> maybeCompactForTest(ChatSession s, ProviderConfig p) =>
-      _maybeCompact(s, p);
-
-  /// PR29 test seam: replace the compaction summarizer (no provider in
-  /// unit tests). Signature: (session, from, cutoff) → summary text
-  /// (null = model failure). Bypasses the F4 retry loop.
-  @visibleForTesting
-  Future<String?> Function(ChatSession s, int from, int cutoff)?
-  compactionSummarizerForTest;
-
-  /// PR43 test seam: call _applyCompaction directly (bypasses the lock
-  /// and the LLM summarizer — tests the state/string contract in isolation).
-  @visibleForTesting
-  String applyCompactionForTest(
-    ChatSession s,
-    int from,
-    int cutoff,
-    String summary,
-  ) => _applyCompaction(s, from, cutoff, summary, forced: false);
-
-  /// PR43 test seam: drive the locked body directly (bypasses the lock) —
-  /// a test owns the lock itself.
-  @visibleForTesting
-  Future<void> maybeCompactLockedForTest(ChatSession s, ProviderConfig p) =>
-      _maybeCompactLocked(s, p);
 
   /// Test seam: the request-message array this session's history replays to.
   @visibleForTesting
@@ -14036,290 +12318,6 @@ ${await _agentsMdBlock()}
   ) {
     if (rawArgs.isEmpty || _hasCommandArgumentPlaceholders(body)) return '';
     return '\n\n$label: $rawArgs';
-  }
-
-  Future<String> _handleSkill(Map<String, dynamic> args) async {
-    final name = (args['name'] as String).trim();
-    if (name.isEmpty) return 'skill name is required';
-    final registry = PluginContributionRegistry.I;
-    final runSid = _runSession?.id ?? '';
-    final compatibilityMode =
-        _runSessionOverrideForTest != null &&
-        !SkillService.I.hasSnapshotForSession(runSid);
-    if (compatibilityMode) {
-      await _refreshCompatibilitySkillRoots();
-    } else if (!SkillService.I.hasSnapshotForSession(runSid) ||
-        SkillService.I.isSessionCatalogStale(runSid)) {
-      // Hot reload: an edited/added/removed workspace SKILL.md is picked up
-      // on the next load instead of requiring a manual refresh.
-      await _refreshSkillRoots(runSid);
-    }
-    // Unique-alias resolution (spec §4.4): an exact provider id (canonical
-    // plugin skill id or path) or a globally-unique bare name loads; an
-    // ambiguous bare name lists the exact providers and loads NOTHING.
-    final res = compatibilityMode
-        ? SkillService.I.resolveAlias(name)
-        : SkillService.I.resolveForSession(runSid, name);
-    if (res.isAmbiguous) {
-      return 'Skill "$name" is ambiguous — ${res.matches.length} providers '
-          'share this alias: ${res.options.join(', ')}. Nothing was loaded. '
-          'Call again with one exact provider id from that list.';
-    }
-    final skill = res.unique;
-    if (skill != null) {
-      if (!isSkillAvailableForSession(skill, runSid)) {
-        return 'Plugin contribution "${skill.canonicalId}" is not active in '
-            'the current manifest for this session. Nothing was executed.';
-      }
-      _emit('think', 'skill loaded: ${skill.name}');
-      // A skill that declares `allowed-tools` scopes the run to those tools.
-      if (skill.allowedTools.isNotEmpty) {
-        _runResolved.activeSkillTools = skill.allowedTools.toSet();
-        _runResolved.activeSkillName = skill.name;
-      } else {
-        _runResolved.activeSkillTools = null;
-        _runResolved.activeSkillName = null;
-      }
-      final input = args['input'] ?? args['arguments'];
-      return _skillContentWithFiles(skill, rawArgs: input?.toString() ?? '');
-    }
-    if (compatibilityMode && name.startsWith('plugin:')) {
-      final contribution = registry.contributionByCanonicalId(name);
-      if (contribution != null && contribution.isRosterTool) {
-        if (!registry.isPluginActiveForSession(contribution.pluginId, runSid)) {
-          return _pluginScopeRefusal(
-            contribution.canonicalId,
-            contribution.pluginId,
-          );
-        }
-        return await _runPluginContribution(contribution, args);
-      }
-    }
-    final catalog = SkillService.I.catalogBlockForSession(runSid);
-    return 'Skill "$name" not found.\n\n'
-        '${catalog.isEmpty ? 'No skills are installed yet.' : catalog}';
-  }
-
-  /// Per-file cap for a skill's bundled supporting file when it is inlined
-  /// into the loaded skill content.
-  static const int kSkillSupportingFileInlineCap = 8 * 1024;
-
-  /// Total cap across all inlined supporting files (keeps one large bundle
-  /// from crowding out the conversation).
-  static const int kSkillSupportingTotalInlineCap = 32 * 1024;
-
-  /// Render a loaded skill as `<skill_content>` plus its bundled supporting
-  /// files. Real [CC] skills ship scripts/templates alongside `SKILL.md` and
-  /// reference them by relative path; without this the model never saw them.
-  /// Small text files are inlined; larger ones are listed so the model can
-  /// read them from [Skill.dirPath] via the filesystem tools.
-  Future<String> _skillContentWithFiles(
-    Skill skill, {
-    String rawArgs = '',
-  }) async {
-    final content = substituteCommandArguments(skill.content, rawArgs);
-    final buf = StringBuffer('<skill_content>\n$content\n');
-    final files = SkillService.I.supportingFilesFor(skill);
-    if (files.isEmpty) {
-      buf.write('</skill_content>');
-      return buf.toString();
-    }
-    buf.writeln('\n<skill_files>');
-    var budget = kSkillSupportingTotalInlineCap;
-    for (final rel in files) {
-      if (budget <= 0) {
-        buf.writeln('- $rel (not inlined — read it from ${skill.dirPath})');
-        continue;
-      }
-      final content = await SkillService.I.readSupportingFile(skill, rel);
-      if (content == null) continue;
-      final clipped = content.length > kSkillSupportingFileInlineCap
-          ? '${content.substring(0, kSkillSupportingFileInlineCap)}\n'
-                '[truncated]'
-          : content;
-      budget -= clipped.length;
-      buf
-        ..writeln('--- $rel ---')
-        ..writeln(clipped);
-    }
-    buf.write('</skill_files>\n</skill_content>');
-    return buf.toString();
-  }
-
-  /// Honest session-scope refusal (spec §7): names the contribution, its
-  /// activation state, and executes nothing.
-  String _pluginScopeRefusal(String canonicalId, String pluginId) =>
-      'Plugin contribution "$canonicalId" is not active for this session '
-      '(plugin $pluginId activation: '
-      '${PluginContributionRegistry.I.activationFor(pluginId)?.name ?? 'unregistered'}). '
-      'Nothing was executed.';
-
-  /// Short user-facing reason why [isSkillAvailableForSession] is false for
-  /// [skill], or `null` when it is available.
-  String? skillUnavailableReason(Skill skill, String sessionId) {
-    if (isSkillAvailableForSession(skill, sessionId)) return null;
-    final pluginId = skill.pluginId;
-    final canonicalId = skill.canonicalId;
-    if (pluginId == null || canonicalId == null) return null;
-    if (!PluginContributionRegistry.I.isPluginActiveForSession(
-      pluginId,
-      sessionId,
-    )) {
-      return 'plugin $pluginId is not enabled for this chat';
-    }
-    return 'not in the current manifest of plugin $pluginId';
-  }
-
-  bool isSkillAvailableForSession(Skill skill, String sessionId) {
-    final pluginId = skill.pluginId;
-    if (pluginId == null) return true;
-    final canonicalId = skill.canonicalId;
-    if (canonicalId == null) return false;
-    final contribution = PluginContributionRegistry.I.contributionByCanonicalId(
-      canonicalId,
-    );
-    if (contribution == null ||
-        !PluginContributionRegistry.I.isPluginActiveForSession(
-          pluginId,
-          sessionId,
-        )) {
-      return false;
-    }
-    final expectedKind = switch (skill.kind) {
-      SkillContributionKind.command => PluginContributionKind.command,
-      SkillContributionKind.skill => PluginContributionKind.skill,
-      SkillContributionKind.agent => PluginContributionKind.agent,
-    };
-    if (contribution.kind != expectedKind) return false;
-    // Compare CANONICAL paths, not `File.absolute.path`.
-    //
-    // `skill.path` was produced by `resolveSymbolicLinksSync()` during the
-    // catalog scan (see SkillService._containedRegularFile), but
-    // `contribution.rootPath` is taken verbatim from the manifest. On
-    // Android `/data/user/0` is a symlink to `/data/data`, so the two
-    // spellings of the SAME file never compare equal through
-    // `File.absolute.path` (which does not resolve links). That mismatch
-    // rejected every plugin contribution with "not active in the current
-    // manifest for this session" even though the plugin was mounted and
-    // active. Resolve both sides before comparing.
-    return canonicalFilePath(skill.path) ==
-        canonicalFilePath('${contribution.rootPath}/${contribution.path}');
-  }
-
-  /// Symlink-resolved absolute path, falling back to the plain absolute path
-  /// when resolution fails (missing file, permission error). Needed because
-  /// Android exposes the app data dir under two equivalent spellings
-  /// (`/data/user/0/...` and `/data/data/...`); `File.absolute.path` keeps
-  /// whichever spelling it was handed and never resolves the link.
-  @visibleForTesting
-  static String canonicalFilePath(String path) {
-    try {
-      return File(path).resolveSymbolicLinksSync();
-    } catch (_) {
-      return File(path).absolute.path;
-    }
-  }
-
-  /// Executes ONE canonical plugin contribution (spec §4.4): the declared
-  /// markdown file's body is returned as agent instructions — commands,
-  /// skills, and agents are prompt bundles, never shell payloads. Path
-  /// containment is enforced lexically before any read; a missing/empty/
-  /// unreadable file is reported honestly instead of faking execution.
-  Future<String> _runPluginContribution(
-    PluginContribution c,
-    Map<String, dynamic> args,
-  ) async {
-    final runSid = _runSession?.id ?? '';
-    final current = PluginContributionRegistry.I.contributionByCanonicalId(
-      c.canonicalId,
-    );
-    if (current == null ||
-        current.pluginId != c.pluginId ||
-        current.kind != c.kind ||
-        current.path != c.path ||
-        current.rootPath != c.rootPath ||
-        !PluginContributionRegistry.I.isPluginActiveForSession(
-          c.pluginId,
-          runSid,
-        )) {
-      return _pluginScopeRefusal(c.canonicalId, c.pluginId);
-    }
-    final mounted = SkillService.I
-        .resolveForSession(runSid, c.canonicalId)
-        .unique;
-    if (mounted != null) {
-      if (!isSkillAvailableForSession(mounted, runSid)) {
-        return 'Plugin contribution "${c.canonicalId}" is not mounted from '
-            'its current declaration. Nothing was executed.';
-      }
-      // CLAUDE CODE AGENT PARITY (audit 2026-09-25): a plugin `agents/*.md`
-      // contribution is a SUBAGENT definition — its own system prompt, its own
-      // model, its own tool allowlist, run in an isolated context. It used to
-      // be inlined into the parent as prompt text (identical to a command/
-      // skill), so its declared `model` was ignored and it shared the parent's
-      // context and tools. Now it is dispatched as a real subagent. Exception:
-      // if we are ALREADY inside a subagent (zero-nesting rule), fall back to
-      // inlining the instructions so the work still happens.
-      if (c.kind == PluginContributionKind.agent &&
-          !(_runSession?.isSubagent ?? false)) {
-        final input = (args['input'] ?? args['arguments'])?.toString() ?? '';
-        final defArgs = await _agentDefinitionDispatchArgs(mounted, input);
-        // `model:` is resolved (inherit / alias / full id) before dispatch.
-        return _handleDispatchAgent(
-          defArgs,
-          modelOverride: defArgs['_model'] as String?,
-        );
-      }
-      _emit('think', 'plugin ${c.pluginId} ${c.kindLabel}: ${c.name}');
-      // Same scoping + bundled-file surfacing as the `skill` tool path.
-      if (mounted.allowedTools.isNotEmpty) {
-        _runResolved.activeSkillTools = mounted.allowedTools.toSet();
-        _runResolved.activeSkillName = mounted.name;
-      } else {
-        _runResolved.activeSkillTools = null;
-        _runResolved.activeSkillName = null;
-      }
-      final input = args['input'] ?? args['arguments'];
-      final rawArgs = input?.toString() ?? '';
-      final content = await _skillContentWithFiles(mounted, rawArgs: rawArgs);
-      return '$content'
-          '${commandArgumentTrailer(mounted.content, rawArgs, 'Arguments')}';
-    }
-    if (_runSessionOverrideForTest == null ||
-        SkillService.I.hasSnapshotForSession(runSid)) {
-      return 'Plugin contribution "${c.canonicalId}" is not mounted for this '
-          'session. Nothing was executed.';
-    }
-    _emit('think', 'plugin ${c.pluginId} ${c.kindLabel}: ${c.name}');
-    if (c.path.isEmpty || c.rootPath.isEmpty) {
-      return 'Plugin contribution "${c.canonicalId}" declares no readable '
-          'file — nothing was executed.';
-    }
-    if (!c.pathContained) {
-      return 'Plugin contribution "${c.canonicalId}" is refused: declaring '
-          'path "${c.path}" escapes its plugin root. Nothing was executed.';
-    }
-    final file = File('${c.rootPath}/${c.path}');
-    if (!file.existsSync()) {
-      return 'Plugin contribution "${c.canonicalId}" cannot run: '
-          '"${c.path}" is missing under the plugin root.';
-    }
-    final String raw;
-    try {
-      raw = await file.readAsString();
-    } catch (e) {
-      return 'Plugin contribution "${c.canonicalId}" is unreadable: $e';
-    }
-    final body = stripMarkdownFrontmatter(raw).trim();
-    if (body.isEmpty) {
-      return 'Plugin contribution "${c.canonicalId}" is empty — nothing '
-          'was executed.';
-    }
-    final input = args['input'] ?? args['arguments'];
-    final rawArgs = input?.toString() ?? '';
-    final content = substituteCommandArguments(body, rawArgs);
-    final inputStr = commandArgumentTrailer(body, rawArgs, 'Arguments');
-    return '<skill_content>\n$content\n</skill_content>$inputStr';
   }
 
   // ── Subagents ─────────────────────────────────────────────────────────
@@ -14692,146 +12690,6 @@ ${await _agentsMdBlock()}
     // an app restart (cold resume). Persisted with the session JSON.
     child.agentId = sub.id;
     await AppState.I.persistSessions();
-    await SessionLifecycleService.I.sessionStarted(
-      child,
-      reason: SessionStartReason.subagent,
-    );
-    // Claude Code SubagentStart: cannot block, but
-    // `hookSpecificOutput.additionalContext` is added to the subagent's
-    // context before its first prompt.
-    final start = await HookService.I.fireDetailed(
-      'subagent_start',
-      child.id,
-      payload: {
-        'subagentId': sub.id,
-        'parentSessionId': parent.id,
-        'label': sub.label,
-        'background': background,
-        'agent_id': sub.id,
-        'agent_type': sub.agentType,
-        'transcript_path': _transcriptPathFor(child.id),
-      },
-      model: child.model,
-    );
-    final contexts = [
-      for (final out in start.hookOutputs)
-        ?HookOutputContract.parse(out).additionalContext,
-    ];
-    sub.startContext = contexts.join('\n\n');
-  }
-
-  // ── Claude Code subagent parity helpers ─────────────────────────────────
-
-  /// [HookService.agentIdentityResolver]: the Claude Code identity of the
-  /// subagent running in [sessionId], or null for a main-conversation session.
-  Map<String, dynamic>? _hookAgentIdentity(String sessionId) {
-    final session = AppState.I.sessionById(sessionId);
-    final sub = subagentForSession(sessionId);
-    if (sub == null && (session == null || !session.isSubagent)) return null;
-    final lineage = AppState.I.lineageOf(sessionId);
-    final root = lineage.isEmpty ? null : lineage.first;
-    final hasRoot = root != null && root.id != sessionId;
-    return {
-      'agent_id': sub?.id ?? session?.agentId ?? sessionId,
-      'agent_type': sub?.agentType ?? 'general-purpose',
-      if (hasRoot) 'root_session_id': root.id,
-      if (hasRoot) 'root_transcript_path': _transcriptPathFor(root.id),
-    };
-  }
-
-  /// The zone identity a subagent's run executes under (tool-usage and MCP
-  /// attribution read it via [SubagentScope.current]).
-  SubagentScope _subagentScope(SubagentInfo sub) {
-    final lineage = AppState.I.lineageOf(sub.sessionId);
-    return SubagentScope(
-      agentId: sub.id,
-      agentType: sub.agentType,
-      sessionId: sub.sessionId,
-      rootSessionId: lineage.isEmpty ? sub.parentSessionId : lineage.first.id,
-    );
-  }
-
-  /// True when [name] is a plugin `agents/*.md` contribution tool — calling
-  /// it dispatches a subagent, so it is a spawn tool for a child.
-  static bool _isAgentContributionTool(String name) =>
-      PluginContributionRegistry.I.contributionByToolName(name)?.kind ==
-      PluginContributionKind.agent;
-
-  /// Resolve a Claude Code subagent definition (a mounted `agents/*.md`
-  /// contribution) by [type]: exact name, plugin-scoped `plugin:agent`, or
-  /// the canonical id. Null when unknown.
-  Skill? _agentDefinitionFor(String sessionId, String type) {
-    final t = type.trim();
-    if (t.isEmpty || t == 'general-purpose') return null;
-    for (final a in SkillService.I.agentsForSession(sessionId)) {
-      if (a.name == t || a.canonicalId == t || _agentTypeOf(a) == t) return a;
-    }
-    return null;
-  }
-
-  /// Claude Code `agent_type` for an agent definition: `plugin:agent` for a
-  /// plugin-shipped agent, the bare name otherwise.
-  static String _agentTypeOf(Skill agent) {
-    final pid = agent.pluginId;
-    if (pid == null) return agent.name;
-    final pluginName =
-        PluginContributionRegistry.I.manifestFor(pid)?.name ??
-        pid.split('/').last;
-    return '$pluginName:${agent.name}';
-  }
-
-  /// Dispatch args for a Claude Code agent definition: system prompt (body),
-  /// `tools` / `disallowedTools` scope, preloaded `skills`, and `model`.
-  Future<Map<String, dynamic>> _agentDefinitionDispatchArgs(
-    Skill agent,
-    String prompt, {
-    String? label,
-  }) async {
-    final runSid = _runSession?.id ?? '';
-    final body = await _skillContentWithFiles(agent, rawArgs: '');
-    final fm = agent.frontmatter;
-    final tools = fm.containsKey('tools')
-        ? parseFrontmatterList(fm['tools'])
-        : agent.allowedTools.toList();
-    final disallowed = parseFrontmatterList(
-      fm['disallowedTools'] ?? fm['disallowed-tools'],
-    );
-    // `skills:` preloads the FULL content of each named skill into the
-    // subagent's context (Claude Code; first 32, model-invocable only).
-    final preload = StringBuffer();
-    var loaded = 0;
-    for (final name in parseFrontmatterList(fm['skills'])) {
-      if (loaded >= 32) break;
-      final skill = SkillService.I.resolveForSession(runSid, name).unique;
-      if (skill == null || !skill.modelInvocable || skill.isAgent) continue;
-      final content = await _skillContentWithFiles(skill, rawArgs: '');
-      preload.write(
-        '\n\n<preloaded_skill name="${skill.name}">\n$content\n'
-        '</preloaded_skill>',
-      );
-      loaded++;
-    }
-    final parent = _runSession;
-    final model = resolveSubagentModel(
-      agent.model,
-      parentModel: parent?.model ?? '',
-      providerModels: parent == null
-          ? const []
-          : (AppState.I.providerForSession(parent)?.models ?? const []),
-    );
-    return {
-      'prompt': prompt.isEmpty
-          ? 'Carry out your role as defined in your instructions.'
-          : prompt,
-      'label': (label ?? '').trim().isNotEmpty ? label!.trim() : agent.name,
-      'persona': '$body$preload',
-      'allowed_tools': SubagentToolPolicy.encode(
-        tools: tools,
-        disallowed: disallowed,
-      ),
-      '_agent_type': _agentTypeOf(agent),
-      '_model': ?model,
-    };
   }
 
   Future<String> _handleDispatchAgent(
@@ -14846,9 +12704,6 @@ ${await _agentsMdBlock()}
     final label = ((args['label'] as String?)?.trim().isNotEmpty ?? false)
         ? (args['label'] as String).trim()
         : cleanTruncate(prompt, 60);
-    var allowed =
-        (args['allowed_tools'] as List?)?.whereType<String>().toList() ??
-        const <String>[];
     var persona = (args['persona'] as String? ?? '').trim();
     final outputHint = (args['output_schema_hint'] as String? ?? '').trim();
     final parent = _runSession;
@@ -14857,29 +12712,6 @@ ${await _agentsMdBlock()}
     // definition (a mounted agents/*.md, e.g. `my-plugin:reviewer`) whose
     // body, tools, skills and model drive the child.
     var agentType = (args['_agent_type'] as String?) ?? 'general-purpose';
-    final requestedType = (args['subagent_type'] as String? ?? '').trim();
-    if (!parent.isSubagent &&
-        args['_agent_type'] == null &&
-        requestedType.isNotEmpty &&
-        requestedType != 'general-purpose') {
-      final def = _agentDefinitionFor(parent.id, requestedType);
-      if (def == null) {
-        return 'Unknown subagent_type "$requestedType". Available: '
-            '${['general-purpose', for (final a in SkillService.I.agentsForSession(parent.id)) _agentTypeOf(a)].join(', ')}.';
-      }
-      final defArgs = await _agentDefinitionDispatchArgs(
-        def,
-        prompt,
-        label: args['label'] as String?,
-      );
-      agentType = defArgs['_agent_type'] as String;
-      persona = [
-        defArgs['persona'] as String,
-        if (persona.isNotEmpty) persona,
-      ].join('\n\n');
-      if (allowed.isEmpty) allowed = defArgs['allowed_tools'] as List<String>;
-      modelOverride ??= defArgs['_model'] as String?;
-    }
     modelOverride ??= args['_model'] as String?;
 
     // Zero nesting: a subagent is already a child, so it may not spawn one.
@@ -14918,7 +12750,6 @@ ${await _agentsMdBlock()}
       label: label,
       mode: childMode.name,
       continuable: continuable,
-      allowedTools: allowed,
       persona: persona,
       outputSchemaHint: outputHint,
       model: modelOverride,
@@ -14964,7 +12795,6 @@ ${await _agentsMdBlock()}
           'subagent $id · mode ${childMode.label}\n'
           'session ${child.id}\n'
           'task: $prompt\n'
-          '${allowed.isEmpty ? '' : 'tools: ${allowed.join(', ')}\n'}'
           '\n';
       AppState.I.refresh();
     }
@@ -15224,73 +13054,6 @@ ${await _agentsMdBlock()}
   /// Run a subagent's session as a REAL run: its transcript, tool cards and
   /// streaming all land in the child session, so the user can open it and
   /// see exactly what happened.
-  /// How many times a SubagentStop hook may block a child's stop. Claude Code
-  /// lets exit 2 send the subagent back to work; without a bound a hook that
-  /// always blocks would spin the child forever.
-  static const int _maxSubagentStopBlocks = 3;
-
-  /// Fire `subagent_end` as a BLOCKING check at the child's natural stop point.
-  /// Returns the hook's stderr when it exits 2 (Claude Code: block the stop and
-  /// keep working), else null. Fail-open on any error — a broken hook must
-  /// never wedge a settled child.
-  Future<String?> _subagentStopBlockReason(
-    ChatSession child,
-    SubagentInfo sub, {
-    bool stopHookActive = false,
-  }) async {
-    if (!HookService.I.hasHookListeners('subagent_end', sessionId: child.id)) {
-      return null;
-    }
-    try {
-      final res = await HookService.I.fireDetailed(
-        'subagent_end',
-        child.id,
-        payload: _subagentStopPayload(
-          child,
-          sub,
-          state: sub.state,
-          stopHookActive: stopHookActive,
-        ),
-        model: child.model,
-      );
-      // Claude Code SubagentStop decision contract: exit 2 (stderr) OR
-      // `{"decision":"block","reason":…}` keeps the subagent running with the
-      // reason as its next instruction.
-      if (res.blockedReason != null) return res.blockedReason;
-      for (final out in res.hookOutputs) {
-        final reason = HookService.jsonBlockReason(out);
-        if (reason != null) return reason;
-      }
-      return res.promptBlockReason;
-    } catch (e) {
-      Diag.swallow('agent_service.subagentStopHook', e);
-      return null;
-    }
-  }
-
-  /// SubagentStop stdin fields (Claude Code): `agent_id`, `agent_type`,
-  /// `agent_transcript_path` (the child's own transcript), the MAIN session's
-  /// `transcript_path` (via the identity resolver), `last_assistant_message`
-  /// and `stop_hook_active`. Legacy Ovid keys are kept for older hooks.
-  Map<String, dynamic> _subagentStopPayload(
-    ChatSession child,
-    SubagentInfo sub, {
-    required String state,
-    bool stopHookActive = false,
-  }) => {
-    'subagentId': sub.id,
-    'parentSessionId': sub.parentSessionId,
-    'state': state,
-    'interrupted': sub.interrupted,
-    'result': cleanTruncate(sub.result, 400),
-    'agent_id': sub.id,
-    'agent_type': sub.agentType,
-    'agent_transcript_path': _transcriptPathFor(child.id),
-    'last_assistant_message': sub.result,
-    'stop_hook_active': stopHookActive,
-    'transcript_path': _transcriptPathFor(child.id),
-  };
-
   Future<void> _runSubagentSession(
     SubagentInfo sub,
     String firstPrompt, {
@@ -15347,16 +13110,8 @@ ${await _agentsMdBlock()}
         AppState.I.refresh();
       });
     }
-    var endHookFired = false;
     var failed = false;
     try {
-      // Resuming a durable child after restart needs its own runtime/skill
-      // initialization too. Initial dispatch already fired this; the lifecycle
-      // service reserves exactly once per boot and child id.
-      await SessionLifecycleService.I.sessionStarted(
-        child,
-        reason: SessionStartReason.subagent,
-      );
       var next = firstPrompt;
       var expandNext = userReferences;
       void takeFollowUp() {
@@ -15371,7 +13126,6 @@ ${await _agentsMdBlock()}
         next = sub.messages.removeAt(0);
       }
 
-      var stopBlocks = 0;
       while (true) {
         if (sub.interrupted || !currentOwner()) break;
         child.messages.add(Message(role: 'user', content: next));
@@ -15380,46 +13134,19 @@ ${await _agentsMdBlock()}
         if (sub.interrupted || !currentOwner()) break;
         // A full run: streaming bubbles, tool cards, compaction, jobs — all
         // inside the child's own session and workspace.
-        await _subagentScope(sub).run(
-          () => runZoned(
-            () => runTask(
-              next,
-              sessionId: child.id,
-              freshTurn: false,
-              expandRefsFor: expandNext ? child : null,
-            ),
-            zoneValues: {#subagentRunOwner: sub},
+        await runZoned(
+          () => runTask(
+            next,
+            sessionId: child.id,
+            freshTurn: false,
+            expandRefsFor: expandNext ? child : null,
           ),
+          zoneValues: {#subagentRunOwner: sub},
         );
         if (!currentOwner()) break;
         sub.result = _lastAssistantText(child);
         if (sub.interrupted) break;
         if (sub.messages.isEmpty) {
-          // CLAUDE CODE PARITY (audit 2026-09-25): a SubagentStop hook that
-          // exits 2 BLOCKS the stop — the child keeps working with the hook's
-          // stderr as its next instruction. Bounded so a hook that always
-          // blocks cannot spin forever.
-          endHookFired = true;
-          final block = await _subagentStopBlockReason(
-            child,
-            sub,
-            stopHookActive: stopBlocks > 0,
-          );
-          if (sub.interrupted || !currentOwner()) break;
-          // A follow-up can arrive while the hook awaits. Recheck before the
-          // synchronous settlement below releases ownership and its slot.
-          if (sub.messages.isNotEmpty) {
-            endHookFired = false;
-            takeFollowUp();
-            continue;
-          }
-          if (block != null && stopBlocks < _maxSubagentStopBlocks) {
-            stopBlocks++;
-            endHookFired = false;
-            next = block;
-            expandNext = false;
-            continue;
-          }
           break;
         }
         takeFollowUp();
@@ -15429,33 +13156,6 @@ ${await _agentsMdBlock()}
       sub.result = 'Subagent failed: $e';
     } finally {
       mirror?.cancel();
-      // Task 8 (spec §8.1): subagent_end — observe hook at settlement
-      // (finished, interrupted, or failed — one fire per settled child).
-      // Skipped when the stop-point gate already fired it, so a natural stop
-      // never double-fires the same event.
-      if (!endHookFired &&
-          currentOwner() &&
-          HookService.I.hasHookListeners('subagent_end', sessionId: child.id)) {
-        try {
-          await HookService.I.fire(
-            'subagent_end',
-            child.id,
-            payload: _subagentStopPayload(
-              child,
-              sub,
-              state: failed
-                  ? 'failed'
-                  : sub.interrupted
-                  ? 'stopped'
-                  : 'finished',
-            ),
-            model: child.model,
-          );
-        } catch (e) {
-          Diag.swallow('agent_service.subagentEndHook', e);
-        }
-      }
-      // Release the reservation only after every child hook has unwound.
       sub
         ..finished = true
         ..finishedAt = DateTime.now();
@@ -17053,28 +14753,6 @@ class AgentTool {
   final String name;
   final String description;
   const AgentTool(this.name, this.description);
-}
-
-/// Usage tracking for plugin contributions (commands, skills, agents): a
-/// roster call whose model-visible name belongs to a registered plugin is
-/// recorded under that plugin. Other tools (built-ins, MCP — recorded by
-/// the MCP client itself) are ignored here.
-void _recordPluginToolUsage(
-  String toolName,
-  Duration elapsed, {
-  required bool ok,
-  String? error,
-}) {
-  final c = PluginContributionRegistry.I.contributionByToolName(toolName);
-  if (c == null || !c.isRosterTool) return;
-  ToolUsageStore.I.record(
-    kind: ToolUsageKind.pluginTool,
-    tool: c.name,
-    pluginId: c.pluginId,
-    ok: ok,
-    elapsed: elapsed,
-    error: ok ? null : error,
-  );
 }
 
 /// One remembered tool denial, decoded for display and revocation (F-109).

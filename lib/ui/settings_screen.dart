@@ -1,19 +1,18 @@
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../core/agent_service.dart';
+import '../core/distribution.dart';
+import '../core/cloud/byok_client.dart';
 import '../core/app_info.dart';
 import '../core/native_share.dart';
 import '../core/firebase_service.dart';
 import '../core/legal_links.dart';
 import '../core/model_limits.dart';
-import '../core/plan_mode.dart';
 import '../core/presets.dart';
-import '../core/skills.dart';
 import '../core/state.dart';
 import '../core/settings_actions.dart';
 import 'settings_action_widgets.dart';
@@ -213,6 +212,16 @@ class SettingsScreen extends StatelessWidget {
                   'BYOK · free & custom providers',
                   const ProvidersScreen(),
                 ),
+                if (Distribution.cloudByok) ...[
+                  _hairline(),
+                  _navTile(
+                    context,
+                    Icons.vpn_key_outlined,
+                    'Bring your own keys',
+                    'Escrow provider keys · encrypted server-side',
+                    const ByokKeysScreen(),
+                  ),
+                ],
                 _hairline(),
                 _navTile(
                   context,
@@ -236,29 +245,6 @@ class SettingsScreen extends StatelessWidget {
                   'Response wait limit',
                   'How long to wait for the model to respond (or resume) before giving up.',
                   const _TimeoutScreen(),
-                ),
-              ],
-            ),
-          ),
-
-          // ── Studio ────────────────────────────────────────────────────
-          const _SectionGap(),
-          const AetherSectionTitle(
-            eyebrow: 'Studio',
-            subtitle:
-                'Workspace agents, MCP servers and skill packs the agent can use in every chat.',
-          ),
-          const SizedBox(height: 10),
-          AetherCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                _navTile(
-                  context,
-                  Icons.auto_fix_high_outlined,
-                  'Skills',
-                  'Upload .md skill files the agent uses in chat',
-                  const SkillsScreen(),
                 ),
               ],
             ),
@@ -1532,47 +1518,6 @@ class _ContextModelScreen extends StatelessWidget {
                   ],
                 ),
               ),
-              SectionHeader(context.l10n.promptCachingTitle),
-              SwitchListTile(
-                dense: true,
-                title: Text(
-                  context.l10n.promptCachePrefixTitle,
-                  style: const TextStyle(fontSize: 14),
-                ),
-                subtitle: Text(
-                  context.l10n.promptCachePrefixSubtitle,
-                  style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-                ),
-                value: app.promptCachingEnabled,
-                activeTrackColor: Aether.accent,
-                onChanged: (v) => _savePreference(
-                  context,
-                  'ovid_prompt_caching',
-                  v,
-                  () => AppState.I.setPromptCaching(v),
-                ),
-              ),
-              SwitchListTile(
-                dense: true,
-                title: Text(
-                  context.l10n.promptCacheExtendedTitle,
-                  style: const TextStyle(fontSize: 14),
-                ),
-                subtitle: Text(
-                  context.l10n.promptCacheExtendedSubtitle,
-                  style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-                ),
-                value: app.promptCacheTtl1h,
-                activeTrackColor: Aether.accent,
-                onChanged: app.promptCachingEnabled
-                    ? (v) => _savePreference(
-                        context,
-                        'ovid_prompt_cache_ttl_1h',
-                        v,
-                        () => AppState.I.setPromptCacheTtl1h(v),
-                      )
-                    : null,
-              ),
               const SectionHeader('Max output tokens'),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 18),
@@ -1751,364 +1696,6 @@ class _AboutLinkTile extends StatelessWidget {
   }
 }
 
-/// ── Skills screen (Settings → Personalization → Skills) ────────────────
-/// Upload .md skill files ONLY. Uploaded skills live in a GLOBAL app-docs
-/// folder (`<docs>/skills`) that SkillService scans on every run, so the
-/// agent can use them in any chat via the `skill` tool, `/skill-name`
-/// invocation, or the composer slash menu.
-/// Test seam: replaces [AgentService.refreshSkills] for the Skills screen.
-@visibleForTesting
-Future<void> Function()? refreshSkillsForTest;
-
-class SkillsScreen extends StatefulWidget {
-  const SkillsScreen({super.key});
-  @override
-  State<SkillsScreen> createState() => _SkillsScreenState();
-}
-
-class _SkillsScreenState extends State<SkillsScreen> {
-  List<Skill> _skills = const [];
-  bool _loading = true;
-  UserError? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _reload();
-  }
-
-  Future<void> _reload() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      await (refreshSkillsForTest ?? AgentService.I.refreshSkills)();
-      if (!mounted) return;
-      // Show ONLY global user-uploaded skills here — workspace skills are
-      // managed by the agent inside each session.
-      final docs = await getApplicationDocumentsDirectory();
-      final root = '${docs.path}/skills';
-      final all = SkillService.I.skills.where((s) => s.path.startsWith(root));
-      if (!mounted) return;
-      setState(() {
-        _skills = all.toList()..sort((a, b) => a.name.compareTo(b.name));
-      });
-    } catch (e, st) {
-      if (!mounted) return;
-      setState(() {
-        _error = UserError.from(
-          e,
-          l10n: context.l10n,
-          stack: st,
-          log: 'settings_screen.skills_reload',
-        );
-      });
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  Future<void> _upload() async {
-    final l = context.l10n;
-    try {
-      await _uploadFiles(l);
-    } catch (e, st) {
-      // Picker (PlatformException) and folder creation failures used to
-      // escape as uncaught async errors with no feedback.
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            l.skillsUploadFailed(
-              friendlyError(
-                e,
-                l10n: l,
-                stack: st,
-                log: 'settings_screen.skills_upload',
-              ),
-            ),
-          ),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
-  }
-
-  Future<void> _uploadFiles(AppLocalizations l) async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: const ['md'],
-      allowMultiple: true,
-      withData: false,
-    );
-    if (result == null || result.files.isEmpty) return;
-    final docs = await getApplicationDocumentsDirectory();
-    final dir = Directory('${docs.path}/skills');
-    dir.createSync(recursive: true);
-
-    var ok = 0;
-    final errors = <String>[];
-    for (final f in result.files) {
-      final src = f.path;
-      final name = f.name;
-      if (src == null || !name.toLowerCase().endsWith('.md')) {
-        errors.add('$name — not a .md file');
-        continue;
-      }
-      try {
-        final srcFile = File(src);
-        final size = await srcFile.length();
-        if (size > 512 * 1024) {
-          errors.add(
-            '$name — too large (${(size / 1024).toStringAsFixed(0)} KB, max 512 KB)',
-          );
-          continue;
-        }
-        // Collision-safe: suffix if a skill with this name already exists.
-        var destName = name;
-        var dest = File('${dir.path}/$destName');
-        var n = 1;
-        while (dest.existsSync()) {
-          final dot = name.lastIndexOf('.');
-          destName = dot > 0
-              ? '${name.substring(0, dot)}_$n${name.substring(dot)}'
-              : '${name}_$n';
-          dest = File('${dir.path}/$destName');
-          n++;
-        }
-        await srcFile.copy(dest.path);
-        ok++;
-      } catch (e, st) {
-        errors.add(
-          l.skillsUploadFileFailed(
-            name,
-            friendlyError(
-              e,
-              l10n: l,
-              stack: st,
-              log: 'settings_screen.skills_upload_file',
-            ),
-          ),
-        );
-      }
-    }
-    await _reload();
-    if (!mounted) return;
-    final msg = errors.isEmpty
-        ? '$ok skill${ok == 1 ? '' : 's'} uploaded — the agent can now use '
-              '${ok == 1 ? 'it' : 'them'} in any chat.'
-        : '$ok uploaded · ${errors.length} skipped: ${errors.take(2).join(' · ')}';
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
-    );
-  }
-
-  Future<void> _delete(Skill s) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(
-          'Delete "${s.name}"?',
-          style: const TextStyle(fontSize: 15),
-        ),
-        content: const Text('The agent will no longer see this skill in chat.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: Text('Delete', style: TextStyle(color: Aether.danger)),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    try {
-      final f = File(s.path);
-      if (f.existsSync()) await f.delete();
-    } catch (e) {
-      Diag.swallow('settings_screen', e);
-    }
-    await _reload();
-  }
-
-  Future<void> _preview(Skill s) async {
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(s.name, style: const TextStyle(fontSize: 16)),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: SingleChildScrollView(
-            child: Text(
-              s.content,
-              style: TextStyle(
-                fontSize: 12.5,
-                height: 1.5,
-                color: Aether.textMuted,
-              ),
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Close'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Aether.bg,
-      appBar: AppBar(
-        leading: const BackButton(),
-        title: const Text('Skills'),
-        actions: [
-          IconButton(
-            tooltip: 'Upload .md skill',
-            onPressed: _upload,
-            icon: const Icon(Icons.upload_file_outlined, size: 20),
-          ),
-        ],
-      ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
-          : _error != null
-          ? ErrorRetryView(
-              message:
-                  '${context.l10n.skillsLoadFailed} ${_error!.message}',
-              detail: _error!.detail,
-              onRetry: _reload,
-            )
-          : _skills.isEmpty
-          ? _empty(context)
-          : ListView.separated(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 40),
-              itemCount: _skills.length,
-              separatorBuilder: (_, _) => const SizedBox(height: 8),
-              itemBuilder: (_, i) {
-                final s = _skills[i];
-                return Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Aether.surface,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Aether.hairline),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.auto_fix_high_outlined,
-                        size: 18,
-                        color: Aether.accent,
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              s.name,
-                              style: const TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            if (s.description.isNotEmpty) ...[
-                              const SizedBox(height: 2),
-                              Text(
-                                s.description,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 11.5,
-                                  color: Aether.textFaint,
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: 'Preview',
-                        onPressed: () => _preview(s),
-                        icon: Icon(
-                          Icons.visibility_outlined,
-                          size: 17,
-                          color: Aether.textMuted,
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: 'Delete',
-                        onPressed: () => _delete(s),
-                        icon: Icon(
-                          Icons.delete_outline,
-                          size: 17,
-                          color: Aether.danger,
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            ),
-    );
-  }
-
-  Widget _empty(BuildContext context) {
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(vertical: 24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.auto_fix_high_outlined,
-              size: 40,
-              color: Aether.textFaint,
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'No skills yet',
-              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 6),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 40),
-              child: Text(
-                'Upload .md skill files. The agent can then call them in any '
-                'chat with the skill tool, or you can type /name directly.',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 12,
-                  height: 1.5,
-                  color: Aether.textFaint,
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            FilledButton.icon(
-              onPressed: _upload,
-              icon: const Icon(Icons.upload_file_outlined, size: 18),
-              label: const Text('Upload .md skill'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _PresetsScreen extends StatefulWidget {
   const _PresetsScreen();
 
@@ -2178,7 +1765,6 @@ class _PresetsScreenState extends State<_PresetsScreen> {
       model: preset.model,
       modelProviderId: preset.modelProviderId,
       temperature: preset.temperature,
-      planAllowedTools: List.of(preset.planAllowedTools),
     );
     await AppState.I.saveCustomPreset(newPreset);
     if (!mounted) return;
@@ -2411,17 +1997,12 @@ class _PresetTileState extends State<_PresetTile> {
                 ),
                 if (p.model != null ||
                     p.temperature != null ||
-                    p.planAllowedTools.isNotEmpty ||
                     isCustom) ...[
                   const SizedBox(height: 2),
                   Text(
                     [
                       if (p.model != null) 'model: ${p.model}',
                       if (p.temperature != null) 'temp: ${p.temperature}',
-                      if (p.planAllowedTools.isNotEmpty)
-                        'plan allowlist: ${p.planAllowedTools.length} selected',
-                      if (p.planAllowedTools.isEmpty)
-                        'plan allowlist: built-in policy',
                     ].join(' · '),
                     style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
                   ),
@@ -2503,66 +2084,6 @@ class _PresetTileState extends State<_PresetTile> {
                       },
                     ),
                 ],
-              ),
-            ),
-            // ── G5: the plan-mode allowlist (custom presets only) ──────────
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
-              child: Text(
-                'Plan-mode allowlist (checked = allowed while planning). '
-                'None checked = the built-in plan policy.',
-                style: TextStyle(
-                  fontSize: 11.5,
-                  fontWeight: FontWeight.w600,
-                  color: Aether.textMuted,
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: [
-                  for (final tool in PlanModePolicy.catalogue)
-                    FilterChip(
-                      // A `*` marks a tool Read-Only still refuses even when
-                      // the plan policy lists it (the plan preset forces
-                      // Read-Only) — labelled, not silently implied.
-                      label: Text(
-                        PlanModePolicy.readOnlyBlocked.contains(tool)
-                            ? '$tool*'
-                            : tool,
-                        style: const TextStyle(fontSize: 11),
-                      ),
-                      selected: p.planAllowedTools.contains(tool),
-                      selectedColor: Aether.warn.withValues(alpha: 0.2),
-                      checkmarkColor: Aether.warn,
-                      onSelected: (selected) {
-                        final current = List<String>.from(p.planAllowedTools);
-                        if (selected) {
-                          if (!current.contains(tool)) current.add(tool);
-                        } else {
-                          current.remove(tool);
-                        }
-                        widget.onUpdate?.call(
-                          p.copyWith(planAllowedTools: current),
-                        );
-                      },
-                    ),
-                ],
-              ),
-            ),
-            // Footnote for the `*` suffix above. A labelling fix only — the
-            // chip's selection logic and the saved value are untouched.
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-              child: Text(
-                '* Read-Only mode refuses this outright — and the plan '
-                'preset forces Read-Only — so ticking it only widens the plan '
-                'policy; Read-Only still blocks it. (`run_shell` carries no '
-                'marker: Read-Only runs its read-only commands.)',
-                style: TextStyle(fontSize: 10.5, color: Aether.textMuted),
               ),
             ),
             // ── G3: model + temperature pins for this preset's runs ───────
@@ -2762,6 +2283,362 @@ class _PresetModelPickerSheetState extends State<_PresetModelPickerSheet> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// ── BYOK escrow (Settings → Models → Bring your own keys) ────────────────
+///
+/// Write-once keys: the raw value is sent to `POST /byok` and then dropped.
+/// The server never projects it back, so this screen can only ever render
+/// providerId + endpoint + label + status (there is no fingerprint field in
+/// the built P9 schema). Nothing key-shaped is written to SharedPreferences.
+class ByokKeysScreen extends StatefulWidget {
+  const ByokKeysScreen({super.key});
+
+  @override
+  State<ByokKeysScreen> createState() => _ByokKeysScreenState();
+}
+
+class _ByokKeysScreenState extends State<ByokKeysScreen> {
+  List<ByokKeyDto> _keys = const [];
+  bool _loading = true;
+  String? _error;
+  final Set<String> _busy = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final keys = await ByokClient.I.list();
+      if (!mounted) return;
+      setState(() {
+        _keys = keys;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = friendlyError(e);
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _add() async {
+    final entry = await showDialog<_ByokEntry>(
+      context: context,
+      builder: (_) => const _ByokAddDialog(),
+    );
+    if (entry == null || !mounted) return;
+    setState(() => _busy.add('add'));
+    try {
+      await ByokClient.I.upload(
+        providerId: entry.providerId,
+        endpoint: entry.endpoint,
+        apiKey: entry.apiKey,
+        label: entry.label,
+      );
+      if (!mounted) return;
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not save the key: ${friendlyError(e)}'),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _busy.remove('add'));
+    }
+  }
+
+  Future<void> _remove(ByokKeyDto key) async {
+    setState(() => _busy.add(key.id));
+    try {
+      await ByokClient.I.revoke(key.id);
+      if (!mounted) return;
+      setState(() => _keys = _keys.where((k) => k.id != key.id).toList());
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not remove the key: ${friendlyError(e)}'),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _busy.remove(key.id));
+    }
+  }
+
+  Future<void> _test(ByokKeyDto key) async {
+    setState(() => _busy.add(key.id));
+    try {
+      final result = await ByokClient.I.test(key.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            result.ok
+                ? '${key.providerId} responded successfully.'
+                : 'Test failed${result.error == null ? '' : ': ${result.error}'}.',
+          ),
+        ),
+      );
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not test the key: ${friendlyError(e)}'),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _busy.remove(key.id));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: const Text('Bring your own keys'),
+        backgroundColor: Aether.bg,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+        children: [
+          const AetherSectionTitle(
+            eyebrow: 'Escrow',
+            subtitle:
+                'Keys are encrypted on the server and never shown again. '
+                'Ovid Cloud uses them only for the provider endpoint you '
+                'register here.',
+          ),
+          const SizedBox(height: 12),
+          if (_error != null)
+            AetherCard(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Could not load keys', style: AetherType.title),
+                  const SizedBox(height: 4),
+                  Text(_error!, style: AetherType.bodyMuted),
+                  const SizedBox(height: 8),
+                  AetherSecondaryButton(label: 'Retry', onPressed: _load),
+                ],
+              ),
+            )
+          else if (_loading && _keys.isEmpty)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: CircularProgressIndicator(strokeWidth: 1.6),
+              ),
+            )
+          else if (_keys.isEmpty)
+            AetherCard(
+              key: const ValueKey('byok-empty'),
+              padding: const EdgeInsets.all(18),
+              child: Text('No keys yet', style: AetherType.bodyMuted),
+            )
+          else
+            for (final key in _keys) ...[
+              AetherCard(
+                key: ValueKey('byok-row-${key.id}'),
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.vpn_key_outlined,
+                            size: 18, color: Aether.accent),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            key.providerId,
+                            style: AetherType.title,
+                          ),
+                        ),
+                        AetherPill(label: key.status, color: Aether.textMuted),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(key.endpoint, style: AetherType.bodyMuted),
+                    if (key.label != null && key.label!.trim().isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(key.label!, style: AetherType.bodyMuted),
+                    ],
+                    const SizedBox(height: 8),
+                    OverflowBar(
+                      spacing: 8,
+                      overflowSpacing: 4,
+                      children: [
+                        AetherGhostButton(
+                          label: _busy.contains(key.id) ? 'Testing…' : 'Test',
+                          icon: Icons.bolt_outlined,
+                          onPressed: _busy.contains(key.id)
+                              ? null
+                              : () => _test(key),
+                        ),
+                        AetherGhostButton(
+                          label: 'Remove',
+                          icon: Icons.delete_outline,
+                          onPressed: _busy.contains(key.id)
+                              ? null
+                              : () => _remove(key),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
+            ],
+          const SizedBox(height: 8),
+          FilledButton.icon(
+            onPressed: _busy.contains('add') ? null : _add,
+            icon: const Icon(Icons.add, size: 18),
+            label: const Text('Add key'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Values returned by the add dialog. Deliberately short-lived: the raw key
+/// exists only in the controller and the request body.
+class _ByokEntry {
+  const _ByokEntry({
+    required this.providerId,
+    required this.endpoint,
+    required this.apiKey,
+    this.label,
+  });
+
+  final String providerId;
+  final String endpoint;
+  final String apiKey;
+  final String? label;
+}
+
+class _ByokAddDialog extends StatefulWidget {
+  const _ByokAddDialog();
+
+  @override
+  State<_ByokAddDialog> createState() => _ByokAddDialogState();
+}
+
+class _ByokAddDialogState extends State<_ByokAddDialog> {
+  final _provider = TextEditingController();
+  final _endpoint = TextEditingController();
+  final _apiKey = TextEditingController();
+  final _label = TextEditingController();
+
+  @override
+  void dispose() {
+    _provider.dispose();
+    _endpoint.dispose();
+    _apiKey.dispose();
+    _label.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final provider = _provider.text.trim();
+    final endpoint = _endpoint.text.trim();
+    final apiKey = _apiKey.text.trim();
+    if (provider.isEmpty || endpoint.isEmpty || apiKey.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Provider, endpoint and key are all required.'),
+        ),
+      );
+      return;
+    }
+    Navigator.of(context).pop(
+      _ByokEntry(
+        providerId: provider,
+        endpoint: endpoint,
+        apiKey: apiKey,
+        label: _label.text.trim().isEmpty ? null : _label.text.trim(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Add provider key'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              key: const ValueKey('byok-provider'),
+              controller: _provider,
+              decoration: const InputDecoration(
+                labelText: 'Provider id',
+                hintText: 'anthropic',
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              key: const ValueKey('byok-endpoint'),
+              controller: _endpoint,
+              decoration: const InputDecoration(
+                labelText: 'Endpoint',
+                hintText: 'https://api.anthropic.com/v1',
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              key: const ValueKey('byok-api-key'),
+              controller: _apiKey,
+              obscureText: true,
+              autocorrect: false,
+              enableSuggestions: false,
+              decoration: const InputDecoration(
+                labelText: 'API key',
+                helperText: 'Sent once · never shown again',
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              key: const ValueKey('byok-label'),
+              controller: _label,
+              decoration: const InputDecoration(
+                labelText: 'Label (optional)',
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _save,
+          child: const Text('Save key'),
+        ),
+      ],
     );
   }
 }

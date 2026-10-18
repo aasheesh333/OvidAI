@@ -4,11 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
-import 'package:ovid_ai/ui/subagent_screen.dart';
 import 'package:ovid_ai/ui/trajectory_screen.dart';
 import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
 
@@ -22,22 +20,15 @@ import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  final agent = AgentService.I;
-  // AppState.I is a getter whose target changes across setUp()
-  // (resetTestInstance / createForTest), so always read it fresh inside tests.
-  AppState app() => AppState.I;
-
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     AppState.resetTestInstance();
     AppState.createForTest().seenWelcomeVersion = AppState.welcomeVersion;
-    agent.debugPauseScheduleTimerForTest(true);
     SessionLedger.rootOverrideForTest = await Directory.systemTemp
         .createTemp('wave2-trajectory-');
   });
 
   tearDown(() {
-    agent.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
     final root = SessionLedger.rootOverrideForTest;
     SessionLedger.rootOverrideForTest = null;
@@ -69,114 +60,6 @@ void main() {
     expect(find.byType(CircularProgressIndicator), findsNothing,
         reason: 'Ledger must leave loading once real IO completes');
   }
-
-  testWidgets(
-    'subagent catalog renders AetherEmptyState when a parent has no children '
-    'and preserves dispatch open route',
-    (tester) async {
-      final parent = ChatSession(
-        id: 'wave2-ui-parent-empty',
-        title: 'Parent',
-        model: 'm',
-        mode: 'auto',
-      );
-      app().sessions.add(parent);
-      await tester.pumpWidget(
-        host(
-          Builder(
-            builder: (context) => Scaffold(
-              body: Center(
-                child: TextButton(
-                  onPressed: () => showSubagentCatalog(context, parent.id),
-                  child: const Text('open-catalog'),
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.tap(find.text('open-catalog'));
-      await tester.pumpAndSettle();
-
-      expect(
-        find.byKey(const ValueKey('subagent-catalog-empty')),
-        findsOneWidget,
-      );
-      expect(find.byType(AetherEmptyState), findsOneWidget);
-    },
-  );
-
-  testWidgets(
-    'subagent catalog renders an AetherCard per child with status pill and '
-    'stop ghost for running ones',
-    (tester) async {
-      final parent = ChatSession(
-        id: 'wave2-ui-parent',
-        title: 'Parent',
-        model: 'm',
-        mode: 'auto',
-      );
-      final childRunning = ChatSession(
-        id: 'wave2-ui-child-running',
-        title: 'child-running',
-        model: 'm',
-        mode: 'auto',
-        parentId: parent.id,
-        agentState: 'running',
-      );
-      final childDone = ChatSession(
-        id: 'wave2-ui-child-done',
-        title: 'child-done',
-        model: 'm',
-        mode: 'auto',
-        parentId: parent.id,
-        agentState: 'finished',
-      );
-      app().sessions.addAll([parent, childRunning, childDone]);
-      agent.runBucketForTest(childRunning.id).activeRunId = 'r-running';
-
-      await tester.pumpWidget(
-        host(
-          Builder(
-            builder: (context) => Scaffold(
-              body: Center(
-                child: TextButton(
-                  onPressed: () => showSubagentCatalog(context, parent.id),
-                  child: const Text('open-catalog'),
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.tap(find.text('open-catalog'));
-      // The running child's AetherStatusDot drives a repeating pulse
-      // AnimationController, so pumpAndSettle never terminates. Pump a few
-      // frames to let the bottom sheet open and the catalog build.
-      for (var i = 0; i < 10; i++) {
-        await tester.pump(const Duration(milliseconds: 50));
-      }
-
-      expect(find.byType(AetherCard), findsNWidgets(2));
-      // Each child's state surfaces as a pill; stop ghost only for running.
-      expect(find.byType(AetherPill), findsNWidgets(2));
-      expect(
-        find.byKey(ValueKey('subagent-stop-${childRunning.id}')),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(ValueKey('subagent-stop-${childDone.id}')),
-        findsNothing,
-      );
-      // Dispatch open route is still a TextButton inside the catalog cards:
-      // tapping the running card still runs SubagentScreen.open (verified by
-      // the InkWell wrapper being hit-testable).
-      expect(find.text('child-running'), findsOneWidget);
-      expect(find.text('child-done'), findsOneWidget);
-
-      agent.dropSessionRun(childRunning.id);
-    },
-  );
 
   testWidgets(
     'trajectory screen renders AetherEmptyState when the ledger has no events',

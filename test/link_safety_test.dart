@@ -5,7 +5,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ovid_ai/core/agent_service.dart';
-import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/core/url_safety.dart';
@@ -71,8 +70,6 @@ void main() {
       final app = AppState.createForTest();
       app.seenWelcomeVersion = AppState.welcomeVersion;
       AgentService.I.debugPauseScheduleTimerForTest(true);
-      AgentService.skillCatalogInputsForTest = (_) async =>
-          SkillCatalogInputs();
       AgentService.I.pendingApproval = null;
       launched.clear();
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -94,7 +91,6 @@ void main() {
             const MethodChannel('plugins.flutter.io/url_launcher'),
             null,
           );
-      AgentService.skillCatalogInputsForTest = null;
       AppState.resetTestInstance();
     });
 

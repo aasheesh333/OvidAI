@@ -48,7 +48,7 @@ void main() {
   );
 
   testWidgets(
-    'renders Account / Personalization / Data controls / Models / Studio sections',
+    'renders Account / Personalization / Data controls / Models sections',
     (tester) async {
       // Give the screen a tall viewport so every section is laid out and
       // reachable via a single scroll pass.
@@ -67,7 +67,6 @@ void main() {
       expect(find.text('PERSONALIZATION'), findsOneWidget);
       expect(find.text('DATA CONTROLS'), findsOneWidget);
       expect(find.text('MODELS'), findsOneWidget);
-      expect(find.text('STUDIO'), findsOneWidget);
 
       // Multiple AetherCard surfaces are composed into the list — one per
       // section bucket at minimum.

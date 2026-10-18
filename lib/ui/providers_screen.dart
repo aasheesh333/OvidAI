@@ -3,7 +3,6 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
-import '../core/prompt_cache.dart';
 import 'package:http/http.dart' as http;
 
 import '../core/diag.dart';
@@ -1103,32 +1102,6 @@ class _EditProviderSheetState extends State<_EditProviderSheet> {
                 ],
               ),
               const SizedBox(height: 16),
-              Text(context.l10n.promptCachingTitle, style: AetherType.label),
-              const SizedBox(height: 2),
-              Text(
-                context.l10n.promptCacheProviderHelp,
-                style: AetherType.caption,
-              ),
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final option in PromptCacheOverride.values)
-                    ChoiceChip(
-                      label: Text(
-                        option.name[0].toUpperCase() + option.name.substring(1),
-                      ),
-                      selected: provider.promptCache == option,
-                      materialTapTargetSize: MaterialTapTargetSize.padded,
-                      onSelected: (_) => AppState.I.updateProviderPromptCache(
-                        provider,
-                        option,
-                      ),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 20),
               Wrap(
                 spacing: 12,
                 crossAxisAlignment: WrapCrossAlignment.center,

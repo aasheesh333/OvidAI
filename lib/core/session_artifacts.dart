@@ -31,6 +31,7 @@ class SessionArtifact {
     required this.origin,
     required this.kind,
     this.path,
+    this.url,
     this.size,
     this.html,
     this.toolName,
@@ -43,6 +44,9 @@ class SessionArtifact {
   /// Absolute host path, or a workspace-relative path for tool-written files.
   /// Null for inline HTML artifacts.
   final String? path;
+
+  /// Presigned R2 URL for cloud artifacts (D7). Local-only entries have none.
+  final String? url;
   final String sessionId;
   final String sessionTitle;
   final DateTime time;
@@ -242,6 +246,7 @@ List<SessionArtifact> collectSessionArtifacts(Iterable<ChatSession> sessions) {
               id: '${s.id}:up:${m.privateSyncId}:$a',
               name: att.name,
               path: att.path,
+              url: att.url,
               size: att.size,
               sessionId: s.id,
               sessionTitle: s.title,
@@ -254,12 +259,15 @@ List<SessionArtifact> collectSessionArtifacts(Iterable<ChatSession> sessions) {
         continue;
       }
       switch (m.kind) {
-        case MsgKind.imageGen when (m.imagePath ?? '').isNotEmpty:
+        case MsgKind.imageGen
+            when (m.imagePath ?? '').isNotEmpty || (m.imageUrl ?? '').isNotEmpty:
+          final imageRef = m.imagePath ?? m.imageUrl!;
           out.add(
             SessionArtifact(
               id: '${s.id}:img:${m.privateSyncId}',
-              name: _base(m.imagePath!),
+              name: _base(imageRef),
               path: m.imagePath,
+              url: m.imageUrl,
               sessionId: s.id,
               sessionTitle: s.title,
               time: m.time,

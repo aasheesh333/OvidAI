@@ -208,7 +208,7 @@ void main() {
   });
 
   test(
-    'canonical enumeration includes the usage participant in order',
+    'canonical enumeration includes every participant in order',
     () async {
       final stores = <ResetStoreKind, ResetStore>{
         for (final kind in ResetStoreKind.values) kind: _FakeStore(kind.id),
@@ -223,7 +223,6 @@ void main() {
         'search',
         'ledger',
         'memory',
-        'usage',
         'account',
         'image-receipts',
         'shares',
@@ -236,7 +235,6 @@ void main() {
         'cache',
         'cookies',
         'drafts',
-        'tool-usage',
       ]);
       expect(report.success, isTrue);
     },

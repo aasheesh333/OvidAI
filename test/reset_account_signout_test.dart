@@ -51,7 +51,6 @@ void main() {
     directory = await Directory.systemTemp.createTemp('reset-account-signout-');
     originalPaths = PathProviderPlatform.instance;
     PathProviderPlatform.instance = _Paths(directory);
-    AppState.usageRootOverrideForTest = directory;
     SessionSearch.dbPathOverrideForTest = '${directory.path}/search.db';
     app = AppState.createForTest(memoryStore: MemoryStore(directory));
     app.suspendCoalescedPersistenceForTest = true;
@@ -80,7 +79,6 @@ void main() {
     await app.awaitPendingSessionWritesForTest();
     await SessionSearch.I.close();
     SessionSearch.dbPathOverrideForTest = null;
-    AppState.usageRootOverrideForTest = null;
     AppState.resetTestInstance();
     PathProviderPlatform.instance = originalPaths;
     await directory.delete(recursive: true);

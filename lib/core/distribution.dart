@@ -63,8 +63,13 @@ class Distribution {
   /// MCP/plugin runtime is dark until P5.
   static bool get cloudPlugins => false;
 
-  /// BYOK escrow is dark until the P9 escrow endpoints.
-  static bool get cloudByok => false;
+  /// BYOK escrow is live with the P9 escrow endpoints.
+  ///
+  /// Test seam: force it on/off without a build define.
+  @visibleForTesting
+  static bool? byokOverrideForTest;
+
+  static bool get cloudByok => byokOverrideForTest ?? true;
 
   /// Accessibility-driven Control mode. Removed entirely in P8 Task 13
   /// (spec D5): false for every channel, not just Play.

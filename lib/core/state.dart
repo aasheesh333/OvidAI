@@ -7,7 +7,6 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter/widgets.dart' show Brightness, WidgetsBinding;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -16,29 +15,22 @@ import 'agent_service.dart' show AgentService;
 import 'firebase_service.dart';
 import 'cloud_app_check.dart';
 import 'github_service.dart';
-import 'grant_store.dart';
-import 'tool_usage_store.dart';
 import 'html_artifact.dart';
 import 'image_receipt_store.dart';
 import 'image_studio.dart';
 import 'model_limits.dart';
-import 'prompt_cache.dart';
 import 'composer_drafts.dart';
 import 'studio_drafts.dart';
 import 'memory_store.dart';
-import 'usage_attempt.dart';
-import 'usage_attempt_store.dart';
 import 'secure_store.dart';
 import 'security_service.dart';
 import 'theme.dart';
 import 'conversation_share_service.dart';
-import 'session_lifecycle_service.dart';
 import 'session_history_store.dart';
 import 'session_search.dart';
 import 'session_ledger.dart';
 import 'settings_actions.dart';
 import 'settings_backup_service.dart';
-import 'skills.dart' show SkillService;
 import 'presets.dart';
 import 'reset_coordinator.dart';
 import 'distribution.dart';
@@ -127,11 +119,6 @@ class ProviderConfig {
   ApiFormat apiFormat;
   bool _hasExplicitApiFormat;
 
-  /// Prompt-cache override for this provider: auto = capability detection
-  /// (BYOK custom endpoints get no markers), on = force cache_control
-  /// markers, off = never send them.
-  PromptCacheOverride promptCache = PromptCacheOverride.auto;
-
   /// Per-model vision override. `true` = force vision-capable, `false` =
   /// force text-only, absent = auto-detect. Lets a user enable a model whose
   /// id the allowlist cannot parse (custom/aggregator endpoints) without
@@ -177,7 +164,6 @@ class ProviderConfig {
           ? normalizeOvidCloudBaseUrl(persistedBaseUrl)
           : persistedBaseUrl;
     }
-    promptCache = PromptCacheOverride.parse(entry['promptCache']);
     final fmt = entry['apiFormat'];
     if (fmt is String && fmt.isNotEmpty) {
       apiFormat = ApiFormat.parse(fmt);
@@ -269,7 +255,6 @@ class ProviderConfig {
     'models': models,
     'requiresApiKey': requiresApiKey,
     'apiFormat': apiFormat.wire,
-    if (promptCache != PromptCacheOverride.auto) 'promptCache': promptCache.name,
     if (_visionOverrides.isNotEmpty)
       'visionOverrides': Map<String, bool>.from(_visionOverrides),
     if (fetchedModels.isNotEmpty) 'fetchedModels': fetchedModels.toList(),
@@ -283,64 +268,6 @@ String _slug(String value) => value
     .replaceAll(RegExp(r'^-+|-+$'), '');
 
 String _baseModel(String value) => value.split('·').first.trim();
-
-/// One metered model call — appended by the agent loop per request.
-/// Persisted (capped history) and aggregated by the Usage screen.
-class UsageEntry {
-  final DateTime time;
-  final String providerId;
-  final String providerName;
-  final String model;
-  final int promptTokens;
-  final int completionTokens;
-  final int totalTokens;
-
-  /// Cache accounting (PR18, token-meter parity): prompt_tokens
-  /// decomposed into cache-read (KV reused) and cache-write (new KV).
-  final int cacheReadTokens;
-  final int cacheWriteTokens;
-  final Duration duration;
-
-  UsageEntry({
-    required this.time,
-    required this.providerId,
-    required this.providerName,
-    required this.model,
-    required this.promptTokens,
-    required this.completionTokens,
-    required this.totalTokens,
-    this.cacheReadTokens = 0,
-    this.cacheWriteTokens = 0,
-    required this.duration,
-  });
-
-  Map<String, dynamic> toJson() => {
-    't': time.toIso8601String(),
-    'pid': providerId,
-    'pn': providerName,
-    'm': model,
-    'pt': promptTokens,
-    'ct': completionTokens,
-    'tt': totalTokens,
-    if (cacheReadTokens > 0) 'cr': cacheReadTokens,
-    if (cacheWriteTokens > 0) 'cw': cacheWriteTokens,
-    'd': duration.inMilliseconds,
-  };
-
-  factory UsageEntry.fromJson(Map<String, dynamic> j) => UsageEntry(
-    time: DateTime.tryParse(j['t'] as String? ?? '') ?? DateTime.now(),
-    providerId: j['pid'] as String? ?? '',
-    providerName: j['pn'] as String? ?? '',
-    model: j['m'] as String? ?? '',
-    promptTokens: j['pt'] as int? ?? 0,
-    completionTokens: j['ct'] as int? ?? 0,
-    totalTokens: j['tt'] as int? ?? 0,
-    cacheReadTokens: j['cr'] as int? ?? 0,
-    cacheWriteTokens: j['cw'] as int? ?? 0,
-    duration: Duration(milliseconds: j['d'] as int? ?? 0),
-  );
-}
-
 
 enum ServiceHealth { connecting, working, failed }
 
@@ -435,19 +362,25 @@ class MessageAttachment {
   /// Actual workspace path, retained for later turns and process restarts.
   /// Null on messages written before attachment paths were persisted.
   final String? path;
-  MessageAttachment({required this.name, required this.size, this.path});
+
+  /// Presigned R2 download URL (P7/P8): cloud artifacts are fetched by URL,
+  /// not from a local workspace.
+  final String? url;
+  MessageAttachment({required this.name, required this.size, this.path, this.url});
 
   factory MessageAttachment.fromJson(Map<String, dynamic> j) =>
       MessageAttachment(
         name: j['name'] as String? ?? 'file',
         size: (j['size'] as num?)?.toInt() ?? 0,
         path: j['path'] as String?,
+        url: j['url'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
     'name': name,
     'size': size,
     if (path != null) 'path': path,
+    if (url != null) 'url': url,
   };
 }
 
@@ -517,6 +450,7 @@ class Message {
     this.toolInput,
     this.attachments = const [],
     this.imagePath,
+    this.imageUrl,
     this.imageRequestId,
     this.htmlArtifact,
     this.feedback,
@@ -529,6 +463,10 @@ class Message {
   /// Local file path for `MsgKind.imageGen` rows — the generated image
   /// saved into the session workspace (rendered in-chat, tappable to open).
   final String? imagePath;
+
+  /// Presigned R2 URL for a generated image (cloud result). Local builds
+  /// carried an on-disk [imagePath]; cloud results are URL-backed.
+  final String? imageUrl;
 
   /// Ovid Cloud image request id behind an `imageGen` row, so Image receipts
   /// can show the saved result instead of "unavailable".
@@ -579,6 +517,7 @@ class Message {
     toolSessionId: j['toolSessionId'] as String?,
     toolInput: j['toolInput'] as String?,
     imagePath: j['imagePath'] as String?,
+    imageUrl: j['imageUrl'] as String?,
     imageRequestId: j['imageRequestId'] is String
         ? j['imageRequestId'] as String
         : null,
@@ -608,6 +547,7 @@ class Message {
     if (toolSessionId != null) 'toolSessionId': toolSessionId,
     if (toolInput != null) 'toolInput': toolInput,
     if (imagePath != null) 'imagePath': imagePath,
+    if (imageUrl != null) 'imageUrl': imageUrl,
     if (imageRequestId != null) 'imageRequestId': imageRequestId,
     if (htmlArtifact != null) 'htmlArtifact': htmlArtifact!.toJson(),
     if (feedback != null) 'feedback': feedback,
@@ -776,6 +716,12 @@ class SessionAnalytics {
 }
 
 class ChatSession {
+  /// Persisted session JSON schema. v2 (P8 Task 18) dropped the local
+  /// agent-core fields: `grants`, `compactedSummary`, `compactionState`,
+  /// `compactedAtCount`, `planPreMode`, `agentAllowedTools`. `fromJson`
+  /// silently ignores unknown/removed keys, so a v1 row still loads.
+  static const int schemaVersion = 2;
+
   final String id;
   String title;
   String model;
@@ -866,30 +812,11 @@ class ChatSession {
   /// (dispatch_agent `output_schema_hint` arg).
   String? agentOutputHint;
 
-  /// When set, the child may only call these tools (parent-imposed filter).
-  List<String> agentAllowedTools;
-
-  /// Session-scoped "always allow" permission grants (the strict permission
-  /// model: General/Studio). Recorded when the user picks "Always allow" on
-  /// an out-of-workspace path or off-allowlist host prompt. Hierarchical —
-  /// a folder grant covers its children. Persisted in the session JSON
-  /// (`grants` key); missing key on old sessions means no grants.
-  List<PermissionGrant> grants;
-
   bool get isSubagent => parentId != null;
 
   /// Session todo/task list — written by todo_write tool, rendered as a
   /// live checklist above the chat input.  Persisted with the session.
   final List<Map<String, String>> todos;
-
-  /// Compacted summary of older conversation — set when history exceeds
-  /// the compaction threshold (~30 messages).  The AI sees this instead of
-  /// the full history.  Persisted.
-  String? compactedSummary;
-
-  /// Lossless compaction ledger carried across compactions (verbatim user
-  /// messages + deterministic work log) — see lib/core/compaction/. Persisted.
-  Map<String, dynamic>? compactionState;
 
   /// Active goal (the goal manager goal-round equivalent) — created by create_goal,
   /// advanced by update_goal.  One goal per session at a time.  Persisted.
@@ -903,20 +830,6 @@ class ChatSession {
   /// waiting for the next turn boundary (dsh's `queued` state). Null = nothing
   /// queued. Persisted so a restart mid-turn does not lose the intent.
   bool? planModePending;
-
-  /// The access mode the `plan` preset overrode when it entered plan mode.
-  /// Recorded when the plan preset introduces safe read-only (the session
-  /// was not already `safe`), regardless of entry order. Every plan exit
-  /// restores it. When it is null and the session exits plan while `safe`
-  /// (the legacy round-1 state, or an already-safe session the plan preset
-  /// gated), the exit releases the read-only to `auto` rather than leaving
-  /// the session locked. An independent `/permission read-only` session has
-  /// `planMode=false` and never reaches a plan exit. Persisted.
-  String? planPreMode;
-
-  /// Message count at the time of last compaction — re-compact only when
-  /// this many NEW messages have arrived since.
-  int compactedAtCount;
 
   final List<Message> messages;
   final DateTime createdAt;
@@ -1002,14 +915,10 @@ class ChatSession {
     this.presetId = 'standard',
     this.workspaceFolder,
     this.workspaceFolderPinned = false,
-    this.compactedSummary,
-    this.compactionState,
     this.systemPromptSnapshot,
     this.goal,
     this.planMode = false,
     this.planModePending,
-    this.planPreMode,
-    this.compactedAtCount = 0,
     this.parentId,
     this.agentLabel,
     this.agentState,
@@ -1018,8 +927,6 @@ class ChatSession {
     this.agentId,
     this.agentPersona,
     this.agentOutputHint,
-    List<String>? agentAllowedTools,
-    List<PermissionGrant>? grants,
     List<Message>? messages,
     List<Map<String, String>>? todos,
     DateTime? createdAt,
@@ -1028,10 +935,8 @@ class ChatSession {
     this.titleGenerated = false,
     Iterable<String> referencedSessionIds = const [],
     Iterable<String> pendingAgentNotices = const [],
-  }) : agentAllowedTools = agentAllowedTools ?? [],
-       referencedSessionIds = Set.of(referencedSessionIds),
+  }) : referencedSessionIds = Set.of(referencedSessionIds),
        pendingAgentNotices = List.of(pendingAgentNotices),
-       grants = grants ?? [],
        messages = messages ?? [],
        todos = todos ?? [],
        createdAt = createdAt ?? DateTime.now(),
@@ -1051,10 +956,7 @@ class ChatSession {
     presetId: j['presetId'] as String? ?? 'standard',
     workspaceFolder: j['workspaceFolder'] as String?,
     workspaceFolderPinned: j['workspaceFolderPinned'] as bool? ?? false,
-    compactedSummary: j['compactedSummary'] as String?,
-    compactionState: (j['compactionState'] as Map?)?.cast<String, dynamic>(),
     systemPromptSnapshot: j['systemPromptSnapshot'] as String?,
-    compactedAtCount: (j['compactedAtCount'] as num?)?.toInt() ?? 0,
     parentId: j['parentId'] as String?,
     agentLabel: j['agentLabel'] as String?,
     // A child persisted while still running was killed by app death.
@@ -1066,18 +968,11 @@ class ChatSession {
     agentId: j['agentId'] as String?,
     agentPersona: j['agentPersona'] as String?,
     agentOutputHint: j['agentOutputHint'] as String?,
-    agentAllowedTools:
-        (j['agentAllowedTools'] as List?)?.whereType<String>().toList() ??
-        const [],
-    // Backward compatible: sessions persisted before grants existed have
-    // no 'grants' key — they simply start with no grants.
-    grants: PermissionGrant.listFromJson(j['grants'] as List?),
     goal: j['goal'] == null
         ? null
         : Map<String, dynamic>.from(j['goal'] as Map),
     planMode: j['planMode'] as bool? ?? false,
     planModePending: j['planModePending'] as bool?,
-    planPreMode: j['planPreMode'] as String?,
     messages:
         (j['messages'] as List?)
             ?.map((m) => Message.fromJson(m as Map<String, dynamic>))
@@ -1107,6 +1002,7 @@ class ChatSession {
   );
 
   Map<String, dynamic> toJson() => {
+    'schemaVersion': schemaVersion,
     'id': id,
     'title': title,
     'model': model,
@@ -1119,11 +1015,8 @@ class ChatSession {
     if (workspaceFolder != null && workspaceFolder!.isNotEmpty)
       'workspaceFolder': workspaceFolder,
     if (workspaceFolderPinned) 'workspaceFolderPinned': true,
-    if (compactedSummary != null) 'compactedSummary': compactedSummary,
-    if (compactionState != null) 'compactionState': compactionState,
     if (systemPromptSnapshot != null)
       'systemPromptSnapshot': systemPromptSnapshot,
-    if (compactedAtCount > 0) 'compactedAtCount': compactedAtCount,
     if (parentId != null) 'parentId': parentId,
     if (agentLabel != null) 'agentLabel': agentLabel,
     if (agentState != null) 'agentState': agentState,
@@ -1134,12 +1027,9 @@ class ChatSession {
       'agentPersona': agentPersona,
     if (agentOutputHint != null && agentOutputHint!.isNotEmpty)
       'agentOutputHint': agentOutputHint,
-    if (agentAllowedTools.isNotEmpty) 'agentAllowedTools': agentAllowedTools,
-    if (grants.isNotEmpty) 'grants': grants.map((g) => g.toJson()).toList(),
     if (goal != null) 'goal': goal,
     if (planMode) 'planMode': planMode,
     if (planModePending != null) 'planModePending': planModePending,
-    if (planPreMode != null) 'planPreMode': planPreMode,
     'todos': todos,
     'messages': messages.map((m) => m.toJson()).toList(),
     'createdAt': createdAt.toIso8601String(),
@@ -1227,11 +1117,10 @@ class _SessionCleanup {
 }
 
 class _AccountHandoff {
-  _AccountHandoff(this.account, this.rows, this.active, this.usage);
+  _AccountHandoff(this.account, this.rows, this.active);
   final String account;
   final List<String> rows;
   final String? active;
-  final List<String> usage;
 }
 
 const _sessionBootstrapTailSize = 50;
@@ -1361,7 +1250,6 @@ class AppState extends ChangeNotifier {
   @visibleForTesting
   factory AppState.createForTest({
     MemoryStore? memoryStore,
-    Directory? usageRoot,
     String? sessionAccountIdForTest,
     void Function(String stage)? startupStageRecorder,
     Map<String, StartupStageDelegate> startupStageDelegates = const {},
@@ -1373,7 +1261,6 @@ class AppState extends ChangeNotifier {
   }) {
     final instance = AppState._(
       memoryStore: memoryStore,
-      usageRoot: usageRoot,
       sessionAccountIdForTest: sessionAccountIdForTest,
       startupStageRecorder: startupStageRecorder,
       startupStageDelegates: startupStageDelegates,
@@ -1420,14 +1307,11 @@ class AppState extends ChangeNotifier {
     // ignore: invalid_use_of_visible_for_testing_member
     ComposerDraftStore.I.resetForTest();
     // ignore: invalid_use_of_visible_for_testing_member
-    SessionLifecycleService.I.resetForTest();
-    // ignore: invalid_use_of_visible_for_testing_member
     AgentService.resetTitleStateForTest();
   }
 
   AppState._({
     MemoryStore? memoryStore,
-    Directory? usageRoot,
     String? sessionAccountIdForTest,
     this._startupStageRecorder,
     Map<String, StartupStageDelegate> startupStageDelegates = const {},
@@ -1437,8 +1321,7 @@ class AppState extends ChangeNotifier {
     AccountLifecycleIntegration? accountLifecycle,
     Duration? sessionPersistDebounce,
   }) : _startupStageDelegates = Map.unmodifiable(startupStageDelegates),
-       _memoryRootOverride = memoryStore?.root,
-       _usageRootOverride = usageRoot {
+       _memoryRootOverride = memoryStore?.root {
     _sessionPersistDebounce = sessionPersistDebounce ?? Duration.zero;
     _memoryStore = memoryStore;
     _sessionAccountId = sessionAccountIdForTest ?? 'guest';
@@ -1632,12 +1515,6 @@ class AppState extends ChangeNotifier {
   bool _sessionAccountReady = true;
   bool _sessionNamespaceLoaded = false;
   Future<void>? _accountTransition;
-  UsageAttemptStore? _usageAttemptStore;
-  Future<UsageAttemptStore>? _usageOpening;
-  Object? _usageStoreToken;
-  Future<void>? _usagePreparation;
-  Object? _usagePreparationToken;
-  Object? _usageStorageError;
   bool _settingsBusy = false;
 
   /// Test seam: simulates a settings operation holding the session stores.
@@ -1672,17 +1549,11 @@ class AppState extends ChangeNotifier {
         ? _sessionJsonForPersistence()
         : null;
     final oldActive = activeSessionId;
-    final oldUsage = usageLog.isNotEmpty
-        ? [for (final e in usageLog) jsonEncode(e.toJson())]
-        : const <String>[];
-    final oldUsageStore = _usageAttemptStore;
-    final oldUsageAppendTail = _usageAppendTail;
-    if (oldRows != null || oldUsage.isNotEmpty) {
+    if (oldRows != null) {
       _retainedHandoffs[oldAccount] = _AccountHandoff(
         oldAccount,
-        oldRows ?? const [],
+        oldRows,
         oldActive,
-        oldUsage,
       );
     }
     final previous = _accountTransition;
@@ -1698,13 +1569,6 @@ class AppState extends ChangeNotifier {
     _persistScheduled = false;
     _completeScheduledPersistence();
     final token = _sessionAccountToken = Object();
-    _usageOpening = null;
-    _usageAttemptStore = null;
-    _usageStoreToken = null;
-    _usagePreparation = null;
-    _usagePreparationToken = null;
-    _usageStorageError = null;
-    _usageAppendError = null;
     _sessionCleanupToken = Object();
     _sessionAccountId = account;
     _memoryStore = null;
@@ -1721,7 +1585,6 @@ class AppState extends ChangeNotifier {
     _pendingWorkspaceDeletions.clear();
     _pendingAccountCleanup.addAll(oldCleanup);
     sessions.clear();
-    usageLog.clear();
     activeSessionId = null;
     _accountLifecycle.fenceSynchronously();
     AgentService.I.sessionAccountChanged();
@@ -1746,8 +1609,6 @@ class AppState extends ChangeNotifier {
         } catch (_) {
           /* a newer owner may retry */
         }
-        await oldUsageAppendTail;
-        if (oldUsageStore != null) await oldUsageStore.retire();
         await writing;
         // A failed restore must roll back its captured namespace before any
         // account (including A -> B -> A) can hydrate or write that namespace.
@@ -1783,7 +1644,6 @@ class AppState extends ChangeNotifier {
         if (!identical(token, _sessionAccountToken)) return;
         _deferredSessionJson = List.of(storedRows ?? const <String>[]);
         activeSessionId = prefs.getString(_accountKey(_kActive));
-        await _loadUsage();
         await _hydrateDeferredSessions();
         if (!identical(token, _sessionAccountToken)) return;
         await _accountLifecycle.onBind(account, _deferredSessionGeneration);
@@ -1827,14 +1687,6 @@ class AppState extends ChangeNotifier {
             );
       if (!saved) {
         throw StateError('Account active session storage rejected write');
-      }
-    }
-    if (handoff.usage.isNotEmpty) {
-      if (!await prefs.setStringList(
-        _accountKey(_kUsage, handoff.account),
-        handoff.usage,
-      )) {
-        throw StateError('Account usage storage rejected write');
       }
     }
   }
@@ -1895,7 +1747,6 @@ class AppState extends ChangeNotifier {
   var _sessionRestoreRequested = false;
   var _skillMountSettled = false;
   var _skillMountSucceeded = false;
-  var _pendingActiveRootReason = SessionStartReason.implicit;
   String? _pendingActiveRootId;
   final List<Future<void>> _pendingSessionLifecycles = [];
 
@@ -1923,29 +1774,20 @@ class AppState extends ChangeNotifier {
     });
   }
 
-  /// Persist [session] then dispatch its exactly-once `session_start`.
-  Future<void> _dispatchSessionStart(
-    ChatSession session,
-    SessionStartReason reason,
-  ) {
-    final account = _sessionAccountToken;
+  /// Persist [session] before the run can start (the local lifecycle service
+  /// died with the agent-core satellite strip; cloud session lifecycle is
+  /// server-owned).
+  Future<void> _dispatchSessionStart(ChatSession session) {
     final future = () async {
       try {
-        // The exactly-once `session_start` must observe the persisted session,
-        // so bypass the debounce rather than waiting on a coalesced window.
         await flushSessionPersistence();
       } catch (e) {
         Diag.swallow('state', e);
       }
-      if (!identical(account, _sessionAccountToken) || !sessionAccountReady) {
-        return;
-      }
-      await SessionLifecycleService.I.sessionStarted(session, reason: reason);
     }();
     _trackSessionLifecycle(future);
     return future;
   }
-
 
   Future<void> initialize() => _initialization ??= initializeReadiness();
 
@@ -2041,11 +1883,9 @@ class AppState extends ChangeNotifier {
   Future<void> _hydrateRemainingLocalState() async {
     await loadProviderCredentials();
     await loadSessions();
-    await _loadUsage();
     await _loadOvidCloudTier();
     await _loadCustomPresets();
     await _loadMemories();
-    await ToolUsageStore.I.load();
   }
 
   Future<void> _mountRuntimeSkills() async {
@@ -2073,10 +1913,6 @@ class AppState extends ChangeNotifier {
     // event or receive a mislabel.
     final root = sessionById(_pendingActiveRootId);
     if (root != null && !root.isSubagent) {
-      await SessionLifecycleService.I.sessionStarted(
-        root,
-        reason: _pendingActiveRootReason,
-      );
     }
     return true;
   }
@@ -2118,8 +1954,6 @@ class AppState extends ChangeNotifier {
       }
       contextWindowOverride = prefs.getInt(_kContextWindowOverride) ?? 0;
       maxOutputTokens = prefs.getInt(_kMaxOutputTokens) ?? 0;
-      promptCachingEnabled = prefs.getBool(_kPromptCaching) ?? true;
-      promptCacheTtl1h = prefs.getBool(_kPromptCacheTtl1h) ?? false;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
       final savedThemeMode = prefs.getString(_kThemeMode);
       if (savedThemeMode == null || savedThemeMode.isEmpty) {
@@ -2140,14 +1974,6 @@ class AppState extends ChangeNotifier {
       githubSync = prefs.getBool(_kGithubSync) ?? true;
       workflowEnabled = prefs.getBool(_kWorkflowEnabled) ?? true;
       autoRunSafeCommands = prefs.getBool(_kAutoRunSafe) ?? true;
-      try {
-        final rawGrants = await _readGlobalPermissionGrantsRaw();
-        globalPermissionGrants = rawGrants == null
-            ? []
-            : PermissionGrant.listFromJson(jsonDecode(rawGrants) as List?);
-      } catch (_) {
-        globalPermissionGrants = [];
-      }
       sendWhileBusy = prefs.getString(_kSendWhileBusy) ?? 'queue';
       conversationDisplay = prefs.getString(_kConversationDisplay) ?? 'compact';
       localePref = prefs.getString(_kLocale) ?? 'system';
@@ -2537,7 +2363,6 @@ class AppState extends ChangeNotifier {
         if (resolved != null && !resolved.isSubagent) {
           // A loaded persisted root is the boot-active root for restore.
           _pendingActiveRootId = resolved.id;
-          _pendingActiveRootReason = SessionStartReason.restored;
         }
       }
       for (final session in sessions) {
@@ -2563,8 +2388,18 @@ class AppState extends ChangeNotifier {
 
   String? _activeRawSession(List<String> raw, String? activeId) {
     if (activeId == null) return null;
-    final prefix = '{"id":${jsonEncode(activeId)},';
-    return raw.where((encoded) => encoded.startsWith(prefix)).firstOrNull;
+    // Parse rather than prefix-match: the v2 schema writes `schemaVersion`
+    // before `id`, so a positional prefix is no longer stable.
+    for (final encoded in raw) {
+      try {
+        if ((jsonDecode(encoded) as Map<String, dynamic>)['id'] == activeId) {
+          return encoded;
+        }
+      } catch (_) {
+        // Opaque/deferred rows are skipped; they never match an id.
+      }
+    }
+    return null;
   }
 
   Future<void> _loadSessionsForFirstFrame() async {
@@ -2621,10 +2456,11 @@ class AppState extends ChangeNotifier {
       _deferredSessionJson = List<String>.of(raw);
       Map<String, dynamic>? activeJson;
       if (requestedActiveId != null) {
-        final idPrefix = '{"id":${jsonEncode(requestedActiveId)},';
         for (final encoded in raw) {
-          if (!encoded.startsWith(idPrefix)) continue;
           try {
+            final decodedId =
+                (jsonDecode(encoded) as Map<String, dynamic>)['id'];
+            if (decodedId != requestedActiveId) continue;
             final candidate = await _decodeSessionForFirstFrame(encoded);
             if (!identical(token, _sessionAccountToken)) return;
             if (candidate.id == requestedActiveId && !candidate.isSubagent) {
@@ -2693,7 +2529,6 @@ class AppState extends ChangeNotifier {
     // its id so restore dispatches THAT session (not a later active switch)
     // with reason `restored`, never `implicit`.
     _pendingActiveRootId = active.id;
-    _pendingActiveRootReason = SessionStartReason.restored;
     notifyListeners();
   }
 
@@ -3093,22 +2928,16 @@ class AppState extends ChangeNotifier {
       session.agentContinuable,
       session.agentPersona,
       session.agentOutputHint,
-      Object.hashAll(session.agentAllowedTools),
-      Object.hashAll(session.grants),
       Object.hashAll(session.referencedSessionIds),
       Object.hashAll(session.pendingAgentNotices),
-      session.compactedSummary,
-      session.compactedAtCount,
       session.planMode,
       session.planModePending,
-      session.planPreMode,
       session.sandboxId,
       session.systemPromptSnapshot,
       session.titleGenerated,
       session.updatedAt,
       _sessionNestedSignature(session.analytics.toJson()),
       _sessionNestedSignature(session.goal),
-      _sessionNestedSignature(session.compactionState),
       _sessionNestedSignature(session.todos),
     ]);
   }
@@ -3535,7 +3364,6 @@ class AppState extends ChangeNotifier {
       await ComposerDraftStore.I.clearAll();
       AgentService.I.clearStudioStateForReset();
       await StudioDraftStore.I.deleteAll('');
-      await ToolUsageStore.I.clear();
       _clearDeferredSessions();
       for (final s in List.of(sessions)) {
         final sid = s.sandboxId;
@@ -3546,14 +3374,12 @@ class AppState extends ChangeNotifier {
       providers.clear();
       _seed();
       memories.clear();
-      usageLog.clear();
-      memoryEnabled = true;
+        memoryEnabled = true;
       showReasoning = true;
       githubSync = true;
       workflowEnabled = true;
       autoRunSafeCommands = true;
-      globalPermissionGrants = [];
-      shareSessionMemory = false;
+        shareSessionMemory = false;
       lastSelectedModel = '';
       lastSelectedProviderId = null;
       try {
@@ -3644,18 +3470,6 @@ class AppState extends ChangeNotifier {
   /// Auto-run safe commands: read-only shell commands skip confirmation.
   static const _kAutoRunSafe = 'ovid_auto_run_safe';
   bool autoRunSafeCommands = true;
-
-  /// Global "always allow" permission grants (the strict permission model:
-  /// General/Studio). Applies to every session; the user can revoke entries
-  /// from Settings. Session-scoped grants live on the ChatSession instead.
-  /// LEGACY preferences key; migrated once into [_kPermissionGrantsSecure].
-  static const _kPermissionGrants = 'ovid_permission_grants_v1';
-
-  /// Secure-storage key for global "always allow/deny" decisions (H1): an
-  /// "always allow shell" entry is execution authority, so it must not be
-  /// mintable by editing a preferences file.
-  static const _kPermissionGrantsSecure = 'ovid_permission_grants_v2';
-  List<PermissionGrant> globalPermissionGrants = [];
 
   /// Send behavior while the agent is running: `queue` (default) appends the
   /// text to the active run; `interrupt` stops the current run first, then
@@ -3925,115 +3739,6 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<void> _persistGlobalPermissionGrants() async {
-    try {
-      await _secureStorage.write(
-        key: _kPermissionGrantsSecure,
-        value: jsonEncode(
-          globalPermissionGrants.map((g) => g.toJson()).toList(),
-        ),
-      );
-      await _dropLegacyPermissionGrants();
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
-  }
-
-  Future<void> _dropLegacyPermissionGrants() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      if (prefs.containsKey(_kPermissionGrants)) {
-        await prefs.remove(_kPermissionGrants);
-      }
-    } catch (e) {
-      Diag.swallow('state.permission_grants_legacy', e);
-    }
-  }
-
-  /// The persisted global "always allow/deny" decisions as raw JSON, running
-  /// the one-time H1 migration out of SharedPreferences: copy, read back to
-  /// verify, then delete the preferences copy (never losing a decision). An
-  /// unverified copy is removed and retried next run; an unreadable keystore
-  /// keeps serving the legacy value.
-  Future<String?> _readGlobalPermissionGrantsRaw() async {
-    final prefs = await SharedPreferences.getInstance();
-    String? raw;
-    try {
-      raw = await _secureStorage.read(key: _kPermissionGrantsSecure);
-    } catch (e) {
-      Diag.swallow('state.permission_grants_read', e);
-      return prefs.getString(_kPermissionGrants);
-    }
-    if (raw != null) {
-      await _dropLegacyPermissionGrants();
-      return raw;
-    }
-    final legacy = prefs.getString(_kPermissionGrants);
-    if (legacy == null) return null;
-    try {
-      await _secureStorage.write(key: _kPermissionGrantsSecure, value: legacy);
-      final readBack = await _secureStorage.read(key: _kPermissionGrantsSecure);
-      if (readBack != legacy) {
-        throw StateError('permission grant migration did not verify');
-      }
-    } catch (e) {
-      Diag.swallow('state.permission_grants_migrate', e);
-      try {
-        await _secureStorage.delete(key: _kPermissionGrantsSecure);
-      } catch (e) {
-        Diag.swallow('state.permission_grants_migrate_rollback', e);
-      }
-      return legacy;
-    }
-    await _dropLegacyPermissionGrants();
-    return legacy;
-  }
-
-  /// Adds a global "always allow" grant (applies to every session).
-  Future<void> addGlobalPermissionGrant(PermissionGrant grant) async {
-    if (grant.value.isEmpty) return;
-    // Identity includes MODE and DECISION. This used to rebuild the entry from
-    // kind/value/scope only, which silently dropped the mode tag — so every
-    // global grant became mode-less and the mode-scoped match never saw it.
-    // Two decisions on the same value (allowed in Studio, denied in General)
-    // are two different facts and must both survive.
-    final exists = globalPermissionGrants.any(
-      (g) =>
-          g.kind == grant.kind &&
-          g.value == grant.value &&
-          g.mode == grant.mode &&
-          g.decision == grant.decision,
-    );
-    if (!exists) {
-      globalPermissionGrants.add(
-        PermissionGrant(
-          kind: grant.kind,
-          value: grant.value,
-          scope: PermissionGrant.scopeGlobal,
-          mode: grant.mode,
-          decision: grant.decision,
-          grantedAt: grant.grantedAt,
-        ),
-      );
-      notifyListeners();
-      await _persistGlobalPermissionGrants();
-    }
-  }
-
-  /// Revokes a global grant; returns true when one was removed.
-  Future<bool> revokeGlobalPermissionGrant(String kind, String value) async {
-    final before = globalPermissionGrants.length;
-    globalPermissionGrants.removeWhere(
-      (g) => g.kind == kind && g.value == value,
-    );
-    if (globalPermissionGrants.length < before) {
-      notifyListeners();
-      await _persistGlobalPermissionGrants();
-      return true;
-    }
-    return false;
-  }
-
   /// AI response timeout (seconds, user-configurable in Settings).
   static const _kResponseTimeout = 'ovid_response_timeout_sec';
 
@@ -4054,38 +3759,6 @@ class AppState extends ChangeNotifier {
   /// tokens requested from the provider.
   static const _kMaxOutputTokens = 'ovid_max_output_tokens';
   int maxOutputTokens = 0;
-
-  /// Prompt caching (provider-aware cache_control markers + stable prefix).
-  /// ON by default; markers still only go to providers that accept them.
-  static const _kPromptCaching = 'ovid_prompt_caching';
-  static const _kPromptCacheTtl1h = 'ovid_prompt_cache_ttl_1h';
-  bool promptCachingEnabled = true;
-
-  /// Extended 1h cache TTL for long-running sessions. Cache writes cost 2x
-  /// base input (vs 1.25x for the default 5 minutes); reads stay 0.1x.
-  bool promptCacheTtl1h = false;
-
-  Future<void> setPromptCaching(bool v) async {
-    promptCachingEnabled = v;
-    notifyListeners();
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_kPromptCaching, v);
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
-  }
-
-  Future<void> setPromptCacheTtl1h(bool v) async {
-    promptCacheTtl1h = v;
-    notifyListeners();
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_kPromptCacheTtl1h, v);
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
-  }
 
   Future<void> setContextWindowOverride(int tokens) async {
     contextWindowOverride = tokens;
@@ -4160,7 +3833,6 @@ class AppState extends ChangeNotifier {
   MemoryStore? _memoryStore;
   Object? _memoryStoreToken;
   final Directory? _memoryRootOverride;
-  final Directory? _usageRootOverride;
   Future<MemoryStore>? _memoryOpening;
   Object? _memoryOpeningToken;
   String? _memoryError;
@@ -4488,7 +4160,6 @@ class AppState extends ChangeNotifier {
     required String label,
     required String mode,
     bool continuable = false,
-    List<String> allowedTools = const [],
     String persona = '',
     String outputSchemaHint = '',
     String? model,
@@ -4510,7 +4181,6 @@ class AppState extends ChangeNotifier {
       agentLabel: label,
       agentState: 'running',
       agentContinuable: continuable,
-      agentAllowedTools: allowedTools,
       agentPersona: persona,
       agentOutputHint: outputSchemaHint,
       // Children share the parent's working folder so their edits land in
@@ -4604,15 +4274,14 @@ class AppState extends ChangeNotifier {
     _warmWorkspace(session.id);
     if (_localHydrationSettled) {
       // A real root created after hydration is an implicit session start.
-      _dispatchSessionStart(session, SessionStartReason.implicit);
-    } else if (_pendingActiveRootId == null) {
+      _dispatchSessionStart(session);
+    } else {
       // Constructor/hydration provisional root: capture the id, but never
       // clobber an already-captured restored marker (M3). Only the surviving
       // active root fires, once local hydration confirms no persisted root
       // replaced it (`_maybeFinishSessionRestore`); this prevents ghost events
       // for a discarded provisional ID.
-      _pendingActiveRootId = session.id;
-      _pendingActiveRootReason = SessionStartReason.implicit;
+      _pendingActiveRootId ??= session.id;
     }
     return session;
   }
@@ -4706,7 +4375,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     // Persist first, then dispatch exactly-once `created` lifecycle. The
     // method stays synchronous; the tracked future owns persistence.
-    _dispatchSessionStart(s, SessionStartReason.created);
+    _dispatchSessionStart(s);
   }
 
   /// Fork the conversation: create a new session that copies messages
@@ -4850,11 +4519,6 @@ class AppState extends ChangeNotifier {
     final idx = index.clamp(0, s.messages.length);
     final removed = s.messages.skip(idx).toList();
     s.messages.removeWhere(removed.contains);
-    if (idx == 0) {
-      s.compactedSummary = null;
-      s.compactionState = null;
-      s.compactedAtCount = 0;
-    }
     _markSessionDirty(s.id);
     notifyListeners();
     persistSessions();
@@ -4868,10 +4532,8 @@ class AppState extends ChangeNotifier {
   bool restoreMessagesAt(
     String sessionId,
     int index,
-    List<Message> removed, {
-    String? compactedSummary,
-    int compactedAtCount = 0,
-  }) {
+    List<Message> removed,
+  ) {
     if (_settingsBusy || removed.isEmpty) return false;
     final s = sessionById(sessionId);
     if (s == null || s.messages.length != index) return false;
@@ -4879,10 +4541,6 @@ class AppState extends ChangeNotifier {
       for (final m in removed)
         Message.fromJson({...m.toJson(), 'privateSyncId': _newMessageId()}),
     ]);
-    if (index == 0 && compactedSummary != null) {
-      s.compactedSummary = compactedSummary;
-      s.compactedAtCount = compactedAtCount;
-    }
     _markSessionDirty(s.id);
     notifyListeners();
     persistSessions();
@@ -5252,15 +4910,6 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  Future<void> updateProviderPromptCache(
-    ProviderConfig provider,
-    PromptCacheOverride value,
-  ) async {
-    provider.promptCache = value;
-    refresh();
-    await persistProviderState();
-  }
-
   /// Replace the fetched model ids of [provider] with [ids] from a fresh
   /// `/models` call. Ids that an earlier fetch added but this one no longer
   /// lists are removed; with [keepManual] (the default) ids the user added
@@ -5434,308 +5083,6 @@ class AppState extends ChangeNotifier {
 
   String fmtInstalls(int n) =>
       n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}k' : '$n';
-
-  /// ---------- Usage log (real token metering) ----------
-  static const _kUsage = 'ovid_usage_log';
-  final List<UsageEntry> usageLog = [];
-  static const _maxUsageEntries = 2000;
-  Future<void> _usageAppendTail = Future<void>.value();
-  Object? _usageAppendError;
-
-  @visibleForTesting
-  static Directory? usageRootOverrideForTest;
-
-  List<UsageAttempt> get usageAttempts =>
-      _usageAttemptStore?.snapshot ?? const [];
-  int get usageRevision => _usageAttemptStore?.revision ?? 0;
-
-  /// Cheap change key for usage-derived UI. Changes whenever the attempt
-  /// journal is mutated or replaced (account switch) — unlike
-  /// [usageAttempts], reading it copies nothing, so screens can compare it on
-  /// every [AppState] notification and re-aggregate only when it moves.
-  Object get usageMemoKey => (_usageAttemptStore, usageRevision);
-  bool get usageHistoryTruncated =>
-      _usageAttemptStore?.historyTruncated ?? false;
-  Object? get usageStorageError => _usageStorageError;
-
-  Directory? get _usageBaseRoot =>
-      _usageRootOverride ?? usageRootOverrideForTest;
-
-  Future<Directory?> _usageAccountRoot() async {
-    final base =
-        _usageBaseRoot ??
-        Directory(
-          '${(await getApplicationDocumentsDirectory()).path}/usage-attempts',
-        );
-    final digest = sha256.convert(utf8.encode(_sessionAccountId)).toString();
-    return Directory('${base.path}/account-$digest');
-  }
-
-  Future<UsageAttemptStore> _openUsageAttempts(Object owner) {
-    if (!identical(owner, _sessionAccountToken)) {
-      return Future.error(StateError('Stale usage account owner'));
-    }
-    final existing = _usageAttemptStore;
-    if (existing != null && identical(_usageStoreToken, owner)) {
-      return Future.value(existing);
-    }
-    final opening = _usageOpening;
-    if (opening != null && identical(_usageStoreToken, owner)) return opening;
-    late final Future<UsageAttemptStore> future;
-    future = () async {
-      try {
-        final root = await _usageAccountRoot();
-        if (!identical(owner, _sessionAccountToken)) {
-          throw StateError('Stale usage account owner');
-        }
-        final store = await UsageAttemptStore.open(
-          accountRoot: root!,
-          ownerFence: () => identical(owner, _sessionAccountToken),
-        );
-        if (!identical(owner, _sessionAccountToken)) {
-          throw StateError('Stale usage account owner');
-        }
-        _usageAttemptStore = store;
-        _usageStoreToken = owner;
-        _usageStorageError = null;
-        notifyListeners();
-        return store;
-      } catch (error) {
-        if (identical(owner, _sessionAccountToken)) _usageStorageError = error;
-        rethrow;
-      } finally {
-        if (identical(_usageOpening, future)) _usageOpening = null;
-      }
-    }();
-    _usageStoreToken = owner;
-    _usageOpening = future;
-    return future;
-  }
-
-  Future<void> prepareUsageAttempts({Object? owner}) {
-    final token = owner ?? _sessionAccountToken;
-    if (_usagePreparation != null && identical(_usagePreparationToken, token)) {
-      return _usagePreparation!;
-    }
-    late final Future<void> preparation;
-    preparation = () async {
-      try {
-        final store = await _openUsageAttempts(token);
-        if (!identical(token, _sessionAccountToken)) {
-          throw StateError('Stale usage account owner');
-        }
-        final prefs = await SharedPreferences.getInstance();
-        final raw = prefs.getStringList(_accountKey(_kUsage));
-        usageLog.clear();
-        final legacyRows = <UsageAttempt>[];
-        for (var index = 0; index < (raw?.length ?? 0); index++) {
-          try {
-            final entry = UsageEntry.fromJson(
-              jsonDecode(raw![index]) as Map<String, dynamic>,
-            );
-            usageLog.add(entry);
-            final stable = sha256
-                .convert(utf8.encode('$index:${raw[index]}'))
-                .toString();
-            legacyRows.add(
-              UsageAttempt(
-                attemptId: 'legacy-$stable',
-                requestId: 'legacy-request-$stable',
-                revision: 1,
-                sourceDevice: 'legacy',
-                provider: entry.providerId.isEmpty
-                    ? 'unknown'
-                    : entry.providerId,
-                requestedModel: entry.model.isEmpty ? 'unknown' : entry.model,
-                purpose: 'legacy',
-                startedAt: entry.time.toUtc(),
-                elapsed: entry.duration,
-                dispatchStage: UsageDispatchStage.completed,
-                outcome: UsageOutcome.succeeded,
-                inputTokens: UsageTokenCount.legacy(entry.promptTokens),
-                outputTokens: UsageTokenCount.legacy(entry.completionTokens),
-                totalTokens: UsageTokenCount.legacy(entry.totalTokens),
-              ),
-            );
-          } catch (e) {
-            Diag.swallow('usage.legacyMigration', e);
-          }
-        }
-        final sourceDigest = sha256.convert(
-          utf8.encode(jsonEncode(raw ?? <String>[])),
-        );
-        await store.migrateLegacy(
-          marker: 'state-usage-v2-$sourceDigest',
-          records: legacyRows,
-        );
-        if (identical(token, _sessionAccountToken)) notifyListeners();
-      } on StateError catch (error) {
-        if (error.message == 'Stale usage account owner' &&
-            !identical(token, _sessionAccountToken)) {
-          return;
-        }
-        rethrow;
-      } finally {
-        if (identical(_usagePreparation, preparation)) {
-          _usagePreparation = null;
-          _usagePreparationToken = null;
-        }
-      }
-    }();
-    _usagePreparationToken = token;
-    _usagePreparation = preparation;
-    return preparation;
-  }
-
-  Future<bool> recordUsageAttempt(UsageAttempt attempt, {Object? owner}) async {
-    final token = owner ?? _sessionAccountToken;
-    if (!identical(token, _sessionAccountToken)) {
-      throw StateError('Stale usage account owner');
-    }
-    final changed = await (await _openUsageAttempts(token)).upsert(attempt);
-    if (changed && identical(token, _sessionAccountToken)) notifyListeners();
-    return changed;
-  }
-
-  Future<void> flushUsage({Object? owner}) async {
-    final token = owner ?? _sessionAccountToken;
-    await _usageAppendTail;
-    if (_usageAppendError != null) throw _usageAppendError!;
-    if (!identical(token, _sessionAccountToken)) {
-      throw StateError('Stale usage account owner');
-    }
-    if (_usageStorageError != null) throw _usageStorageError!;
-    if (_usageBaseRoot == null && _usageAttemptStore == null) return;
-    await _openUsageAttempts(token);
-  }
-
-  Future<void> _loadUsage() async {
-    final token = _sessionAccountToken;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      if (!identical(token, _sessionAccountToken)) return;
-      final raw = prefs.getStringList(_accountKey(_kUsage)) ?? const <String>[];
-      usageLog.clear();
-      usageLog.addAll(
-        raw.map((e) {
-          try {
-            return UsageEntry.fromJson(jsonDecode(e) as Map<String, dynamic>);
-          } catch (_) {
-            return null;
-          }
-        }).whereType<UsageEntry>(),
-      );
-      try {
-        await prepareUsageAttempts(owner: token);
-      } catch (error) {
-        // Native path_provider is optional for legacy-only callers. A caller
-        // that supplies the test seam (or has already opened the journal) gets
-        // the durable error surfaced instead of silently losing it.
-        if (!identical(token, _sessionAccountToken)) return;
-        if (_usageBaseRoot == null && _usageAttemptStore == null) {
-          // Usage is observational: a failure resolving the implicit
-          // platform root must never block account/session admission. It is
-          // surfaced as a usage storage error instead (except a missing
-          // native plugin, which simply means no journal on this platform).
-          _usageStorageError = error is MissingPluginException ? null : error;
-          Diag.swallow('usage.journalRoot', error);
-          notifyListeners();
-        } else {
-          rethrow;
-        }
-      }
-    } catch (e) {
-      if (identical(token, _sessionAccountToken)) {
-        _usageStorageError = e;
-        notifyListeners();
-      }
-      rethrow;
-    }
-  }
-
-  Future<void> _persistUsage() async {
-    final token = _sessionAccountToken;
-    final key = _accountKey(_kUsage);
-    final recent = usageLog.length > _maxUsageEntries
-        ? usageLog.sublist(usageLog.length - _maxUsageEntries)
-        : usageLog;
-    final snapshot = recent.map((e) => jsonEncode(e.toJson())).toList();
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      if (!identical(token, _sessionAccountToken)) return;
-      await prefs.setStringList(key, snapshot);
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
-  }
-
-  void appendUsage(UsageEntry e, {Object? owner}) {
-    if (!_sessionAccountReady) return;
-    if (owner != null && !identical(owner, _sessionAccountToken)) return;
-    usageLog.add(e);
-    final token = owner ?? _sessionAccountToken;
-    final persistence = _persistUsage();
-    Future<void> journalWrite = Future<void>.value();
-    if (_usageAttemptStore != null && identical(_usageStoreToken, token)) {
-      final encoded = jsonEncode(e.toJson());
-      final digest = sha256
-          .convert(utf8.encode('${usageLog.length - 1}:$encoded'))
-          .toString();
-      journalWrite = _usageAppendTail.then((_) async {
-        try {
-          await recordUsageAttempt(
-            UsageAttempt(
-              attemptId: 'legacy-$digest',
-              requestId: 'legacy-request-$digest',
-              revision: 1,
-              sourceDevice: 'legacy',
-              provider: e.providerId.isEmpty ? 'unknown' : e.providerId,
-              requestedModel: e.model.isEmpty ? 'unknown' : e.model,
-              purpose: 'legacy',
-              startedAt: e.time.toUtc(),
-              elapsed: e.duration,
-              dispatchStage: UsageDispatchStage.completed,
-              outcome: UsageOutcome.succeeded,
-              inputTokens: UsageTokenCount.legacy(e.promptTokens),
-              outputTokens: UsageTokenCount.legacy(e.completionTokens),
-              totalTokens: UsageTokenCount.legacy(e.totalTokens),
-            ),
-            owner: token,
-          );
-          _usageAppendError = null;
-        } catch (error) {
-          if (identical(token, _sessionAccountToken)) {
-            _usageStorageError = error;
-            _usageAppendError = error;
-            notifyListeners();
-          }
-        }
-      });
-    }
-    _usageAppendTail = Future.wait<void>([
-      _usageAppendTail,
-      persistence,
-      journalWrite,
-    ]).then<void>((_) {});
-    refresh();
-  }
-
-  /// Last N days of relative daily activity (heights 0..1) for a provider,
-  /// used by the usage charts.
-  List<double> dailyActivityFor(String providerId, {int days = 14}) {
-    final now = DateTime.now();
-    final counts = List<int>.filled(days, 0);
-    for (final e in usageLog) {
-      if (providerId.isNotEmpty && e.providerId != providerId) continue;
-      final age = now.difference(e.time).inDays;
-      if (age < 0 || age >= days) continue;
-      counts[days - 1 - age] += e.totalTokens.clamp(1, 1 << 40);
-    }
-    final max = counts.reduce((a, b) => a > b ? a : b);
-    if (max == 0) return List<double>.filled(days, 0.05);
-    return counts.map((c) => (c / max).clamp(0.05, 1.0)).toList();
-  }
-
 
   // ── Custom Presets ──────────────────────────────────────────────────
   Future<void> _persistCustomPresets() async {

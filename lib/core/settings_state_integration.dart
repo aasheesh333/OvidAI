@@ -122,60 +122,6 @@ extension _SettingsStateIntegration on AppState {
           onVerifyDeleted: () async =>
               !(await _openMemoryStore()).root.existsSync(),
         ),
-        ResetStoreKind.usage: FunctionalResetStore(
-          name: ResetStoreKind.usage.id,
-          onStage: () async {
-            await _usageAppendTail;
-            if (_usageAppendError != null) throw _usageAppendError!;
-            final store = _usageAttemptStore;
-            if (store != null) await store.retire();
-          },
-          onDelete: () async {
-            final root = (await _usageAccountRoot())!;
-            final journal = File(
-              '${root.path}/${UsageAttemptStore.journalFileName}',
-            );
-            if (await journal.exists()) await journal.delete();
-            if (await root.exists()) {
-              await for (final entity in root.list(followLinks: false)) {
-                if (entity is File &&
-                    entity.path.startsWith('${journal.path}.tmp')) {
-                  await entity.delete();
-                }
-              }
-            }
-            final prefs = await SharedPreferences.getInstance();
-            await prefs.remove(_accountKey(AppState._kUsage));
-            await prefs.reload();
-            usageLog.clear();
-            _usageAttemptStore = null;
-            _usageStoreToken = null;
-            _usageStorageError = null;
-            _usageAppendError = null;
-          },
-          onVerifyDeleted: () async {
-            final root = (await _usageAccountRoot())!;
-            final journal = File(
-              '${root.path}/${UsageAttemptStore.journalFileName}',
-            );
-            var staging = false;
-            if (await root.exists()) {
-              await for (final entity in root.list(followLinks: false)) {
-                if (entity is File &&
-                    entity.path.startsWith('${journal.path}.tmp')) {
-                  staging = true;
-                }
-              }
-            }
-            final prefs = await SharedPreferences.getInstance();
-            await prefs.reload();
-            return !await journal.exists() &&
-                !staging &&
-                prefs.getStringList(_accountKey(AppState._kUsage)) == null &&
-                usageLog.isEmpty &&
-                _usageAttemptStore == null;
-          },
-        ),
         ResetStoreKind.account: FunctionalResetStore(
           name: ResetStoreKind.account.id,
           onStage: () async {},
@@ -258,7 +204,6 @@ extension _SettingsStateIntegration on AppState {
           onDelete: () async {
             final dir = await _userSkillsDir();
             if (await dir.exists()) await dir.delete(recursive: true);
-            SkillService.I.invalidateAllSessions();
           },
           onVerifyDeleted: () async => !await (await _userSkillsDir()).exists(),
         ),
@@ -309,12 +254,6 @@ extension _SettingsStateIntegration on AppState {
               await ComposerDraftStore.I.isEmpty() &&
               await StudioDraftStore.I.isEmpty(),
         ),
-        ResetStoreKind.toolUsage: FunctionalResetStore(
-          name: ResetStoreKind.toolUsage.id,
-          onStage: () async {},
-          onDelete: () => ToolUsageStore.I.clear(),
-          onVerifyDeleted: () => ToolUsageStore.I.isEmpty(),
-        ),
       });
       await coordinator.prepare();
       return (await coordinator.commit()).toSettingsResult();
@@ -344,7 +283,6 @@ extension _SettingsStateIntegration on AppState {
     AppState._kLastProvider,
     AppState._kRecentModels,
     AppState._kCustomPresets,
-    AppState._kPermissionGrants,
   };
   static const _configurationPrefixes = <String>[];
 
@@ -363,7 +301,6 @@ extension _SettingsStateIntegration on AppState {
     providers.clear();
     _seed();
     PresetRegistry.clearCustom();
-    globalPermissionGrants.clear();
     lastSelectedModel = '';
     lastSelectedProviderId = null;
     refresh();
@@ -374,7 +311,6 @@ extension _SettingsStateIntegration on AppState {
     await prefs.reload();
     return !prefs.getKeys().any(_isConfigurationKey) &&
         PresetRegistry.customPresets.isEmpty &&
-        globalPermissionGrants.isEmpty &&
         providers.every((provider) => provider.apiKey.isEmpty);
   }
 

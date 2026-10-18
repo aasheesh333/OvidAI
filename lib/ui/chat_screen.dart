@@ -37,7 +37,6 @@ import '../core/agent_service.dart';
 import '../core/connection_service.dart';
 import '../core/commands.dart';
 import '../core/presets.dart';
-import '../core/skills.dart';
 import '../core/composer_drafts.dart';
 import '../core/diag.dart';
 import '../core/firebase_service.dart';
@@ -464,7 +463,6 @@ class _StatsLine extends StatelessWidget {
                         'cached ${analytics.cachedPercent.toStringAsFixed(0)}%',
                       if (analytics.averageTtftMs > 0)
                         'ttft ~${analytics.averageTtftMs} ms',
-                      if (s.compactedSummary != null) 'compacted',
                     ].join('  |  '),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -1015,28 +1013,6 @@ class _ChatScreenState extends State<ChatScreen>
     _showJumpFab = false;
     _visibleCount = _pageSize; // lazy paging resets per session
     _followScheduled = false; // tip-follow re-arms for the new transcript
-  }
-
-  void _showSkillUnavailable(
-    BuildContext context,
-    Skill skill,
-    String sessionId,
-  ) {
-    // P8 Task 10: the thin client has no local skills runtime — the reason
-    // is a local concept (the member's call site dies with the on-device
-    // runtime; kept compiled for the default build).
-    final reason = Distribution.cloudExecution
-        ? null
-        : AgentService.I.skillUnavailableReason(skill, sessionId);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          "Skill ${skill.name} isn't available in this session"
-          '${reason == null ? '' : ' ($reason)'}.',
-        ),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
   }
 
   @override
@@ -2021,67 +1997,6 @@ class _ChatScreenState extends State<ChatScreen>
                                   }
                                   if (AppState.I.activeSessionId != s.id) {
                                     return;
-                                  }
-                                  // Skill direct invocation: /skill-name [args].
-                                  final parsed = parseSkillInvocation(t);
-                                  if (parsed != null) {
-                                    final resolved = SkillService.I
-                                        .resolveForSession(s.id, parsed.token);
-                                    if (resolved.isAmbiguous) {
-                                      if (context.mounted) {
-                                        ScaffoldMessenger.of(
-                                          context,
-                                        ).showSnackBar(
-                                          SnackBar(
-                                            content: Text(
-                                              'Ambiguous skill. Choose exactly one: '
-                                              '${resolved.options.join(', ')}',
-                                            ),
-                                            behavior: SnackBarBehavior.floating,
-                                          ),
-                                        );
-                                      }
-                                      return;
-                                    }
-                                    final skill = resolved.unique;
-                                    if (skill != null && skill.userInvocable) {
-                                      if (!AgentService.I
-                                          .isSkillAvailableForSession(
-                                            skill,
-                                            s.id,
-                                          )) {
-                                        // Never fail silently: say why and
-                                        // offer the plugin settings. The
-                                        // draft is kept.
-                                        _showSkillUnavailable(
-                                          context,
-                                          skill,
-                                          s.id,
-                                        );
-                                        return;
-                                      }
-                                      final content =
-                                          AgentService.substituteCommandArguments(
-                                            skill.content,
-                                            parsed.args,
-                                          );
-                                      final argsText =
-                                          AgentService.commandArgumentTrailer(
-                                            skill.content,
-                                            parsed.args,
-                                            'User instruction',
-                                          );
-                                      if (context.mounted) {
-                                        _sendPrompt(
-                                          context,
-                                          s,
-                                          '<skill_content>\n$content\n</skill_content>'
-                                          '$argsText',
-                                          onAccepted: clearSubmitted,
-                                        );
-                                      }
-                                      return;
-                                    }
                                   }
                                   // Unknown /command falls through to the agent.
                                 }
@@ -5745,18 +5660,14 @@ class _MessageView extends StatelessWidget {
     return current ? removed : null;
   }
 
-  ({int index, String? summary, int summaryAt}) _undoSnapshot(int index) => (
-    index: index,
-    summary: session.compactedSummary,
-    summaryAt: session.compactedAtCount,
-  );
+  ({int index}) _undoSnapshot(int index) => (index: index);
 
   /// "[message] · Undo" for ~8 s after a history truncation. Undo restores
   /// the removed rows only while nothing was added after the cut; it also
   /// takes back an edit staged in the composer by [stagedText].
   void _offerUndo(
     BuildContext context,
-    ({int index, String? summary, int summaryAt}) snapshot,
+    ({int index}) snapshot,
     List<Message> removed, {
     required String message,
     String? stagedText,
@@ -5776,8 +5687,6 @@ class _MessageView extends StatelessWidget {
               sessionId,
               snapshot.index,
               removed,
-              compactedSummary: snapshot.summary,
-              compactedAtCount: snapshot.summaryAt,
             );
         if (!restored) {
           if (messenger.mounted) {
@@ -6680,28 +6589,6 @@ class _InputBarState extends State<_InputBar> {
           hint: c.hint,
         ),
       );
-    }
-    // User-invocable skills come from the on-device skill registry, which the
-    // thin client does not run (Task 18 removes the local skill runtime).
-    // P8 Task 10: gate on the execution arm rather than `cloudPlugins` — the
-    // latter is hardcoded false and would be a no-op.
-    if (!Distribution.cloudExecution) {
-      for (final s in SkillService.I.userSkillsForSession(
-        widget.sessionId ?? '',
-      )) {
-        final invocation = s.canonicalId ?? s.name;
-        add(
-          1,
-          '$invocation ${s.name}',
-          _SlashSuggestion(
-            icon: Icons.auto_fix_high_outlined,
-            name: '/$invocation',
-            description: s.description.isEmpty ? 'Skill' : s.description,
-            hint: '',
-            group: 'Skills',
-          ),
-        );
-      }
     }
     scored.sort((a, b) {
       final c = a.score.compareTo(b.score);

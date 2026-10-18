@@ -74,9 +74,7 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: UsageScreen()));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byIcon(Icons.more_vert));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Image receipts'));
+    await tester.tap(find.byTooltip('Image receipts'));
     await tester.pumpAndSettle();
 
     // The pushed route embeds the panel bound to the singleton studio.

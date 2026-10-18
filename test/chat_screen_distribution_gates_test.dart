@@ -28,9 +28,7 @@ import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/commands.dart';
 import 'package:ovid_ai/core/connection_service.dart';
 import 'package:ovid_ai/core/distribution.dart';
-import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/session_history_store.dart';
-import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/app_router.dart';
@@ -102,41 +100,6 @@ void _seedCommand() {
   );
 }
 
-Future<void> _seedSkill(
-  WidgetTester tester,
-  Directory tmp,
-  String sessionId,
-) async {
-  final root = Directory('${tmp.path}/research-kit')
-    ..createSync(recursive: true);
-  File('${root.path}/skills/research/SKILL.md')
-    ..createSync(recursive: true)
-    ..writeAsStringSync(
-      '---\nname: research\ndescription: Research things\n'
-      'user-invocable: true\n---\nRESEARCH',
-    );
-  final manifest = NormalizedPluginManifest(
-    id: 'gate/research-kit',
-    name: 'Research Kit',
-    version: '1.0.0',
-    format: PluginFormat.claudeCode,
-    rootPath: root.path,
-    skills: const [
-      PluginSkill(
-        pluginId: 'gate/research-kit',
-        name: 'research',
-        path: 'skills/research/SKILL.md',
-      ),
-    ],
-  );
-  await tester.runAsync(
-    () => SkillService.I.publishSessionCatalog(
-      sessionId,
-      mounts: [PluginCatalogMount(root.path, manifest)],
-    ),
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -189,26 +152,11 @@ void main() {
     Distribution.thinOverrideForTest = null;
     CloudAgentFacade.resetForTest();
     CloudSessionStore.resetForTest();
-    SkillService.I.clearRoots();
     AppState.resetTestInstance();
     if (tmp.existsSync()) tmp.deleteSync(recursive: true);
   });
 
   group('composer slash sources — default build', () {
-    testWidgets('Skills are offered when execution is on-device', (
-      tester,
-    ) async {
-      final s = _addSession('gate-skill');
-      _seedCommand();
-      await _seedSkill(tester, tmp, s.id);
-      await _pumpChat(tester);
-      await _openSlashMenu(tester);
-
-      expect(find.text('COMMANDS'), findsOneWidget);
-      expect(find.text('SKILLS'), findsOneWidget);
-      expect(find.textContaining('research'), findsOneWidget);
-    });
-
     testWidgets('Browser header action is absent on the default build', (
       tester,
     ) async {
@@ -228,9 +176,8 @@ void main() {
     testWidgets('Skills, MCP tools and Plugins are NOT offered', (
       tester,
     ) async {
-      final s = _addSession('gate-thin');
+      _addSession('gate-thin');
       _seedCommand();
-      await _seedSkill(tester, tmp, s.id);
       await _bindCloud();
       await _pumpChat(tester);
       await _openSlashMenu(tester);

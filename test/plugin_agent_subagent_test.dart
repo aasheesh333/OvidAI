@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -59,32 +57,6 @@ void main() {
             .model,
         'parent-model',
       );
-    });
-  });
-
-  group('the agent branch dispatches instead of inlining', () {
-    final src = File('lib/core/agent_service.dart').readAsStringSync();
-
-    test('_runPluginContribution dispatches an agent-kind contribution', () {
-      final i = src.indexOf('Future<String> _runPluginContribution(');
-      expect(i, greaterThanOrEqualTo(0));
-      final body = src.substring(i, i + 3000);
-      // The agent kind routes to a real subagent dispatch carrying the
-      // plugin agent's model, not the inline <skill_content> return.
-      expect(body, contains('c.kind == PluginContributionKind.agent'));
-      expect(body, contains('_handleDispatchAgent('));
-      // The declared model is resolved (inherit / alias / full id) first.
-      expect(body, contains("modelOverride: defArgs['_model']"));
-      // Zero-nesting fallback: an agent invoked from within a subagent still
-      // inlines (a subagent cannot spawn a subagent).
-      expect(body, contains('_runSession?.isSubagent ?? false'));
-    });
-
-    test('_handleDispatchAgent threads the model override to the child', () {
-      final i = src.indexOf('_handleDispatchAgent(');
-      expect(i, greaterThanOrEqualTo(0));
-      expect(src, contains('String? modelOverride'));
-      expect(src, contains('model: modelOverride'));
     });
   });
 }

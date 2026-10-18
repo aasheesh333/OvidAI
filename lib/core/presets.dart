@@ -2,7 +2,6 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
-import 'plan_mode.dart';
 
 /// One named agent preset (the tool gate agent-presets parity): a tool-roster
 /// composition plus a persona preamble. A session joins a preset; the
@@ -41,12 +40,6 @@ class AgentPreset {
   /// Anthropic runs that enable a thinking budget, which rejects it.
   final double? temperature;
 
-  /// G5: the preset's OWN plan-mode allowlist. When non-empty it REPLACES the
-  /// built-in [PlanModePolicy.allowedTools] while this preset is planning, so
-  /// the plan policy becomes user-authorable through the existing custom
-  /// preset plumbing instead of a hardcoded set. Empty = built-in policy.
-  final List<String> planAllowedTools;
-
   const AgentPreset({
     required this.id,
     required this.label,
@@ -57,7 +50,6 @@ class AgentPreset {
     this.model,
     this.modelProviderId,
     this.temperature,
-    this.planAllowedTools = const [],
   });
 
   factory AgentPreset.fromJson(Map<String, dynamic> json) {
@@ -75,11 +67,6 @@ class AgentPreset {
           ? null
           : (json['modelProviderId'] as String).trim(),
       temperature: (json['temperature'] as num?)?.toDouble(),
-      planAllowedTools:
-          (json['planAllowedTools'] as List?)
-              ?.map((e) => e.toString())
-              .toList() ??
-          const [],
     );
   }
 
@@ -94,7 +81,6 @@ class AgentPreset {
     if (model != null && modelProviderId != null)
       'modelProviderId': modelProviderId,
     if (temperature != null) 'temperature': temperature,
-    if (planAllowedTools.isNotEmpty) 'planAllowedTools': planAllowedTools,
   };
 
   AgentPreset copyWith({
@@ -107,7 +93,6 @@ class AgentPreset {
     String? model,
     String? modelProviderId,
     double? temperature,
-    List<String>? planAllowedTools,
     bool clearModel = false,
     bool clearTemperature = false,
   }) {
@@ -125,7 +110,6 @@ class AgentPreset {
       temperature: clearTemperature
           ? null
           : (temperature ?? this.temperature),
-      planAllowedTools: planAllowedTools ?? this.planAllowedTools,
     );
   }
 }
@@ -317,21 +301,18 @@ class PresetRegistry {
   }
 
   /// Orchestration + session bookkeeping stay available in every preset:
-  /// they are the harness itself, not a capability being gated. G7: the set
-  /// now has exactly ONE definition — [PlanModePolicy.harnessTools] — so the
-  /// preset roster and the plan-mode roster can never drift apart.
-  static const Set<String> _alwaysAllowed = PlanModePolicy.harnessTools;
+  /// they are the harness itself, not a capability being gated.
+  static const Set<String> _alwaysAllowed = {
+    'dispatch_agent',
+    'report',
+    'update_goal',
+    'get_goal',
+    'create_goal',
+    'memory_save',
+  };
 
   /// Test seam (G7): the harness set, which now has exactly one definition.
   @visibleForTesting
   static Set<String> get harnessToolsForTest => _alwaysAllowed;
 
-  /// G5: the plan-mode allowlist in force for [preset]. A preset that declares
-  /// its own `planAllowedTools` replaces the built-in policy; otherwise
-  /// [PlanModePolicy.allowedTools] applies. ONE resolution point, shared by the
-  /// dispatch gate and the roster projection.
-  static Set<String> planPolicyFor(AgentPreset preset) =>
-      preset.planAllowedTools.isEmpty
-      ? PlanModePolicy.allowedTools
-      : preset.planAllowedTools.toSet();
 }

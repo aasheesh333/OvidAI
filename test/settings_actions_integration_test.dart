@@ -18,7 +18,6 @@ import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/studio_drafts.dart';
-import 'package:ovid_ai/core/tool_usage_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 // ignore: depend_on_referenced_packages
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
@@ -147,7 +146,6 @@ void main() {
     final imported = app.sessions.singleWhere((s) => s.id != 'existing');
     expect(imported.id, startsWith('restored-'));
     expect(imported.sandboxId, imported.id);
-    expect(imported.grants, isEmpty);
     expect(imported.messages.single.content, 'Imported transcript');
     final path = imported.messages.single.attachments.single.path!;
     expect(await File(path).readAsString(), 'portable');
@@ -429,8 +427,6 @@ void main() {
   // in-memory MCP OAuth attempts (PR-7).
   test('reset clears drafts, tool usage, every history namespace and OAuth memory', () async {
     ComposerDraftStore.I.resetForTest();
-    ToolUsageStore.I.resetForTest();
-    ToolUsageStore.saveDelayForTest = Duration.zero;
     StudioDraftStore.I.enable(root: () async => root);
     SessionHistoryRepository.I.enableSqlite(
       path: '${root.path}/chat-history.db',
@@ -445,7 +441,6 @@ void main() {
       SessionLedger.rootOverrideForTest = null;
       StudioDraftStore.I.disableForTest();
       ComposerDraftStore.I.resetForTest();
-      ToolUsageStore.I.resetForTest();
       await SessionHistoryRepository.I.resetForTest();
     });
 
@@ -460,31 +455,21 @@ void main() {
       () => (data: {'v': 1}),
     );
     await StudioDraftStore.I.flush();
-    ToolUsageStore.I.record(
-      kind: ToolUsageKind.pluginTool,
-      tool: 'search',
-      mcpServerId: 'srv',
-      ok: true,
-      elapsed: const Duration(milliseconds: 5),
-    );
-    await ToolUsageStore.I.flush();
     // Another account's namespace in chat-history.db.
     await SessionHistoryRepository.I.writeRows(prefs, 'ovid_sessions__other', [
       jsonEncode(original.toJson()),
     ]);
     expect(await ComposerDraftStore.I.isEmpty(), isFalse);
     expect(await StudioDraftStore.I.isEmpty(), isFalse);
-    expect(await ToolUsageStore.I.isEmpty(), isFalse);
     expect(await SessionHistoryRepository.I.isEmpty(), isFalse);
 
     final report = await SettingsActions.resetAll!();
 
     expect(report.failures, isEmpty);
     expect(report.success, isTrue);
-    expect(report.completed, containsAll(['drafts', 'tool-usage', 'sessions']));
+    expect(report.completed, containsAll(['drafts', 'sessions']));
     expect(await ComposerDraftStore.I.isEmpty(), isTrue);
     expect(await StudioDraftStore.I.isEmpty(), isTrue);
-    expect(await ToolUsageStore.I.isEmpty(), isTrue);
     expect(await SessionHistoryRepository.I.isEmpty(), isTrue);
     expect(AgentService.I.studioDraftsEmpty, isTrue);
   });
@@ -534,7 +519,6 @@ void main() {
     expect(await secure.readAll(), isEmpty);
     expect(app.providers.every((p) => p.apiKey.isEmpty), isTrue);
     expect(PresetRegistry.customPresets, isEmpty);
-    expect(app.globalPermissionGrants, isEmpty);
     await prefs.reload();
     expect(prefs.getKeys(), isEmpty);
     expect(skill.existsSync(), isFalse);
