@@ -21,7 +21,12 @@ export interface LoadThreshold {
    * the tier. A profile-less call evaluates the gate, so missing context can
    * never hide a dead measurement.
    */
-  whenProfileFieldPositive?: "sandboxDutyCycle";
+  whenProfileFieldPositive?: "sandboxDutyCycle" | "schedules";
+  /**
+   * Evaluate this gate only when the profile declares a spike. A profile-less
+   * call evaluates it (same missing-context rule as above).
+   */
+  whenProfileHasSpike?: boolean;
 }
 
 /**
@@ -111,6 +116,14 @@ export const SMOKE_THRESHOLDS: LoadThreshold[] = [
     op: "eq",
     value: 0,
     rationale: "positive data: no off-contract server frames were accepted",
+  },
+  {
+    metric: "scheduleRuns.created",
+    op: "gt",
+    value: 0,
+    whenProfileFieldPositive: "schedules",
+    rationale:
+      "positive data: schedules were created under the session-owning uid (0/0/0 ledger is not PASS)",
   },
 ];
 
@@ -211,6 +224,14 @@ export const FULL_THRESHOLDS: LoadThreshold[] = [
     rationale: "positive data: schedules fired and the claim ledger was read",
   },
   {
+    metric: "admission.spikeHeldRequests",
+    op: "gt",
+    value: 0,
+    whenProfileHasSpike: true,
+    rationale:
+      "positive data: the gated mock actually parked the spike burst (not a silent 0)",
+  },
+  {
     metric: "runsFailedUnattributed",
     op: "eq",
     value: 0,
@@ -275,6 +296,13 @@ export function checkThresholds(
     if (threshold.whenProfileFieldPositive !== undefined && profile !== undefined) {
       const profileValue = profile[threshold.whenProfileFieldPositive];
       if (typeof profileValue === "number" && profileValue <= 0) continue;
+    }
+    if (
+      threshold.whenProfileHasSpike === true &&
+      profile !== undefined &&
+      profile.spike === undefined
+    ) {
+      continue;
     }
     const measured = readMetric(report, threshold.metric);
     if (measured === undefined || !passes(measured, threshold.op, threshold.value)) {

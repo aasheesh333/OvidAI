@@ -44,10 +44,11 @@ function healthyReport(): LoadReport {
       acceptedNotTerminal: 0,
       spikeDrainMs: 1_000,
       spikeRuns: 16,
+      spikeHeldRequests: 16,
     },
     memory: { gatewayMaxRssMb: 500, hostMemAvailableMinMb: 5_000, workerMaxRssMb: 1_000 },
     harness: { maxPendingFrames: 10, latencyFloorP95Ms: 5, invalidFrames: 0 },
-    scheduleRuns: { fired: 40, duplicated: 0, missed: 0 },
+    scheduleRuns: { created: 10, fired: 40, duplicated: 0, missed: 0 },
     thresholdFailures: [],
     notes: [],
   };
@@ -72,10 +73,11 @@ function deadReport(): LoadReport {
       acceptedNotTerminal: 0,
       spikeDrainMs: 0,
       spikeRuns: 0,
+      spikeHeldRequests: 0,
     },
     memory: { gatewayMaxRssMb: 0, hostMemAvailableMinMb: 0, workerMaxRssMb: 0 },
     harness: { maxPendingFrames: 0, latencyFloorP95Ms: 0, invalidFrames: 0 },
-    scheduleRuns: { fired: 0, duplicated: 0, missed: 0 },
+    scheduleRuns: { created: 0, fired: 0, duplicated: 0, missed: 0 },
   };
 }
 
@@ -93,7 +95,9 @@ describe("FULL_THRESHOLDS positive-data gates", () => {
         "runsCompleted",
         "replay.samples",
         "admission.spikeRuns",
+        "admission.spikeHeldRequests",
         "admission.maxObservedActiveSandboxes",
+        "scheduleRuns.created",
         "scheduleRuns.fired",
         "memory.gatewayMaxRssMb",
         "memory.workerMaxRssMb",
@@ -133,6 +137,38 @@ describe("FULL_THRESHOLDS positive-data gates", () => {
     expect(checkThresholds(report, FULL_THRESHOLDS, PROFILE)).toContain(
       "runsFailedUnattributed",
     );
+  });
+
+  it("schedules>0 with zero created FAILS even when the ledger counters are 0/0/0", () => {
+    const report = healthyReport();
+    report.scheduleRuns = { created: 0, fired: 0, duplicated: 0, missed: 0 };
+    const failures = checkThresholds(report, FULL_THRESHOLDS, PROFILE);
+    expect(failures).toContain("scheduleRuns.created");
+    expect(failures).toContain("scheduleRuns.fired");
+  });
+
+  it("the schedule-created gate does not apply when the profile creates none", () => {
+    const report = healthyReport();
+    report.scheduleRuns = { created: 0, fired: 0, duplicated: 0, missed: 0 };
+    expect(
+      checkThresholds(report, FULL_THRESHOLDS, { ...PROFILE, schedules: 0 }),
+    ).not.toContain("scheduleRuns.created");
+  });
+
+  it("a spike with zero held requests FAILS (the hold is not silently 0)", () => {
+    const report = healthyReport();
+    report.admission.spikeHeldRequests = 0;
+    expect(checkThresholds(report, FULL_THRESHOLDS, PROFILE)).toContain(
+      "admission.spikeHeldRequests",
+    );
+  });
+
+  it("the spike-hold gate does not apply to a profile with no spike", () => {
+    const report = healthyReport();
+    report.admission.spikeHeldRequests = 0;
+    expect(
+      checkThresholds(report, FULL_THRESHOLDS, { ...PROFILE, spike: undefined }),
+    ).not.toContain("admission.spikeHeldRequests");
   });
 
   it("keeps the brief's spike-drain threshold (T4 M1): ≤600 s", () => {

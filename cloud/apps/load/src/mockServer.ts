@@ -16,6 +16,19 @@ import { resolve } from "node:path";
  * Determinism: `arm()` installs the script the NEXT request streams and
  * returns a deferred gate — no timing guesses. Each request snapshots the
  * script at arrival, so a later `arm()` never mutates an in-flight stream.
+ *
+ * Out-of-process control (the load scenario against the standalone staging
+ * mock) uses a documented HTTP surface — the same arm/release mechanics:
+ *
+ *   POST /_control/arm      body: MockLlmScript → {gateId}
+ *   POST /_control/release  body: {gateId?}     → {released, heldRequests}
+ *   GET  /_control/status                       → {armed, gateId, requestsSeen,
+ *                                                   heldRequests, totalHeldRequests}
+ *
+ * `/_control/arm` installs the next-request script exactly like `arm()` and
+ * returns the id of its deferred gate; `/_control/release` resolves it. The
+ * staging mock binds 0.0.0.0:14000 on the host behind the firewall (see the
+ * staging topology note above); these routes are mock-only and never proxy.
  */
 
 /**
@@ -51,6 +64,13 @@ export interface MockLlmScript {
    * scenario already prefixes onto `sandboxDutyCycle` runs.
    */
   toolCallMarker?: string | null;
+  /**
+   * Only honour `gateAfterDeltas` when the last user message starts with this
+   * marker. `null` = gate every request (the `arm()` default). The scenario
+   * arms `"[spike]"` so only the spike burst is held; steady-state runs keep
+   * streaming while the spike is parked.
+   */
+  gateMarker?: string | null;
 }
 
 export interface MockLlmServer {
@@ -74,6 +94,7 @@ interface ResolvedScript {
   closeSocketAfterDeltas: number | null;
   toolCall: MockLlmToolCall | null;
   toolCallMarker: string | null;
+  gateMarker: string | null;
 }
 
 /**
@@ -120,6 +141,7 @@ function resolveScript(script: MockLlmScript, fallback: ResolvedScript): Resolve
     toolCall: script.toolCall === undefined ? fallback.toolCall : script.toolCall,
     toolCallMarker:
       script.toolCallMarker === undefined ? fallback.toolCallMarker : script.toolCallMarker,
+    gateMarker: script.gateMarker === undefined ? fallback.gateMarker : script.gateMarker,
   };
 }
 
@@ -201,6 +223,19 @@ function shouldEmitToolCall(script: ResolvedScript, rawBody: string): boolean {
   return true;
 }
 
+/**
+ * Whether this request's stream should honour `gateAfterDeltas`. With no
+ * marker every request is eligible (the historical `arm()` semantics); with a
+ * marker only requests whose latest user message starts with it are held.
+ */
+function shouldGate(script: ResolvedScript, rawBody: string): boolean {
+  if (script.gateAfterDeltas === null) return false;
+  if (script.gateMarker === null) return true;
+  const lastUser = lastUserMessage(parseMessages(rawBody));
+  const text = lastUser === undefined ? "" : contentText(lastUser.content);
+  return text.startsWith(script.gateMarker);
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -248,16 +283,25 @@ export async function startMockLlmServer(
     closeSocketAfterDeltas: null,
     toolCall: DEFAULT_SANDBOX_TOOL_CALL,
     toolCallMarker: "[sandbox]",
+    gateMarker: null,
   });
   let current = fallback;
   let gate = deferred();
   let chatRequests = 0;
+  /** HTTP control gates by id; in-process `arm()` gates stay outside this map. */
+  const remoteGates = new Map<string, Deferred>();
+  let gateSeq = 0;
+  let activeGateId: string | null = null;
+  /** Requests currently parked on a deferred gate (and the running total). */
+  let heldRequests = 0;
+  let totalHeldRequests = 0;
 
   async function stream(
     res: ServerResponse,
     script: ResolvedScript,
     requestGate: Deferred,
     emitToolCall: boolean,
+    gateAfterDeltas: number | null,
   ): Promise<void> {
     res.writeHead(200, {
       "content-type": "text/event-stream",
@@ -314,8 +358,14 @@ export async function startMockLlmServer(
         res.socket?.destroy();
         return;
       }
-      if (script.gateAfterDeltas === written) {
-        await requestGate.promise;
+      if (gateAfterDeltas === written) {
+        heldRequests += 1;
+        totalHeldRequests += 1;
+        try {
+          await requestGate.promise;
+        } finally {
+          heldRequests -= 1;
+        }
         if (res.destroyed || res.writableEnded) return;
       }
     }
@@ -336,7 +386,65 @@ export async function startMockLlmServer(
         // Snapshot per request: a later arm() never mutates an in-flight stream.
         const script = { ...current, deltas: [...current.deltas] };
         const requestGate = gate;
-        await stream(res, script, requestGate, shouldEmitToolCall(script, body));
+        await stream(
+          res,
+          script,
+          requestGate,
+          shouldEmitToolCall(script, body),
+          shouldGate(script, body) ? script.gateAfterDeltas : null,
+        );
+        return;
+      }
+
+      // ---- Out-of-process control surface (the spike hold) ----------------
+      if (req.method === "POST" && path === "/_control/arm") {
+        let script: MockLlmScript;
+        try {
+          script = JSON.parse(await readBody(req)) as MockLlmScript;
+        } catch {
+          sendJson(res, 400, { error: { message: "control arm: body must be JSON" } });
+          return;
+        }
+        gateSeq += 1;
+        const gateId = `gate-${gateSeq}`;
+        current = resolveScript(script, fallback);
+        gate = deferred();
+        remoteGates.set(gateId, gate);
+        activeGateId = gateId;
+        sendJson(res, 200, { gateId });
+        return;
+      }
+
+      if (req.method === "POST" && path === "/_control/release") {
+        let gateId: string | null = null;
+        try {
+          const body = JSON.parse(await readBody(req)) as { gateId?: unknown };
+          gateId = typeof body.gateId === "string" ? body.gateId : null;
+        } catch {
+          sendJson(res, 400, { error: { message: "control release: body must be JSON" } });
+          return;
+        }
+        const targetId = gateId ?? activeGateId;
+        const target = targetId === null ? undefined : remoteGates.get(targetId);
+        if (target !== undefined && targetId !== null) {
+          remoteGates.delete(targetId);
+          if (activeGateId === targetId) activeGateId = null;
+          target.resolve();
+        }
+        sendJson(res, 200, { released: target !== undefined, heldRequests });
+        return;
+      }
+
+      if (req.method === "GET" && path === "/_control/status") {
+        sendJson(res, 200, {
+          armed: activeGateId !== null,
+          gateId: activeGateId,
+          gateAfterDeltas: current.gateAfterDeltas,
+          gateMarker: current.gateMarker,
+          requestsSeen: chatRequests,
+          heldRequests,
+          totalHeldRequests,
+        });
         return;
       }
 

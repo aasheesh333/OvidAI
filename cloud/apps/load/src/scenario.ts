@@ -110,6 +110,14 @@ export interface LoadReport {
      * drain threshold alone is vacuous; this must be > 0.
      */
     spikeRuns: number;
+    /**
+     * Additive (I4): provider requests the gated mock was holding at the end
+     * of the spike window. 0 means the burst was not held — either no control
+     * surface was reachable or the gate never parked a spike request — and the
+     * report says which. The admission queue depth itself is NOT observable
+     * from the client wire; this is the evidence that the hold was real.
+     */
+    spikeHeldRequests: number;
   };
   memory: {
     gatewayMaxRssMb: number;
@@ -126,7 +134,13 @@ export interface LoadReport {
      */
     invalidFrames: number;
   };
-  scheduleRuns: { fired: number; duplicated: number; missed: number };
+  /**
+   * Additive (I5): schedules the REST tier actually created. `fired` /
+   * `duplicated` / `missed` are all legitimately 0 when a 300 s schedule did
+   * not fire inside the run, so this counter is the tier's positive-data gate:
+   * `schedules > 0` with `created === 0` must never read as PASS.
+   */
+  scheduleRuns: { created: number; fired: number; duplicated: number; missed: number };
   thresholdFailures: string[];
   /** Additive: loud "NOT EXERCISED" notes (browser tier, schedule tier, …). */
   notes?: string[];
@@ -137,9 +151,45 @@ const REPLAY_WAIT_MS = 2_000;
 const MEMORY_SAMPLE_EVERY_MS = 5_000;
 const PENDING_SAMPLE_EVERY_MS = 25;
 const GROUND_TRUTH_LIMIT = 100_000;
+/** Prefix the spike prompts carry so the mock gate holds ONLY spike runs. */
+const SPIKE_MARKER = "[spike]";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+interface MockControlStatus {
+  heldRequests?: number;
+  totalHeldRequests?: number;
+  requestsSeen?: number;
+}
+
+/**
+ * The mock's documented out-of-process control surface (`/_control/arm` etc.,
+ * see mockServer.ts). Used only when `target.mockLlmUrl` is set — the
+ * standalone staging mock and the in-process composition both expose it.
+ * Failures are surfaced by the caller as loud notes; they never throw out of
+ * the scenario.
+ */
+async function mockControl(
+  mockLlmUrl: string,
+  path: string,
+  body?: unknown,
+): Promise<Record<string, unknown>> {
+  const base = mockLlmUrl.replace(/\/+$/, "");
+  const response = await fetch(`${base}${path}`, {
+    method: body === undefined ? "GET" : "POST",
+    ...(body === undefined
+      ? {}
+      : {
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+  });
+  if (!response.ok) {
+    throw new Error(`${path}: HTTP ${response.status}`);
+  }
+  return (await response.json()) as Record<string, unknown>;
 }
 
 function run(
@@ -294,6 +344,8 @@ export async function runScenario(
 
   const clients: Array<LoadClient | undefined> = [];
   const sessions: Array<string | undefined> = [];
+  /** Parallel to `sessions`: the uid that created (and therefore owns) it. */
+  const sessionOwners: Array<string | undefined> = [];
   const notes: string[] = [];
   const replaySamples: number[] = [];
   let sends = 0;
@@ -302,6 +354,7 @@ export async function runScenario(
   let maxPendingFrames = 0;
   let browserAttached = 0;
   const spikeRunIds: string[] = [];
+  let spikeHeldRequests = 0;
   /**
    * Every run the gateway accepted (202). Admission metrics are derived from
    * this list plus the event stream — never from WS error frames.
@@ -386,15 +439,17 @@ export async function runScenario(
   }
 
   async function runUser(index: number): Promise<void> {
+    const uid = `${runTag}-u${index}`;
     const client = await createLoadClient({
       baseUrl: target.baseUrl,
       wsBase: target.wsBase,
-      uid: `${runTag}-u${index}`,
+      uid,
       authMode: "test",
     });
     clients[index] = client;
     const sessionId = await client.createSession();
     sessions[index] = sessionId;
+    sessionOwners[index] = uid;
     await client.subscribe(sessionId, null);
 
     if (index < profile.browserUsers) {
@@ -456,35 +511,120 @@ export async function runScenario(
   async function fireSpike(): Promise<void> {
     const spike = profile.spike;
     if (spike === undefined) return;
-    const deadline = Date.now() + 5_000;
-    for (let i = 0; i < spike.extraConcurrentRuns && Date.now() < deadline; i += 1) {
-      const live = clients
-        .map((client, index) => ({ client, sessionId: sessions[index] }))
-        .filter(
-          (entry): entry is { client: LoadClient; sessionId: string } =>
-            entry.client !== undefined && entry.sessionId !== undefined,
-        );
-      if (live.length === 0) {
-        await sleep(25);
-        continue;
-      }
-      const chosen = live[i % live.length]!;
+    const spikeStartedAt = Date.now();
+    let gateId: string | undefined;
+    let released = false;
+
+    // Arm the mock BEFORE the burst so every spike request is parked from the
+    // start. `gateMarker` keeps steady-state runs streaming: only prompts
+    // carrying SPIKE_MARKER are held.
+    if (target.mockLlmUrl === "") {
+      notes.push(
+        "spike hold: NOT EXERCISED — target.mockLlmUrl is empty, so the burst could not be " +
+          "gated. Admission saturation is NOT measurable from this run.",
+      );
+    } else {
       try {
-        const sent = await chosen.client.sendMessage(chosen.sessionId, `${runTag} spike ${i}`);
-        spikeRunIds.push(sent.runId);
-        acceptedRuns.push({
-          runId: sent.runId,
-          sessionId: chosen.sessionId,
-          acceptedAtMs: Date.now(),
+        const armed = await mockControl(target.mockLlmUrl, "/_control/arm", {
+          deltas: ["held by spike gate"],
+          chunkDelayMs: 0,
+          gateAfterDeltas: 1,
+          gateMarker: SPIKE_MARKER,
         });
-        sends += 1;
+        if (typeof armed.gateId === "string") gateId = armed.gateId;
+        else notes.push("spike hold: /_control/arm returned no gateId — burst NOT held");
       } catch (err) {
-        sendFailures += 1;
-        notes.push(`spike send failed: ${err instanceof Error ? err.message : String(err)}`);
+        notes.push(
+          `spike hold: mock control surface unavailable (${
+            err instanceof Error ? err.message : String(err)
+          }) — burst NOT held; admission saturation is NOT measurable.`,
+        );
       }
-      await sleep(Math.max(1, Math.floor(5_000 / Math.max(1, spike.extraConcurrentRuns))));
     }
-    spikeEndedAt = Date.now();
+
+    try {
+      // Fire the burst within 5 s, exactly as before.
+      const deadline = Date.now() + 5_000;
+      for (let i = 0; i < spike.extraConcurrentRuns && Date.now() < deadline; i += 1) {
+        const live = clients
+          .map((client, index) => ({ client, sessionId: sessions[index] }))
+          .filter(
+            (entry): entry is { client: LoadClient; sessionId: string } =>
+              entry.client !== undefined && entry.sessionId !== undefined,
+          );
+        if (live.length === 0) {
+          await sleep(25);
+          continue;
+        }
+        const chosen = live[i % live.length]!;
+        try {
+          const sent = await chosen.client.sendMessage(
+            chosen.sessionId,
+            `${SPIKE_MARKER} ${runTag} spike ${i}`,
+          );
+          spikeRunIds.push(sent.runId);
+          acceptedRuns.push({
+            runId: sent.runId,
+            sessionId: chosen.sessionId,
+            acceptedAtMs: Date.now(),
+          });
+          sends += 1;
+        } catch (err) {
+          sendFailures += 1;
+          notes.push(`spike send failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        await sleep(Math.max(1, Math.floor(5_000 / Math.max(1, spike.extraConcurrentRuns))));
+      }
+
+      // Hold the gate for the profile's spike window. The runs stay attached
+      // to their sandboxes while parked, which is what pushes demand over
+      // OVID_MAX_ACTIVE_SANDBOXES in the staging composition.
+      const holdUntil = spikeStartedAt + Math.max(0, spike.durationMs);
+      while (Date.now() < holdUntil) {
+        await sleep(Math.min(100, Math.max(1, holdUntil - Date.now())));
+      }
+
+      if (gateId !== undefined) {
+        try {
+          const status = (await mockControl(
+            target.mockLlmUrl,
+            "/_control/status",
+          )) as MockControlStatus;
+          spikeHeldRequests = Math.max(
+            spikeHeldRequests,
+            Number(status.heldRequests ?? 0),
+          );
+          if (spikeHeldRequests === 0) {
+            notes.push(
+              "spike hold: the mock gate was armed but 0 requests were parked at the end of " +
+                "the spike window (the burst did not reach the provider before release).",
+            );
+          }
+        } catch (err) {
+          notes.push(
+            `spike hold: /_control/status failed (${
+              err instanceof Error ? err.message : String(err)
+            }) — held-request evidence unavailable.`,
+          );
+        }
+        try {
+          await mockControl(target.mockLlmUrl, "/_control/release", { gateId });
+          released = true;
+        } catch (err) {
+          notes.push(
+            `spike hold: /_control/release failed (${
+              err instanceof Error ? err.message : String(err)
+            }) — spike runs may remain parked.`,
+          );
+        }
+      }
+    } finally {
+      // Never leave the mock gate parked if the body threw mid-window.
+      if (gateId !== undefined && !released) {
+        await mockControl(target.mockLlmUrl, "/_control/release", { gateId }).catch(() => {});
+      }
+      spikeEndedAt = Date.now();
+    }
   }
   if (profile.spike !== undefined) {
     spikeTimer = setTimeout(() => {
@@ -499,20 +639,30 @@ export async function runScenario(
   async function createSchedules(): Promise<void> {
     if (profile.schedules <= 0) return;
     const deadline = Date.now() + 5_000;
-    let sessionId: string | undefined;
-    while (Date.now() < deadline && sessionId === undefined) {
-      sessionId = sessions.find((sid) => sid !== undefined);
-      if (sessionId === undefined) await sleep(25);
+    let ownerIndex = -1;
+    while (Date.now() < deadline && ownerIndex < 0) {
+      ownerIndex = sessions.findIndex(
+        (sid, index) => sid !== undefined && sessionOwners[index] !== undefined,
+      );
+      if (ownerIndex < 0) await sleep(25);
     }
-    if (sessionId === undefined) {
-      notes.push("schedule tier: NOT EXERCISED (no session available at ramp start)");
+    if (ownerIndex < 0) {
+      notes.push(
+        "schedule tier: NOT EXERCISED (no session/owner available at ramp start; " +
+          `created=0 of ${profile.schedules})`,
+      );
       return;
     }
+    const sessionId = sessions[ownerIndex]!;
+    // I5: the schedule service owner-scopes the referenced session, so the
+    // create MUST use the uid that created it. A separate `-sched` identity
+    // 404s and the tier silently reads 0/0/0 (which used to PASS).
+    const ownerUid = sessionOwners[ownerIndex]!;
     for (let i = 0; i < profile.schedules; i += 1) {
       const response = await fetch(`${target.baseUrl}/cloud/v1/schedules`, {
         method: "POST",
         headers: {
-          authorization: `Bearer test:${runTag}-sched`,
+          authorization: `Bearer test:${ownerUid}`,
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -524,12 +674,20 @@ export async function runScenario(
       });
       if (!response.ok) {
         notes.push(
-          `schedule tier: NOT EXERCISED (POST /cloud/v1/schedules → ${response.status})`,
+          `schedule tier: NOT EXERCISED (POST /cloud/v1/schedules as the session owner → ` +
+            `${response.status}; created=${scheduleIds.length} of ${profile.schedules}). ` +
+            "scheduleRuns.created will be 0 and the threshold gate FAILS.",
         );
         return;
       }
       const body = (await response.json()) as { id?: unknown };
       if (typeof body.id === "string") scheduleIds.push(body.id);
+    }
+    if (scheduleIds.length < profile.schedules) {
+      notes.push(
+        `schedule tier: created=${scheduleIds.length} of ${profile.schedules} — ` +
+          "scheduleRuns.created will fail the positive-data gate.",
+      );
     }
   }
   const schedulesTask = createSchedules();
@@ -684,9 +842,11 @@ export async function runScenario(
     );
   }
 
-  // Spike drain: from the end of the spike burst to the last spike run's
-  // run_started. 0 when no spike ran; a value only appears once every spike
-  // run has started (Task 5 gates this at ≤600 s).
+  // Spike drain: from the END OF THE HOLD (mock release) to the last spike
+  // run's run_started. In a composition without sandbox admission the spike
+  // runs start immediately (before release), so 0 is legitimate and is
+  // labelled; in staging, runs queued beyond the sandbox cap start only after
+  // slots free, which is the number Task 5 gates at ≤600 s.
   let spikeDrainMs = 0;
   if (spikeRunIds.length > 0 && spikeEndedAt !== undefined) {
     let lastStartedAt = 0;
@@ -700,13 +860,44 @@ export async function runScenario(
         }
       }
     }
-    if (lastStartedAt > 0) spikeDrainMs = Math.max(0, lastStartedAt - spikeEndedAt);
+    if (lastStartedAt > 0) {
+      spikeDrainMs = Math.max(0, lastStartedAt - spikeEndedAt);
+      if (lastStartedAt <= spikeEndedAt) {
+        notes.push(
+          "spike drain: all spike runs started before the hold was released (drain 0 is real, " +
+            "not missing data); no admission backlog was observed at release.",
+        );
+      }
+    } else {
+      notes.push(
+        `spike drain: NOT MEASURED — ${spikeRunIds.length} spike run(s) were accepted but no ` +
+          "run_started event for any of them was observed.",
+      );
+    }
+  }
+  if (spikeHeldRequests > 0 && spikeDrainMs === 0) {
+    notes.push(
+      `spike hold: ${spikeHeldRequests} provider request(s) were parked, but no spike run was ` +
+        "still queued at release (drain 0). In a sandbox composition this means the burst did " +
+        "NOT exceed OVID_MAX_ACTIVE_SANDBOXES; the admission path was NOT saturated by this run.",
+    );
   }
 
   // Schedules: best-effort claim-ledger read (needs staging Postgres).
+  // `created` is the tier's positive-data signal: the ledger counters below
+  // are legitimately 0 when an `every:300s` schedule did not fire inside a
+  // short run, so zero ledger rows alone cannot prove the tier ran.
+  const created = scheduleIds.length;
   let fired = 0;
   let duplicated = 0;
   let missed = 0;
+  let scheduleLedgerRead = false;
+  if (profile.schedules > 0 && created === 0) {
+    notes.push(
+      `schedule tier: NOT EXERCISED — created=0 of ${profile.schedules}; ` +
+        "scheduleRuns.created fails the positive-data gate (a 0/0/0 ledger is NOT a PASS).",
+    );
+  }
   if (db !== undefined && scheduleIds.length > 0) {
     try {
       const rows = (await db.$client.unsafe(
@@ -734,13 +925,29 @@ export async function runScenario(
         [scheduleIds],
       )) as Array<{ n: number }>;
       duplicated = Number(dupRows[0]?.n ?? 0);
+      scheduleLedgerRead = true;
     } catch (err) {
       notes.push(
-        `schedule ledger read failed: ${err instanceof Error ? err.message : String(err)}`,
+        `schedule ledger read failed: ${
+          err instanceof Error ? err.message : String(err)
+        } — fired/duplicated/missed are NOT MEASURED (the zeros are placeholders).`,
       );
     }
   } else if (profile.schedules > 0 && scheduleIds.length > 0) {
-    notes.push("schedule tier: claim ledger NOT READ (no staging Postgres configured)");
+    notes.push(
+      "schedule tier: claim ledger NOT READ (no staging Postgres configured) — " +
+        "fired/duplicated/missed are NOT MEASURED (the zeros are placeholders).",
+    );
+  }
+  if (
+    profile.schedules > 0 &&
+    scheduleLedgerRead &&
+    fired + duplicated + missed === 0
+  ) {
+    notes.push(
+      "schedule tier: claim ledger read; 0 occurrences in this window (a genuine zero, " +
+        "not an unobservable ledger).",
+    );
   }
 
   const dispatchSamples = clients.flatMap((client) => client?.dispatchLatenciesMs() ?? []);
@@ -775,6 +982,7 @@ export async function runScenario(
       acceptedNotTerminal: admission.acceptedNotTerminal,
       spikeDrainMs,
       spikeRuns: spikeRunIds.length,
+      spikeHeldRequests,
     },
     memory: {
       gatewayMaxRssMb: Math.round(memory.gatewayMaxRssMb),
@@ -790,7 +998,7 @@ export async function runScenario(
         0,
       ),
     },
-    scheduleRuns: { fired, duplicated, missed },
+    scheduleRuns: { created, fired, duplicated, missed },
     thresholdFailures: [],
     notes,
   };

@@ -1,11 +1,27 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { Redis } from "ioredis";
 import WebSocket, { WebSocketServer } from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { EventLog } from "@ovid/events";
+import { createDb, eventMirror, migrate, type Db } from "@ovid/db";
+import {
+  createRedisEventLog,
+  createRedisSystemBus,
+  type EventLog,
+} from "@ovid/events";
+import { createAgentRunsWorker, createQueues, type QueueServices } from "@ovid/queue";
+import {
+  buildGateway,
+  createTestVerifier,
+  createTicketStore,
+  type TicketStore,
+} from "@ovid/gateway";
+import { createAgentRunProcessor, createOpenAiTransport } from "@ovid/worker";
 import {
   sessionDtoSchema,
-  wsServerMsg,
+  type InternalMintProvisioner,
+  type KeyProvider,
+  type KeyResolver,
   type SessionEvent,
   type SessionEventType,
   type WsClientMsg,
@@ -16,11 +32,18 @@ import { startMockLlmServer, type MockLlmServer } from "./mockServer.js";
 import { SMOKE_THRESHOLDS, checkThresholds } from "./thresholds.js";
 
 /**
- * Fully self-contained harness test (no dev services, no staging):
+ * Two tiers in this file:
  *
- *   mock gateway (HTTP + WS, in-process)  ←→  @ovid/load client
- *              │
- *              └── mock LiteLLM ([OI] SSE, in-process)
+ * 1. UNIT (always runs): a hand-written mock gateway (HTTP + WS, in-process)
+ *    plus the in-process mock LiteLLM. It pins the harness's own mechanics
+ *    (ramp, cadence, reconnect+replay, drain, ground-truth diff) without any
+ *    external service. It is NOT the plan's integration proof.
+ * 2. INTEGRATION (skipped unless TEST_DATABASE_URL && TEST_REDIS_URL): the
+ *    REAL `buildGateway` + REAL worker composed in one process over a real
+ *    Redis event log, real BullMQ queues and real Postgres, exactly like
+ *    `apps/e2e/src/spine.test.ts`. This is Task 4 Step 4's test: 10 users /
+ *    20 s, `chunkDelayMs: 20`, real ticket/session/message/WS routes. It must
+ *    run against an isolated database and Redis (the e2e suite's pattern).
  *
  * The mock gateway is the smallest composition that honours the wire
  * contract the harness consumes: `POST /auth/ticket`, `POST /sessions`,
@@ -360,7 +383,7 @@ async function startMockGateway(mockLlmUrl: string): Promise<MockGateway> {
   };
 }
 
-describe("load harness (self-contained in-process)", () => {
+describe("load harness (unit: self-contained mock gateway)", () => {
   let sse: MockLlmServer;
   let gateway: MockGateway;
 
@@ -503,6 +526,72 @@ describe("load harness (self-contained in-process)", () => {
     expect(plainText).toContain('"finish_reason":"stop"');
   });
 
+  it("HTTP control surface holds only gateMarker requests until release (spike hold seam)", async () => {
+    const armed = await fetch(`${sse.baseUrl}/_control/arm`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        deltas: ["parked", "released"],
+        chunkDelayMs: 0,
+        gateAfterDeltas: 1,
+        gateMarker: "[spike]",
+      }),
+    });
+    expect(armed.status).toBe(200);
+    const { gateId } = (await armed.json()) as { gateId: string };
+    expect(gateId).toMatch(/^gate-/);
+
+    const chat = (content: string): Promise<Response> =>
+      fetch(`${sse.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ stream: true, messages: [{ role: "user", content }] }),
+      });
+
+    const gated = await chat("[spike] held run");
+    expect(gated.status).toBe(200);
+    const reader = gated.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    const deadline = Date.now() + 2_000;
+    while (!text.includes("parked") && Date.now() < deadline) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+    expect(text).toContain("parked");
+    expect(text).not.toContain("released"); // parked after the first delta
+
+    const status = (await (
+      await fetch(`${sse.baseUrl}/_control/status`)
+    ).json()) as { gateId: string | null; heldRequests: number };
+    expect(status.gateId).toBe(gateId);
+    expect(status.heldRequests).toBeGreaterThan(0);
+
+    // The marker scopes the gate: a steady-state request is NOT held.
+    const plain = await chat("plain run");
+    expect(await plain.text()).toContain("[DONE]");
+
+    const released = await fetch(`${sse.baseUrl}/_control/release`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ gateId }),
+    });
+    expect(released.status).toBe(200);
+    expect(((await released.json()) as { released: boolean }).released).toBe(true);
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+    expect(text).toContain("released");
+    expect(text).toContain("[DONE]");
+
+    // Restore the default script for the scenario tests below.
+    sse.arm({ deltas: ["Hello", " from", " the mock"], chunkDelayMs: 5 });
+  });
+
   it("smoke run: zero loss/duplicates vs readSince ground truth, harness under the latency floor", async () => {
     // Restore the default script after the gate test above.
     sse.arm({ deltas: ["Hello", " from", " the mock"], chunkDelayMs: 5 });
@@ -543,7 +632,7 @@ describe("load harness (self-contained in-process)", () => {
     // Review Focus #2: the harness itself is not the bottleneck.
     expect(report.harness.latencyFloorP95Ms).toBeLessThanOrEqual(50);
     expect(report.harness.maxPendingFrames).toBeLessThanOrEqual(32);
-    expect(checkThresholds(report, SMOKE_THRESHOLDS)).toEqual([]);
+    expect(checkThresholds(report, SMOKE_THRESHOLDS, profile)).toEqual([]);
     expect(sse.requestsSeen()).toBeGreaterThan(0);
 
     // Every frame the client accepted was schema-valid: a second client can
@@ -560,3 +649,208 @@ describe("load harness (self-contained in-process)", () => {
     await probe.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Integration tier (Task 4 Step 4): the REAL gateway + worker in one process,
+// exactly like apps/e2e/src/spine.test.ts. Runs only when isolated services
+// are supplied — never against the shared dev DB or the live stack.
+// ---------------------------------------------------------------------------
+
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const TEST_REDIS_URL = process.env.TEST_REDIS_URL;
+
+describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
+  "load harness integration (real gateway + worker + Postgres/Redis)",
+  () => {
+    let db: Db;
+    let redis: Redis;
+    let events: EventLog;
+    let tickets: TicketStore;
+    let queues: QueueServices;
+    let worker: ReturnType<typeof createAgentRunsWorker>;
+    let sse: MockLlmServer;
+    let app: ReturnType<typeof buildGateway>;
+    let baseUrl: string;
+    let wsBase: string;
+
+    /**
+     * Suite-unique BullMQ prefix: the runner's Redis may be shared with other
+     * suites, so this suite can only ever obliterate its OWN queue keys.
+     */
+    const QUEUE_PREFIX = process.env.OVID_TEST_QUEUE_PREFIX
+      ? `${process.env.OVID_TEST_QUEUE_PREFIX}-load`
+      : `ovid-load-test-${process.pid}-${Date.now()}`;
+    /** Session ids observed through the scenario's mirror read (cleanup). */
+    const seenSessions = new Set<string>();
+
+    // The mock LiteLLM ignores key validity, so a constant key is enough.
+    const keys: KeyProvider & KeyResolver = {
+      getKeyForUser: async () => "test-key",
+      resolveForRun: async () => ({ kind: "litellm", key: "test-key", baseUrl: "" }),
+    };
+    const mint: InternalMintProvisioner = {
+      ensureKeyForUid: async () => ({ key: "test-key", tier: "free", baseUrl: "" }),
+    };
+
+    beforeAll(async () => {
+      await migrate(TEST_DATABASE_URL!);
+      db = createDb(TEST_DATABASE_URL!);
+      redis = new Redis(TEST_REDIS_URL!);
+      // Created ONCE and shared by gateway deps AND RunDeps: live fanout only
+      // works when both sides hit the same Redis instance (spine.test.ts).
+      events = createRedisEventLog(redis);
+      tickets = createTicketStore(redis);
+
+      // OBJECT form mandatory (spine.test.ts / Task 7 lesson).
+      const connection = { url: TEST_REDIS_URL! };
+      queues = createQueues(connection, { prefix: QUEUE_PREFIX });
+
+      sse = await startMockLlmServer({
+        deltas: ["Hello", " from", " the real composition"],
+        chunkDelayMs: 20,
+      });
+      const processor = createAgentRunProcessor({
+        db,
+        events,
+        keys,
+        transport: createOpenAiTransport(),
+        litellmBaseUrl: sse.baseUrl,
+        defaultModel: "load-test-model",
+      });
+      worker = createAgentRunsWorker(connection, processor, { prefix: QUEUE_PREFIX });
+
+      app = buildGateway({
+        system: createRedisSystemBus(redis),
+        db,
+        queues,
+        verifier: createTestVerifier(),
+        tickets,
+        keys,
+        mint,
+        events,
+      });
+      await app.listen({ host: "127.0.0.1", port: 0 });
+      const port = (app.server.address() as AddressInfo).port;
+      baseUrl = `http://127.0.0.1:${port}`;
+      wsBase = `ws://127.0.0.1:${port}/cloud/ws`;
+    }, 60_000);
+
+    afterAll(async () => {
+      // The scenario releases its spike gate before returning; close the
+      // worker first so BullMQ's blocking connections stop fetching.
+      await worker?.close();
+      await app?.close();
+      if (queues) {
+        await queues.agentRuns.obliterate({ force: true }).catch(() => {});
+        await queues.agentRuns.close().catch(() => {});
+      }
+      await sse?.close();
+      if (seenSessions.size > 0) {
+        // Only this suite's streams (the runner supplied an isolated Redis).
+        await redis
+          ?.del([...seenSessions].map((id) => `sess:${id}:events`))
+          .catch(() => {});
+      }
+      redis?.disconnect();
+      await db?.$client.end({ timeout: 5 });
+    }, 60_000);
+
+    it(
+      "10 users / 20 s: zero loss/dups vs the real event log, floor held, spike held",
+      async () => {
+        /**
+         * Read the REAL Postgres mirror, settling until it has caught up with
+         * the REAL Redis stream. The worker appends then mirrors; the live
+         * frame can reach the client a beat before `eventMirror.put` commits.
+         * A persistent gap still fails the scenario's `gapsVsMirror` check.
+         */
+        const mirrorRead = async (sessionId: string): Promise<string[]> => {
+          seenSessions.add(sessionId);
+          let seqs: string[] = [];
+          for (let attempt = 0; attempt < 80; attempt += 1) {
+            seqs = (await eventMirror.readSince(db, sessionId, null, 100_000)).map(
+              (event) => event.seq,
+            );
+            const truth = (await events.readSince(sessionId, null, 100_000)).length;
+            if (seqs.length >= truth) return seqs;
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+          return seqs;
+        };
+
+        const profile: LoadProfile = {
+          users: 10,
+          durationMs: 20_000,
+          rampMs: 1_000,
+          runsPerUserEveryMs: 4_000,
+          sandboxDutyCycle: 0, // this composition has no sandbox/tool roster
+          browserUsers: 0,
+          schedules: 1, // I5: created under the session owner's uid
+          reconnectEveryMs: 10_000,
+          // I4: a small held burst proves the scenario's mock control seam.
+          spike: { atMs: 8_000, extraConcurrentRuns: 5, durationMs: 1_000 },
+        };
+        const target: LoadTarget = {
+          baseUrl,
+          wsBase,
+          redisQUrl: "",
+          databaseUrl: "",
+          mockLlmUrl: sse.baseUrl,
+          queuePrefix: QUEUE_PREFIX,
+          eventLog: events,
+          mirrorRead,
+        };
+
+        const report = await runScenario(profile, target);
+
+        // Plan Step 4 assertions (unchanged).
+        expect(report.users).toBe(profile.users);
+        expect(report.integrity).toEqual({
+          lostEvents: 0,
+          duplicateEvents: 0,
+          gapsVsMirror: 0,
+        });
+        expect(report.runsCompleted).toBe(report.runsStarted);
+        expect(report.eventDelivery.p95Ms).toBeLessThanOrEqual(250);
+        expect(report.harness.latencyFloorP95Ms).toBeLessThanOrEqual(50);
+        expect(report.harness.maxPendingFrames).toBeLessThanOrEqual(32);
+
+        // Positive data: the run cannot pass with nothing running.
+        expect(report.runsStarted).toBeGreaterThan(0);
+        expect(report.eventDelivery.samples).toBeGreaterThan(0);
+        expect(report.runsFailed).toBe(0);
+        expect(report.harness.invalidFrames).toBe(0);
+        expect(sse.requestsSeen()).toBeGreaterThan(0);
+
+        // I5: the schedule was created under the session-owning uid. A wrong
+        // identity 404s and leaves created=0 (the old silent PASS).
+        expect(report.scheduleRuns.created).toBe(1);
+        expect(report.notes ?? []).not.toEqual(
+          expect.arrayContaining([expect.stringContaining("schedule tier: NOT EXERCISED")]),
+        );
+
+        // I4: the spike fired AND was actually held by the mock gate.
+        expect(report.admission.spikeRuns).toBeGreaterThan(0);
+        expect(report.admission.spikeHeldRequests).toBeGreaterThan(0);
+        expect(report.admission.spikeDrainMs).toBeGreaterThanOrEqual(0);
+
+        // One compact evidence line (kept in the test output so a Task 5
+        // operator can see the values behind the assertions).
+        console.log(
+          `load integration: runsStarted=${report.runsStarted} ` +
+            `runsCompleted=${report.runsCompleted} ` +
+            `delivery.p95=${report.eventDelivery.p95Ms}ms ` +
+            `samples=${report.eventDelivery.samples} ` +
+            `integrity=${JSON.stringify(report.integrity)} ` +
+            `floor.p95=${report.harness.latencyFloorP95Ms}ms ` +
+            `pending=${report.harness.maxPendingFrames} ` +
+            `schedules.created=${report.scheduleRuns.created} ` +
+            `spike.runs=${report.admission.spikeRuns} ` +
+            `spike.held=${report.admission.spikeHeldRequests} ` +
+            `spike.drainMs=${report.admission.spikeDrainMs}`,
+        );
+      },
+      120_000,
+    );
+  },
+);
