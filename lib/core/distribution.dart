@@ -78,36 +78,18 @@ class Distribution {
   /// Termux-style on-device Linux sandbox. Removed entirely in P8 Task 13.
   static bool get onDeviceSandboxAvailable => false;
 
-  /// Device permissions the agent may ask for. Play builds only declare the
-  /// ones a shipped feature uses (browser camera/mic/location, voice input,
-  /// notifications); asking for an undeclared permission would just fail.
-  static const List<String> allAgentPermissions = [
+  /// Device permissions the app actually declares, for the UI that explains
+  /// why a request can fail. This used to be a 15-entry list mirroring the
+  /// on-device agent's capability roster; every capability that needed the
+  /// broad entries (sandbox T13, device control T13, background agent T12,
+  /// on-device browser T16) is gone, so the manifest now declares exactly
+  /// these three and the list mirrors it. `test/play_distribution_test.dart`
+  /// parses the manifest and fails if the two drift.
+  static const List<String> declaredPermissions = [
+    'internet',
     'notifications',
-    'camera',
     'microphone',
-    'storage',
-    'photos',
-    'videos',
-    'audio',
-    'contacts',
-    'calendar',
-    'location',
-    'phone',
-    'sms',
-    'bluetooth',
-    'activity_recognition',
-    'sensors',
   ];
-
-  static const List<String> _playAgentPermissions = [
-    'notifications',
-    'camera',
-    'microphone',
-    'location',
-  ];
-
-  static List<String> get agentPermissions =>
-      play ? _playAgentPermissions : allAgentPermissions;
 
   /// User-facing reason shown when a sideload-only capability is requested.
   static const String sandboxUnavailableMessage =

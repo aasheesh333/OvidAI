@@ -18,15 +18,42 @@ void main() {
     }
   });
 
-  test('Play agent permissions match the Play manifest', () {
-    Distribution.playOverrideForTest = true;
-    expect(
-      Distribution.agentPermissions,
-      unorderedEquals(['notifications', 'camera', 'microphone', 'location']),
-    );
-    for (final removed in ['sms', 'phone', 'contacts', 'calendar', 'sensors']) {
-      expect(Distribution.agentPermissions, isNot(contains(removed)));
+  test('the declared permission set matches the manifest exactly', () {
+    // The on-device agent is gone (P8 Tasks 12/13/16), so the manifest must
+    // not keep requesting permissions nothing uses — Play rejects or demands
+    // justification for broad ones (SEND_SMS, MANAGE_EXTERNAL_STORAGE).
+    final manifest = File(
+      'android/app/src/main/AndroidManifest.xml',
+    ).readAsStringSync();
+    final declared = RegExp(r'android\.permission\.([A-Z_]+)')
+        .allMatches(manifest)
+        .map((m) => m.group(1)!)
+        .toSet();
+    expect(declared, {'INTERNET', 'POST_NOTIFICATIONS', 'RECORD_AUDIO'});
+    for (final removed in [
+      'SEND_SMS',
+      'CALL_PHONE',
+      'READ_CONTACTS',
+      'WRITE_CONTACTS',
+      'READ_CALENDAR',
+      'WRITE_CALENDAR',
+      'ACCESS_FINE_LOCATION',
+      'ACCESS_COARSE_LOCATION',
+      'MANAGE_EXTERNAL_STORAGE',
+      'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+      'CAMERA',
+      'BODY_SENSORS',
+      'ACTIVITY_RECOGNITION',
+      'BLUETOOTH_SCAN',
+      'BLUETOOTH_CONNECT',
+      'READ_PHONE_STATE',
+    ]) {
+      expect(manifest, isNot(contains(removed)), reason: removed);
     }
+    expect(
+      Distribution.declaredPermissions,
+      unorderedEquals(['internet', 'notifications', 'microphone']),
+    );
   });
 
   group('native Play packaging', () {

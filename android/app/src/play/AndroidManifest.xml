@@ -8,10 +8,10 @@
   * AccessibilityService: Play prohibits using the Accessibility API to let an
     app "autonomously initiate, plan, and execute actions" (answer/10964491).
     Control mode is an LLM agent, so the Play build ships without it.
-  * SMS/phone/contacts/calendar/sensors/bluetooth/activity permissions: only
-    the on-device shell (absent in Play builds) or a generic agent
-    "request_permission" tool used them; no core feature needs them, and
-    SEND_SMS is a restricted permission (default-handler only).
+  * SMS/phone/contacts/calendar/sensors/bluetooth/activity permissions: the
+    on-device agent that used them was deleted (P8 Tasks 12/13/16), and
+    src/main no longer declares them. These removals are kept as defense in
+    depth against a transitive library manifest re-introducing one.
   * READ_MEDIA_IMAGES/VIDEO/AUDIO: photo & video permissions policy; the app
     picks files through the system picker (answer/14115180).
   * MANAGE_EXTERNAL_STORAGE: All files access policy (answer/10467955).
