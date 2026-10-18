@@ -460,6 +460,45 @@ gate4_tests() {
   if [[ -n "${STAGING_DATABASE_URL:-}" ]]; then
     export TEST_DATABASE_URL="$STAGING_DATABASE_URL"
   fi
+
+  # A DEDICATED database for the suite while the staging stack is live.
+  # packages/db's suites DROP and re-create the whole schema, and gate 4 runs
+  # while gate 3's gateway/worker/mint are attached to the STAGING database.
+  # Sharing it left the live worker querying tables that had just been
+  # replaced: gate 5 then accepted 60 runs and the worker started ZERO.
+  # The schema is migrated here with the deploy path's own migrate().
+  local accept_db="ovid_accept_$$"
+  if [[ -n "${STAGING_DATABASE_URL:-}" ]] && command -v node >/dev/null 2>&1 \
+     && [[ -f "$CLOUD_DIR/packages/db/dist/migrate-cli.js" ]]; then
+    if node --input-type=module -e '
+      import postgres from "postgres";
+      const [url, name] = process.argv.slice(1);
+      const admin = postgres(url, { max: 1, onnotice: () => {} });
+      try { await admin.unsafe(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
+            await admin.unsafe(`CREATE DATABASE "${name}"`); }
+      finally { await admin.end({ timeout: 5 }); }
+    ' "$STAGING_DATABASE_URL" "$accept_db" >/dev/null 2>&1; then
+      local accept_url="${STAGING_DATABASE_URL%/*}/$accept_db"
+      if node "$CLOUD_DIR/packages/db/dist/migrate-cli.js" "$accept_url" >/dev/null 2>&1; then
+        export TEST_DATABASE_URL="$accept_url"
+        echo "gate 4: dedicated test database $accept_db (staging DB untouched)"
+        cleanup_accept_db() {
+          node --input-type=module -e '
+            import postgres from "postgres";
+            const [url, name] = process.argv.slice(1);
+            const admin = postgres(url, { max: 1, onnotice: () => {} });
+            try { await admin.unsafe(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`); }
+            finally { await admin.end({ timeout: 5 }); }
+          ' "$STAGING_DATABASE_URL" "$accept_db" >/dev/null 2>&1 || true
+        }
+        ACCEPT_CLEANUPS+=(cleanup_accept_db)
+      else
+        echo "gate 4: WARN — could not migrate $accept_db; using $TEST_DATABASE_URL" >&2
+      fi
+    else
+      echo "gate 4: WARN — could not create $accept_db; using $TEST_DATABASE_URL" >&2
+    fi
+  fi
   if [[ -n "${STAGING_REDIS_Q_URL:-}" ]]; then
     export TEST_REDIS_URL="$STAGING_REDIS_Q_URL"
   fi
@@ -474,13 +513,24 @@ gate4_tests() {
   # for open", "terminal no longer exists". Pub/sub is NOT db-scoped, so only
   # a separate server isolates them. In CI (--quick, no staging worker) the
   # caller's TEST_REDIS_URL is used unchanged.
+  # One EXIT trap for every resource this gate creates (bash keeps a single
+  # EXIT trap per shell; a second `trap ... EXIT` would silently drop the
+  # first). gate4_tests runs in run_gate's subshell, so this fires as the
+  # gate finishes.
+  ACCEPT_CLEANUPS=()
+  cleanup_accept_resources() {
+    local fn
+    for fn in "${ACCEPT_CLEANUPS[@]}"; do "$fn"; done
+  }
+  trap cleanup_accept_resources EXIT
+
   local test_redis="" test_redis_port=""
   if [[ -n "${STAGING_WORKER_PIDFILE:-}" && -r "${STAGING_WORKER_PIDFILE:-/nonexistent}" ]] \
      && kill -0 "$(cat "$STAGING_WORKER_PIDFILE" 2>/dev/null || echo 0)" 2>/dev/null \
      && command -v docker >/dev/null 2>&1; then
     test_redis="ovid-accept-redis-$$"
     cleanup_test_redis() { docker rm -f "$test_redis" >/dev/null 2>&1 || true; }
-    trap cleanup_test_redis EXIT
+    ACCEPT_CLEANUPS+=(cleanup_test_redis)
     if docker run -d --name "$test_redis" -p 127.0.0.1::6379 redis:7-alpine >/dev/null 2>&1; then
       for _ in $(seq 1 100); do
         if docker exec "$test_redis" redis-cli ping >/dev/null 2>&1; then break; fi

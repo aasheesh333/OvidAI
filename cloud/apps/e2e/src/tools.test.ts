@@ -594,6 +594,26 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       return body;
     }
 
+    /**
+     * Poll for a TERMINAL row. The processor emits the terminal event BEFORE
+     * flipping the row (pinned ordering, runProcessor.ts: "Terminal event
+     * BEFORE the status flip"), so a client that reacts to run_completed can
+     * legitimately observe the row still `running`. Asserting the row
+     * immediately after the event is a race, not a stronger check.
+     */
+    async function terminalRunRow(
+      runId: string,
+      timeoutMs = 10_000,
+    ): Promise<{ status: string; attempts: number }> {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const row = await runRow(runId);
+        if (row.status !== "running") return row;
+        if (Date.now() >= deadline) return row;
+        await sleep(25);
+      }
+    }
+
     async function runRow(runId: string): Promise<{ status: string; attempts: number }> {
       const rows = await db.$client.unsafe(
         "SELECT status, attempts FROM runs WHERE id = $1",
@@ -719,7 +739,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
       // attempts counts MODEL CALLS (bumpAttempt per attempt), and the tool
       // loop makes one call per round: 3 rounds here.
-      expect(await runRow(sent.runId)).toEqual({ status: "completed", attempts: 3 });
+      expect(await terminalRunRow(sent.runId)).toEqual({ status: "completed", attempts: 3 });
 
       // The LAST model request (round 3) proves the wired v1 loop end to end:
       // pinned system prompt first, the six-roster tools param, and both tool
@@ -827,7 +847,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
       // The refusal is a tool RESULT: the model saw it, answered, and the
       // run completed normally (2 model calls: the tool round + the text).
-      expect(await runRow(sent.runId)).toEqual({ status: "completed", attempts: 2 });
+      expect(await terminalRunRow(sent.runId)).toEqual({ status: "completed", attempts: 2 });
       expect(workerFailures).toEqual([]);
       expect(workerErrors).toEqual([]);
       await client.close();
@@ -862,7 +882,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       });
       // The model was never called: no deltas, no completion, and the run row
       // is terminal-failed with zero model attempts.
-      expect(await runRow(sent1.runId)).toEqual({ status: "failed", attempts: 0 });
+      expect(await terminalRunRow(sent1.runId)).toEqual({ status: "failed", attempts: 0 });
 
       // Queue not stuck: the job COMPLETED (no BullMQ failure) and a second
       // run through the now-working fake proceeds end to end.
@@ -878,7 +898,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         "second run completed",
         25_000,
       );
-      expect(await runRow(sent2.runId)).toEqual({ status: "completed", attempts: 1 });
+      expect(await terminalRunRow(sent2.runId)).toEqual({ status: "completed", attempts: 1 });
       // message_completed carries no runId — slice by position, not filter.
       const evts2 = client.events().slice(eventsBeforeRun2);
       expect(typesOf(evts2)).toEqual([
@@ -946,7 +966,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
       // The refusal is a tool result: the model recovered and finished
       // (2 model calls: the tool round + the text).
-      expect(await runRow(sent.runId)).toEqual({ status: "completed", attempts: 2 });
+      expect(await terminalRunRow(sent.runId)).toEqual({ status: "completed", attempts: 2 });
       expect(workerFailures).toEqual([]);
       expect(workerErrors).toEqual([]);
       await client.close();
