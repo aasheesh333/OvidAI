@@ -4,7 +4,6 @@ import '../core/cloud/cloud_rest.dart';
 import '../core/cloud/cloud_session_store.dart';
 import '../core/cloud/schedule_client.dart';
 import '../core/diag.dart';
-import '../core/distribution.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import '../l10n/l10n.dart';
@@ -30,14 +29,13 @@ String scheduleFailure(
 
 /// Schedule screen — server-backed (P4 REST).
 ///
-/// The widget tree is the Aether redesign; the data bindings now come from
-/// [ScheduleClient] (`GET/PATCH/DELETE /schedules`, `GET /schedules/:id/runs`)
-/// instead of the deleted local `ScheduleCoordinator` runtime. Rows are
-/// filtered to [sessionId] because the server list is account-wide.
+/// The widget tree is the Aether redesign; the data bindings come from
+/// [ScheduleClient] (`GET/PATCH/DELETE /schedules`, `GET /schedules/:id/runs`).
+/// Rows are filtered to [sessionId] because the server list is account-wide.
 ///
-/// When `Distribution.cloudSchedules` is false (a build without the thin
-/// client) the local runtime no longer exists, so the screen shows the
-/// cloud-empty state rather than pretending to schedule locally.
+/// There is no local runtime to fall back to (P8 Task 20 deleted it and
+/// collapsed the distribution flags), so the screen has exactly one path:
+/// the server.
 class ScheduleScreen extends StatefulWidget {
   final String sessionId;
   const ScheduleScreen({super.key, required this.sessionId});
@@ -54,15 +52,10 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   @override
   void initState() {
     super.initState();
-    if (Distribution.cloudSchedules) {
-      _load();
-    } else {
-      _loading = false;
-    }
+    _load();
   }
 
   Future<void> _load() async {
-    if (!Distribution.cloudSchedules) return;
     if (mounted) setState(() => _error = null);
     try {
       // `ScheduleDto.sessionId` is the SERVER UUID; the screen is opened with
@@ -104,63 +97,46 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       appBar: AppBar(
         title: Text('Schedule · ${session?.title ?? 'session'}'),
       ),
-      body: !Distribution.cloudSchedules
-          ? _cloudUnavailable(context)
-          : RefreshIndicator(
-              onRefresh: _load,
-              child: ListView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-                children: [
-                  _statusStrip(context),
-                  const SizedBox(height: 20),
-                  const AetherSectionTitle(eyebrow: 'Scheduled tasks'),
-                  const SizedBox(height: 12),
-                  if (_loading)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 32),
-                      child: Center(child: CircularProgressIndicator()),
-                    )
-                  else if (_error != null)
-                    _errorState(context)
-                  else if (_schedules.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 32),
-                      child: AetherEmptyState(
-                        icon: Icons.schedule,
-                        title: 'No scheduled tasks',
-                        message:
-                            'Ask the agent to schedule a daily, recurring, or one-off task.',
-                      ),
-                    )
-                  else
-                    for (final schedule in _schedules) ...[
-                      _TaskCard(
-                        key: ValueKey(schedule.id),
-                        schedule: schedule,
-                        onChanged: _load,
-                        onEdit: () => _edit(context, schedule),
-                      ),
-                      const SizedBox(height: 12),
-                    ],
-                ],
-              ),
-            ),
-    );
-  }
-
-  Widget _cloudUnavailable(BuildContext context) {
-    final l = context.l10n;
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(16, 32, 16, 32),
-      children: [
-        AetherEmptyState(
-          icon: Icons.cloud_off,
-          title: l.scheduleCloudEmptyTitle,
-          message: l.scheduleCloudEmptyMessage,
+      body: RefreshIndicator(
+        onRefresh: _load,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+          children: [
+            _statusStrip(context),
+            const SizedBox(height: 20),
+            const AetherSectionTitle(eyebrow: 'Scheduled tasks'),
+            const SizedBox(height: 12),
+            if (_loading)
+              const Padding(
+                padding: EdgeInsets.only(top: 32),
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else if (_error != null)
+              _errorState(context)
+            else if (_schedules.isEmpty)
+              const Padding(
+                padding: EdgeInsets.only(top: 32),
+                child: AetherEmptyState(
+                  icon: Icons.schedule,
+                  title: 'No scheduled tasks',
+                  message:
+                      'Ask the agent to schedule a daily, recurring, or one-off task.',
+                ),
+              )
+            else
+              for (final schedule in _schedules) ...[
+                _TaskCard(
+                  key: ValueKey(schedule.id),
+                  schedule: schedule,
+                  onChanged: _load,
+                  onEdit: () => _edit(context, schedule),
+                ),
+                const SizedBox(height: 12),
+              ],
+          ],
         ),
-      ],
+      ),
     );
   }
 
