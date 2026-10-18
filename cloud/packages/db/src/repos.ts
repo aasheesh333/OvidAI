@@ -657,7 +657,7 @@ function splitSeq(seq: string): { ms: number; sub: number } | null {
   return { ms, sub };
 }
 
-function toSessionEvent(row: SessionEventMirrorRow): SessionEvent {
+export function toSessionEvent(row: SessionEventMirrorRow): SessionEvent {
   return {
     sessionId: row.sessionId,
     seq: row.seq,
@@ -705,6 +705,39 @@ export const eventMirror = {
       .orderBy(asc(seqMs), asc(seqSub))
       .limit(limit);
     return rows.map(toSessionEvent);
+  },
+
+  /**
+   * Events with seq STRICTLY before beforeSeq, in ASCENDING seq order so the
+   * caller can prepend the page. A null (or malformed) bound means "the newest
+   * page". Both modes take the page NEAREST the bound — ORDER BY seq DESC
+   * LIMIT, then reverse — so successive `before=<first seq of the previous
+   * page>` calls walk backwards contiguously (a plain ASC LIMIT would return
+   * the oldest rows instead and skip the middle of the history).
+   *
+   * The comparison mirrors readSince's split_seq expression with the
+   * comparison inverted (strictly less on ms, or equal ms and less on sub).
+   */
+  async readBefore(
+    db: Db,
+    sessionId: string,
+    beforeSeq: string | null,
+    limit: number,
+  ): Promise<SessionEvent[]> {
+    const key = beforeSeq === null ? null : splitSeq(beforeSeq);
+    const where = key
+      ? and(
+          eq(sessionEventMirror.sessionId, sessionId),
+          or(sql`${seqMs} < ${key.ms}`, and(sql`${seqMs} = ${key.ms}`, sql`${seqSub} < ${key.sub}`)),
+        )
+      : eq(sessionEventMirror.sessionId, sessionId);
+    const rows = await db
+      .select()
+      .from(sessionEventMirror)
+      .where(where)
+      .orderBy(desc(seqMs), desc(seqSub))
+      .limit(limit);
+    return rows.reverse().map(toSessionEvent);
   },
 };
 

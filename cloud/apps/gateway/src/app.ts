@@ -19,6 +19,7 @@ import type { AttachmentPresigner } from "./routes/attachments.js";
 import { registerByokRoutes } from "./routes/byok.js";
 import type { ByokRouteOverrides } from "./routes/byok.js";
 import { registerDevicesRoutes } from "./routes/devices.js";
+import { registerEventRoutes } from "./routes/events.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerImportRoutes } from "./routes/import.js";
 import { registerMcpCatalogRoutes } from "./routes/mcpCatalog.js";
@@ -315,6 +316,7 @@ export function buildGateway(
 
       registerSessionRoutes(scope, deps);
       registerMessageRoutes(scope, deps);
+      registerEventRoutes(scope, deps);
       registerAttachmentRoutes(scope, deps);
       registerRunRoutes(scope, deps);
       registerImportRoutes(scope, deps);

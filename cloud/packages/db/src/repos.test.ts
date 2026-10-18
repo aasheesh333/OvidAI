@@ -453,8 +453,35 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
     const limited = await eventMirror.readSince(db, sessionId, null, 2);
     expect(limited.map((e) => e.seq)).toEqual(["999999999999-0", "1700000000000-0"]);
 
+    // readBefore: STRICTLY before the boundary, ascending (prependable).
+    const beforeSub = await eventMirror.readBefore(db, sessionId, "1700000000000-5", 100);
+    expect(beforeSub.map((e) => e.seq)).toEqual(["999999999999-0", "1700000000000-0"]);
+
+    // Boundary exclusivity + numeric sub-sequence comparison: -10 is AFTER -5,
+    // so it must not appear in a page before -5.
+    const beforeTen = await eventMirror.readBefore(db, sessionId, "1700000000000-10", 100);
+    expect(beforeTen.map((e) => e.seq)).toEqual([
+      "999999999999-0",
+      "1700000000000-0",
+      "1700000000000-5",
+    ]);
+
+    // A bound before the first event → empty; the first event itself excluded.
+    expect(await eventMirror.readBefore(db, sessionId, "999999999999-0", 100)).toEqual([]);
+
+    // Null bound → the NEWEST page, still ascending (DESC select then reverse).
+    const newest = await eventMirror.readBefore(db, sessionId, null, 2);
+    expect(newest.map((e) => e.seq)).toEqual(["1700000000000-10", "1700000000001-0"]);
+    expect(newest).toEqual([e4, e5]);
+
+    // A bounded page takes the rows NEAREST the boundary (not the oldest).
+    const bounded = await eventMirror.readBefore(db, sessionId, "1700000000001-0", 2);
+    expect(bounded.map((e) => e.seq)).toEqual(["1700000000000-5", "1700000000000-10"]);
+
     // Session isolation.
     expect(await eventMirror.readSince(db, newId(), null, 100)).toEqual([]);
+    expect(await eventMirror.readBefore(db, newId(), null, 100)).toEqual([]);
+    expect(await eventMirror.readBefore(db, newId(), "1700000000000-5", 100)).toEqual([]);
   });
 
   it("users.ensure: insert-new, idempotent re-ensure, null email never clobbers, tier never overwritten", async () => {
