@@ -558,7 +558,16 @@ describe("spawnLongRunning (G3)", () => {
 // SandboxHandle wiring (Task 9 manager integration)
 // ---------------------------------------------------------------------------
 
-describe("SandboxHandle wiring — jobs / spawnProcess / ptys on one env", () => {
+// The manager's attach() chowns the per-user tree to the sandbox uid — a
+// root-only operation, exactly as in production. On an unprivileged CI runner
+// it returns EPERM, so this manager-level wiring block runs only where it can
+// exercise the real thing; the pure JobRegistry suites above are unaffected.
+const canChownToOtherUid =
+  typeof process.getuid === "function" && process.getuid() === 0;
+
+describe.skipIf(!canChownToOtherUid)(
+  "SandboxHandle wiring — jobs / spawnProcess / ptys on one env",
+  () => {
   it("handle.jobs and handle.spawnProcess leaves are siblings under the env cgroup", async () => {
     const fx = await freshManagerFixture();
     await fx.handle.jobs.start({ command: "sleep 300" });
