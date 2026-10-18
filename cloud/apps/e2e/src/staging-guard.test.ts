@@ -359,13 +359,23 @@ describe("NEW-1: worker-start --env overrides are validated", () => {
     // workerKill needs a 15 s threshold to observe a stranded run quickly.
     // The file-level floor (>= 60 s) deliberately does NOT apply to an
     // explicit override; otherwise that scenario could not run at all.
-    const result = runWorkerStart([
-      "--env-file",
-      EXAMPLE_ENV,
-      "--env",
-      "OVID_RUN_STALE_MS=15000",
-    ]);
-    expect(result.stderr).not.toContain("GUARD FAIL: OVID_RUN_STALE_MS");
+    //
+    // This call really launches the staging worker (worker-start's whole
+    // point), so it MUST be stopped again — a leftover worker holds :18093
+    // and makes every later worker-start in this suite fail with "already
+    // running", which reads as a guard bug and is not one.
+    runScript("worker-stop", ["kill"]);
+    try {
+      const result = runWorkerStart([
+        "--env-file",
+        EXAMPLE_ENV,
+        "--env",
+        "OVID_RUN_STALE_MS=15000",
+      ]);
+      expect(result.stderr).not.toContain("GUARD FAIL: OVID_RUN_STALE_MS");
+    } finally {
+      runScript("worker-stop", ["kill"]);
+    }
   });
 });
 
