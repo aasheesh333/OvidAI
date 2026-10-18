@@ -1080,10 +1080,11 @@ complete in the cited review.
   (`backup/pg_backup.sh`, `README.md`), monitoring units, `staging.sh`,
   `acceptance.sh`, `verify-r2.mjs`, `browser-memory-bench.mjs`, and the load
   CLI/profile. Each path was checked with `test -f`.
-  **Several are still untracked/modified in the working tree** (e.g.
-  `Dockerfile.mint`, `DECOMMISSION.md`, `caddy-flips/`,
-  `docker-compose.staging.yml`); commit the release tree before activation so
-  the deploy is reproducible.
+  **All of them are now tracked in git** — `Dockerfile.mint`,
+  `DECOMMISSION.md`, `caddy-flips/` and `docker-compose.staging.yml` were
+  committed by P9-T18 and the wave-merger. Before activation, just confirm the
+  release tree is clean (`git status`) rather than hunting for untracked deploy
+  files.
 - **Rootfs revision r2 is already built.** `cloud/deploy/rootfs/dist/`
   contains `ubuntu-noble-min-20261017-r2.tar.zst` (plus manifest and
   SHA256SUMS) and the r1 predecessor. `DEPLOY.md` §11 step 2 says a fresh
@@ -1111,9 +1112,9 @@ complete in the cited review.
   healthchecks. Do not re-do these in the activation window.
 - **The env-example duplicate `OVID_MAX_WARM_GB` is fixed** (commit `0bc12a4`):
   all four templates have zero duplicate keys and source cleanly.
-- **The `@ovid/load` typecheck debt is fixed** (commit `bad63b4`): 0 errors in
-  that package; the remaining 144-error total is the test-source debt in §7.2
-  (re-run for the current count).
+- **The `@ovid/load` typecheck debt is fixed** (commit `bad63b4`), and the
+  workspace-wide test-source debt is now **0** too (§7.2): CI gates
+  `tsconfig.check.json`, so `*.test.ts` cannot drift again.
 - **P9 decommission artifacts now exist on disk**:
   `cloud/deploy/DECOMMISSION.md` and `cloud/deploy/caddy-flips/` (verified).
   They are written, not executed; execution stays owner-gated.
