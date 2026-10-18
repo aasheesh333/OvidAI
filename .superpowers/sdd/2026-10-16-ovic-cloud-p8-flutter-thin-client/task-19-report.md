@@ -405,3 +405,17 @@ $ grep -rn "AgentService\|agent_service" lib/ test/
 
 Full-suite count: 1,724 passed / 2 skipped / 0 failed (baseline 1,701 total
 including the 2 skipped; the four files add 25 tests).
+
+Committed tree (`git archive HEAD` → `/tmp/t19-fix-post`, then
+`flutter pub get --offline` for the untracked package config):
+
+```
+$ flutter analyze --no-pub
+No issues found! (ran in 7.3s)
+
+$ flutter test --no-pub test/session_analytics_test.dart test/queue_ids_test.dart \
+    test/approval_dock_safety_test.dart test/composer_attachments_test.dart
+... +25: All tests passed!
+```
+
+Commit: `8c196b3` (pathspec-only; no unrelated working-tree mods touched).
