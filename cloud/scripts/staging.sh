@@ -51,9 +51,11 @@ usage: staging.sh <command> [options]
                                    production-valued or non-loopback value)
   env                              print the resolved staging env as
                                    KEY=VALUE (consumed by @ovid/load)
-  up [--auth test|firebase]        guard -> compose up -> migrate -> wait for
+  up [--auth test|firebase]        guard -> compose up -> install the staging
+                                   egress nft table -> migrate -> wait for
                                    the mint boot re-sync and gateway health
-  down [-v]                        stop the staging compose project (named
+  down [-v]                        remove the staging egress nft table, then
+                                   stop the staging compose project (named
                                    volumes are kept unless -v)
   mock-start | mock-stop           start/stop the Task-4 mock LiteLLM on
                                    0.0.0.0:14000 (one of two host
@@ -211,6 +213,104 @@ http_hostport() {
   local url="$1" rest
   rest="${url#*://}"
   printf '%s' "${rest%%/*}"
+}
+
+# ── staging egress filter (P10 Task 8) ─────────────────────────────────────
+#
+# `up` loads and `down` removes table inet sandbox_egress_staging, keyed on
+# the staging uid block. The ruleset is rendered by @ovid/sandbox's
+# `renderNftRuleset` with the SAME DEFAULT_BLOCKED_V4/V6 as the production
+# renderer — a hand-written second list would drift. This is a SEPARATE table
+# from the production `ovid_sandbox`; nothing here may flush or modify that
+# table.
+STAGING_EGRESS_TABLE="sandbox_egress_staging"
+STAGING_EGRESS_UID_BASE=220000
+STAGING_EGRESS_UID_MAX=229999
+DEFAULT_PUBLIC_IP="148.113.44.36"
+
+render_staging_egress_ruleset() {
+  local public_ip="${OVID_PUBLIC_IP:-$DEFAULT_PUBLIC_IP}"
+  if [[ ! "$public_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    log "WARNING: OVID_PUBLIC_IP='$public_ip' is not an IPv4 address — using $DEFAULT_PUBLIC_IP for the staging egress table" >&2
+    public_ip="$DEFAULT_PUBLIC_IP"
+  fi
+  (
+    cd "$CLOUD_DIR"
+    OVID_SANDBOX_UID_BASE="$STAGING_EGRESS_UID_BASE" \
+    OVID_SANDBOX_UID_MAX="$STAGING_EGRESS_UID_MAX" \
+    OVID_PUBLIC_IP="$public_ip" \
+    OVID_STAGING_EGRESS_TABLE="$STAGING_EGRESS_TABLE" \
+      node --input-type=module -e '
+        import {
+          renderNftRuleset,
+          DEFAULT_BLOCKED_V4,
+          DEFAULT_BLOCKED_V6,
+        } from "./packages/sandbox/dist/index.js";
+        process.stdout.write(
+          renderNftRuleset({
+            uidRange: [
+              Number(process.env.OVID_SANDBOX_UID_BASE),
+              Number(process.env.OVID_SANDBOX_UID_MAX),
+            ],
+            blockedV4: [...DEFAULT_BLOCKED_V4],
+            blockedV6: [...DEFAULT_BLOCKED_V6],
+            ownPublicIp: process.env.OVID_PUBLIC_IP,
+            table: process.env.OVID_STAGING_EGRESS_TABLE,
+          }),
+        );
+      '
+  )
+}
+
+# Loads the staging table. No-op (loudly) when the box cannot own nftables.
+install_staging_egress() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    log "WARNING: not running as root — skipping the staging egress nft table ($STAGING_EGRESS_TABLE); the egress corpus will SKIP"
+    return 0
+  fi
+  if ! command -v nft >/dev/null 2>&1; then
+    log "WARNING: nft not found — skipping the staging egress nft table ($STAGING_EGRESS_TABLE); the egress corpus will SKIP"
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    die "node not found — cannot render the staging egress ruleset (run 'cd cloud && pnpm -r build')"
+  fi
+  [[ -f "$CLOUD_DIR/packages/sandbox/dist/index.js" ]] \
+    || die "packages/sandbox/dist/index.js missing — run 'cd cloud && pnpm -r build' before staging.sh up"
+
+  local rules
+  rules="$(render_staging_egress_ruleset)" \
+    || die "failed to render the staging egress ruleset"
+  # Hard safety: this must be a SEPARATE table. Never touch prod's ovid_sandbox.
+  if grep -q 'table inet ovid_sandbox' <<<"$rules"; then
+    die "refusing to load: the renderer produced the PRODUCTION table (ovid_sandbox); staging must use $STAGING_EGRESS_TABLE"
+  fi
+  grep -q "table inet $STAGING_EGRESS_TABLE" <<<"$rules" \
+    || die "renderer did not produce table inet $STAGING_EGRESS_TABLE"
+
+  printf '%s\n' "$rules" | nft -f - \
+    || die "failed to load table inet $STAGING_EGRESS_TABLE (production ovid_sandbox untouched)"
+  log "loaded staging egress table inet $STAGING_EGRESS_TABLE (uids $STAGING_EGRESS_UID_BASE-$STAGING_EGRESS_UID_MAX)"
+}
+
+# Removes the staging table; idempotent (`nft delete` fails if absent).
+remove_staging_egress() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    log "WARNING: not running as root — cannot remove the staging egress nft table ($STAGING_EGRESS_TABLE)"
+    return 0
+  fi
+  if ! command -v nft >/dev/null 2>&1; then
+    log "WARNING: nft not found — cannot remove the staging egress nft table ($STAGING_EGRESS_TABLE)"
+    return 0
+  fi
+  if nft list table inet "$STAGING_EGRESS_TABLE" >/dev/null 2>&1; then
+    nft delete table inet "$STAGING_EGRESS_TABLE" \
+      || log "WARNING: failed to delete table inet $STAGING_EGRESS_TABLE"
+    log "removed staging egress table inet $STAGING_EGRESS_TABLE"
+  else
+    log "staging egress table inet $STAGING_EGRESS_TABLE not loaded — nothing to remove"
+  fi
+  return 0
 }
 
 # ── guard: refuse any production-valued staging env ────────────────────────
@@ -635,6 +735,11 @@ cmd_up() {
   log "starting staging compose project '$PROJECT' (auth=$auth)"
   compose up -d --build
 
+  # P10 Task 8: the permanent egress corpus requires this table. Loading it
+  # after the compose bring-up keeps a failed `up` from leaving a host-level
+  # filter behind; `down` removes it. Separate table from prod `ovid_sandbox`.
+  install_staging_egress
+
   log "running migrations against $DATABASE_URL"
   ( cd "$CLOUD_DIR" && node packages/db/dist/migrate-cli.js "$DATABASE_URL" )
 
@@ -671,6 +776,8 @@ cmd_down() {
   else
     log "compose file missing — nothing to stop"
   fi
+  # P10 Task 8: remove the staging egress table (idempotent; prod untouched).
+  remove_staging_egress
   live_check after || log "WARNING: live stack post-check failed"
 }
 

@@ -21,11 +21,14 @@
  * terminals).
  *
  * `classifyCommand` is the Task 8 adapter over P2's landed
- * `checkCommandPolicy`: same verdict, with the exact refusal copy attached
- * (the plan's `{ allowed, refusal? }` shape).
+ * `checkCommandPolicy`. It deliberately does NOT synthesize a `refusal`
+ * field: the real §7 copy is emitted by the exec path (asserted in-jail by
+ * group 7) and pinned as a constant by the portable test. An adapter that
+ * always set `refusal: REFUSAL_MESSAGE` would make the copy assertion
+ * tautological (Task 8 review M3).
  */
 
-import { checkCommandPolicy, REFUSAL_MESSAGE } from "@ovid/sandbox";
+import { checkCommandPolicy } from "@ovid/sandbox";
 
 export type InvocationForm =
   | "direct"
@@ -260,20 +263,16 @@ export const ALLOWED_DENYLIST_CORPUS: readonly string[] = [
 ];
 
 /**
- * Task 8 adapter over P2's landed interceptor. The exact §7 refusal copy is
- * attached here so callers (and the plan's `classifyCommand` contract) get
- * one shape regardless of P2's internal verdict type.
+ * Task 8 adapter over P2's landed interceptor: the REAL verdict, unmodified.
+ * `matched`/`segment` come from `checkCommandPolicy`; no refusal copy is
+ * fabricated here (see the module header — review M3).
  */
 export function classifyCommand(command: string): {
   allowed: boolean;
-  refusal?: string;
   matched?: string;
+  segment?: string;
 } {
   const verdict = checkCommandPolicy(command);
   if (verdict.allowed) return { allowed: true };
-  return {
-    allowed: false,
-    refusal: REFUSAL_MESSAGE,
-    matched: verdict.matched,
-  };
+  return { allowed: false, matched: verdict.matched, segment: verdict.segment };
 }

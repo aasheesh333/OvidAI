@@ -19,6 +19,21 @@
  * 220000–229999 and the egress table is `sandbox_egress_staging`; both are
  * what `staging.sh up` provisions.
  *
+ * Set `OVID_SECURITY_STRICT=1` to make any skipped group fail this file, and
+ * `OVID_SECURITY_REPORT=/path.json` to persist the machine-readable summary.
+ *
+ * COVERAGE DEVIATION — `./gradlew` (Task 8 review M5)
+ * --------------------------------------------------
+ * `./gradlew` (and the bare `assembleDebug`/`assembleRelease` task words) are
+ * asserted at LAYER 1 only. Layer 2 is a PATH shim roster, and `./gradlew`
+ * is a project-local PATH, not a PATH lookup, so no shim can intercept it.
+ * Tool calls are safe because `checkCommandPolicy` refuses `./gradlew` before
+ * `sandbox.exec` (`apps/worker/src/tools/shellTool.ts`). The interactive PTY
+ * path bypasses layer 1 BY DESIGN and therefore has no layer-2 defense for a
+ * project-local `./gradlew`; that path is not exercised here. This is a
+ * documented deviation from the review matrix's "every §7 command × every
+ * invocation form", not an untested escape that the corpus claims to cover.
+ *
  * SKIP DISCIPLINE (Review Focus #4)
  * ---------------------------------
  * When the host lacks bwrap, cgroup v2, the staging nft ruleset, rootfs or
@@ -79,10 +94,12 @@ import {
   LAYER2_DENYLIST_CORPUS,
 } from "./denylist-corpus.js";
 import {
+  assertSecurityStrict,
   capabilityGate,
   printSecuritySummary,
   recordSecurityRun,
   securityCase,
+  writeSecurityReport,
   type CapabilityGate,
 } from "./skipReport.js";
 
@@ -274,6 +291,21 @@ function ruleCounter(text: string, predicate: (line: string) => boolean): number
   throw new Error(`nft counter line not found in table inet ${STAGING_NFT_TABLE}:\n${text}`);
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Matcher for one `nft list table` rule line. `renderNftRuleset` emits an
+ * anonymous `counter drop`, but `nft list` EXPANDS it to
+ * `counter packets N bytes M drop` (reproduced with nft 1.0.9 in a
+ * disposable netns). Asserting the pre-load text is a false negative that
+ * throws before any packet is sent (Task 8 review H1).
+ */
+function rulePattern(prefix: string): RegExp {
+  return new RegExp(`${escapeRegExp(prefix)} counter packets \\d+ bytes \\d+ drop`);
+}
+
 async function curlInJail(handle: SandboxHandle, url: string) {
   return handle.exec({
     command: `curl -m 5 -s -o /dev/null -w '%{http_code}' ${url}`,
@@ -286,14 +318,41 @@ async function curlInJail(handle: SandboxHandle, url: string) {
 // ---------------------------------------------------------------------------
 
 describe("security — command-policy denylist (layer 1, portable)", () => {
-  it("refuses every §7 blocked command in every invocation form with the exact refusal copy", () => {
+  it("refuses every §7 blocked command in every invocation form (real layer-1 verdict)", () => {
     recordSecurityRun();
     expect(LAYER1_DENYLIST_CORPUS.length).toBeGreaterThanOrEqual(150);
     for (const c of LAYER1_DENYLIST_CORPUS) {
       const verdict = classifyCommand(c.command);
       expect(verdict.allowed, `${c.id}: ${JSON.stringify(c.command)} must be blocked`).toBe(false);
-      expect(verdict.refusal, `${c.id}: exact §7 refusal copy`).toBe(REFUSAL_MESSAGE);
+      // Produced by the real `checkCommandPolicy`, not synthesized by the
+      // adapter (review M3).
+      expect(verdict.matched, `${c.id}: the real interceptor must name a match`).toBeTruthy();
+      expect(verdict.segment, `${c.id}: the offending segment must be reported`).toBeTruthy();
     }
+
+    // The §7 copy is pinned ONCE here as a literal. The in-jail execution
+    // group (7) proves the exec path actually emits it. Asserting
+    // `verdict.refusal === REFUSAL_MESSAGE` per case was tautological because
+    // the adapter fabricated the field.
+    expect(REFUSAL_MESSAGE).toBe(
+      "Heavy native compilation (APK/Gradle/Kotlin builds) is disabled on live cloud workspaces. Use GitHub Actions CI or syntax/lint preview mode instead.",
+    );
+  });
+
+  it("the egress rule matcher accepts nft's expanded anonymous-counter form", () => {
+    recordSecurityRun();
+    const prefix = "meta skuid 220000-229999 ip daddr @blocked_v4";
+    // Exactly what `nft list table` prints after loading the renderer output
+    // (nft 1.0.9, disposable netns):
+    expect(`${prefix} counter packets 0 bytes 0 drop`).toMatch(rulePattern(prefix));
+    expect(`${prefix} counter packets 42 bytes 3360 drop`).toMatch(rulePattern(prefix));
+    // The pre-load rendering is NOT the listed form; asserting it is the H1
+    // false negative.
+    expect(`${prefix} counter drop`).not.toMatch(rulePattern(prefix));
+    // A renamed/removed rule must not match.
+    expect(
+      "meta skuid 220000-229999 ip daddr 10.0.0.0/8 counter packets 0 bytes 0 drop",
+    ).not.toMatch(rulePattern(prefix));
   });
 
   it("documents the layer-1 boundaries (env indirection / base64) instead of pretending they are static", () => {
@@ -334,6 +393,7 @@ function emitSummaryOnce(): void {
   if (summaryPrinted) return;
   summaryPrinted = true;
   printSecuritySummary();
+  writeSecurityReport();
 }
 
 function ctx(): { handle: SandboxHandle; rawMgr: CgroupManager } {
@@ -345,8 +405,11 @@ function ctx(): { handle: SandboxHandle; rawMgr: CgroupManager } {
 
 afterAll(() => {
   // Backstop: even if the gated afterAll below never runs (import/setup
-  // failure), the summary is still visible.
+  // failure), the summary is still visible. Strict mode is enforced here so
+  // `OVID_SECURITY_STRICT=1` makes a skipped group a red suite even when the
+  // caller does not parse the summary line.
   emitSummaryOnce();
+  assertSecurityStrict();
 });
 
 describe("security — sandbox isolation corpus (host-gated)", () => {
@@ -407,14 +470,14 @@ describe("security — sandbox isolation corpus (host-gated)", () => {
       } catch (e) {
         problems.push(`cleanup ${BASE}: ${String(e)}`);
       }
-      // Scoped sweep: only THIS suite's probe prefix (sibling suites own
-      // their own bases).
-      for (const entry of readdirSync(CG_ROOT)) {
-        if (!entry.startsWith("ovid-probe-sec-")) continue;
+      // Remove ONLY this process's own cgroups: the probe base and the
+      // capability gate's transient probe. A broad `ovid-probe-sec-*` sweep
+      // would kill a concurrent run of this same suite (review L1).
+      for (const own of [BASE, `ovid-probe-sec-gate-${process.pid}`]) {
         try {
-          await removeCgroupTree(join(CG_ROOT, entry), process.pid);
+          await removeCgroupTree(join(CG_ROOT, own), process.pid);
         } catch (e) {
-          problems.push(`sweep ${entry}: ${String(e)}`);
+          problems.push(`cleanup ${own}: ${String(e)}`);
         }
       }
       if (wsRoot !== "") {
@@ -445,9 +508,12 @@ describe("security — sandbox isolation corpus (host-gated)", () => {
     securityCase("path confinement", baseGate, async () => {
       const { handle: h } = ctx();
 
-      // /etc/shadow: the jail's own rootfs shadow is not readable by the
-      // mapped uid, and the HOST shadow must never appear.
+      // /etc/shadow: the jail's own rootfs copy may exist (mode 0640), so a
+      // nonzero `cat` cannot distinguish ENOENT from EACCES. Compare the
+      // (device,inode) pair with the HOST file — a host bind matches exactly
+      // (review M1) — then prove no host content leaks.
       const hostShadow = readFileSync("/etc/shadow", "utf8");
+      const hostShadowStat = statSync("/etc/shadow");
       const shadow = await h.exec({ command: "cat /etc/shadow", timeoutMs: 20_000 });
       expect(
         shadow.exitCode,
@@ -455,13 +521,95 @@ describe("security — sandbox isolation corpus (host-gated)", () => {
       ).not.toBe(0);
       expect(shadow.stdout).not.toContain(hostShadow.split("\n")[0]);
       expect(shadow.stdout).not.toMatch(/^[^:\n]+:[^:\n]*:[0-9]+:[0-9]+:/m);
+      const shadowStat = await h.exec({
+        command: "stat -Lc '%d %i' /etc/shadow",
+        timeoutMs: 20_000,
+      });
+      if (shadowStat.exitCode === 0) {
+        expect(
+          shadowStat.stdout.trim(),
+          "jail /etc/shadow is the HOST file (same device+inode) — host /etc is bind-mounted",
+        ).not.toBe(`${hostShadowStat.dev} ${hostShadowStat.ino}`);
+      } else {
+        expect(shadowStat.stderr, "an absent /etc/shadow must be ENOENT, not EACCES").toMatch(
+          /No such file/i,
+        );
+      }
 
-      const ssh = await h.exec({ command: "cat /root/.ssh/authorized_keys", timeoutMs: 20_000 });
+      // /root/.ssh: the sandbox home is bound at /root, so the host's 0700
+      // /root must be ABSENT (ENOENT) — never present-but-EACCES. Compare
+      // /root itself too, which catches a host bind even without .ssh.
+      const hostRootStat = statSync("/root");
+      const jailRootStat = await h.exec({ command: "stat -Lc '%d %i' /root", timeoutMs: 20_000 });
+      expect(jailRootStat.exitCode, jailRootStat.stderr).toBe(0);
+      expect(
+        jailRootStat.stdout.trim(),
+        "jail /root is the HOST /root (same device+inode)",
+      ).not.toBe(`${hostRootStat.dev} ${hostRootStat.ino}`);
+      const ssh = await h.exec({
+        command: "stat -Lc '%d %i' /root/.ssh/authorized_keys",
+        timeoutMs: 20_000,
+      });
       expect(ssh.exitCode, "host /root/.ssh must not be reachable").not.toBe(0);
+      expect(
+        ssh.stderr,
+        "ENOENT expected; EACCES would mean the host /root is mounted but unreadable",
+      ).toMatch(/No such file/i);
+      const sshCat = await h.exec({
+        command: "cat /root/.ssh/authorized_keys",
+        timeoutMs: 20_000,
+      });
+      expect(sshCat.exitCode, "host /root/.ssh must not be readable").not.toBe(0);
+      expect(sshCat.stdout).toBe("");
 
       const prodWs = await h.exec({ command: "ls /workspaces/users", timeoutMs: 20_000 });
       expect(prodWs.exitCode, "the prod workspaces root must not be mounted").not.toBe(0);
       expect(prodWs.stderr).toMatch(/No such file/i);
+
+      // `..` traversal: the jail must not climb out of /workspace. From
+      // /workspace, `..` lands on the jail's own rootfs root, never the host
+      // (review M2). P2's PATH_ESCAPE_CORPUS covers the tool-side meaning;
+      // these are the jail-side forms.
+      const hostPasswd = readFileSync("/etc/passwd", "utf8");
+      const privatePasswd = renderEtcBundle({ dns: ["1.1.1.1"] }).passwd;
+      const hostAuthorized = (() => {
+        try {
+          return readFileSync("/root/.ssh/authorized_keys", "utf8");
+        } catch {
+          return "";
+        }
+      })();
+      const traversal = [
+        "cd /workspace && cat ../../etc/shadow",
+        "cd /workspace && cat ../../../etc/shadow",
+        "cat /workspace/../../etc/shadow",
+        "cat /workspace/../root/.ssh/authorized_keys",
+        "cat /workspace/../../root/.ssh/authorized_keys",
+      ];
+      for (const command of traversal) {
+        const res = await h.exec({ command, timeoutMs: 20_000 });
+        expect(res.stdout, `${command} leaked host /etc/shadow`).not.toContain(
+          hostShadow.split("\n")[0],
+        );
+        if (hostAuthorized !== "") {
+          expect(res.stdout, `${command} leaked host /root/.ssh`).not.toContain(
+            hostAuthorized.split("\n")[0],
+          );
+        }
+      }
+      const travPasswd = await h.exec({
+        command: "cd /workspace && cat ../../etc/passwd",
+        timeoutMs: 20_000,
+      });
+      if (travPasswd.exitCode === 0) {
+        expect(
+          travPasswd.stdout,
+          "traversal must land on the jail's private /etc/passwd",
+        ).toBe(privatePasswd);
+      } else {
+        expect(travPasswd.stderr).toMatch(/No such file|Permission denied/i);
+      }
+      expect(travPasswd.stdout, "traversal leaked the HOST /etc/passwd").not.toBe(hostPasswd);
 
       const ro = await h.exec({ command: "touch /usr/x", timeoutMs: 20_000 });
       expect(ro.exitCode, "the rootfs bind is read-only").not.toBe(0);
@@ -602,15 +750,19 @@ describe("security — sandbox isolation corpus (host-gated)", () => {
         line.includes(`meta skuid ${uidRange}`) &&
         line.includes(`ip daddr ${OWN_PUBLIC_IP}`) &&
         !line.includes("@blocked_v4");
+      const blockedV6Predicate = (line: string): boolean =>
+        line.includes(`meta skuid ${uidRange}`) && line.includes("@blocked_v6");
 
       // Assert the uid-keyed rules EXIST before sending any packet — a
       // missing rule must fail here, not silently probe a live service.
+      // `nft list` expands the renderer's anonymous `counter drop` to
+      // `counter packets N bytes M drop`, so match the LISTED form (H1).
       const initial = nftTableText();
-      expect(initial).toContain(`meta skuid ${uidRange} ip daddr @blocked_v4 counter drop`);
-      expect(initial).toContain(
-        `meta skuid ${uidRange} ip daddr ${OWN_PUBLIC_IP} counter drop`,
-      );
+      expect(initial).toMatch(rulePattern(`meta skuid ${uidRange} ip daddr @blocked_v4`));
+      expect(initial).toMatch(rulePattern(`meta skuid ${uidRange} ip6 daddr @blocked_v6`));
+      expect(initial).toMatch(rulePattern(`meta skuid ${uidRange} ip daddr ${OWN_PUBLIC_IP}`));
       const blockedStart = ruleCounter(initial, blockedPredicate);
+      const blockedV6Start = ruleCounter(initial, blockedV6Predicate);
       const ownStart = ruleCounter(initial, ownPredicate);
 
       // Safety probe first: an unreachable address proves the filter fires
@@ -625,6 +777,9 @@ describe("security — sandbox isolation corpus (host-gated)", () => {
         "http://169.254.169.254/latest/meta-data/",
         "http://192.168.1.1/",
         "http://172.16.5.4/",
+        // CGNAT (100.64.0.0/10) is in DEFAULT_BLOCKED_V4 and is a classic
+        // cloud metadata/relay path (review M2).
+        "http://100.64.0.1/",
         // Host loopback carries staging redis-q and LiteLLM — plus the prod
         // proxies. A jail must never reach any of them.
         "http://127.0.0.1:16379/",
@@ -650,6 +805,24 @@ describe("security — sandbox isolation corpus (host-gated)", () => {
         own.exitCode,
       );
       expect(ruleCounter(nftTableText(), ownPredicate)).toBeGreaterThan(ownBefore);
+
+      // IPv6 half of the filter (review M2): ::1 is in DEFAULT_BLOCKED_V6.
+      // The COUNTER is the proof, not curl's exit code — nothing listens on
+      // ::1:16379, so an UNFILTERED connect would also fail (rc 7).
+      const v6lo = await h.exec({ command: "cat /proc/net/if_inet6", timeoutMs: 20_000 });
+      expect(
+        v6lo.stdout,
+        "IPv6 loopback (::1) must exist on the release host for the v6 egress proof",
+      ).toContain("00000000000000000000000000000001");
+      const v6 = await h.exec({
+        command: "curl -6 -m 5 -s -o /dev/null http://[::1]:16379/",
+        timeoutMs: 15_000,
+      });
+      expect([28, 7], `[::1] must be filtered (rc=${v6.exitCode})`).toContain(v6.exitCode);
+      expect(
+        ruleCounter(nftTableText(), blockedV6Predicate),
+        "[::1] must increment the uid-keyed blocked_v6 counter",
+      ).toBeGreaterThan(blockedV6Start);
 
       // Control: allowed egress still works (the filter is not a blanket drop).
       const allowed = await h.exec({
@@ -781,5 +954,99 @@ describe("security — sandbox isolation corpus (host-gated)", () => {
       expect(n, "the execution matrix must stay broad").toBeGreaterThan(100);
     }),
     600_000,
+  );
+
+  it(
+    title(
+      "(8) device & mount confinement — host devices are absent, mknod is refused, and the jail's mount namespace is private (host mounts unaffected)",
+      baseGate,
+    ),
+    securityCase("device & mount confinement", baseGate, async () => {
+      const { handle: h } = ctx();
+
+      // bwrap `--dev /dev` builds a minimal devtmpfs: null/zero/full/
+      // random/urandom/tty/console/ptmx only. Host devices must never appear.
+      const dev = await h.exec({ command: "ls -1 /dev", timeoutMs: 20_000 });
+      expect(dev.exitCode, dev.stderr).toBe(0);
+      const names = dev.stdout.trim().split(/\s+/);
+      for (const node of [
+        "mem",
+        "kmem",
+        "port",
+        "kvm",
+        "sda",
+        "sda1",
+        "nvme0n1",
+        "vda",
+        "dm-0",
+        "loop0",
+      ]) {
+        expect(names, `host device /dev/${node} is visible in the jail`).not.toContain(node);
+      }
+      for (const p of ["/dev/mem", "/dev/kvm", "/dev/sda", "/dev/loop0"]) {
+        const st = await h.exec({ command: `stat -Lc '%d %i' ${p}`, timeoutMs: 20_000 });
+        expect(st.exitCode, `${p} must not be visible`).not.toBe(0);
+        expect(st.stderr).toMatch(/No such file/i);
+      }
+
+      // Creating a device node must be refused: /workspace is a host bind
+      // owned by the initial user namespace, where the mapped root has no
+      // CAP_MKNOD.
+      const mknod = await h.exec({
+        command: "mknod /workspace/devmem c 1 1",
+        timeoutMs: 20_000,
+      });
+      expect(mknod.exitCode, "mknod must not create a device node").not.toBe(0);
+      expect(mknod.stderr).toMatch(/Operation not permitted|Permission denied|Invalid argument/i);
+      expect(existsSync(join(h.workspaceDir, "devmem")), "mknod created a host file").toBe(false);
+
+      // Mount namespace: the jail's PID 1 is its own, and its mount namespace
+      // inode must differ from the host's.
+      const hostMntNs = statSync("/proc/1/ns/mnt").ino;
+      const jailMntNs = await h.exec({
+        command: "stat -Lc %i /proc/1/ns/mnt",
+        timeoutMs: 20_000,
+      });
+      expect(jailMntNs.exitCode, jailMntNs.stderr).toBe(0);
+      expect(Number(jailMntNs.stdout.trim())).not.toBe(hostMntNs);
+
+      // Host mount points must not leak into the jail's mount table. (The
+      // rootfs SOURCE path is allowed — it is the jail's `/` bind.)
+      const mountinfo = await h.exec({
+        command: "cat /proc/self/mountinfo",
+        timeoutMs: 20_000,
+      });
+      expect(mountinfo.exitCode, mountinfo.stderr).toBe(0);
+      for (const marker of [
+        "/workspaces/users",
+        "/workspaces-staging",
+        "/var/lib/docker",
+        "/mnt/ovid-pressure",
+      ]) {
+        expect(mountinfo.stdout, `host mount leaked: ${marker}`).not.toContain(marker);
+      }
+      expect(mountinfo.stdout).toContain(" /workspace ");
+      expect(mountinfo.stdout).toContain(" /root ");
+
+      // mount/umount/pivot_root attempts may succeed INSIDE the jail's own
+      // throwaway mount namespace — that is not an escape. The HOST mount
+      // table must be byte-identical afterwards.
+      const hostMountinfo = readFileSync("/proc/self/mountinfo", "utf8");
+      const attempts = [
+        "umount /workspace",
+        "mkdir -p /workspace/mnt && mount -t tmpfs none /workspace/mnt",
+        "mkdir -p /workspace/newroot /workspace/put_old && pivot_root /workspace/newroot /workspace/put_old",
+      ];
+      for (const command of attempts) {
+        // No exit-code assertion: the attempt is the evidence, and the
+        // required property is confinement to the jail's own namespace.
+        await h.exec({ command, timeoutMs: 20_000 });
+      }
+      expect(
+        readFileSync("/proc/self/mountinfo", "utf8"),
+        "the HOST mount namespace changed during mount/umount/pivot_root attempts",
+      ).toBe(hostMountinfo);
+    }),
+    120_000,
   );
 });

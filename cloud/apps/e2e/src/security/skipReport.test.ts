@@ -12,9 +12,13 @@
  * - a zero-case corpus is loudly reported instead of a green `0 SKIPPED`.
  */
 
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  assertSecurityStrict,
   capabilityGate,
   formatSecuritySummary,
   printSecuritySummary,
@@ -24,8 +28,10 @@ import {
   SECURITY_SUMMARY_PREFIX,
   securityCase,
   securityCorpusCounts,
+  securityStrictEnabled,
   SKIPPED_SECURITY,
   STAGING_NFT_TABLE,
+  writeSecurityReport,
 } from "./skipReport.js";
 
 afterEach(() => {
@@ -156,5 +162,41 @@ describe("security corpus skip reporting (Review Focus #4)", () => {
 
   it("exports the plan's staging egress table name", () => {
     expect(STAGING_NFT_TABLE).toBe("sandbox_egress_staging");
+  });
+
+  it("OVID_SECURITY_STRICT=1 fails on any skip and is inert when unset", () => {
+    recordSecurityRun();
+    expect(securityStrictEnabled({})).toBe(false);
+    expect(() => assertSecurityStrict({})).not.toThrow(); // inert without the env
+
+    expect(securityStrictEnabled({ OVID_SECURITY_STRICT: "1" })).toBe(true);
+    expect(() => assertSecurityStrict({ OVID_SECURITY_STRICT: "1" })).not.toThrow(); // no skips yet
+
+    recordSecuritySkip("egress rules", "nft staging ruleset missing", () => {});
+    expect(() => assertSecurityStrict({ OVID_SECURITY_STRICT: "1" })).toThrow(
+      /egress rules: nft staging ruleset missing/,
+    );
+  });
+
+  it("OVID_SECURITY_REPORT persists a machine-readable artifact", () => {
+    recordSecurityRun();
+    recordSecuritySkip("path confinement", "bwrap missing", () => {});
+
+    const dir = mkdtempSync(join(tmpdir(), "ovid-sec-report-"));
+    try {
+      const path = join(dir, "security-corpus.json");
+      expect(writeSecurityReport(path, () => {})).toBe(path);
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+      expect(parsed).toMatchObject({
+        ran: 1,
+        skipped: 1,
+        reasons: ["path confinement: bwrap missing"],
+        strict: false,
+      });
+      expect(typeof parsed.generatedAt).toBe("string");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(writeSecurityReport("", () => {})).toBeNull();
   });
 });

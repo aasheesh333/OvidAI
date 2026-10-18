@@ -13,6 +13,11 @@
  * `M > 0` on the release box. A suite that registers zero cases is itself
  * reported as a skip — a silent zero-test green is impossible.
  *
+ * SELF-DEFENCE: `OVID_SECURITY_STRICT=1` makes `assertSecurityStrict()` throw
+ * when `M > 0` (the suite is red without relying on the caller), and
+ * `OVID_SECURITY_REPORT=/path.json` persists a machine-readable
+ * `{ ran, skipped, reasons, strict, generatedAt }` artifact.
+ *
  * `capabilityGate()` probes the host exactly once per suite (callers may
  * inject probes for deterministic unit tests). The check list is pinned by
  * the P10 plan:
@@ -26,8 +31,10 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmdirSync, statfsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmdirSync, statfsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+import { parseRootfsManifest } from "@ovid/sandbox";
 
 /** The exact prefix Task 14 greps for. */
 export const SECURITY_SUMMARY_PREFIX = "security corpus:";
@@ -38,7 +45,13 @@ export const STAGING_NFT_TABLE = "sandbox_egress_staging";
 /** cgroup v2 superblock magic (`CGROUP2_SUPER_MAGIC`). */
 const CGROUP2_SUPER_MAGIC = 0x63677270;
 
-/** Files `resolveRootfs` requires; kept in sync with @ovid/sandbox's rootfs.ts. */
+/**
+ * Files `resolveRootfs` requires. Kept in sync with @ovid/sandbox's
+ * rootfs.ts (the constant is private to that module and `cloud/packages/**`
+ * is outside this fix's commit lane, so it cannot be imported here). The
+ * manifest SCHEMA is validated with the package's own parser below, so only
+ * this list can drift.
+ */
 const ROOTFS_REQUIRED_FILES = [
   "usr/bin/env",
   "usr/local/bin/node",
@@ -78,12 +91,31 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Trivial jail probe — mirrors @ovid/sandbox's `jailMechanismAvailable`. */
+/**
+ * Trivial jail probe — mirrors @ovid/sandbox's `jailMechanismAvailable` AND
+ * the real invocation (`buildBwrapArgs`, launch:"setuid"). The userns flags
+ * are load-bearing: a host with bwrap but unprivileged user namespaces
+ * disabled passes a plain `--ro-bind` probe and then fails every real jail.
+ */
 function defaultBwrapProbe(path: string): string | null {
   if (!existsSync(path)) return `bwrap binary missing at ${path}`;
   const res = spawnSync(
     path,
-    ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "/bin/true"],
+    [
+      "--ro-bind",
+      "/",
+      "/",
+      "--dev",
+      "/dev",
+      "--proc",
+      "/proc",
+      "--unshare-user",
+      "--uid",
+      "0",
+      "--gid",
+      "0",
+      "/bin/true",
+    ],
     { timeout: 5_000 },
   );
   if (res.error !== undefined) return `bwrap probe failed (${errText(res.error)})`;
@@ -109,6 +141,24 @@ function defaultCgroupProbe(root: string): string | null {
   }
   const missing = ["cpu", "memory", "pids"].filter((c) => !controllers.includes(c));
   if (missing.length > 0) return `cgroup controllers missing: ${missing.join(", ")}`;
+
+  // The corpus creates its probe base directly under the root and enables
+  // "+cpu +memory +pids" on the base's cgroup.subtree_control. That write
+  // only succeeds if the ROOT delegates those controllers — a probe that
+  // stops at cgroup.controllers would pass and then fail at manager.init().
+  let delegated: string[];
+  try {
+    delegated = readFileSync(join(root, "cgroup.subtree_control"), "utf8")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+  } catch (err) {
+    return `cannot read ${join(root, "cgroup.subtree_control")} (${errText(err)})`;
+  }
+  const notDelegated = ["cpu", "memory", "pids"].filter((c) => !delegated.includes(c));
+  if (notDelegated.length > 0) {
+    return `cgroup root ${root} does not delegate ${notDelegated.join(", ")} via cgroup.subtree_control (got '${delegated.join(" ")}')`;
+  }
 
   // Definitive writability probe: create + remove a throwaway cgroup. This
   // proves the corpus can build its own probe base; it never touches the
@@ -138,18 +188,18 @@ function defaultNftProbe(table: string): string | null {
 }
 
 function defaultRootfsProbe(path: string): string | null {
-  let manifest: unknown;
+  let raw: string;
   try {
-    manifest = JSON.parse(readFileSync(join(path, "manifest.json"), "utf8"));
+    raw = readFileSync(join(path, "manifest.json"), "utf8");
   } catch (err) {
     return `rootfs unavailable at ${path} (${errText(err)})`;
   }
-  if (
-    typeof manifest !== "object" ||
-    manifest === null ||
-    typeof (manifest as { name?: unknown }).name !== "string"
-  ) {
-    return `rootfs at ${path} has an invalid manifest.json`;
+  // Full schema, parsed by the SAME validator `resolveRootfs` uses — a
+  // name-only check would pass a manifest the real setup then rejects.
+  try {
+    parseRootfsManifest(JSON.parse(raw));
+  } catch (err) {
+    return `rootfs at ${path} has an invalid manifest.json (${errText(err)})`;
   }
   for (const rel of ROOTFS_REQUIRED_FILES) {
     if (!existsSync(join(path, rel))) {
@@ -261,6 +311,64 @@ export function formatSecuritySummary(): string {
 
 export function printSecuritySummary(log: (line: string) => void = console.log): void {
   log(formatSecuritySummary());
+}
+
+/** `OVID_SECURITY_STRICT=1` (or `true`) makes skips a suite failure. */
+export function securityStrictEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = env.OVID_SECURITY_STRICT;
+  return v === "1" || v?.toLowerCase() === "true";
+}
+
+export interface SecurityReport {
+  ran: number;
+  skipped: number;
+  reasons: string[];
+  strict: boolean;
+  generatedAt: string;
+}
+
+/** Machine-readable snapshot of the accumulator (the JSON artifact body). */
+export function securityReport(env: NodeJS.ProcessEnv = process.env): SecurityReport {
+  const { ran, skipped, reasons } = securityCorpusCounts();
+  return {
+    ran,
+    skipped,
+    reasons,
+    strict: securityStrictEnabled(env),
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Persists the JSON artifact when `OVID_SECURITY_REPORT` names a path (Task
+ * 14 can read this instead of scraping stdout). Returns the path written, or
+ * null when the env var is unset. Console output remains the primary signal.
+ */
+export function writeSecurityReport(
+  path: string | undefined = process.env.OVID_SECURITY_REPORT,
+  log: (line: string) => void = console.log,
+): string | null {
+  if (path === undefined || path === "") return null;
+  writeFileSync(path, `${JSON.stringify(securityReport(), null, 2)}\n`, "utf8");
+  log(`security corpus report: ${path}`);
+  return path;
+}
+
+/**
+ * Self-defending strict mode. `M > 0` throws, which fails the vitest file
+ * (the afterAll hook). Without this the corpus relies entirely on Task 14
+ * parsing the summary line; with it, `OVID_SECURITY_STRICT=1` in the release
+ * environment makes a skipped group a red suite by itself.
+ */
+export function assertSecurityStrict(env: NodeJS.ProcessEnv = process.env): void {
+  if (!securityStrictEnabled(env)) return;
+  const { skipped, reasons } = securityCorpusCounts();
+  if (skipped > 0) {
+    throw new Error(
+      `OVID_SECURITY_STRICT=1: ${skipped} security corpus group(s) SKIPPED ` +
+        `(the release box must run every group):\n- ${reasons.join("\n- ")}`,
+    );
+  }
 }
 
 /**
