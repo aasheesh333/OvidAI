@@ -266,10 +266,16 @@ export async function createLoadClient(opts: CreateLoadClientOptions): Promise<L
       // App-level backlog (frames delivered but not yet parsed/recorded) plus
       // a one-frame estimate for bytes still sitting in the TCP read buffer.
       // Both are sampled by the scenario; zero means the consumer keeps up.
-      const transport = (socket as unknown as { _socket?: { readableLength?: number } } | null)
+      //
+      // `ws._socket` is set to NULL (not undefined) once the underlying socket
+      // detaches, so this must test for null too: `null !== undefined` is true,
+      // and the old guard then read `.readableLength` off null — an
+      // intermittent TypeError during reconnect/teardown that surfaced as a
+      // full-suite-only failure.
+      const transport = (socket as unknown as { _socket?: { readableLength?: number } | null } | null)
         ?._socket;
       const bufferedBytes =
-        transport !== undefined && typeof transport.readableLength === "number"
+        transport != null && typeof transport.readableLength === "number"
           ? transport.readableLength
           : 0;
       return Math.max(0, rawFrames - processedFrames) + (bufferedBytes > 0 ? 1 : 0);
