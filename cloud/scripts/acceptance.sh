@@ -245,6 +245,24 @@ GATE 7 canary-sweep [${gate7_tag}]
              -- <wrapper: smoke10 load, then docker compose logs gateway>
   extra: 'canary-sweep: PASS — zero leaks', workload exit=0, and the canary
          smoke10 JSON passes the same positive-data check.
+  scope: canaries are injected into the WRAPPED WORKLOAD's environment. This
+         proves the load client/staging logs do not leak them; it does NOT put
+         canaries into the gateway/worker configuration (those use .env).
+
+GATE 7b canary-stack [${gate7_tag}]
+  cwd: $CLOUD_DIR
+  command: node apps/load/dist/canaryCli.js --in-process-stack --strict
+             --captures-dir $CANARY_DIR/stack
+             --database-url <staging DATABASE_URL (ADMIN)>
+             --redis-url <staging REDIS_Q_URL (ADMIN)>
+             --stack-proof $CANARY_DIR/stack/proof.json
+  extra: provisions a disposable DB role + Redis ACL user whose passwords ARE
+         canaries, runs the SHIPPED gateway+worker with canaries as the real
+         DATABASE_URL / REDIS_Q_URL / OVID_MASTER_KEY / mint / LiteLLM config,
+         drives one authenticated run to a terminal event plus a BYOK upload,
+         then scans. The proof file must show run_completed, a byok row, and
+         mirror/event counts > 0 — an empty workload cannot pass.
+  note: this is the only gate that proves the DB/Redis/BYOK paths do not leak.
 
 GATE 8 live-unaffected [${gate8_tag}]
   command: $STAGING live-check --baseline <work>/live-baseline.txt
@@ -670,6 +688,61 @@ gate7_post_check() {
   return $rc
 }
 
+# Gate 7b — the STRONG canary sweep.
+#
+# Gate 7 injects the canaries into the load client's environment and scans the
+# staging logs/DB/Redis for them. That proves the wrapped process does not dump
+# its own env; it does NOT put the canaries into the gateway/worker/BYOK/mint
+# configuration, because those services run with the staging .env. Gate 7b runs
+# the shipped gateway + worker composition with canaries as the REAL config
+# values (DATABASE_URL / REDIS_Q_URL / OVID_MASTER_KEY / mint + LiteLLM keys),
+# drives one authenticated run to a terminal event plus a BYOK upload, and only
+# then scans. Without it, "PASS — zero leaks" understates what was proven.
+gate7b_canary_stack() {
+  mkdir -p "$CANARY_DIR/stack"
+  node apps/load/dist/canaryCli.js \
+    --in-process-stack \
+    --strict \
+    --captures-dir "$CANARY_DIR/stack" \
+    --database-url "$STAGING_DATABASE_URL" \
+    --redis-url "$STAGING_REDIS_Q_URL" \
+    --stack-proof "$CANARY_DIR/stack/proof.json"
+}
+
+gate7b_post_check() {
+  local log="$1"
+  local rc=0
+  grep -qE 'canary-sweep: PASS .* zero leaks' "$log" \
+    || { echo "CANARY-STACK GATE: FAIL — no 'PASS — zero leaks' line"; rc=1; }
+  if grep -qE 'canary-sweep: LEAK ' "$log"; then
+    echo "CANARY-STACK GATE: FAIL — canary leak(s) from the shipped stack"
+    grep -E 'canary-sweep: LEAK ' "$log" || true
+    rc=1
+  fi
+  # An empty workload must not read as a pass: require proof that a real run
+  # reached a terminal event and a BYOK row was escrowed.
+  local proof="$CANARY_DIR/stack/proof.json"
+  if [[ ! -s "$proof" ]]; then
+    echo "CANARY-STACK GATE: FAIL — stack proof missing ($proof)"
+    rc=1
+  else
+    node -e '
+      const fs = require("fs");
+      const p = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const fail = [];
+      if (!p.runId) fail.push("no runId");
+      if (p.terminalEvent !== "run_completed") fail.push(`terminalEvent=${p.terminalEvent}`);
+      if (!p.byokId) fail.push("no byok row");
+      if (!(p.mirrorRows > 0)) fail.push(`mirrorRows=${p.mirrorRows}`);
+      if (!(p.eventCount > 0)) fail.push(`eventCount=${p.eventCount}`);
+      if (fail.length) { console.error("proof: " + fail.join(", ")); process.exit(1); }
+      console.log(`proof: run=${p.runId} terminal=${p.terminalEvent} byok=${p.byokId} mirror=${p.mirrorRows} events=${p.eventCount}`);
+    ' "$proof" || rc=1
+  fi
+  [[ $rc -eq 0 ]] && echo "CANARY-STACK GATE: PASS (canaries were the shipped stack's real config; a real run and a BYOK upload executed)"
+  return $rc
+}
+
 gate8_live() {
   "$STAGING" live-check --baseline "$BASELINE"
 }
@@ -900,6 +973,7 @@ else
     record_skip 5 "load-smoke10" "--quick"
     record_skip 6 "chaos-worker-kill" "--quick"
     record_skip 7 "canary-sweep" "--quick"
+    record_skip 7b "canary-stack" "--quick"
   elif [[ "$GATE3_OK" -eq 1 ]]; then
     POST_CHECK=gate5_post_check
     run_gate 5 "load-smoke10" gate5_load
@@ -912,10 +986,15 @@ else
     POST_CHECK=gate7_post_check
     run_gate 7 "canary-sweep" gate7_canary
     POST_CHECK=""
+
+    POST_CHECK=gate7b_post_check
+    run_gate 7b "canary-stack" gate7b_canary_stack
+    POST_CHECK=""
   else
     record_skip 5 "load-smoke10" "gate 3 (staging bring-up) failed"
     record_skip 6 "chaos-worker-kill" "gate 3 (staging bring-up) failed"
     record_skip 7 "canary-sweep" "gate 3 (staging bring-up) failed"
+    record_skip 7b "canary-stack" "gate 3 (staging bring-up) failed"
   fi
 
   # GATE 8 — live stack unaffected across gates 3-7 (needs the baseline
