@@ -237,7 +237,7 @@ steps or skip a gate.
 
 | # | Gate | Why it is here in the order | Owner |
 |---|---|---|---|
-| 0 | Quiet tree + lockfile regeneration | `pnpm install --frozen-lockfile` and the first build fail by design until this lands. See §7. | `[QUIET TREE]` |
+| 0 | ~~Quiet tree + lockfile regeneration~~ **DONE** | Landed in `873d993`; a scratch `pnpm install --frozen-lockfile --offline` exits 0 with "Lockfile is up to date". Nothing to run. See §7. | — |
 | 1 | bwrap probe → fill `MECHANISM.md` DECISION | Decides `OVID_SANDBOX_LAUNCH` (`setuid` vs `rootmap`) before the worker env is written. | `[OWNER]` |
 | 2 | R1 compose spine, or an explicit P2-only decision | §11 steps 5–7 assume the compose spine (gateway, redis-q, proxies) is up. If activating P2-only with the gateway absent, record that decision in the log. | `[OWNER]` |
 | 2a | R2 credentials: bucket, token, both env blocks, verified | Both gateway and worker call `loadStorageEnv` at boot; production refuses `fs`; a missing/empty `OVID_R2_*` block stops both. `CHANGE_ME` passes the non-empty boot check and fails at runtime, so step 5's probe is the real gate. See §5. | `[OWNER]` |
@@ -257,12 +257,15 @@ steps or skip a gate.
 | 16 | R0 hardening A / B / C / E / F / G | Hard gate before real users; independent of the P2 order, but E+G batch into the activation window and C runs last. | `[OWNER]` |
 | 17 | Browser per-host consent | NOT blocking activation (browser tools are not yet dispatched), but must be decided BEFORE they are wired: the on-device build required the user to grant each host a page-acting tool touches, and the server has only SSRF/egress control. See 3.15. | `[OWNER]` |
 
-### 3.1 Gate 0 — quiet tree + lockfile regeneration
+### 3.1 Gate 0 — quiet tree + lockfile — **ALREADY DONE, skip it**
 
-Do this **before** any `pnpm install --frozen-lockfile` or `pnpm -r build`.
-The full procedure and the importer table are in
-`.superpowers/sdd/2026-10-16-ovid-cloud-p0-p1-spine/WAVE-MERGER.md` and §7
-below. A fresh checkout currently fails the frozen install by design.
+Landed 2026-10-18 (commit `873d993`). The frozen install now resolves every
+importer: a scratch copy carrying only the 19 manifests runs
+`pnpm install --frozen-lockfile --offline` → "Lockfile is up to date,
+resolution step is skipped", 380 packages, exit 0. The test-typecheck debt that
+went with it is also zero and CI now enforces it. See §7 for the proofs.
+
+**Start at Gate 1 (the bwrap probe).**
 
 ### 3.2 Gate 1 — bwrap probe (fills `MECHANISM.md` DECISION)
 
@@ -867,87 +870,43 @@ note, never a silent zero). The CLI is
 
 ---
 
-## 7. Wave-merger items that need the owner or a quiet tree
+## 7. Wave-merger items — **ALL THREE ARE DONE** (nothing for you to run)
 
 Source: `.superpowers/sdd/2026-10-16-ovid-cloud-p0-p1-spine/WAVE-MERGER.md`
-(the binding checklist) and the 2026-10-15 copy's late status block.
+(the binding checklist, now CLOSED).
 
-### 7.1 Lockfile regeneration — `[QUIET TREE]`, and it blocks activation
+These three were listed here as `[QUIET TREE]` work. All three landed on
+2026-10-18 and are verified. **Do not redo them** — this section now exists only
+so the reasoning is on record and so a stale copy of this doc cannot send you
+down a path that is already finished.
 
-**Why it blocks:** every parallel lane was forbidden from editing
-`cloud/pnpm-lock.yaml`, so new `package.json` edges are unrecorded. A fresh
-checkout or `pnpm install --frozen-lockfile` fails by design. This must land
-**before** the first activation build in §3.1.
+| Item | Status | Proof |
+|---|---|---|
+| 7.1 Lockfile regeneration | **DONE** — commit `873d993` | A scratch copy carrying only the 19 manifests runs `pnpm install --frozen-lockfile --offline` → "Lockfile is up to date, resolution step is skipped", 380 packages, exit 0. |
+| 7.2 Test-source typecheck debt | **DONE** — 174 → **0**; commits `6aba5c9`, `9c96acd`, `4c08119`, `ee3e211`, `1487667`, + the e2e/mint/worker batch | `pnpm -r --parallel exec tsc -p tsconfig.check.json --noEmit` → **exit 0**. CI now enforces it (commit `f71ed7a` switched the Typecheck step from `tsconfig.json` to `tsconfig.check.json`, so `*.test.ts` is gated). |
+| 7.3 Duplicate SSRF classifier | **DONE** — commit `37aee77` | There were **FOUR** copies, not two (`agent-core/src/ssrf.ts`, `escrow/src/address.ts`, `mcp/src/ssrf.ts`, `browser/src/url.ts`). All now import `@ovid/shared`'s `netAddress.ts`. Differential test: 0 differences across 167,840 inputs. Adding a reserved prefix is now a one-file change. |
 
-Procedure (run once, only when `git status` is quiet for `cloud/**` and every
-lane has committed its `package.json`):
+**What this means for §3.1 (Gate 0):** the "quiet tree + lockfile regeneration"
+gate is already satisfied — skip straight to the bwrap probe.
 
-```bash
-cd /opt/ovid-cloud/repo/cloud
-pnpm install                    # plain, NOT frozen — records every importer
-git add pnpm-lock.yaml
-git commit pnpm-lock.yaml -m "chore(cloud): regenerate lockfile — all lane importers (wave merger)"
+### 7.4 The one genuinely unproven deploy step
 
-# Full gate on the real tree:
-pnpm -r build
-pnpm -r test
-```
-
-Then **in a separate scratch copy of the repo** (not the real tree), prove the
-frozen install resolves every importer:
-
-```bash
-cd <scratch-copy>/cloud
-pnpm install --frozen-lockfile  # must exit 0; a named importer means a missing edge
-```
-
-Importers that must be present: the table in `WAVE-MERGER.md` (P3/P5/P6/P7/
-P9/P10 edges), including the P6 CRITICAL `apps/worker` and `apps/e2e` →
-`@ovid/browser`, and the P9 `apps/worker` → `@ovid/escrow` /
-`packages/shared` → `@types/node` edges.
-
-### 7.2 Test-source typecheck debt — `[QUIET TREE]`
-
-`WAVE-MERGER.md` records **144 pre-existing errors, all in `*.test.ts` / test
-helpers, none in production `src`** (e2e 2, mint 3, browser 4, worker 8,
-agent-core 24, gateway 28, sandbox 35, mcp 40; load/db/escrow/events/money/
-queue/shared/storage clean). The `@ovid/load` portion was fixed in `bad63b4`
-(7 errors in `workerKill.test.ts`), so re-run to get the current count.
-
-Gate (production sources, the CI-proven form, from `RUNBOOKS.md` O-2):
+**A real `docker compose build` has never been run.** The static audit
+(`cloud/deploy/DOCKERFILE-AUDIT.md`) proves both runtime import maps are
+complete — every `@ovid/*` package imported at runtime has both its
+`package.json` and its `dist` COPY — and the `node-pty` toolchain gap in both
+BUILD stages is fixed (commit `45c7033`). With the lockfile now valid, the
+build should succeed. It is still **unverified**, and it is the first thing
+that will fail if anything is wrong.
 
 ```bash
 cd /opt/ovid-cloud/repo/cloud
-pnpm -r exec tsc --noEmit -p tsconfig.json
+docker compose -f deploy/docker-compose.yml build gateway mint
 ```
 
-Optional stricter per-package pass where the config exists. `packages/account`
-has no `tsconfig.check.json`, so the bare recursive form fails there; run it
-per package rather than pretending it is workspace-wide:
-
-```bash
-for d in apps/* packages/*; do
-  if [ -f "$d/tsconfig.check.json" ]; then
-    ( cd "$d" && pnpm exec tsc -p tsconfig.check.json --noEmit )
-  fi
-done
-```
-
-Sequencing: after every lane has committed and the tree is quiet — the failing
-files are exactly the ones lanes are editing. Fix per package and re-run so a
-regression is attributable.
-
-### 7.3 Duplicate SSRF classifier — `[QUIET TREE]`
-
-`isNonPublicAddress` exists in **both** `cloud/packages/agent-core/src/ssrf.ts`
-and `cloud/packages/escrow/src/address.ts`. The escrow copy was created because
-the gateway could not import agent-core without a new lockfile importer
-(forbidden during the parallel wave). Two security classifiers will drift.
-
-Action, only after 7.1: make the gateway depend on `@ovid/agent-core` (or move
-the classifier to `@ovid/shared`), delete the escrow copy, re-point
-`byok.ts` at the single export, and move `address.test.ts`'s 31 assertions
-with it. Do not leave two implementations in the shipped tree.
+Expect a few minutes (native `node-pty` compile). If it fails, the error names
+the missing COPY or the missing importer — the audit tells you which one it
+would be.
 
 ---
 
