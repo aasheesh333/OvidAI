@@ -14,15 +14,23 @@ import {
   type SandboxManager,
 } from "@ovid/sandbox";
 import {
+  imageMimeTypeFor,
+  modelVisionSupport,
+  visionRefusalMessage,
+  type ModelCapabilityRow,
+} from "./modelCapabilities.js";
+import {
   sanitizeAttachmentName,
   type KeyResolver,
   type SessionEvent,
   type SessionEventType,
 } from "@ovid/shared";
+import type { AgentImage } from "@ovid/agent-core";
 import type { ActivityTracker } from "@ovid/storage";
 import type { Redis } from "ioredis";
 import {
   APPROVAL_TIMEOUT_MS,
+  AUTO_ALIASES,
   adaptLegacyTransport,
   commandPrePass,
   createAgentEngine,
@@ -184,6 +192,23 @@ export interface RunDeps {
   litellmBaseUrl: string;
   defaultModel: string;
   /**
+   * Push delivery for run failures the user must act on (owner directive
+   * 2026-10-18). Absent → the failure still lands in the run log and the
+   * session event stream; only the push is skipped.
+   */
+  notifier?: { notifyAgentFailed(a: {
+    userId: string;
+    sessionId: string;
+    sessionTitle: string;
+    code: string;
+    message: string;
+  }): Promise<void> };
+  /**
+   * The model catalog, read once per run only when the run carries images
+   * (see modelCapabilities.ts). Absent → the static family list decides.
+   */
+  modelCatalog?: () => Promise<readonly ModelCapabilityRow[] | null>;
+  /**
    * P2 Task 12: the sandbox the run's tools execute in, and the tool roster.
    * main.ts (composition root) always wires both. They are OPTIONAL in the
    * type because the processor carries a documented runtime guard for the
@@ -253,6 +278,24 @@ export interface RunDeps {
 export interface FullRunDeps {
   db: Db;
   events: EventLog;
+  /**
+   * Push delivery for run failures the user must act on (owner directive
+   * 2026-10-18). Absent → the failure still lands in the run log and the
+   * session event stream; only the push is skipped.
+   */
+  notifier?: { notifyAgentFailed(a: {
+    userId: string;
+    sessionId: string;
+    sessionTitle: string;
+    code: string;
+    message: string;
+  }): Promise<void> };
+  /**
+   * The model catalog, read once per run only when the run carries images
+   * (see modelCapabilities.ts). Absent → the static family list decides.
+   */
+  modelCatalog?: () => Promise<readonly ModelCapabilityRow[] | null>;
+
   /** P9 Task 9: see RunDeps.keys. */
   keys: KeyResolver;
   redisQ: Redis;
@@ -310,6 +353,20 @@ export interface FullRunDeps {
    */
   extraTools?: readonly CoreTool[];
   /**
+   * P6 browser tools (owner directive 2026-10-18): the full Playwright /
+   * Lightpanda action suite, adapted onto the canonical Tool seam. Absent →
+   * the agent cannot browse (the pre-2026-10-18 behaviour, kept for
+   * deployments without a browser engine).
+   */
+  browserTools?: readonly CoreTool[];
+  /**
+   * Ends this run's browser session: stops the screencast, captures and
+   * flushes `storageState`, closes the context and releases the pool slot.
+   * Called in the run's terminal `finally` so a context never outlives its
+   * run (the 15 s ephemeral lease is the backstop, not the contract).
+   */
+  browserReleaseSession?: (sessionId: string) => Promise<void>;
+  /**
    * P5 Task 11 I4: release this run's MCP connections when it ends. Custom
    * stdio (and legacy SSE) connections are per-run; without this they would
    * live until process shutdown. The composition root wires the MCP router's
@@ -341,6 +398,16 @@ const MAX_MODEL_ATTEMPTS = 5;
 const RETRY_BACKOFF_MS: readonly number[] = [3_000, 9_000, 27_000, 60_000];
 
 /** Context window cap for v0: newest 100 stored messages, oldest-first. */
+/**
+ * Image-prompt bounds (owner directive 2026-10-18). Providers cap image count
+ * and payload size; exceeding either fails the whole request, so the worker
+ * forwards the first few and leaves the rest as workspace files the tools can
+ * still open. 4 images / ~8 MB of base64 matches what the routed providers
+ * accept today.
+ */
+const MAX_PROMPT_IMAGES = 4;
+const MAX_PROMPT_IMAGE_BYTES = 8 * 1024 * 1024;
+
 const HISTORY_LIMIT = 100;
 
 /**
@@ -863,6 +930,8 @@ export function createAgentRunProcessor(
 
     // ---- P2 Task 12 / P3 Task 16: attach + engine over the P2 machinery ----
     let handle: SandboxHandle | undefined;
+    /** Image attachments forwarded to the model (bounded; see the loop). */
+    const promptImages: AgentImage[] = [];
     try {
       // `useTools` above guarantees both are present (legacy path returned).
       handle = await deps.sandbox!.attach(userId, {
@@ -893,6 +962,54 @@ export function createAgentRunProcessor(
           await failAttachments("attachment storage is not configured");
           return;
         }
+
+        // ---- Vision capability gate (owner directive 2026-10-18) ----------
+        // An image attachment is about to be sent to the model. A model that
+        // cannot see would either error mid-run or silently drop the visual
+        // context; either way the user pays for a broken run and finds out
+        // late. Refuse BEFORE any bytes move, with copy they can act on, and
+        // push it so a backgrounded app still learns.
+        const imageRows = rows.filter((r) => imageMimeTypeFor(r.name) !== null);
+        if (imageRows.length > 0) {
+          // The effective model is the session's pin (what the engine's key
+          // adapter will pass to the provider), falling back to the fleet
+          // default exactly like `agentKeyFor`.
+          const agentState = await createPostgresSessionStateStore(deps.db).get(sessionId);
+          const requested = (agentState.modelPin ?? "").trim();
+          const model =
+            requested === "" || (AUTO_ALIASES as readonly string[]).includes(requested)
+              ? deps.defaultModel
+              : requested;
+          const catalog =
+            deps.modelCatalog === undefined ? null : await deps.modelCatalog().catch(() => null);
+          const decision = modelVisionSupport(model, catalog);
+          if (!decision.supports) {
+            const message = visionRefusalMessage(model);
+            await emit("run_failed", {
+              code: "model_no_vision",
+              message,
+              model,
+              basis: decision.basis,
+              imageCount: imageRows.length,
+            });
+            await runs.finish(deps.db, runId, "failed", "model_no_vision");
+            // Best-effort: a push failure must never change the run outcome.
+            await deps.notifier
+              ?.notifyAgentFailed({
+                userId,
+                sessionId,
+                // ScheduleRunRef carries no title, and the run path has no
+                // session row in hand. The notifier's generic title applies;
+                // the actionable copy is in the body either way.
+                sessionTitle: "",
+                code: "model_no_vision",
+                message,
+              })
+              .catch(() => {});
+            return;
+          }
+        }
+
         const uploadsDir = join(handle.workspaceDir, "uploads");
         await mkdir(uploadsDir, { recursive: true });
         for (const row of rows) {
@@ -900,6 +1017,18 @@ export function createAgentRunProcessor(
           if (buffer === null) {
             await failAttachments(`attachment object not found: ${row.r2Key}`);
             return;
+          }
+          // An image the model must SEE (owner directive 2026-10-18): the
+          // bytes ride the prompt as content parts, and the file also lands in
+          // the workspace so tools can still open it by path. Bounded — an
+          // unbounded base64 payload would blow the request size and the
+          // provider's own limits.
+          const mime = imageMimeTypeFor(row.name);
+          if (mime !== null && promptImages.length < MAX_PROMPT_IMAGES) {
+            const total = promptImages.reduce((n, i) => n + i.dataBase64.length, 0);
+            if (total + buffer.length * 4 / 3 <= MAX_PROMPT_IMAGE_BYTES) {
+              promptImages.push({ mimeType: mime, dataBase64: buffer.toString("base64") });
+            }
           }
           await writeFile(join(uploadsDir, sanitizeAttachmentName(row.name)), buffer);
         }
@@ -1003,6 +1132,7 @@ export function createAgentRunProcessor(
       ...(job.data.attachmentIds !== undefined
         ? { attachmentIds: job.data.attachmentIds }
         : {}),
+      ...(promptImages.length > 0 ? { promptImages } : {}),
     });
     } finally {
       // "after finish": every terminal path above has already flipped the
@@ -1314,6 +1444,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     const coreTools = [
       ...p2Tools,
       ...(deps.extraTools ?? []),
+      ...(deps.browserTools ?? []),
       ...createSandboxTools({ sandbox: o.sandbox }),
       withGrantHop(
         createFetchUrlTool({
@@ -1757,6 +1888,10 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       // the try (completion, run-level failure, prepass finish, cancel).
       // Best-effort: release must never turn a finished run into a job throw.
       await deps.mcpReleaseRun?.(userId, { sessionId, runId }).catch(() => {});
+      // P6: the browser context is per-run. Best-effort like the MCP release —
+      // a finished run must never throw because teardown failed; the pool's
+      // 15 s idle lease reaps anything this misses.
+      await deps.browserReleaseSession?.(sessionId).catch(() => {});
       await bumpActivity();
     }
   }) as FullAgentRunProcessor;

@@ -4,9 +4,29 @@
 
 export type SessionMode = "safe" | "auto" | "drive" | "studio";
 export interface ToolCall { id: string; name: string; args: Record<string, unknown>; }
+/**
+ * One image attached to a user message (owner directive 2026-10-18).
+ *
+ * Only user messages carry images: the model sees them once, with the prompt
+ * that referenced them. `dataBase64` is the raw image bytes; the transports
+ * turn it into the provider's own content-part shape.
+ */
+export interface AgentImage {
+  /** e.g. "image/png", "image/jpeg", "image/webp", "image/gif". */
+  mimeType: string;
+  dataBase64: string;
+}
+
 export interface AgentMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
+  /**
+   * Images the model must SEE with this message. Absent on every message the
+   * agent produced itself. A provider that cannot take images must never
+   * receive one — the worker checks the model's capability BEFORE the run
+   * starts (see modelCapabilities.ts).
+   */
+  images?: readonly AgentImage[];
   /**
    * Durable message-row id, when this row was rebuilt from `messages` (P3 fix
    * round I-3). Additive and never serialized to a provider: the compaction

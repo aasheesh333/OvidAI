@@ -1066,7 +1066,10 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
     it("job attachmentIds → one storage download per id into uploads/<sanitizedName> before streaming, then a normal completed run", async () => {
       const seeded = await seedRun();
       const sbx = makeFakeSandbox();
-      const a1 = await seedAttachment(seeded.sessionId, seeded.uid, "photo 1.png");
+      // A NON-image name on purpose: this case pins materialization and
+      // sanitization. Image attachments are gated by the vision check, which
+      // has its own tests below.
+      const a1 = await seedAttachment(seeded.sessionId, seeded.uid, "photo 1.txt");
       const a2 = await seedAttachment(seeded.sessionId, seeded.uid, "../evil.txt");
 
       const downloads: string[] = [];
@@ -1096,7 +1099,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       // Both files landed in the sandbox workspace under uploads/ with the
       // sanitized single-segment names (the raw name is stored, the path is safe).
       const uploads = join(sbx.workspaceDir, "uploads");
-      expect(await readFile(join(uploads, "photo_1.png"), "utf8")).toBe(
+      expect(await readFile(join(uploads, "photo_1.txt"), "utf8")).toBe(
         `content-of-${a1.r2Key}`,
       );
       expect(await readFile(join(uploads, "_evil.txt"), "utf8")).toBe(
@@ -1113,6 +1116,115 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         "message_completed",
         "run_completed",
       ]);
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+      rmWs(sbx.workspaceDir);
+    });
+
+    // ---- Vision gate (owner directive 2026-10-18) ----------------------
+    // An image attachment goes to the model as an image. A model that cannot
+    // see it must be refused BEFORE any bytes move, with copy the user can act
+    // on and a push so a backgrounded app still learns.
+    it("image attachment + a non-vision model → run_failed{model_no_vision}, no download, push sent", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox();
+      const a1 = await seedAttachment(seeded.sessionId, seeded.uid, "shot.png");
+
+      const downloads: string[] = [];
+      const storage = {
+        async getBuffer(key: string): Promise<Buffer | null> {
+          downloads.push(key);
+          return Buffer.from("png-bytes", "utf8");
+        },
+      };
+      const pushes: Array<{ code: string; message: string; userId: string }> = [];
+      const notifier = {
+        async notifyAgentFailed(a: {
+          userId: string;
+          sessionId: string;
+          sessionTitle: string;
+          code: string;
+          message: string;
+        }): Promise<void> {
+          pushes.push({ code: a.code, message: a.message, userId: a.userId });
+        },
+      };
+      const { transport, calls } = stubTransport([{ kind: "ok", deltas: ["never"] }]);
+
+      await createAgentRunProcessor(
+        makeDeps(transport, {
+          sandbox: sbx.manager,
+          tools: createToolRegistry(),
+          storage,
+          notifier,
+        }),
+      )({
+        data: {
+          runId: seeded.runId,
+          sessionId: seeded.sessionId,
+          userId: seeded.uid,
+          prompt: "what is in this picture?",
+          attachmentIds: [a1.id],
+        },
+      } as never);
+
+      // Nothing was downloaded and the provider was never called.
+      expect(downloads).toEqual([]);
+      expect(calls).toHaveLength(0);
+
+      const evts = await readEvents(seeded.sessionId);
+      const failure = evts.find((e) => e.type === "run_failed");
+      expect(failure?.payload).toMatchObject({
+        code: "model_no_vision",
+        model: "ovid-default-model",
+        basis: "unknown",
+        imageCount: 1,
+      });
+      expect(String(failure?.payload.message)).toContain("does not support vision/image inputs");
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "failed" });
+
+      // The push carries the same actionable copy.
+      expect(pushes).toHaveLength(1);
+      expect(pushes[0]).toMatchObject({ code: "model_no_vision", userId: seeded.uid });
+      expect(pushes[0]!.message).toContain("switch to a vision-capable model");
+      rmWs(sbx.workspaceDir);
+    });
+
+    it("image attachment + a catalog-confirmed vision model → the run proceeds", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox();
+      const a1 = await seedAttachment(seeded.sessionId, seeded.uid, "shot.png");
+
+      const downloads: string[] = [];
+      const storage = {
+        async getBuffer(key: string): Promise<Buffer | null> {
+          downloads.push(key);
+          return Buffer.from("png-bytes", "utf8");
+        },
+      };
+      const { transport, calls } = stubTransport([{ kind: "ok", deltas: ["a photo"] }]);
+
+      await createAgentRunProcessor(
+        makeDeps(transport, {
+          sandbox: sbx.manager,
+          tools: createToolRegistry(),
+          storage,
+          // The operator's catalog vouches for the fleet default.
+          modelCatalog: async () => [
+            { model_name: "ovid-default-model", model_info: { supports_vision: true } },
+          ],
+        }),
+      )({
+        data: {
+          runId: seeded.runId,
+          sessionId: seeded.sessionId,
+          userId: seeded.uid,
+          prompt: "what is in this picture?",
+          attachmentIds: [a1.id],
+        },
+      } as never);
+
+      expect(downloads).toEqual([a1.r2Key]);
+      expect(calls).toHaveLength(1);
       expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
       rmWs(sbx.workspaceDir);
     });

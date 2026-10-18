@@ -170,6 +170,29 @@ it("(a) streams text deltas, concatenates content, maps end_turn → finishReaso
   });
 });
 
+it("serializes user images as image content blocks (owner directive 2026-10-18)", async () => {
+  await startMock((_req, res) => {
+    sseHead(res);
+    res.end("event: message_stop\ndata: {}\n\n");
+  });
+  await streamCall({
+    messages: [
+      {
+        role: "user",
+        content: "what is this?",
+        images: [{ mimeType: "image/webp", dataBase64: "QUJD" }],
+      },
+    ],
+  }).promise;
+
+  const body = lastRequest!.body as { messages: Array<{ role: string; content: unknown }> };
+  const user = body.messages.find((m) => m.role === "user")!;
+  expect(user.content).toEqual([
+    { type: "text", text: "what is this?" },
+    { type: "image", source: { type: "base64", media_type: "image/webp", data: "QUJD" } },
+  ]);
+});
+
 it("(a) thinking blocks stream through onThinkingDelta and accumulate; signature deltas are ignored", async () => {
   await startMock((_req, res) => {
     sseHead(res);

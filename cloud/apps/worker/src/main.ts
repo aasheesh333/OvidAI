@@ -72,6 +72,8 @@ import { createNotifier, createFcmPushSender } from "./notify.js";
 import { createPluginInstallProcessor } from "./pluginInstallProcessor.js";
 import { startWorkerPtyBridge } from "./ptyBridge.js";
 import { createSandboxPort, createStepLimiter } from "./sandboxAdapter.js";
+import { adaptBrowserTools } from "./browserToolAdapter.js";
+import { createModelCatalogReader } from "./modelCapabilities.js";
 import { createSandboxSeam } from "./sandboxSeam.js";
 import { createScheduleFireProcessor, resyncScheduleMirror } from "./schedulerMirror.js";
 import { createScheduleTools, toCoreTools } from "./scheduleTools.js";
@@ -558,6 +560,14 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   // the state dir and the master key are present — loadWorkerEnv already
   // refused the dir-without-key combination. The engine's bridge connections
   // ride redis-q per the P6-Q6 ruling (ephemeral pub/sub, AG3-safe).
+  // Vision capability catalog (owner directive 2026-10-18): a cached read of
+  // LiteLLM's model metadata, consulted only when a run carries images. The
+  // worker already holds the master key for its own model calls.
+  const modelCatalogReader = createModelCatalogReader({
+    baseUrl: cfg.litellmBaseUrl,
+    masterKey: env.OVID_LITELLM_MASTER_KEY ?? "",
+  });
+
   const browserEngineCfg = loadBrowserEngineConfig(env);
   const browserPersistence =
     cfg.browserStateDir !== null && cfg.masterKey !== null
@@ -752,6 +762,18 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     // P4 Task 13: the agent schedule tools enter P3's roster through the
     // additive FullRunDeps.extraTools seam (adapted beside P2's six).
     extraTools: toCoreTools(createScheduleTools({ db, system })),
+    // P6 browser tools (owner directive 2026-10-18): the engine has always
+    // been composed above, but nothing dispatched its tools — the agent could
+    // not browse at all. Registered unconditionally: the browser engine is a
+    // required part of the worker composition, not an MCP-dependent extra.
+    // Vision gate (owner directive 2026-10-18): a run carrying images asks
+    // the model catalog whether the selected model can see them, and pushes
+    // the refusal when it cannot. The catalog read is lazy — only image runs
+    // pay for it.
+    notifier,
+    modelCatalog: modelCatalogReader,
+    browserTools: adaptBrowserTools(browser.tools),
+    browserReleaseSession: (sessionId: string) => browser.releaseSession(sessionId),
     // P5 Task 11 I4: kill the run's lazily spawned per-run MCP stdio/legacy
     // SSE connections when the run ends. (connectForRun is unnecessary here:
     // the first callTool spawns under its own run context and this releases

@@ -37,7 +37,7 @@ import type { EgressFetch } from "../ports.js";
 import type { MarkedToolSpec } from "../promptCache.js";
 import { TerminalModelError, TransientModelError } from "./errors.js";
 
-export interface AnthropicBlock { type: "text" | "tool_use" | "tool_result" | "thinking"; [k: string]: unknown; }
+export interface AnthropicBlock { type: "text" | "tool_use" | "tool_result" | "thinking" | "image"; [k: string]: unknown; }
 export interface AnthropicMessage { role: "user" | "assistant"; content: AnthropicBlock[] | string; }
 
 function errorMessage(err: unknown): string {
@@ -168,6 +168,22 @@ export function convertMessagesToAnthropic(
       continue;
     }
     // user — text passes through as a plain string unless the row is marked
+    // or carries images (then it becomes content blocks).
+    const images = m.images ?? [];
+    if (images.length > 0) {
+      const blocks: AnthropicBlock[] = [];
+      if (m.content !== "") blocks.push({ type: "text", text: m.content });
+      for (const img of images) {
+        blocks.push({
+          type: "image",
+          source: { type: "base64", media_type: img.mimeType, data: img.dataBase64 },
+        });
+      }
+      const wire: AnthropicMessage = { role: "user", content: blocks };
+      applyMark(wire, m);
+      messages.push(wire);
+      continue;
+    }
     const wire: AnthropicMessage = { role: "user", content: m.content };
     applyMark(wire, m);
     messages.push(wire);

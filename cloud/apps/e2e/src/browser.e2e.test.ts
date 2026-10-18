@@ -356,7 +356,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
         lightpandaBin: null, // no tier-1 legs in this suite
         allowHosts: ["127.0.0.1", "localhost"], // the fixture server's host
         ownPublicIp: null,
-        chromiumArgs: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        blockHeavyResources: false,
+  chromiumArgs: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
       };
 
       // The worker's exact engine wiring (main.ts): persistence = local-disk

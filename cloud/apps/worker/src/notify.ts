@@ -192,6 +192,19 @@ export interface Notifier {
     summary: string;
     question: boolean;
   }): Promise<void>;
+  /**
+   * A run failed for a reason the user must act on (owner directive
+   * 2026-10-18). Delivered when the app is closed or backgrounded, so a
+   * failure that only existed in a stream the user was not watching still
+   * reaches them. Never throws.
+   */
+  notifyAgentFailed(a: {
+    userId: string;
+    sessionId: string;
+    sessionTitle: string;
+    code: string;
+    message: string;
+  }): Promise<void>;
 }
 
 export function createNotifier(deps: NotifierDeps): Notifier {
@@ -375,5 +388,28 @@ export function createNotifier(deps: NotifierDeps): Notifier {
         },
       });
     },
+    async notifyAgentFailed(a) {
+      const kind: NotificationKind = "agentFailed";
+      const title = a.sessionTitle === ""
+        ? "Ovid could not finish this run"
+        : `Ovid could not finish: ${notificationSummary(a.sessionTitle, { max: 40 })}`;
+      const route = chatRoute(a.sessionId);
+      await fanOut({
+        userId: a.userId,
+        kind,
+        title,
+        body: notificationSummary(a.message, { max: 180 }),
+        route,
+        data: {
+          kind,
+          channel: notificationChannelFor(kind),
+          route,
+          sessionId: a.sessionId,
+          code: a.code,
+          ts: clock().toISOString(),
+        },
+      });
+    },
+
   };
 }

@@ -65,6 +65,7 @@ import { buildSystemPrompt } from "./systemPrompt.js";
 import { spillToolOutput, toolOutputCapFor, withToolTimeout } from "./tools/spill.js";
 import { TerminalModelError, TransientModelError } from "./transport/errors.js";
 import type {
+  AgentImage,
   AgentMessage,
   AgentRequest,
   AgentResponse,
@@ -99,6 +100,11 @@ export interface AgentRunJob {
   sessionId: string;
   userId: string;
   prompt: string;
+  /**
+   * Images the model must SEE with this prompt (owner directive 2026-10-18).
+   * The worker checks the model's vision capability before starting the run.
+   */
+  promptImages?: readonly AgentImage[];
   tier?: string;
   attachmentIds?: string[];
   // ── P3 Task 20 (additive child-loop seam) ────────────────────────────────
@@ -621,10 +627,22 @@ export async function runAgentLoop(
   // (full processor) may have rewritten it (e.g. a skill invocation). The
   // gateway persisted the raw composer line, so replace the trailing user row
   // rather than appending a second copy.
+  const promptImages =
+    job.promptImages !== undefined && job.promptImages.length > 0
+      ? job.promptImages
+      : undefined;
   if (msgs.length > 0) {
     const last = msgs[msgs.length - 1]!;
     if (last.role === "user" && last.content !== job.prompt) {
-      msgs[msgs.length - 1] = { ...last, content: job.prompt };
+      msgs[msgs.length - 1] = {
+        ...last,
+        content: job.prompt,
+        ...(promptImages !== undefined ? { images: promptImages } : {}),
+      };
+    } else if (last.role === "user" && promptImages !== undefined) {
+      // Same text (the gateway persisted the composer line): the images still
+      // belong to this turn, so attach them to that row.
+      msgs[msgs.length - 1] = { ...last, images: promptImages };
     }
   }
 

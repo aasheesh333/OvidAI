@@ -399,6 +399,7 @@ describe.skipIf(!chromiumExecutableExists())("BrowserSessionRegistry (chromium)"
       lightpandaBin: null,
       allowHosts: ["127.0.0.1", "localhost"],
       ownPublicIp: null,
+      blockHeavyResources: false,
       chromiumArgs: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
       ...overrides,
     };

@@ -26,7 +26,7 @@ import type { SessionEventType } from "@ovid/shared";
 
 import { runAgentLoop, type AgentRunJob, type LoopDeps, type LoopResult, type RunTime } from "./loop.js";
 import type { EventSink } from "./ports.js";
-import type { SessionMode } from "./types.js";
+import type { AgentImage, SessionMode } from "./types.js";
 
 export interface AgentEngine {
   /**
@@ -34,7 +34,17 @@ export interface AgentEngine {
    * this method never claims. Never throws for run-level failures.
    */
   run(
-    job: AgentRunJob & { unattended?: boolean; autonomy?: "safe" | "auto"; mode?: SessionMode },
+    job: AgentRunJob & {
+      unattended?: boolean;
+      autonomy?: "safe" | "auto";
+      mode?: SessionMode;
+      /**
+       * Images the model must see with the prompt (owner directive
+       * 2026-10-18). The WORKER checks the model's vision capability before
+       * calling run(), so a non-vision model never receives one.
+       */
+      promptImages?: readonly AgentImage[];
+    },
   ): Promise<void>;
   /** Flips the run token and aborts the in-flight transport. false = no live run. */
   cancel(sessionId: string, reason?: string): Promise<boolean>;
@@ -94,6 +104,9 @@ export function createAgentEngine(deps: AgentEngineDeps): AgentEngine {
             sessionId: job.sessionId,
             userId: job.userId,
             prompt: job.prompt,
+            ...(job.promptImages !== undefined && job.promptImages.length > 0
+              ? { promptImages: job.promptImages }
+              : {}),
             unattended: job.unattended ?? false,
             ...(job.autonomy !== undefined ? { autonomy: job.autonomy } : {}),
             ...(job.mode !== undefined ? { mode: job.mode } : {}),

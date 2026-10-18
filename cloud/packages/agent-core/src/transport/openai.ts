@@ -187,6 +187,20 @@ function toWireMessages(messages: AgentMessage[]): Array<Record<string, unknown>
     if (m.role === "tool") {
       return { role: "tool", content: m.content, tool_call_id: m.toolCallId };
     }
+    if (m.role === "user" && m.images !== undefined && m.images.length > 0) {
+      // Multimodal user turn: [OI]-compatible content parts. Text first so a
+      // provider that only renders the first part still sees the prompt.
+      return {
+        role: "user",
+        content: [
+          { type: "text", text: m.content },
+          ...m.images.map((img) => ({
+            type: "image_url",
+            image_url: { url: `data:${img.mimeType};base64,${img.dataBase64}` },
+          })),
+        ],
+      };
+    }
     return { role: m.role, content: m.content };
   });
 }

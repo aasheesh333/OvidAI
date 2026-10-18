@@ -148,6 +148,41 @@ it("POSTs the agent streaming request shape (path, auth, system rows first, tool
   });
 });
 
+it("serializes user images as content parts (owner directive 2026-10-18)", async () => {
+  await startMock((_req, res) => {
+    sseHead(res);
+    res.end("data: [DONE]\n\n");
+  });
+  await streamCall({
+    messages: [
+      {
+        role: "user",
+        content: "what is this?",
+        images: [{ mimeType: "image/png", dataBase64: "QUJD" }],
+      },
+    ],
+  }).promise;
+
+  const messages = (lastRequest!.body as { messages: unknown[] }).messages;
+  expect(messages[1]).toEqual({
+    role: "user",
+    content: [
+      { type: "text", text: "what is this?" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } },
+    ],
+  });
+});
+
+it("keeps a text-only user message a plain string (no content-parts regression)", async () => {
+  await startMock((_req, res) => {
+    sseHead(res);
+    res.end("data: [DONE]\n\n");
+  });
+  await streamCall({ messages: [{ role: "user", content: "hi" }] }).promise;
+  const messages = (lastRequest!.body as { messages: unknown[] }).messages;
+  expect(messages[1]).toEqual({ role: "user", content: "hi" });
+});
+
 it("omits the tools/temperature/max_tokens keys entirely when unset (v0 body shape)", async () => {
   await startMock((_req, res) => {
     sseHead(res);
