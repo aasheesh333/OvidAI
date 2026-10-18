@@ -80,7 +80,20 @@ void main() {
     SessionSearch.dbPathOverrideForTest = null;
     AppState.resetTestInstance();
     PathProviderPlatform.instance = originalPaths;
-    await directory.delete(recursive: true);
+    // SessionSearch's database handle is disposed, but sqflite may still be
+    // finishing a write when close() returns: a single recursive delete can
+    // then lose the race and fail with "Directory not empty" (a file appeared
+    // between the walk and the rmdir). Retry briefly — this directory is a
+    // test temp dir and nothing recreates it once the writes settle.
+    for (var attempt = 0; ; attempt++) {
+      try {
+        await directory.delete(recursive: true);
+        break;
+      } on FileSystemException {
+        if (attempt >= 10) rethrow;
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+    }
   });
 
   test(

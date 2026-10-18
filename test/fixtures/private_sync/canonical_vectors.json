@@ -1,0 +1,377 @@
+{
+  "vectors": [
+    {
+      "name": "keys.rfc8785_utf16_order",
+      "input": {
+        "€": "Euro Sign",
+        "\r": "Carriage Return",
+        "דּ": "Hebrew Letter Dalet With Dagesh",
+        "1": "One",
+        "😀": "Emoji: Grinning Face",
+        "": "Control",
+        "ö": "Latin Small Letter O With Diaeresis"
+      },
+      "canonical": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\":\"Control\",\"ö\":\"Latin Small Letter O With Diaeresis\",\"€\":\"Euro Sign\",\"😀\":\"Emoji: Grinning Face\",\"דּ\":\"Hebrew Letter Dalet With Dagesh\"}"
+    },
+    {
+      "name": "keys.non_bmp_before_bmp_high",
+      "input": {
+        "�": 1,
+        "😀": 2,
+        "Ａ": 3,
+        "𐀀": 4
+      },
+      "canonical": "{\"𐀀\":4,\"😀\":2,\"Ａ\":3,\"�\":1}"
+    },
+    {
+      "name": "keys.ascii_case_and_prefix",
+      "input": {
+        "b": 1,
+        "B": 2,
+        "a": 3,
+        "aa": 4,
+        "": 5,
+        "A": 6
+      },
+      "canonical": "{\"\":5,\"A\":6,\"B\":2,\"a\":3,\"aa\":4,\"b\":1}"
+    },
+    {
+      "name": "keys.camel_case_envelope_order",
+      "input": {
+        "schemaVersion": 1,
+        "recordId": "r",
+        "payload": {},
+        "createdAt": "2026-10-08T12:34:56Z",
+        "accountId": "a"
+      },
+      "canonical": "{\"accountId\":\"a\",\"createdAt\":\"2026-10-08T12:34:56Z\",\"payload\":{},\"recordId\":\"r\",\"schemaVersion\":1}"
+    },
+    {
+      "name": "numbers.integers",
+      "input": [
+        0,
+        1,
+        -1,
+        2147483647,
+        4294967295,
+        604800000,
+        9007199254740991
+      ],
+      "canonical": "[0,1,-1,2147483647,4294967295,604800000,9007199254740991]"
+    },
+    {
+      "name": "numbers.negative_zero",
+      "input": [
+        -0.0
+      ],
+      "canonical": "[0]"
+    },
+    {
+      "name": "numbers.integral_float",
+      "input": [
+        4.0,
+        100.0,
+        1e+20
+      ],
+      "canonical": "[4,100,100000000000000000000]"
+    },
+    {
+      "name": "numbers.exponent_threshold",
+      "input": [
+        1e+21,
+        1e-07,
+        1e-06,
+        1.5e+300
+      ],
+      "canonical": "[1e+21,1e-7,0.000001,1.5e+300]"
+    },
+    {
+      "name": "numbers.rfc8785_section_3_2_2",
+      "input": [
+        333333333.3333333,
+        1e+30,
+        4.5,
+        0.002,
+        1e-27
+      ],
+      "canonical": "[333333333.3333333,1e+30,4.5,0.002,1e-27]"
+    },
+    {
+      "name": "numbers.extremes",
+      "input": [
+        5e-324,
+        -5e-324,
+        1.7976931348623157e+308
+      ],
+      "canonical": "[5e-324,-5e-324,1.7976931348623157e+308]"
+    },
+    {
+      "name": "numbers.shortest_round_trip",
+      "input": [
+        0.1,
+        0.30000000000000004,
+        1424953923781206.2
+      ],
+      "canonical": "[0.1,0.30000000000000004,1424953923781206.2]"
+    },
+    {
+      "name": "strings.short_escapes",
+      "input": "\b\t\n\f\r\"\\",
+      "canonical": "\"\\b\\t\\n\\f\\r\\\"\\\\\""
+    },
+    {
+      "name": "strings.control_hex_lowercase",
+      "input": "\u0000\u0001\u000b\u000e\u001f",
+      "canonical": "\"\\u0000\\u0001\\u000b\\u000e\\u001f\""
+    },
+    {
+      "name": "strings.not_escaped",
+      "input": "/  '<>&",
+      "canonical": "\"/  '<>&\""
+    },
+    {
+      "name": "strings.non_bmp_literal",
+      "input": "😀🔑𐍈",
+      "canonical": "\"😀🔑𐍈\""
+    },
+    {
+      "name": "strings.rfc8785_section_3_2_2",
+      "input": "€$\u000f\nA'B\"\\\\\"/",
+      "canonical": "\"€$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\""
+    },
+    {
+      "name": "strings.combining_not_normalized",
+      "input": "éé",
+      "canonical": "\"éé\""
+    },
+    {
+      "name": "nested.literals",
+      "input": {
+        "t": true,
+        "f": false,
+        "n": null
+      },
+      "canonical": "{\"f\":false,\"n\":null,\"t\":true}"
+    },
+    {
+      "name": "nested.empty",
+      "input": {
+        "o": {},
+        "a": [],
+        "s": ""
+      },
+      "canonical": "{\"a\":[],\"o\":{},\"s\":\"\"}"
+    },
+    {
+      "name": "nested.deep_sorting",
+      "input": {
+        "z": [
+          {
+            "y": {
+              "b": 2,
+              "a": 1
+            },
+            "x": [
+              3,
+              {
+                "d": null,
+                "c": [
+                  true
+                ]
+              }
+            ]
+          }
+        ],
+        "a": {
+          "é": {
+            "e": 0
+          }
+        }
+      },
+      "canonical": "{\"a\":{\"é\":{\"e\":0}},\"z\":[{\"x\":[3,{\"c\":[true],\"d\":null}],\"y\":{\"a\":1,\"b\":2}}]}"
+    },
+    {
+      "name": "nested.array_order_preserved",
+      "input": [
+        3,
+        1,
+        2,
+        [
+          {
+            "b": 0,
+            "a": 0
+          }
+        ]
+      ],
+      "canonical": "[3,1,2,[{\"a\":0,\"b\":0}]]"
+    },
+    {
+      "name": "record.upload.transcript_private_secret_text",
+      "input": {
+        "schemaVersion": 1,
+        "recordId": "rec-msg-1",
+        "sourceDeviceId": "dev-1",
+        "recordType": "transcript",
+        "conversationId": "conv-1",
+        "createdAt": "2026-10-08T12:34:56Z",
+        "revision": 1,
+        "payload": {
+          "messageId": "msg-1",
+          "parentMessageId": null,
+          "kind": "user",
+          "text": "Private: sk-live-0123456789abcdefABCDEF password=hunter2 Bearer eyJ.e30.sig\n🔑 café \"q\" \\ \t",
+          "providerMetadataRecordId": "rec-prov-1",
+          "requestPurpose": null,
+          "displayTitle": ""
+        }
+      },
+      "canonical": "{\"conversationId\":\"conv-1\",\"createdAt\":\"2026-10-08T12:34:56Z\",\"payload\":{\"displayTitle\":\"\",\"kind\":\"user\",\"messageId\":\"msg-1\",\"parentMessageId\":null,\"providerMetadataRecordId\":\"rec-prov-1\",\"requestPurpose\":null,\"text\":\"Private: sk-live-0123456789abcdefABCDEF password=hunter2 Bearer eyJ.e30.sig\\n🔑 café \\\"q\\\" \\\\ \\t\"},\"recordId\":\"rec-msg-1\",\"recordType\":\"transcript\",\"revision\":1,\"schemaVersion\":1,\"sourceDeviceId\":\"dev-1\"}"
+    },
+    {
+      "name": "record.upload.providerMetadata",
+      "input": {
+        "schemaVersion": 1,
+        "recordId": "rec-prov-1",
+        "sourceDeviceId": "dev-1",
+        "recordType": "providerMetadata",
+        "conversationId": null,
+        "createdAt": "2026-10-08T12:34:56Z",
+        "revision": 2,
+        "payload": {
+          "providerId": "openai",
+          "modelId": "gpt-test",
+          "endpoint": "https://api.openai.com/v1",
+          "requestPurpose": "chat",
+          "displayName": "OpenAI",
+          "supportsStreaming": true
+        }
+      },
+      "canonical": "{\"conversationId\":null,\"createdAt\":\"2026-10-08T12:34:56Z\",\"payload\":{\"displayName\":\"OpenAI\",\"endpoint\":\"https://api.openai.com/v1\",\"modelId\":\"gpt-test\",\"providerId\":\"openai\",\"requestPurpose\":\"chat\",\"supportsStreaming\":true},\"recordId\":\"rec-prov-1\",\"recordType\":\"providerMetadata\",\"revision\":2,\"schemaVersion\":1,\"sourceDeviceId\":\"dev-1\"}"
+    },
+    {
+      "name": "record.upload.usage_null_vs_zero",
+      "input": {
+        "schemaVersion": 1,
+        "recordId": "att-1",
+        "sourceDeviceId": "dev-1",
+        "recordType": "usage",
+        "conversationId": "conv-1",
+        "createdAt": "2026-10-08T12:34:56Z",
+        "revision": 3,
+        "payload": {
+          "logicalRequestId": "req-1",
+          "attemptId": "att-1",
+          "requestedModel": "gpt-test",
+          "reportedModel": null,
+          "outcome": "succeeded",
+          "inputTokens": 0,
+          "outputTokens": null,
+          "totalTokens": 4294967295,
+          "usageProvenance": "providerReported",
+          "startedAt": "2026-10-08T12:34:56.123Z",
+          "completedAt": null,
+          "elapsedMilliseconds": 0
+        }
+      },
+      "canonical": "{\"conversationId\":\"conv-1\",\"createdAt\":\"2026-10-08T12:34:56Z\",\"payload\":{\"attemptId\":\"att-1\",\"completedAt\":null,\"elapsedMilliseconds\":0,\"inputTokens\":0,\"logicalRequestId\":\"req-1\",\"outcome\":\"succeeded\",\"outputTokens\":null,\"reportedModel\":null,\"requestedModel\":\"gpt-test\",\"startedAt\":\"2026-10-08T12:34:56.123Z\",\"totalTokens\":4294967295,\"usageProvenance\":\"providerReported\"},\"recordId\":\"att-1\",\"recordType\":\"usage\",\"revision\":3,\"schemaVersion\":1,\"sourceDeviceId\":\"dev-1\"}"
+    },
+    {
+      "name": "record.upload.activity",
+      "input": {
+        "schemaVersion": 1,
+        "recordId": "act-1",
+        "sourceDeviceId": "dev-1",
+        "recordType": "activity",
+        "conversationId": "conv-1",
+        "createdAt": "2026-10-08T12:34:56Z",
+        "revision": 1,
+        "payload": {
+          "logicalRequestId": "req-1",
+          "attemptId": "att-1",
+          "kind": "tool",
+          "status": "succeeded",
+          "updatedAt": "2026-10-08T12:35:00Z",
+          "title": "Build ✓",
+          "detail": "",
+          "usageRecordId": "att-1"
+        }
+      },
+      "canonical": "{\"conversationId\":\"conv-1\",\"createdAt\":\"2026-10-08T12:34:56Z\",\"payload\":{\"attemptId\":\"att-1\",\"detail\":\"\",\"kind\":\"tool\",\"logicalRequestId\":\"req-1\",\"status\":\"succeeded\",\"title\":\"Build ✓\",\"updatedAt\":\"2026-10-08T12:35:00Z\",\"usageRecordId\":\"att-1\"},\"recordId\":\"act-1\",\"recordType\":\"activity\",\"revision\":1,\"schemaVersion\":1,\"sourceDeviceId\":\"dev-1\"}"
+    },
+    {
+      "name": "record.upload.tombstone",
+      "input": {
+        "schemaVersion": 1,
+        "recordId": "tomb-1",
+        "sourceDeviceId": "dev-1",
+        "recordType": "tombstone",
+        "conversationId": null,
+        "createdAt": "2026-10-08T12:34:56Z",
+        "revision": 1,
+        "payload": {
+          "targetRecordId": "rec-msg-1",
+          "deletionRevision": 2147483647,
+          "deletedAt": "2026-10-09T00:00:00Z",
+          "reason": "user"
+        }
+      },
+      "canonical": "{\"conversationId\":null,\"createdAt\":\"2026-10-08T12:34:56Z\",\"payload\":{\"deletedAt\":\"2026-10-09T00:00:00Z\",\"deletionRevision\":2147483647,\"reason\":\"user\",\"targetRecordId\":\"rec-msg-1\"},\"recordId\":\"tomb-1\",\"recordType\":\"tombstone\",\"revision\":1,\"schemaVersion\":1,\"sourceDeviceId\":\"dev-1\"}"
+    },
+    {
+      "name": "record.replay.activity",
+      "input": {
+        "schemaVersion": 1,
+        "recordId": "act-1",
+        "sourceDeviceId": "dev-1",
+        "recordType": "activity",
+        "conversationId": "conv-1",
+        "createdAt": "2026-10-08T12:34:56Z",
+        "revision": 1,
+        "payload": {
+          "logicalRequestId": "req-1",
+          "attemptId": "att-1",
+          "kind": "tool",
+          "status": "succeeded",
+          "updatedAt": "2026-10-08T12:35:00Z",
+          "title": "Build ✓",
+          "detail": "",
+          "usageRecordId": "att-1"
+        },
+        "accountId": "acct-1",
+        "changeSequence": 42
+      },
+      "canonical": "{\"accountId\":\"acct-1\",\"changeSequence\":42,\"conversationId\":\"conv-1\",\"createdAt\":\"2026-10-08T12:34:56Z\",\"payload\":{\"attemptId\":\"att-1\",\"detail\":\"\",\"kind\":\"tool\",\"logicalRequestId\":\"req-1\",\"status\":\"succeeded\",\"title\":\"Build ✓\",\"updatedAt\":\"2026-10-08T12:35:00Z\",\"usageRecordId\":\"att-1\"},\"recordId\":\"act-1\",\"recordType\":\"activity\",\"revision\":1,\"schemaVersion\":1,\"sourceDeviceId\":\"dev-1\"}"
+    },
+    {
+      "name": "record.replay.tombstone",
+      "input": {
+        "schemaVersion": 1,
+        "recordId": "tomb-1",
+        "sourceDeviceId": "dev-1",
+        "recordType": "tombstone",
+        "conversationId": null,
+        "createdAt": "2026-10-08T12:34:56Z",
+        "revision": 1,
+        "payload": {
+          "targetRecordId": "rec-msg-1",
+          "deletionRevision": 2147483647,
+          "deletedAt": "2026-10-09T00:00:00Z",
+          "reason": "user"
+        },
+        "accountId": "acct-1",
+        "changeSequence": 43
+      },
+      "canonical": "{\"accountId\":\"acct-1\",\"changeSequence\":43,\"conversationId\":null,\"createdAt\":\"2026-10-08T12:34:56Z\",\"payload\":{\"deletedAt\":\"2026-10-09T00:00:00Z\",\"deletionRevision\":2147483647,\"reason\":\"user\",\"targetRecordId\":\"rec-msg-1\"},\"recordId\":\"tomb-1\",\"recordType\":\"tombstone\",\"revision\":1,\"schemaVersion\":1,\"sourceDeviceId\":\"dev-1\"}"
+    },
+    {
+      "name": "error.rate_limited",
+      "input": {
+        "schemaVersion": 1,
+        "code": "rate_limited",
+        "message": "Too many requests. Retry later.",
+        "retryAfterSeconds": 30
+      },
+      "canonical": "{\"code\":\"rate_limited\",\"message\":\"Too many requests. Retry later.\",\"retryAfterSeconds\":30,\"schemaVersion\":1}"
+    }
+  ]
+}
