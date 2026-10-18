@@ -1199,7 +1199,12 @@ internet.
 VNC (5901/6080) are untouched — the owner connects through them. R0-B
 (SSH key-only) is not executed.
 
-**Not implemented (needs a product decision):** removing the user-facing
-PTY/terminal. The approved spec (§6.1) ships it and the Flutter Studio
-terminal depends on it; stripping it is a feature removal, not a hardening
-step.
+**Implemented 2026-10-18 (owner decision):** the user-facing terminal is
+GONE. `pty_open`/`pty_attach`/`pty_input`/`pty_resize`/`pty_close` are refused
+at the gateway dispatch boundary with a `forbidden` frame and the pinned copy
+("Interactive terminals are not available. Ovid runs commands on your behalf —
+follow them in the run log."), before any ownership lookup, so the refusal
+cannot probe session ids. The Studio terminal pane and its client
+(`studio_terminal_tabs.dart`, `studio_pty.dart`) are deleted. Spec §6.2 and
+the §14 P2 acceptance row now say so. Execution is agent-only; the user's view
+is the read-only session event log.
