@@ -1,6 +1,6 @@
 # Task 17 — MCP/plugin runtime + UI removal wave
 
-Status: IMPLEMENTED (2026-10-18), gates pending full-suite + APK run
+Status: DONE — commit **c344db0** (2026-10-18)
 
 ## Scope decisions
 

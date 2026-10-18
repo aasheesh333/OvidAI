@@ -141,20 +141,9 @@ jobs:
       - name: Resolve dependencies
         run: flutter pub get --enforce-lockfile
 
-      # Pinned upstream assets are re-verified against their SHA-256 pins on
-      # every run (bootstrap_supply.py rejects a poisoned cache).
-      - name: Cache native sandbox bootstrap downloads
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: /tmp/opencode/bootstrap-work
-          key: bootstrap-${{ runner.os }}-${{ hashFiles('tool/bootstrap_supply.py', 'tool/prepare_bootstrap.sh') }}
-
-      - name: Package native sandbox bootstrap (per-ABI jniLibs payload)
-        run: |
-          if ! command -v zip >/dev/null || ! command -v unzip >/dev/null; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq zip unzip >/dev/null
-          fi
-          bash tool/prepare_bootstrap.sh
+      # The on-device sandbox was removed with the cloud migration (P8 Task
+      # 13), so no bootstrap payload is built or packaged here. The release
+      # inventory gate REJECTS one if it ever reappears.
 
       - name: Prepare release signing
         if: env.release_signing == 'true' && inputs.production_release != true
@@ -220,8 +209,8 @@ jobs:
           flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED" $play_define
 
       # Manual production_release enforces the API 36 Play floor and the Play
-      # profile (OVID_PLAY_BUILD=true: no sandbox bootstrap payload allowed).
-      # The release-candidate build keeps the sideload profile (bootstrap required).
+      # profile (OVID_PLAY_BUILD=true). Both profiles forbid a sandbox
+      # bootstrap payload — the on-device sandbox no longer exists.
       - name: Gate release artifacts
         if: env.release_signing == 'true'
         run: |
@@ -269,7 +258,7 @@ jobs:
       # uploaded to Crashlytics) if symbolication is ever needed.
 
   # Static checks, workflow/tool unit tests and the JVM host tests. Native host
-  # tests need only the debug Flutter assets, not the bootstrap payload.
+  # tests need only the debug Flutter assets.
   analyze:
     name: Analyze and native host tests
     runs-on: ubuntu-latest
@@ -434,18 +423,7 @@ jobs:
       - name: Resolve dependencies
         run: flutter pub get --enforce-lockfile
 
-      - name: Cache native sandbox bootstrap downloads
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: /tmp/opencode/bootstrap-work
-          key: bootstrap-${{ runner.os }}-${{ hashFiles('tool/bootstrap_supply.py', 'tool/prepare_bootstrap.sh') }}
-
-      - name: Package native sandbox bootstrap (per-ABI jniLibs payload)
-        run: |
-          if ! command -v zip >/dev/null || ! command -v unzip >/dev/null; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq zip unzip >/dev/null
-          fi
-          bash tool/prepare_bootstrap.sh
+      # No sandbox bootstrap payload: execution is server-side now.
 
       - name: Build debug APK
         run: flutter build apk --debug --dart-define=OVID_BUILD=${{ github.sha }}

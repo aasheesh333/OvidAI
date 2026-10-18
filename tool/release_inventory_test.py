@@ -101,7 +101,9 @@ class ReleaseInventoryTest(unittest.TestCase):
         bootstrap = archive([('bin/bash', elf(relro_end=28672))])
         report = self.inspect([('lib/arm64-v8a/libovid_bootstrap.so', bootstrap),
                                ('lib/arm64-v8a/libflutter.so', elf())])
-        self.assertEqual(report['errors'], [])
+        # Shipping the payload is an error now, but its contents are still
+        # inspected — an alignment problem inside it must not be hidden.
+        self.assertTrue(any('must not ship' in e for e in report['errors']))
         self.assertEqual(report['entries'][0]['kind'], 'bootstrap_zip')
         self.assertEqual(report['entries'][0]['elf_count'], 1)
         self.assertTrue(any('GNU_RELRO' in e for e in report['alignment_errors']))
@@ -174,17 +176,32 @@ class ReleaseInventoryTest(unittest.TestCase):
         shipped = self.gate.inspect_native(io.BytesIO(archive([
             lib, ('lib/arm64-v8a/libovid_bootstrap.so', archive([('bin/bash', elf())]))])),
             'apk', {'arm64-v8a'}, 'play')
-        self.assertTrue(any('Play profile must not ship' in e for e in shipped['errors']))
+        self.assertTrue(any('must not ship libovid_bootstrap.so' in e for e in shipped['errors']))
 
-    def test_sideload_profile_still_requires_bootstrap_by_default(self):
+    def test_sideload_profile_ships_no_sandbox_payload_either(self):
+        # P8 Task 13 removed the on-device sandbox from every channel, so a
+        # payload-free APK is the CORRECT shape for sideload too.
         report = self.gate.inspect_native(
             io.BytesIO(archive([('lib/arm64-v8a/libflutter.so', elf())])),
             'apk', {'arm64-v8a'})
-        self.assertTrue(any('missing valid bootstrap ZIP' in e for e in report['errors']))
+        self.assertEqual(report['errors'], [])
 
-    def test_requires_bootstrap_for_each_delivered_abi(self):
+    def test_a_sandbox_payload_is_rejected_in_both_profiles(self):
+        for profile in (None, 'sideload', 'play'):
+            with self.subTest(profile=profile):
+                report = self.gate.inspect_native(
+                    io.BytesIO(archive([
+                        ('lib/arm64-v8a/libflutter.so', elf()),
+                        ('lib/arm64-v8a/libovid_bootstrap.so', archive([('bin/bash', elf())])),
+                    ])),
+                    'apk', {'arm64-v8a'}, profile or 'sideload')
+                self.assertTrue(
+                    any('must not ship libovid_bootstrap.so' in e for e in report['errors']))
+
+    def test_a_payload_free_build_passes_the_native_gate(self):
         report = self.inspect([('lib/arm64-v8a/libflutter.so', elf())])
-        self.assertTrue(any('bootstrap' in e for e in report['errors']))
+        self.assertEqual(report['errors'], [])
+        self.assertEqual(report['bootstrap_abis'], [])
 
     def test_plugin_elf_alone_cannot_claim_a_working_flutter_abi(self):
         report = self.inspect([('lib/arm64-v8a/libplugin.so', elf()),
@@ -220,17 +237,23 @@ class ReleaseInventoryTest(unittest.TestCase):
         self.assertGreaterEqual(report['min_sdk'], 23)
         self.assertGreaterEqual(report['target_sdk'], report['min_sdk'])
 
-    def test_unsigned_real_bootstrap_is_rejected_by_bundle_verifier(self):
+    def test_unsigned_archive_is_rejected_by_bundle_verifier(self):
+        # The verifier must reject an archive whose entries are not signed.
+        # Built in a temp dir: the old version pointed at the Termux bootstrap
+        # payload, which the cloud migration deleted, so the test only ever
+        # passed when a CI step had generated that file first.
         root = Path(__file__).resolve().parents[1]
-        result = subprocess.run(['java', str(root / 'tool/release_verify_bundle.java'),
-                                 str(root / 'android/app/src/main/jniLibs/arm64-v8a/libovid_bootstrap.so'), '-'],
-                                capture_output=True, text=True)
+        with tempfile.TemporaryDirectory() as directory:
+            payload = Path(directory) / 'payload.zip'
+            payload.write_bytes(archive([('lib/arm64-v8a/libflutter.so', elf())]))
+            result = subprocess.run(['java', str(root / 'tool/release_verify_bundle.java'),
+                                     str(payload), '-'],
+                                    capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Unsigned or multi-signed bundle payload entry', result.stderr)
 
     def test_aab_native_layout_is_inspected(self):
-        data = archive([('base/lib/arm64-v8a/libflutter.so', elf()),
-                        ('base/lib/arm64-v8a/libovid_bootstrap.so', archive([('bin/bash', elf())]))])
+        data = archive([('base/lib/arm64-v8a/libflutter.so', elf())])
         report = self.gate.inspect_native(io.BytesIO(data), 'aab', {'arm64-v8a'})
         self.assertEqual(report['errors'], [])
         self.assertEqual(report['alignment_errors'], [])
@@ -245,7 +268,7 @@ class ReleaseInventoryTest(unittest.TestCase):
 
     def run_bundle_gate(self, target=36, certificate='a' * 64, mode='production',
                         manifest_target=None, debuggable=None, relro_end=32768,
-                        profile=None, bootstrap=True):
+                        profile=None, bootstrap=False):
         manifest_target = target if manifest_target is None else manifest_target
         with tempfile.TemporaryDirectory() as directory:
             artifact = Path(directory) / 'fixture.aab'
@@ -291,11 +314,11 @@ class ReleaseInventoryTest(unittest.TestCase):
         code, report = self.run_bundle_gate(relro_end=28672)
         self.assertEqual(code, 1)
         self.assertTrue(any('16 KB alignment' in e for e in report['errors']))
-        self.assertTrue(any('repacking the bootstrap ZIP' in e for e in report['errors']))
         self.assertIn('alignment_remediation', report)
         summary = report['native']['alignment_summary']
         self.assertEqual(summary['outer_native_libraries'], 1)
-        self.assertEqual(summary['bootstrap_payload_elfs'], 1)
+        # No sandbox payload ships any more, so there are no payload ELFs.
+        self.assertEqual(summary['bootstrap_payload_elfs'], 0)
 
     def test_production_play_profile_passes_without_bootstrap(self):
         code, report = self.run_bundle_gate(profile='play', bootstrap=False)
@@ -303,16 +326,17 @@ class ReleaseInventoryTest(unittest.TestCase):
         self.assertEqual(report['profile'], 'play')
 
     def test_production_play_profile_rejects_bootstrap_payload(self):
-        code, report = self.run_bundle_gate(profile='play')
+        code, report = self.run_bundle_gate(profile='play', bootstrap=True)
         self.assertEqual(code, 1)
-        self.assertTrue(any('Play profile must not ship' in e for e in report['errors']))
+        self.assertTrue(any('must not ship libovid_bootstrap.so' in e for e in report['errors']))
 
-    def test_production_sideload_profile_requires_bootstrap(self):
+    def test_production_sideload_profile_rejects_a_sandbox_payload(self):
         for profile in (None, 'sideload'):
             with self.subTest(profile=profile):
-                code, report = self.run_bundle_gate(profile=profile, bootstrap=False)
+                code, report = self.run_bundle_gate(profile=profile, bootstrap=True)
                 self.assertEqual(code, 1)
-                self.assertTrue(any('missing valid bootstrap ZIP' in e for e in report['errors']))
+                self.assertTrue(
+                    any('must not ship libovid_bootstrap.so' in e for e in report['errors']))
 
     def test_debug_inventory_can_describe_legacy_target(self):
         code, report = self.run_bundle_gate(target=28, certificate='', mode='debug')

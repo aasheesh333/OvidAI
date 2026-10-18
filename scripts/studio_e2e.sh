@@ -68,9 +68,8 @@ log "device: $(adb shell getprop ro.product.model | tr -d '\r') API $(adb shell 
 
 # ── 2. build + install ─────────────────────────────────────────────────
 if [ "$BUILD" = 1 ]; then
-  log "deriving the x86_64 bootstrap payload (same recipe as CI)"
-  (cd "$ROOT" && tool/prepare_bootstrap.sh x86_64) >"$OUT/payload.log" 2>&1
-  rm -f "$ROOT"/android/app/src/main/jniLibs/*/libovid_bootstrap.manifest.json
+  # No sandbox bootstrap payload: execution is server-side since the cloud
+  # migration, and the release inventory gate rejects one if present.
   log "building debug APK"
   (cd "$ROOT" && ${FLUTTER:-flutter} build apk --debug --target-platform android-x64 \
      --dart-define=OVID_BUILD="e2e-$(git rev-parse --short HEAD)" \

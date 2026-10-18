@@ -55,8 +55,8 @@ jobs:
       - name: Test release inventory gates
         run: python3 -m unittest discover -s tool -p 'release_*test.py'
 
-      - name: Package native sandbox bootstrap (per-ABI jniLibs payload)
-        run: bash tool/prepare_bootstrap.sh
+      # No sandbox bootstrap payload: the on-device sandbox was removed with
+      # the cloud migration, and the inventory gate rejects one if present.
 
       # Flutter's default ABI filters include all three ABIs even when only
       # android-x64 is requested. Build all three to avoid partial ABI contents.

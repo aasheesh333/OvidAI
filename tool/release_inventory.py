@@ -12,10 +12,11 @@ LOAD/RELRO plus APK ZIP alignment, require target API 36+, and pin the signer to
 a required certificate SHA-256. None of these static checks establishes device
 or Play qualification.
 
-Distribution profile (`--profile`): `sideload` (default) requires the
-`libovid_bootstrap.so` sandbox payload in every ABI. `play` (the
-OVID_PLAY_BUILD=true build) deliberately ships no sandbox userland, so there the
-bootstrap payload must be ABSENT and its presence is an error (Play policy).
+Distribution profile (`--profile`): `sideload` (default) and `play` both ship
+NO on-device sandbox. The cloud migration (P8 Task 13) deleted the Termux/proot
+userland from every channel, so `libovid_bootstrap.so` must be ABSENT in both
+profiles and its presence is an error. The profile flag is kept because the
+Play build additionally differs in targetSdk and the manifest overlay.
 
 The 16 KB findings are ELF properties, not packaging properties: the outer APK
 ZIP alignment is independent and already checked with `zipalign -P 16`, while
@@ -208,14 +209,16 @@ def inspect_native(source, kind, expected_abis, profile='sideload'):
     result['profile'] = profile
     result['bootstrap_abis'] = sorted(bootstrap_abis)
     for abi in sorted(expected_abis):
-        if profile == 'play':
-            # Play policy: no downloaded/extracted executable userland. Any
-            # bootstrap member (valid or not) contradicts the Play profile.
-            if abi in bootstrap_abis or abi in bootstrap_seen:
-                result['errors'].append(
-                    f'{abi}: Play profile must not ship {BOOTSTRAP} (sandbox payload)')
-        elif abi not in bootstrap_abis:
-            result['errors'].append(f'{abi}: missing valid bootstrap ZIP')
+        # No channel ships the on-device sandbox any more (P8 Task 13 removed
+        # the Termux/proot userland from every build; execution is server-side).
+        # A bootstrap member — valid or not — contradicts that, so it is an
+        # error in BOTH profiles. Before the migration the sideload profile
+        # required it; requiring a payload the app cannot use would only
+        # bloat the APK and fail the bundle verifier's unsigned-entry check.
+        if abi in bootstrap_abis or abi in bootstrap_seen:
+            result['errors'].append(
+                f'{abi}: must not ship {BOOTSTRAP} (the on-device sandbox was removed; '
+                f'execution is server-side)')
         if abi not in elf_abis:
             result['errors'].append(f'{abi}: missing outer ELF library')
         if abi not in flutter_abis:
@@ -346,8 +349,8 @@ def main():
     parser.add_argument('artifact', type=Path)
     parser.add_argument('--mode', choices=('debug', 'production', 'release'), required=True)
     parser.add_argument('--profile', choices=('sideload', 'play'), default='sideload',
-                        help='distribution profile: sideload requires the bootstrap payload, '
-                             'play (OVID_PLAY_BUILD=true) forbids it')
+                        help='distribution profile: neither ships the sandbox payload; '
+                             'play (OVID_PLAY_BUILD=true) additionally pins the Play target')
     parser.add_argument('--expected-abis', default=','.join(ABIS))
     parser.add_argument('--expected-target', type=int, required=True)
     parser.add_argument('--expected-min', type=int, default=23)

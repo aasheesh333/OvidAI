@@ -152,8 +152,9 @@ class ReleaseWorkflowTest(unittest.TestCase):
         push_prepare = [step for step in release["steps"] if step.get("name") == "Prepare release signing"][1]
         self.assertEqual(push_prepare["if"], "env.release_signing == 'true' && inputs.production_release != true")
         build = names.index("Build signed release APK + AAB")
-        for earlier in ("Package native sandbox bootstrap (per-ABI jniLibs payload)",
-                        "Validate production key before release compilation",
+        # The bootstrap packaging step is gone with the on-device sandbox;
+        # the remaining secret/flag guards still have to precede compilation.
+        for earlier in ("Validate production key before release compilation",
                         "Guard release feature flags"):
             self.assertLess(names.index(earlier), build, earlier)
         self.assertGreater(names.index("Gate release artifacts"), build)

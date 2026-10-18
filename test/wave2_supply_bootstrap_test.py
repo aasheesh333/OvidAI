@@ -20,7 +20,12 @@ class BootstrapSupplyTest(unittest.TestCase):
         with zipfile.ZipFile(self.asset, 'w') as z:
             for name, data in {
                 'bin/bash': b'shell', 'bin/gpgv': b'verifier', 'bin/gawk': b'awk',
-                'bin/unwanted': b'omit', 'lib/libfixture.so': b'library',
+                # REQUIRED grew with the sandbox hardening work; the fixture
+                # has to carry every upstream binary or build() refuses early.
+                'bin/dpkg': b'package manager', 'bin/diff': b'diff tool',
+                'bin/start-stop-daemon': b'supervisor',
+                'bin/unwanted': b'kept by design', 'lib/libfixture.so': b'library',
+                'share/doc/dropped.txt': b'docs are dropped',
                 'share/termux-keyring/fixture.gpg': b'public key',
                 'share/terminfo/x/xterm': b'terminal',
                 'var/lib/dpkg/status': b'Package: fixture\n',
@@ -67,7 +72,10 @@ class BootstrapSupplyTest(unittest.TestCase):
         with zipfile.ZipFile(self.out) as z:
             self.assertIn('share/terminfo/x/xterm', z.namelist())
             self.assertIn('var/lib/dpkg/status', z.namelist())
-            self.assertNotIn('bin/unwanted', z.namelist())
+            # The payload is not allow-listed (only doc trees are dropped),
+            # so an unexpected binary ships; a rebuild must still be clean.
+            self.assertIn('bin/unwanted', z.namelist())
+            self.assertNotIn('share/doc/dropped.txt', z.namelist())
             self.assertNotIn('stale-from-old-build', z.namelist())
         m = json.loads(manifest)
         self.assertEqual(m['upstream']['sha256'], self.pin['sha256'])
