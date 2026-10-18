@@ -117,7 +117,23 @@ Verified with `./gradlew :app:processDebugMainManifest`:
 
 ### Evidence
 
-The integration manifest declares 29 permissions (`AndroidManifest.xml:3-46`). Library manifests add `AD_ID`, `ACCESS_ADSERVICES_ATTRIBUTION`, `ACCESS_ADSERVICES_AD_ID`, `READ_GSERVICES` and the install-referrer permission. None of these is needed for the app to work.
+> **UPDATE 2026-10-18 (P8 cloud migration).** This section describes the
+> pre-migration manifest (29 declared permissions, with the Play overlay
+> removing the risky ones). The migration deleted every on-device capability
+> that needed them — the Linux sandbox and device control (P8 T13), the
+> background agent (T12) and the on-device WebView browser (T16) — so
+> `android/app/src/main/AndroidManifest.xml` now declares exactly **three**
+> permissions: `INTERNET`, `POST_NOTIFICATIONS`, `RECORD_AUDIO`. The Play
+> overlay keeps its removals as defense in depth against a transitive library
+> manifest re-introducing one. `Distribution.agentPermissions` no longer
+> exists (the agent roster it mirrored is gone); the invariant is now pinned
+> by `test/play_distribution_test.dart`, which parses the manifest and fails
+> if the declared set changes or a restricted permission returns.
+>
+> The table below is retained as the historical analysis of *why* each
+> permission is unacceptable; the "Play build" column still holds.
+
+The pre-migration integration manifest declared 29 permissions (`AndroidManifest.xml:3-46`). Library manifests add `AD_ID`, `ACCESS_ADSERVICES_ATTRIBUTION`, `ACCESS_ADSERVICES_AD_ID`, `READ_GSERVICES` and the install-referrer permission. None of these is needed for the app to work.
 
 The dangerous ones are only:
 - requested by the generic agent tool `request_permission` (`agent_service.dart:24129-24180`), or
@@ -138,7 +154,7 @@ The dangerous ones are only:
 | CAMERA, RECORD_AUDIO, FINE/COARSE location | Browser `getUserMedia` (`agent_service.dart:2851`), voice input, page geolocation | Kept. Each runtime prompt is triggered by the user. |
 | `QUERY_ALL_PACKAGES`, `SYSTEM_ALERT_WINDOW`, `REQUEST_INSTALL_PACKAGES`, `USE_EXACT_ALARM`, `SCHEDULE_EXACT_ALARM`, background location | (not declared) | **Pass** |
 
-The agent's `request_permission` tool now refuses permissions that a Play build doesn't declare (`Distribution.agentPermissions`).
+The pre-migration agent's `request_permission` tool refused permissions that a Play build did not declare (`Distribution.agentPermissions`). Both the tool and that list were deleted with the on-device agent (P8 T17–T19); `Distribution.declaredPermissions` now mirrors the three-permission manifest.
 
 **Owner action:** complete the FGS declaration for **dataSync** in Play Console. It needs a description, the impact if interrupted, and a video (§13.4).
 
@@ -472,7 +488,7 @@ To test in a Play-recognized setup:
 | dataSync 6-hour cap | `onTimeout` now stops cleanly. Before this fix it would have crashed with `ForegroundServiceDidNotStopInTimeException`. |
 | Accessibility warnings (touch targets, contrast) | The integration action rows use 48 dp targets (`chat_screen.dart:4859-4870`) and PR-6b contrast. The new Report action uses the same `add()` helper. |
 | ANR at startup | `checkExisting` is now a constant `false` in Play builds, so there is no disk probe. Startup work is already deferred. |
-| Undeclared permission requests | Blocked by `Distribution.agentPermissions`. |
+| Undeclared permission requests | Not possible: the on-device agent that requested them is gone, and the manifest declares only INTERNET/POST_NOTIFICATIONS/RECORD_AUDIO (pinned by `play_distribution_test`). |
 
 ---
 
