@@ -467,7 +467,7 @@ gate4_tests() {
   # Sharing it left the live worker querying tables that had just been
   # replaced: gate 5 then accepted 60 runs and the worker started ZERO.
   # The schema is migrated here with the deploy path's own migrate().
-  local accept_db="ovid_accept_$$"
+  accept_db="ovid_accept_$$"
   if [[ -n "${STAGING_DATABASE_URL:-}" ]] && command -v node >/dev/null 2>&1 \
      && [[ -f "$CLOUD_DIR/packages/db/dist/migrate-cli.js" ]]; then
     # Run from packages/db: pnpm is strict, so the driver is linked there and
@@ -481,7 +481,7 @@ gate4_tests() {
             await admin.unsafe(`CREATE DATABASE "${name}"`); }
       finally { await admin.end({ timeout: 5 }); }
     ' "$STAGING_DATABASE_URL" "$accept_db" ) >/dev/null 2>&1; then
-      local accept_url="${STAGING_DATABASE_URL%/*}/$accept_db"
+      accept_url="${STAGING_DATABASE_URL%/*}/$accept_db"
       if node "$CLOUD_DIR/packages/db/dist/migrate-cli.js" "$accept_url" >/dev/null 2>&1; then
         export TEST_DATABASE_URL="$accept_url"
         echo "gate 4: dedicated test database $accept_db (staging DB untouched)"
@@ -520,6 +520,8 @@ gate4_tests() {
   # EXIT trap per shell; a second `trap ... EXIT` would silently drop the
   # first). gate4_tests runs in run_gate's subshell, so this fires as the
   # gate finishes.
+  # NOT `local`: an EXIT trap runs after this function returns, so function-
+  # local state is gone by then (bash + `set -u` → "unbound variable").
   ACCEPT_CLEANUPS=()
   cleanup_accept_resources() {
     local fn
@@ -527,7 +529,8 @@ gate4_tests() {
   }
   trap cleanup_accept_resources EXIT
 
-  local test_redis="" test_redis_port=""
+  test_redis=""
+  test_redis_port=""
   if [[ -n "${STAGING_WORKER_PIDFILE:-}" && -r "${STAGING_WORKER_PIDFILE:-/nonexistent}" ]] \
      && kill -0 "$(cat "$STAGING_WORKER_PIDFILE" 2>/dev/null || echo 0)" 2>/dev/null \
      && command -v docker >/dev/null 2>&1; then
@@ -554,7 +557,24 @@ gate4_tests() {
   # schema, so a parallel workspace run races packages/mcp and packages/storage
   # ("relation messages already exists" / "plugins does not exist"). The whole
   # suite is under a minute, so serial costs little and is deterministic.
-  pnpm -r --workspace-concurrency=1 test
+  local worker_pidfile="${STAGING_WORKER_PIDFILE:-/tmp/opencode/ovid-staging-worker.pid}"
+  local worker_was_up=0
+  if [[ -r "$worker_pidfile" ]] && kill -0 "$(cat "$worker_pidfile" 2>/dev/null || echo 0)" 2>/dev/null; then
+    worker_was_up=1
+  fi
+
+  local rc=0
+  pnpm -r --workspace-concurrency=1 test || rc=$?
+
+  # apps/e2e's staging-guard suite deliberately runs `worker-stop kill` (it
+  # must not leave a worker behind), which takes down the worker gate 3
+  # started. Gates 5-7 need it, so put it back when it was up on entry.
+  if [[ "$worker_was_up" -eq 1 ]] \
+     && { [[ ! -r "$worker_pidfile" ]] || ! kill -0 "$(cat "$worker_pidfile" 2>/dev/null || echo 0)" 2>/dev/null; }; then
+    echo "gate 4: the suite stopped the staging worker (staging-guard) — restarting it for gates 5-7"
+    bash "$STAGING" worker-start >/dev/null 2>&1 || { echo "gate 4: WARN — worker restart failed" >&2; rc=$(( rc == 0 ? 1 : rc )); }
+  fi
+  return "$rc"
 }
 
 SECURITY_SUMMARY="<not run>"
