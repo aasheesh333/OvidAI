@@ -87,19 +87,12 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private var webViewHandler: OvidWebViewHandler? = null
-
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         flutterEngine.platformViewsController.registry.registerViewFactory(
             "ovid/html-artifact", HtmlArtifactViewFactory(flutterEngine.dartExecutor.binaryMessenger),
         )
         val nativeChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-        webViewHandler = OvidWebViewHandler(
-            this,
-            flutterEngine,
-            flutterEngine.dartExecutor.binaryMessenger
-        )
         nativeChannel
             .setMethodCallHandler { call, rawResult ->
                 val result = rawResult

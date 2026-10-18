@@ -56,7 +56,8 @@ class Distribution {
   /// Cloud schedules are live only after Task 14.
   static bool get cloudSchedules => thinClient;
 
-  /// Cloud browser is live only after Task 16.
+  /// Cloud browser screencast (P8 Task 16) — the only browser surface now
+  /// that the on-device WebView browser is removed.
   static bool get cloudBrowser => thinClient;
 
   /// MCP/plugin runtime is dark until P5.

@@ -119,39 +119,4 @@ void main() {
     expect(find.text(l.storageSizeUnknown), findsNothing);
   });
 
-  group('cookie clear copy', () {
-    test('full success is one plain sentence', () {
-      final message = cookieClearMessage(
-        l,
-        profiles: 3,
-        cleared: 3,
-        profilesSupported: true,
-      );
-      expect(message, 'Signed out of websites in the in-app browser.');
-    });
-
-    test('unsupported profiles share the default jar, so no partial', () {
-      expect(
-        cookieClearMessage(
-          l,
-          profiles: 3,
-          cleared: 0,
-          profilesSupported: false,
-        ),
-        l.storageCookiesCleared,
-      );
-    });
-
-    test('partial variant only when some profiles failed', () {
-      final message = cookieClearMessage(
-        l,
-        profiles: 3,
-        cleared: 1,
-        profilesSupported: true,
-      );
-      expect(message, contains('2 chat browser profiles'));
-      expect(message, isNot(contains('jar')));
-      expect(message, isNot(contains('cannot be verified')));
-    });
-  });
 }

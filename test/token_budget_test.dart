@@ -71,12 +71,6 @@ void main() {
       'fs_grep',
       'file_read',
       'file_write',
-      'browser_open',
-      'browser_navigate',
-      'browser_click',
-      'browser_type',
-      'browser_snapshot',
-      'browser_evaluate',
       'web_search',
       'memory_search',
       'memory_save',
@@ -106,7 +100,6 @@ void main() {
       'send_message',
       'list_agents',
       'interrupt_agent',
-      'preview',
       'create_goal',
       'get_goal',
       'update_goal',
@@ -210,7 +203,12 @@ void main() {
     // still-long descriptions (run_shell, browser_screenshot) had their
     // load-bearing constraint front-loaded, so NOTHING is truncated now —
     // pinned by the next test. Ceiling raised to 10800.
-    expect(tools.length, greaterThan(80));
+    // P8 Task 16 removed the on-device browser tool family (36 tools) and the
+    // local `preview` tool with the WebView browser. The roster is therefore
+    // intentionally smaller; every surviving capability family is still
+    // asserted by name above, so this bound only guards against a catastrophic
+    // roster loss.
+    expect(tools.length, greaterThan(60));
     // Integrated 2026-10-03: 10,929 tokens / 43,717 JSON chars. The added
     // session_read schema, scoped search authorization, scheduler fields and
     // render_html contract account for the growth; no capability is removed.

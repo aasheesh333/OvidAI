@@ -314,6 +314,16 @@ class WsMultiplexer extends ChangeNotifier {
   /// Server frames outside the session-event pipeline (see [_rawFrames]).
   Stream<Map<String, dynamic>> get rawServerFrames => _rawFrames.stream;
 
+  /// Raw BINARY server frames — the P6 browser screencast (Task 16). The
+  /// gateway sends image bytes only (it strips redis's 1-byte format prefix);
+  /// the image format travels in the latest `browser_state`. Broadcast:
+  /// attach before the frames you care about.
+  final StreamController<Uint8List> _binaryFrames =
+      StreamController<Uint8List>.broadcast();
+
+  /// Raw binary frames (see [_binaryFrames]).
+  Stream<Uint8List> get binaryServerFrames => _binaryFrames.stream;
+
   /// The replay cursor currently held for [sessionId]: the live
   /// subscription's max accepted seq, else a Task 9 seed, else the persisted
   /// pref. Task 9 records it as the offline cache's high-water mark.
@@ -491,6 +501,7 @@ class WsMultiplexer extends ChangeNotifier {
     }
     _subs.clear();
     unawaited(_rawFrames.close().catchError((Object _) {}));
+    unawaited(_binaryFrames.close().catchError((Object _) {}));
     super.dispose();
   }
 
@@ -743,8 +754,16 @@ class WsMultiplexer extends ChangeNotifier {
 
   void _onFrame(Object frame) {
     if (frame is! String) {
-      // Binary frames (the P6 browser channel, Task 16) are not part of the
-      // session-event pipeline; ignore here.
+      // Binary frames are the P6 browser screencast (Task 16), not part of
+      // the session-event pipeline. `dart:io` delivers them as Uint8List;
+      // accept a plain byte list too so a fake socket can emit either.
+      if (frame is Uint8List) {
+        if (!_binaryFrames.isClosed) _binaryFrames.add(frame);
+      } else if (frame is List<int>) {
+        if (!_binaryFrames.isClosed) {
+          _binaryFrames.add(Uint8List.fromList(frame));
+        }
+      }
       return;
     }
     dynamic decoded;

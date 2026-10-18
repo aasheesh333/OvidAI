@@ -1464,53 +1464,21 @@ class _ChatScreenState extends State<ChatScreen>
                       ),
                     ),
               ),
-              // Browser button with agent-activity status dot (top-right).
-              // P8 Task 10: hidden on the thin client — the on-device WebView
-              // browser is not part of it; Task 16 re-points the button at the
-              // P6 screencast screen. The default/sideload build keeps the
-              // local browser. (`Distribution.cloudBrowser` is `thinClient`,
-              // so gating on it would invert this.)
-              if (!Distribution.cloudExecution)
-                AnimatedBuilder(
-                  animation: _agent,
-                  builder: (_, _) {
-                    final a = _agent;
-                    final dotColor = a.browserBusy
-                        ? Aether.accent
-                        : (a.browserReady
-                              ? Aether.successLight
-                              : Aether.textFaint);
-                    return Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        IconButton(
-                          key: const ValueKey('chat-header-browser'),
-                          tooltip: context.l10n.chatHeaderBrowser,
-                          icon: const Icon(Icons.public, size: 19),
-                          onPressed: () => Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => const BrowserScreen(),
-                            ),
-                          ),
-                        ),
-                        Positioned(
-                          top: 10,
-                          right: 10,
-                          child: IgnorePointer(
-                            child: Container(
-                              width: 7,
-                              height: 7,
-                              decoration: BoxDecoration(
-                                color: dotColor,
-                                shape: BoxShape.circle,
-                                border: Border.all(color: Aether.bg, width: 1.5),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    );
-                  },
+              // Browser button — P8 Task 16: the on-device WebView browser is
+              // gone, so the thin arm opens the cloud screencast viewer. The
+              // gate follows `Distribution.cloudBrowser` (== thinClient); the
+              // T10 inversion was fixed by deleting the on-device screen, not
+              // by flipping this condition back.
+              if (Distribution.cloudBrowser)
+                IconButton(
+                  key: const ValueKey('chat-header-browser'),
+                  tooltip: context.l10n.chatHeaderBrowser,
+                  icon: const Icon(Icons.public, size: 19),
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => BrowserScreen(sessionId: s?.id),
+                    ),
+                  ),
                 ),
               ChatOverflowMenu(
                 session: s,
@@ -9996,7 +9964,31 @@ Future<void> _openLink(
     if (choice != LinkChoice.open || !context.mounted) return;
   }
   if (link.isWeb) {
-    await BrowserScreen.open(context, url: link.uri.toString());
+    // The on-device browser was removed (P8 Task 16). The thin arm opens the
+    // cloud screencast viewer; a non-cloud build has no in-app web surface, so
+    // the link goes to the system browser.
+    if (!Distribution.cloudBrowser) {
+      try {
+        final ok = await launchUrl(
+          link.uri,
+          mode: LaunchMode.externalApplication,
+        );
+        if (!ok) throw StateError('not launched');
+      } catch (_) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('Could not open this link.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+      return;
+    }
+    await BrowserScreen.open(
+      context,
+      url: link.uri.toString(),
+      sessionId: AppState.I.activeSessionId,
+    );
     return;
   }
   try {

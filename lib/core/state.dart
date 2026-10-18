@@ -11,7 +11,6 @@ import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter/widgets.dart' show Brightness, WidgetsBinding;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:webview_flutter/webview_flutter.dart' show WebViewCookieManager;
 
 import 'agent_service.dart' show AgentService;
 import 'firebase_service.dart';
@@ -41,8 +40,6 @@ import 'plugin_source_resolver.dart';
 import 'secure_store.dart';
 import 'security_service.dart';
 import 'theme.dart';
-import 'session_browser_profiles.dart';
-import 'session_data_sharing.dart';
 import 'conversation_share_service.dart';
 import 'session_lifecycle_service.dart';
 import 'session_history_store.dart';
@@ -2504,11 +2501,6 @@ class AppState extends ChangeNotifier {
 
   static final _secureStorage = ovidSecureStorage();
 
-  /// Clears the default WebView cookie jar; resolves to whether any cookie
-  /// was present. The all-data reset uses a second call as its readback.
-  /// Replaceable so hosts without a WebView platform (tests) can supply one.
-  static Future<bool> Function() clearWebCookies = () =>
-      WebViewCookieManager().clearCookies();
   static const _providerKeyPrefix = 'ovid_provider_key_';
   Future<void>? _initialization;
   Future<void>? _firstFrameInitialization;
@@ -3127,10 +3119,6 @@ class AppState extends ChangeNotifier {
         await _refreshMarketplaceForStartup(repo);
       }
       await _runStartupStage('github.initialize', GitHubService.I.initialize);
-      await _runStartupStage(
-        'session.shareOnRestart',
-        SessionDataSharing.I.runOnStartup,
-      );
       for (final name in await _mcpConnectedIntent()) {
         final server = _mcpServerByCanonicalId(name);
         final timeoutS = server?.startupTimeoutS ?? 30;
@@ -3310,8 +3298,6 @@ class AppState extends ChangeNotifier {
       promptCachingEnabled = prefs.getBool(_kPromptCaching) ?? true;
       promptCacheTtl1h = prefs.getBool(_kPromptCacheTtl1h) ?? false;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
-      shareStudioOnRestart = prefs.getBool(_kShareStudioOnRestart) ?? true;
-      shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? true;
       final savedThemeMode = prefs.getString(_kThemeMode);
       if (savedThemeMode == null || savedThemeMode.isEmpty) {
         final legacyLight = prefs.getBool(_kTheme);
@@ -3330,7 +3316,6 @@ class AppState extends ChangeNotifier {
       showReasoning = prefs.getBool(_kShowReasoning) ?? true;
       githubSync = prefs.getBool(_kGithubSync) ?? true;
       workflowEnabled = prefs.getBool(_kWorkflowEnabled) ?? true;
-      browserDesktopMode = prefs.getBool(_kBrowserDesktopMode) ?? false;
       autoRunSafeCommands = prefs.getBool(_kAutoRunSafe) ?? true;
       try {
         final rawGrants = await _readGlobalPermissionGrantsRaw();
@@ -4748,12 +4733,9 @@ class AppState extends ChangeNotifier {
       showReasoning = true;
       githubSync = true;
       workflowEnabled = true;
-      browserDesktopMode = false;
       autoRunSafeCommands = true;
       globalPermissionGrants = [];
       shareSessionMemory = false;
-      shareStudioOnRestart = true;
-      shareBrowserOnRestart = true;
       lastSelectedModel = '';
       lastSelectedProviderId = null;
       try {
@@ -4808,66 +4790,6 @@ class AppState extends ChangeNotifier {
   /// this getter rather than the raw preference.
   bool get effectiveShareSessionMemory => memoryEnabled && shareSessionMemory;
 
-  /// Share Studio repo/branch selections across sessions ON RESTART
-  /// (persisted, default ON).
-  ///
-  /// Sessions stay isolated while the app runs: switching to another chat
-  /// keeps that chat's own repo, branch, open files and buffers. On the next
-  /// launch every session starts from the union of what was selected before,
-  /// so a repo connected in one chat is offered in all of them. Turn this OFF
-  /// to keep repo/branch strictly per session, even across restarts.
-  static const _kShareStudioOnRestart = 'ovid_share_studio_on_restart';
-  bool shareStudioOnRestart = true;
-
-  /// Share browser logins (cookies) across sessions ON RESTART
-  /// (persisted, default ON).
-  ///
-  /// Each session browses in its own WebView profile, so a Google login in
-  /// one chat is invisible from another while the app runs. Once per launch
-  /// (the `session.shareOnRestart` startup task) the accumulated logins are
-  /// merged into every session — cookies only, never tabs or visit history.
-  ///
-  /// OWNER DECISION (2026-09-30): defaults ON. History: the 2026-09-24 note
-  /// below flipped this to opt-in for prompt-injection safety, but the
-  /// Settings rows that could opt in were removed afterwards ("Issue 6"), so
-  /// `setShareBrowserOnRestart` had no caller left and the restart merge was
-  /// dead in production — the owner's "log in in chat X, restart, chat Y is
-  /// still logged out" report. The requested contract is explicit: after a
-  /// restart the LOGINS are shared across ALL sessions; tabs, history and
-  /// every other per-session data stay per session.
-  ///
-  /// SECURITY (2026-09-24, kept for the record — the trade-off is real and
-  /// was accepted by the owner): with the merge ON, a prompt-injected agent
-  /// in chat B can act on sites the user logged into in chat A, under a
-  /// different model/provider/plugin set. The opt-out seam remains:
-  /// `setShareBrowserOnRestart(false)` persists and disables the merge.
-  static const _kShareBrowserOnRestart = 'ovid_share_browser_on_restart';
-  bool shareBrowserOnRestart = true;
-
-  Future<void> setShareStudioOnRestart(bool v) async {
-    shareStudioOnRestart = v;
-    notifyListeners();
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_kShareStudioOnRestart, v);
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
-    if (v) unawaited(SessionDataSharing.I.shareStudioOnRestart());
-  }
-
-  Future<void> setShareBrowserOnRestart(bool v) async {
-    shareBrowserOnRestart = v;
-    notifyListeners();
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_kShareBrowserOnRestart, v);
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
-    if (v) unawaited(SessionDataSharing.I.shareBrowserOnRestart());
-  }
-
   // ── Light/dark theme (the theme controller light/dark preference parity) ──
   static const _kTheme = 'ovid_light_theme';
   static const _kThemeMode = 'ovid_theme_mode';
@@ -4917,13 +4839,6 @@ class AppState extends ChangeNotifier {
   /// Off = those tools leave the roster entirely.
   static const _kWorkflowEnabled = 'ovid_workflow_enabled';
   bool workflowEnabled = true;
-
-  /// PR27/B3: default browser mode — false = MOBILE viewport (default),
-  /// true = DESKTOP logical viewport (1280px wide via zoom). New tabs
-  /// apply it at controller creation; browser_resize still overrides
-  /// per-call.
-  static const _kBrowserDesktopMode = 'ovid_browser_desktop_mode';
-  bool browserDesktopMode = false;
 
   /// Auto-run safe commands: read-only shell commands skip confirmation.
   static const _kAutoRunSafe = 'ovid_auto_run_safe';
@@ -5201,17 +5116,6 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kWorkflowEnabled, v);
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
-  }
-
-  Future<void> setBrowserDesktopMode(bool v) async {
-    browserDesktopMode = v;
-    notifyListeners();
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_kBrowserDesktopMode, v);
     } catch (e) {
       Diag.swallow('state', e);
     }
@@ -5967,9 +5871,7 @@ class AppState extends ChangeNotifier {
   void selectSession(String id) {
     activeSessionId = id;
     // NOTE: runs are per-session (parallel) — switching NEVER stops a
-    // running session (the session scheduler multi-session behavior).  Lazy-restore the
-    // newly-active session's browser tabs (per-session browsers).
-    onSessionSwitched?.call(id);
+    // running session (the session scheduler multi-session behavior).
     // PR23/M1: make sure the workspace dir exists for the mention menu.
     _warmWorkspace(id);
     notifyListeners();
@@ -5977,11 +5879,6 @@ class AppState extends ChangeNotifier {
     // A pending coalesced write must land before the user moves on.
     unawaited(flushSessionPersistence());
   }
-
-  /// Hook for AgentService to lazy-restore per-session browser tabs on
-  /// session switch.  Set in AgentService's constructor (avoids a
-  /// circular import).
-  void Function(String sessionId)? onSessionSwitched;
 
   /// Set the ACTIVE session's agent mode (per-session, persisted). Other
   /// sessions' modes are untouched — parallel sessions never bleed.
@@ -6035,9 +5932,8 @@ class AppState extends ChangeNotifier {
       s.providerId =
           lastSelectedProviderId ?? _inferProviderId(lastSelectedModel);
     }
-    // New session starts with its own default browser tab + the last Studio
-    // repo/folder so a restart never forces fresh selection (fresh per-session
-    // state, cookies shared). A vanished folder falls back to the sandbox.
+    // New session starts with the last Studio repo/folder so a restart never
+    // forces fresh selection. A vanished folder falls back to the sandbox.
     s.repo = lastRepoFull;
     s.branch = lastBranch;
     s.workspaceFolder = _resolvedLastWorkspaceFolder();
@@ -6046,7 +5942,6 @@ class AppState extends ChangeNotifier {
     s.workspaceFolderPinned = false;
     sessions.insert(0, s);
     activeSessionId = s.id;
-    onSessionSwitched?.call(s.id);
     // PR23/M1: the @file mention menu lists workspace files — the dir
     // must exist BEFORE the first agent run, else the menu is empty and
     // "@" looks dead. Best-effort warm-up.
@@ -6088,7 +5983,6 @@ class AppState extends ChangeNotifier {
     );
     sessions.insert(0, branch);
     activeSessionId = branch.id;
-    onSessionSwitched?.call(branch.id);
     notifyListeners();
     persistSessions();
     return branch;
@@ -6121,7 +6015,6 @@ class AppState extends ChangeNotifier {
       if (!duplicate) imported.messages.add(message);
     }
     activeSessionId = imported.id;
-    onSessionSwitched?.call(imported.id);
     notifyListeners();
     persistSessions();
     return imported;
@@ -6286,8 +6179,6 @@ class AppState extends ChangeNotifier {
           .where((s) => !_pendingDeletionIds.contains(s.id))
           .firstOrNull
           ?.id;
-      final next = activeSessionId;
-      if (next != null) onSessionSwitched?.call(next);
     }
     notifyListeners();
   }
@@ -6298,7 +6189,6 @@ class AppState extends ChangeNotifier {
     final wasActive = _pendingDeletionWasActive.remove(sessionId) ?? false;
     if (wasActive && sessionById(sessionId) != null) {
       activeSessionId = sessionId;
-      onSessionSwitched?.call(sessionId);
     }
     notifyListeners();
   }
@@ -10827,9 +10717,8 @@ class AppState extends ChangeNotifier {
       // REMOVED from the seed. Both need a full browser binary (headless
       // Chromium / Playwright browsers) downloaded and launched — that does not
       // run on Android even with Node.js in the sandbox, so seeding them only
-      // produced installs that can never work. Ovid's own in-app Browser panel
-      // (browser_* tools: navigate, click, tap, type, screenshot, swipe) covers
-      // the same "drive a page" need natively and IS supported on device.
+      // produced installs that can never work. The server-side cloud browser
+      // (P6) covers the same "drive a page" need and runs off-device.
       McpServer(
         name: 'Postgres',
         author: 'modelcontextprotocol',

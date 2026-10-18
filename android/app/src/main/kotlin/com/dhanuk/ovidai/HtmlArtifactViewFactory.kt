@@ -33,8 +33,9 @@ import io.flutter.plugin.platform.PlatformViewFactory
 import java.io.ByteArrayInputStream
 import java.util.UUID
 
-/** Separate from OvidWebViewHandler: no registration in the browser controller
- * registry, no Ovid native/JS channel, no shared-profile switching/clearing.
+/** Independent of the removed on-device browser: no registration in a browser
+ * controller registry, no Ovid native/JS channel, no shared-profile
+ * switching/clearing.
  * Android's cookie manager is process-global on older WebViews, so use an
  * opaque loadData origin and sandboxed srcdoc (no allow-same-origin), with
  * network blocked at both CSP and native boundaries. Never clear auth cookies.

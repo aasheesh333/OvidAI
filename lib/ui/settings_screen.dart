@@ -4,7 +4,6 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:webview_flutter/webview_flutter.dart';
 
 import '../core/agent_service.dart';
 import '../core/app_info.dart';
@@ -15,7 +14,6 @@ import '../core/model_limits.dart';
 import '../core/plan_mode.dart';
 import '../core/presets.dart';
 import '../core/skills.dart';
-import '../core/session_browser_profiles.dart';
 import '../core/state.dart';
 import '../core/settings_actions.dart';
 import 'settings_action_widgets.dart';
@@ -30,7 +28,6 @@ import 'memory_screen.dart';
 import 'permissions_screen.dart';
 import 'providers_screen.dart';
 import 'usage_screen.dart';
-import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/external_link.dart';
 import 'widgets/error_views.dart';
@@ -44,7 +41,7 @@ import 'widgets/ovid_mark.dart';
 /// Rows are grouped by what people come to change: Account (plan, usage),
 /// Personalization (theme, memory, reasoning), Data controls (export,
 /// permissions, telemetry, storage, delete), Models, Studio, Notifications,
-/// Advanced (device health, browser viewport, integrity, sync internals) and
+/// Advanced (device health, integrity, sync internals) and
 /// About. Preference tiles keep their persisted bindings.
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -284,7 +281,7 @@ class SettingsScreen extends StatelessWidget {
           const AetherSectionTitle(
             eyebrow: 'Advanced',
             subtitle:
-                'Cloud health, browser viewport and device integrity.',
+                'Cloud health and device integrity.',
           ),
           const SizedBox(height: 10),
           AetherCard(
@@ -298,17 +295,6 @@ class SettingsScreen extends StatelessWidget {
                   'Ovid Cloud service status',
                   const SettingsHealthScreen(),
                   actionLabel: 'Health',
-                ),
-                _hairline(),
-                const _SettingsSwitchTile(
-                  icon: Icons.desktop_windows_outlined,
-                  title: 'Browser: desktop mode',
-                  subtitleOn:
-                      'ON — Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable)',
-                  subtitleOff:
-                      'OFF — new tabs use the device\'s mobile viewport (default)',
-                  getter: _getBrowserDesktop,
-                  setter: _setBrowserDesktop,
                 ),
                 _hairline(),
                 const _DeviceIntegrityTile(),
@@ -652,13 +638,6 @@ Future<void> _setShowReasoning(bool v) => SettingsActions.persist(
   () => AppState.I.setShowReasoning(v),
 );
 
-bool _getBrowserDesktop() => AppState.I.browserDesktopMode;
-Future<void> _setBrowserDesktop(bool v) => SettingsActions.persist(
-  'ovid_browser_desktop_mode',
-  v,
-  () => AppState.I.setBrowserDesktopMode(v),
-);
-
 Future<void> _savePreference(
   BuildContext context,
   String key,
@@ -742,7 +721,7 @@ class _StorageTile extends StatelessWidget {
       leading: Icon(Icons.storage_outlined, size: 19, color: Aether.textMuted),
       title: const Text('Storage', style: TextStyle(fontSize: 14)),
       subtitle: Text(
-        'Usage by section · clear cache & cookies',
+        'Usage by section · clear cache',
         style: TextStyle(fontSize: 12, color: Aether.textFaint),
       ),
       trailing: const Icon(Icons.chevron_right, size: 18),
@@ -751,20 +730,6 @@ class _StorageTile extends StatelessWidget {
       ).push(MaterialPageRoute(builder: (_) => const _StorageScreen())),
     );
   }
-}
-
-/// Result copy for "Clear browser cookies". Per-session jars exist only where
-/// the WebView supports profiles; elsewhere every session shares the default
-/// jar, so only a shortfall on a profile-capable WebView is a partial result.
-@visibleForTesting
-String cookieClearMessage(
-  AppLocalizations l, {
-  required int profiles,
-  required int cleared,
-  required bool profilesSupported,
-}) {
-  final failed = profilesSupported ? (profiles - cleared).clamp(0, profiles) : 0;
-  return failed == 0 ? l.storageCookiesCleared : l.storageCookiesPartial(failed);
 }
 
 @visibleForTesting
@@ -880,64 +845,6 @@ class _StorageScreenState extends State<_StorageScreen> {
     }
   }
 
-  /// Clearing cookies signs the user out of every site in every chat's
-  /// browser profile, so it confirms first.
-  Future<void> _confirmClearCookies() async {
-    final ok = await showAetherConfirmDialog(
-      context,
-      title: 'Clear browser cookies?',
-      message:
-          'You will be signed out of every website in the in-app browser, in '
-          'every chat, and site data such as preferences is removed.',
-      confirmLabel: 'Clear cookies',
-    );
-    if (ok && mounted) await _clearCookies();
-  }
-
-  Future<void> _clearCookies() async {
-    setState(() => _clearing = true);
-    try {
-      // Per-session profiles hold their own jars, so clearing only the default
-      // one would leave every session still logged in.
-      // Empty URLs request whole jars. Keep origin metadata because the native
-      // count cannot prove that every profile was successfully cleared.
-      final profiles = AppState.I.sessions
-          .map((s) => BrowserProfileId.forSession(s.id))
-          .toList();
-      final perProfile = await SessionBrowserProfiles.I.clearCookies(
-        profiles: profiles,
-        urls: const [],
-      );
-      // `false` only means the default jar was already empty.
-      await WebViewCookieManager().clearCookies();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            cookieClearMessage(
-              context.l10n,
-              profiles: profiles.length,
-              cleared: perProfile,
-              profilesSupported: SessionBrowserProfiles.I.supported,
-            ),
-          ),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } catch (e, st) {
-      Diag.swallow('settings_screen.clear_cookies', e, st);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(context.l10n.storageCookiesFailed),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } finally {
-      if (mounted) setState(() => _clearing = false);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final total = _docs + _cache + _support;
@@ -1049,26 +956,6 @@ class _StorageScreenState extends State<_StorageScreen> {
               trailing: Text(
                 _size(_support),
                 style: const TextStyle(fontSize: 13),
-              ),
-            ),
-            ListTile(
-              dense: true,
-              leading: Icon(
-                Icons.cookie_outlined,
-                size: 19,
-                color: Aether.textMuted,
-              ),
-              title: const Text(
-                'Browser cookies',
-                style: TextStyle(fontSize: 14),
-              ),
-              subtitle: Text(
-                'In-app browser logins & site data',
-                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-              ),
-              trailing: TextButton(
-                onPressed: _clearing ? null : _confirmClearCookies,
-                child: const Text('Clear'),
               ),
             ),
             const Divider(height: 24),
@@ -2434,11 +2321,6 @@ class _PresetTileState extends State<_PresetTile> {
   }
 
   static const _gatedTools = [
-    'browser_open',
-    'browser_navigate',
-    'browser_click',
-    'browser_type',
-    'browser_evaluate',
     'render_html',
     'generate_image',
     'edit_image',

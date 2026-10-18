@@ -299,12 +299,14 @@ void main() {
       expect(find.text('Gate Plugin'), findsOneWidget);
     });
 
-    testWidgets('Browser header action is present on the default build', (
+    testWidgets('Browser header action is absent on the default build', (
       tester,
     ) async {
       _addSession('gate-browser-default');
       await _pumpChat(tester);
-      expect(find.byKey(const ValueKey('chat-header-browser')), findsOneWidget);
+      // The on-device WebView browser was removed (P8 Task 16); the cloud
+      // screencast button exists only on the thin arm.
+      expect(find.byKey(const ValueKey('chat-header-browser')), findsNothing);
     });
   });
 
@@ -337,14 +339,14 @@ void main() {
       expect(find.text('Gate Plugin'), findsNothing);
     });
 
-    testWidgets('Browser header action is absent on the thin client', (
+    testWidgets('Browser header action opens the cloud viewer on the thin client', (
       tester,
     ) async {
       _addSession('gate-browser-thin');
       await _bindCloud();
       await _pumpChat(tester);
 
-      expect(find.byKey(const ValueKey('chat-header-browser')), findsNothing);
+      expect(find.byKey(const ValueKey('chat-header-browser')), findsOneWidget);
       expect(find.byKey(const ValueKey('chat-header-studio')), findsOneWidget);
       expect(find.byKey(const ValueKey('chat-header-more')), findsOneWidget);
     });

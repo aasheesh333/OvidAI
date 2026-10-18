@@ -44,7 +44,6 @@ class _Preferences extends InMemorySharedPreferencesStore {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  final defaultClearWebCookies = AppState.clearWebCookies;
   late Directory root;
   late AppState app;
   late SharedPreferences prefs;
@@ -69,8 +68,6 @@ void main() {
         );
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
-    // No WebView platform in unit tests: model an emptied cookie jar.
-    AppState.clearWebCookies = () async => false;
     backend = _Preferences();
     SharedPreferencesStorePlatform.instance = backend;
     prefs = await SharedPreferences.getInstance();
@@ -104,7 +101,6 @@ void main() {
   });
 
   tearDown(() async {
-    AppState.clearWebCookies = defaultClearWebCookies;
     backend.beforeWrite = null;
     await SessionSearch.I.close();
     SessionSearch.dbPathOverrideForTest = null;
@@ -520,8 +516,6 @@ void main() {
       ..writeAsStringSync('zip');
     final shareCache = Directory('${root.path}/outgoing-shares')..createSync();
     final userFile = File('${root.path}/user-file')..writeAsStringSync('keep');
-    var cookieClears = 0;
-    AppState.clearWebCookies = () async => cookieClears++ == 0;
     // SessionLedger.I caches the first test's (since deleted) root; point it
     // at this test's root so the ledger tombstone can be written.
     SessionLedger.rootOverrideForTest =
@@ -550,16 +544,7 @@ void main() {
     expect(backupDir.existsSync(), isFalse);
     expect(exportZip.existsSync(), isFalse);
     expect(shareCache.existsSync(), isFalse);
-    expect(cookieClears, 2, reason: 'clear, then readback');
     expect(userFile.readAsStringSync(), 'keep');
-  });
-
-  test('a store whose readback still finds data is never reported as success', () async {
-    // A cookie jar that keeps reporting cookies after clearing.
-    AppState.clearWebCookies = () async => true;
-    final report = await SettingsActions.resetAll!();
-    expect(report.success, isFalse);
-    expect(report.failures.keys, contains('cookies'));
   });
 
   test('legacy deleteAllData still clears memory preferences and sessions', () async {

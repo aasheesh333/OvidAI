@@ -11,10 +11,6 @@ import 'package:ovid_ai/core/state.dart';
 /// fails OPEN — anything not listed ran freely while "planning". Two concrete
 /// escapes shipped:
 ///
-///   • every non-interaction `browser_*` tool was unlisted, so a planning agent
-///     could open tabs, navigate live pages, resize, and **close the user's
-///     tabs** — plus unrestricted network egress. With the `javascript:` hole
-///     that was script execution during planning.
 ///   • `interrupt_agent` and `send_message` were unlisted, so a plan-mode agent
 ///     could stop or steer ANOTHER session — which is not in plan mode — into
 ///     performing the mutation for it.
@@ -54,45 +50,11 @@ void main() {
       return await AgentService.I.dispatchForTest(tool, args);
     } on Object catch (e) {
       // The plan gate LET THE TOOL THROUGH and it then hit an unmocked
-      // platform channel (path_provider, webview, …). For this suite that is a
+      // platform channel (path_provider, …). For this suite that is a
       // pass: the assertion is about the gate, not the tool's own IO.
       return 'TOOL_RAN_PAST_THE_GATE: $e';
     }
   }
-
-  group('plan mode refuses the browser drivers the blocklist missed', () {
-    test('navigation and tab lifecycle are refused', () async {
-      for (final tool in [
-        'browser_open',
-        'browser_navigate',
-        'browser_new_tab',
-        'browser_close_tab',
-        'browser_switch_tab',
-        'browser_back',
-        'browser_forward',
-        'browser_reload',
-        'browser_resize',
-        'browser_scroll',
-        'browser_hover',
-      ]) {
-        expect(
-          await call(tool, {'url': 'https://example.com'}),
-          contains('PLAN MODE ACTIVE'),
-          reason: '$tool must not run while planning',
-        );
-      }
-    });
-
-    test('interaction tools stay refused', () async {
-      for (final tool in ['browser_click', 'browser_type', 'browser_evaluate']) {
-        expect(
-          await call(tool, {'selector': 'a'}),
-          contains('PLAN MODE ACTIVE'),
-          reason: '$tool must not run while planning',
-        );
-      }
-    });
-  });
 
   group('plan mode cannot act through another session', () {
     test('interrupt_agent and send_message are refused', () async {

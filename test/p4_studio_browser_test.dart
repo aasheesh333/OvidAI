@@ -17,19 +17,6 @@ void main() {
     expect(src.contains('Aether.danger'), isTrue);
   });
 
-  test('a new session starts with the home page tab, never blank', () {
-    final src = File('lib/core/agent_service.dart').readAsStringSync();
-    final idx = src.indexOf('Future<void> _restoreSessionTabsIfNeeded');
-    // Bound the window at the next member instead of a fixed length: a fixed
-    // 1400-char window silently stopped reaching the fresh-tab fallback once
-    // the legacy-envelope migration branch grew the function.
-    final end = src.indexOf('Future<void> onSessionSwitched', idx);
-    final body = src.substring(idx, end);
-    expect(body.contains("about:blank"), isFalse);
-    expect(body.contains("_defaultBrowserUrl"), isTrue);
-    expect(src.contains("static const _defaultBrowserUrl = 'https://www.google.com'"), isTrue);
-  });
-
   test('the on-device workspace folder picker is gone (remote Studio)', () {
     // P8 Task 15 removed the local git/working-folder UI: the server owns
     // the workspace. No Studio surface may open a device directory picker.
@@ -47,13 +34,4 @@ void main() {
     }
   });
 
-  test('in-app browser uses a non-wv mobile UA for OAuth', () {
-    final src = File('lib/core/agent_service.dart').readAsStringSync();
-    expect(src.contains('mobileUserAgent'), isTrue);
-    // The mobile UA must not carry the embedded-WebView `wv` token.
-    final idx = src.indexOf('static const mobileUserAgent');
-    final line = src.substring(idx, idx + 220);
-    expect(line.contains('; wv'), isFalse);
-    expect(src.contains('setUserAgent(BrowserTab.mobileUserAgent)'), isTrue);
-  });
 }

@@ -4,7 +4,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
-import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/native_mcp.dart';
 import 'package:ovid_ai/core/ssrf_guard.dart';
 
@@ -151,18 +150,5 @@ void main() {
       await handler.dispose();
     });
 
-    test('browser URL gate classifies literal CGNAT/ULA/mapped hosts', () {
-      for (final url in [
-        'http://100.64.0.1/',
-        'http://[fd00::1]/',
-        'http://[::ffff:127.0.0.1]/',
-        'http://[fe80::1]/',
-        'http://0.0.0.0/',
-        'http://api.localhost/',
-      ]) {
-        expect(AgentService.isAllowedBrowserUrl(url), isFalse, reason: url);
-      }
-      expect(AgentService.isAllowedBrowserUrl('https://example.com/'), isTrue);
-    });
   });
 }

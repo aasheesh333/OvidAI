@@ -208,15 +208,14 @@ extension _SettingsStateIntegration on AppState {
         ResetStoreKind.shares: FunctionalResetStore(
           name: ResetStoreKind.shares.id,
           onStage: () async {},
-          // Local reset covers the app-owned local state: per-session browser
-          // profiles and the local share cache. Server-side conversation
-          // shares are deleted by the account lifecycle, not a device reset.
+          // Local reset covers the app-owned local share cache. Server-side
+          // conversation shares are deleted by the account lifecycle, not a
+          // device reset. Per-session browser profiles died with the on-device
+          // browser (P8 Task 16).
           onDelete: () async {
-            await SessionBrowserProfiles.I.deleteAll();
             await ConversationShareService.production().clearLocal();
           },
           onVerifyDeleted: () async =>
-              (await SessionBrowserProfiles.I.profileCount()) == 0 &&
               (await ConversationShareService.production().localShareCount()) ==
                   0,
         ),
@@ -294,12 +293,12 @@ extension _SettingsStateIntegration on AppState {
         ResetStoreKind.cookies: FunctionalResetStore(
           name: ResetStoreKind.cookies.id,
           onStage: () async {},
-          onDelete: () async {
-            await AppState.clearWebCookies();
-          },
-          // The cookie jar cannot be enumerated; a second clear reports
-          // whether any cookie was still present.
-          onVerifyDeleted: () async => !await AppState.clearWebCookies(),
+          // The on-device WebView browser (and its cookie jars) was removed in
+          // P8 Task 16; the cloud browser's cookies live server-side. The
+          // canonical store stays so reset enumeration remains complete, and
+          // there is nothing local left to verify.
+          onDelete: () async {},
+          onVerifyDeleted: () async => true,
         ),
         ResetStoreKind.drafts: FunctionalResetStore(
           name: ResetStoreKind.drafts.id,
@@ -342,11 +341,8 @@ extension _SettingsStateIntegration on AppState {
     return result;
   }
 
-  /// Preferences that survive an all-data reset: pending browser profile
-  /// deletions, whose retry must outlive the reset.
-  static const _resetKeepPreferences = <String>{
-    'ovid_browser_profile_deletes',
-  };
+  /// Preferences that survive an all-data reset.
+  static const _resetKeepPreferences = <String>{};
 
   /// Configuration keys owned by [_resetConfiguration]. Prefix keys carry a
   /// per-server suffix.
@@ -435,11 +431,8 @@ extension _SettingsStateIntegration on AppState {
     showReasoning = true;
     githubSync = true;
     workflowEnabled = true;
-    browserDesktopMode = false;
     autoRunSafeCommands = true;
     shareSessionMemory = false;
-    shareStudioOnRestart = true;
-    shareBrowserOnRestart = true;
     refresh();
   }
 

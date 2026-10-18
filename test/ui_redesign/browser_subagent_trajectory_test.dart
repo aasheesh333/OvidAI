@@ -8,14 +8,13 @@ import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
-import 'package:ovid_ai/ui/browser_screen.dart';
 import 'package:ovid_ai/ui/subagent_screen.dart';
 import 'package:ovid_ai/ui/trajectory_screen.dart';
 import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
 
-/// Wave 2 UI redesign — browser / subagent / trajectory render contract.
+/// Wave 2 UI redesign — subagent / trajectory render contract.
 ///
-/// Asserts the premium Aether primitives are mounted on the three redesigned
+/// Asserts the premium Aether primitives are mounted on the two surviving
 /// screens, while the ORIGINAL navigation, dispatch and playback entry points
 /// remain intact (visible buttons, open callbacks, screen types). These tests
 /// are deliberately shallow: they prove the redesign surface, not the
@@ -28,26 +27,17 @@ void main() {
   // (resetTestInstance / createForTest), so always read it fresh inside tests.
   AppState app() => AppState.I;
 
-  const stubKey = Key('stub-webview');
-
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     AppState.resetTestInstance();
     AppState.createForTest().seenWelcomeVersion = AppState.welcomeVersion;
-    agent
-      ..debugPauseScheduleTimerForTest(true)
-      ..clearBrowserTabsForTest();
-    browserWebViewBuilderForTest = (_) =>
-        const ColoredBox(key: stubKey, color: Color(0xFF123456));
+    agent.debugPauseScheduleTimerForTest(true);
     SessionLedger.rootOverrideForTest = await Directory.systemTemp
         .createTemp('wave2-trajectory-');
   });
 
   tearDown(() {
-    browserWebViewBuilderForTest = null;
-    agent
-      ..clearBrowserTabsForTest()
-      ..debugPauseScheduleTimerForTest(false);
+    agent.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
     final root = SessionLedger.rootOverrideForTest;
     SessionLedger.rootOverrideForTest = null;
@@ -79,29 +69,6 @@ void main() {
     expect(find.byType(CircularProgressIndicator), findsNothing,
         reason: 'Ledger must leave loading once real IO completes');
   }
-
-  testWidgets(
-    'browser screen mounts compact aether header/field primitives and '
-    'preserves nav controls',
-    (tester) async {
-      tester.view.physicalSize = const Size(480, 960);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-      agent.browserTabs.add(BrowserTab(url: 'https://example.com'));
-      await tester.pumpWidget(host(const BrowserScreen()));
-      await tester.pump();
-
-      expect(find.byType(AetherGradientHeader), findsOneWidget);
-      expect(find.byKey(const ValueKey('browser-url-field')), findsOneWidget);
-      expect(find.byKey(const ValueKey('browser-status-dot')), findsNothing);
-      expect(find.byKey(const ValueKey('browser-back')), findsOneWidget);
-      expect(find.byKey(const ValueKey('browser-forward')), findsOneWidget);
-      expect(find.byKey(const ValueKey('browser-reload')), findsOneWidget);
-      // Download / external-launch nav entry point still present.
-      expect(find.byTooltip('Open in browser'), findsOneWidget);
-    },
-  );
 
   testWidgets(
     'subagent catalog renders AetherEmptyState when a parent has no children '
