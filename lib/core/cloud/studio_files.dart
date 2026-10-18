@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import 'cloud_rest.dart';
+import 'cloud_session_store.dart';
 import '../studio_drafts.dart' show kStudioEditHardCap;
 
 /// P7 workspace file API — reconciled against the BUILT gateway routes
@@ -183,18 +184,36 @@ class StudioFileHydratingException extends CloudApiException {
 }
 
 class StudioFilesClient {
-  StudioFilesClient(this.rest, {http.Client? httpClient})
-      : _http = httpClient ?? http.Client();
+  StudioFilesClient(
+    this.rest, {
+    http.Client? httpClient,
+    CloudSessionStore? sessions,
+  })  : _http = httpClient ?? http.Client(),
+        // ignore: prefer_initializing_formals
+        _sessions = sessions;
 
   final CloudRestClient rest;
   final http.Client _http;
+
+  /// The local→server id map. Null uses the process store lazily, so merely
+  /// constructing a client in a test never touches SharedPreferences.
+  final CloudSessionStore? _sessions;
+
+  /// The server UUID for a caller's (possibly local) session id.
+  ///
+  /// Studio state keys stay LOCAL (tabs, buffers, `StudioDraftStore` records);
+  /// only the REST path is translated.
+  Future<String> _serverSessionId(String sessionId) =>
+      (_sessions ?? CloudSessionStore.I)
+          .resolveServerSessionIdAsync(sessionId);
 
   /// GET /sessions/:id/workspace/tree — parsed into the synthetic root.
   Future<FileNode> tree(String sessionId) async =>
       (await treeSnapshot(sessionId)).root;
 
   Future<StudioTreeSnapshot> treeSnapshot(String sessionId) async {
-    final json = await rest.getJson('/sessions/$sessionId/workspace/tree');
+    final serverId = await _serverSessionId(sessionId);
+    final json = await rest.getJson('/sessions/$serverId/workspace/tree');
     final tree = json['tree'];
     if (tree is! Map) {
       throw CloudApiException(
@@ -212,7 +231,7 @@ class StudioFilesClient {
     ];
     final totals = manifest['totals'];
     return StudioTreeSnapshot(
-      sessionId: (json['sessionId'] as String?) ?? sessionId,
+      sessionId: (json['sessionId'] as String?) ?? serverId,
       state: (json['state'] as String?) ?? 'warm',
       generation: (json['generation'] as num?)?.toInt() ?? 0,
       source: (json['source'] as String?) ?? 'live',
@@ -239,8 +258,14 @@ class StudioFilesClient {
 
   Future<StudioFileRead> readFileDetailed(
       String sessionId, String path) async {
+    final serverId = await _serverSessionId(sessionId);
+    return _readFile(serverId, path);
+  }
+
+  /// The resolved-id read. [serverId] is already a server UUID.
+  Future<StudioFileRead> _readFile(String serverId, String path) async {
     final json = await rest.getJson(
-      '/sessions/$sessionId/workspace/file',
+      '/sessions/$serverId/workspace/file',
       query: <String, String>{'path': path},
     );
     final downloadUrl = json['downloadUrl'];
@@ -320,10 +345,11 @@ class StudioFilesClient {
     String content, {
     String? baselineHash,
   }) async {
+    final serverId = await _serverSessionId(sessionId);
     if (baselineHash != null) {
       StudioFileRead? current;
       try {
-        current = await readFileDetailed(sessionId, path);
+        current = await _readFile(serverId, path);
       } on CloudApiException catch (error) {
         // A file that does not exist yet has no baseline to conflict with.
         if (error.status != 404) rethrow;
@@ -338,7 +364,7 @@ class StudioFilesClient {
     }
 
     final json = await rest.putJson(
-      '/sessions/$sessionId/workspace/file',
+      '/sessions/$serverId/workspace/file',
       body: <String, Object>{'path': path, 'contentUtf8': content},
     );
     if (json['status'] == 'hydrating') {

@@ -118,6 +118,11 @@ class CloudSessionStore extends ChangeNotifier {
 
   late final Future<void> _ready;
 
+  /// True once [_load] has populated the in-memory maps (always true for the
+  /// test constructor). Lets async callers skip awaiting a future that may
+  /// have been created outside the current (widget-test) zone.
+  bool _loaded = false;
+
   final Map<String, String> _idMap = <String, String>{};
   final Set<String> _knownServerIds = <String>{};
   final List<OutboxEntry> _outbox = <OutboxEntry>[];
@@ -153,6 +158,29 @@ class CloudSessionStore extends ChangeNotifier {
   @visibleForTesting
   static void resetForTest() => _instance = null;
 
+  /// A store seeded with an in-memory local→server map, for tests.
+  ///
+  /// Unlike the production constructor this never touches SharedPreferences
+  /// or the network: [ready] is already complete, so the async resolver can be
+  /// exercised without mocking platform channels.
+  @visibleForTesting
+  CloudSessionStore.forTest({
+    Map<String, String> idMap = const <String, String>{},
+    CloudRestClient? rest,
+    SessionHistoryRepository? cache,
+    ConnectionService? connection,
+    WsMultiplexer? ws,
+  })  : _rest = rest ?? CloudRestClient(),
+        _cache = cache ?? SessionHistoryRepository.I,
+        _prefs = null,
+        _connection = connection ?? ConnectionService.I,
+        _ws = ws ?? WsMultiplexer.I {
+    _idMap.addAll(idMap);
+    _knownServerIds.addAll(idMap.values);
+    _loaded = true;
+    _ready = Future<void>.value();
+  }
+
   // -------------------------------------------------------------------------
   // Lifecycle
   // -------------------------------------------------------------------------
@@ -166,6 +194,7 @@ class CloudSessionStore extends ChangeNotifier {
     _knownServerIds.addAll(_idMap.values);
     _decodeKnownServerIds(prefs.getString(knownServerIdsKey));
     _decodeOutbox(prefs.getString(outboxKey));
+    _loaded = true;
   }
 
   /// Completes once the persisted map/outbox are in memory. Every async API
@@ -194,6 +223,26 @@ class CloudSessionStore extends ChangeNotifier {
 
   /// The server session id for a local id (null when unmapped).
   String? serverIdFor(String localSessionId) => _idMap[localSessionId];
+
+  /// The id to put on the wire for [id]: the mapped server UUID when one
+  /// exists, otherwise [id] unchanged.
+  ///
+  /// `ChatSession.id` is LOCAL (`DateTime.now().microsecondsSinceEpoch`), and
+  /// the server routes require a UUID. Feature clients that build a path or a
+  /// WS frame from a session id must resolve it here at the REST/WS boundary;
+  /// UI state keys stay local. Unmapped ids (already-server rows, or a chat
+  /// that has not had its first send yet) pass through untouched.
+  ///
+  /// This is the synchronous form: it sees whatever [ready] has loaded so far.
+  /// Async callers must use [resolveServerSessionIdAsync] so the persisted map
+  /// is in memory first.
+  String resolveServerSessionId(String id) => serverIdFor(id) ?? id;
+
+  /// [resolveServerSessionId] after [ready], for async call sites.
+  Future<String> resolveServerSessionIdAsync(String id) async {
+    if (!_loaded) await _ready;
+    return resolveServerSessionId(id);
+  }
 
   /// Creates the server session on first send; idempotent across calls,
   /// concurrent callers and process restarts (the map is persisted).

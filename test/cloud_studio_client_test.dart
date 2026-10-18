@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
+import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
 import 'package:ovid_ai/core/cloud/cloud_ws.dart';
 import 'package:ovid_ai/core/cloud/studio_files.dart';
 import 'package:ovid_ai/core/cloud/studio_pty.dart';
@@ -138,19 +139,212 @@ class _FakeRest {
 StudioRemoteClient _remote(_FakeRest fake) {
   StudioDraftStore.I.disableForTest();
   final remote = StudioRemoteClient(
-    files: StudioFilesClient(fake.client()),
+    files: StudioFilesClient(
+      fake.client(),
+      sessions: CloudSessionStore.forTest(),
+    ),
     drafts: StudioDraftStore.I,
   );
   StudioRemoteClient.installForTest(remote);
   return remote;
 }
 
+/// Records the exact path of every workspace call and answers for any session
+/// id, so a test can prove which id went on the wire.
+class _RecordingRest {
+  final List<String> paths = <String>[];
+  final List<String> methods = <String>[];
+
+  CloudRestClient client() {
+    final mock = MockClient((request) async {
+      final path = request.url.path;
+      paths.add(path);
+      methods.add(request.method);
+      final segments = request.url.pathSegments;
+      final sessionId = segments.length > 3 ? segments[3] : 'unknown-session';
+      if (request.method == 'GET' && path.endsWith('/workspace/tree')) {
+        return http.Response(
+          jsonEncode({
+            'sessionId': sessionId,
+            'state': 'warm',
+            'generation': 1,
+            'source': 'live',
+            'tree': {
+              'truncated': false,
+              'totals': {'files': 0, 'dirs': 0, 'bytes': 0},
+              'roots': <Object>[],
+            },
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (request.method == 'GET' && path.endsWith('/workspace/file')) {
+        return http.Response(
+          jsonEncode({
+            'path': request.url.queryParameters['path'],
+            'sizeBytes': 5,
+            'contentType': 'text/plain',
+            'encoding': 'utf8',
+            'content': 'hello',
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (request.method == 'PUT' && path.endsWith('/workspace/file')) {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        final content = body['contentUtf8'] as String? ?? '';
+        return http.Response(
+          jsonEncode({
+            'path': body['path'],
+            'sizeBytes': utf8.encode(content).length,
+            'sha256': _sha(content),
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response(
+        '{"error":{"code":"not_found","message":"no"}}',
+        404,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+    return CloudRestClient(
+      httpClient: mock,
+      headers: CloudHeaders.forTest(),
+      restBase: _base,
+    );
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  group('local→server session id resolution', () {
+    const local = 'local-1';
+    const server = '018f3b0e-7a2c-7c4d-9e5f-123456789abc';
+
+    CloudSessionStore mappedStore() =>
+        CloudSessionStore.forTest(idMap: const {local: server});
+
+    test('treeSnapshot sends the mapped server UUID in the path', () async {
+      final rest = _RecordingRest();
+      final files = StudioFilesClient(
+        rest.client(),
+        sessions: mappedStore(),
+      );
+
+      final snapshot = await files.treeSnapshot(local);
+
+      expect(rest.paths.single,
+          '/cloud/v1/sessions/$server/workspace/tree');
+      expect(rest.paths.single, isNot(contains(local)));
+      expect(snapshot.sessionId, server);
+    });
+
+    test('readFile sends the mapped server UUID in the path', () async {
+      final rest = _RecordingRest();
+      final files = StudioFilesClient(
+        rest.client(),
+        sessions: mappedStore(),
+      );
+
+      expect(await files.readFile(local, 'a.txt'), 'hello');
+
+      expect(rest.paths.single,
+          '/cloud/v1/sessions/$server/workspace/file');
+      expect(rest.paths.single, isNot(contains(local)));
+    });
+
+    test('writeFile sends the mapped server UUID in the path', () async {
+      final rest = _RecordingRest();
+      final files = StudioFilesClient(
+        rest.client(),
+        sessions: mappedStore(),
+      );
+
+      final result = await files.writeFile(local, 'a.txt', 'new');
+
+      expect(result.sha256, _sha('new'));
+      expect(rest.paths.single,
+          '/cloud/v1/sessions/$server/workspace/file');
+      expect(rest.methods.single, 'PUT');
+      expect(rest.paths.single, isNot(contains(local)));
+    });
+
+    test('an unmapped id passes through unchanged', () async {
+      final rest = _RecordingRest();
+      final files = StudioFilesClient(
+        rest.client(),
+        sessions: CloudSessionStore.forTest(),
+      );
+
+      await files.treeSnapshot(local);
+
+      expect(rest.paths.single,
+          '/cloud/v1/sessions/$local/workspace/tree');
+    });
+
+    test('pty_open sends the mapped server UUID', () async {
+      final sent = <Map<String, Object?>>[];
+      final channel = CloudPtyChannel(
+        sessionId: local,
+        tabId: 't1',
+        ws: WsMultiplexer(
+          mintTicket: () async => 'ticket',
+          heartbeatInterval: const Duration(hours: 1),
+          pongTimeout: const Duration(hours: 1),
+        ),
+        sessions: mappedStore(),
+        sendOverride: (frame) async => sent.add(frame),
+      );
+      addTearDown(channel.close);
+
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        sent.single,
+        {
+          'op': 'pty_open',
+          'sessionId': server,
+          'cols': 80,
+          'rows': 24,
+        },
+      );
+      expect(sent.single['sessionId'], isNot(local));
+    });
+
+    test('pty_open passes an unmapped id through unchanged', () async {
+      final sent = <Map<String, Object?>>[];
+      final channel = CloudPtyChannel(
+        sessionId: local,
+        tabId: 't1',
+        ws: WsMultiplexer(
+          mintTicket: () async => 'ticket',
+          heartbeatInterval: const Duration(hours: 1),
+          pongTimeout: const Duration(hours: 1),
+        ),
+        sessions: CloudSessionStore.forTest(),
+        sendOverride: (frame) async => sent.add(frame),
+      );
+      addTearDown(channel.close);
+
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(sent.single['sessionId'], local);
+    });
+  });
+
   group('StudioFilesClient parses the built P7 shapes', () {
     test('tree parses nested FileNodes from the manifest response', () async {
-      final files = StudioFilesClient(_FakeRest().client());
+      final files = StudioFilesClient(
+        _FakeRest().client(),
+        sessions: CloudSessionStore.forTest(),
+      );
       final root = await files.tree(_session);
 
       expect(root.children, hasLength(2));
@@ -272,6 +466,7 @@ void main() {
         sessionId: _session,
         tabId: 't1',
         ws: idleWs(),
+        sessions: CloudSessionStore.forTest(),
         settleWindow: Duration.zero,
         rawFramesOverride: frames.stream,
         sendOverride: (frame) async => sent.add(frame),
@@ -382,6 +577,7 @@ void main() {
           sessionId: _session,
           tabId: tabId,
           ws: ws,
+          sessions: CloudSessionStore.forTest(),
           settleWindow: Duration.zero,
           rawFramesOverride: frames.stream,
           sendOverride: (frame) async => sent.add(frame),

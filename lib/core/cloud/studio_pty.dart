@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
+import 'cloud_session_store.dart';
 import 'cloud_ws.dart';
 
 /// Client side of the P2 terminal-over-WS channel (`cloud/packages/shared/
@@ -57,26 +58,28 @@ class CloudPtyChannel extends ChangeNotifier {
     Duration settleWindow = const Duration(milliseconds: 20),
     Stream<Map<String, dynamic>>? rawFramesOverride,
     Future<void> Function(Map<String, Object?> frame)? sendOverride,
+    CloudSessionStore? sessions,
   })  : _ws = ws,
+        // ignore: prefer_initializing_formals
         _cols = cols,
+        // ignore: prefer_initializing_formals
         _rows = rows,
         // ignore: prefer_initializing_formals
         _settleWindow = settleWindow,
         _frames = rawFramesOverride ?? ws.rawServerFrames,
         // ignore: prefer_initializing_formals
-        _sendOverride = sendOverride {
+        _sendOverride = sendOverride,
+        // ignore: prefer_initializing_formals
+        _sessions = sessions {
     _sub = _frames.listen(
       _onFrame,
       onError: (Object error) => debugPrint('cloud pty: frame error: $error'),
     );
+    // The queue is keyed by the LOCAL id: it correlates tabs client-side and
+    // must stay stable regardless of when the server id is resolved.
     _scopeFor(_ws).enqueue(sessionId, this);
     _openPending = true;
-    unawaited(_send(<String, Object?>{
-      'op': 'pty_open',
-      'sessionId': sessionId,
-      'cols': cols,
-      'rows': rows,
-    }));
+    unawaited(_openPty());
   }
 
   /// Per-[WsMultiplexer] open-order registry. The queue is the only client-
@@ -92,7 +95,12 @@ class CloudPtyChannel extends ChangeNotifier {
   final WsMultiplexer _ws;
   final Stream<Map<String, dynamic>> _frames;
   final Future<void> Function(Map<String, Object?> frame)? _sendOverride;
+  final CloudSessionStore? _sessions;
   final Duration _settleWindow;
+
+  /// The server UUID sent in `pty_open` (null until resolved). Acks echo this
+  /// id, so session matching accepts either it or the local [sessionId].
+  String? _serverSessionId;
 
   StreamSubscription<Map<String, dynamic>>? _sub;
   final StreamController<List<int>> _output =
@@ -238,6 +246,37 @@ class CloudPtyChannel extends ChangeNotifier {
     return override != null ? override(frame) : _ws.sendRaw(frame);
   }
 
+  /// Resolves the local→server session id, then sends `pty_open`.
+  ///
+  /// The gateway's `pty_open` handler looks the session up by UUID, so a chat
+  /// created in the app (whose `ChatSession.id` is a local timestamp) must be
+  /// translated before the frame goes out. A resolver failure falls back to
+  /// the caller's id rather than blocking the terminal.
+  Future<void> _openPty() async {
+    String serverId;
+    try {
+      serverId = await (_sessions ?? CloudSessionStore.I)
+          .resolveServerSessionIdAsync(sessionId);
+    } catch (_) {
+      serverId = sessionId;
+    }
+    _serverSessionId = serverId;
+    await _send(<String, Object?>{
+      'op': 'pty_open',
+      'sessionId': serverId,
+      'cols': _cols,
+      'rows': _rows,
+    });
+  }
+
+  /// Whether a frame's `sessionId` names this channel's session. Accepts the
+  /// local id (pre-resolution frames/tests) and the resolved server id (the
+  /// built gateway echoes what `pty_open` sent).
+  bool _matchesSession(Object? frameSession) {
+    if (frameSession is! String) return false;
+    return frameSession == sessionId || frameSession == _serverSessionId;
+  }
+
   void _sendInput(String ptyId, List<int> bytes) {
     unawaited(_send(<String, Object?>{
       'op': 'pty_input',
@@ -289,7 +328,7 @@ class CloudPtyChannel extends ChangeNotifier {
   /// Claims a `pty_opened` only when this channel is the oldest outstanding
   /// open for the session (the gateway acks in request order).
   void _adoptOpened(Object? ptyId, Object? frameSession) {
-    if (frameSession != sessionId) return;
+    if (!_matchesSession(frameSession)) return;
     if (_ptyId != null) return;
     final scope = _scopeFor(_ws);
     final queue = scope.queueFor(sessionId);
@@ -345,13 +384,13 @@ class CloudPtyChannel extends ChangeNotifier {
       if (ptyId is String && ptyId != bound) return;
       if (ptyId == null) {
         final frameSession = frame['sessionId'];
-        if (frameSession is String && frameSession != sessionId) return;
+        if (frameSession is String && !_matchesSession(frameSession)) return;
       }
     } else {
       final queue = scope.queueFor(sessionId);
       if (queue.isEmpty || !identical(queue.first, this)) return;
       final frameSession = frame['sessionId'];
-      if (frameSession is String && frameSession != sessionId) return;
+      if (frameSession is String && !_matchesSession(frameSession)) return;
       if (ptyId is String) {
         final owner = scope.owners[ptyId];
         if (owner != null && !identical(owner, this)) return;

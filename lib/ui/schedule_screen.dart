@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../core/cloud/cloud_rest.dart';
+import '../core/cloud/cloud_session_store.dart';
 import '../core/cloud/schedule_client.dart';
 import '../core/diag.dart';
 import '../core/distribution.dart';
@@ -64,11 +65,16 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     if (!Distribution.cloudSchedules) return;
     if (mounted) setState(() => _error = null);
     try {
+      // `ScheduleDto.sessionId` is the SERVER UUID; the screen is opened with
+      // a local `ChatSession.id`. Resolve once here and compare on the server
+      // id (an unmapped or already-server id passes through unchanged).
+      final serverSessionId = await CloudSessionStore.I
+          .resolveServerSessionIdAsync(widget.sessionId);
       final all = await ScheduleClient.I.list(includeCancelled: true);
       if (!mounted) return;
       setState(() {
         _schedules = all
-            .where((s) => s.sessionId == widget.sessionId)
+            .where((s) => s.sessionId == serverSessionId)
             .toList(growable: false);
         _loading = false;
       });

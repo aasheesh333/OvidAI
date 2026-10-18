@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
+import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
 import 'package:ovid_ai/core/cloud/studio_files.dart';
 import 'package:ovid_ai/core/cloud/studio_remote_client.dart';
 import 'package:ovid_ai/core/studio_drafts.dart';
@@ -188,7 +189,12 @@ StudioRemoteClient installFakeStudio(
   StudioDraftStore? drafts,
 }) {
   final remote = StudioRemoteClient(
-    files: StudioFilesClient(fake.client()),
+    // The fake session is already a server id; an empty test store keeps the
+    // resolver off SharedPreferences while passing the id through unchanged.
+    files: StudioFilesClient(
+      fake.client(),
+      sessions: CloudSessionStore.forTest(),
+    ),
     drafts: drafts ?? StudioDraftStore.I,
   );
   StudioRemoteClient.installForTest(remote);
