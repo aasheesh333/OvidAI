@@ -244,15 +244,21 @@ async function deleteSchedule(
   baseUrl: string,
   uid: string,
   id: string,
-): Promise<void> {
-  await fetch(
-    `${baseUrl.replace(/\/+$/, "")}/cloud/v1/schedules/${encodeURIComponent(id)}`,
-    {
-      method: "DELETE",
-      headers: { authorization: `Bearer test:${uid}` },
-      signal: AbortSignal.timeout(5_000),
-    },
-  ).catch(() => {});
+): Promise<boolean> {
+  try {
+    const response = await fetch(
+      `${baseUrl.replace(/\/+$/, "")}/cloud/v1/schedules/${encodeURIComponent(id)}`,
+      {
+        method: "DELETE",
+        headers: { authorization: `Bearer test:${uid}` },
+        signal: AbortSignal.timeout(5_000),
+      },
+    );
+    // 404 = already gone, which is the state cleanup wants.
+    return response.ok || response.status === 404;
+  } catch {
+    return false;
+  }
 }
 
 async function readLedger(
@@ -618,11 +624,12 @@ export const clockSkewScenario: ChaosScenario<Prepared> = {
     // F6: delete the REST schedules. The `at` one is done, but the two
     // `every 300` schedules would keep firing runs into staging forever.
     const baseUrl = ctx.env.STAGING_GATEWAY_URL ?? "";
-    await Promise.allSettled(
+    const deleted = await Promise.all(
       prepared.scheduleHandles.map((handle) =>
         deleteSchedule(baseUrl, handle.uid, handle.id),
       ),
     );
+    const deleteFailures = deleted.filter((ok) => !ok).length;
 
     // The evidence rows are deliberately seeded as 'running'; terminalize
     // ours so a later real-clock sweep never mistakes them for stranded work.
@@ -649,5 +656,10 @@ export const clockSkewScenario: ChaosScenario<Prepared> = {
     );
     await prepared.redis.quit().catch(() => {});
     await prepared.db.$client.end({ timeout: 5 }).catch(() => {});
+    if (deleteFailures > 0) {
+      throw new Error(
+        `clock-skew cleanup: failed to delete ${deleteFailures}/${prepared.scheduleHandles.length} schedules — they may keep firing into staging`,
+      );
+    }
   },
 };
