@@ -451,9 +451,12 @@ describe("auth surface — real firebase verifier", () => {
       expect(res.body).not.toContain("auth/id-token");
 
       // Task 2 seam: the swallowed error is visible to the injected logger.
+      // The verifier now names WHICH half failed (id token vs App Check) so an
+      // operator can diagnose a real client; the client body above stays
+      // generic, which is the property this case exists to pin.
       const joined = logLines.join("\n");
       expect(joined).toContain("auth verification failed");
-      expect(joined).toContain("token verification failed");
+      expect(joined).toContain("id token rejected");
     } finally {
       await app.close();
       await deleteApp(firebaseApp);
