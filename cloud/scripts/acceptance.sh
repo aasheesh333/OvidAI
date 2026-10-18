@@ -470,26 +470,29 @@ gate4_tests() {
   local accept_db="ovid_accept_$$"
   if [[ -n "${STAGING_DATABASE_URL:-}" ]] && command -v node >/dev/null 2>&1 \
      && [[ -f "$CLOUD_DIR/packages/db/dist/migrate-cli.js" ]]; then
-    if node --input-type=module -e '
+    # Run from packages/db: pnpm is strict, so the driver is linked there and
+    # NOT at cloud/node_modules — an eval from the workspace root cannot
+    # resolve it and the gate would silently fall back to the staging DB.
+    if ( cd "$CLOUD_DIR/packages/db" && node --input-type=module -e '
       import postgres from "postgres";
       const [url, name] = process.argv.slice(1);
       const admin = postgres(url, { max: 1, onnotice: () => {} });
       try { await admin.unsafe(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
             await admin.unsafe(`CREATE DATABASE "${name}"`); }
       finally { await admin.end({ timeout: 5 }); }
-    ' "$STAGING_DATABASE_URL" "$accept_db" >/dev/null 2>&1; then
+    ' "$STAGING_DATABASE_URL" "$accept_db" ) >/dev/null 2>&1; then
       local accept_url="${STAGING_DATABASE_URL%/*}/$accept_db"
       if node "$CLOUD_DIR/packages/db/dist/migrate-cli.js" "$accept_url" >/dev/null 2>&1; then
         export TEST_DATABASE_URL="$accept_url"
         echo "gate 4: dedicated test database $accept_db (staging DB untouched)"
         cleanup_accept_db() {
-          node --input-type=module -e '
+          ( cd "$CLOUD_DIR/packages/db" && node --input-type=module -e '
             import postgres from "postgres";
             const [url, name] = process.argv.slice(1);
             const admin = postgres(url, { max: 1, onnotice: () => {} });
             try { await admin.unsafe(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`); }
             finally { await admin.end({ timeout: 5 }); }
-          ' "$STAGING_DATABASE_URL" "$accept_db" >/dev/null 2>&1 || true
+          ' "$STAGING_DATABASE_URL" "$accept_db" ) >/dev/null 2>&1 || true
         }
         ACCEPT_CLEANUPS+=(cleanup_accept_db)
       else
