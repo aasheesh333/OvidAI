@@ -94,5 +94,10 @@ jobs:
       # 2026-10-18); until then this step checked production src only.
       - name: Typecheck (src + tests)
         run: pnpm -r exec tsc --noEmit -p tsconfig.check.json
+      # The postgres service starts EMPTY, and several suites (storage
+      # hydrate, the repos) query the real schema. Apply the same migrations
+      # the deploy path runs before executing the tests.
+      - name: Migrate the test database
+        run: node packages/db/dist/migrate-cli.js "$TEST_DATABASE_URL"
       - name: Test
         run: pnpm -r test

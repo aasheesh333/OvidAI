@@ -122,7 +122,18 @@ describe("workspaceDir — P2's agent workspace", () => {
   });
 });
 
-describe("resolveWorkspaceDir — equality with P2's landed identity (contract 1)", () => {
+/**
+ * The manager's `workspaceDir` seam chowns the session tree to the sandbox uid
+ * — a root-only operation, exactly as in production (the worker runs as root
+ * and drops INTO the uid). On a non-root CI runner the chown returns EPERM,
+ * so this block runs only where it can exercise the real thing; acceptance.sh
+ * (root) covers it on every gate run. Skipping loudly beats asserting a
+ * layout the production code could not produce.
+ */
+const canChownToOtherUid =
+  typeof process.getuid === "function" && process.getuid() === 0;
+
+describe.skipIf(!canChownToOtherUid)("resolveWorkspaceDir — equality with P2's landed identity (contract 1)", () => {
   it("resolves the SAME numeric uid the manager allocates and equals the agent cwd", async () => {
     const wsRoot = mkdtempSync(join(tmpdir(), "ovid-wsp-ws-"));
     roots.push(wsRoot);

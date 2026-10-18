@@ -250,6 +250,16 @@ async function compareTrees(srcRoot: string, dstRoot: string): Promise<string[]>
 // Tests
 // ---------------------------------------------------------------------------
 
+/** chmod a tree writable so an unprivileged user can delete it. */
+async function makeWritable(dir: string): Promise<void> {
+  await chmod(dir, 0o700);
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) await makeWritable(path);
+    else if (!entry.isSymbolicLink()) await chmod(path, 0o600);
+  }
+}
+
 describe("extract — read path over a rich fixture", () => {
   let tmp: string;
   let wsDir: string;
@@ -278,6 +288,11 @@ describe("extract — read path over a rich fixture", () => {
   });
 
   afterAll(async () => {
+    // The fixture deliberately contains 0o500 dirs and 0o444 files (the
+    // read-only matrix). Removing them needs WRITE on the parent dir, which
+    // root bypasses and a normal CI user does not — so restore permissions
+    // first. Without this the suite fails only on unprivileged runners.
+    await makeWritable(tmp).catch(() => {});
     await rm(tmp, { recursive: true, force: true });
     await rm(workerBundleDir, { recursive: true, force: true });
   });
