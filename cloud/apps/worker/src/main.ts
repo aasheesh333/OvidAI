@@ -774,7 +774,27 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
 
   // Connection OPTIONS OBJECT — a bare URL string silently spreads into
   // garbage opts and hangs (Task 7 lesson, pinned by its health test).
-  const worker = createAgentRunsWorker({ url: cfg.redisQUrl }, processor);
+  // Concurrency: the queue default is 8, but the admission gate allows
+  // OVID_MAX_ACTIVE_SANDBOXES runs at once. Leaving it at 8 means the box
+  // executes a third of what it admits, and the rest waits in Redis — the
+  // first full100 run measured exactly that (8 active, ~1800 queued). The
+  // knob is explicit so an operator can still cap it below admission.
+  const runConcurrency = (() => {
+    const raw = env.OVID_AGENT_RUN_CONCURRENCY;
+    if (raw === undefined || raw.trim() === "") return undefined;
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      throw new Error(
+        `OVID_AGENT_RUN_CONCURRENCY must be a positive integer, got: ${raw}`,
+      );
+    }
+    return parsed;
+  })();
+  const worker = createAgentRunsWorker(
+    { url: cfg.redisQUrl },
+    processor,
+    runConcurrency === undefined ? {} : { concurrency: runConcurrency },
+  );
   worker.on("error", (err) => {
     console.error("[worker] bullmq worker error", err);
   });

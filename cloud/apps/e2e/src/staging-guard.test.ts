@@ -341,18 +341,41 @@ describe("NEW-1: worker-start --env overrides are validated", () => {
     );
   });
 
-  it("still runs the full validation for an allowlisted knob", () => {
-    // The chaos harness's knob is allowlisted, but the effective value must
-    // still satisfy validate_env (OVID_RUN_STALE_MS is pinned to 15000).
+  it("still runs the shared value validation for an allowlisted knob", () => {
+    // The knob is allowlisted, but a non-numeric value must still fail the
+    // shared validator (which runs on the effective env, overrides included).
     expectRejected(
       runWorkerStart([
         "--env-file",
         EXAMPLE_ENV,
         "--env",
-        "OVID_RUN_STALE_MS=99999",
+        "OVID_RUN_STALE_MS=soon",
       ]),
       "OVID_RUN_STALE_MS",
     );
+  });
+
+  it("accepts a lowered stale threshold via --env (the chaos harness path)", () => {
+    // workerKill needs a 15 s threshold to observe a stranded run quickly.
+    // The file-level floor (>= 60 s) deliberately does NOT apply to an
+    // explicit override; otherwise that scenario could not run at all.
+    const result = runWorkerStart([
+      "--env-file",
+      EXAMPLE_ENV,
+      "--env",
+      "OVID_RUN_STALE_MS=15000",
+    ]);
+    expect(result.stderr).not.toContain("GUARD FAIL: OVID_RUN_STALE_MS");
+  });
+});
+
+describe("OVID_RUN_STALE_MS: the file floor that broke the first full100 run", () => {
+  it("rejects a 15 s file value — it sweeps healthy long runs as run_lost", () => {
+    expectRejected(runGuard({ OVID_RUN_STALE_MS: "15000" }), "OVID_RUN_STALE_MS");
+  });
+
+  it("accepts the production-like 600 s default", () => {
+    expect(runGuard({ OVID_RUN_STALE_MS: "600000" }).status).toBe(0);
   });
 });
 

@@ -770,14 +770,28 @@ validate_env() {
   [[ "$BULL_PREFIX" == "bull" ]] \
     || guard_fail "BULL_PREFIX" "must be 'bull' — the value the staging gateway/worker mains actually use (no prefix option => BullMQ default); got '$BULL_PREFIX'"
   require_var OVID_RUN_STALE_MS
-  [[ "$OVID_RUN_STALE_MS" == "15000" ]] \
-    || guard_fail "OVID_RUN_STALE_MS" "must be 15000 (got '$OVID_RUN_STALE_MS')"
+  # The FILE must carry a production-like stale threshold. A 15 s value (the
+  # original staging default) swept every run that legitimately took longer
+  # than 15 s as `run_lost` — the first full100 run failed 63 of its 85
+  # started runs that way, which reads as a product failure and is not one.
+  # The chaos workerKill scenario still lowers it through the allowlisted
+  # --env override (it needs a fast stranded-run observation); an override
+  # deliberately skips this floor, which is why it is checked here and not
+  # inside the shared value validator.
+  if ! override_names_include OVID_RUN_STALE_MS; then
+    [[ "$OVID_RUN_STALE_MS" =~ ^[0-9]+$ ]] \
+      || guard_fail "OVID_RUN_STALE_MS" "must be an integer number of milliseconds (got '$OVID_RUN_STALE_MS')"
+    (( OVID_RUN_STALE_MS >= 60000 )) \
+      || guard_fail "OVID_RUN_STALE_MS" "must be >= 60000 ms in the env file — anything shorter sweeps healthy long runs as run_lost (got '$OVID_RUN_STALE_MS'); the chaos harness may lower it per-run via --env"
+  fi
   require_var OVID_MAX_ACTIVE_SANDBOXES
   [[ "$OVID_MAX_ACTIVE_SANDBOXES" == "24" ]] \
     || guard_fail "OVID_MAX_ACTIVE_SANDBOXES" "must be 24 (got '$OVID_MAX_ACTIVE_SANDBOXES')"
   require_var MAX_LIVE_BROWSERS
-  [[ "$MAX_LIVE_BROWSERS" == "4" ]] \
-    || guard_fail "MAX_LIVE_BROWSERS" "must be 4 (got '$MAX_LIVE_BROWSERS')"
+  # The founder raised the live-context cap to 24 with the ephemeral-lease
+  # model (15 s freeze + resource diet); 4 was the pre-diet ceiling.
+  [[ "$MAX_LIVE_BROWSERS" == "24" ]] \
+    || guard_fail "MAX_LIVE_BROWSERS" "must be 24 (got '$MAX_LIVE_BROWSERS')"
   require_var OVID_MAX_WARM_GB
   [[ "$OVID_MAX_WARM_GB" == "8" ]] \
     || guard_fail "OVID_MAX_WARM_GB" "must be 8 (got '$OVID_MAX_WARM_GB')"
@@ -831,8 +845,21 @@ override_allowed() {
 # Validate override syntax, the allowlist and the shared value rule. Runs
 # BEFORE the env file is read so a rejected override fails closed even when
 # the default env file is absent.
+# Override names seen on this invocation (validate_env exempts the rules that
+# a deliberate per-run override is allowed to change).
+OVERRIDE_NAMES=()
+
+override_names_include() {
+  local wanted="$1" name
+  for name in "${OVERRIDE_NAMES[@]:-}"; do
+    [[ "$name" == "$wanted" ]] && return 0
+  done
+  return 1
+}
+
 check_overrides() {
   local spec name value
+  OVERRIDE_NAMES=()
   for spec in "$@"; do
     [[ "$spec" == *=* ]] \
       || guard_fail "--env" "override must be K=V (got '$spec')"
@@ -842,7 +869,17 @@ check_overrides() {
       || guard_fail "--env" "invalid override name '$name'"
     override_allowed "$name" \
       || guard_fail "$name" "may not be overridden via --env (allowed: ${OVERRIDE_ALLOWLIST[*]}); path, URL, credential and identity variables are file-only"
+    OVERRIDE_NAMES+=("$name")
     validate_env_value "$name" "$value"
+    # Knobs the worker parses as numbers must be numbers HERE, not at boot:
+    # a bad value would crash-loop the worker after the launcher reported
+    # success.
+    case "$name" in
+      OVID_RUN_STALE_MS|OVID_MAX_ACTIVE_SANDBOXES|MAX_LIVE_BROWSERS|OVID_MAX_WARM_GB|OVID_DISK_ALERT_PCT)
+        [[ "$value" =~ ^[0-9]+$ ]] \
+          || guard_fail "$name" "override must be a non-negative integer (got '$value')"
+        ;;
+    esac
   done
 }
 
