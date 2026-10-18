@@ -63,12 +63,12 @@ describe("extractReadable", () => {
   });
 
   it("returns null (no throw) on garbage HTML", () => {
-    let out: ReturnType<typeof extractReadable> = undefined;
+    let out: ReturnType<typeof extractReadable> | undefined;
     expect(() => {
       out = extractReadable("<html>", URL);
     }).not.toThrow();
     expect(out).toBeNull();
-    expect(isStaticEnough("<html>", out)).toBe(false);
+    expect(isStaticEnough("<html>", out ?? null)).toBe(false);
   });
 });
 

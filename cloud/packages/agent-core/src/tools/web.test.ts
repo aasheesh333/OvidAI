@@ -106,7 +106,7 @@ function makeEgress(port: number, table: Record<string, string[]>): EgressFetch 
   return createGuardedEgressFetch(guard, toServer);
 }
 
-const TABLE = { "ok.example": ["93.184.216.34"] };
+const TABLE: Record<string, string[]> = { "ok.example": ["93.184.216.34"] };
 
 /** One DuckDuckGo-style result block (anchor + snippet pair) — Dart `_ddgResult`. */
 const ddgResult = (title: string, href: string, snippet: string): string =>
@@ -268,7 +268,7 @@ describe("createFetchUrlTool", () => {
   });
 
   it("a name resolving to a private address is refused before any prompt (fail-closed)", async () => {
-    const table = { "inner.example": ["93.184.216.34", "10.1.2.3"] };
+    const table: Record<string, string[]> = { "inner.example": ["93.184.216.34", "10.1.2.3"] };
     const { origin, requests } = await startServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/plain" });
       res.end("reached");

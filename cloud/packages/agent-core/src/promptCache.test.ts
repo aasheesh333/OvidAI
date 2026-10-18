@@ -328,7 +328,7 @@ describe("golden: prefix stability across turns", () => {
 
   it("turn N+1 request extends turn N byte-for-byte (marks stripped)", () => {
     const t1 = convo(3);
-    const t2 = [...convo(3), { role: "tool", toolCallId: "c3", content: "result 3" }];
+    const t2: AgentMessage[] = [...convo(3), { role: "tool", toolCallId: "c3", content: "result 3" }];
     const b1 = pipeline(t1);
     const b2 = pipeline(t2);
 

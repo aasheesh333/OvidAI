@@ -6,6 +6,7 @@ import {
   adaptLegacyTransport,
   createLegacyOpenAiTransport,
   type LegacyChatMessage,
+  type LegacyModelToolSpec,
   type LegacyModelTransport,
 } from "./legacy.js";
 
@@ -52,7 +53,7 @@ const TOOLS: ToolSpec[] = [
   },
 ];
 
-const WIRE_TOOLS = [
+const WIRE_TOOLS: LegacyModelToolSpec[] = [
   { type: "function", function: TOOLS[0]! },
 ];
 

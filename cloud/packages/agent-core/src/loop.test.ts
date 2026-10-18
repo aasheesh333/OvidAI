@@ -83,6 +83,9 @@ function stubTransport(script: Scripted[]): {
           }
           signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
         });
+        // Unreachable: the promise above only ever rejects. Throwing lets the
+        // compiler narrow `step` past the abort variant for the code below.
+        throw new Error("aborted");
       }
       if (step.delayMs !== undefined && step.delayMs > 0) {
         await new Promise<void>((resolve, reject) => {

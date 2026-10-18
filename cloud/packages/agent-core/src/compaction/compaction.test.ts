@@ -36,7 +36,7 @@ import {
   summarizerSystemPrompt,
   summarizerUserPrompt,
 } from "./checkpoint.js";
-import { applyCheckpoint, createCompactor, foldBoundaryFor, isCheckpointRow } from "./compactor.js";
+import { applyCheckpoint, createCompactor, foldBoundaryFor, isCheckpointRow, type CompactionSummarizeInput } from "./compactor.js";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -197,13 +197,13 @@ function recordingSink(): {
 }
 
 function setup(o?: {
-  summarize?: (i: { messages: readonly AgentMessage[]; budgetTokens: number; priorNarrative: string; focus?: string; strict?: boolean }) => Promise<string | null>;
+  summarize?: (i: CompactionSummarizeInput) => Promise<string | null>;
   windowTokens?: number;
 }) {
   const state = createMemoryStateStore();
   const { sandbox, writes } = fakeSandbox();
   const { sink, events } = recordingSink();
-  const summarizeCalls: Array<{ messages: readonly AgentMessage[]; budgetTokens: number; priorNarrative: string; focus?: string; strict?: boolean }> = [];
+  const summarizeCalls: CompactionSummarizeInput[] = [];
   const summarize =
     o?.summarize ??
     (async () =>

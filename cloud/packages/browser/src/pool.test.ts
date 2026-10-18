@@ -284,6 +284,7 @@ describe.skipIf(!chromiumExecutableExists())("BrowserPool", () => {
     await pool.close();
     const outcome = await queued;
     expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected acquireLive to reject");
     expect(outcome.e).toBeInstanceOf(BrowserPoolBusyError);
     expect(pool.stats()).toEqual({ browserAlive: false, live: 0, tier1: 0, queued: 0 });
 
@@ -323,6 +324,7 @@ describe.skipIf(!chromiumExecutableExists())("BrowserPool", () => {
 
     const outcome = await queued;
     expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected acquireLive to reject");
     expect(outcome.e).toBeInstanceOf(BrowserPoolBusyError);
     expect((outcome.e as Error).message).toContain("browser process died");
     expect(pool.stats()).toEqual({ browserAlive: false, live: 0, tier1: 0, queued: 0 });
