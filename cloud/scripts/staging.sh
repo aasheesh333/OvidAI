@@ -42,6 +42,37 @@ guard_fail() {
   exit 2
 }
 
+# NEW-6: a value with an embedded newline would be validated only up to the
+# first line by line-oriented consumers. Every value gets this check.
+validate_no_newline() {
+  local name="$1" value="$2"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] \
+    || guard_fail "$name" "must not contain a newline (got '$value')"
+}
+
+# NEW-1: the ONE value rule shared by the env-file guard and the
+# `worker-start --env` override path. An empty value is rejected because
+# downstream `strEnv` treats "" as unset and falls back to LIVE defaults; ".."
+# is rejected before any lexical normalization. Path-like callers use this;
+# URL/credential callers use validate_no_newline (a password may contain "..").
+validate_env_value() {
+  local name="$1" value="$2"
+  [[ -n "$value" ]] \
+    || guard_fail "$name" "must not be empty (an empty value falls back to a live default downstream)"
+  validate_no_newline "$name" "$value"
+  [[ "$value" != *".."* ]] \
+    || guard_fail "$name" "must not contain '..' path traversal (got '$value')"
+}
+
+# Resolve symlinks in every existing path component; missing leaf components
+# are kept (`realpath -m`). The guard must never follow a staging path into a
+# live namespace, so an unavailable resolver is fail-closed.
+canonical_path() {
+  local path="$1"
+  command -v realpath >/dev/null 2>&1 || return 1
+  realpath -m -- "$path"
+}
+
 usage() {
   cat <<'EOF'
 usage: staging.sh <command> [options]
@@ -61,8 +92,11 @@ usage: staging.sh <command> [options]
                                    0.0.0.0:14000 (one of two host
                                    non-loopback listeners; the other is the
                                    worker file service on 0.0.0.0:18093)
-  worker-start [--env K=V ...]     start the host staging worker (root is
-                                   required for bwrap/cgroups)
+  worker-start [--env-file <path>] [--env K=V ...]
+                                   start the host staging worker (root is
+                                   required for bwrap/cgroups); --env is
+                                   limited to operational knobs (the chaos
+                                   harness uses OVID_RUN_STALE_MS)
   worker-stop [graceful|kill]      stop the host staging worker
   pressure-mount [MB] | pressure-unmount
                                    P10 Task 7: mount/remove a loopback ext4
@@ -81,15 +115,86 @@ EOF
 
 # ── env loading / URL parsing ───────────────────────────────────────────────
 
-load_env_file() {
-  local file="$1"
+# NEW-4: the env file is DATA, never code. Parsing (not sourcing) means
+# `$(...)`, `exit 0`, function definitions and shell metacharacters cannot
+# execute or change the guard. The accepted grammar is deliberately small:
+# blank lines, `#` comments, optional `export `, and `KEY=VALUE` with an
+# optionally single- or double-quoted value.
+#
+# Values are exported into the current shell so the backgrounded worker/mock
+# inherit the validated staging env without re-reading the file.
+ENV_FILE_UNSAFE_NAMES=(
+  PATH IFS BASH_ENV ENV SHELLOPTS BASHOPTS CDPATH GLOBIGNORE
+  LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT NODE_OPTIONS NODE_PATH
+  PROMPT_COMMAND PS4 BASH_XTRACEFD SHELL
+)
+
+env_name_is_unsafe() {
+  local name="$1" unsafe
+  for unsafe in "${ENV_FILE_UNSAFE_NAMES[@]}"; do
+    [[ "$name" == "$unsafe" ]] && return 0
+  done
+  [[ "$name" == BASH_FUNC_* ]] && return 0
+  return 1
+}
+
+# Unquote one RHS. Never expands anything. Returns 1 on malformed/unsupported
+# syntax so the caller can fail closed with the line number.
+parse_env_value() {
+  local value="$1"
+  if [[ "$value" == \'* ]]; then
+    [[ "$value" == *\' && ${#value} -ge 2 ]] || return 1
+    value="${value#\'}"
+    value="${value%\'}"
+    [[ "$value" != *"'"* ]] || return 1
+  elif [[ "$value" == \"* ]]; then
+    [[ "$value" == *\" && ${#value} -ge 2 ]] || return 1
+    value="${value#\"}"
+    value="${value%\"}"
+    [[ "$value" != *'"'* ]] || return 1
+    # Never executed, but refuse shell-expansion syntax so a value cannot be
+    # mistaken for code by a future consumer.
+    [[ "$value" != *'$('* && "$value" != *'`'* ]] || return 1
+    value="${value//\\\"/\"}"
+    value="${value//\\\\/\\}"
+  else
+    [[ "$value" != *'$('* && "$value" != *'`'* ]] || return 1
+    # No inline comments by contract; a '#' in a value is literal.
+  fi
+  printf '%s' "$value"
+}
+
+parse_env_file() {
+  local file="$1" raw line name value lineno=0 parsed
   [[ -f "$file" ]] || die "env file not found: $file (copy cloud/deploy/.env.staging.example)"
-  # Plain KEY=VALUE shell syntax by contract. `set -a` exports every value so
-  # the backgrounded worker/mock inherit the staging env without re-parsing.
-  set -a
-  # shellcheck disable=SC1090
-  . "$file"
-  set +a
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    lineno=$((lineno + 1))
+    raw="${raw%$'\r'}"
+    [[ "$raw" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$raw" =~ ^[[:space:]]*# ]] && continue
+    line="${raw#"${raw%%[![:space:]]*}"}"
+    if [[ "$line" =~ ^export[[:space:]]+ ]]; then
+      line="${line#*export}"
+      line="${line#"${line%%[![:space:]]*}"}"
+    fi
+    if [[ ! "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      die "env file $file:$lineno is not a KEY=VALUE assignment: '$raw' (the guard parses the file; it never sources it)"
+    fi
+    name="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+    if env_name_is_unsafe "$name"; then
+      die "env file $file:$lineno sets forbidden shell/loader variable '$name'"
+    fi
+    parsed="$(parse_env_value "$value")" \
+      || die "env file $file:$lineno has unsupported value syntax for '$name' (quotes must be balanced; no \$(...) or backticks)"
+    printf -v "$name" '%s' "$parsed"
+    export "$name"
+  done < "$file"
+}
+
+# Kept as the one loading entry point used by the stop paths.
+load_env_file() {
+  parse_env_file "$1"
 }
 
 # L2: stop paths must honour a custom pidfile from the env file, but must
@@ -132,6 +237,7 @@ verify_pid_identity() {
 require_var() {
   local name="$1"
   [[ -n "${!name:-}" ]] || guard_fail "$name" "is required"
+  validate_no_newline "$name" "${!name}"
 }
 
 # Lexically normalize a path-like value without touching the filesystem:
@@ -155,23 +261,71 @@ normalize_path() {
 }
 
 # Require VAR to be present and, after lexical normalization, EXACTLY the
-# expected staging literal. Two independent gates:
-#   1. ".." anywhere is rejected outright (H2 — no normalization may climb
-#      from a staging prefix into a live path);
+# expected staging literal. Three independent gates:
+#   1. the shared value rule rejects empty values, newlines and ".." (H2 —
+#      no normalization may climb from a staging prefix into a live path);
 #   2. the normalized value must equal the expected literal (H1 — omission
-#      or a sibling path cannot fall back to a live default/prefix).
+#      or a sibling path cannot fall back to a live default/prefix);
+#   3. NEW-5: the resolved path (realpath -m, i.e. the nearest existing
+#      ancestor's symlinks followed) must equal the literal expected path.
+#      A symlinked /workspaces-staging therefore cannot redirect staging
+#      writes into /workspaces or /opt.
 # One helper for every path-like variable, so a future variable cannot
 # reintroduce the prefix-matching bug.
 require_exact_path() {
   local name="$1" expected="$2" value normalized expected_norm
+  local actual_abs expected_abs resolved
   require_var "$name"
   value="${!name}"
-  [[ "$value" != *".."* ]] \
-    || guard_fail "$name" "must not contain '..' path traversal (got '$value')"
+  validate_env_value "$name" "$value"
   normalized="$(normalize_path "$value")"
   expected_norm="$(normalize_path "$expected")"
   [[ "$normalized" == "$expected_norm" ]] \
     || guard_fail "$name" "must be exactly '$expected' after path normalization (got '$value' -> '$normalized')"
+
+  if [[ "$expected" == /* ]]; then
+    actual_abs="$value"
+    expected_abs="$expected"
+  else
+    # Relative cgroup paths live under OVID_CGROUP_ROOT.
+    actual_abs="${OVID_CGROUP_ROOT:-/sys/fs/cgroup}/$value"
+    expected_abs="${OVID_CGROUP_ROOT:-/sys/fs/cgroup}/$expected"
+  fi
+  resolved="$(canonical_path "$actual_abs")" \
+    || guard_fail "$name" "cannot resolve '$actual_abs' (realpath unavailable or failed)"
+  [[ "$resolved" == "$(normalize_path "$expected_abs")" ]] \
+    || guard_fail "$name" "resolves to '$resolved' through a symlinked parent; must be exactly '$expected'"
+}
+
+# NEW-7: log/pidfile paths are written by root. Pin them under a private
+# directory and prove the resolved path does not escape through a symlink.
+validate_tmp_file_path() {
+  local name="$1" dir="$2" value resolved
+  [[ -n "${!name:-}" ]] || return 0
+  value="${!name}"
+  validate_env_value "$name" "$value"
+  [[ "$value" == "$dir"/* ]] \
+    || guard_fail "$name" "must be under $dir (got '$value'; /opt, /workspaces* and /var/lib are forbidden)"
+  resolved="$(canonical_path "$value")" \
+    || guard_fail "$name" "cannot resolve '$value'"
+  [[ "$resolved" == "$(normalize_path "$dir")"/* ]] \
+    || guard_fail "$name" "resolves to '$resolved' outside $dir (symlinked parent)"
+}
+
+# Host paths that are intentionally shared with the live stack (read-only
+# rootfs, bwrap binary) are allowed, but must stay absolute and outside the
+# live writable namespaces.
+validate_shared_host_path() {
+  local name="$1" value
+  [[ -n "${!name:-}" ]] || return 0
+  value="${!name}"
+  validate_env_value "$name" "$value"
+  [[ "$value" == /* ]] \
+    || guard_fail "$name" "must be an absolute host path (got '$value')"
+  [[ "$value" != /workspaces* ]] \
+    || guard_fail "$name" "must not point into the live workspaces (got '$value')"
+  [[ "$value" != /var/lib/* ]] \
+    || guard_fail "$name" "must not point into live state (/var/lib) (got '$value')"
 }
 
 # postgres://user:pass@host:port/db -> DB_USER / DB_HOST / DB_PORT / DB_NAME
@@ -208,11 +362,44 @@ redis_url_parts() {
   if [[ "$hostport" == *:* ]]; then R_PORT="${hostport##*:}"; else R_PORT="6379"; fi
 }
 
-# http(s)://host:port/path -> host:port
-http_hostport() {
-  local url="$1" rest
+# NEW-2: parse http(s) URLs by authority instead of globbing the raw string.
+# A naive `127.0.0.1:*` match accepts `http://127.0.0.1:8080@api.ovidsi.com`
+# because the userinfo is not a host. This returns the authority only after
+# rejecting userinfo, queries and fragments. Callers compare the exact
+# host:port; the path (if any) is ignored.
+http_authority() {
+  local name="$1" url="$2" rest authority
+  validate_no_newline "$name" "$url"
+  [[ "$url" == http://* || "$url" == https://* ]] \
+    || guard_fail "$name" "must be an http(s) URL (got '$url')"
+  [[ "$url" != *"?"* && "$url" != *"#"* ]] \
+    || guard_fail "$name" "must not contain a query or fragment (got '$url')"
   rest="${url#*://}"
-  printf '%s' "${rest%%/*}"
+  authority="${rest%%/*}"
+  [[ -n "$authority" ]] \
+    || guard_fail "$name" "has no host (got '$url')"
+  [[ "$authority" != *"@"* ]] \
+    || guard_fail "$name" "must not contain URL userinfo (got '$url')"
+  printf '%s' "$authority"
+}
+
+validate_redis_url() {
+  local name="$1" url="$2"
+  validate_no_newline "$name" "$url"
+  [[ "$url" == redis://* || "$url" == rediss://* ]] \
+    || guard_fail "$name" "must be a redis:// URL (got '$url')"
+  [[ "$url" != *"?"* && "$url" != *"#"* ]] \
+    || guard_fail "$name" "must not contain a query or fragment (got '$url')"
+}
+
+# Pin an exact loopback staging listener: host must be 127.0.0.1 (no
+# localhost alias, no userinfo) and the port must be the staging port.
+validate_loopback_url() {
+  local name="$1" url="$2" port="$3" authority
+  validate_env_value "$name" "$url"
+  authority="$(http_authority "$name" "$url")"
+  [[ "$authority" == "127.0.0.1:$port" ]] \
+    || guard_fail "$name" "must be exactly http://127.0.0.1:$port (got '$url'; host must be 127.0.0.1 and the port must be $port)"
 }
 
 # ── staging egress filter (P10 Task 8) ─────────────────────────────────────
@@ -315,6 +502,35 @@ remove_staging_egress() {
 
 # ── guard: refuse any production-valued staging env ────────────────────────
 
+# NEW-4: variables the guard owns are cleared before the file is parsed, so an
+# ambient shell value cannot silently satisfy a missing file entry. The file
+# is the one source of truth for the host-side staging environment.
+GUARDED_ENV_NAMES=(
+  NODE_ENV COMPOSE_PROJECT_NAME OVID_AUTH_MODE DATABASE_URL
+  REDIS_Q_URL REDIS_Q_PASSWORD REDIS_MINT_URL REDIS_MINT_PASSWORD
+  OVID_INTERNAL_MINT_URL OVID_WORKSPACES_ROOT OVID_SANDBOX_UID_BASE
+  OVID_SANDBOX_UID_MAX OVID_CGROUP_BASE OVID_CGROUP_ROOT
+  OVID_STORAGE_BACKEND OVID_FS_STORAGE_ROOT OVID_BROWSER_STATE_DIR
+  OVID_R2_ACCOUNT_ID OVID_R2_ACCESS_KEY_ID OVID_R2_SECRET_ACCESS_KEY
+  OVID_R2_BUCKET STAGING_BIND_ADDRESS STAGING_GATEWAY_URL
+  STAGING_MOCK_LLM_URL STAGING_WORKER_PIDFILE STAGING_WORKER_LOG
+  STAGING_MOCK_PIDFILE STAGING_MOCK_LOG OVID_WORKER_FILE_PORT
+  OVID_LITELLM_BASE OVID_DEFAULT_MODEL BULL_PREFIX OVID_RUN_STALE_MS
+  OVID_MAX_ACTIVE_SANDBOXES MAX_LIVE_BROWSERS OVID_MAX_WARM_GB
+  OVID_INTERNAL_API_SECRET OVID_INTERNAL_TOKEN OVID_MASTER_KEY
+  REDIS_C_URL OVID_ANTHROPIC_BASE OVID_BROWSER_EGRESS_UID
+  OVID_PUBLIC_IP MINT_BASE_URL OVID_ROOTFS OVID_BWRAP_PATH
+  OVID_SANDBOX_LAUNCHER OVID_LIGHTPANDA_BIN OVID_DISK_ALERT_PCT
+  REDIS_DB2_URL LITELLM_BASE MINT_PROJECTION_MODE PUBLIC_BASE_URL
+  PUBLIC_PORT ADMIN_PORT
+)
+unset_guarded_env() {
+  local name
+  for name in "${GUARDED_ENV_NAMES[@]}"; do
+    unset "$name" 2>/dev/null || true
+  done
+}
+
 guard_env_file() {
   local file="$1"
 
@@ -330,8 +546,15 @@ guard_env_file() {
     guard_fail "STAGING_MINT_ENV_FILE" "must be the default $DEFAULT_MINT_ENV_FILE (compose hardcodes env_file: .env.staging.mint); got '$STAGING_MINT_ENV_FILE'"
   fi
 
-  load_env_file "$file"
+  unset_guarded_env
+  parse_env_file "$file"
+  validate_env
+}
 
+# Every rule for the resolved environment. Called once after parsing the file
+# and again after `worker-start --env` overrides are applied, so the effective
+# worker environment is validated with exactly the same rules.
+validate_env() {
   require_var NODE_ENV
   [[ "$NODE_ENV" != "production" ]] || guard_fail "NODE_ENV" "must not be production (staging only)"
 
@@ -368,6 +591,7 @@ guard_env_file() {
 
   # ── redis-q: dedicated staging instance only ──
   require_var REDIS_Q_URL
+  validate_redis_url REDIS_Q_URL "$REDIS_Q_URL"
   redis_url_parts "$REDIS_Q_URL"
   if [[ "$R_HOST" == "127.0.0.1" || "$R_HOST" == "localhost" ]]; then
     [[ "$R_PORT" == "16379" ]] \
@@ -386,6 +610,7 @@ guard_env_file() {
 
   # ── staging mint db2 projection ──
   require_var REDIS_MINT_URL
+  validate_redis_url REDIS_MINT_URL "$REDIS_MINT_URL"
   redis_url_parts "$REDIS_MINT_URL"
   if [[ "$R_HOST" == "127.0.0.1" || "$R_HOST" == "localhost" ]]; then
     [[ "$R_PORT" == "16380" ]] \
@@ -399,10 +624,29 @@ guard_env_file() {
   [[ "$R_DB" == "2" ]] \
     || guard_fail "REDIS_MINT_URL" "must select db 2 (staging mint projection; got '${R_DB:-<none>}')"
 
+  # NEW-3: REDIS_C_URL is optional (the worker shares redis-q when unset), but
+  # when set it must be the staging instance. Live host ports 6390/6391/6393
+  # (ovid-dev-redis / redis-q / redis-c) are forbidden.
+  if [[ -n "${REDIS_C_URL:-}" ]]; then
+    validate_redis_url REDIS_C_URL "$REDIS_C_URL"
+    redis_url_parts "$REDIS_C_URL"
+    if [[ "$R_HOST" == "127.0.0.1" || "$R_HOST" == "localhost" ]]; then
+      [[ "$R_PORT" == "16379" ]] \
+        || guard_fail "REDIS_C_URL" "loopback staging redis-c must use the staging redis-q at 127.0.0.1:16379 (got $R_HOST:$R_PORT; live 6390/6391/6393 are forbidden)"
+    elif [[ "$R_HOST" == "redis-q" ]]; then
+      [[ "$R_PORT" == "6379" ]] \
+        || guard_fail "REDIS_C_URL" "compose service redis-c must be redis-q:6379"
+    else
+      guard_fail "REDIS_C_URL" "host must be 127.0.0.1:16379 or redis-q:6379 (got '$R_HOST:$R_PORT')"
+    fi
+    [[ -z "$R_DB" || "$R_DB" == "0" ]] \
+      || guard_fail "REDIS_C_URL" "must not select a non-zero db (got '$R_DB')"
+  fi
+
   # ── internal mint surface (P9 Task 9) ──
   require_var OVID_INTERNAL_MINT_URL
   local internal_hp
-  internal_hp="$(http_hostport "$OVID_INTERNAL_MINT_URL")"
+  internal_hp="$(http_authority OVID_INTERNAL_MINT_URL "$OVID_INTERNAL_MINT_URL")"
   [[ "$internal_hp" == "127.0.0.1:18092" || "$internal_hp" == "mint:8092" ]] \
     || guard_fail "OVID_INTERNAL_MINT_URL" "must be http://127.0.0.1:18092 (host) or http://mint:8092 (container); got '$internal_hp'"
   if [[ -v MINT_BASE_URL ]]; then
@@ -422,6 +666,29 @@ guard_env_file() {
       || guard_fail "OVID_SANDBOX_UID_MAX" "must be 229999 (got '$OVID_SANDBOX_UID_MAX')"
   fi
   require_exact_path OVID_CGROUP_BASE "ovid-sandboxes-staging.slice/ovid-staging-worker.service"
+  if [[ -n "${OVID_CGROUP_ROOT:-}" ]]; then
+    require_exact_path OVID_CGROUP_ROOT "/sys/fs/cgroup"
+  fi
+
+  # NEW-3: browser processes must use a uid keyspace distinct from BOTH the
+  # staging sandbox block (220000-229999) and the live one (200000-200099).
+  # Overlapping either one makes ownership/nftables collide.
+  if [[ -n "${OVID_BROWSER_EGRESS_UID:-}" ]]; then
+    local egress_value="${OVID_BROWSER_EGRESS_UID}" egress_a egress_b
+    validate_env_value OVID_BROWSER_EGRESS_UID "$egress_value"
+    [[ "$egress_value" =~ ^([0-9]+)(-([0-9]+))?$ ]] \
+      || guard_fail "OVID_BROWSER_EGRESS_UID" "must be a uid or uid range like 230000 or 230000-230099 (got '$egress_value')"
+    egress_a="${BASH_REMATCH[1]}"
+    egress_b="${BASH_REMATCH[3]:-$egress_a}"
+    (( egress_b >= egress_a )) \
+      || guard_fail "OVID_BROWSER_EGRESS_UID" "range end is before its start (got '$egress_value')"
+    if (( egress_a <= 200099 && 200000 <= egress_b )); then
+      guard_fail "OVID_BROWSER_EGRESS_UID" "must be outside the live sandbox uid block 200000-200099 (got '$egress_value')"
+    fi
+    if (( egress_a <= 229999 && 220000 <= egress_b )); then
+      guard_fail "OVID_BROWSER_EGRESS_UID" "must be outside the staging sandbox uid block 220000-229999 (got '$egress_value')"
+    fi
+  fi
 
   # ── storage: staging-local fs only; never the prod R2 bucket ──
   if [[ -n "${OVID_STORAGE_BACKEND:-}" ]]; then
@@ -439,19 +706,33 @@ guard_env_file() {
     fi
   done
 
+  # NEW-3/NEW-7: shared host binaries/rootfs are allowed (they are read-only
+  # inputs, not staging-owned state), but never under the live writable
+  # namespaces. Log/pid files are written as root, so they are pinned to the
+  # private /tmp/opencode directory.
+  local shared_path_var
+  for shared_path_var in OVID_ROOTFS OVID_BWRAP_PATH OVID_SANDBOX_LAUNCHER OVID_LIGHTPANDA_BIN; do
+    validate_shared_host_path "$shared_path_var"
+  done
+  validate_tmp_file_path STAGING_WORKER_PIDFILE "/tmp/opencode"
+  validate_tmp_file_path STAGING_WORKER_LOG "/tmp/opencode"
+  validate_tmp_file_path STAGING_MOCK_PIDFILE "/tmp/opencode"
+  validate_tmp_file_path STAGING_MOCK_LOG "/tmp/opencode"
+
   # ── published addresses: loopback-only (mock bind is 0.0.0.0 by design,
   #    but it is never a *published* staging port; it is a host listener) ──
   require_var STAGING_BIND_ADDRESS
   [[ "$STAGING_BIND_ADDRESS" == "127.0.0.1" ]] \
     || guard_fail "STAGING_BIND_ADDRESS" "every staging publish address must be 127.0.0.1 (got '$STAGING_BIND_ADDRESS')"
-  local urlvar url_hp
-  for urlvar in STAGING_GATEWAY_URL STAGING_MOCK_LLM_URL; do
-    if [[ -n "${!urlvar:-}" ]]; then
-      url_hp="$(http_hostport "${!urlvar}")"
-      [[ "$url_hp" == 127.0.0.1:* ]] \
-        || guard_fail "$urlvar" "must be loopback (127.0.0.1); got '$url_hp'"
-    fi
-  done
+  # NEW-2: parse the URL and pin host AND port. The old `127.0.0.1:*` glob
+  # accepted `http://127.0.0.1:8080@api.ovidsi.com` (userinfo, real host
+  # api.ovidsi.com) and unpinned live ports (8080 account-dev, 4000 LiteLLM).
+  if [[ -n "${STAGING_GATEWAY_URL:-}" ]]; then
+    validate_loopback_url STAGING_GATEWAY_URL "$STAGING_GATEWAY_URL" 18082
+  fi
+  if [[ -n "${STAGING_MOCK_LLM_URL:-}" ]]; then
+    validate_loopback_url STAGING_MOCK_LLM_URL "$STAGING_MOCK_LLM_URL" 14000
+  fi
 
   # ── worker file service: own port (the live worker owns 8091) ──
   require_var OVID_WORKER_FILE_PORT
@@ -461,9 +742,18 @@ guard_env_file() {
   # ── model routing: the host-bound mock only ──
   require_var OVID_LITELLM_BASE
   local llm_hp
-  llm_hp="$(http_hostport "$OVID_LITELLM_BASE")"
+  llm_hp="$(http_authority OVID_LITELLM_BASE "$OVID_LITELLM_BASE")"
   [[ "$llm_hp" == "172.17.0.1:14000" || "$llm_hp" == "host.docker.internal:14000" ]] \
     || guard_fail "OVID_LITELLM_BASE" "must point at the staging mock (172.17.0.1:14000 or host.docker.internal:14000); got '$llm_hp' (live LiteLLM :4000 is forbidden)"
+  # NEW-3: OVID_ANTHROPIC_BASE is added to the trusted provider-egress
+  # origins. It must be the staging mock; the live LiteLLM (:4000) would
+  # bypass the SSRF guard and receive staging Anthropic traffic.
+  if [[ -n "${OVID_ANTHROPIC_BASE:-}" ]]; then
+    local anthropic_hp
+    anthropic_hp="$(http_authority OVID_ANTHROPIC_BASE "$OVID_ANTHROPIC_BASE")"
+    [[ "$anthropic_hp" == "172.17.0.1:14000" || "$anthropic_hp" == "host.docker.internal:14000" ]] \
+      || guard_fail "OVID_ANTHROPIC_BASE" "must point at the staging mock (172.17.0.1:14000 or host.docker.internal:14000); got '$anthropic_hp' (live LiteLLM :4000 is forbidden)"
+  fi
   require_var OVID_DEFAULT_MODEL
 
   # ── queue prefix / worker knobs ──
@@ -504,16 +794,77 @@ guard_env_file() {
   fi
 }
 
+# ── worker-start --env overrides (NEW-1) ───────────────────────────────────
+#
+# `worker-start --env K=V` is applied to the worker process AFTER the file
+# guard. It therefore used to re-open every H1/H2/H3 bypass. Only a fixed set
+# of non-path, non-credential operational knobs may be overridden; every
+# value still passes `validate_env_value` and the full `validate_env` runs on
+# the effective environment before exec. The chaos harness passes only
+# OVID_RUN_STALE_MS (workerKill.ts), so that is the anchor of the list.
+OVERRIDE_ALLOWLIST=(
+  OVID_RUN_STALE_MS
+  OVID_MAX_ACTIVE_SANDBOXES
+  MAX_LIVE_BROWSERS
+  OVID_MAX_WARM_GB
+  OVID_DISK_ALERT_PCT
+  OVID_SANDBOX_CPU_MAX
+  OVID_SANDBOX_MEMORY_MAX_MB
+  OVID_SANDBOX_SWAP_MAX_MB
+  OVID_SANDBOX_PIDS_MAX
+  OVID_APPROVAL_TIMEOUT_MS
+  OVID_WINDOW_TOKENS
+)
+
+override_allowed() {
+  local name="$1" allowed
+  for allowed in "${OVERRIDE_ALLOWLIST[@]}"; do
+    [[ "$name" == "$allowed" ]] && return 0
+  done
+  return 1
+}
+
+# Validate override syntax, the allowlist and the shared value rule. Runs
+# BEFORE the env file is read so a rejected override fails closed even when
+# the default env file is absent.
+check_overrides() {
+  local spec name value
+  for spec in "$@"; do
+    [[ "$spec" == *=* ]] \
+      || guard_fail "--env" "override must be K=V (got '$spec')"
+    name="${spec%%=*}"
+    value="${spec#*=}"
+    [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+      || guard_fail "--env" "invalid override name '$name'"
+    override_allowed "$name" \
+      || guard_fail "$name" "may not be overridden via --env (allowed: ${OVERRIDE_ALLOWLIST[*]}); path, URL, credential and identity variables are file-only"
+    validate_env_value "$name" "$value"
+  done
+}
+
+# Apply already-checked overrides, then re-run EVERY file rule so the
+# effective (file + overrides) environment is what the guard approved.
+apply_overrides() {
+  local spec name value
+  for spec in "$@"; do
+    name="${spec%%=*}"
+    value="${spec#*=}"
+    printf -v "$name" '%s' "$value"
+    export "$name"
+  done
+  [[ $# -eq 0 ]] || validate_env
+}
+
 # Validate `.env.staging.mint` in a subshell so its DATABASE_URL/REDIS_DB2_URL
 # do not overwrite the host-side view used by `up`/`worker-start`.
 guard_mint_env_file() {
   local file="$1" expected_secret="$2"
   [[ -f "$file" ]] || die "mint env file not found: $file (copy cloud/deploy/.env.staging.mint.example)"
   (
-    set -a
-    # shellcheck disable=SC1090
-    . "$file"
-    set +a
+    # NEW-4: parse, never source. The subshell keeps the mint values from
+    # overwriting the host-side view.
+    unset_guarded_env
+    parse_env_file "$file"
 
     require_var DATABASE_URL
     db_url_parts "$DATABASE_URL"
@@ -525,6 +876,7 @@ guard_mint_env_file() {
       || guard_fail "DATABASE_URL" "mint Postgres port must be 5432 (container) or 15432 (host)"
 
     require_var REDIS_DB2_URL
+    validate_redis_url REDIS_DB2_URL "$REDIS_DB2_URL"
     redis_url_parts "$REDIS_DB2_URL"
     if [[ "$R_HOST" == "127.0.0.1" || "$R_HOST" == "localhost" ]]; then
       [[ "$R_PORT" == "16380" ]] \
@@ -539,11 +891,26 @@ guard_mint_env_file() {
 
     require_var LITELLM_BASE
     local hp
-    hp="$(http_hostport "$LITELLM_BASE")"
+    hp="$(http_authority LITELLM_BASE "$LITELLM_BASE")"
     [[ "$hp" == "172.17.0.1:14000" || "$hp" == "host.docker.internal:14000" ]] \
       || guard_fail "LITELLM_BASE" "mint must use the mock LiteLLM admin stub (got '$hp'; live :4000 forbidden)"
     [[ "$LITELLM_BASE" != *"ovid-gateway-litellm-1"* ]] \
       || guard_fail "LITELLM_BASE" "live LiteLLM container name is forbidden"
+
+    # NEW-2: pin the host-published mint listeners too. PUBLIC_BASE_URL is
+    # handed to clients; the public listener is 127.0.0.1:18091 and the
+    # admin/internal listener is 127.0.0.1:18092.
+    if [[ -n "${PUBLIC_BASE_URL:-}" ]]; then
+      validate_loopback_url PUBLIC_BASE_URL "$PUBLIC_BASE_URL" 18091
+    fi
+    if [[ -n "${PUBLIC_PORT:-}" ]]; then
+      [[ "$PUBLIC_PORT" == "8091" ]] \
+        || guard_fail "PUBLIC_PORT" "mint public container port must be 8091 (got '$PUBLIC_PORT')"
+    fi
+    if [[ -n "${ADMIN_PORT:-}" ]]; then
+      [[ "$ADMIN_PORT" == "8092" ]] \
+        || guard_fail "ADMIN_PORT" "mint admin container port must be 8092 (got '$ADMIN_PORT')"
+    fi
 
     require_var OVID_INTERNAL_API_SECRET
     [[ "$OVID_INTERNAL_API_SECRET" == "$expected_secret" ]] \
@@ -686,6 +1053,12 @@ cmd_guard() {
     esac
   done
   guard_env_file "$file"
+  # NEW-8: `up` already validates the mint file; the standalone `guard` gate
+  # must too. It is optional here only because a host-side-only guard may run
+  # before the mint file is created; `up` still requires it.
+  if [[ -f "$MINT_ENV_FILE" ]]; then
+    guard_mint_env_file "$MINT_ENV_FILE" "$OVID_INTERNAL_API_SECRET"
+  fi
   printf '[staging] guard OK: %s\n' "$file"
 }
 
@@ -782,7 +1155,7 @@ cmd_down() {
 }
 
 cmd_worker_start() {
-  local overrides=()
+  local overrides=() env_file="$ENV_FILE"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --env)
@@ -790,11 +1163,21 @@ cmd_worker_start() {
         overrides+=("$2")
         shift 2
         ;;
+      --env-file)
+        [[ $# -ge 2 ]] || die "--env-file needs a path"
+        env_file="$2"
+        shift 2
+        ;;
       *) die "worker-start: unknown argument '$1'" ;;
     esac
   done
 
-  guard_env_file "$ENV_FILE"
+  # NEW-1: check the overrides BEFORE reading the file, then load/validate the
+  # file, then apply the overrides and re-run every rule. The value that
+  # reaches `exec env ... node` is therefore the value `validate_env` approved.
+  check_overrides "${overrides[@]}"
+  guard_env_file "$env_file"
+  apply_overrides "${overrides[@]}"
   live_check before || die "live stack pre-check failed — refusing to start the staging worker"
 
   local pidfile="${STAGING_WORKER_PIDFILE:-/tmp/opencode/ovid-staging-worker.pid}"
@@ -840,6 +1223,9 @@ cmd_worker_stop() {
   # L2: source the env file so a custom STAGING_WORKER_PIDFILE is honoured
   # (start and stop must agree); missing file is tolerated.
   load_env_if_present || true
+  # NEW-7: the pidfile is removed below; never accept one outside the private
+  # directory (a parsed file must not be able to target /opt or /var/lib).
+  validate_tmp_file_path STAGING_WORKER_PIDFILE "/tmp/opencode"
   local pidfile="${STAGING_WORKER_PIDFILE:-/tmp/opencode/ovid-staging-worker.pid}"
   live_check before || log "WARNING: live stack pre-check failed; continuing worker stop"
   if [[ ! -f "$pidfile" ]]; then
@@ -917,6 +1303,8 @@ cmd_mock_stop() {
   # L2: honour a custom STAGING_MOCK_PIDFILE from the env file, and verify
   # the PID is the staging mock before signalling.
   load_env_if_present || true
+  # NEW-7: same pidfile rule as the worker stop path.
+  validate_tmp_file_path STAGING_MOCK_PIDFILE "/tmp/opencode"
   local pidfile="${STAGING_MOCK_PIDFILE:-/tmp/opencode/ovid-staging-mock.pid}"
   if [[ ! -f "$pidfile" ]]; then
     log "no mock pidfile at $pidfile — nothing to stop"
