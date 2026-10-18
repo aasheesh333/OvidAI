@@ -743,8 +743,12 @@ validate_env() {
   require_var OVID_LITELLM_BASE
   local llm_hp
   llm_hp="$(http_authority OVID_LITELLM_BASE "$OVID_LITELLM_BASE")"
-  [[ "$llm_hp" == "172.17.0.1:14000" || "$llm_hp" == "host.docker.internal:14000" ]] \
-    || guard_fail "OVID_LITELLM_BASE" "must point at the staging mock (172.17.0.1:14000 or host.docker.internal:14000); got '$llm_hp' (live LiteLLM :4000 is forbidden)"
+  # The staging worker runs on the HOST, where the mock is published on
+  # 127.0.0.1:14000; the containers reach it as mock-llm:14000 (compose
+  # overrides their env). All three spellings name the same mock — never the
+  # live LiteLLM on :4000.
+  [[ "$llm_hp" == "127.0.0.1:14000" || "$llm_hp" == "172.17.0.1:14000" || "$llm_hp" == "host.docker.internal:14000" || "$llm_hp" == "mock-llm:14000" ]] \
+    || guard_fail "OVID_LITELLM_BASE" "must point at the staging mock (127.0.0.1:14000 for the host worker, mock-llm:14000 inside compose); got '$llm_hp' (live LiteLLM :4000 is forbidden)"
   # NEW-3: OVID_ANTHROPIC_BASE is added to the trusted provider-egress
   # origins. It must be the staging mock; the live LiteLLM (:4000) would
   # bypass the SSRF guard and receive staging Anthropic traffic.
@@ -892,7 +896,7 @@ guard_mint_env_file() {
     require_var LITELLM_BASE
     local hp
     hp="$(http_authority LITELLM_BASE "$LITELLM_BASE")"
-    [[ "$hp" == "172.17.0.1:14000" || "$hp" == "host.docker.internal:14000" ]] \
+    [[ "$hp" == "172.17.0.1:14000" || "$hp" == "host.docker.internal:14000" || "$hp" == "mock-llm:14000" ]] \
       || guard_fail "LITELLM_BASE" "mint must use the mock LiteLLM admin stub (got '$hp'; live :4000 forbidden)"
     [[ "$LITELLM_BASE" != *"ovid-gateway-litellm-1"* ]] \
       || guard_fail "LITELLM_BASE" "live LiteLLM container name is forbidden"
@@ -1106,15 +1110,24 @@ cmd_up() {
 
   export STAGING_AUTH_MODE="$auth"
   log "starting staging compose project '$PROJECT' (auth=$auth)"
+
+  # ORDERING: the mint applies its boot re-sync immediately and queries money
+  # tables (image_cards, …). On a fresh staging database those do not exist
+  # until the migrations run, and the mint then exits with
+  # `relation "image_cards" does not exist` — taking the gateway's
+  # `depends_on: mint healthy` down with it. So: bring up the DATA services
+  # first, migrate, and only then start gateway + mint. (Found on the first
+  # real staging bring-up, 2026-10-18; production is unaffected because
+  # provision.sh migrates before any compose up.)
+  compose up -d --build postgres redis-q redis-mint
+  log "running migrations against $DATABASE_URL"
+  ( cd "$CLOUD_DIR" && node packages/db/dist/migrate-cli.js "$DATABASE_URL" )
   compose up -d --build
 
   # P10 Task 8: the permanent egress corpus requires this table. Loading it
   # after the compose bring-up keeps a failed `up` from leaving a host-level
   # filter behind; `down` removes it. Separate table from prod `ovid_sandbox`.
   install_staging_egress
-
-  log "running migrations against $DATABASE_URL"
-  ( cd "$CLOUD_DIR" && node packages/db/dist/migrate-cli.js "$DATABASE_URL" )
 
   wait_for_mint_projection
   wait_for_gateway_health
@@ -1202,6 +1215,18 @@ cmd_worker_start() {
   fi
 
   log "starting staging worker (workspaces $OVID_WORKSPACES_ROOT, uid base $OVID_SANDBOX_UID_BASE)"
+  # The worker's SandboxManager enables +cpu +memory +pids on ITS cgroup. A
+  # controller can only be enabled where the parent already exposes it, and a
+  # slice created outside systemd has an empty subtree_control — the worker
+  # then dies at init with ENOENT (cgroup v2 reports an unavailable controller
+  # that way). Production's systemd unit does this in ExecStartPre; the
+  # staging worker is a plain background process, so do it here.
+  local staging_slice="/sys/fs/cgroup/${OVID_CGROUP_BASE%%/*}"
+  if [[ -d /sys/fs/cgroup && "$staging_slice" == /sys/fs/cgroup/* ]]; then
+    mkdir -p "$staging_slice" 2>/dev/null || true
+    printf '+cpu +memory +pids' > "$staging_slice/cgroup.subtree_control" 2>/dev/null \
+      || log "WARNING: could not enable controllers on $staging_slice (sandbox init may fail)"
+  fi
   (
     cd "$CLOUD_DIR/apps/worker"
     exec env "${overrides[@]}" node dist/main.js
@@ -1274,6 +1299,15 @@ cmd_mock_start() {
   mkdir -p "$(dirname "$pidfile")" "$(dirname "$logfile")"
   if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
     die "mock LiteLLM already running (pid $(cat "$pidfile"))"
+  fi
+  # The staging composition now runs the mock as a service on the staging
+  # bridge (a host-bound mock is unreachable from the containers — the host
+  # firewall drops container→host traffic). When that service holds the port,
+  # starting a second host-side mock would fail to bind, so treat an already
+  # listening control endpoint as success.
+  if curl -s -o /dev/null --max-time 1 http://127.0.0.1:14000/_control/status 2>/dev/null; then
+    log "mock LiteLLM already listening on 127.0.0.1:14000 (staging compose service) — nothing to do"
+    return 0
   fi
 
   log "starting mock LiteLLM on 0.0.0.0:14000 (gateway reaches it at 172.17.0.1:14000)"

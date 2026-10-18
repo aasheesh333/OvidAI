@@ -188,7 +188,7 @@ services:
       REDIS_Q_URL: redis://:${REDIS_Q_PASSWORD:-staging}@redis-q:6379
       REDIS_MINT_URL: redis://:${REDIS_MINT_PASSWORD:-staging}@redis-mint:6379/2
       OVID_INTERNAL_MINT_URL: http://mint:8092
-      OVID_LITELLM_BASE: http://172.17.0.1:14000
+      OVID_LITELLM_BASE: http://mock-llm:14000
       # The staging worker's file service runs on the HOST (staging.sh
       # worker-start) on its own port — never the live worker's 8091.
       OVID_WORKER_INTERNAL_URL: http://host.docker.internal:18093
@@ -229,6 +229,26 @@ services:
       retries: 3
       start_period: 15s
 
+  # ── Mock LLM (LiteLLM stand-in) ───────────────────────────────────────────
+  # Runs INSIDE the staging network: container→host traffic is dropped by the
+  # host firewall (Docker FORWARD policy DROP), so a host-bound mock on
+  # 172.17.0.1/172.20.0.1 is unreachable from gateway/mint — the first load
+  # run failed every key provisioning with a 10 s timeout for exactly this.
+  # Published on loopback so host-side clients (the load CLI, staging.sh
+  # mock-start's health probe) still use 127.0.0.1:14000.
+  mock-llm:
+    image: node:22-alpine
+    working_dir: /repo
+    command: ["node", "apps/load/dist/mockServer.js", "--port", "14000", "--bind", "0.0.0.0"]
+    volumes:
+      - ..:/repo:ro
+    ports:
+      - "127.0.0.1:14000:14000"
+    networks: [staging]
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 1.0
+
   # ── Staging mint — the REAL P9 service, never a mock ──────────────────────
   # Both listeners are loopback-bound. The public listener (18091) is for the
   # load harness / gateway; the admin listener (18092) is the internal
@@ -250,10 +270,12 @@ services:
       ADMIN_PORT: "8092"
       DATABASE_URL: postgres://postgres:${STAGING_PG_PASSWORD:-staging}@postgres:5432/ovid_cloud_staging
       REDIS_DB2_URL: redis://:${REDIS_MINT_PASSWORD:-staging}@redis-mint:6379/2
-      LITELLM_BASE: http://172.17.0.1:14000
+      LITELLM_BASE: http://mock-llm:14000
     ports:
       - "127.0.0.1:18091:8091"
       - "127.0.0.1:18092:8092"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - staging-mintdata:/data
     depends_on:

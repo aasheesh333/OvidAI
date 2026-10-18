@@ -15,6 +15,13 @@ RUN corepack enable
 # falls through to `node-gyp rebuild`. node:22-alpine ships no python3/make/g++.
 # This stage is discarded — the runtime image below stays slim.
 RUN apk add --no-cache python3 make g++ linux-headers
+# node-gyp otherwise downloads the Node headers tarball at install time. That
+# fetch times out inside the BuildKit sandbox on this host (IPv6 first hop),
+# which failed the very first real image build. The node image already ships
+# matching headers at /usr/local/include/node, so point node-gyp at them and
+# remove the network dependency entirely (this also makes the build offline-
+# reproducible).
+ENV npm_config_nodedir=/usr/local
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY packages ./packages
 COPY apps ./apps

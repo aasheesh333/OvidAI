@@ -207,11 +207,6 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.gateway
-      # BUILD-stage network: node-gyp must fetch node headers, and this
-      # host's BuildKit sandbox has flaky IPv6 egress (ETIMEDOUT on the
-      # first hop). Host networking resolves it; runtime networking is
-      # unchanged (the ovid-cloud bridge below).
-      network: host
     restart: unless-stopped
     env_file: [.env]
     environment:
@@ -331,7 +326,6 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.mint
-      network: host
     restart: unless-stopped
     profiles: [mint]
     env_file: [.env]
