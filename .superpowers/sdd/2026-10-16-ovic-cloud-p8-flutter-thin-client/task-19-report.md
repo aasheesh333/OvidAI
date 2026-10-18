@@ -419,3 +419,18 @@ $ flutter test --no-pub test/session_analytics_test.dart test/queue_ids_test.dar
 ```
 
 Commit: `8c196b3` (pathspec-only; no unrelated working-tree mods touched).
+
+Full suite on the committed archive (same `/tmp/t19-fix-post`):
+
+```
+$ flutter test --no-pub --reporter compact
+01:49 +1724 ~2: All other tests passed!        # exit 0, 2 skipped
+```
+
+**Shared-working-tree note:** the working-tree analyze/full-suite runs above
+were taken while `lib/` and `test/` matched this commit. After the commit,
+another lane began editing unrelated cloud files in the shared tree
+(`lib/core/cloud/cloud_ws.dart`, `lib/core/cloud/browser_stream.dart`,
+`lib/ui/chat_screen.dart`), so a later working-tree analyze is red for those
+in-flight changes. They are untouched by this fix round; the archive is the
+authoritative verification.
