@@ -42,7 +42,12 @@ PNPM_OUT="$(jail pnpm -v)"
 [ "$PNPM_OUT" = "$PNPM_VERSION" ] || die "pnpm: expected $PNPM_VERSION, got '$PNPM_OUT'"
 
 UV_OUT="$(jail uv -V)"
-[ "$UV_OUT" = "uv $UV_VERSION" ] || die "uv: expected uv $UV_VERSION, got '$UV_OUT'"
+# `uv -V` prints the version plus a build-target suffix
+# ("uv 0.13.1 (x86_64-unknown-linux-gnu)"), so compare the version TOKEN, not
+# the whole line. Exactness is preserved: the first two fields must be
+# exactly "uv <pinned version>".
+UV_TOKEN="$(printf '%s\n' "$UV_OUT" | awk '{print $1" "$2}')"
+[ "$UV_TOKEN" = "uv $UV_VERSION" ] || die "uv: expected uv $UV_VERSION, got '$UV_OUT'"
 
 # --- present-but-unpinned tools: just prove they run -------------------------
 PYTHON_OUT="$(jail python3 -V)"
