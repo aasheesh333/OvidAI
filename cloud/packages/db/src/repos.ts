@@ -1023,11 +1023,15 @@ export const plugins = {
    * HIGH-3: re-key a gateway-created provisional `pending/<installId>` row to
    * the canonical `publisher/name` the WORKER derived from the source.
    *
-   * The row id is preserved so the `installId` returned to the client keeps
-   * resolving. A reinstall/upgrade already has a canonical row: its
-   * install-time state (installedAt, sealed config, prior version/manifest)
-   * is copied onto the provisional row before the old row is removed, so a
-   * failed upgrade can still restore the prior install verbatim.
+   * Fresh install: the provisional row is updated in place, preserving the
+   * id the client received as `installId`.
+   *
+   * Reinstall/upgrade: a canonical row already exists, and it MUST stay (its
+   * id is the AAD recordId for `config_sealed`, so moving the sealed envelope
+   * to a new id would make it undecryptable). The provisional row is removed
+   * and the canonical row returned; the worker installs against it. The
+   * response's ephemeral `installId` then points at a removed row — clients
+   * should read the plugin from `GET /plugins` after an upgrade.
    *
    * Returns null when the provisional row does not exist (stale job).
    */
@@ -1061,25 +1065,11 @@ export const plugins = {
         .limit(1);
 
       if (existing !== undefined && existing.id !== provisional.id) {
-        // Carry the prior install's identity + sealed state onto the
-        // provisional row, then drop the old row (unique (user, plugin)).
-        await tx
-          .update(pluginsTable)
-          .set({
-            installedAt: existing.installedAt,
-            version: existing.version,
-            source: existing.source,
-            status: existing.status,
-            contentDir: existing.contentDir,
-            manifest: existing.manifest,
-            probeFailures: existing.probeFailures,
-            configSealed: existing.configSealed,
-            updatedAt: new Date(),
-          })
-          .where(eq(pluginsTable.id, provisional.id));
+        // Reinstall: keep the canonical row (sealed-config AAD is its id).
         await tx
           .delete(pluginsTable)
-          .where(eq(pluginsTable.id, existing.id));
+          .where(eq(pluginsTable.id, provisional.id));
+        return existing;
       }
 
       const [adopted] = await tx

@@ -71,6 +71,12 @@ function fakeRepo(rows: Row[] = []): {
         if (provisional.pluginId === input.pluginId) {
           return { id: provisional.id, status: provisional.status };
         }
+        const existing = byKey.get(`${input.userId}/${input.pluginId}`);
+        if (existing !== undefined && existing.id !== provisional.id) {
+          // Reinstall: the canonical row (sealed-config AAD) stays.
+          byKey.delete(`${input.userId}/${provisional.pluginId}`);
+          return { id: existing.id, status: existing.status };
+        }
         byKey.delete(`${provisional.userId}/${provisional.pluginId}`);
         provisional.pluginId = input.pluginId;
         byKey.set(`${provisional.userId}/${provisional.pluginId}`, provisional);

@@ -325,6 +325,61 @@ describe.skipIf(!TEST_DATABASE_URL)("mcp/plugin repos against real postgres", ()
     expect(await plugins.get(db, first.id, uid)).toBeNull();
   });
 
+  it("plugins.adopt rekeys a fresh provisional row; a reinstall keeps the canonical row (sealed-config AAD)", async () => {
+    const uid = await seedUser();
+    const envelope = sealed();
+    const canonical = await plugins.upsert(db, {
+      userId: uid,
+      pluginId: "ovid/emoji",
+      version: "1.0.0",
+      source: { kind: "npm" },
+      status: "active",
+      configSealed: envelope,
+    });
+
+    // Reinstall: the gateway's provisional row is dropped and the canonical
+    // row is returned — its id is the AAD for config_sealed, so moving the
+    // envelope to a new id would make it undecryptable.
+    const provisional = await plugins.upsert(db, {
+      id: newId(),
+      userId: uid,
+      pluginId: `pending/${newId()}`,
+      version: "pending",
+      source: { kind: "github" },
+      status: "queued",
+    });
+    const adopted = await plugins.adopt(db, {
+      id: provisional.id,
+      userId: uid,
+      pluginId: "ovid/emoji",
+    });
+    expect(adopted!.id).toBe(canonical.id);
+    expect(adopted!.configSealed).toEqual(envelope);
+    expect(await plugins.get(db, provisional.id, uid)).toBeNull();
+
+    // Fresh install: no canonical row exists → the provisional id is kept.
+    const fresh = await plugins.upsert(db, {
+      id: newId(),
+      userId: uid,
+      pluginId: `pending/${newId()}`,
+      version: "pending",
+      source: { kind: "github" },
+      status: "queued",
+    });
+    const rekeyed = await plugins.adopt(db, {
+      id: fresh.id,
+      userId: uid,
+      pluginId: "ovid/new-plugin",
+    });
+    expect(rekeyed!.id).toBe(fresh.id);
+    expect(rekeyed!.pluginId).toBe("ovid/new-plugin");
+
+    // listActive (worker rehydration) sees the active canonical row only.
+    const active = await plugins.listActive(db);
+    expect(active.some((row) => row.id === canonical.id)).toBe(true);
+    expect(active.some((row) => row.id === provisional.id)).toBe(false);
+  });
+
   it("pluginGrants.put upserts capabilities; get/remove ownership-scoped", async () => {
     const uid = await seedUser();
     const stranger = await seedUser();
