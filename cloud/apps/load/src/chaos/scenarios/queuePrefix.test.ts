@@ -11,9 +11,10 @@ import {
 /**
  * H2: redis-q-restart must read the SAME queue keys the staging gateway and
  * worker write. Both mains call `createQueues`/`createAgentRunsWorker` with no
- * `prefix`, so BullMQ's default `"bull"` applies. `.env.staging` still records
- * `BULL_PREFIX=bull:staging`, but it is not threaded into those calls — reading
- * it would inspect an empty `bull:staging:agent-runs`.
+ * `prefix`, so BullMQ's default `"bull"` applies. `.env.staging` records
+ * `BULL_PREFIX=bull` to match; it once said `bull:staging`, which made tooling
+ * inspect an empty `bull:staging:agent-runs` (staging is isolated by its own
+ * redis-q instance, not by the prefix).
  *
  * This test pins the derivation against the mains' real source calls (a future
  * `prefix` threading change fails here) and against BullMQ's actual default.

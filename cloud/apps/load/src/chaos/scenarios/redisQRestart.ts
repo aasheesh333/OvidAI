@@ -48,10 +48,11 @@ const AOF_SETTLE_MS = 2_000;
  *
  * Their mains call `createQueues`/`createAgentRunsWorker` with NO `prefix`
  * option (`apps/gateway/src/index.ts`, `apps/worker/src/main.ts`), so BullMQ's
- * default `"bull"` applies. `BULL_PREFIX` in `.env.staging` is still
- * `bull:staging`, but it is NOT threaded into those calls (P10 Task 3 surface),
- * so reading it here would inspect `bull:staging:agent-runs`, where no job
- * ever lands. `queuePrefix.test.ts` pins this against the mains' real calls.
+ * default `"bull"` applies. `.env.staging` records `BULL_PREFIX=bull` to
+ * match (it once said `bull:staging`, which sent two chaos scenarios to
+ * inspect `bull:staging:agent-runs`, where no job ever lands — staging is
+ * isolated by its own redis-q instance, not by the prefix).
+ * `queuePrefix.test.ts` pins this against the mains' real calls.
  */
 export const STAGING_QUEUE_PREFIX = "bull";
 

@@ -99,8 +99,11 @@ environment is the separate `/opt/ovid-cloud/worker.env`
   `REDIS_Q_PASSWORD`, `REDIS_C_PASSWORD`, `OVID_MASTER_KEY`,
   `OVID_INTERNAL_TOKEN`, R2 credentials) and `/opt/ovid-cloud/worker.env`
   (host worker; loopback URLs). Both `chmod 600`.
-- Queue prefix is `bull` in production (`bull:staging` in staging); the
-  queue names are `agent-runs`, `schedules`, `hibernate`, `hydrate`,
+- Queue prefix is `bull` in BOTH production and staging — the gateway and
+  worker mains pass no `prefix` option, so BullMQ's default applies. Staging
+  is isolated by its own redis-q INSTANCE, not by the prefix; do not set
+  `BULL_PREFIX=bull:staging` (it would point tooling at queues nothing writes
+  to). The queue names are `agent-runs`, `schedules`, `hibernate`, `hydrate`,
   `plugin-installs`.
 - Session event streams are `sess:{sessionId}:events`. **Shipped retention
   is exact `MAXLEN 10000` events** (`cloud/packages/events/src/eventLog.ts`),

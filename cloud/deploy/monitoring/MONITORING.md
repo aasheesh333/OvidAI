@@ -38,8 +38,10 @@ Notes:
   worse than a noisy one. Disable explicitly with `WATCH_SPEND_PARITY=off`
   only when a side is genuinely unavailable.
 - Queue names are `WATCH_QUEUE_NAMES` (comma-separated; default
-  `agent-runs`). `WATCH_QUEUE_PREFIX` must match the deployment (`bull` in
-  production, `bull:staging` in staging).
+  `agent-runs`). `WATCH_QUEUE_PREFIX` must match the deployment — and the
+  gateway/worker mains pass no `prefix` option, so it is **`bull` in both
+  production and staging**. Staging is isolated by its own redis-q instance,
+  not by the prefix; `bull:staging` would watch queues nothing writes to.
 
 ## Edge-triggered alerting (Review Focus #5)
 
