@@ -2,11 +2,11 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { PassThrough, type Readable, type Writable } from "node:stream";
+import { PassThrough, type Writable } from "node:stream";
 import { afterAll, describe, expect, it } from "vitest";
 import { createCgroupManager, type CgroupManager } from "./cgroups.js";
 import { DEFAULT_SANDBOX_LIMITS, loadSandboxConfig, type SandboxConfig } from "./config.js";
-import { makeJailContext, type JailContext } from "./exec.js";
+import { makeJailContext } from "./exec.js";
 import {
   createJobRegistry,
   spawnLongRunning,
@@ -23,6 +23,7 @@ import {
 import { CommandBlockedError, REFUSAL_MESSAGE } from "./policy.js";
 import { createNoopQuotaBackend } from "./quota.js";
 import type { RootfsManifest } from "./rootfs.js";
+import type { JailContext } from "./types.js";
 
 /**
  * Portable JobRegistry + spawnLongRunning tests (Task 9 Step 1): a stub
@@ -73,8 +74,10 @@ interface RecordedSpawn {
 
 class StubChild implements ChildProcessLike {
   readonly pid = 4242;
-  readonly stdout: Readable;
-  readonly stderr: Readable;
+  // PassThrough (not just Readable) because the stub writes to the pipes
+  // directly; PassThrough still satisfies ChildProcessLike's Readable fields.
+  readonly stdout: PassThrough;
+  readonly stderr: PassThrough;
   readonly stdin: Writable;
   readonly kills: string[] = [];
   readonly stdinData: string[] = [];
@@ -92,16 +95,24 @@ class StubChild implements ChildProcessLike {
     });
   }
 
-  kill(signal = "SIGTERM"): boolean {
+  kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
     this.kills.push(signal);
     this.emitter.emit("exit", null, signal);
     return true;
   }
 
-  once(event: "exit", listener: (code: number | null, signal: string | null) => void): void;
+  once(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
   once(event: "error", listener: (err: Error) => void): void;
-  once(event: string, listener: (...args: unknown[]) => void): void {
-    this.emitter.once(event, listener as (...args: unknown[]) => void);
+  // The union implementation signature is compatible with both precise
+  // overloads (an `unknown[]`/`never[]` rest parameter is not), so no cast is
+  // needed at the EventEmitter seam.
+  once(
+    event: "exit" | "error",
+    listener:
+      | ((code: number | null, signal: NodeJS.Signals | null) => void)
+      | ((err: Error) => void),
+  ): void {
+    this.emitter.once(event, listener);
   }
 }
 

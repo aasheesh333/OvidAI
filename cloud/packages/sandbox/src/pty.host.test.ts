@@ -16,13 +16,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createCgroupManager, type CgroupManager } from "./cgroups.js";
 import { DEFAULT_SANDBOX_LIMITS, loadSandboxConfig, type SandboxConfig } from "./config.js";
 import { renderEtcBundle, renderHomeDotfiles, writeEnvFiles } from "./etcFiles.js";
-import { execOnce, makeJailContext, type JailContext } from "./exec.js";
+import { execOnce, makeJailContext } from "./exec.js";
 import { hostTestsAvailable, jailMechanismAvailable } from "./hostGate.js";
 import { createJobRegistry, spawnLongRunning, type JobRegistry, type SpawnedProcess } from "./jobs.js";
 import { createSetuidLauncher } from "./launcher.js";
 import { createPtySession, type PtySession } from "./pty.js";
 import { REFUSAL_MESSAGE } from "./policy.js";
 import { resolveRootfs } from "./rootfs.js";
+import type { JailContext } from "./types.js";
 
 /**
  * HOST-GATED PTY / job / spawn proofs (Task 9 Step 5): real node-pty terminals

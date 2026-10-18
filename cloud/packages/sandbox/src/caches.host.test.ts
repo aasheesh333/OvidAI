@@ -15,10 +15,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createCgroupManager, type CgroupManager } from "./cgroups.js";
 import { DEFAULT_SANDBOX_LIMITS, loadSandboxConfig, type SandboxConfig } from "./config.js";
 import { renderEtcBundle, renderHomeDotfiles, writeEnvFiles } from "./etcFiles.js";
-import { execOnce, makeJailContext, type JailContext } from "./exec.js";
+import { execOnce, makeJailContext } from "./exec.js";
 import { hostTestsAvailable, jailMechanismAvailable } from "./hostGate.js";
 import { createSetuidLauncher } from "./launcher.js";
 import { resolveRootfs } from "./rootfs.js";
+import type { JailContext } from "./types.js";
 
 /**
  * HOST-GATED per-user cache proofs (Task 10 Step 5): real bwrap jails through

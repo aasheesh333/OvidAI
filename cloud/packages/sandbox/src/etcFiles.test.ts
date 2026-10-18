@@ -70,7 +70,9 @@ describe("writeEnvFiles", () => {
     const dotfiles = renderHomeDotfiles();
 
     // Portable variant of the chown assertion: current process uid.
-    const ownerUid = process.getuid();
+    // The sandbox package is Linux-only; @types/node marks getuid optional
+    // because it does not exist on Windows.
+    const ownerUid = process.getuid!();
     await writeEnvFiles({ etcDir, homeDir, bundle, dotfiles, ownerUid });
 
     const expected: Array<[string, string]> = [
@@ -106,7 +108,7 @@ describe("writeEnvFiles", () => {
       homeDir,
       bundle: renderEtcBundle({ dns: ["1.1.1.1"] }),
       dotfiles: renderHomeDotfiles(),
-      ownerUid: process.getuid(),
+      ownerUid: process.getuid!(),
     });
     expect(statSync(stale).mode & 0o777).toBe(0o644);
     expect(readFileSync(stale, "utf8")).toBe("nameserver 1.1.1.1\n");

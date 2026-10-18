@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough, type Readable, type Writable } from "node:stream";
+import { PassThrough, type Writable } from "node:stream";
 import { afterAll, describe, expect, it } from "vitest";
 import { createCgroupManager, type CgroupManager } from "./cgroups.js";
 import { loadSandboxConfig, type SandboxConfig } from "./config.js";
@@ -66,8 +66,10 @@ interface StubScript {
 
 class StubChild implements ChildProcessLike {
   readonly pid = 4242;
-  readonly stdout: Readable;
-  readonly stderr: Readable;
+  // PassThrough (not just Readable) because the stub writes to the pipes
+  // directly; PassThrough still satisfies ChildProcessLike's Readable fields.
+  readonly stdout: PassThrough;
+  readonly stderr: PassThrough;
   readonly stdin: Writable;
   private readonly emitter = new EventEmitter();
 
@@ -81,15 +83,23 @@ class StubChild implements ChildProcessLike {
     });
   }
 
-  kill(signal = "SIGTERM"): boolean {
+  kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
     this.emitter.emit("exit", null, signal);
     return true;
   }
 
-  once(event: "exit", listener: (code: number | null, signal: string | null) => void): void;
+  once(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
   once(event: "error", listener: (err: Error) => void): void;
-  once(event: string, listener: (...args: unknown[]) => void): void {
-    this.emitter.once(event, listener as (...args: unknown[]) => void);
+  // The union implementation signature is compatible with both precise
+  // overloads (an `unknown[]`/`never[]` rest parameter is not), so no cast is
+  // needed at the EventEmitter seam.
+  once(
+    event: "exit" | "error",
+    listener:
+      | ((code: number | null, signal: NodeJS.Signals | null) => void)
+      | ((err: Error) => void),
+  ): void {
+    this.emitter.once(event, listener);
   }
 }
 
