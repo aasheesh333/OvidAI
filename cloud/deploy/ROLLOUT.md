@@ -5,6 +5,11 @@ written and dry-validated (artifact existence + `bash -n` only) on 2026-10-17.
 No Caddy change, compose command, container stop, or store action was run
 while producing it.
 
+**Working directory.** Every relative path and fenced command block is run
+from the repo root, `/opt/ovid-cloud/repo`, unless the block itself changes
+directory (R1's block `cd`s to `cloud/deploy`). Do not run the blocks from
+`cloud/deploy` or any other subdirectory by default.
+
 **Execution rule.** Every step below is **owner-present, per-step go/no-go** —
 the same shape as P1 Task 11 Step 6. An agent may run the read-only
 verification commands; an agent may **not** execute a rollout step. A step is
@@ -21,8 +26,9 @@ in §0 are deliberately empty; nothing in this file preselects a branch.
 ## 0. Owner decision gates — fill these in before anything else
 
 The rollout is blocked until **all three** gates have a dated owner answer and
-the decision log at the end of this section is signed. The answers drive R5
-and R6; R0–R4 are branch-independent.
+the decision log at the end of this section is signed. Q1 and Q2 drive R5 and
+R6; Q3 branches R3 (which staging host runs the internal track). R0–R2 and R4
+are branch-independent.
 
 ### Q1 — clean break (CB) vs installed base (IB)
 
@@ -144,9 +150,11 @@ C = **forward-only** — restore from the password manager only if a new secret
 was recorded wrongly; E = remove `daemon.json` and restart docker; G = restore
 `docker-compose.yml.bak-pin-<TS>` and `docker compose up -d litellm`.
 
-**Decision point.** All six boxes checked and their verification lines
-recorded in `HARDENING.md` → proceed to R1. **If A or B is unchecked, STOP:**
-do not route user traffic to a box with a root desktop or password SSH open.
+**Decision point.** All seven boxes checked and their verification lines
+recorded in `HARDENING.md` → proceed to R1. **If any of A, B, C, E or G is
+unchecked, STOP:** do not route user traffic to a box with a root desktop,
+password SSH open, an unrotated exposed secret, no Docker log rotation, or an
+unpinned LiteLLM image.
 
 ---
 
@@ -159,9 +167,10 @@ activated in an earlier phase**.
 
 **Steps.** Follow `DEPLOY.md` §§1–9 in order, gates included:
 
-1. §1 layout/prerequisites; §2 `.env` (secrets — never commit); §3 Firebase
-   credentials; §4 database provisioning (idempotent `./provision.sh`).
-2. §5 start the compose spine; gate:
+1. `[OWNER]` §1 layout/prerequisites; §2 `.env` (secrets — never commit);
+   §3 Firebase credentials; §4 database provisioning (idempotent
+   `./provision.sh`).
+2. `[OWNER]` §5 start the compose spine (`docker compose up -d`); gate:
    `curl -sS http://127.0.0.1:8082/cloud/v1/health` →
    `{"status":"ok","checks":{"db":true,"redisQ":true}}`.
 3. §6 route `https://api.ovidsi.com/cloud/*` — **the only live-stack change
@@ -172,6 +181,7 @@ activated in an earlier phase**.
    checklist.
 
 ```bash
+# [OWNER] live-stack activation — run only with the owner present.
 cd /opt/ovid-cloud/repo/cloud/deploy
 ./provision.sh
 docker compose up -d
@@ -235,7 +245,9 @@ UP → proceed to R3. A silent monitor is a failed gate; do not proceed on
 ## R3 — Thin-client internal track
 
 **Entry criteria.** R1 + R2 green; R0 signed; P8 thin-client build available;
-§0 answered. No Caddy change is made in R3.
+§0 answered. No Caddy change is made in R3. **Q3 branch:** Q3=SM → run this
+section on this box; Q3=2M → run it on the second machine, after the Q3
+smoke/chaos run there.
 
 **Steps.**
 
@@ -331,13 +343,16 @@ built from the same commit as the staging smoke; `ACCEPTANCE_REQUIRE_FULL_SECURI
 run green (R7 may be run before R5 as a pre-submission gate, then repeated at
 R7).
 
-**Steps.**
+**Steps** (`[OWNER]` — every submission, promotion and enforcement change is
+an owner action). **Stop condition for each step:** any abort signal in the
+list below halts the rollout.
 
-1. **Internal track** for the Q2 duration; keep the R3 observability.
-2. **Closed track** of the Q2 size; same soak discipline.
-3. **Production staged rollout: 10% → 50% → 100%**, **48 h soak per step**.
-   Do not advance a step with an open abort signal.
-4. **Q1 enforcement:**
+1. `[OWNER]` **Internal track** for the Q2 duration; keep the R3
+   observability.
+2. `[OWNER]` **Closed track** of the Q2 size; same soak discipline.
+3. `[OWNER]` **Production staged rollout: 10% → 50% → 100%**, **48 h soak per
+   step**. Do not advance a step with an open abort signal.
+4. `[OWNER]` **Q1 enforcement:**
    - **CB:** publish the "required update" listing and enable the
      min-version gate. As of 2026-10-17 the gate is **not shipped** (P8
      Task 20 prepares the hook only). CB cannot start until it exists and has
@@ -395,28 +410,43 @@ and spec §13.4.
 6. images.
 7. mint **last**.
 
+These are **route groups**, not one container each: only `account-dev`
+(after the account/shares/reports groups) and `mint` (after the
+billing/images groups) end in a container stop. Everything else is a Caddy
+route flip to the TS surface.
+
 **Per-service pattern (execute from `DECOMMISSION.md`, not here):**
 
 1. Timestamped Caddyfile backup
    (`/opt/ovid-gateway/caddy`, `Caddyfile.bak-$(date -u +%Y%m%dT%H%M%SZ)`).
-2. Flip **one** route group to the TS surface.
+2. Flip **one** route group to the TS surface — `account`/`shares`/`reports`
+   to the gateway, `billing`/`images` to `mint-ts` (`127.0.0.1:8091`).
 3. `caddy validate` → `caddy reload` (container binary, per `DEPLOY.md` §6).
-4. Smoke the flipped routes; then **observe 72 h**.
-5. Only after a clean observation: remove that Python container.
+4. Smoke the flipped routes; then **observe ≥ 24 h** with the R2 alerts live
+   (P9's floor; a longer soak is the owner's call).
+5. **Container stops are P9's, not per-flip:** stop only `account-dev` after
+   the account/shares/reports group soaks, and `mint` after the
+   billing/images group soaks. `billing` and `images` are route flips to
+   `mint-ts`, not Python containers. Keep `litellm`, `img-edit-shim`,
+   `redis`, `postgres` and `caddy` running (the Python hook stays per
+   D2/G10).
 
 All of the above is `[OWNER]` (live traffic + container stops).
 
-**Time budget.** 72 h observation per service; six active groups ≈ 18 days
-minimum. Do not compress a soak to hit a date.
+**Time budget.** P9's schedule: an observation floor of **≥ 24 h** between
+money-critical route groups, then the two container stops above after their
+group soaks. Do not compress a soak to hit a date; `DECOMMISSION.md` sets the
+actual elapsed schedule.
 
 **Rollback (per service).** Restore the timestamped Caddy backup → validate →
 reload → `docker compose up -d <service>` in `/opt/ovid-gateway` (P9's exact
-rollback; the containers are only removed after the soak, so the image/config
+rollback; the containers are only stopped after the soak, so the image/config
 is still present). Re-run the service's smoke before resuming the schedule.
 
-**Decision point.** Each service's smoke + 72 h observation clean → next
-service. Any regression → roll back that service, pause the schedule, and do
-not touch the next group.
+**Decision point.** Each group's smoke + P9's observation window clean → next
+group; both required container stops done only after their group soaks. Any
+regression → roll back that group, pause the schedule, and do not touch the
+next group.
 
 ---
 
@@ -441,8 +471,9 @@ from live traffic.
    the live compose project.
 
 2. Confirm the run wrote and commit the evidence file:
-   `cloud/apps/load/reports/RELEASE-EVIDENCE-<YYYYMMDD>.md` (produced by
-   execution; the directory does not exist yet).
+   `cloud/apps/load/reports/RELEASE-EVIDENCE-<YYYYMMDD>.md`. The directory
+   now exists (it holds `load-100u-template.md`); the dated evidence file is
+   produced by execution.
 3. Fill the `HARDENING.md` §"Decision log" rows for A/B/C/E/G and the
    `MONITORING.md` verification log.
 4. Fill the `RUNBOOKS.md` verification lines for the drills actually run
@@ -466,8 +497,10 @@ the rollout is complete. Any FAIL → stop and triage.
 
 ## Appendix A — cited artifacts (dry validation)
 
-`test -f` was run over every path below on 2026-10-17. **PENDING** entries are
-cited in the text as "to be produced by …" and are not pretended to exist.
+`test -f` was run over every path below on 2026-10-17, and the statuses were
+refreshed after the Task 13 review. **PENDING** entries do not exist yet or do
+not yet carry executed evidence; they are cited in the text as "to be produced
+by …" and are not pretended to exist.
 
 | Artifact | Status |
 |---|---|
@@ -509,11 +542,12 @@ cited in the text as "to be produced by …" and are not pretended to exist.
 | `.superpowers/sdd/2026-10-16-ovid-cloud-p10-hardening-cutover/task-10-report.md` | exists |
 | `.superpowers/sdd/2026-10-16-ovid-cloud-p10-hardening-cutover/task-11-report.md` | exists |
 | `.superpowers/sdd/2026-10-16-ovid-cloud-p10-hardening-cutover/task-14-report.md` | exists |
-| `.superpowers/sdd/2026-10-16-ovid-cloud-p10-hardening-cutover/task-5-report.md` | **PENDING — to be produced by Task 5** |
-| `cloud/deploy/DECOMMISSION.md` | **PENDING — P9 Task 18** |
-| `cloud/deploy/caddy-flips/` | **PENDING — P9 Task 18** |
-| `cloud/scripts/migrate/` | **PENDING — P9 Task 18** |
+| `.superpowers/sdd/2026-10-16-ovid-cloud-p10-hardening-cutover/task-5-report.md` | exists — status **PREPARED — EXECUTION BLOCKED** on `cloud/deploy/Dockerfile.mint`; no executed 100-user evidence yet |
+| `cloud/deploy/DECOMMISSION.md` | exists — P9 Task 18 wrote it; execution is owner-gated |
+| `cloud/deploy/caddy-flips/` | exists — P9 Task 18 wrote the five snippets; no flip has been applied |
+| `cloud/scripts/migrate/` | exists — P9 Task 18 scripts written and unit-tested; execution is owner-gated |
 | min-version / forced-update hook | **PENDING — P8 Task 20 prepares it; not enabled** |
+| `cloud/apps/load/reports/` | exists — holds `load-100u-template.md` |
 | `cloud/apps/load/reports/RELEASE-EVIDENCE-<YYYYMMDD>.md` | **PENDING — produced by executing `acceptance.sh`** |
 
 Artifact check command (re-runnable):
@@ -532,6 +566,8 @@ for f in \
   cloud/deploy/workspaces/setup-workspaces.sh cloud/deploy/rootfs/build.sh \
   cloud/deploy/rootfs/install.sh cloud/deploy/rootfs/smoke-jail.sh \
   cloud/deploy/docker-compose.staging.yml cloud/scripts/acceptance.sh \
+  cloud/deploy/DECOMMISSION.md cloud/deploy/caddy-flips/README.md \
+  cloud/deploy/Dockerfile.mint cloud/apps/load/reports/load-100u-template.md \
   cloud/scripts/staging.sh cloud/scripts/verify-r2.mjs \
   cloud/apps/load/src/cli.ts cloud/apps/load/src/chaosCli.ts \
   cloud/apps/load/dist/cli.js cloud/apps/load/dist/chaosCli.js \
@@ -547,5 +583,8 @@ done
 
 - **2026-10-17:** every non-mutating fenced `bash` block in this file passes
   `bash -n`; the artifact loop above reports OK for every `exists` row.
+- **2026-10-17 (post-review polish):** after the owner-tag, gate-count and R6
+  edits, every fenced `bash` block still passes `bash -n`; Appendix A
+  statuses refreshed against the files on disk.
 - No rollout step was executed. The only commands run by the author were
   `test -f`, `grep`, `sed`, `bash -n`, and the two git commit commands.
