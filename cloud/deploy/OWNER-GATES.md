@@ -1175,3 +1175,31 @@ and a real-bucket verification (7/7 probe + 10/10 live suite) all completed
 | Wave merger | `.superpowers/sdd/2026-10-16-ovid-cloud-p0-p1-spine/WAVE-MERGER.md` (and the 2026-10-15 copy's status block) |
 | Post-launch | `monitoring/MONITORING.md`, `BROWSERS.md` §(c), `RUNBOOKS.md` I-3/I-9/O-1–O-5, `ROLLOUT.md` R5/R7 |
 | Already done | P2/P6 final reviews, `progress.md`, commits `1d076bd`/`0bc12a4`/`bad63b4`, on-disk artifact checks |
+
+---
+
+## 10. Sandbox security posture (2026-10-18)
+
+Three layers, all proven by `cloud/scripts/security-regressions.sh` (gate 4b
+in `acceptance.sh`) running inside a real jail:
+
+| Layer | What it does | Where |
+|---|---|---|
+| 1 — command policy | Refuses tunnels/remote access (cloudflared, tailscale, ngrok, frp, chisel, tmate, ttyd, gotty, autossh, sshd), proxies/VPN (socat, nc, proxychains, 3proxy, squid, shadowsocks, v2ray, xray, sing-box, wireguard, openvpn, tor), scanners (nmap, masscan, zmap, hydra, sqlmap) and miners (xmrig, minerd, cpuminer, ethminer, …). `ssh` works for git but `-R/-L/-D/-w` refuse. Heavy toolchains (cargo, rustc, go, docker, podman, kubectl, cc/clang, cmake, ninja, gcc, make, gradle, kotlinc) are unavailable. | `packages/sandbox/src/policy.ts` |
+| 2 — egress firewall | Sandbox uids (200000-209999) and the browser uid (230000) may reach **TCP 53/80/443 + UDP 53 only**; everything else is dropped. Internal nets, metadata and this host's public IP are blocked ahead of the allow-list, so an allowed port cannot reach a blocked address. | `packages/sandbox/src/net.ts` → `install-nft.sh` |
+| 3 — package scripts | `/usr/local/etc/npmrc` `ignore-scripts=true`, `/etc/pnpm/rc`, `/etc/pip.conf` `only-binary = :all:`, `/etc/uv/uv.toml` `no-build = true`. A malicious `postinstall` cannot run. | rootfs image + installed revision |
+
+**Known boundary (documented, not hidden):** the jail shares the host network
+namespace by design (spec §8.5) so installs and git work; egress is enforced
+per-uid by nftables. A process inside the jail can therefore *bind* a port,
+but the host firewall does not forward it, so it is not reachable from the
+internet.
+
+**Deliberately NOT changed:** SSH (port 22, sshd config, auth methods) and
+VNC (5901/6080) are untouched — the owner connects through them. R0-B
+(SSH key-only) is not executed.
+
+**Not implemented (needs a product decision):** removing the user-facing
+PTY/terminal. The approved spec (§6.1) ships it and the Flutter Studio
+terminal depends on it; stripping it is a feature removal, not a hardening
+step.
