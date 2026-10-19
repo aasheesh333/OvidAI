@@ -182,6 +182,14 @@ class CloudRestClient {
     }
   }
 
+  /// DELETE that answers a JSON body (Studio `DELETE …/workspace/file`, which
+  /// can also answer 202 `{status:'hydrating'}`). Same error mapping.
+  Future<Map<String, dynamic>> deleteJson(String path,
+      {Map<String, String>? query, Duration? timeout}) async {
+    return _decode(
+        await _authed('DELETE', _uri(path, query), null, timeout: timeout));
+  }
+
   /// PUT with a JSON body. Added for the Studio workspace file write
   /// (`PUT /sessions/:id/workspace/file`); every non-2xx answer maps to
   /// [CloudApiException] exactly like the other verbs.

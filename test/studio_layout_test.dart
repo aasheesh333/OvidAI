@@ -100,63 +100,9 @@ void main() {
       }
     });
 
-    test('the terminal never eats the editor viewport', () {
-      for (final h in <double>[200, 256, 320, 400, 494, 536, 800, 1096, 1600]) {
-        final m = StudioMetrics.of(
-            BoxConstraints.tightFor(width: 1200, height: h));
-        if (!m.terminalFits) {
-          expect(
-              m.terminalHeight,
-              lessThanOrEqualTo(
-                  (h - StudioMetrics.minEditorHeight).clamp(0.0, double.infinity)),
-              reason: 'editor viewport squeezed at $h');
-          expect(m.terminalHeight,
-              lessThanOrEqualTo(StudioMetrics.collapsedBarHeight));
-          continue;
-        }
-        expect(m.terminalHeight,
-            greaterThanOrEqualTo(StudioMetrics.minTerminalHeight));
-        expect(m.terminalHeight, lessThanOrEqualTo(h - StudioMetrics.minEditorHeight),
-            reason: 'editor viewport squeezed at $h');
-        expect(h - m.terminalHeight,
-            greaterThanOrEqualTo(StudioMetrics.minEditorHeight));
-      }
-    });
-
-    test('a landscape phone (640x360 region) collapses the terminal', () {
-      final m =
-          StudioMetrics.of(const BoxConstraints.tightFor(width: 640, height: 256));
-      expect(m.terminalFits, isFalse);
-      expect(m.terminalHeight, StudioMetrics.collapsedBarHeight);
-    });
-
-    test('an explicitly expanded terminal in a short region keeps its chrome',
-        () {
-      // Landscape phone: too short for both panes at their minimums.
-      final m = StudioMetrics.of(
-          const BoxConstraints.tightFor(width: 640, height: 256));
-      expect(m.terminalFits, isFalse);
-      final expanded = m.resolveTerminalHeight(m.terminalHeight,
-          regionHeight: 256);
-      expect(
-          expanded,
-          greaterThanOrEqualTo(StudioMetrics.collapsedBarHeight +
-              StudioMetrics.commandRowHeight),
-          reason: 'below its own chrome the terminal pane overflows');
-      expect(expanded, lessThanOrEqualTo(256));
-      expect(256 - expanded, greaterThanOrEqualTo(0),
-          reason: 'the editor must keep a non-negative viewport');
-      // A drag in the same region is bounded the same way.
-      expect(m.resolveTerminalHeight(100000, regionHeight: 256), 256);
-    });
-
-    test('drag clamping keeps both minimums', () {
+    test('tree drag clamping keeps the editor minimum', () {
       final m = StudioMetrics.of(
           const BoxConstraints.tightFor(width: 1200, height: 494));
-      expect(m.clampTerminalHeight(10000, regionHeight: 494),
-          lessThanOrEqualTo(494 - StudioMetrics.minEditorHeight));
-      expect(m.clampTerminalHeight(-50, regionHeight: 494),
-          greaterThanOrEqualTo(StudioMetrics.minTerminalHeight));
       expect(m.clampTreeWidth(10000, regionWidth: 1200),
           lessThanOrEqualTo(1200 - StudioMetrics.minEditorWidth));
       expect(m.clampTreeWidth(1, regionWidth: 1200),

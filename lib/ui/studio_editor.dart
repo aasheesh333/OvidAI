@@ -6,12 +6,13 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
+import '../core/cloud/studio_files.dart';
 import '../core/cloud/studio_remote_client.dart';
-import '../core/state.dart';
 import '../core/studio_drafts.dart';
 import '../core/theme.dart';
-import 'studio_layout.dart';
 import 'studio_errors.dart';
+import 'studio_file_actions.dart';
+import 'studio_layout.dart';
 import 'widgets/aether_primitives.dart';
 
 // ── Studio editor ───────────────────────────────────────────────────────────
@@ -21,8 +22,8 @@ import 'widgets/aether_primitives.dart';
 //    quotes/dashes are disabled, and the field asks for a newline action.
 //  * `_bind` dumped the caret at end of file on every fresh open and mutated
 //    the controller from inside `build`. Binding now happens in a listener,
-//    a fresh open starts at offset 0, and a background rewrite (agent
-//    file_write) keeps the user's caret instead of moving it.
+//    a fresh open starts at offset 0, and a background rewrite (an agent
+//    edit picked up by a workspace refresh) keeps the user's caret.
 //  * There was no find, no position readout and no undo. All three exist now.
 
 /// Stable key for the code field (tests and the find bar both target it).
@@ -30,6 +31,12 @@ const Key studioEditorFieldKey = Key('studio-editor-field');
 
 /// Key for the in-file find field.
 const Key studioFindFieldKey = Key('studio-find-field');
+
+/// The editor header's Save button.
+const Key studioSaveButtonKey = Key('studio-save');
+
+/// The compact editor header's overflow (find / undo / redo).
+const Key studioEditorMoreKey = Key('studio-editor-more');
 
 /// Editor monospace size. The screen shipped 12.5px here and 9.5–10.5px in the
 /// surrounding chrome; everything is now at or above [kStudioMinFontSize].
@@ -46,49 +53,11 @@ const double kStudioTabAccent = 2;
 class StudioEditorTabs extends StatelessWidget {
   const StudioEditorTabs({super.key, this.sessionId});
 
-  /// Test seam / explicit binding. Production callers pass the active server
-  /// session id; null falls back to [AppState].
+  /// The Studio bucket key; null is the user's workspace
+  /// ([kStudioWorkspaceKey]).
   final String? sessionId;
 
-  String get _sid => sessionId ?? AppState.I.activeSession?.id ?? '';
-
-  Future<void> _askNewFile(BuildContext context) async {
-    final ctrl = TextEditingController();
-    final ok = await showDialog<String>(
-      context: context,
-      builder: (d) => AlertDialog(
-        title: const Text('New file', style: TextStyle(fontSize: 15)),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          // It is a path in a code repository — no autocorrect, no suggestions.
-          autocorrect: false,
-          enableSuggestions: false,
-          keyboardType: TextInputType.text,
-          textInputAction: TextInputAction.done,
-          style: const TextStyle(fontFamily: Aether.mono, fontFamilyFallback: kStudioMonoFallback, fontSize: 13),
-          decoration: const InputDecoration(
-            hintText: 'path/to/file.dart',
-            isDense: true,
-          ),
-          onSubmitted: (v) => Navigator.pop(d, v.trim()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(d),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(d, ctrl.text.trim()),
-            child: const Text('Create'),
-          ),
-        ],
-      ),
-    );
-    ctrl.dispose();
-    if (ok == null || ok.isEmpty) return;
-    StudioRemoteClient.I.newStudioFile(_sid, ok);
-  }
+  String get _sid => sessionId ?? kStudioWorkspaceKey;
 
   @override
   Widget build(BuildContext context) {
@@ -119,12 +88,15 @@ class StudioEditorTabs extends StatelessWidget {
                           scrollDirection: Axis.horizontal,
                           padding: EdgeInsets.zero,
                           children: [
-                            for (final p in tabs)
+                            for (var i = 0; i < tabs.length; i++)
                               _tab(
                                 context,
-                                p,
-                                p == active,
-                                StudioRemoteClient.I.isStudioFileDirty(_sid, p),
+                                tabs[i],
+                                tabs[i] == active,
+                                StudioRemoteClient.I
+                                    .isStudioFileDirty(_sid, tabs[i]),
+                                index: i,
+                                count: tabs.length,
                               ),
                           ],
                         ),
@@ -133,7 +105,7 @@ class StudioEditorTabs extends StatelessWidget {
                   icon: Icons.add,
                   tooltip: 'New file',
                   iconSize: 18,
-                  onPressed: () => _askNewFile(context),
+                  onPressed: () => studioNewFile(context, _sid),
                 ),
                 const SizedBox(width: 2),
               ],
@@ -144,11 +116,20 @@ class StudioEditorTabs extends StatelessWidget {
     );
   }
 
-  Widget _tab(BuildContext context, String path, bool selected, bool dirty) {
+  Widget _tab(
+    BuildContext context,
+    String path,
+    bool selected,
+    bool dirty, {
+    required int index,
+    required int count,
+  }) {
     final name = path.split('/').last;
     return StudioTapTarget(
       onTap: () => StudioRemoteClient.I.selectStudioFile(_sid, path),
-      label: '$name, tab${dirty ? ', unsaved changes' : ''}'
+      // Positional semantics (ST-020): "tab 2 of 5".
+      label: '$name, tab ${index + 1} of $count'
+          '${dirty ? ', unsaved changes' : ''}'
           '${selected ? ', active' : ''}',
       selected: selected,
       minWidth: 0,
@@ -247,7 +228,7 @@ Future<StudioUnsavedChoice> showStudioUnsavedDialog(
 /// Closes a tab, asking first when it holds an unsaved draft (F-071).
 Future<void> closeStudioTab(BuildContext context, String path,
     {String? sessionId}) async {
-  final sid = sessionId ?? AppState.I.activeSession?.id ?? '';
+  final sid = sessionId ?? kStudioWorkspaceKey;
   final remote = StudioRemoteClient.I;
   if (!remote.isStudioFileDirty(sid, path)) {
     remote.closeStudioFile(sid, path);
@@ -270,7 +251,7 @@ Future<void> closeStudioTab(BuildContext context, String path,
         if (context.mounted) {
           showStudioToast(
             context,
-            'Resolve the external change before saving',
+            'Choose which version to keep before saving.',
             error: true,
           );
         }
@@ -297,7 +278,7 @@ class _NoTabsHint extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12),
       child: SingleChildScrollView(
         child: Text(
-          'No open files — tap a file in the tree or +',
+          'No open files — pick one from Files, or tap +',
           style: TextStyle(fontSize: 12, color: Aether.textFaint),
         ),
       ),
@@ -309,7 +290,8 @@ class _NoTabsHint extends StatelessWidget {
 class StudioEditor extends StatefulWidget {
   const StudioEditor({super.key, this.sessionId});
 
-  /// Explicit server-session binding (tests); null falls back to [AppState].
+  /// The Studio bucket key; null is the user's workspace
+  /// ([kStudioWorkspaceKey]).
   final String? sessionId;
 
   @override
@@ -326,7 +308,7 @@ class _EditorPosition {
 typedef _BufferKey = (Map<String, String>, String);
 
 class _StudioEditorState extends State<StudioEditor> {
-  String get _sid => widget.sessionId ?? AppState.I.activeSession?.id ?? '';
+  String get _sid => widget.sessionId ?? kStudioWorkspaceKey;
   StudioRemoteClient get _remote => StudioRemoteClient.I;
 
   /// One controller per open file, so a tab switch preserves that file's text,
@@ -387,16 +369,26 @@ class _StudioEditorState extends State<StudioEditor> {
   void initState() {
     super.initState();
     _remote.tabsFor(_sid).addListener(_onServiceChanged);
-    AppState.I.addListener(_onServiceChanged);
     _findCtrl.addListener(_onQueryChanged);
     _bind(notify: false);
     _initializing = false;
   }
 
+  /// A new bucket key moves the listener with it (ST-016): the old code kept
+  /// listening to — and on dispose detached from — the first key's notifier.
+  @override
+  void didUpdateWidget(StudioEditor oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final oldKey = oldWidget.sessionId ?? kStudioWorkspaceKey;
+    if (oldKey == _sid) return;
+    _remote.tabsFor(oldKey).removeListener(_onServiceChanged);
+    _remote.tabsFor(_sid).addListener(_onServiceChanged);
+    _bind(notify: false);
+  }
+
   @override
   void dispose() {
     _remote.tabsFor(_sid).removeListener(_onServiceChanged);
-    AppState.I.removeListener(_onServiceChanged);
     _findCtrl.removeListener(_onQueryChanged);
     for (final entry in _buffers.entries) {
       entry.value
@@ -426,8 +418,6 @@ class _StudioEditorState extends State<StudioEditor> {
 
   void _onServiceChanged() {
     if (!mounted) return;
-    // May publish a studioTabs change (and re-enter here) for a session
-    // switch that only notified AppState; the input check below dedupes.
     final studio = _remote.tabsState(_sid);
     final inputs = _currentBindInputs(studio);
     if (_bindInputs != null && listEquals(inputs, _bindInputs)) return;
@@ -666,26 +656,37 @@ class _StudioEditorState extends State<StudioEditor> {
   }
 
   // ── save / undo ─────────────────────────────────────────────────────────
+  bool get _saving {
+    final path = _boundPath;
+    return path != null && _remote.isSaving(_sid, path);
+  }
+
   Future<void> _save() async {
     final path = _boundPath;
     final key = _boundKey;
     final ctrl = _ctrl;
     if (path == null || ctrl == null || key == null || _conflict) return;
+    // One PUT at a time per file (ST-014): a second tap or Ctrl+S while the
+    // first save is in flight does nothing.
+    if (!_dirty || _saving) return;
     final edit = _edits[key];
     try {
-      // The PUT carries the sha256 baseline captured at open time. A 409
-      // records the conflict in the remote bucket, which renders the
+      // The PUT carries the sha256 baseline as the server-side precondition.
+      // A 409 records the conflict in the remote bucket, which renders the
       // resolution bar above.
       await _remote.saveStudioFile(_sid, path);
+    } on StudioFileHydratingException catch (error) {
+      if (mounted) showStudioToast(context, StudioFailure.messageOf(error));
+      return;
     } catch (error) {
       if (mounted) {
-        showStudioToast(context, StudioFailure.of(error).message, error: true);
+        showStudioToast(context, StudioFailure.messageOf(error), error: true);
       }
       return;
     }
     if (!mounted) return;
     if (key != _boundKey || edit != _edits[key]) return;
-    showStudioToast(context, 'Saved ${path.split('/').last} to the workspace');
+    showStudioToast(context, 'Saved ${path.split('/').last}');
   }
 
   // ── layout ──────────────────────────────────────────────────────────────
@@ -737,6 +738,11 @@ class _StudioEditorState extends State<StudioEditor> {
                   _openFind,
               const SingleActivator(LogicalKeyboardKey.keyF, meta: true):
                   _openFind,
+              // Ctrl/Cmd+S saves (ST-014); _save ignores repeats in flight.
+              const SingleActivator(LogicalKeyboardKey.keyS, control: true):
+                  _save,
+              const SingleActivator(LogicalKeyboardKey.keyS, meta: true):
+                  _save,
             },
             if (_findOpen)
               const SingleActivator(LogicalKeyboardKey.escape): _closeFind,
@@ -789,24 +795,31 @@ class _StudioEditorState extends State<StudioEditor> {
     );
   }
 
-  Widget _conflictBar() => MaterialBanner(
-    content: const Text('This file changed externally. Your draft has been kept.'),
-    actions: [
-      TextButton(onPressed: () {
-        final key = _boundKey!;
-        _edits[key] = (_edits[key] ?? 0) + 1;
-        _seenConflicts[key] = null;
-        _remote.resolveStudioConflict(_sid, key.$2, keepDraft: true);
-      }, child: const Text('Keep draft')),
-      TextButton(onPressed: () {
-        final key = _boundKey!;
-        _edits[key] = (_edits[key] ?? 0) + 1;
-        _seenConflicts[key] = null;
-        // The bucket swaps the buffer; _bind applies it to the controller
-        // with the caret clamped.
-        _remote.resolveStudioConflict(_sid, key.$2, keepDraft: false);
-      }, child: const Text('Use external')),
-    ],
+  Widget _conflictBar() => Semantics(
+    liveRegion: true,
+    container: true,
+    child: MaterialBanner(
+      content: const Text(
+        'This file changed in the workspace (the agent may have edited it). '
+        'Your draft has been kept.',
+      ),
+      actions: [
+        TextButton(onPressed: () {
+          final key = _boundKey!;
+          _edits[key] = (_edits[key] ?? 0) + 1;
+          _seenConflicts[key] = null;
+          _remote.resolveStudioConflict(_sid, key.$2, keepDraft: true);
+        }, child: const Text('Keep my draft')),
+        TextButton(onPressed: () {
+          final key = _boundKey!;
+          _edits[key] = (_edits[key] ?? 0) + 1;
+          _seenConflicts[key] = null;
+          // The bucket swaps the buffer; _bind applies it to the controller
+          // with the caret clamped.
+          _remote.resolveStudioConflict(_sid, key.$2, keepDraft: false);
+        }, child: const Text('Use workspace version')),
+      ],
+    ),
   );
 
   Widget _header(String path, TextEditingController? ctrl) {
@@ -841,6 +854,12 @@ class _StudioEditorState extends State<StudioEditor> {
         icon: Icons.sync_problem_outlined,
         color: Aether.danger,
       );
+    } else if (_saving) {
+      pill = AetherPill(
+        label: 'SAVING',
+        icon: Icons.cloud_upload_outlined,
+        color: Aether.accent,
+      );
     } else if (_dirty) {
       pill = AetherPill(
         label: 'UNSAVED',
@@ -868,6 +887,9 @@ class _StudioEditorState extends State<StudioEditor> {
         builder: (context, c) {
           final scale = MediaQuery.textScalerOf(context).scale(1.0);
           final roomy = c.maxWidth >= 760 * math.max(1.0, scale);
+          // Below this the header folds find / undo / redo into an overflow
+          // so it stays ONE row on a phone (ST-019).
+          final compact = c.maxWidth < 480 * math.max(1.0, scale);
           final identity = Row(
             children: [
               Icon(
@@ -916,12 +938,67 @@ class _StudioEditorState extends State<StudioEditor> {
               pill,
             ],
           );
+          final VoidCallback? onFind = ctrl == null
+              ? null
+              : _findOpen
+                  ? _closeFind
+                  : _openFind;
+          final VoidCallback? onUndo =
+              ctrl != null && undo!.value.canUndo ? undo.undo : null;
+          final VoidCallback? onRedo =
+              ctrl != null && undo!.value.canRedo ? undo.redo : null;
+          final saving = _saving;
+          final save = StudioIconButton(
+            key: studioSaveButtonKey,
+            icon: saving ? Icons.cloud_upload_outlined : Icons.save_outlined,
+            tooltip: saving ? 'Saving…' : 'Save changes',
+            iconSize: 18,
+            color: _dirty ? Aether.accent : null,
+            // Disabled while a save is in flight (ST-014).
+            onPressed:
+                ctrl != null && _dirty && !conflict && !saving ? _save : null,
+          );
+          if (compact) {
+            // Compact (ST-019): one row — name, state, Save, and an overflow
+            // for find / undo / redo instead of a second wrapped row.
+            return Row(children: [
+              Expanded(child: identity),
+              save,
+              PopupMenuButton<String>(
+                key: studioEditorMoreKey,
+                tooltip: 'More editor actions',
+                icon: const Icon(Icons.more_vert, size: 20),
+                onSelected: (v) => switch (v) {
+                  'find' => onFind?.call(),
+                  'undo' => onUndo?.call(),
+                  'redo' => onRedo?.call(),
+                  _ => null,
+                },
+                itemBuilder: (_) => [
+                  PopupMenuItem(
+                    value: 'find',
+                    enabled: onFind != null,
+                    child: Text(_findOpen ? 'Close find' : 'Find in file'),
+                  ),
+                  PopupMenuItem(
+                    value: 'undo',
+                    enabled: onUndo != null,
+                    child: const Text('Undo'),
+                  ),
+                  PopupMenuItem(
+                    value: 'redo',
+                    enabled: onRedo != null,
+                    child: const Text('Redo'),
+                  ),
+                ],
+              ),
+            ]);
+          }
           final actions = Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               if (roomy && pos != null) ...[
                 Semantics(
-                  liveRegion: true,
                   label:
                       'Line ${pos.line}, column ${pos.column} of ${pos.lines} lines',
                   child: Text(
@@ -935,51 +1012,28 @@ class _StudioEditorState extends State<StudioEditor> {
                 icon: _findOpen ? Icons.search_off : Icons.search,
                 tooltip: 'Find in file',
                 iconSize: 18,
-                onPressed: ctrl == null
-                    ? null
-                    : _findOpen
-                        ? _closeFind
-                        : _openFind,
+                onPressed: onFind,
               ),
               StudioIconButton(
                 icon: Icons.undo,
                 tooltip: 'Undo',
                 iconSize: 18,
-                onPressed: ctrl != null && undo!.value.canUndo ? undo.undo : null,
+                onPressed: onUndo,
               ),
               StudioIconButton(
                 icon: Icons.redo,
                 tooltip: 'Redo',
                 iconSize: 18,
-                onPressed: ctrl != null && undo!.value.canRedo ? undo.redo : null,
+                onPressed: onRedo,
               ),
-              StudioIconButton(
-                icon: Icons.save_outlined,
-                tooltip: 'Save changes',
-                iconSize: 18,
-                color: _dirty ? Aether.accent : null,
-                onPressed:
-                    ctrl != null && _dirty && !conflict ? _save : null,
-              ),
+              save,
             ],
           );
-          if (roomy) {
-            return Row(children: [
-              Expanded(child: identity),
-              const SizedBox(width: 8),
-              actions,
-            ]);
-          }
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              identity,
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: actions,
-              ),
-            ],
-          );
+          return Row(children: [
+            Expanded(child: identity),
+            const SizedBox(width: 8),
+            actions,
+          ]);
         },
       ),
     );
@@ -1188,14 +1242,15 @@ class _NoFileView extends StatelessWidget {
           child: Semantics(
             label: 'No file open',
             child: Text(
-              'Ovid Studio\n\n• Pick a file from the tree, or + to create one\n'
-              '• Ask the AI in chat to read/edit files — they open here as tabs\n'
-              '• Terminal below runs inside the native Linux sandbox',
+              'Pick a file, or ask the agent in chat to create one.\n\n'
+              'These are the files in your cloud workspace — the same ones '
+              'the agent works on in every chat. When the agent changes a '
+              'file, it updates here.',
               textAlign: TextAlign.center,
               style: TextStyle(
-                fontSize: 12.5,
-                height: 1.7,
-                color: Aether.textFaint,
+                fontSize: 13.5,
+                height: 1.6,
+                color: Aether.textMuted,
               ),
             ),
           ),
@@ -1340,13 +1395,11 @@ class _CenteredNotice extends StatelessWidget {
     required this.icon,
     required this.title,
     required this.body,
-    this.action,
   });
 
   final IconData icon;
   final String title;
   final String body;
-  final Widget? action;
 
   @override
   Widget build(BuildContext context) {
@@ -1371,7 +1424,6 @@ class _CenteredNotice extends StatelessWidget {
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 12.5, height: 1.5, color: Aether.textMuted),
             ),
-            if (action != null) ...[const SizedBox(height: 12), action!],
           ],
         ),
       ),
@@ -1395,7 +1447,8 @@ class _BinaryFileView extends StatelessWidget {
       );
 }
 
-/// Above the on-device cap the file is never loaded (F-076).
+/// Above the edit cap the file is never loaded (F-076). There is no
+/// terminal: the agent works with big files on the user's behalf (ST-011).
 class _TooLargeView extends StatelessWidget {
   const _TooLargeView({required this.path, required this.bytes});
 
@@ -1404,21 +1457,13 @@ class _TooLargeView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final command = "less '${path.replaceAll("'", r"'\''")}'";
     return _CenteredNotice(
       icon: Icons.description_outlined,
-      title: 'Too large to open on device',
-      body: '${path.split('/').last}${bytes > 0 ? ' is ${_formatBytes(bytes)}' : ''}. '
-          'Studio edits files up to ${_formatBytes(kStudioEditHardCap)}. '
-          'Open it in the terminal instead:\n$command',
-      action: OutlinedButton.icon(
-        icon: const Icon(Icons.copy, size: 16),
-        label: const Text('Copy terminal command'),
-        onPressed: () {
-          Clipboard.setData(ClipboardData(text: command));
-          showStudioToast(context, 'Command copied');
-        },
-      ),
+      title: 'Too large to edit in Studio',
+      body: '${path.split('/').last}'
+          '${bytes > 0 ? ' is ${_formatBytes(bytes)}' : ''}. Studio edits '
+          'files up to ${_formatBytes(kStudioEditHardCap)}. Ask the agent in '
+          'chat to work with it.',
     );
   }
 }

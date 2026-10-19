@@ -16,9 +16,6 @@ import 'share_actions.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/code_highlight.dart';
 
-const kStudioMovesToCloudMessage =
-    'Studio moves to the cloud in this build.';
-
 /// Largest text file the preview reads inline. Bigger files offer
 /// "Open with" instead of loading megabytes into a Text widget.
 const int artifactPreviewMaxBytes = 512 * 1024;

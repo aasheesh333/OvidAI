@@ -4,8 +4,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:ovid_ai/core/cloud/cloud_ws.dart';
 import 'package:ovid_ai/core/cloud/studio_remote_client.dart';
-import 'package:ovid_ai/core/github_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/studio_drafts.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -17,8 +17,7 @@ import 'support/studio_fake_gateway.dart';
 /// Studio accessibility, re-pointed at the P7 workspace API.
 ///
 /// The screen-level invariants survive the thin-client move: every interactive
-/// control is at least 44dp and labelled, the auth badge is not colour-only,
-/// and the main regions are exposed to screen readers. The removed local-sync
+/// control is at least 44dp and labelled, and the main regions are exposed to screen readers. The removed local-sync
 /// progress live region (RepoCache) is not tested.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -32,7 +31,6 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     AppState.resetTestInstance();
     StudioDraftStore.I.disableForTest();
-    studioLoginPromptOverrideForTest = (_) {};
     final app = AppState.createForTest();
     app.sessions.add(ChatSession(
       id: kFakeStudioSession,
@@ -40,8 +38,6 @@ void main() {
       model: 'gpt-4o',
     ));
     app.activeSessionId = kFakeStudioSession;
-    await GitHubService.I.initialize();
-    GitHubService.I.setTokenForTest('tok');
 
     fake = FakeStudioGateway(
       files: {
@@ -58,10 +54,8 @@ void main() {
   });
 
   tearDown(() async {
-    studioLoginPromptOverrideForTest = null;
     remote.clearAll();
     StudioDraftStore.I.disableForTest();
-    await GitHubService.I.signOut();
     AppState.resetTestInstance();
   });
 
@@ -74,7 +68,10 @@ void main() {
 
   Future<void> pumpStudio(WidgetTester tester) async {
     await tester.pumpWidget(
-      MaterialApp(theme: Aether.theme(), home: const StudioScreen()),
+      MaterialApp(theme: Aether.theme(), home: StudioScreen(
+          workspaceKey: kFakeStudioSession,
+          agentEvents: Stream<CloudSessionEvent>.empty(),
+        )),
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 120));

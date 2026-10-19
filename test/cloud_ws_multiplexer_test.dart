@@ -201,6 +201,27 @@ void main() {
     await ws.disconnect();
   });
 
+  test('(b2) sessionEvents mirrors every ACCEPTED event of every session to '
+      'read-only observers (Studio workspace refresh, ST-006)', () async {
+    final spy = SocketFactorySpy();
+    final ws = await _build(spy);
+    final observed = <String>[];
+    final tap = ws.sessionEvents.listen((e) => observed.add('${e.sessionId}:${e.seq}'));
+    final (events, _) = await _subscribeAndListen(ws, 's1');
+    ws.subscribe('s2').listen((_) {});
+    await pumpEventQueue();
+    final socket = spy.sockets.single;
+    socket.server(_eventFrame('s1', '5-0'));
+    socket.server(_eventFrame('s1', '5-0')); // duplicate: dropped for both
+    socket.server(_eventFrame('s2', '1-0'));
+    await pumpEventQueue();
+    expect(events.map((e) => e.seq), ['5-0'],
+        reason: 'the owner still receives its own stream');
+    expect(observed, ['s1:5-0', 's2:1-0']);
+    await tap.cancel();
+    await ws.disconnect();
+  });
+
   test('(c) the same seq delivered twice is emitted exactly once '
       '(Review Focus #2) and persisted', () async {
     final spy = SocketFactorySpy();

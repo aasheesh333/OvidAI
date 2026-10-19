@@ -137,7 +137,7 @@ StudioRemoteClient _remote(_FakeRest fake) {
   final remote = StudioRemoteClient(
     files: StudioFilesClient(
       fake.client(),
-      sessions: CloudSessionStore.forTest(),
+      sessions: CloudSessionStore.forTest(idMap: const {_session: _session}),
     ),
     drafts: StudioDraftStore.I,
   );
@@ -270,17 +270,22 @@ void main() {
       expect(rest.paths.single, isNot(contains(local)));
     });
 
-    test('an unmapped id passes through unchanged', () async {
+    // ST-002: a chat that never reached the server has a LOCAL id
+    // (microseconds since epoch). Putting it on the wire produced a 404 for a
+    // non-UUID path; it is now refused before any request.
+    test('an unmapped local id is never put on the wire (ST-002)', () async {
       final rest = _RecordingRest();
       final files = StudioFilesClient(
         rest.client(),
         sessions: CloudSessionStore.forTest(),
       );
 
-      await files.treeSnapshot(local);
-
-      expect(rest.paths.single,
-          '/cloud/v1/sessions/$local/workspace/tree');
+      await expectLater(
+        files.treeSnapshot(local),
+        throwsA(isA<StudioNoWorkspaceException>()
+            .having((e) => e.code, 'code', 'no_workspace')),
+      );
+      expect(rest.paths, isEmpty);
     });
 
 
@@ -290,7 +295,7 @@ void main() {
     test('tree parses nested FileNodes from the manifest response', () async {
       final files = StudioFilesClient(
         _FakeRest().client(),
-        sessions: CloudSessionStore.forTest(),
+        sessions: CloudSessionStore.forTest(idMap: const {_session: _session}),
       );
       final root = await files.tree(_session);
 
@@ -335,16 +340,23 @@ void main() {
       await remote.saveStudioFile(_session, 'a.txt');
 
       expect(fake.putCalls, 1);
-      expect(fake.lastPutBody, {'path': 'a.txt', 'contentUtf8': 'new'});
+      // ST-007: the baseline travels as the server-side precondition; there
+      // is no client-side pre-read GET any more.
+      expect(fake.lastPutBody, {
+        'path': 'a.txt',
+        'contentUtf8': 'new',
+        'ifMatchSha256': _sha('old'),
+      });
+      expect(fake.getFileCalls, 1, reason: 'only the open read, no pre-check');
       expect(remote.isStudioFileDirty(_session, 'a.txt'), isFalse);
       expect(remote.baselines(_session)['a.txt'], _sha('new'));
     });
 
     test('PUT 409 becomes a conflict entry and keeps the draft', () async {
-      // First read (open) and the optimistic pre-check both see "old"; the
-      // conflict refetch after the 409 sees what actually landed upstream.
+      // The open read sees "old"; the server refuses the guarded PUT (409)
+      // and the conflict refetch sees what actually landed upstream.
       final fake = _FakeRest(
-        reads: ['old', 'old', 'remote-new'],
+        reads: ['old', 'remote-new'],
         putStatus: 409,
       );
       final remote = _remote(fake);
@@ -367,7 +379,7 @@ void main() {
     testWidgets('409 routes into the editor conflict-resolution path',
         (tester) async {
       final fake = _FakeRest(
-        reads: ['old', 'old', 'remote-new'],
+        reads: ['old', 'remote-new'],
         putStatus: 409,
       );
       final remote = _remote(fake);
@@ -384,9 +396,9 @@ void main() {
       ));
       await tester.pump();
 
-      expect(find.textContaining('changed externally'), findsOneWidget);
+      expect(find.textContaining('changed in the workspace'), findsOneWidget);
 
-      await tester.tap(find.text('Use external'));
+      await tester.tap(find.text('Use workspace version'));
       await tester.pump();
 
       expect(remote.fileBuffer(_session)['a.txt'], 'remote-new');

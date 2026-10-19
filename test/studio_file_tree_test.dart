@@ -93,6 +93,37 @@ void main() {
       expect(nodes.single.isDirectory, isTrue);
     });
 
+    // ST-015: a folder the <5 KB manifest pruned used to expand to nothing.
+    test('an expanded pruned folder ends with a "Show N more" row', () {
+      final root = _dir('', [
+        const FileNode(
+          name: 'big',
+          path: 'big',
+          kind: 'dir',
+          files: 40,
+          dirs: 2,
+        ),
+        FileNode(
+          name: 'partial',
+          path: 'partial',
+          kind: 'dir',
+          omitted: 7,
+          children: [_file('partial/a.ts')],
+        ),
+      ]);
+      final collapsed = flattenStudioTree(root, const {});
+      expect(collapsed.any((n) => n.isMore), isFalse);
+
+      final nodes = flattenStudioTree(root, const {'big', 'partial'});
+      expect(
+        nodes.map((n) => '${n.depth}:${n.isMore ? 'more(${n.hiddenCount})' : n.name}'),
+        ['0:big', '1:more(42)', '0:partial', '1:a.ts', '1:more(7)'],
+      );
+      final loaded = flattenStudioTree(root, const {'big', 'partial'},
+          loadedDirs: const {'partial'});
+      expect(loaded.where((n) => n.isMore).map((n) => n.path), ['big']);
+    });
+
     test('sorting inside a level is case-insensitive and stable', () {
       final root = _dir('', [
         _dir('d', [
