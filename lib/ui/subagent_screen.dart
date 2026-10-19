@@ -161,4 +161,3 @@ class _SubagentRow extends StatelessWidget {
     );
   }
 }
-

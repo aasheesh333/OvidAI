@@ -352,6 +352,32 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
     expect((await messages.page(db, sid, { limit: 10 })).rows).toHaveLength(2);
   });
 
+  it("delete/edit and regenerate refuse while a running task awaits approval, preserving history and approval", async () => {
+    const h = makeApp();
+    const uid = testUid("w1b-approval-history");
+    const sid = await createSession(h, uid);
+    const prompt = await messages.append(db, { sessionId: sid, role: "user", content: "change a file" });
+    const answer = await messages.append(db, { sessionId: sid, role: "assistant", content: "awaiting permission" });
+    const run = await runs.create(db, { sessionId: sid, promptMessageId: prompt.id });
+    await db.$client.unsafe("UPDATE runs SET status = 'running' WHERE id = $1", [run.id]);
+    const approvalSeq = await putEvent(sid, "approval_requested", {
+      approvalId: "approval-history-guard", kind: "tool", summary: "Edit a file", detail: "fs_edit",
+    }, new Date());
+    for (const method of ["DELETE", "POST"] as const) {
+      const res = await h.app.inject({
+        method,
+        url: `/cloud/v1/sessions/${sid}/messages/${answer.id}${method === "POST" ? "/regenerate" : ""}`,
+        headers: authHeaders(uid),
+        ...(method === "POST" ? { payload: {} } : {}),
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe("session_busy");
+    }
+    expect((await messages.page(db, sid, { limit: 10 })).rows.map((m) => m.id)).toEqual([answer.id, prompt.id]);
+    expect((await eventMirror.readSince(db, sid, null, 10)).map((e) => e.seq)).toEqual([approvalSeq]);
+    expect(h.adds).toHaveLength(0);
+  });
+
   // ── branch ─────────────────────────────────────────────────────────────
 
   it("branch creates a new owned session holding the history up to the message", async () => {
