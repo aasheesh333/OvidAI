@@ -92,6 +92,9 @@ String upgradeResultMessage(UpgradeResult result, {String? planTitle}) =>
         'Payment received. Ovid is still confirming it with Google Play — '
             'your plan starts automatically, and we retry every time you '
             'open the app.',
+      UpgradeResult.otherAccount =>
+        'This Google Play subscription belongs to a different Ovid account. '
+            'Sign in with that account to use it.',
       UpgradeResult.unknown => 'Could not complete the upgrade. Try again.',
     };
 

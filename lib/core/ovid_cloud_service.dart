@@ -79,6 +79,10 @@ enum UpgradeResult {
   /// Never "Nothing was charged".
   confirming,
 
+  /// The Play purchase belongs to a different Ovid account (409 /
+  /// account_mismatch): sign in with that account to use it.
+  otherAccount,
+
   /// Anything else.
   unknown,
 }
@@ -1108,19 +1112,29 @@ class OvidCloudService extends ChangeNotifier {
     );
     final c = client ?? _newClient();
     try {
-      final headers = await _headers(scope);
-      final res = await c
-          .post(
-            Uri.parse(billingVerifyUrl),
-            headers: {...headers, 'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'product_id': productId,
-              'purchase_token': purchaseToken,
-              'package_name': packageName,
-            }),
-          )
-          .timeout(const Duration(seconds: 30));
+      Future<http.Response> send({bool forceRefresh = false}) async {
+        final headers = await _headers(scope, forceRefresh: forceRefresh);
+        return c
+            .post(
+              Uri.parse(billingVerifyUrl),
+              headers: {...headers, 'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'product_id': productId,
+                'purchase_token': purchaseToken,
+                'package_name': packageName,
+              }),
+            )
+            .timeout(const Duration(seconds: 30));
+      }
+
+      var res = await send();
       scope.check();
+      // A stale cached ID token must not turn a paid purchase into
+      // "rejected": retry once with a fresh one.
+      if (res.statusCode == 401) {
+        res = await send(forceRefresh: true);
+        scope.check();
+      }
       Map<String, dynamic> body;
       try {
         body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -1138,6 +1152,14 @@ class OvidCloudService extends ChangeNotifier {
       }
       if (res.statusCode >= 500) {
         return const PlayVerifyOutcome(UpgradeResult.unknown);
+      }
+      final errorCode = body['error'] is Map
+          ? (body['error'] as Map)['code']
+          : null;
+      if (res.statusCode == 409 ||
+          errorCode == 'account_mismatch' ||
+          errorCode == 'purchase_owned_by_another_account') {
+        return const PlayVerifyOutcome(UpgradeResult.otherAccount);
       }
       if (res.statusCode != 200) {
         return const PlayVerifyOutcome(UpgradeResult.rejected);
