@@ -74,6 +74,7 @@ import { assertSafeRelPath, r2Keys } from "./keys.js";
 import { anotherLiveSessionOfUser } from "./liveSessionGuard.js";
 import { openReader } from "./rangeReader.js";
 import { resolveWorkspaceDir, type SandboxUidResolver } from "./workspacePaths.js";
+import { withWorkspaceMutation } from "./workspaceMutationLock.js";
 
 // ---------------------------------------------------------------------------
 // Structural mirrors of the @ovid/db / @ovid/queue surfaces (exact signatures;
@@ -783,89 +784,89 @@ export async function writeWorkspaceFile(
     ref.userId,
     ref.sessionId,
   );
-  if (!(await isDirectory(dir))) {
-    throw new WorkspaceStateError(
-      `workspace ${ref.sessionId} is not warm — hydrate before writing`,
-      { code: "not_warm" },
-    );
-  }
-
   const dest = join(dir, rel);
-  const parent = dirname(dest);
-  const realDir = await realpath(dir);
-  // Same realpath jail as reads: a symlinked parent can never redirect the
-  // write outside the workspace. Checked BEFORE mkdir so no directory is
-  // created through an escaping symlink.
-  await assertParentInsideWorkspace(realDir, parent);
-
-  // Preconditions are checked BEFORE mkdir (a refused write leaves no new
-  // folders behind) and again right before the bytes land (below).
-  if (opts.ifMatchSha256 !== undefined) {
-    await assertCurrentSha(dest, rel, opts.ifMatchSha256);
-  }
-  if (opts.ifNoneMatch === true && (await lstatOrNull(dest)) !== null) {
-    throw new PreconditionFailedError(`'${rel}' already exists`, { code: "already_exists" });
-  }
-  await mkdir(parent, { recursive: true });
-
-  // Cheap du accounting: the delta from the file being replaced. Never a
-  // recursive du on the write path (the T10 sweeper owns exact refresh).
-  let priorSize = 0;
-  try {
-    const prev = await lstat(dest);
-    if (prev.isFile()) priorSize = prev.size;
-  } catch {
-    priorSize = 0;
-  }
-
-  const tmp = `${dest}.part-${process.pid}-${randomBytes(4).toString("hex")}`;
-  try {
-    await writeFile(tmp, content);
-    await chmod(tmp, 0o644);
-    if (opts.ifNoneMatch === true) {
-      // Create-only: link(2) fails with EEXIST atomically, so a file that
-      // appeared after the check above is never clobbered.
-      try {
-        await link(tmp, dest);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-          throw new PreconditionFailedError(`'${rel}' already exists`, {
-            code: "already_exists",
-          });
-        }
-        throw err;
-      }
-      await rm(tmp, { force: true });
-    } else {
-      // Compare-and-swap: re-hash right before the rename so the window for
-      // a concurrent agent write is the rename itself, not a client round
-      // trip (ST-007). Agent tools write from another process, so this is
-      // the tightest guarantee available without a cross-process lock.
-      if (opts.ifMatchSha256 !== undefined) {
-        await assertCurrentSha(dest, rel, opts.ifMatchSha256);
-      }
-      await rename(tmp, dest);
+  return withWorkspaceMutation([dest], async () => {
+    if (!(await isDirectory(dir))) {
+      throw new WorkspaceStateError(
+        `workspace ${ref.sessionId} is not warm — hydrate before writing`,
+        { code: "not_warm" },
+      );
     }
-  } catch (err) {
-    await rm(tmp, { force: true }).catch(() => {});
-    throw err;
-  }
+    const parent = dirname(dest);
+    const realDir = await realpath(dir);
+    // Same realpath jail as reads: a symlinked parent can never redirect the
+    // write outside the workspace. Checked BEFORE mkdir so no directory is
+    // created through an escaping symlink.
+    await assertParentInsideWorkspace(realDir, parent);
 
-  const sha256 = sha256Hex(content);
-  await deps.activity.bump(ref.sessionId);
+    // Preconditions are checked BEFORE mkdir (a refused write leaves no new
+    // folders behind) and again right before the bytes land (below).
+    if (opts.ifMatchSha256 !== undefined) {
+      await assertCurrentSha(dest, rel, opts.ifMatchSha256);
+    }
+    if (opts.ifNoneMatch === true && (await lstatOrNull(dest)) !== null) {
+      throw new PreconditionFailedError(`'${rel}' already exists`, { code: "already_exists" });
+    }
+    await mkdir(parent, { recursive: true });
 
-  // T6 carry: re-read the row and only refresh while it is still warm — the
-  // upsert's conflict arm forces state='warm', so it must never race a
-  // hibernate claim. Missing row / null du: the sweeper registers/refreshes.
-  const row = await deps.fileManifests.get(deps.db, ref.sessionId);
-  if (row !== null && row.state === "warm" && row.workspaceBytes !== null) {
-    await deps.fileManifests.upsertWarm(deps.db, {
-      sessionId: ref.sessionId,
-      userId: ref.userId,
-      workspaceBytes: Math.max(0, row.workspaceBytes + content.length - priorSize),
-    });
-  }
+    // Cheap du accounting: the delta from the file being replaced. Never a
+    // recursive du on the write path (the T10 sweeper owns exact refresh).
+    let priorSize = 0;
+    try {
+      const prev = await lstat(dest);
+      if (prev.isFile()) priorSize = prev.size;
+    } catch {
+      priorSize = 0;
+    }
 
-  return { path: rel, sizeBytes: content.length, sha256Hex: sha256 };
+    const tmp = `${dest}.part-${process.pid}-${randomBytes(4).toString("hex")}`;
+    try {
+      await writeFile(tmp, content);
+      await chmod(tmp, 0o644);
+      if (opts.ifNoneMatch === true) {
+        // Create-only: link(2) fails with EEXIST atomically, so a file that
+        // appeared after the check above is never clobbered.
+        try {
+          await link(tmp, dest);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+            throw new PreconditionFailedError(`'${rel}' already exists`, {
+              code: "already_exists",
+            });
+          }
+          throw err;
+        }
+        await rm(tmp, { force: true });
+      } else {
+        // The compare and replacement are serialized with other Studio
+        // mutations in this worker process. This does not synchronize raw
+        // agent/shell writes from another process.
+        if (opts.ifMatchSha256 !== undefined) {
+          await assertCurrentSha(dest, rel, opts.ifMatchSha256);
+        }
+        await rename(tmp, dest);
+      }
+    } catch (err) {
+      await rm(tmp, { force: true }).catch(() => {});
+      throw err;
+    }
+
+    const sha256 = sha256Hex(content);
+    await deps.activity.bump(ref.sessionId);
+
+    // T6 carry: re-read the row and only refresh while it is still warm — the
+    // upsert's conflict arm forces state='warm', so it must never race a
+    // hibernate claim. Missing row / null du: the sweeper registers/refreshes.
+    const row = await deps.fileManifests.get(deps.db, ref.sessionId);
+    if (row !== null && row.state === "warm" && row.workspaceBytes !== null) {
+      await deps.fileManifests.upsertWarm(deps.db, {
+        sessionId: ref.sessionId,
+        userId: ref.userId,
+        workspaceBytes: Math.max(0, row.workspaceBytes + content.length - priorSize),
+      });
+    }
+
+    return { path: rel, sizeBytes: content.length, sha256Hex: sha256 };
+  });
 }
 
