@@ -423,7 +423,7 @@ void main() {
       expect(suggestion, findsOneWidget);
       await tester.tap(suggestion);
       await tester.pump();
-      expect(draft(tester), 'prefix @session:bounded-b ');
+      expect(draft(tester), 'prefix @[B] ');
       await tester.enterText(composer, 'prefix @B');
       await tester.pump();
       tester.widget<TextField>(composer).controller!.clear();

@@ -1,12 +1,8 @@
-import 'dart:convert';
-import 'dart:io';
 
-import 'package:archive/archive.dart';
-import 'package:flutter/foundation.dart';
-import 'package:path_provider/path_provider.dart';
 
 import 'cloud/cloud_agent_facade.dart';
 import 'cloud/models.dart';
+import 'native_share.dart';
 import 'presets.dart';
 import 'state.dart';
 
@@ -118,20 +114,14 @@ class CommandService {
     register(
       AgentCommand(
         name: 'clear',
-        description: 'Clear the current session messages',
+        description: 'Start a fresh chat (this one stays in your history)',
         handler: (args) async {
-          final s = AppState.I.activeSession;
-          if (s == null) return CommandResult(feedback: 'No active session.');
-          try {
-            await AppState.I.deleteMessagesFrom(s.id, 0);
-          } catch (_) {
-            return const CommandResult(
-              feedback:
-                  'Session could not be cleared. Your draft and messages have been kept; retry the deletion.',
-              clearInput: false,
-            );
-          }
-          return CommandResult(feedback: 'Session cleared.');
+          // CH-025: cloud chats keep their history server-side, so "clear"
+          // honestly means a fresh context — a new chat. Nothing is deleted.
+          AppState.I.newSession();
+          return const CommandResult(
+            feedback: 'Started a new chat. The previous one is in your history.',
+          );
         },
       ),
     );
@@ -145,15 +135,11 @@ class CommandService {
             'log); optional focus text steers the summary',
         handler: (args) async {
           final s = AppState.I.activeSession;
-          final p = AppState.I.providerForSession(s);
-          if (s == null || p == null) {
-            return const CommandResult(
-              feedback: 'Select a provider and model first.',
-            );
+          if (s == null) {
+            return const CommandResult(feedback: 'No active session.');
           }
-          // PR26/C5: /compact is idle-only (busy|changed error codes)
-          // — compacting under a live run would race the loop's own
-          // compaction + rewrite history it is iterating.
+          // PR26/C5: /compact is idle-only — compacting under a live run
+          // would race the loop's own compaction.
           if (CloudAgentFacade.I.busyFor(s.id)) {
             return const CommandResult(
               feedback:
@@ -161,10 +147,11 @@ class CommandService {
                   '(queue it as a message instead).',
             );
           }
-          // Local compaction died with the agent-core satellite strip
-          // (P8 Task 18); Ovid Cloud compacts server-side.
-          return const CommandResult(
-            feedback: 'Context compaction is managed by Ovid Cloud.',
+          // CH-025: Ovid Cloud implements /compact — forward it verbatim;
+          // the server's answer (and its compaction event) is the result.
+          final focus = args.trim();
+          return CommandResult(
+            prompt: focus.isEmpty ? '/compact' : '/compact $focus',
           );
         },
       ),
@@ -179,8 +166,12 @@ class CommandService {
         handler: (args) async {
           final agent = CloudAgentFacade.I;
           if (args.trim().toLowerCase() == 'off') {
+            // The Plan chip rides every send (CT-001): the server leaves
+            // plan mode with the next message.
             agent.planMode = false;
-            return const CommandResult(feedback: 'Plan mode off.');
+            return const CommandResult(
+              feedback: 'Plan mode off — applies to your next message.',
+            );
           }
           agent.planMode = true;
           final msg = args.trim().isEmpty
@@ -234,7 +225,6 @@ class CommandService {
           // drive died with the local service (P8 Task 19); the cloud
           // roster is server-owned. The `plan` preset still owns plan +
           // read-only; any other preset clears that coupling.
-          final hadMessages = s.messages.isNotEmpty;
           final agent = CloudAgentFacade.I;
           s.presetId = match.id;
           if (match.id == 'plan') {
@@ -245,11 +235,12 @@ class CommandService {
           }
           await app.persistSessions();
           app.refresh();
+          // The preset rides every send (CT-001); the server validates it
+          // against its built-in roster.
           return CommandResult(
             feedback:
                 'Preset → ${match.id} (${match.label}) — '
-                '${match.description}'
-                '${hadMessages ? ' Applies from your next message.' : ''}',
+                '${match.description} Applies from your next message.',
           );
         },
       ),
@@ -338,96 +329,43 @@ class CommandService {
     register(
       AgentCommand(
         name: 'export',
-        description: 'Export all sessions as a ZIP (sessions, ledgers, spill)',
+        description: 'Share this chat as a text transcript',
         handler: (args) async {
+          // CH-025: cloud chats live in the server projection, not in
+          // `ChatSession.messages` — export what the chat actually shows.
+          final s = AppState.I.activeSession;
+          if (s == null) {
+            return const CommandResult(feedback: 'No active session.');
+          }
+          final rows = CloudAgentFacade.I.transcriptFor(s.id) ?? s.messages;
+          final visible = [
+            for (final m in rows)
+              if (CloudAgentFacade.pendingClientMsgIdOf(m) == null &&
+                  m.content.trim().isNotEmpty)
+                m,
+          ];
+          if (visible.isEmpty) {
+            return const CommandResult(feedback: 'This chat has no messages yet.');
+          }
+          final copy = ChatSession(id: s.id, title: s.title, model: s.model);
+          copy.messages.addAll(visible);
           try {
-            final file = await _exportSessionsZip();
-            return CommandResult(feedback: 'Exported to:\n${file.path}');
-          } catch (e) {
-            return CommandResult(feedback: 'Export failed: $e');
+            await NativeShare.transcript(copy);
+            return const CommandResult(feedback: 'Opening the share sheet…');
+          } catch (_) {
+            return const CommandResult(
+              feedback: 'Could not open the share sheet on this device.',
+            );
           }
         },
       ),
     );
 
-    register(
-      AgentCommand(
-        name: 'feedback',
-        hint: '<text>',
-        description: 'Record feedback for this build',
-        handler: (args) async {
-          if (args.trim().isEmpty) {
-            return const CommandResult(feedback: 'Feedback needs text.');
-          }
-          try {
-            final dir = await getApplicationDocumentsDirectory();
-            final file = File('${dir.path}/feedback.log');
-            await file.writeAsString(
-              '${DateTime.now().toIso8601String()} $args\n',
-              mode: FileMode.append,
-            );
-            return CommandResult(feedback: 'Feedback recorded. Thank you.');
-          } catch (e) {
-            return CommandResult(feedback: 'Could not record feedback: $e');
-          }
-        },
-      ),
-    );
+    // `/feedback` was removed (CH-025): it wrote a local file nothing ever
+    // uploaded. Report a reply with its flag action instead.
   }
 
   /// Kebab-case preset name for `/permission` (Read-Only → read-only).
   static String _permName(AgentMode m) =>
       m.label.toLowerCase().replaceAll(' ', '-');
-
-  /// Test seam: fixed directory for exports (no path_provider channel in
-  /// unit tests). When set, [getTemporaryDirectory] is never called.
-  @visibleForTesting
-  static String? exportDirOverrideForTest;
-
-  /// session-log-export parity: a streamed ZIP containing
-  ///   sessions.json          — every session with full messages
-  ///   ledgers/`<id>`.jsonl   — the append-only event ledger per session
-  /// plus a manifest. Descendants (subagent children) are inside their
-  /// parent's session JSON by construction (lineage fields).
-  Future<File> _exportSessionsZip() async {
-    final app = AppState.I;
-    final outDir =
-        exportDirOverrideForTest ?? (await getTemporaryDirectory()).path;
-    final file = File(
-      '$outDir/ovid-export-${DateTime.now().millisecondsSinceEpoch}.zip',
-    );
-    final archive = Archive();
-
-    void addText(String path, String text) {
-      archive.addFile(ArchiveFile.string(path, text));
-    }
-
-    // Manifest first — a reader knows the shape before parsing anything.
-    addText(
-      'manifest.json',
-      const JsonEncoder.withIndent('  ').convert({
-        'exportedAt': DateTime.now().toIso8601String(),
-        'format': 'ovid-session-export/1',
-        'sessions': app.sessions.length,
-        'contents': [
-          'sessions.json — every session (messages, lineage, goals, todos)',
-        ],
-      }),
-    );
-
-    addText(
-      'sessions.json',
-      const JsonEncoder.withIndent('  ').convert({
-        'exportedAt': DateTime.now().toIso8601String(),
-        'sessions': app.sessions.map((s) => s.toJson()).toList(),
-      }),
-    );
-
-    // The local event ledger was deleted in P8 Task 20 (the trajectory view
-    // reads the server event mirror now), so there is no `ledgers/` section
-    // to export. Transcripts above remain the export's payload.
-    final bytes = ZipEncoder().encode(archive);
-    await file.writeAsBytes(bytes);
-    return file;
-  }
 }

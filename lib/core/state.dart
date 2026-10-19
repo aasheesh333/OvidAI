@@ -3633,6 +3633,8 @@ class AppState extends ChangeNotifier {
   Future<void> setShareSessionMemory(bool v) async {
     shareSessionMemory = v;
     notifyListeners();
+    // SE-005 / R1: the server enforces this on every run.
+    CloudAgentFacade.syncPreferencesIfInstalled();
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kShareMemory, v);
@@ -3644,6 +3646,8 @@ class AppState extends ChangeNotifier {
   Future<void> setMemoryEnabled(bool v) async {
     memoryEnabled = v;
     notifyListeners();
+    // SE-005: the server enforces this on every run (memory tools).
+    CloudAgentFacade.syncPreferencesIfInstalled();
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kMemoryEnabled, v);

@@ -3,11 +3,17 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
-/// App-level connectivity signal (the connection monitor brand/connection parity): a tiny
-/// reachability probe that never blocks the UI and drives the sidebar
-/// chip, the shell's offline banner and the composer's Send button. No new
-/// dependency — a plain `HttpClient` GET against a fast, public,
-/// CDN-hosted endpoint that answers 204 with no body.
+import 'cloud/cloud_config.dart';
+
+/// App-level connectivity signal: a tiny reachability probe that never
+/// blocks the UI and drives the sidebar chip, the shell's offline banner and
+/// the outbox (SH-011). It asks the question that matters — "can we reach
+/// OVID?" — by GETting the public gateway health route
+/// (`https://api.ovidsi.com/cloud/v1/health`). Any HTTP answer from Ovid
+/// (200 ok, or 503 degraded) counts as reachable: sends then go through the
+/// outbox, which retries by itself. Only when Ovid does not answer at all is
+/// a public CDN endpoint asked, purely to tell "no internet" from "Ovid is
+/// unreachable" for the banner copy.
 ///
 /// Semantics:
 ///   online   — last probe answered within the deadline
@@ -21,9 +27,17 @@ import 'package:flutter/foundation.dart';
 class ConnectionService extends ChangeNotifier {
   ConnectionService._({
     Future<bool> Function()? reach,
+    Future<bool> Function()? internetReach,
     bool autoProbe = true,
     this.periodicRecheck = true,
-  }) : _reach = reach ?? _defaultReach {
+  })  : _reach = reach ?? _defaultReach,
+        _internetReach = internetReach ??
+            (reach != null
+                ? (() async => false)
+                : () async {
+                    final s = await _get(_internetProbeUrl);
+                    return s == 204 || s == 200;
+                  }) {
     if (autoProbe) probe();
   }
 
@@ -35,10 +49,12 @@ class ConnectionService extends ChangeNotifier {
   factory ConnectionService.forTest({
     ConnectionStatus status = ConnectionStatus.online,
     Future<bool> Function()? reach,
+    Future<bool> Function()? internetReach,
     bool periodicRecheck = false,
   }) {
     final s = ConnectionService._(
       reach: reach ?? () async => true,
+      internetReach: internetReach,
       autoProbe: false,
       periodicRecheck: periodicRecheck,
     );
@@ -69,23 +85,36 @@ class ConnectionService extends ChangeNotifier {
     _instance = value;
   }
 
-  /// Probe target: generates a 204 with no body, ~20 byte response.
-  static const _probeUrl = 'https://www.gstatic.com/generate_204';
+  /// Primary probe: Ovid's own public health route.
+  static String get ovidProbeUrl => '${CloudConfig.restBase}/health';
+
+  /// Secondary probe, only consulted when Ovid did not answer: tells "no
+  /// internet at all" from "Ovid is unreachable".
+  static const _internetProbeUrl = 'https://www.gstatic.com/generate_204';
 
   /// Re-check cadence while offline (none while online).
   static const offlineRecheckInterval = Duration(seconds: 30);
 
+  /// True when the last failed probe found the internet up but Ovid
+  /// unreachable (the banner says so instead of "you're offline").
+  bool ovidUnreachable = false;
+
   static Future<bool> _defaultReach() async {
+    // Ovid answering at all (200 ok or 503 degraded) is "reachable".
+    final status = await _get(ovidProbeUrl);
+    return status != null && (status == 200 || status == 503);
+  }
+
+  /// Status code of a bounded GET, or null when nothing answered.
+  static Future<int?> _get(String url) async {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 4);
     try {
       final request = await client
-          .getUrl(Uri.parse(_probeUrl))
+          .getUrl(Uri.parse(url))
           .timeout(const Duration(seconds: 4));
-      // Deliberately no redirect guard: the probe target is a FIXED public
-      // CDN URL that answers directly. HttpShim's redirect/SSRF policy
-      // existed for arbitrary agent fetches and died with the local service;
-      // re-implementing it here would add surface for no reachability gain.
+      // Deliberately no redirect guard: both targets are FIXED URLs that
+      // answer directly.
       final response =
           await request.close().timeout(const Duration(seconds: 4));
       // Drain at most 1 KiB so an unexpected body can never grow the probe.
@@ -94,15 +123,16 @@ class ConnectionService extends ChangeNotifier {
         read += chunk.length;
         if (read >= 1024) break;
       }
-      return response.statusCode == 204 || response.statusCode == 200;
+      return response.statusCode;
     } catch (_) {
-      return false;
+      return null;
     } finally {
       client.close(force: true);
     }
   }
 
   final Future<bool> Function() _reach;
+  final Future<bool> Function() _internetReach;
 
   /// Whether to re-probe every [offlineRecheckInterval] while offline.
   final bool periodicRecheck;
@@ -132,6 +162,15 @@ class ConnectionService extends ChangeNotifier {
     } catch (_) {
       ok = false;
     }
+    var internetUp = false;
+    if (!ok) {
+      try {
+        internetUp = await _internetReach();
+      } catch (_) {
+        internetUp = false;
+      }
+    }
+    ovidUnreachable = !ok && internetUp;
     _settle(ok ? ConnectionStatus.online : ConnectionStatus.offline);
   }
 

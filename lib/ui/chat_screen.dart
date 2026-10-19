@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../core/theme.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
+import '../core/cloud/cloud_errors.dart';
 import '../core/cloud/cloud_session_store.dart';
 import '../core/cloud/models.dart';
 import '../core/model_limits.dart';
@@ -24,6 +25,8 @@ import '../core/voice_input_service.dart';
 import '../core/state.dart';
 import '../core/native_share.dart';
 import 'share_actions.dart';
+import 'auth_screen.dart';
+import 'billing_screen.dart';
 import 'browser_screen.dart';
 import 'sidebar.dart';
 import 'settings_screen.dart';
@@ -1047,7 +1050,23 @@ class _ChatScreenState extends State<ChatScreen>
     unawaited(
       ComposerDraftStore.I.load().then((_) => _restorePersistedDraft()),
     );
+    ConnectionService.I.addListener(_onConnectivityForHistory);
     unawaited(_bootCloud());
+  }
+
+  /// CH-035: a history page that failed while offline (or on a transient
+  /// 5xx) is retried as soon as Ovid is reachable again — never a
+  /// permanent empty chat.
+  bool _wasOfflineForHistory = false;
+  void _onConnectivityForHistory() {
+    final offline = ConnectionService.I.offline;
+    final cameBack = _wasOfflineForHistory && !offline;
+    _wasOfflineForHistory = offline;
+    if (!cameBack || !mounted) return;
+    final active = AppState.I.activeSessionId;
+    if (active != null && _cloudTranscriptsFailed.contains(active)) {
+      unawaited(_loadCloudTranscript(active, force: true));
+    }
   }
 
   /// P8 Task 10 boot path (binding carries from Task 9):
@@ -1072,6 +1091,9 @@ class _ChatScreenState extends State<ChatScreen>
       } catch (e) {
         Diag.swallow('chat_screen.bootCloud', e);
       }
+      // SE-005 / R1: the server enforces the Settings memory switches on
+      // every run — make sure it has the user's current choice.
+      unawaited(CloudAgentFacade.I.syncPreferences());
     }
     if (!mounted) return;
     final active = AppState.I.activeSessionId;
@@ -1082,21 +1104,46 @@ class _ChatScreenState extends State<ChatScreen>
   /// events keep them fresh after the first page.
   final Set<String> _cloudTranscriptsLoaded = <String>{};
 
+  /// First history pages that FAILED (offline, 5xx): the chat shows
+  /// "Couldn't load this chat" with Retry instead of an empty chat (CH-035).
+  final Set<String> _cloudTranscriptsFailed = <String>{};
+
+  /// First history pages in flight (the chat shows a loading state).
+  final Set<String> _cloudTranscriptsLoading = <String>{};
+
   /// Pages the active session's transcript through the store (seed + cache
-  /// write). A local-only session (never sent) has no server transcript —
-  /// the REST failure is swallowed and the empty chat renders.
-  Future<void> _loadCloudTranscript(String sessionId) async {
+  /// write). Marked loaded only on success; a failure for a known server
+  /// session is remembered and retried (Retry button, reconnect). A
+  /// local-only session (never sent) has no server transcript.
+  Future<void> _loadCloudTranscript(String sessionId, {bool force = false}) async {
     if (!mounted) return;
-    if (!_cloudTranscriptsLoaded.add(sessionId)) return;
+    if (!force && _cloudTranscriptsLoaded.contains(sessionId)) return;
+    if (!_cloudTranscriptsLoading.add(sessionId)) return;
+    final store = CloudSessionStore.I;
+    var known = false;
     try {
-      final store = CloudSessionStore.I;
       await store.ready;
+      known = store.knownServerIdFor(sessionId) != null;
       final serverId = store.serverIdFor(sessionId) ?? sessionId;
       await store.loadTranscript(serverId);
+      _cloudTranscriptsLoaded.add(sessionId);
+      _cloudTranscriptsFailed.remove(sessionId);
     } catch (e) {
       Diag.swallow('chat_screen.loadCloudTranscript', e);
+      if (known) {
+        _cloudTranscriptsFailed.add(sessionId);
+      } else {
+        // A chat that never reached the server has no history to load.
+        _cloudTranscriptsLoaded.add(sessionId);
+      }
+    } finally {
+      _cloudTranscriptsLoading.remove(sessionId);
+      if (mounted) setState(() {});
     }
   }
+
+  /// EM-010: one pending auto-create at a time.
+  bool _autoSessionScheduled = false;
 
   /// Fetches the next OLDER server page for the active session's transcript
   /// (chat P1: history past the first server page was unreachable — the
@@ -1205,6 +1252,7 @@ class _ChatScreenState extends State<ChatScreen>
 
   @override
   void dispose() {
+    ConnectionService.I.removeListener(_onConnectivityForHistory);
     _fallbackNotice?.removeListener(_showModelFallbackNotice);
     unawaited(ComposerDraftStore.I.flush());
     _scroll.dispose();
@@ -1522,6 +1570,20 @@ class _ChatScreenState extends State<ChatScreen>
       animation: Listenable.merge([app, _agent]),
       builder: (_, _) {
         final s = app.activeSession;
+        // EM-010: a signed-in user always has a chat to type into. A fresh
+        // account (or a deleted active chat) gets a new local chat on the
+        // spot; the server session is created by the first send.
+        if (s == null && app.sessionAccountReady && !_autoSessionScheduled) {
+          _autoSessionScheduled = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _autoSessionScheduled = false;
+            if (!mounted) return;
+            final a = AppState.I;
+            if (a.activeSession == null && a.sessionAccountReady) {
+              a.newSession();
+            }
+          });
+        }
         // Restore the draft that belongs to THIS session — never leak
         // another session's composer text.
         if (s != null &&
@@ -1532,6 +1594,13 @@ class _ChatScreenState extends State<ChatScreen>
             if (_draftBindScheduledFor == s.id) {
               _draftBindScheduledFor = null;
             }
+            // CH-014: the chat we are leaving drops its live subscription
+            // (once its work settles); the one we open (re)subscribes.
+            final previous = _boundSessionId;
+            if (previous != null && previous != s.id) {
+              CloudAgentFacade.I.releaseSession(previous);
+            }
+            CloudAgentFacade.I.activateSession(s.id);
             _bindDraft(s.id);
             // Thin client: the newly active session's server transcript is
             // paged (seed + offline cache write) the first time it opens.
@@ -1644,6 +1713,7 @@ class _ChatScreenState extends State<ChatScreen>
                     _CloudErrorRow(
                       sessionId: AppState.I.activeSessionId,
                       onRetry: _retryFailedCloudPrompt,
+                      onPickModel: () => _modelPicker(context),
                     ),
                     _QueueDock(
                       sessionId: AppState.I.activeSessionId,
@@ -1687,7 +1757,20 @@ class _ChatScreenState extends State<ChatScreen>
                           children: [
                             Expanded(
                               child: s == null || _messagesOf(s).isEmpty
-                                  ? const _EmptyState()
+                                  ? (s != null &&
+                                          _cloudTranscriptsFailed
+                                              .contains(s.id)
+                                      ? _HistoryLoadFailed(
+                                          loading: _cloudTranscriptsLoading
+                                              .contains(s.id),
+                                          onRetry: () => unawaited(
+                                            _loadCloudTranscript(
+                                              s.id,
+                                              force: true,
+                                            ),
+                                          ),
+                                        )
+                                      : const _EmptyState())
                                   : Stack(
                                       children: [
                                         // Pinch-to-zoom: scales message text only.
@@ -2142,12 +2225,16 @@ class _ChatScreenState extends State<ChatScreen>
                                 // `busyFor` also covers a send whose POST has not
                                 // landed yet, so a double-tap queues instead of
                                 // dispatching a second run (double spend). ──
+                                var interrupt = false;
                                 if (_agent.busyFor(s.id)) {
                                   if (AppState.I.sendWhileBusyInterrupt) {
+                                    // CH-044: stop the current run AND send
+                                    // now — the server queues this run right
+                                    // behind the one being cancelled.
                                     _agent.stopRequested(
                                       sessionId: s.id,
                                     );
-                                    // fall through to send
+                                    interrupt = true;
                                   } else {
                                     if (_enqueuePrompt(s, t)) clearSubmitted();
                                     return;
@@ -2160,6 +2247,7 @@ class _ChatScreenState extends State<ChatScreen>
                                     s,
                                     t,
                                     onAccepted: clearSubmitted,
+                                    interrupt: interrupt,
                                   );
                                 }
                               },
@@ -2317,6 +2405,7 @@ class _ChatScreenState extends State<ChatScreen>
     ChatSession? s,
     String t, {
     VoidCallback? onAccepted,
+    bool interrupt = false,
   }) {
     final app = AppState.I;
     final session = s;
@@ -2326,64 +2415,112 @@ class _ChatScreenState extends State<ChatScreen>
       return;
     }
     // P8 Task 20: the local provider/run arm is gone. There is no local
-    // provider validation and no local optimistic row — the run is admitted
-    // server-side and the facade owns staging.
-    unawaited(_sendCloudPrompt(session, t, onAccepted: onAccepted));
+    // provider validation — the run is admitted server-side and the facade
+    // owns staging.
+    unawaited(_sendCloudPrompt(session, t,
+        onAccepted: onAccepted, interrupt: interrupt));
   }
 
-  /// The last cloud prompt whose send FAILED — the error row's Retry
-  /// affordance re-sends it. Null once a send is accepted.
-  String? _lastFailedCloudPrompt;
+  /// Sessions the user @-tagged in [text] (`@[Chat title]`, inserted by the
+  /// @ menu): their server ids ride the send so the agent sees THOSE chats'
+  /// context for this turn only (owner rule R1). Unsynced chats are skipped;
+  /// the server also resolves the tag by title.
+  static List<String> sessionRefsIn(String text, String currentSessionId) {
+    final store = CloudSessionStore.I;
+    final refs = <String>[];
+    for (final match in _sessionTag.allMatches(text)) {
+      final title = match.group(1)!.trim().toLowerCase();
+      for (final candidate in AppState.I.sessions) {
+        if (candidate.id == currentSessionId) continue;
+        if (candidate.title.trim().toLowerCase() != title) continue;
+        final serverId = store.knownServerIdFor(candidate.id);
+        if (serverId != null && !refs.contains(serverId)) refs.add(serverId);
+      }
+      if (refs.length >= 5) break;
+    }
+    return refs;
+  }
 
-  /// Cloud send path (P8 Task 10). The facade POSTs, appends the optimistic
-  /// user row to the live projection and owns staged attachments. The draft
-  /// is only cleared when the send was ACCEPTED — a 402/409/503 envelope
-  /// keeps the composed text so nothing is lost (Review Focus #4); the
-  /// error row explains and, for 5xx, offers Retry.
+  static final RegExp _sessionTag = RegExp(r'@\[([^\]\n]{1,120})\]');
+
+  /// Cloud send path. The facade shows the prompt as a pending row at once
+  /// and makes it durable in the outbox before anything touches the
+  /// network, so the composer clears as soon as the prompt is safe
+  /// (`onQueued`) — never lost on a timeout, 429, 401 or process death
+  /// (CH-009, CH-011). Failures render on the row ("Not sent" + Retry) and
+  /// in the error row with the right action.
   Future<void> _sendCloudPrompt(
     ChatSession session,
     String text, {
     VoidCallback? onAccepted,
+    bool interrupt = false,
   }) async {
     final facade = CloudAgentFacade.I;
-    if (facade.busyFor(session.id)) {
+    if (!interrupt && facade.busyFor(session.id)) {
       if (_enqueuePrompt(session, text)) onAccepted?.call();
       return;
     }
-    await facade.runTask(text, sessionId: session.id);
-    if (!mounted) return;
-    final accepted = facade.runStateFor(session.id).lastErrorCode == null;
-    if (!accepted) {
-      _lastFailedCloudPrompt = text;
-      return;
-    }
-    _lastFailedCloudPrompt = null;
-    // Local cosmetic parity with the local path's first-prompt auto title
-    // and recency touch (the server transcript renders from the
-    // projection; the row title is what the sidebar shows).
-    if (session.title.isEmpty || session.title == 'New chat') {
+    // CH-013: the first prompt titles the chat BEFORE the send, so the
+    // server session is created with it (and an existing server session is
+    // renamed) — the server's "New chat" never overwrites a real title.
+    if (CloudSessionStore.isPlaceholderTitle(session.title)) {
       session.title = AppState.autoTitle(text);
       session.touch();
       AppState.I.refresh();
+      CloudAgentFacade.renameSessionIfInstalled(session.id, session.title);
     }
-    onAccepted?.call();
-    // New user message → snap to bottom so the user sees the answer start.
-    _atBottom = true;
-    Future.delayed(const Duration(milliseconds: 80), () {
-      if (_scroll.hasClients) {
-        _scroll.jumpTo(_scroll.position.maxScrollExtent);
-      }
-    });
+    var queued = false;
+    await facade.runTask(
+      text,
+      sessionId: session.id,
+      sessionRefs: sessionRefsIn(text, session.id),
+      onQueued: () {
+        queued = true;
+        onAccepted?.call();
+        // New user message → snap to bottom so the user sees it at once.
+        _atBottom = true;
+        Future.delayed(const Duration(milliseconds: 80), () {
+          if (_scroll.hasClients) {
+            _scroll.jumpTo(_scroll.position.maxScrollExtent);
+          }
+        });
+      },
+    );
+    if (!mounted) return;
+    if (!queued) {
+      // The prompt never left the composer (no chat yet, …): keep the
+      // draft; the error row explains.
+      _lastFailedCloudPrompt[session.id] = text;
+    } else {
+      _lastFailedCloudPrompt.remove(session.id);
+    }
   }
 
-  /// Retry affordance for a retryable cloud envelope (5xx `unavailable`):
-  /// re-sends the preserved draft through the same send path.
+  /// Drafts that could not even be queued, per session (CH-046 keying).
+  final Map<String, String> _lastFailedCloudPrompt = <String, String>{};
+
+  /// The error row's Retry: a refused prompt is re-delivered with its SAME
+  /// clientMsgId (CH-010); a failed RUN re-sends the last prompt.
   Future<void> _retryFailedCloudPrompt() async {
-    final text = _lastFailedCloudPrompt;
     final session = AppState.I.activeSession;
-    if (text == null || session == null) return;
-    _lastFailedCloudPrompt = null;
-    await _sendCloudPrompt(session, text);
+    if (session == null) return;
+    final facade = CloudAgentFacade.I;
+    for (final entry in CloudSessionStore.I.outboxFor(session.id)) {
+      if (entry.failed) {
+        await facade.retryPendingSend(entry.clientMsgId);
+        return;
+      }
+    }
+    if (CloudSessionStore.I.outboxFor(session.id).isNotEmpty) {
+      await CloudSessionStore.I.flushOutbox();
+      return;
+    }
+    if (facade.canRetryLastPrompt(session.id)) {
+      await facade.retryLastPrompt(session.id);
+      return;
+    }
+    final text = _lastFailedCloudPrompt.remove(session.id);
+    if (text != null) await _sendCloudPrompt(session, text);
   }
 
   /// Background jobs popover (the jobs panel ui-jobs): one row per job with label,
@@ -3296,7 +3433,7 @@ class _EmptyState extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Ask, deep-dive, build — the agent runs tools right here.',
+                    'Ask, research, build. Ovid works on it in the cloud.',
                     style: TextStyle(
                       fontSize: 13,
                       height: 1.5,
@@ -5390,6 +5527,11 @@ class _MessageView extends StatelessWidget {
                 // Attachment chips under the user bubble (in-chat display).
                 if (isUser && m.attachments.isNotEmpty)
                   _attachmentTiles(context),
+                // Delivery state of a prompt the server has not confirmed
+                // yet (CH-009 / CH-011).
+                if (isUser &&
+                    CloudAgentFacade.pendingClientMsgIdOf(m) != null)
+                  _PendingSendStatus(message: m),
               ],
             ),
           ),
@@ -6718,29 +6860,35 @@ class _InputBarState extends State<_InputBar> {
           icon: Icons.info_outline,
           name: 'no files yet',
           description:
-              'The agent creates workspace files as it works — '
-              'try @session:<id> to cite another chat',
+              'The agent creates workspace files as it works. '
+              'Type @ and pick a chat to include its context.',
           hint: '',
           insert: '@',
           group: 'Files',
         ),
       ));
     }
-    // ── @session: this chat's sessions (the session mention provider session-reference parity) ──
+    // ── @[chat title]: include another chat's context in THIS message only
+    // (owner rule R1 — chats never see each other unless tagged, or unless
+    // "Share session memory" is on). The server resolves the tag.
     for (final s in app.rootSessions.take(30)) {
       if (s.id == parent.id) continue;
-      final score = _fuzzyScore('${s.title} ${s.id}', query);
+      final title = s.title.replaceAll(RegExp(r'[\[\]\n]'), ' ').trim();
+      if (title.isEmpty || CloudSessionStore.isPlaceholderTitle(title)) {
+        continue;
+      }
+      final score = _fuzzyScore(title, query);
       if (score == null) continue;
       scored.add((
         score: score,
         order: order++,
         s: _SlashSuggestion(
           icon: Icons.chat_bubble_outline,
-          name: s.title,
-          description: '${s.messages.length} messages · ${s.id}',
+          name: title,
+          description: "Include this chat's context in your message",
           hint: '',
-          insert: '@session:${s.id} ',
-          group: 'Sessions',
+          insert: '@[$title] ',
+          group: 'Chats',
         ),
       ));
     }
@@ -7370,9 +7518,9 @@ class _InputBarState extends State<_InputBar> {
                       // Match the existing submission handler: files alone
                       // are not a submission, and queue edits retain their
                       // original attachments rather than newly staged files.
-                      // Offline: the request cannot leave the device, so
-                      // Send is disabled (the shell banner explains why and
-                      // offers Retry). Saving a queue edit stays local.
+                      // Offline (CH-035 / SH-011): Send stays enabled — the
+                      // prompt goes into the outbox and its row says it
+                      // will send when Ovid is reachable again.
                       final offline =
                           ConnectionService.I.offline && !widget.editingQueue;
                       final canSubmit =
@@ -7381,18 +7529,21 @@ class _InputBarState extends State<_InputBar> {
                           hasDraft &&
                           !locked &&
                           !widget.commandBusy &&
-                          !offline &&
                           _agent.pendingApproval == null &&
                           (!widget.editingQueue ||
                               _agent.pendingAttachments.isEmpty);
                       final interrupt = AppState.I.sendWhileBusyInterrupt;
+                      final stopping = hasSession &&
+                          CloudAgentFacade.I.stoppingFor(sessionId);
                       final actionLabel = widget.editingQueue
                           ? 'Save'
                           : runningNow
-                          ? (interrupt ? 'Interrupt and send' : 'Queue')
+                          ? (interrupt ? 'Stop and send' : 'Queue')
                           : 'Send';
-                      final actionTooltip = offline
-                          ? "You're offline"
+                      final actionTooltip = !hasSession
+                          ? 'Preparing your chat…'
+                          : offline && !runningNow
+                          ? "Send (you're offline — it sends when you're back)"
                           : widget.editingQueue
                           ? 'Save queued message'
                           : runningNow && !interrupt
@@ -7424,13 +7575,17 @@ class _InputBarState extends State<_InputBar> {
                           ],
                           if (runningNow)
                             AetherDangerButton(
-                              label: 'Stop',
-                              tooltip: hasQueued
+                              label: stopping ? 'Stopping…' : 'Stop',
+                              tooltip: stopping
+                                  ? 'Stopping…'
+                                  : hasQueued
                                   ? 'Stop session (next queued will run)'
                                   : 'Stop session',
                               icon: Icons.stop_rounded,
                               iconOnly: true,
-                              onPressed: stop,
+                              loading: stopping,
+                              // CH-044: one cancel per run.
+                              onPressed: stopping ? null : stop,
                             ),
                         ],
                       );
@@ -7952,8 +8107,11 @@ class _CloudOutboxChip extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    '${entries.length} queued message${entries.length == 1 ? '' : 's'} · '
-                    'sends automatically when you are back online',
+                    CloudSessionStore.I.offline
+                        ? '${entries.length} message${entries.length == 1 ? '' : 's'} '
+                            'waiting · sends automatically when you are back online'
+                        : '${entries.length} message${entries.length == 1 ? '' : 's'} '
+                            'waiting to send',
                     style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
                   ),
                 ),
@@ -7966,21 +8124,18 @@ class _CloudOutboxChip extends StatelessWidget {
   }
 }
 
-/// P8 Task 10 — the cloud error-envelope row (spec §15 UX):
-///
-///  * 402 `daily_limit_reached` — the server message VERBATIM plus a
-///    countdown derived from `x-ovid-resets-at`; the composed draft is kept.
-///  * 409 `key_not_minted` — the server message plus a provider-settings
-///    action.
-///  * 409 `run_conflict` — SILENT state refresh (the prompt was already
-///    accepted; no row renders).
-///  * 503 `unavailable` / other 5xx — the server message plus a Retry
-///    affordance that re-sends the preserved draft.
+/// The cloud error row (Wave 1a — CH-019 / CH-031): every send or run
+/// failure renders as plain language from the shared copy table
+/// (`cloudErrorCopy`) with the ONE action that helps — Retry (same
+/// clientMsgId for a refused prompt), Sign in, Open Plans (with a live
+/// allowance-reset countdown), or Pick a model. Raw server text only
+/// appears under "Details". A 409 `run_conflict` stays a silent refresh.
 class _CloudErrorRow extends StatefulWidget {
-  const _CloudErrorRow({this.sessionId, this.onRetry});
+  const _CloudErrorRow({this.sessionId, this.onRetry, this.onPickModel});
 
   final String? sessionId;
   final Future<void> Function()? onRetry;
+  final VoidCallback? onPickModel;
 
   @override
   State<_CloudErrorRow> createState() => _CloudErrorRowState();
@@ -7989,6 +8144,27 @@ class _CloudErrorRow extends StatefulWidget {
 class _CloudErrorRowState extends State<_CloudErrorRow> {
   /// A 409 `run_conflict` refresh is fired once per recorded error.
   String? _conflictRefreshedKey;
+  bool _showDetails = false;
+
+  /// Re-renders the allowance countdown every 30 s while it is visible.
+  Timer? _ticker;
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  void _ensureTicker(bool needed) {
+    if (needed && _ticker == null) {
+      _ticker = Timer.periodic(const Duration(seconds: 30), (_) {
+        if (mounted) setState(() {});
+      });
+    } else if (!needed && _ticker != null) {
+      _ticker?.cancel();
+      _ticker = null;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -7996,17 +8172,32 @@ class _CloudErrorRowState extends State<_CloudErrorRow> {
       animation: Listenable.merge([CloudAgentFacade.I, CloudSessionStore.I]),
       builder: (_, _) {
         final facade = CloudAgentFacade.I;
+        final store = CloudSessionStore.I;
         final sid = widget.sessionId;
         final run = sid == null ? null : facade.runStateFor(sid);
         final code = run?.lastErrorCode;
-        // The outbox flush's last failure surfaces through the same row when
-        // no session-scoped error is recorded (a reconnect flush failure).
-        final outboxError = code == null ? CloudSessionStore.I.outboxError : null;
-        final effectiveCode = code ?? outboxError?.code;
-        final message =
-            code != null ? (run?.lastErrorMessage ?? '') : (outboxError?.message ?? '');
-        final resetsAt = sid == null ? null : facade.errorResetsAtFor(sid);
-        if (effectiveCode == null) return const SizedBox.shrink();
+        // A refused queued prompt of THIS chat surfaces through the same
+        // row when no session-scoped error is recorded.
+        OutboxEntry? refused;
+        if (code == null && sid != null) {
+          for (final entry in store.outboxFor(sid)) {
+            if (entry.failed) {
+              refused = entry;
+              break;
+            }
+          }
+        }
+        final effectiveCode = code ?? refused?.failedCode;
+        final message = code != null
+            ? (run?.lastErrorMessage ?? '')
+            : (refused?.failedMessage ?? '');
+        final resetsAt = code != null
+            ? (sid == null ? null : facade.errorResetsAtFor(sid))
+            : store.outboxErrorResetsAt;
+        if (effectiveCode == null) {
+          _ensureTicker(false);
+          return const SizedBox.shrink();
+        }
         if (effectiveCode == 'run_conflict') {
           // Silent state refresh: the server already accepted the prompt.
           final key = '$effectiveCode:$message';
@@ -8020,12 +8211,59 @@ class _CloudErrorRowState extends State<_CloudErrorRow> {
           }
           return const SizedBox.shrink();
         }
-        final countdown = resetsAt == null
-            ? null
-            : 'Resets in '
-              '${resetsAt.difference(DateTime.now()).inMinutes.clamp(0, 1 << 31)} min';
-        final retryable =
-            effectiveCode == 'unavailable' || effectiveCode == 'internal';
+        final copy = cloudErrorCopy(
+          effectiveCode,
+          message: message,
+          resetsAt: resetsAt,
+        );
+        _ensureTicker(resetsAt != null);
+        Widget action(String label, VoidCallback onTap, {Key? key}) =>
+            TextButton(key: key, onPressed: onTap, child: Text(label));
+        final actions = <Widget>[
+          switch (copy.action) {
+            CloudErrorAction.retry when widget.onRetry != null => action(
+                'Retry',
+                () => unawaited(widget.onRetry!()),
+                key: const ValueKey('cloud-error-retry'),
+              ),
+            CloudErrorAction.signIn => action(
+                'Sign in',
+                () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const AuthScreen()),
+                ),
+                key: const ValueKey('cloud-error-sign-in'),
+              ),
+            CloudErrorAction.openPlans => action(
+                'Plans',
+                () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const BillingScreen()),
+                ),
+                key: const ValueKey('cloud-error-plans'),
+              ),
+            CloudErrorAction.pickModel when widget.onPickModel != null =>
+              action(
+                'Pick model',
+                widget.onPickModel!,
+                key: const ValueKey('cloud-error-pick-model'),
+              ),
+            _ => const SizedBox.shrink(),
+          },
+          if (refused != null)
+            action(
+              'Discard',
+              () => unawaited(facade.discardPendingSend(refused!.clientMsgId)),
+              key: const ValueKey('cloud-error-discard'),
+            )
+          else
+            action(
+              'Dismiss',
+              () {
+                if (code != null && sid != null) facade.clearErrorFor(sid);
+                CloudSessionStore.I.clearOutboxError();
+              },
+              key: const ValueKey('cloud-error-dismiss'),
+            ),
+        ];
         return Padding(
           key: const ValueKey('cloud-error-row'),
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
@@ -8036,63 +8274,171 @@ class _CloudErrorRowState extends State<_CloudErrorRow> {
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: Aether.danger.withValues(alpha: 0.4)),
             ),
-            child: Row(
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.error_outline, size: 15, color: Aether.danger),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // The server message, VERBATIM.
-                      Text(
-                        message.isEmpty ? effectiveCode : message,
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          color: Aether.text,
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.error_outline, size: 15, color: Aether.danger),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: copy.detail == null
+                            ? null
+                            : () => setState(() => _showDetails = !_showDetails),
+                        child: Text(
+                          copy.text,
+                          style: TextStyle(fontSize: 11.5, color: Aether.text),
                         ),
-                      ),
-                      if (countdown != null) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          countdown,
-                          style: TextStyle(
-                            fontSize: 10.5,
-                            color: Aether.textMuted,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-                if (effectiveCode == 'key_not_minted')
-                  TextButton(
-                    onPressed: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => const SettingsScreen(),
                       ),
                     ),
-                    child: const Text('Provider settings'),
+                  ],
+                ),
+                if (_showDetails && copy.detail != null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(23, 4, 4, 0),
+                    child: SelectableText(
+                      copy.detail!,
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        color: Aether.textMuted,
+                      ),
+                    ),
                   ),
-                if (retryable && widget.onRetry != null)
-                  TextButton(
-                    onPressed: () => unawaited(widget.onRetry!()),
-                    child: const Text('Retry'),
-                  ),
-                TextButton(
-                  key: const ValueKey('cloud-error-dismiss'),
-                  onPressed: code != null
-                      ? (sid == null ? null : () => facade.clearErrorFor(sid))
-                      : CloudSessionStore.I.clearOutboxError,
-                  child: const Text('Dismiss'),
+                Wrap(
+                  alignment: WrapAlignment.end,
+                  children: [
+                    if (copy.detail != null)
+                      action(
+                        _showDetails ? 'Hide details' : 'Details',
+                        () => setState(() => _showDetails = !_showDetails),
+                      ),
+                    ...actions,
+                  ],
                 ),
               ],
             ),
           ),
         );
       },
+    );
+  }
+}
+
+/// The status line under a user row the server has not confirmed yet:
+/// "Sending…", "Retrying…", "Waiting for connection — sends automatically"
+/// or "Not sent" with Retry / Discard (CH-009, CH-011).
+class _PendingSendStatus extends StatelessWidget {
+  const _PendingSendStatus({required this.message});
+
+  final Message message;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([CloudAgentFacade.I, CloudSessionStore.I]),
+      builder: (_, _) {
+        final facade = CloudAgentFacade.I;
+        final state = facade.pendingStateOf(message);
+        if (state == null) return const SizedBox.shrink();
+        final id = CloudAgentFacade.pendingClientMsgIdOf(message)!;
+        final (label, color) = switch (state) {
+          PendingSendState.sending => ('Sending…', Aether.textFaint),
+          PendingSendState.retrying =>
+            ('Retrying — Ovid is not answering yet…', Aether.warnLight),
+          PendingSendState.waitingForNetwork =>
+            ("Waiting for connection — sends when you're back online",
+                Aether.warnLight),
+          PendingSendState.failed => ('Not sent', Aether.danger),
+        };
+        return Padding(
+          key: ValueKey('pending-send-$id'),
+          padding: const EdgeInsets.only(top: 2, right: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (state == PendingSendState.failed)
+                Icon(Icons.error_outline, size: 12, color: color)
+              else
+                Icon(Icons.schedule, size: 12, color: color),
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(
+                  label,
+                  style: TextStyle(fontSize: 11, color: color),
+                ),
+              ),
+              if (state == PendingSendState.failed) ...[
+                TextButton(
+                  key: ValueKey('pending-retry-$id'),
+                  onPressed: () => unawaited(facade.retryPendingSend(id)),
+                  child: const Text('Retry'),
+                ),
+                TextButton(
+                  key: ValueKey('pending-discard-$id'),
+                  onPressed: () => unawaited(facade.discardPendingSend(id)),
+                  child: const Text('Discard'),
+                ),
+              ] else if (state != PendingSendState.sending)
+                TextButton(
+                  key: ValueKey('pending-discard-$id'),
+                  onPressed: () => unawaited(facade.discardPendingSend(id)),
+                  child: const Text('Discard'),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// CH-035: the first history page failed — say so and offer Retry instead
+/// of an empty chat that looks like lost history.
+class _HistoryLoadFailed extends StatelessWidget {
+  const _HistoryLoadFailed({required this.onRetry, required this.loading});
+
+  final VoidCallback onRetry;
+  final bool loading;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      key: const ValueKey('chat-history-load-failed'),
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.cloud_off_outlined, size: 28, color: Aether.textFaint),
+            const SizedBox(height: 10),
+            Text(
+              "Couldn't load this chat",
+              style: TextStyle(fontSize: 15, color: Aether.text),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Check your connection. Your messages are safe on Ovid.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: Aether.textMuted),
+            ),
+            const SizedBox(height: 12),
+            loading
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : TextButton(
+                    key: const ValueKey('chat-history-retry'),
+                    onPressed: onRetry,
+                    child: const Text('Retry'),
+                  ),
+          ],
+        ),
+      ),
     );
   }
 }
