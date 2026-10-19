@@ -1827,6 +1827,1488 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Couldn\'t reach cloud scheduling'**
   String get scheduleStripError;
+
+  /// Settings screen title.
+  ///
+  /// In en, this message translates to:
+  /// **'Settings'**
+  String get settingsTitle;
+
+  /// Settings section heading.
+  ///
+  /// In en, this message translates to:
+  /// **'Account'**
+  String get settingsAccount;
+
+  /// Account row title when signed out.
+  ///
+  /// In en, this message translates to:
+  /// **'You'**
+  String get settingsYou;
+
+  /// Account row subtitle when signed out.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign in to your account'**
+  String get settingsSignInPrompt;
+
+  /// Settings row: plan and billing screen.
+  ///
+  /// In en, this message translates to:
+  /// **'Plan & billing'**
+  String get settingsPlan;
+
+  /// Subtitle of the Plan & billing row.
+  ///
+  /// In en, this message translates to:
+  /// **'Your Ovid Cloud plan and upgrades'**
+  String get settingsPlanSubtitle;
+
+  /// Settings row: usage screen.
+  ///
+  /// In en, this message translates to:
+  /// **'Usage'**
+  String get settingsUsage;
+
+  /// Subtitle of the Usage row.
+  ///
+  /// In en, this message translates to:
+  /// **'Today\'s allowance and recent spend'**
+  String get settingsUsageSubtitle;
+
+  /// Settings section heading for chat preferences.
+  ///
+  /// In en, this message translates to:
+  /// **'Chat'**
+  String get settingsChat;
+
+  /// Toggle: show the model reasoning in chats.
+  ///
+  /// In en, this message translates to:
+  /// **'Show reasoning'**
+  String get settingsShowReasoning;
+
+  /// Show reasoning toggle, on state.
+  ///
+  /// In en, this message translates to:
+  /// **'On: reasoning shows before answers'**
+  String get settingsShowReasoningOn;
+
+  /// Show reasoning toggle, off state.
+  ///
+  /// In en, this message translates to:
+  /// **'Off: answers only'**
+  String get settingsShowReasoningOff;
+
+  /// Toggle: let Ovid save and recall memories.
+  ///
+  /// In en, this message translates to:
+  /// **'Memory'**
+  String get settingsMemory;
+
+  /// Memory toggle, on state.
+  ///
+  /// In en, this message translates to:
+  /// **'On: Ovid can save and recall facts you ask it to remember'**
+  String get settingsMemoryOn;
+
+  /// Memory toggle, off state.
+  ///
+  /// In en, this message translates to:
+  /// **'Off: Ovid does not save or read memories'**
+  String get settingsMemoryOff;
+
+  /// Toggle: let chats search each other for context.
+  ///
+  /// In en, this message translates to:
+  /// **'Share memory across chats'**
+  String get settingsShareMemory;
+
+  /// Share memory toggle, on state.
+  ///
+  /// In en, this message translates to:
+  /// **'On: Ovid can search your other chats for context'**
+  String get settingsShareMemoryOn;
+
+  /// Share memory toggle, off state.
+  ///
+  /// In en, this message translates to:
+  /// **'Off: each chat only sees itself. Tag a chat with @ to include it.'**
+  String get settingsShareMemoryOff;
+
+  /// Share memory toggle while Memory is off.
+  ///
+  /// In en, this message translates to:
+  /// **'Turn on Memory to use this'**
+  String get settingsShareMemoryNeedsMemory;
+
+  /// Settings row: view and edit what Ovid remembers.
+  ///
+  /// In en, this message translates to:
+  /// **'Memory files'**
+  String get settingsMemoryFiles;
+
+  /// Subtitle of the Memory files row.
+  ///
+  /// In en, this message translates to:
+  /// **'See, edit or delete what Ovid remembers'**
+  String get settingsMemoryFilesSubtitle;
+
+  /// Settings section heading for models, keys and presets.
+  ///
+  /// In en, this message translates to:
+  /// **'Models & keys'**
+  String get settingsModels;
+
+  /// Subtitle of the Your API keys row.
+  ///
+  /// In en, this message translates to:
+  /// **'Run chats on your own provider account'**
+  String get settingsKeysSubtitle;
+
+  /// Subtitle of the Agent presets row.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose which tools and model the agent uses'**
+  String get settingsPresetsSubtitle;
+
+  /// Subtitle of the Responses row.
+  ///
+  /// In en, this message translates to:
+  /// **'Answer length and the \"still working\" hint'**
+  String get settingsResponsesSubtitle;
+
+  /// Settings section heading and notifications toggle title.
+  ///
+  /// In en, this message translates to:
+  /// **'Notifications'**
+  String get settingsNotifications;
+
+  /// Settings section heading.
+  ///
+  /// In en, this message translates to:
+  /// **'Data & privacy'**
+  String get settingsData;
+
+  /// Settings row: export or import chat archives.
+  ///
+  /// In en, this message translates to:
+  /// **'Export & import'**
+  String get settingsExport;
+
+  /// Subtitle of the Export & import row.
+  ///
+  /// In en, this message translates to:
+  /// **'Download your cloud chats or upload an archive'**
+  String get settingsExportSubtitle;
+
+  /// Telemetry consent toggle title.
+  ///
+  /// In en, this message translates to:
+  /// **'Crash reports & analytics'**
+  String get settingsTelemetry;
+
+  /// Telemetry toggle, on state.
+  ///
+  /// In en, this message translates to:
+  /// **'On: share crash reports and anonymous usage to help fix bugs'**
+  String get settingsTelemetryOn;
+
+  /// Telemetry toggle, off state.
+  ///
+  /// In en, this message translates to:
+  /// **'Off'**
+  String get settingsTelemetryOff;
+
+  /// Telemetry toggle when Firebase is not configured.
+  ///
+  /// In en, this message translates to:
+  /// **'Not available in this build'**
+  String get settingsTelemetryUnavailable;
+
+  /// Settings row and screen title: on-device storage.
+  ///
+  /// In en, this message translates to:
+  /// **'Storage'**
+  String get settingsStorage;
+
+  /// Subtitle of the Storage row.
+  ///
+  /// In en, this message translates to:
+  /// **'Space Ovid uses on this phone'**
+  String get settingsStorageSubtitle;
+
+  /// Settings row: sign out and wipe local data.
+  ///
+  /// In en, this message translates to:
+  /// **'Clear this device'**
+  String get settingsClearDevice;
+
+  /// Subtitle of the Clear this device row.
+  ///
+  /// In en, this message translates to:
+  /// **'Signs out and removes local data. Your cloud chats are kept.'**
+  String get settingsClearDeviceSubtitle;
+
+  /// Subtitle for an action this build cannot run.
+  ///
+  /// In en, this message translates to:
+  /// **'Unavailable in this build'**
+  String get settingsUnavailable;
+
+  /// Settings row: delete the account and cloud data.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete account'**
+  String get settingsDeleteAccount;
+
+  /// Subtitle of the Delete account row.
+  ///
+  /// In en, this message translates to:
+  /// **'Permanently delete your account and cloud data'**
+  String get settingsDeleteAccountSubtitle;
+
+  /// Settings section heading.
+  ///
+  /// In en, this message translates to:
+  /// **'Help & about'**
+  String get settingsHelp;
+
+  /// Subtitle of the Service status row.
+  ///
+  /// In en, this message translates to:
+  /// **'Check that Ovid Cloud and this device are working'**
+  String get settingsStatusSubtitle;
+
+  /// Row that shares the Ovid website.
+  ///
+  /// In en, this message translates to:
+  /// **'Share Ovid'**
+  String get settingsShare;
+
+  /// Row that opens the privacy policy.
+  ///
+  /// In en, this message translates to:
+  /// **'Privacy policy'**
+  String get settingsPrivacy;
+
+  /// Settings row and screen title.
+  ///
+  /// In en, this message translates to:
+  /// **'About'**
+  String get settingsAbout;
+
+  /// Subtitle of the About row.
+  ///
+  /// In en, this message translates to:
+  /// **'Ovid Si {version}'**
+  String settingsAboutSubtitle(String version);
+
+  /// A preference failed to save.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t save that setting. Try again.'**
+  String get settingsSaveFailed;
+
+  /// Theme selector title.
+  ///
+  /// In en, this message translates to:
+  /// **'Theme'**
+  String get themeTitle;
+
+  /// Theme subtitle in auto mode while light.
+  ///
+  /// In en, this message translates to:
+  /// **'Auto (default): follows your phone, light now'**
+  String get themeAutoLight;
+
+  /// Theme subtitle in auto mode while dark.
+  ///
+  /// In en, this message translates to:
+  /// **'Auto (default): follows your phone, dark now'**
+  String get themeAutoDark;
+
+  /// Theme subtitle in light mode.
+  ///
+  /// In en, this message translates to:
+  /// **'Light'**
+  String get themeLight;
+
+  /// Theme subtitle in dark mode.
+  ///
+  /// In en, this message translates to:
+  /// **'Dark'**
+  String get themeDark;
+
+  /// Theme option that follows the OS.
+  ///
+  /// In en, this message translates to:
+  /// **'Auto'**
+  String get themeOptionAuto;
+
+  /// Theme option.
+  ///
+  /// In en, this message translates to:
+  /// **'Light'**
+  String get themeOptionLight;
+
+  /// Theme option.
+  ///
+  /// In en, this message translates to:
+  /// **'Dark'**
+  String get themeOptionDark;
+
+  /// Notifications toggle, on state.
+  ///
+  /// In en, this message translates to:
+  /// **'On: get notified when a cloud run finishes, fails or needs your approval'**
+  String get notificationsOn;
+
+  /// Notifications toggle on while the OS permission is denied.
+  ///
+  /// In en, this message translates to:
+  /// **'On, but Android is blocking notifications for Ovid'**
+  String get notificationsOnBlocked;
+
+  /// Notifications toggle, off state.
+  ///
+  /// In en, this message translates to:
+  /// **'Off: Ovid Cloud sends no notifications to your devices'**
+  String get notificationsOff;
+
+  /// Row shown when notifications are blocked by the OS.
+  ///
+  /// In en, this message translates to:
+  /// **'Blocked by Android'**
+  String get notificationsBlockedTitle;
+
+  /// Explains how to unblock notifications.
+  ///
+  /// In en, this message translates to:
+  /// **'Allow notifications for Ovid in system settings.'**
+  String get notificationsBlockedBody;
+
+  /// Button: opens Android notification settings.
+  ///
+  /// In en, this message translates to:
+  /// **'Open settings'**
+  String get notificationsOpenSettings;
+
+  /// Row title for the device integrity check.
+  ///
+  /// In en, this message translates to:
+  /// **'Device integrity'**
+  String get integrityTitle;
+
+  /// Device integrity check in progress.
+  ///
+  /// In en, this message translates to:
+  /// **'Checking…'**
+  String get integrityChecking;
+
+  /// Device integrity probe incomplete.
+  ///
+  /// In en, this message translates to:
+  /// **'This device didn\'t return a complete result'**
+  String get integrityUnavailable;
+
+  /// Device integrity: nothing suspicious found.
+  ///
+  /// In en, this message translates to:
+  /// **'No signs of root, hooking tools or a debugger (basic check)'**
+  String get integrityClean;
+
+  /// Device integrity on a virtual device.
+  ///
+  /// In en, this message translates to:
+  /// **'This is an emulator, so its integrity can\'t be verified'**
+  String get integrityEmulator;
+
+  /// Device integrity: problems found.
+  ///
+  /// In en, this message translates to:
+  /// **'At risk: {flags}. Your sign-in could be read by other apps.'**
+  String integrityAtRisk(String flags);
+
+  /// Integrity flag: device is rooted.
+  ///
+  /// In en, this message translates to:
+  /// **'rooted'**
+  String get integrityFlagRooted;
+
+  /// Integrity flag: a hooking framework is installed.
+  ///
+  /// In en, this message translates to:
+  /// **'hooking framework'**
+  String get integrityFlagHooking;
+
+  /// Integrity flag: a debugger is attached.
+  ///
+  /// In en, this message translates to:
+  /// **'debugger attached'**
+  String get integrityFlagDebugger;
+
+  /// Snackbar after re-running the integrity check.
+  ///
+  /// In en, this message translates to:
+  /// **'Checked again'**
+  String get integrityRechecked;
+
+  /// Storage screen section heading.
+  ///
+  /// In en, this message translates to:
+  /// **'On this device'**
+  String get storageOnDevice;
+
+  /// Storage screen intro.
+  ///
+  /// In en, this message translates to:
+  /// **'Your chats live in Ovid Cloud. This is the space the app uses on this phone.'**
+  String get storageIntro;
+
+  /// Storage row: cached chats.
+  ///
+  /// In en, this message translates to:
+  /// **'Offline chat cache'**
+  String get storageChats;
+
+  /// Storage row subtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Recent chats kept for offline reading'**
+  String get storageChatsSubtitle;
+
+  /// Storage row: cache directory.
+  ///
+  /// In en, this message translates to:
+  /// **'Temporary files'**
+  String get storageCache;
+
+  /// Storage row subtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Safe to clear'**
+  String get storageCacheSubtitle;
+
+  /// Storage row: support files.
+  ///
+  /// In en, this message translates to:
+  /// **'App data'**
+  String get storageApp;
+
+  /// Storage row subtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Needed to run Ovid. Removed by Clear this device.'**
+  String get storageAppSubtitle;
+
+  /// Storage total row.
+  ///
+  /// In en, this message translates to:
+  /// **'Total'**
+  String get storageTotal;
+
+  /// Confirm dialog title.
+  ///
+  /// In en, this message translates to:
+  /// **'Clear temporary files?'**
+  String get storageClearTitle;
+
+  /// Confirm dialog body.
+  ///
+  /// In en, this message translates to:
+  /// **'Frees {size}. Chats and settings are not touched.'**
+  String storageClearBody(String size);
+
+  /// Button that clears the cache.
+  ///
+  /// In en, this message translates to:
+  /// **'Clear temporary files'**
+  String get storageClearConfirm;
+
+  /// Snackbar after clearing the cache.
+  ///
+  /// In en, this message translates to:
+  /// **'Cleared {size}.'**
+  String storageCleared(String size);
+
+  /// Cache clear partly failed.
+  ///
+  /// In en, this message translates to:
+  /// **'Some files couldn\'t be cleared. Try again in a moment.'**
+  String get storageClearIncomplete;
+
+  /// About screen version line.
+  ///
+  /// In en, this message translates to:
+  /// **'Version {version}'**
+  String aboutVersion(String version);
+
+  /// About screen maker line. Company name, do not translate.
+  ///
+  /// In en, this message translates to:
+  /// **'by Dhanuk Softwares'**
+  String get aboutMaker;
+
+  /// About screen tagline.
+  ///
+  /// In en, this message translates to:
+  /// **'Your AI agent in the cloud: chat, files, browsing and schedules.'**
+  String get aboutTagline;
+
+  /// Link to the website.
+  ///
+  /// In en, this message translates to:
+  /// **'Website'**
+  String get aboutWebsite;
+
+  /// Link to the terms.
+  ///
+  /// In en, this message translates to:
+  /// **'Terms of Service'**
+  String get aboutTerms;
+
+  /// Row that opens the licenses page.
+  ///
+  /// In en, this message translates to:
+  /// **'Open-source licenses'**
+  String get aboutLicenses;
+
+  /// Licenses row subtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Third-party software used by Ovid Si'**
+  String get aboutLicensesSubtitle;
+
+  /// Copyright line.
+  ///
+  /// In en, this message translates to:
+  /// **'© {year} Dhanuk Softwares'**
+  String aboutCopyright(int year);
+
+  /// Relative time under a minute.
+  ///
+  /// In en, this message translates to:
+  /// **'just now'**
+  String get timeJustNow;
+
+  /// Relative time in minutes.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 min ago} other{{count} min ago}}'**
+  String timeMinutesAgo(int count);
+
+  /// Relative time in hours.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 hour ago} other{{count} hours ago}}'**
+  String timeHoursAgo(int count);
+
+  /// Relative time in days.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 day ago} other{{count} days ago}}'**
+  String timeDaysAgo(int count);
+
+  /// A duration in seconds.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 second} other{{count} seconds}}'**
+  String durationSeconds(int count);
+
+  /// A duration in minutes.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 minute} other{{count} minutes}}'**
+  String durationMinutes(int count);
+
+  /// Screen title and settings row for the user's own provider keys.
+  ///
+  /// In en, this message translates to:
+  /// **'Your API keys'**
+  String get keysTitle;
+
+  /// Intro text of the keys screen.
+  ///
+  /// In en, this message translates to:
+  /// **'Add a key from a model provider to run your chats on your own account with that provider. Keys are encrypted on Ovid\'s servers and never shown again.'**
+  String get keysIntro;
+
+  /// Keys failed to load.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load your keys'**
+  String get keysLoadFailed;
+
+  /// Card title showing which models chats run on.
+  ///
+  /// In en, this message translates to:
+  /// **'Your chats use'**
+  String get keysChatsUseTitle;
+
+  /// Chats run on Ovid models.
+  ///
+  /// In en, this message translates to:
+  /// **'Ovid models, counted against your Ovid allowance.'**
+  String get keysChatsUseOvid;
+
+  /// Chats run on the user's own key.
+  ///
+  /// In en, this message translates to:
+  /// **'{model} with your {provider} key. These runs bill your provider account, not your Ovid allowance.'**
+  String keysChatsUseKey(String model, String provider);
+
+  /// Button: stop using the user's key for chats.
+  ///
+  /// In en, this message translates to:
+  /// **'Use Ovid models instead'**
+  String get keysUseOvidAction;
+
+  /// Empty state of the keys list.
+  ///
+  /// In en, this message translates to:
+  /// **'No keys yet.'**
+  String get keysEmpty;
+
+  /// Button: add a provider key.
+  ///
+  /// In en, this message translates to:
+  /// **'Add a key'**
+  String get keysAdd;
+
+  /// Pill on the key chats use.
+  ///
+  /// In en, this message translates to:
+  /// **'Used for chats'**
+  String get keysInUse;
+
+  /// Key test status.
+  ///
+  /// In en, this message translates to:
+  /// **'Not tested yet'**
+  String get keysNeverTested;
+
+  /// Key test status, success.
+  ///
+  /// In en, this message translates to:
+  /// **'Tested {ago}: working'**
+  String keysLastTestedOk(String ago);
+
+  /// Key test status, failure.
+  ///
+  /// In en, this message translates to:
+  /// **'Tested {ago}: not working'**
+  String keysLastTestedFailed(String ago);
+
+  /// Button: test a key.
+  ///
+  /// In en, this message translates to:
+  /// **'Test'**
+  String get keysTest;
+
+  /// Key test in progress.
+  ///
+  /// In en, this message translates to:
+  /// **'Testing…'**
+  String get keysTesting;
+
+  /// Key test succeeded.
+  ///
+  /// In en, this message translates to:
+  /// **'{provider} accepted the key.'**
+  String keysTestOk(String provider);
+
+  /// Key test failed.
+  ///
+  /// In en, this message translates to:
+  /// **'The provider didn\'t accept the key. Check the key and try again.'**
+  String get keysTestFailed;
+
+  /// Button: route chats through this key.
+  ///
+  /// In en, this message translates to:
+  /// **'Use for my chats'**
+  String get keysUseForChats;
+
+  /// Button: change the model used with this key.
+  ///
+  /// In en, this message translates to:
+  /// **'Change model'**
+  String get keysChangeModel;
+
+  /// Dialog title.
+  ///
+  /// In en, this message translates to:
+  /// **'Use this key for your chats'**
+  String get keysUseForChatsTitle;
+
+  /// Dialog body.
+  ///
+  /// In en, this message translates to:
+  /// **'Every chat and scheduled task will run on this {provider} model. Enter the model id as your provider names it.'**
+  String keysUseForChatsBody(String provider);
+
+  /// Field label: provider model id.
+  ///
+  /// In en, this message translates to:
+  /// **'Model'**
+  String get keysModelLabel;
+
+  /// Validation: model id missing.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter a model id.'**
+  String get keysModelRequired;
+
+  /// Snackbar after choosing a key for chats.
+  ///
+  /// In en, this message translates to:
+  /// **'Your chats now use {model}.'**
+  String keysUsingNow(String model);
+
+  /// Snackbar after switching back to Ovid models.
+  ///
+  /// In en, this message translates to:
+  /// **'Your chats now use Ovid models.'**
+  String get keysUsingOvid;
+
+  /// Button: remove a key.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove'**
+  String get keysRemove;
+
+  /// Key removal in progress.
+  ///
+  /// In en, this message translates to:
+  /// **'Removing…'**
+  String get keysRemoving;
+
+  /// Confirm dialog title.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove this key?'**
+  String get keysRemoveTitle;
+
+  /// Confirm dialog body.
+  ///
+  /// In en, this message translates to:
+  /// **'The key is deleted from Ovid. You can add it again later.'**
+  String get keysRemoveBody;
+
+  /// Confirm dialog body when the key is in use.
+  ///
+  /// In en, this message translates to:
+  /// **'Your chats use this key. After removing it they go back to Ovid models. You can add the key again later.'**
+  String get keysRemoveInUseBody;
+
+  /// Confirm button.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove key'**
+  String get keysRemoveConfirm;
+
+  /// Snackbar after removing a key.
+  ///
+  /// In en, this message translates to:
+  /// **'Key removed.'**
+  String get keysRemoved;
+
+  /// Snackbar after adding a key.
+  ///
+  /// In en, this message translates to:
+  /// **'Key saved.'**
+  String get keysSaved;
+
+  /// Section title for keys older versions stored on the device.
+  ///
+  /// In en, this message translates to:
+  /// **'Keys saved on this phone only'**
+  String get keysDeviceTitle;
+
+  /// Explains device-only keys.
+  ///
+  /// In en, this message translates to:
+  /// **'Older versions kept these keys on this phone, and Ovid Cloud never used them. Move a key to your account to use it, or delete it.'**
+  String get keysDeviceBody;
+
+  /// Button and screen title: move a device key to the cloud.
+  ///
+  /// In en, this message translates to:
+  /// **'Move to my account'**
+  String get keysDeviceMove;
+
+  /// Intro of the move-key screen.
+  ///
+  /// In en, this message translates to:
+  /// **'This uploads the key to your Ovid account, encrypted. It is then removed from this phone.'**
+  String get keysDeviceMoveIntro;
+
+  /// Confirm dialog title.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete this key from this phone?'**
+  String get keysDeviceDeleteTitle;
+
+  /// Confirm dialog body.
+  ///
+  /// In en, this message translates to:
+  /// **'The {provider} key is deleted from this phone. This can\'t be undone.'**
+  String keysDeviceDeleteBody(String provider);
+
+  /// Confirm button and action label.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete'**
+  String get keysDeviceDeleteConfirm;
+
+  /// Snackbar.
+  ///
+  /// In en, this message translates to:
+  /// **'Key deleted from this phone.'**
+  String get keysDeviceDeleted;
+
+  /// Add-key screen title.
+  ///
+  /// In en, this message translates to:
+  /// **'Add a key'**
+  String get keysAddTitle;
+
+  /// Add-key screen intro.
+  ///
+  /// In en, this message translates to:
+  /// **'Pick your provider and paste an API key from its dashboard.'**
+  String get keysAddIntro;
+
+  /// Field label.
+  ///
+  /// In en, this message translates to:
+  /// **'Provider'**
+  String get keysProviderLabel;
+
+  /// Provider option for any OpenAI-compatible API.
+  ///
+  /// In en, this message translates to:
+  /// **'Other (OpenAI-compatible)'**
+  String get keysProviderOther;
+
+  /// Field label for a custom provider.
+  ///
+  /// In en, this message translates to:
+  /// **'Provider name'**
+  String get keysProviderNameLabel;
+
+  /// Validation.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter a name for this provider.'**
+  String get keysProviderNameRequired;
+
+  /// Field label: provider API base URL.
+  ///
+  /// In en, this message translates to:
+  /// **'API address'**
+  String get keysEndpointLabel;
+
+  /// Helper text.
+  ///
+  /// In en, this message translates to:
+  /// **'The provider\'s official HTTPS API address, for example https://api.example.com/v1'**
+  String get keysEndpointHelper;
+
+  /// Validation.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the API address.'**
+  String get keysEndpointRequired;
+
+  /// Validation: not an https URL.
+  ///
+  /// In en, this message translates to:
+  /// **'Use the provider\'s official https:// API address.'**
+  String get keysEndpointHttps;
+
+  /// Field label.
+  ///
+  /// In en, this message translates to:
+  /// **'API key'**
+  String get keysApiKeyLabel;
+
+  /// Helper text under the key field.
+  ///
+  /// In en, this message translates to:
+  /// **'Sent once, encrypted, never shown again'**
+  String get keysApiKeyHelper;
+
+  /// Validation.
+  ///
+  /// In en, this message translates to:
+  /// **'Paste your API key.'**
+  String get keysApiKeyRequired;
+
+  /// Validation.
+  ///
+  /// In en, this message translates to:
+  /// **'The key has spaces or line breaks. Paste just the key.'**
+  String get keysApiKeyInvalid;
+
+  /// Field label for a key nickname.
+  ///
+  /// In en, this message translates to:
+  /// **'Name (optional)'**
+  String get keysNameLabel;
+
+  /// Button.
+  ///
+  /// In en, this message translates to:
+  /// **'Save key'**
+  String get keysSave;
+
+  /// Save in progress.
+  ///
+  /// In en, this message translates to:
+  /// **'Saving…'**
+  String get keysSaving;
+
+  /// Server rejected the endpoint.
+  ///
+  /// In en, this message translates to:
+  /// **'Use the provider\'s official HTTPS API address.'**
+  String get keysErrorEndpoint;
+
+  /// Server key limit reached.
+  ///
+  /// In en, this message translates to:
+  /// **'You\'ve reached the limit of saved keys. Remove one first.'**
+  String get keysErrorLimit;
+
+  /// Key store unavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Saving keys isn\'t available right now. Try again later.'**
+  String get keysErrorUnavailable;
+
+  /// Screen title and settings row.
+  ///
+  /// In en, this message translates to:
+  /// **'Agent presets'**
+  String get presetsTitle;
+
+  /// Presets screen intro.
+  ///
+  /// In en, this message translates to:
+  /// **'A preset decides which tools the agent may use, and can pin a model and temperature. Ovid enforces it on every run in that chat.'**
+  String get presetsIntro;
+
+  /// Presets failed to load.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load presets'**
+  String get presetsLoadFailed;
+
+  /// Section heading for built-in presets.
+  ///
+  /// In en, this message translates to:
+  /// **'Built in'**
+  String get presetsBuiltIn;
+
+  /// Section heading for custom presets.
+  ///
+  /// In en, this message translates to:
+  /// **'Yours'**
+  String get presetsCustom;
+
+  /// Empty state.
+  ///
+  /// In en, this message translates to:
+  /// **'No custom presets yet.'**
+  String get presetsCustomEmpty;
+
+  /// Button and screen title.
+  ///
+  /// In en, this message translates to:
+  /// **'New preset'**
+  String get presetsNew;
+
+  /// Button.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit'**
+  String get presetsEdit;
+
+  /// Screen title.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit preset'**
+  String get presetsEditTitle;
+
+  /// Button: apply the preset to the open chat.
+  ///
+  /// In en, this message translates to:
+  /// **'Use in this chat'**
+  String get presetsUseInChat;
+
+  /// Pill on the preset the open chat uses.
+  ///
+  /// In en, this message translates to:
+  /// **'In this chat'**
+  String get presetsInThisChat;
+
+  /// Snackbar after applying a preset.
+  ///
+  /// In en, this message translates to:
+  /// **'Preset applied. It takes effect from your next message.'**
+  String get presetsApplied;
+
+  /// Snackbar when there is no cloud chat to apply to.
+  ///
+  /// In en, this message translates to:
+  /// **'Open a chat and send a message first, then apply a preset.'**
+  String get presetsNeedChat;
+
+  /// Snackbar after saving a preset.
+  ///
+  /// In en, this message translates to:
+  /// **'Saved {name}.'**
+  String presetsSaved(String name);
+
+  /// Confirm title.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete this preset?'**
+  String get presetsDeleteTitle;
+
+  /// Confirm body.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} is deleted. Chats using it go back to Standard.'**
+  String presetsDeleteBody(String name);
+
+  /// Confirm button and action label.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete'**
+  String get presetsDeleteConfirm;
+
+  /// Snackbar.
+  ///
+  /// In en, this message translates to:
+  /// **'Preset deleted.'**
+  String get presetsDeleted;
+
+  /// Preset summary: nothing switched off.
+  ///
+  /// In en, this message translates to:
+  /// **'All tools'**
+  String get presetsAllTools;
+
+  /// Preset summary: switched-off tool families.
+  ///
+  /// In en, this message translates to:
+  /// **'Off: {tools}'**
+  String presetsToolsOff(String tools);
+
+  /// Preset summary: pinned model.
+  ///
+  /// In en, this message translates to:
+  /// **'Model: {model}'**
+  String presetsModelPin(String model);
+
+  /// Preset temperature.
+  ///
+  /// In en, this message translates to:
+  /// **'Temperature {value}'**
+  String presetsTemperatureValue(String value);
+
+  /// Field label.
+  ///
+  /// In en, this message translates to:
+  /// **'Name'**
+  String get presetsNameLabel;
+
+  /// Validation.
+  ///
+  /// In en, this message translates to:
+  /// **'Give the preset a name.'**
+  String get presetsNameRequired;
+
+  /// Field label.
+  ///
+  /// In en, this message translates to:
+  /// **'Description (optional)'**
+  String get presetsDescriptionLabel;
+
+  /// Section heading.
+  ///
+  /// In en, this message translates to:
+  /// **'Tools'**
+  String get presetsToolsTitle;
+
+  /// Help text.
+  ///
+  /// In en, this message translates to:
+  /// **'Switch off what this agent must not do. Switched-off tools are removed and refused.'**
+  String get presetsToolsHelp;
+
+  /// Field label.
+  ///
+  /// In en, this message translates to:
+  /// **'Model'**
+  String get presetsModelLabel;
+
+  /// Model option: do not pin a model.
+  ///
+  /// In en, this message translates to:
+  /// **'The chat\'s model'**
+  String get presetsModelChat;
+
+  /// Toggle label.
+  ///
+  /// In en, this message translates to:
+  /// **'Set temperature'**
+  String get presetsTemperatureLabel;
+
+  /// Temperature not set.
+  ///
+  /// In en, this message translates to:
+  /// **'Provider default'**
+  String get presetsTemperatureDefault;
+
+  /// Button.
+  ///
+  /// In en, this message translates to:
+  /// **'Save preset'**
+  String get presetsSave;
+
+  /// Screen title and settings row.
+  ///
+  /// In en, this message translates to:
+  /// **'Responses'**
+  String get responsesTitle;
+
+  /// Section heading.
+  ///
+  /// In en, this message translates to:
+  /// **'Answer length'**
+  String get responsesLengthTitle;
+
+  /// Help text.
+  ///
+  /// In en, this message translates to:
+  /// **'The most an answer can use. Ovid Cloud allows up to 8K tokens.'**
+  String get responsesLengthHelp;
+
+  /// Answer length option: provider default.
+  ///
+  /// In en, this message translates to:
+  /// **'Auto'**
+  String get responsesLengthAuto;
+
+  /// Section heading.
+  ///
+  /// In en, this message translates to:
+  /// **'\"Still working\" hint'**
+  String get responsesHintTitle;
+
+  /// Help text.
+  ///
+  /// In en, this message translates to:
+  /// **'When to show \"Still working…\" if the agent is quiet. It never stops the run.'**
+  String get responsesHintHelp;
+
+  /// Marks the default option.
+  ///
+  /// In en, this message translates to:
+  /// **'Default'**
+  String get responsesHintDefault;
+
+  /// Section heading.
+  ///
+  /// In en, this message translates to:
+  /// **'Context window'**
+  String get responsesContextTitle;
+
+  /// Help text.
+  ///
+  /// In en, this message translates to:
+  /// **'For information. Ovid Cloud summarizes long chats automatically.'**
+  String get responsesContextHelp;
+
+  /// Context window details.
+  ///
+  /// In en, this message translates to:
+  /// **'Model: {model}\nContext window: {window} tokens\nOvid summarizes older messages at about {threshold} tokens.'**
+  String responsesContextInfo(String model, String window, String threshold);
+
+  /// Screen title.
+  ///
+  /// In en, this message translates to:
+  /// **'Memory files'**
+  String get memoryTitle;
+
+  /// Screen intro.
+  ///
+  /// In en, this message translates to:
+  /// **'Memory stays in the current chat unless you explicitly turn on sharing.'**
+  String get memoryIntro;
+
+  /// No description provided for @memoryScopeChat.
+  ///
+  /// In en, this message translates to:
+  /// **'Current chat only. Other chats cannot use these notes unless you explicitly tag this chat or turn on memory sharing.'**
+  String get memoryScopeChat;
+
+  /// No description provided for @memoryScopeShared.
+  ///
+  /// In en, this message translates to:
+  /// **'Shared memory is on. These notes can be used by your chats. Turn off sharing in Settings to return to chat-only notes.'**
+  String get memoryScopeShared;
+
+  /// No description provided for @memoryNeedChat.
+  ///
+  /// In en, this message translates to:
+  /// **'Open a cloud chat first to manage its memory. A chat that has not been sent yet has no saved memory.'**
+  String get memoryNeedChat;
+
+  /// Empty state.
+  ///
+  /// In en, this message translates to:
+  /// **'Nothing saved yet. Ask Ovid to remember something in a chat.'**
+  String get memoryEmpty;
+
+  /// Button and screen title.
+  ///
+  /// In en, this message translates to:
+  /// **'New memory file'**
+  String get memoryNew;
+
+  /// File size.
+  ///
+  /// In en, this message translates to:
+  /// **'{bytes} bytes'**
+  String memorySize(int bytes);
+
+  /// Confirm title.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete this memory file?'**
+  String get memoryDeleteTitle;
+
+  /// Confirm body.
+  ///
+  /// In en, this message translates to:
+  /// **'Ovid forgets everything in {name}. This can\'t be undone.'**
+  String memoryDeleteBody(String name);
+
+  /// Confirm button and tooltip.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete'**
+  String get memoryDeleteConfirm;
+
+  /// Snackbar.
+  ///
+  /// In en, this message translates to:
+  /// **'Deleted {name}.'**
+  String memoryDeleted(String name);
+
+  /// Button.
+  ///
+  /// In en, this message translates to:
+  /// **'Save'**
+  String get memorySave;
+
+  /// Snackbar.
+  ///
+  /// In en, this message translates to:
+  /// **'Memory saved.'**
+  String get memorySaved;
+
+  /// Field label.
+  ///
+  /// In en, this message translates to:
+  /// **'File name'**
+  String get memoryNameLabel;
+
+  /// Helper text.
+  ///
+  /// In en, this message translates to:
+  /// **'Letters, numbers, - or _, ending in .md'**
+  String get memoryNameHelper;
+
+  /// Validation.
+  ///
+  /// In en, this message translates to:
+  /// **'Use a short name like notes.md (letters, numbers, - or _).'**
+  String get memoryNameInvalid;
+
+  /// Field label.
+  ///
+  /// In en, this message translates to:
+  /// **'Notes (Markdown)'**
+  String get memoryContentLabel;
+
+  /// Validation.
+  ///
+  /// In en, this message translates to:
+  /// **'Memory files can be up to 32 KB.'**
+  String get memoryTooLong;
+
+  /// No workspace yet.
+  ///
+  /// In en, this message translates to:
+  /// **'Start a chat first. Memory lives in your cloud workspace.'**
+  String get memoryNoWorkspace;
+
+  /// Edit conflict.
+  ///
+  /// In en, this message translates to:
+  /// **'This memory changed since you opened it. Go back and open it again.'**
+  String get memoryConflict;
+
+  /// Screen title and settings row.
+  ///
+  /// In en, this message translates to:
+  /// **'Service status'**
+  String get statusTitle;
+
+  /// Check in progress.
+  ///
+  /// In en, this message translates to:
+  /// **'Checking…'**
+  String get statusChecking;
+
+  /// Tooltip: re-run the checks.
+  ///
+  /// In en, this message translates to:
+  /// **'Check again'**
+  String get statusRecheck;
+
+  /// Headline: all checks pass.
+  ///
+  /// In en, this message translates to:
+  /// **'Everything is working'**
+  String get statusAllGood;
+
+  /// Headline: degraded.
+  ///
+  /// In en, this message translates to:
+  /// **'Mostly working. Some things may be slow or unavailable.'**
+  String get statusPartial;
+
+  /// Headline: a check failed.
+  ///
+  /// In en, this message translates to:
+  /// **'Something isn\'t working. Chats may fail until it\'s fixed.'**
+  String get statusProblem;
+
+  /// Headline: server unreachable.
+  ///
+  /// In en, this message translates to:
+  /// **'Ovid couldn\'t reach Ovid Cloud. Check your connection.'**
+  String get statusUnreachable;
+
+  /// Section heading.
+  ///
+  /// In en, this message translates to:
+  /// **'Ovid Cloud'**
+  String get statusCloudSection;
+
+  /// Section heading.
+  ///
+  /// In en, this message translates to:
+  /// **'This device'**
+  String get statusDeviceSection;
+
+  /// Check: database.
+  ///
+  /// In en, this message translates to:
+  /// **'Chats and history'**
+  String get statusStorage;
+
+  /// Check: queue.
+  ///
+  /// In en, this message translates to:
+  /// **'Run queue'**
+  String get statusQueue;
+
+  /// Check: workers consuming runs.
+  ///
+  /// In en, this message translates to:
+  /// **'Agents'**
+  String get statusAgents;
+
+  /// Check: model catalog.
+  ///
+  /// In en, this message translates to:
+  /// **'Models'**
+  String get statusModels;
+
+  /// Check: authenticated request.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign-in'**
+  String get statusAccount;
+
+  /// Detail when signed out.
+  ///
+  /// In en, this message translates to:
+  /// **'You\'re signed out'**
+  String get statusSignedOut;
+
+  /// Check: realtime ticket.
+  ///
+  /// In en, this message translates to:
+  /// **'Live updates'**
+  String get statusLive;
+
+  /// Check: push registration.
+  ///
+  /// In en, this message translates to:
+  /// **'Notifications'**
+  String get statusPush;
+
+  /// Detail when push is not registered.
+  ///
+  /// In en, this message translates to:
+  /// **'This device isn\'t registered for notifications'**
+  String get statusPushOff;
+
+  /// Row state.
+  ///
+  /// In en, this message translates to:
+  /// **'Working'**
+  String get statusOk;
+
+  /// Row state.
+  ///
+  /// In en, this message translates to:
+  /// **'Limited'**
+  String get statusWarn;
+
+  /// Row state.
+  ///
+  /// In en, this message translates to:
+  /// **'Not working'**
+  String get statusDown;
+
+  /// Version line.
+  ///
+  /// In en, this message translates to:
+  /// **'App version {version}'**
+  String statusVersion(String version);
+
+  /// Button: copy a support report.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy diagnostics'**
+  String get statusCopyDiagnostics;
+
+  /// Snackbar.
+  ///
+  /// In en, this message translates to:
+  /// **'Diagnostics copied. Paste them into your message to support.'**
+  String get statusDiagnosticsCopied;
 }
 
 class _AppLocalizationsDelegate

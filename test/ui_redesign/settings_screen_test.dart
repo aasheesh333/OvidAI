@@ -1,17 +1,4 @@
-// Smoke tests for the Wave 2 Aether reskin of SettingsScreen.
-//
-// Verifies that the premium reskin:
-//   * renders the Account / Personalization / Data controls / Models / Studio section
-//     titles (built from AetherSectionTitle, uppercased by the primitive);
-//   * flips Aether.dark when the theme segmented control is driven;
-//   * navigates to SettingsBackupScreen when the backup row's "Backup"
-//     action is tapped;
-//   * navigates to SettingsHealthScreen when the health row's "Health"
-//     action is tapped.
-//
-// Behavior parity (persisted preferences, action widgets, provider config
-// entry, autonomy / Studio / Image bindings) is already covered by the
-// per-feature suites and must remain untouched here.
+// Settings navigation stays one whole-row tap target after the Wave 4 regrouping.
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -31,129 +18,64 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     AppState.resetTestInstance();
     AppState.createForTest();
-    // Keep the schedule timer paused — matches the convention used by the
-    // other ui_redesign suites so the test tree disposes cleanly.
   });
+  tearDown(AppState.resetTestInstance);
 
-  tearDown(() {
-    AppState.resetTestInstance();
-  });
-
-  Widget host() => MaterialApp(
-    theme: Aether.theme(),
-    home: const SettingsScreen(),
-  );
-
-  testWidgets(
-    'renders Account / Personalization / Data controls / Models sections',
-    (tester) async {
-      // Give the screen a tall viewport so every section is laid out and
-      // reachable via a single scroll pass.
-      tester.view.physicalSize = const Size(540, 2400);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-
-      await tester.pumpWidget(host());
-      await tester.pump();
-
-      // AetherSectionTitle is used for every section header. Each title is
-      // uppercased by the primitive, so the raw eyebrow text appears as
-      // 'ACCOUNT', 'APPEARANCE', etc.
-      expect(find.text('ACCOUNT'), findsOneWidget);
-      expect(find.text('PERSONALIZATION'), findsOneWidget);
-      expect(find.text('DATA CONTROLS'), findsOneWidget);
-      expect(find.text('MODELS'), findsOneWidget);
-
-      // Multiple AetherCard surfaces are composed into the list — one per
-      // section bucket at minimum.
-      expect(find.byType(AetherCard), findsWidgets);
-
-      // The theme segmented control is built from the AetherSegmentedControl
-      // primitive instead of the raw Material SegmentedButton.
-      expect(find.byType(AetherSegmentedControl<String>), findsOneWidget);
-    },
-  );
-
-  testWidgets('toggling the dark theme segment flips Aether.dark', (
-    tester,
-  ) async {
+  Future<void> pumpSettings(WidgetTester tester) async {
     tester.view.physicalSize = const Size(540, 2400);
-    tester.view.devicePixelRatio = 1.0;
+    tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-
-    // Start from the known default — dark palette is the production default.
-    Aether.dark = true;
-    AppState.I.lightTheme = false;
-
-    await tester.pumpWidget(host());
+    await tester.pumpWidget(MaterialApp(theme: Aether.theme(), home: const SettingsScreen()));
     await tester.pump();
+  }
 
-    // Tapping the "Light" pill drives AppState.setThemeMode('light'),
-    // which flips Aether.dark to false.
+  Future<void> openRow(WidgetTester tester, String title) async {
+    await tester.scrollUntilVisible(find.text(title), 300, scrollable: find.byType(Scrollable).first);
+    await tester.ensureVisible(find.text(title));
+    await tester.tap(find.text(title));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+  }
+
+  testWidgets('Settings groups expose working response and data routes', (tester) async {
+    await pumpSettings(tester);
+    for (final title in ['ACCOUNT', 'CHAT', 'MODELS & KEYS', 'NOTIFICATIONS', 'DATA & PRIVACY']) {
+      await tester.scrollUntilVisible(find.text(title), 200, scrollable: find.byType(Scrollable).first);
+      expect(find.text(title), findsOneWidget);
+    }
+    expect(find.byType(AetherCard), findsWidgets);
+    expect(find.text('Providers'), findsNothing);
+  });
+
+  testWidgets('theme controls persist the selected light and dark mode', (tester) async {
+    await pumpSettings(tester);
     await tester.tap(find.text('Light'));
     await tester.pumpAndSettle();
     expect(Aether.dark, isFalse);
-    expect(AppState.I.lightTheme, isTrue);
-
-    // And back the other way via the "Dark" pill.
+    expect(AppState.I.themeMode, 'light');
     await tester.tap(find.text('Dark'));
     await tester.pumpAndSettle();
     expect(Aether.dark, isTrue);
-    expect(AppState.I.lightTheme, isFalse);
+    expect(AppState.I.themeMode, 'dark');
   });
 
-  testWidgets('tapping Backup pushes SettingsBackupScreen', (tester) async {
-    tester.view.physicalSize = const Size(540, 2400);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-
-    await tester.pumpWidget(host());
-    await tester.pump();
-
-    // Backup row carries an AetherGhostButton labelled 'Backup' — tapping
-    // it pushes the SettingsBackupScreen without changing the legacy
-    // row-level tap behavior.
-    await tester.ensureVisible(find.widgetWithText(AetherGhostButton, 'Backup'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(AetherGhostButton, 'Backup'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-
+  testWidgets('the Export & import row opens cloud backup', (tester) async {
+    await pumpSettings(tester);
+    await openRow(tester, 'Export & import');
     expect(find.byType(SettingsBackupScreen), findsOneWidget);
+    expect(find.byType(BackButton), findsOneWidget);
   });
 
-  testWidgets('tapping Health pushes SettingsHealthScreen', (tester) async {
-    tester.view.physicalSize = const Size(540, 2400);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-
-    await tester.pumpWidget(host());
-    await tester.pump();
-
-    // Device health now lives under Advanced, below the lazy-build extent.
-    await tester.scrollUntilVisible(
-      find.widgetWithText(AetherGhostButton, 'Health'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.ensureVisible(find.widgetWithText(AetherGhostButton, 'Health'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(AetherGhostButton, 'Health'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-
+  testWidgets('the Service status row opens a route with its own back button', (tester) async {
+    await pumpSettings(tester);
+    await openRow(tester, 'Service status');
     expect(find.byType(SettingsHealthScreen), findsOneWidget);
-    // SettingsHealthScreen kicks real HealthService probes on init; let them
-    // finish (with timers) before popping, so the test does not trip the
-    // pending-Timer invariant on dispose.
+    expect(find.byType(BackButton), findsOneWidget);
     await tester.runAsync(() => Future<void>.delayed(const Duration(seconds: 4)));
-    final ctx = tester.element(find.byType(SettingsHealthScreen));
-    Navigator.of(ctx).pop();
-    await tester.pump();
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+    expect(find.byType(SettingsHealthScreen), findsNothing);
+    expect(find.byType(SettingsScreen), findsOneWidget);
   });
-
 }

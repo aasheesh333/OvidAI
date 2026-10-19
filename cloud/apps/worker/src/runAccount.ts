@@ -50,14 +50,18 @@ export function presetResolverFor(custom: readonly CustomPreset[]): (id: string 
   };
 }
 
-/** Reads the run's account context; a read failure degrades to defaults. */
+/**
+ * Billing choices and tool restrictions are not cache-class settings. A read
+ * failure must fail the job (and let its normal retry/recovery handle it), not
+ * silently route a BYOK user onto Ovid's allowance or drop their deny-list.
+ */
 export async function loadRunAccountContext(db: Db, userId: string): Promise<RunAccountContext> {
   const [settings, custom] = await Promise.all([
-    accountSettings.get(db, userId).catch(() => null),
-    customPresets.list(db, userId).catch(() => [] as CustomPreset[]),
+    accountSettings.get(db, userId),
+    customPresets.list(db, userId),
   ]);
   return {
-    byokDefault: settings?.byokDefault ?? null,
+    byokDefault: settings.byokDefault,
     presets: presetResolverFor(custom),
   };
 }
@@ -72,6 +76,7 @@ export function runKeyAdapter(o: {
   resolver: KeyResolver;
   ctx: { unattended: boolean; byokKeyId: string | null };
   byokDefault: ByokDefault | null;
+  byokModel?: string;
   defaultModel: string;
 }): {
   ctx: { unattended: boolean; byokKeyId: string | null };
@@ -84,7 +89,9 @@ export function runKeyAdapter(o: {
     async resolve(uid, requestedModel) {
       const key = await o.resolver.resolveForRun(uid, ctx);
       if (key === null) return null;
-      const model = useDefault && key.kind === "byok" ? o.byokDefault!.model : requestedModel;
+      const model = key.kind === "byok"
+        ? (o.byokModel ?? (useDefault ? o.byokDefault!.model : requestedModel))
+        : requestedModel;
       return agentKeyFor(key, model, o.defaultModel);
     },
   };

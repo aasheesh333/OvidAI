@@ -19,6 +19,7 @@ import 'dart:math' as math;
 import 'package:crypto/crypto.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../diag.dart';
 import '../state.dart';
 import 'cloud_rest.dart';
 import 'models.dart';
@@ -516,6 +517,8 @@ class CloudBackup {
   ) {
     try {
       onProgress?.call(progress);
-    } catch (_) {}
+    } catch (e) {
+      Diag.swallow('cloud_backup.progress', e);
+    }
   }
 }

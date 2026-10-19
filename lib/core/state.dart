@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' show Random;
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
@@ -97,6 +96,22 @@ enum ApiFormat {
   }
 
   String get wire => name;
+}
+
+/// An API key an older build saved on this device for a retired device
+/// provider (SE-004). Never logged; shown masked.
+class LegacyDeviceKey {
+  const LegacyDeviceKey({
+    required this.providerId,
+    required this.name,
+    required this.baseUrl,
+    required this.apiKey,
+  });
+
+  final String providerId;
+  final String name;
+  final String baseUrl;
+  final String apiKey;
 }
 
 class ProviderConfig {
@@ -725,6 +740,11 @@ class ChatSession {
   /// is allowed (the session manager "switch the blank session" semantics).
   String presetId;
 
+  /// SE-007 (Wave 4): a server-stored custom preset applied to this chat
+  /// from Settings (`PUT /sessions/:id/preset`). While set, [presetId] is
+  /// empty so the per-message built-in preset does not overwrite it.
+  String? customPresetId;
+
   /// User-pinned working folder (picked from the composer). When set and
   /// the directory exists, ALL agent work happens inside it — shell cwd,
   /// file edits, jobs, attachments, skills roots. Null = per-session
@@ -890,6 +910,7 @@ class ChatSession {
     this.branch,
     this.mode = 'auto',
     this.presetId = 'standard',
+    this.customPresetId,
     this.workspaceFolder,
     this.workspaceFolderPinned = false,
     this.systemPromptSnapshot,
@@ -931,6 +952,7 @@ class ChatSession {
     branch: j['branch'] as String?,
     mode: AppState.sanitizeColdStartMode(j['mode'] as String? ?? 'auto'),
     presetId: j['presetId'] as String? ?? 'standard',
+    customPresetId: j['customPresetId'] as String?,
     workspaceFolder: j['workspaceFolder'] as String?,
     workspaceFolderPinned: j['workspaceFolderPinned'] as bool? ?? false,
     systemPromptSnapshot: j['systemPromptSnapshot'] as String?,
@@ -989,6 +1011,7 @@ class ChatSession {
     if (branch != null) 'branch': branch,
     'mode': mode,
     if (presetId != 'standard') 'presetId': presetId,
+    if (customPresetId != null) 'customPresetId': customPresetId,
     if (workspaceFolder != null && workspaceFolder!.isNotEmpty)
       'workspaceFolder': workspaceFolder,
     if (workspaceFolderPinned) 'workspaceFolderPinned': true,
@@ -1938,13 +1961,18 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       final t = prefs.getInt(_kResponseTimeout);
-      if (t != null && t >= 5 && t <= maxResponseTimeoutSec) {
-        responseTimeoutSec = t < minResponseTimeoutSec
-            ? minResponseTimeoutSec
-            : t;
+      if (t != null && t >= 5) {
+        // SE-011: older builds offered 30/60 min, which the hint never
+        // honoured (the facade caps it at 10 min) — clamp them honestly.
+        responseTimeoutSec = t.clamp(
+          minResponseTimeoutSec,
+          maxResponseTimeoutSec,
+        );
       }
-      contextWindowOverride = prefs.getInt(_kContextWindowOverride) ?? 0;
-      maxOutputTokens = prefs.getInt(_kMaxOutputTokens) ?? 0;
+      // SE-012: the context-window override is retired. Ovid Cloud compacts
+      // on its own window, so a local override only moved the % ring.
+      contextWindowOverride = 0;
+      maxOutputTokens = _clampOutput(prefs.getInt(_kMaxOutputTokens) ?? 0);
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
       final savedThemeMode = prefs.getString(_kThemeMode);
       if (savedThemeMode == null || savedThemeMode.isEmpty) {
@@ -2272,6 +2300,16 @@ class AppState extends ChangeNotifier {
           existing.applyPersistedJson(entry);
           continue;
         }
+        // SE-004: device providers are retired — remember the row's name and
+        // URL for the key migration offer, never re-add it to the picker.
+        if (id != ovidCloudProviderId) {
+          final legacy = legacyProviderCatalog[id];
+          _legacyProviderMeta[id] = (
+            entry['name'] as String? ?? legacy?.$1 ?? id,
+            entry['baseUrl'] as String? ?? legacy?.$2 ?? '',
+          );
+          continue;
+        }
         if (entry['custom'] != true) continue;
         final baseUrl = entry['baseUrl'] as String? ?? '';
         final storedFormat = entry['apiFormat'] as String?;
@@ -2304,7 +2342,14 @@ class AppState extends ChangeNotifier {
 
   Future<void> persistProviderState() async {
     final encoded = jsonEncode(
-      providers.map((provider) => provider.toPersistedJson()).toList(),
+      [
+        for (final provider in providers) provider.toPersistedJson(),
+        // Cloud catalog refreshes persist this same preference. Keep metadata
+        // until its secure key is explicitly moved/deleted, even across restart.
+        for (final entry in _legacyProviderMeta.entries)
+          if (providerById(entry.key) == null)
+            {'id': entry.key, 'name': entry.value.$1, 'baseUrl': entry.value.$2},
+      ],
     );
     _providerWrite = _providerWrite.then((_) async {
       try {
@@ -2317,6 +2362,57 @@ class AppState extends ChangeNotifier {
     await _providerWrite;
   }
 
+  /// Name + base URL of retired device provider rows, by provider id.
+  final Map<String, (String, String)> _legacyProviderMeta = {};
+
+  /// SE-004: API keys saved on this device by older builds. They never
+  /// reached Ovid Cloud runs; Settings → Your API keys offers to move each
+  /// into the encrypted cloud key store (with consent) or delete it.
+  final List<LegacyDeviceKey> legacyDeviceKeys = [];
+
+  List<LegacyDeviceKey> _legacyKeysFrom(Map<String, String> credentials) {
+    final out = <LegacyDeviceKey>[];
+    for (final e in credentials.entries) {
+      if (!e.key.startsWith(_providerKeyPrefix)) continue;
+      final id = e.key.substring(_providerKeyPrefix.length);
+      final key = e.value.trim();
+      if (id.isEmpty || id == ovidCloudProviderId || key.isEmpty) continue;
+      final meta = _legacyProviderMeta[id] ?? legacyProviderCatalog[id];
+      out.add(
+        LegacyDeviceKey(
+          providerId: id,
+          name: meta?.$1 ?? id,
+          baseUrl: meta?.$2 ?? '',
+          apiKey: key,
+        ),
+      );
+    }
+    out.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return out;
+  }
+
+  /// Deletes a retired device key (after it was moved to the cloud, or when
+  /// the user chose to delete it). Irreversible; the caller confirms.
+  Future<void> forgetLegacyDeviceKey(String providerId) async {
+    await _secureStorage.delete(key: '$_providerKeyPrefix$providerId');
+    legacyDeviceKeys.removeWhere((k) => k.providerId == providerId);
+    _legacyProviderMeta.remove(providerId);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kProviders);
+      if (raw != null && raw.isNotEmpty) {
+        final rows = (jsonDecode(raw) as List)
+            .whereType<Map<String, dynamic>>()
+            .where((r) => r['id'] != providerId)
+            .toList();
+        await prefs.setString(_kProviders, jsonEncode(rows));
+      }
+    } catch (e) {
+      Diag.swallow('state', e);
+    }
+    notifyListeners();
+  }
+
   Future<void> loadProviderCredentials() async {
     try {
       final credentials = await _secureStorage.readAll();
@@ -2324,6 +2420,9 @@ class AppState extends ChangeNotifier {
         provider.apiKey =
             credentials['$_providerKeyPrefix${provider.id}']?.trim() ?? '';
       }
+      legacyDeviceKeys
+        ..clear()
+        ..addAll(_legacyKeysFrom(credentials));
       notifyListeners();
     } catch (_) {
       // A device keystore failure must not prevent the app from starting.
@@ -2896,6 +2995,7 @@ class AppState extends ChangeNotifier {
       session.providerId,
       session.mode,
       session.presetId,
+      session.customPresetId,
       session.workspaceFolder,
       session.workspaceFolderPinned,
       session.repo,
@@ -3727,7 +3827,9 @@ class AppState extends ChangeNotifier {
   /// Per-EVENT idle timeout (never-stop semantics: as long as chunks keep
   /// arriving the stream runs indefinitely; this is the max silence).
   int responseTimeoutSec = 300;
-  static const timeoutPresets = [120, 300, 600, 1800, 3600];
+  /// SE-011: when the "Still working…" hint appears (it never cancels a run;
+  /// the cloud enforces its own limits). Capped at 10 minutes.
+  static const timeoutPresets = [30, 60, 120, 300, 600];
 
   // ── Context window + output caps (user-configurable, settings) ─
   /// 0 = auto (per-model table, 1M fallback).  Any positive value is the
@@ -3753,7 +3855,16 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// SE-012: Ovid Cloud caps answers at 8K tokens (MAX_OUTPUT_TOKENS_CAP);
+  /// larger picks were silently cut, so they are no longer stored.
+  static const maxOutputTokensCap = 8192;
+  static const outputTokenPresets = [0, 1024, 2048, 4096, 8192];
+
+  static int _clampOutput(int tokens) =>
+      tokens <= 0 ? 0 : tokens.clamp(1, maxOutputTokensCap);
+
   Future<void> setMaxOutputTokens(int tokens) async {
+    tokens = _clampOutput(tokens);
     maxOutputTokens = tokens;
     notifyListeners();
     try {
@@ -3767,7 +3878,7 @@ class AppState extends ChangeNotifier {
   /// The response timeout is a first-byte / idle limit, so anything below
   /// this would fail every turn of a reasoning model that thinks quietly.
   static const minResponseTimeoutSec = 30;
-  static const maxResponseTimeoutSec = 3600;
+  static const maxResponseTimeoutSec = 600;
 
   /// Below this the Settings screen warns that slow models may time out.
   static const responseTimeoutWarnBelowSec = 60;
@@ -4958,7 +5069,10 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_kCustomPresets);
-      if (raw == null || raw.isEmpty) return;
+      // SE-007 (Wave 4): presets saved only on this device never reached a
+      // cloud run. Custom presets now live on the server (Settings → Agent
+      // presets); the old local list is no longer loaded.
+      if (raw == null || raw.isEmpty || !loadLegacyLocalPresets) return;
       final list = jsonDecode(raw);
       if (list is List) {
         PresetRegistry.clearCustom();
@@ -4986,6 +5100,9 @@ class AppState extends ChangeNotifier {
       Diag.swallow('state', e);
     }
   }
+
+  /// Legacy device-only presets are ignored (see [_loadCustomPresets]).
+  static bool loadLegacyLocalPresets = false;
 
   Future<void> saveCustomPreset(AgentPreset preset) async {
     PresetRegistry.saveCustom(preset);
@@ -5071,130 +5188,29 @@ class AppState extends ChangeNotifier {
         // 'auto' is seeded so Auto mode works before the first fetch.
         models: ['auto'],
       ),
-      ProviderConfig(
-        name: 'OpenAI',
-        description: 'GPT and o-series models from the OpenAI platform.',
-        baseUrl: 'https://api.openai.com/v1',
-        models: ['gpt-4o', 'gpt-4o-mini', 'o3-mini'],
-      ),
-      ProviderConfig(
-        name: 'Anthropic',
-        description: 'Claude Opus, Sonnet and Haiku family.',
-        baseUrl: 'https://api.anthropic.com/v1',
-        apiFormat: ApiFormat.anthropic,
-        models: [
-          'claude-sonnet-4-20250514',
-          'claude-opus-4-20250514',
-          'claude-3-7-sonnet-20250219',
-          'claude-3-5-haiku-20241022',
-        ],
-      ),
-      ProviderConfig(
-        name: 'Google Gemini',
-        description: 'Gemini series via AI Studio (free tier available).',
-        baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-        isFree: true, // AI Studio free tier — bas API key daalo
-        models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'],
-      ),
-      ProviderConfig(
-        name: 'DeepSeek',
-        description: 'DeepSeek chat & reasoner, direct API.',
-        baseUrl: 'https://api.deepseek.com/v1',
-        models: ['deepseek-chat', 'deepseek-reasoner'],
-      ),
-      ProviderConfig(
-        name: 'xAI',
-        description: 'Grok family from xAI.',
-        baseUrl: 'https://api.x.ai/v1',
-        models: ['grok-3', 'grok-3-mini'],
-      ),
-      ProviderConfig(
-        name: 'Mistral AI',
-        description: 'Mistral Large, Codestral and open weights.',
-        baseUrl: 'https://api.mistral.ai/v1',
-        models: ['mistral-large-latest', 'codestral-latest'],
-      ),
-      ProviderConfig(
-        name: 'NVIDIA NIM',
-        description:
-            'Free credits for hosted open models on build.nvidia.com. '
-            '82 models are live on the endpoint; context windows for the '
-            'flagship Nemotron routes were read out of the API\'s own 400 '
-            'responses (see ModelLimits).',
-        baseUrl: 'https://integrate.api.nvidia.com/v1',
-        isFree: true,
-        // Every id here was checked against the live endpoint's model list
-        // (2026-09-23). llama-3.3-70b-instruct, deepseek-r1 and
-        // qwen2.5-coder-32b-instruct used to be seeded and now answer 404, so
-        // they are gone rather than left as dead buttons.
-        models: [
-          'nvidia/nemotron-3-super-120b-a12b',
-          'nvidia/nemotron-3-ultra-550b-a55b',
-          'nvidia/nemotron-3.5-lightning-30b-a3b',
-          'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
-          'mistralai/mistral-nemotron',
-        ],
-      ),
-      ProviderConfig(
-        name: 'Groq',
-        description: 'Ultra-fast LPU inference. Free tier available.',
-        baseUrl: 'https://api.groq.com/openai/v1',
-        isFree: true,
-        models: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b'],
-      ),
-      ProviderConfig(
-        name: 'Cerebras',
-        description: 'Wafer-scale speed. Free tier available.',
-        baseUrl: 'https://api.cerebras.ai/v1',
-        isFree: true,
-        models: ['llama-3.3-70b'],
-      ),
-      ProviderConfig(
-        name: 'GitHub Models',
-        description: 'Free tier models with a GitHub token.',
-        baseUrl: 'https://models.github.ai/inference',
-        isFree: true,
-        models: ['gpt-4.1', 'DeepSeek-R1'],
-      ),
-      ProviderConfig(
-        name: 'OpenRouter',
-        description: 'One key, 300+ models including free variants.',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        isFree: true, // :free suffix models — free tier available
-        models: ['deepseek/deepseek-chat-v3.1', 'meta-llama/llama-4-maverick'],
-      ),
-      ProviderConfig(
-        name: 'Together AI',
-        description: 'Fast inference for open models.',
-        baseUrl: 'https://api.together.xyz/v1',
-        models: [],
-      ),
-      ProviderConfig(
-        name: 'Fireworks AI',
-        description: 'Serverless open-model inference.',
-        baseUrl: 'https://api.fireworks.ai/inference/v1',
-        models: [],
-      ),
-      ProviderConfig(
-        name: 'Perplexity',
-        description: 'Sonar models with live web access.',
-        baseUrl: 'https://api.perplexity.ai',
-        models: ['sonar-pro', 'sonar'],
-      ),
-      ProviderConfig(
-        name: 'Cohere',
-        description: 'Command and Embed models.',
-        baseUrl: 'https://api.cohere.ai/compatibility/v1',
-        models: [],
-      ),
-      ProviderConfig(
-        name: 'Ollama (local)',
-        description: 'Models fully on-device or LAN, no key needed.',
-        baseUrl: 'http://localhost:11434/v1',
-        requiresApiKey: false,
-        models: [],
-      ),
     ]);
-
   }
+
+  /// SE-004 (Wave 4): device-only provider keys never reached cloud runs, so
+  /// the app no longer offers them. Rows saved by older builds (built-in
+  /// providers with a key, or custom providers) are kept here — name and base
+  /// URL only — so Settings → Your API keys can offer to move each key into
+  /// the encrypted cloud key store (with consent) or delete it.
+  static const Map<String, (String, String)> legacyProviderCatalog = {
+    'openai': ('OpenAI', 'https://api.openai.com/v1'),
+    'anthropic': ('Anthropic', 'https://api.anthropic.com/v1'),
+    'google-gemini': ('Google Gemini', 'https://generativelanguage.googleapis.com/v1beta'),
+    'deepseek': ('DeepSeek', 'https://api.deepseek.com/v1'),
+    'xai': ('xAI', 'https://api.x.ai/v1'),
+    'mistral-ai': ('Mistral AI', 'https://api.mistral.ai/v1'),
+    'nvidia-nim': ('NVIDIA NIM', 'https://integrate.api.nvidia.com/v1'),
+    'groq': ('Groq', 'https://api.groq.com/openai/v1'),
+    'cerebras': ('Cerebras', 'https://api.cerebras.ai/v1'),
+    'github-models': ('GitHub Models', 'https://models.github.ai/inference'),
+    'openrouter': ('OpenRouter', 'https://openrouter.ai/api/v1'),
+    'together-ai': ('Together AI', 'https://api.together.xyz/v1'),
+    'fireworks-ai': ('Fireworks AI', 'https://api.fireworks.ai/inference/v1'),
+    'perplexity': ('Perplexity', 'https://api.perplexity.ai'),
+    'cohere': ('Cohere', 'https://api.cohere.ai/compatibility/v1'),
+  };
 }

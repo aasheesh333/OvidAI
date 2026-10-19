@@ -14,7 +14,7 @@ class LegalLinks {
   /// Marketing site. Not a policy document.
   static const website = String.fromEnvironment(
     'OVID_WEBSITE_URL',
-    defaultValue: 'https://dhanuk.page.gd/ovid',
+    defaultValue: 'https://ovidsi.com',
   );
 
   static const privacyPolicy = String.fromEnvironment(

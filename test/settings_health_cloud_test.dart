@@ -1,139 +1,99 @@
-// P8 Task 13 — SettingsHealthScreen becomes a thin card over cloud health.
-//
-// The local runtime health probes (HealthService) die with the sandbox. The
-// successor is the ONE public gateway route, `GET /cloud/v1/health`, whose
-// built wire shape is `{status, checks:{db, redisQ}}` (Task 5's CloudHealth).
-// Both the 200-ok and 503-degraded variants carry the same body; the client
-// parses them identically and the SCREEN owns the degraded presentation.
-
-import 'dart:async';
+// Wave 4 (SE-013 / SE-014 / EM-014): Service status is a real screen with
+// its own Scaffold and back button, checks Ovid Cloud's capabilities through
+// the public status route plus this device's sign-in and live updates, and
+// never shows raw exception text.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/cloud/account_settings_client.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
-import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/settings_health_screen.dart';
 
-class _FakeHealthRest extends CloudRestClient {
-  _FakeHealthRest({this.result, this.error})
-      : super(headers: CloudHeaders.forTest(), restBase: 'http://test');
+ServiceStatus _status(String overall, {String agents = 'ok', String models = 'ok'}) =>
+    ServiceStatus.fromJson({
+      'status': overall,
+      'checks': {
+        'api': 'ok',
+        'storage': 'ok',
+        'queue': 'ok',
+        'agents': agents,
+        'models': models,
+      },
+      'checkedAt': '2026-10-19T00:00:00Z',
+    });
 
-  CloudHealth? result;
-  CloudApiException? error;
-  int calls = 0;
+ServiceStatusProbes _probes({
+  Future<ServiceStatus> Function()? server,
+  bool signedIn = true,
+  bool accountOk = true,
+}) => ServiceStatusProbes(
+  server: server ?? () async => _status('ok'),
+  account: () async {
+    if (!accountOk) {
+      throw CloudApiException(status: 401, code: 'unauthorized', message: 'x');
+    }
+  },
+  live: () async {},
+  signedIn: () => signedIn,
+  pushRegistered: () => true,
+);
 
-  @override
-  Future<CloudHealth> health() async {
-    calls++;
-    if (error != null) throw error!;
-    return result!;
-  }
+/// Pushed as a full route the way Settings does — no host Scaffold.
+Future<void> _push(WidgetTester tester, ServiceStatusProbes probes) async {
+  await tester.pumpWidget(
+    MaterialApp(
+      theme: Aether.theme(),
+      home: Builder(
+        builder: (context) => TextButton(
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => SettingsHealthScreen(probes: probes),
+            ),
+          ),
+          child: const Text('open'),
+        ),
+      ),
+    ),
+  );
+  await tester.tap(find.text('open'));
+  await tester.pumpAndSettle();
 }
-
-Widget _host(Widget child) =>
-    MaterialApp(theme: Aether.theme(), home: Scaffold(body: child));
 
 void main() {
-  testWidgets('degraded health renders the banner and per-check rows',
-      (tester) async {
-    final rest = _FakeHealthRest(
-      result: const CloudHealth(
-        status: 'degraded',
-        checks: CloudHealthChecks(db: true, redisQ: false),
-      ),
-    );
-
-    await tester.pumpWidget(_host(SettingsHealthScreen(rest: rest)));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Degraded'), findsOneWidget);
-    expect(find.text('Database'), findsOneWidget);
-    expect(find.text('Redis queue'), findsOneWidget);
-    expect(find.text('Operational'), findsOneWidget);
-    expect(find.text('Unavailable'), findsOneWidget);
+  testWidgets('own Scaffold, app bar title and back button', (tester) async {
+    await _push(tester, _probes());
+    expect(find.byType(Scaffold), findsWidgets);
+    expect(find.widgetWithText(AppBar, 'Service status'), findsOneWidget);
+    expect(find.byType(BackButton), findsOneWidget);
+    expect(find.text('Everything is working'), findsOneWidget);
   });
 
-  testWidgets('healthy status renders no degraded banner', (tester) async {
-    final rest = _FakeHealthRest(
-      result: const CloudHealth(
-        status: 'ok',
-        checks: CloudHealthChecks(db: true, redisQ: true),
-      ),
+  testWidgets('no agent consumer shows a problem, not "operational"', (
+    tester,
+  ) async {
+    await _push(
+      tester,
+      _probes(server: () async => _status('down', agents: 'down')),
     );
-
-    await tester.pumpWidget(_host(SettingsHealthScreen(rest: rest)));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Degraded'), findsNothing);
-    expect(find.text('Operational'), findsNWidgets(2));
+    expect(find.textContaining("Something isn't working"), findsOneWidget);
+    expect(find.text('Not working'), findsOneWidget);
   });
 
-  testWidgets('a 503 unavailable envelope renders the retry affordance',
-      (tester) async {
-    final rest = _FakeHealthRest(
-      error: CloudApiException(
-        status: 503,
-        code: 'unavailable',
-        message: 'Ovid Cloud is temporarily unavailable.',
-      ),
+  testWidgets('unreachable cloud shows human copy without exception text', (
+    tester,
+  ) async {
+    await _push(
+      tester,
+      _probes(server: () async => throw StateError('Bad state: socket 10.0.0.5')),
     );
-
-    await tester.pumpWidget(_host(SettingsHealthScreen(rest: rest)));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Retry'), findsOneWidget);
-    expect(
-      find.textContaining('temporarily unavailable'),
-      findsOneWidget,
-    );
-
-    // Retry re-runs the probe.
-    rest.error = null;
-    rest.result = const CloudHealth(
-      status: 'ok',
-      checks: CloudHealthChecks(db: true, redisQ: true),
-    );
-    await tester.tap(find.text('Retry'));
-    await tester.pumpAndSettle();
-
-    expect(rest.calls, 2);
-    expect(find.text('Retry'), findsNothing);
-    expect(find.text('Operational'), findsNWidgets(2));
+    expect(find.textContaining("couldn't reach Ovid Cloud"), findsOneWidget);
+    expect(find.textContaining('Bad state'), findsNothing);
+    expect(find.textContaining('10.0.0.5'), findsNothing);
   });
 
-  testWidgets('the refresh button stays visible and enabled while a check '
-      'hangs', (tester) async {
-    // The probe NEVER completes in this test — the hung-gateway case. The
-    // refresh control must not vanish behind a spinner (that turned the card
-    // into a dead end); the busy state lives in the body status line.
-    final rest = _GatedHealthRest();
-    await tester.pumpWidget(_host(SettingsHealthScreen(rest: rest)));
-    await tester.pump();
-
-    expect(find.byType(CircularProgressIndicator), findsOneWidget,
-        reason: 'the busy line owns the spinner');
-    final button = tester.widget<IconButton>(find.byType(IconButton));
-    expect(button.onPressed, isNotNull,
-        reason: 'refresh stays enabled while busy');
-    expect(rest.calls, 1);
-
-    // A re-tap while busy just restarts the probe — it is not blocked.
-    await tester.tap(find.byType(IconButton));
-    await tester.pump();
-    expect(rest.calls, 2);
+  testWidgets('a rejected sign-in marks the account row', (tester) async {
+    await _push(tester, _probes(accountOk: false));
+    expect(find.text('Not working'), findsOneWidget);
   });
-}
-
-/// A [CloudRestClient] whose `health()` hangs until released.
-class _GatedHealthRest extends CloudRestClient {
-  _GatedHealthRest() : super(headers: CloudHeaders.forTest(), restBase: 'http://test');
-
-  int calls = 0;
-
-  @override
-  Future<CloudHealth> health() {
-    calls++;
-    return Completer<CloudHealth>().future;
-  }
 }

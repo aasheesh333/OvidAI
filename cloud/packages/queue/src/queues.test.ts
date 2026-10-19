@@ -71,6 +71,13 @@ describe("agentRunJobSchema", () => {
     });
   });
 
+  it("retains a snapshotted BYOK provider model across queue parsing", () => {
+    expect(agentRunJobSchema.parse({ ...valid, byokKeyId: "k1", byokModel: "gpt-4.1-mini" })).toEqual({
+      ...valid, byokKeyId: "k1", byokModel: "gpt-4.1-mini",
+    });
+    expect(agentRunJobSchema.safeParse({ ...valid, byokModel: "" }).success).toBe(false);
+  });
+
   it("rejects a job missing prompt", () => {
     const missing = { runId: "r1", sessionId: "s1", userId: "u1" };
     expect(agentRunJobSchema.safeParse(missing).success).toBe(false);

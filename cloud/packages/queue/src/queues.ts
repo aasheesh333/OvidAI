@@ -75,6 +75,8 @@ export interface AgentRunJob {
    * LiteLLM/internal-mint path. Old payloads still parse.
    */
   byokKeyId?: string | null;
+  /** Provider model captured with the chosen key at enqueue, not an Ovid catalog id. */
+  byokModel?: string;
   /**
    * P3 Task 16 (additive, optional — old payloads still parse): the run has
    * no attending user, so approval cards may not wait forever; the gate's
@@ -117,6 +119,7 @@ export const agentRunJobSchema: z.ZodType<AgentRunJob> = z.object({
   attachmentIds: z.array(z.string().min(1)).optional(),
   maxOutputTokens: z.number().int().min(1).max(MAX_OUTPUT_TOKENS_CAP).optional(),
   byokKeyId: z.string().min(1).nullable().optional(),
+  byokModel: z.string().trim().min(1).max(160).optional(),
   unattended: z.boolean().optional(),
   autonomy: z.enum(["safe", "auto"]).optional(),
   mode: z.enum(["safe", "auto", "drive", "studio"]).optional(),

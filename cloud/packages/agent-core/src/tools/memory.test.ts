@@ -120,10 +120,48 @@ describe("validateMemoryContent", () => {
   });
 });
 
+describe("memory session isolation (R1)", () => {
+  it("A's saved fact and legacy global facts are inaccessible in B by default", async () => {
+    const { sandbox, files } = fakeSandbox();
+    files.set("u1:.ovid/memory/MEMORY.md", "legacy private fact");
+    const tools = byName(createMemoryTools({ sandbox }));
+    const a = { ...ctx(), sessionId: "session-a" };
+    const b = { ...ctx(), sessionId: "session-b" };
+    await tools.get("memory_save")!.execute({ content: "dog: Bruno" }, a);
+    expect(JSON.parse((await tools.get("memory_read")!.execute({}, a)).content).content).toBe("dog: Bruno");
+    expect(JSON.parse((await tools.get("memory_read")!.execute({}, b)).content).content).toBe("");
+    expect((await tools.get("memory_search")!.execute({ query: "Bruno" }, b)).content).toBe("No matches.");
+    expect(files.get("u1:.ovid/memory/MEMORY.md")).toBe("legacy private fact");
+  });
+
+  it("explicit sharing reads the shared directory; switching it off never imports old shared facts", async () => {
+    const { sandbox } = fakeSandbox();
+    const shared = byName(createMemoryTools({ sandbox, shareSessionMemory: true }));
+    await shared.get("memory_save")!.execute({ content: "shared fact" }, { ...ctx(), sessionId: "session-a" });
+    expect(JSON.parse((await shared.get("memory_read")!.execute({}, { ...ctx(), sessionId: "session-b" })).content).content).toBe("shared fact");
+    const isolated = byName(createMemoryTools({ sandbox }));
+    expect(JSON.parse((await isolated.get("memory_read")!.execute({}, { ...ctx(), sessionId: "session-b" })).content).content).toBe("");
+  });
+
+  it("only explicitly authorized tagged sessions can be read, never written, by another chat", async () => {
+    const { sandbox } = fakeSandbox();
+    const plain = byName(createMemoryTools({ sandbox }));
+    const a = { ...ctx(), sessionId: "session-a" };
+    const b = { ...ctx(), sessionId: "session-b" };
+    await plain.get("memory_save")!.execute({ content: "tagged fact" }, a);
+    expect((await plain.get("memory_read")!.execute({ sessionId: "session-a" }, b)).isError).toBe(true);
+    const tagged = byName(createMemoryTools({ sandbox, referencedSessionIds: ["session-a"] }));
+    expect(JSON.parse((await tagged.get("memory_read")!.execute({ sessionId: "session-a" }, b)).content).content).toBe("tagged fact");
+    expect((await tagged.get("memory_save")!.execute({ sessionId: "session-a", content: "overwrite" }, b)).isError).toBe(true);
+    expect((await tagged.get("memory_read")!.execute({ sessionId: "../escape" }, b)).isError).toBe(true);
+    expect(JSON.parse((await plain.get("memory_read")!.execute({}, a)).content).content).toBe("tagged fact");
+  });
+});
+
 describe("memory tools (fake SandboxPort)", () => {
   it("memory_save writes, memory_read round-trips revision + content + file index", async () => {
     const { sandbox } = fakeSandbox();
-    const tools = byName(createMemoryTools({ sandbox }));
+    const tools = byName(createMemoryTools({ sandbox, shareSessionMemory: true }));
 
     const saved = await tools.get("memory_save")!.execute(
       { name: "MEMORY.md", content: "Prefer concise answers" },
@@ -155,7 +193,7 @@ describe("memory tools (fake SandboxPort)", () => {
 
   it("memory_read: missing non-entrypoint file is an error; missing MEMORY.md is empty", async () => {
     const { sandbox } = fakeSandbox();
-    const tools = byName(createMemoryTools({ sandbox }));
+    const tools = byName(createMemoryTools({ sandbox, shareSessionMemory: true }));
 
     const missing = await tools.get("memory_read")!.execute({ name: "nothere.md" }, ctx());
     expect(missing.isError).toBe(true);
@@ -168,7 +206,7 @@ describe("memory tools (fake SandboxPort)", () => {
 
   it("memory_save with a stale expectedRevision → conflict error naming BOTH revisions", async () => {
     const { sandbox } = fakeSandbox();
-    const tools = byName(createMemoryTools({ sandbox }));
+    const tools = byName(createMemoryTools({ sandbox, shareSessionMemory: true }));
 
     await tools.get("memory_save")!.execute({ name: "notes.md", content: "Original" }, ctx());
     const current = memoryRevision("Original");
@@ -200,7 +238,7 @@ describe("memory tools (fake SandboxPort)", () => {
 
   it("memory_save replaces the whole file (bounded full-replace semantics)", async () => {
     const { sandbox } = fakeSandbox();
-    const tools = byName(createMemoryTools({ sandbox }));
+    const tools = byName(createMemoryTools({ sandbox, shareSessionMemory: true }));
     await tools.get("memory_save")!.execute({ name: "a.md", content: "one two" }, ctx());
     await tools.get("memory_save")!.execute({ name: "a.md", content: "three" }, ctx());
     const read = await tools.get("memory_read")!.execute({ name: "a.md" }, ctx());
@@ -209,7 +247,7 @@ describe("memory tools (fake SandboxPort)", () => {
 
   it("memory_save refuses names and content that fail validation", async () => {
     const { sandbox } = fakeSandbox();
-    const tools = byName(createMemoryTools({ sandbox }));
+    const tools = byName(createMemoryTools({ sandbox, shareSessionMemory: true }));
     const badName = await tools.get("memory_save")!.execute(
       { name: "../escape.md", content: "x" },
       ctx(),
@@ -229,7 +267,7 @@ describe("memory tools (fake SandboxPort)", () => {
 
   it("case-conflict: saving notes.md when NOTES.md exists is refused", async () => {
     const { sandbox } = fakeSandbox();
-    const tools = byName(createMemoryTools({ sandbox }));
+    const tools = byName(createMemoryTools({ sandbox, shareSessionMemory: true }));
     await tools.get("memory_save")!.execute({ name: "NOTES.md", content: "upper" }, ctx());
     const conflict = await tools.get("memory_save")!.execute({ name: "notes.md", content: "lower" }, ctx());
     expect(conflict.isError).toBe(true);
@@ -238,7 +276,7 @@ describe("memory tools (fake SandboxPort)", () => {
 
   it("memory_save refuses the maxFiles+1-th file (MEMORY.md counts, Dart parity)", async () => {
     const { sandbox } = fakeSandbox();
-    const tools = byName(createMemoryTools({ sandbox }));
+    const tools = byName(createMemoryTools({ sandbox, shareSessionMemory: true }));
     for (let i = 0; i < MEMORY_LIMITS.maxFiles - 1; i++) {
       const r = await tools.get("memory_save")!.execute(
         { name: `f${i}.md`, content: "x" },
@@ -263,7 +301,7 @@ describe("memory tools (fake SandboxPort)", () => {
 
   it("memory_search finds a substring across two files, case-insensitively, capped", async () => {
     const { sandbox } = fakeSandbox();
-    const tools = byName(createMemoryTools({ sandbox }));
+    const tools = byName(createMemoryTools({ sandbox, shareSessionMemory: true }));
     await sandbox.writeFile("u1", ".ovid/memory/MEMORY.md", "I like pineapple on pizza");
     await sandbox.writeFile("u1", ".ovid/memory/extra.md", "The PINEAPPLE is a fruit");
 
@@ -283,7 +321,7 @@ describe("memory tools (fake SandboxPort)", () => {
 
   it("memory tools are isolated per user (the sandbox keys the workspace)", async () => {
     const { sandbox } = fakeSandbox();
-    const tools = byName(createMemoryTools({ sandbox }));
+    const tools = byName(createMemoryTools({ sandbox, shareSessionMemory: true }));
     await tools.get("memory_save")!.execute({ name: "MEMORY.md", content: "u1 secret" }, ctx("u1"));
     const stranger = await tools.get("memory_read")!.execute({ name: "MEMORY.md" }, ctx("u2"));
     const parsed = JSON.parse(stranger.content) as { content: string; files: string[] };
@@ -294,7 +332,7 @@ describe("memory tools (fake SandboxPort)", () => {
 
   it("memory_search refuses an empty query", async () => {
     const { sandbox } = fakeSandbox();
-    const tools = byName(createMemoryTools({ sandbox }));
+    const tools = byName(createMemoryTools({ sandbox, shareSessionMemory: true }));
     const res = await tools.get("memory_search")!.execute({ query: "" }, ctx());
     expect(res.isError).toBe(true);
   });

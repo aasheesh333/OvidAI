@@ -1473,6 +1473,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     memoryEnabled: boolean;
     /** The user's Share session memory preference (false → session-scoped search). */
     shareSessionMemory: boolean;
+    referencedSessionIds: readonly string[];
   }): CoreToolRegistry => {
     const p2Tools = adaptAgentTools(workerRegistry.tools, {
       sandboxFor: async (ctx) =>
@@ -1504,7 +1505,11 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       ...createRepoTools({ github: deps.github }),
       // Memory OFF removes the whole family — memory_save too (the roster's
       // harness exemption would otherwise keep it advertised).
-      ...(o.memoryEnabled ? createMemoryTools({ sandbox: o.sandbox }) : []),
+      ...(o.memoryEnabled ? createMemoryTools({
+        sandbox: o.sandbox,
+        shareSessionMemory: o.shareSessionMemory,
+        referencedSessionIds: o.referencedSessionIds,
+      }) : []),
       ...createGoalTodoTools({ state, sinkFactory: sinkFor }),
       createSessionSearchTool({ db: deps.db, crossSession: o.shareSessionMemory }),
       createExitPlanModeTool({ state, approvals }),
@@ -1558,6 +1563,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
         byokKeyId: job.data.byokKeyId ?? null,
       },
       byokDefault: account.byokDefault,
+      ...(job.data.byokModel !== undefined ? { byokModel: job.data.byokModel } : {}),
       defaultModel: deps.defaultModel,
     });
     const presetFor = account.presets;
@@ -1637,11 +1643,16 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     // Wave 1a (R1): context from the sessions the user explicitly @-tagged
     // in THIS message (gateway owner-checked; re-checked here). For this run
     // only — the loop never persists it.
+    // Re-check ownership before these ids become a memory_read capability.
+    const referencedSessionIds: string[] = [];
+    for (const id of new Set(job.data.sessionRefs ?? [])) {
+      if (id !== sessionId && (await sessions.get(deps.db, id, userId)) !== null) referencedSessionIds.push(id);
+    }
     const turnContext = await buildReferencedSessionContext(
       deps.db,
       userId,
       sessionId,
-      job.data.sessionRefs ?? [],
+      referencedSessionIds,
     );
 
     /** Image attachments forwarded to the model (bounded; see the loop). */
@@ -1933,6 +1944,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       extraTools: subagentTools,
       memoryEnabled,
       shareSessionMemory: prefs.shareSessionMemory,
+      referencedSessionIds,
     });
     registryRef = registry;
 

@@ -412,6 +412,21 @@ class CloudRestClient {
     throw _toError(response);
   }
 
+  /// Wave 4 (SE-014): an unauthenticated GET for the public status view
+  /// (`GET /health/status`). No auth headers, same error mapping.
+  Future<Map<String, dynamic>> publicGetJson(String path,
+      {Duration? timeout}) async {
+    final response = await _raw('GET', _uri(path), const <String, String>{},
+        timeout: timeout);
+    final dynamic parsed = _tryJson(response.body);
+    if (response.statusCode >= 200 &&
+        response.statusCode < 300 &&
+        parsed is Map<String, dynamic>) {
+      return parsed;
+    }
+    throw _toError(response);
+  }
+
   /// POST /auth/ticket → the single-use WS ticket.
   Future<String> mintTicket() async {
     final json = await postJson('/auth/ticket');

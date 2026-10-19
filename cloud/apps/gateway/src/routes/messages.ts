@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { attachments, messages, runs, sessionState, sessions, users, type Db, type MessageRow } from "@ovid/db";
+import { accountSettings, byokKeysRepo, attachments, messages, runs, sessionState, sessions, users, type Db, type MessageRow } from "@ovid/db";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import {
   CLOUD_PRESET_IDS,
@@ -394,8 +394,15 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     //    x-ovid-resets-at; every other failure collapses to 409 key_not_minted.
     //    P9 Task 9: mint is called with the gateway's own verified uid
     //    (signed server-to-server).
+    // Snapshot the caller's billing choice before accepting the message. BYOK
+    // must not mint/check an Ovid key (including its exhausted allowance), and
+    // a stale/foreign key must never silently fall back to Ovid billing.
+    const byokDefault = (await accountSettings.get(deps.db, uid)).byokDefault;
+    if (byokDefault !== null && (await byokKeysRepo.get(deps.db, byokDefault.keyId, uid)) === null) {
+      return sendError(reply, 409, "key_not_minted", "Your selected API key is unavailable. Update it in Settings.");
+    }
     try {
-      await ensureKeyBounded(deps, uid);
+      if (byokDefault === null) await ensureKeyBounded(deps, uid);
     } catch (err) {
       // P10 Task 2: a deadline breach is a bounded, retryable dependency
       // failure — NOT a "this account has no key" verdict.
@@ -494,6 +501,9 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
           userId: uid,
           prompt: content,
           tier: user.tier,
+          ...(byokDefault !== null
+            ? { byokKeyId: byokDefault.keyId, byokModel: byokDefault.model }
+            : {}),
           ...(requestedAttachmentIds.length > 0
             ? { attachmentIds: requestedAttachmentIds }
             : {}),

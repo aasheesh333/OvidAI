@@ -147,8 +147,14 @@ export const sessionPresetBodySchema = z.object({ presetId: z.string().min(1).ma
 // Memory files (SE-006)
 // ---------------------------------------------------------------------------
 
-/** The memory directory inside the user's cloud workspace (agent-core MEMORY_DIR). */
+/** Shared memory is opt-in; existing files here are never imported into isolated chats. */
 export const MEMORY_DIR = ".ovid/memory";
+
+/** Session ids are trusted internal ids here; REST additionally requires an owned UUID. */
+export function memoryDirectoryFor(sessionId: string, shareSessionMemory = false): string {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(sessionId)) throw new Error("A valid chat is required for memory.");
+  return shareSessionMemory ? MEMORY_DIR : `.ovid/session-memory/${sessionId}`;
+}
 
 /**
  * A memory file name: a plain .md filename, at most 80 characters, no paths

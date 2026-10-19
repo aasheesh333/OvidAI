@@ -1,14 +1,10 @@
 // Memory tools (P3 Task 13) — the port of lib/core/memory_store.dart's
 // canonical personal-memory Markdown files onto the cloud surface.
 //
-// WHERE THE FILES LIVE (ruling P3-Q3): `.ovid/memory/` inside the USER
-// workspace, reached through SandboxPort — server-authoritative and
-// hibernating with the workspace (the P7 packer sweeps the workspace root, so
-// the memory directory rides every hibernate/hydrate cycle). This is a
-// documented deviation from Dart's app-private directory: Dart scoped memory
-// per app account with global/session sub-scopes; the cloud's workspace IS
-// the per-user scope, so the sub-scopes collapse into one flat directory and
-// the entrypoint stays MEMORY.md.
+// Memory files remain in the user's shared workspace for hibernation, but
+// R1 keeps their tool namespace per chat by default. Only explicit memory
+// sharing enables the legacy .ovid/memory directory. Existing global files
+// are preserved, never silently copied into isolated chat memory.
 //
 // Dart parity kept: bounded name/content validation (same error copies), the
 // sha256 revision + conflict semantics of memory_save, the case-conflict and
@@ -20,6 +16,7 @@
 // not re-implemented here.
 
 import { createHash } from "node:crypto";
+import { memoryDirectoryFor } from "@ovid/shared";
 
 import type { SandboxPort } from "../ports.js";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
@@ -77,8 +74,8 @@ export function memoryRevision(content: string): string {
 }
 
 /** The memory file's workspace path. Name is pre-validated. */
-function memoryPath(name: string): string {
-  return `${MEMORY_DIR}/${name}`;
+function memoryPath(name: string, directory: string): string {
+  return `${directory}/${name}`;
 }
 
 /** Runs a tool body; user-level failures become isError results, never throws. */
@@ -100,9 +97,9 @@ interface SandboxFiles {
  * fresh workspace has not written memory yet); Dart also counts MEMORY.md
  * toward maxFiles even while absent (it is the always-readable entrypoint).
  */
-async function listMemoryFiles(sandbox: SandboxPort, userId: string): Promise<SandboxFiles> {
-  if (!(await sandbox.exists(userId, MEMORY_DIR))) return { names: [] };
-  const entries = await sandbox.listDir(userId, MEMORY_DIR);
+async function listMemoryFiles(sandbox: SandboxPort, userId: string, directory: string): Promise<SandboxFiles> {
+  if (!(await sandbox.exists(userId, directory))) return { names: [] };
+  const entries = await sandbox.listDir(userId, directory);
   // Only plain names in the memory root; any other shape (nested dir,
   // save temp) is ignored by the scan, matching Dart's list() tolerance.
   const names = entries.filter((e) => !e.startsWith("."));
@@ -115,10 +112,11 @@ async function memoryRead(
   sandbox: SandboxPort,
   args: Record<string, unknown>,
   ctx: ToolContext,
+  directory: string,
 ): Promise<ToolResult> {
   const name = typeof args.name === "string" && args.name !== "" ? args.name : MEMORY_ENTRYPOINT;
   validateMemoryName(name);
-  const path = memoryPath(name);
+  const path = memoryPath(name, directory);
   const exists = await sandbox.exists(ctx.userId, path);
   if (!exists && name !== MEMORY_ENTRYPOINT) {
     return { content: `Memory file not found: ${name}`, isError: true };
@@ -127,7 +125,7 @@ async function memoryRead(
   // Bounded read-back: a file that grew past the limits (an external writer)
   // is refused, not silently truncated.
   validateMemoryContent(content);
-  const { names } = await listMemoryFiles(sandbox, ctx.userId);
+  const { names } = await listMemoryFiles(sandbox, ctx.userId, directory);
   const files = [...new Set([MEMORY_ENTRYPOINT, ...names])].sort();
   return {
     content: JSON.stringify({
@@ -145,6 +143,7 @@ async function memorySave(
   sandbox: SandboxPort,
   args: Record<string, unknown>,
   ctx: ToolContext,
+  directory: string,
 ): Promise<ToolResult> {
   const name = typeof args.name === "string" && args.name !== "" ? args.name : MEMORY_ENTRYPOINT;
   const content = typeof args.content === "string" ? args.content : "";
@@ -152,8 +151,8 @@ async function memorySave(
   validateMemoryName(name);
   validateMemoryContent(content);
 
-  const path = memoryPath(name);
-  const { names } = await listMemoryFiles(sandbox, ctx.userId);
+  const path = memoryPath(name, directory);
+  const { names } = await listMemoryFiles(sandbox, ctx.userId, directory);
 
   // Case-conflict (Dart): the filesystem is case-sensitive but the memory
   // surface must stay unambiguous — refuse a save that shadows by case.
@@ -202,13 +201,14 @@ async function memorySearch(
   sandbox: SandboxPort,
   args: Record<string, unknown>,
   ctx: ToolContext,
+  directory: string,
 ): Promise<ToolResult> {
   const query = typeof args.query === "string" ? args.query : "";
   if (query.trim() === "") {
     return { content: "query is required", isError: true };
   }
   const needle = query.toLowerCase();
-  const { names } = await listMemoryFiles(sandbox, ctx.userId);
+  const { names } = await listMemoryFiles(sandbox, ctx.userId, directory);
   const files = [...new Set([MEMORY_ENTRYPOINT, ...names])].sort();
 
   const hits: string[] = [];
@@ -217,7 +217,7 @@ async function memorySearch(
     // contribution is a single ≤300-char excerpt — bounded well inside the
     // 16000-char per-file budget, so a pathological file cannot crowd the
     // rest of the result out.
-    const path = memoryPath(name);
+    const path = memoryPath(name, directory);
     const exists = await sandbox.exists(ctx.userId, path);
     const content = exists ? await sandbox.readFile(ctx.userId, path) : "";
     const at = content.toLowerCase().indexOf(needle);
@@ -276,25 +276,40 @@ export function memoryContextBlock(docs: Array<{ name: string; content: string }
 
 // -- tool factory ----------------------------------------------------------------
 
-export function createMemoryTools(deps: { sandbox: SandboxPort }): Tool[] {
+export function createMemoryTools(deps: {
+  sandbox: SandboxPort;
+  shareSessionMemory?: boolean;
+  /** Owner-checked sessions explicitly tagged by the user for this run only. */
+  referencedSessionIds?: readonly string[];
+}): Tool[] {
   const { sandbox } = deps;
+  const referenced = new Set(deps.referencedSessionIds ?? []);
+  function directory(args: Record<string, unknown>, ctx: ToolContext, canReadReference: boolean): string {
+    const target = typeof args.sessionId === "string" ? args.sessionId : ctx.sessionId;
+    if (target !== ctx.sessionId) {
+      if (!canReadReference || !referenced.has(target)) throw new MemoryFormatError("Memory from that chat was not explicitly shared with this run.");
+      return memoryDirectoryFor(target, false);
+    }
+    return memoryDirectoryFor(ctx.sessionId, deps.shareSessionMemory === true);
+  }
   return [
     {
       spec: {
         name: "memory_read",
         description:
           `Read a canonical Markdown memory file (default ${MEMORY_ENTRYPOINT}) with its ` +
-          "revision and the file index. Files live in .ovid/memory/ — a plain .md " +
-          "name, never a path.",
+          "revision and the file index. Files are isolated to this chat unless " +
+          "the user enables sharing. A sessionId may read a chat explicitly tagged in this run. Use a plain .md name, never a path.",
         parameters: {
           type: "object",
           properties: {
             name: { type: "string", description: `Plain .md filename (default ${MEMORY_ENTRYPOINT}).` },
+            sessionId: { type: "string", description: "Optional id of a session the user explicitly tagged for this run (read-only)." },
           },
         },
       },
       timeoutMs: 120_000, // cold/hydrating workspaces attach on first touch
-      execute: (args, ctx) => run(() => memoryRead(sandbox, args, ctx)),
+      execute: (args, ctx) => run(() => memoryRead(sandbox, args, ctx, directory(args, ctx, true))),
     },
     {
       spec: {
@@ -318,7 +333,7 @@ export function createMemoryTools(deps: { sandbox: SandboxPort }): Tool[] {
         },
       },
       timeoutMs: 120_000,
-      execute: (args, ctx) => run(() => memorySave(sandbox, args, ctx)),
+      execute: (args, ctx) => run(() => memorySave(sandbox, args, ctx, directory(args, ctx, false))),
     },
     {
       spec: {
@@ -330,12 +345,13 @@ export function createMemoryTools(deps: { sandbox: SandboxPort }): Tool[] {
           type: "object",
           properties: {
             query: { type: "string", description: "Substring to find (case-insensitive)." },
+            sessionId: { type: "string", description: "Optional id of a session explicitly tagged for this run (read-only)." },
           },
           required: ["query"],
         },
       },
       timeoutMs: 120_000,
-      execute: (args, ctx) => run(() => memorySearch(sandbox, args, ctx)),
+      execute: (args, ctx) => run(() => memorySearch(sandbox, args, ctx, directory(args, ctx, true))),
     },
   ];
 }

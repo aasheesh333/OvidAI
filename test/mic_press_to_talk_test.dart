@@ -93,7 +93,15 @@ void main() {
   });
 
   testWidgets('composer mic final transcript fills the composer without sending', (tester) async {
-    final provider = app.providerById('ollama-local')!;
+    // Device providers are retired (SE-004); a test-local provider row.
+    final provider = ProviderConfig(
+      id: 'ollama-local',
+      name: 'Local',
+      description: '',
+      baseUrl: 'http://127.0.0.1:1/v1',
+      requiresApiKey: false,
+    );
+    app.providers.add(provider);
     provider
       ..baseUrl = 'http://127.0.0.1:1/v1'
       ..models = ['test-model']

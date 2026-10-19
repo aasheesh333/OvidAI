@@ -10,7 +10,6 @@ import 'package:ovid_ai/core/ovid_cloud_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
-import 'package:ovid_ai/ui/providers_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// PR-1: Ovid Cloud model catalog and connection recovery (F-001…F-007).
@@ -102,73 +101,6 @@ void main() {
             .first,
       );
       expect(auto.enabled, isFalse);
-      await tester.pumpWidget(const SizedBox());
-    });
-  });
-
-  group('F-007 providers tile', () {
-    testWidgets('failed connection shows the reason and Retry connection', (
-      tester,
-    ) async {
-      var mints = 0;
-      OvidCloudService.httpClientFactoryForTest = () =>
-          MockClient((request) async {
-            if (request.url.path == '/mint') {
-              mints++;
-              return mint();
-            }
-            return catalog();
-          });
-      OvidCloudService.I.setConnectionForTest(
-        AppState.I,
-        const CloudConnectionState(
-          CloudConnectionStatus.failed,
-          error: 'Ovid Cloud is busy (429). Retry in a moment.',
-        ),
-      );
-      await tester.pumpWidget(
-        MaterialApp(theme: Aether.theme(), home: const ProvidersScreen()),
-      );
-      await tester.pump();
-      expect(
-        find.text('Ovid Cloud is busy (429). Retry in a moment.'),
-        findsOneWidget,
-      );
-      expect(find.textContaining('Signed in'), findsNothing);
-      await tester.tap(
-        find.byKey(const ValueKey('ovid-cloud-retry-connection')),
-      );
-      await tester.runAsync(() async {
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-      });
-      await tester.pumpAndSettle();
-      expect(mints, 1);
-      expect(
-        OvidCloudService.I.connectionFor(AppState.I).status,
-        CloudConnectionStatus.ready,
-      );
-      expect(find.textContaining('Signed in · 2 models'), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey('ovid-cloud-refresh-models')),
-        findsOneWidget,
-      );
-      await tester.pumpWidget(const SizedBox());
-    });
-
-    testWidgets('expired session offers Sign out', (tester) async {
-      OvidCloudService.I.setConnectionForTest(
-        AppState.I,
-        const CloudConnectionState(
-          CloudConnectionStatus.failed,
-          error: 'Your session expired. Sign in again to use Ovid Cloud.',
-          mintStatus: MintStatus.sessionExpired,
-        ),
-      );
-      await tester.pumpWidget(
-        MaterialApp(theme: Aether.theme(), home: const ProvidersScreen()),
-      );
-      await tester.pump();
-      expect(find.byKey(const ValueKey('ovid-cloud-sign-out')), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
   });

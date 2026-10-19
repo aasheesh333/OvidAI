@@ -98,8 +98,21 @@ object SecurityCheck {
         return false
     }
 
+    /** EM-018: a virtual device can't vouch for its own integrity. */
+    fun isEmulator(): Boolean {
+        val fp = Build.FINGERPRINT ?: ""
+        val model = Build.MODEL ?: ""
+        val product = Build.PRODUCT ?: ""
+        val hardware = Build.HARDWARE ?: ""
+        return fp.startsWith("generic") || fp.contains("emulator") ||
+            fp.contains("sdk_gphone") || model.contains("Emulator") ||
+            model.contains("Android SDK built for") || model.startsWith("sdk_gphone") ||
+            product.contains("sdk") || hardware == "goldfish" || hardware == "ranchu"
+    }
+
     fun getDeviceSecuritySummary(context: Context): Map<String, Boolean> {
         return mapOf(
+            "isEmulator" to isEmulator(),
             "isRooted" to isRooted(),
             "isDebuggerAttached" to isDebuggerAttached(),
             "isHookingFrameworkPresent" to isHookingFrameworkPresent(context),

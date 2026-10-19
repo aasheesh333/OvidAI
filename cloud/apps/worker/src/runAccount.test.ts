@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { accountSettings, customPresets, type Db } from "@ovid/db";
 import type { KeyResolver } from "@ovid/shared";
-import { agentPresetFromCustom, presetResolverFor, runKeyAdapter } from "./runAccount.js";
+import { agentPresetFromCustom, loadRunAccountContext, presetResolverFor, runKeyAdapter } from "./runAccount.js";
 
 // Wave 4 — the per-run account context (BYOK default routing, custom presets).
 
@@ -18,6 +19,22 @@ function recordingResolver(): KeyResolver & { ctxs: Array<{ byokKeyId?: string |
     },
   };
 }
+
+describe("loadRunAccountContext", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("fails closed when BYOK settings cannot be read, never falling back to the Ovid allowance", async () => {
+    vi.spyOn(accountSettings, "get").mockRejectedValue(new Error("settings unavailable"));
+    vi.spyOn(customPresets, "list").mockResolvedValue([]);
+    await expect(loadRunAccountContext({} as Db, "u1")).rejects.toThrow("settings unavailable");
+  });
+
+  it("fails closed when custom tool restrictions cannot be read", async () => {
+    vi.spyOn(accountSettings, "get").mockResolvedValue({ notificationsEnabled: true, byokDefault: null });
+    vi.spyOn(customPresets, "list").mockRejectedValue(new Error("presets unavailable"));
+    await expect(loadRunAccountContext({} as Db, "u1")).rejects.toThrow("presets unavailable");
+  });
+});
 
 describe("runKeyAdapter", () => {
   it("without a BYOK default: Ovid's key, the requested model", async () => {
@@ -63,6 +80,19 @@ describe("runKeyAdapter", () => {
     const key = await keys.resolve("u1", "claude-x");
     expect(resolver.ctxs[0]!.byokKeyId).toBe("job-key");
     expect(key?.model).toBe("claude-x");
+  });
+
+  it("uses the enqueue-time provider model even if the account default changes before execution", async () => {
+    const resolver = recordingResolver();
+    const keys = runKeyAdapter({
+      resolver,
+      ctx: { unattended: false, byokKeyId: KEY_ID },
+      byokModel: "gpt-4.1-mini",
+      byokDefault: { keyId: "changed-key", model: "changed-model" },
+      defaultModel: "auto-default",
+    });
+    expect((await keys.resolve("u1", "ovid-model"))?.model).toBe("gpt-4.1-mini");
+    expect(resolver.ctxs[0]!.byokKeyId).toBe(KEY_ID);
   });
 
   it("an undecryptable BYOK key fails (null) — never a silent Ovid fallback", async () => {

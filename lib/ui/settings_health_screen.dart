@@ -1,36 +1,79 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/app_info.dart';
+import '../core/cloud/account_settings_client.dart';
 import '../core/cloud/cloud_rest.dart';
-import '../core/cloud/models.dart';
+import '../core/cloud/push_service.dart';
+import '../core/diag.dart';
 import '../core/distribution.dart';
+import '../core/firebase_service.dart';
 import '../core/theme.dart';
+import '../l10n/l10n.dart';
 import 'widgets/aether_primitives.dart';
 
-/// Cloud-backed device health.
-///
-/// The on-device runtime probes (Termux/proot, dpkg, MCP, plugin install)
-/// were removed with the local execution stack in P8 Task 13. The only
-/// health surface the thin client has is the gateway's public
-/// `GET /cloud/v1/health`, whose built body is `{status, checks:{db, redisQ}}`
-/// (both the 200-ok and 503-degraded variants carry the same shape). This
-/// screen renders that body plus static app/version information.
-class SettingsHealthScreen extends StatefulWidget {
-  /// Test seam; defaults to the process-wide [CloudRestClient.I].
-  final CloudRestClient? rest;
+/// One row's verdict.
+enum StatusLevel { ok, warn, down, checking }
 
-  const SettingsHealthScreen({super.key, this.rest});
+/// Injectable checks (tests replace them; production uses the live clients).
+class ServiceStatusProbes {
+  const ServiceStatusProbes({
+    required this.server,
+    required this.account,
+    required this.live,
+    required this.signedIn,
+    required this.pushRegistered,
+  });
+
+  /// Production probes.
+  factory ServiceStatusProbes.live() => ServiceStatusProbes(
+    server: () => AccountSettingsClient.I.serviceStatus(),
+    account: () async {
+      await CloudRestClient.I.listSessions(limit: 1);
+    },
+    live: () async {
+      await CloudRestClient.I.mintTicket();
+    },
+    signedIn: () => FirebaseService.I.isSignedIn,
+    pushRegistered: () => PushService.I.boundUid != null,
+  );
+
+  final Future<ServiceStatus> Function() server;
+
+  /// Authenticated read: sign-in token and app attestation accepted.
+  final Future<void> Function() account;
+
+  /// Live-updates ticket: the realtime channel would open.
+  final Future<void> Function() live;
+  final bool Function() signedIn;
+  final bool Function() pushRegistered;
+}
+
+/// SE-013 / SE-014 / EM-014 — "Service status": a proper screen (Scaffold,
+/// app bar, back) that checks what actually makes chats work: Ovid Cloud's
+/// storage, run queue, agent workers and models (public `/health/status`),
+/// plus this device's sign-in, live updates and notifications. Errors are
+/// shown in plain words; "Copy diagnostics" copies a scrubbed report for
+/// support.
+class SettingsHealthScreen extends StatefulWidget {
+  const SettingsHealthScreen({super.key, this.probes});
+
+  final ServiceStatusProbes? probes;
 
   @override
   State<SettingsHealthScreen> createState() => _SettingsHealthScreenState();
 }
 
 class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
-  late final CloudRestClient _rest = widget.rest ?? CloudRestClient.I;
+  late final ServiceStatusProbes _probes =
+      widget.probes ?? ServiceStatusProbes.live();
 
-  CloudHealth? _health;
-  CloudApiException? _error;
+  ServiceStatus? _server;
+  bool _serverFailed = false;
+  StatusLevel _account = StatusLevel.checking;
+  StatusLevel _live = StatusLevel.checking;
   bool _loading = true;
+  DateTime? _checkedAt;
 
   @override
   void initState() {
@@ -38,223 +81,201 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
     _check();
   }
 
-  Future<void> _check() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+  Future<StatusLevel> _run(Future<void> Function() probe) async {
     try {
-      final health = await _rest.health();
-      if (!mounted) return;
-      setState(() {
-        _health = health;
-        _loading = false;
-      });
-    } on CloudApiException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = e;
-        _loading = false;
-      });
+      await probe();
+      return StatusLevel.ok;
     } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = CloudApiException(
-          status: 0,
-          code: 'internal',
-          message: 'Could not reach Ovid Cloud. $e',
-        );
-        _loading = false;
-      });
+      Diag.swallow('service_status', e);
+      return StatusLevel.down;
     }
+  }
+
+  Future<void> _check() async {
+    setState(() => _loading = true);
+    final signedIn = _probes.signedIn();
+    final results = await Future.wait<Object?>([
+      _probes.server().then<Object?>((s) => s, onError: (Object e) {
+        Diag.swallow('service_status', e);
+        return null;
+      }),
+      signedIn ? _run(_probes.account) : Future.value(StatusLevel.warn),
+      signedIn ? _run(_probes.live) : Future.value(StatusLevel.warn),
+    ]);
+    if (!mounted) return;
+    setState(() {
+      _server = results[0] as ServiceStatus?;
+      _serverFailed = results[0] == null;
+      _account = results[1]! as StatusLevel;
+      _live = results[2]! as StatusLevel;
+      _loading = false;
+      _checkedAt = DateTime.now();
+    });
+  }
+
+  static StatusLevel _level(ServiceCheck c) => switch (c) {
+    ServiceCheck.ok => StatusLevel.ok,
+    ServiceCheck.degraded || ServiceCheck.unknown => StatusLevel.warn,
+    ServiceCheck.down => StatusLevel.down,
+  };
+
+  String _headline(AppLocalizations l) {
+    if (_loading) return l.statusChecking;
+    if (_serverFailed) return l.statusUnreachable;
+    final rows = [
+      _level(_server!.overall),
+      _account,
+      _live,
+    ];
+    if (rows.contains(StatusLevel.down)) return l.statusProblem;
+    if (rows.contains(StatusLevel.warn)) return l.statusPartial;
+    return l.statusAllGood;
+  }
+
+  Future<void> _copyDiagnostics() async {
+    final l = context.l10n;
+    final s = _server;
+    final lines = <String>[
+      'Ovid Si $kAppVersionLabel',
+      'Distribution: ${Distribution.play ? 'play' : 'sideload'}',
+      'Checked: ${_checkedAt?.toUtc().toIso8601String() ?? '-'}',
+      if (s != null)
+        'Cloud: ${s.overall.name} storage=${s.storage.name} queue=${s.queue.name} '
+            'agents=${s.agents.name} models=${s.models.name}'
+      else
+        'Cloud: unreachable',
+      'Account: ${_account.name} Live: ${_live.name} '
+          'Push: ${_probes.pushRegistered() ? 'registered' : 'not registered'}',
+      'Recent issues:',
+      for (final d in Diag.recent().reversed.take(20))
+        '  ${d.at.toUtc().toIso8601String()} ${d.context}: ${_scrub(d.error)}',
+    ];
+    await Clipboard.setData(ClipboardData(text: lines.join('\n')));
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l.statusDiagnosticsCopied)));
+    }
+  }
+
+  /// Drops anything token- or address-shaped before it leaves the device.
+  static String _scrub(String text) {
+    var t = text.replaceAll(RegExp(r'[A-Za-z0-9_\-]{24,}'), '<redacted>');
+    t = t.replaceAll(RegExp(r'[\w.+-]+@[\w-]+\.[\w.]+'), '<email>');
+    return t.length > 200 ? '${t.substring(0, 200)}…' : t;
   }
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(
-        AetherSpacing.space5,
-        AetherSpacing.space4,
-        AetherSpacing.space5,
-        AetherSpacing.space8,
+    final l = context.l10n;
+    final s = _server;
+    StatusLevel serverRow(ServiceCheck Function(ServiceStatus) pick) =>
+        _loading
+            ? StatusLevel.checking
+            : s == null
+            ? StatusLevel.down
+            : _level(pick(s));
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: Text(l.statusTitle),
+        actions: [
+          IconButton(
+            tooltip: l.statusRecheck,
+            onPressed: _loading ? null : _check,
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
       ),
-      children: [
-        AetherSectionTitle(
-          eyebrow: 'Health',
-          subtitle: 'Ovid Cloud service status.',
-        ),
-        const SizedBox(height: AetherSpacing.space4),
-        AetherCard(
-          title: const Text('Cloud status'),
-          // The refresh control NEVER disappears behind a spinner: a hung
-          // check used to replace the only retry affordance with an endless
-          // loader. The button stays enabled while busy (a re-tap just
-          // restarts _check); the busy indicator lives in the body status
-          // line below.
-          trailing: IconButton(
-            tooltip: 'Refresh',
-            icon: const Icon(Icons.refresh, size: 20),
-            onPressed: _check,
-          ),
-          child: _body(),
-        ),
-        const SizedBox(height: AetherSpacing.space4),
-        const _AppInfoCard(),
-      ],
-    );
-  }
-
-  Widget _body() {
-    if (_loading && _health == null) {
-      return _busyLine('Checking Ovid Cloud…');
-    }
-    if (_error != null) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // A refresh over stale data keeps the last answer on screen with
-          // the busy line above it.
-          if (_loading) ...[
-            _busyLine('Checking Ovid Cloud…'),
-            const SizedBox(height: AetherSpacing.space4),
-          ],
-          Row(
-            children: [
-              AetherStatusDot(color: Aether.danger),
-              const SizedBox(width: AetherSpacing.space2),
-              Text(
-                'Unreachable',
-                style: AetherType.title.copyWith(color: Aether.danger),
-              ),
-            ],
-          ),
-          const SizedBox(height: AetherSpacing.space2),
-          Text(_error!.message, style: AetherType.bodyMuted),
-          const SizedBox(height: AetherSpacing.space3),
-          AetherSecondaryButton(label: 'Retry', onPressed: _check),
-        ],
-      );
-    }
-    final health = _health!;
-    final degraded = health.status != 'ok';
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // A refresh over a healthy answer also keeps the stale body visible
-        // under the busy line.
-        if (_loading) ...[
-          _busyLine('Checking Ovid Cloud…'),
-          const SizedBox(height: AetherSpacing.space4),
-        ],
-        Row(
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
           children: [
-            AetherStatusDot(
-              color: degraded ? Aether.warn : Aether.success,
+            Semantics(
+              liveRegion: true,
+              child: Text(_headline(l), style: AetherType.title),
             ),
-            const SizedBox(width: AetherSpacing.space2),
-            Text(
-              degraded ? 'Degraded' : 'All systems operational',
-              style: AetherType.title.copyWith(
-                color: degraded ? Aether.warn : Aether.success,
+            const SizedBox(height: 16),
+            AetherSectionTitle(eyebrow: l.statusCloudSection),
+            const SizedBox(height: 8),
+            AetherCard(
+              padding: EdgeInsets.zero,
+              child: Column(
+                children: [
+                  _row(l.statusStorage, serverRow((x) => x.storage)),
+                  _row(l.statusQueue, serverRow((x) => x.queue)),
+                  _row(l.statusAgents, serverRow((x) => x.agents)),
+                  _row(l.statusModels, serverRow((x) => x.models)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            AetherSectionTitle(eyebrow: l.statusDeviceSection),
+            const SizedBox(height: 8),
+            AetherCard(
+              padding: EdgeInsets.zero,
+              child: Column(
+                children: [
+                  _row(
+                    l.statusAccount,
+                    _loading ? StatusLevel.checking : _account,
+                    detail: _account == StatusLevel.warn
+                        ? l.statusSignedOut
+                        : null,
+                  ),
+                  _row(l.statusLive, _loading ? StatusLevel.checking : _live),
+                  _row(
+                    l.statusPush,
+                    _probes.pushRegistered() ? StatusLevel.ok : StatusLevel.warn,
+                    detail: _probes.pushRegistered()
+                        ? null
+                        : l.statusPushOff,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            AetherCard(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    l.statusVersion(kAppVersionLabel),
+                    style: AetherType.bodyMuted,
+                  ),
+                  const SizedBox(height: 10),
+                  AetherSecondaryButton(
+                    label: l.statusCopyDiagnostics,
+                    onPressed: _copyDiagnostics,
+                  ),
+                ],
               ),
             ),
           ],
         ),
-        if (degraded) ...[
-          const SizedBox(height: AetherSpacing.space1),
-          Text(
-            'Some cloud services are degraded. Runs may be delayed.',
-            style: AetherType.bodyMuted,
-          ),
-        ],
-        const SizedBox(height: AetherSpacing.space4),
-        _CheckRow(
-          label: 'Database',
-          ok: health.checks.db,
-        ),
-        const SizedBox(height: AetherSpacing.space2),
-        _CheckRow(
-          label: 'Redis queue',
-          ok: health.checks.redisQ,
-        ),
-      ],
-    );
-  }
-
-  /// The trailing status line that owns the busy spinner (the card header's
-  /// refresh button never yields its spot to it).
-  Widget _busyLine(String label) => Row(
-    children: [
-      const SizedBox(
-        width: 16,
-        height: 16,
-        child: CircularProgressIndicator(strokeWidth: 2),
-      ),
-      const SizedBox(width: AetherSpacing.space2),
-      Expanded(child: Text(label, style: AetherType.bodyMuted)),
-    ],
-  );
-}
-
-class _CheckRow extends StatelessWidget {
-  const _CheckRow({required this.label, required this.ok});
-
-  final String label;
-  final bool ok;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        AetherStatusDot(color: ok ? Aether.success : Aether.danger, size: 7),
-        const SizedBox(width: AetherSpacing.space2),
-        Expanded(child: Text(label, style: AetherType.body)),
-        Text(
-          ok ? 'Operational' : 'Unavailable',
-          style: AetherType.caption.copyWith(
-            color: ok ? Aether.textMuted : Aether.danger,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _AppInfoCard extends StatelessWidget {
-  const _AppInfoCard();
-
-  @override
-  Widget build(BuildContext context) {
-    return AetherCard(
-      title: const Text('App'),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _InfoRow(label: 'Version', value: kAppVersion),
-          const SizedBox(height: AetherSpacing.space2),
-          _InfoRow(
-            label: 'Channel',
-            value: Distribution.play ? 'Google Play' : 'Sideload',
-          ),
-        ],
       ),
     );
   }
-}
 
-class _InfoRow extends StatelessWidget {
-  const _InfoRow({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(child: Text(label, style: AetherType.bodyMuted)),
-        Text(value, style: AetherType.body),
-      ],
+  Widget _row(String title, StatusLevel level, {String? detail}) {
+    final l = context.l10n;
+    final (icon, color, label) = switch (level) {
+      StatusLevel.ok => (Icons.check_circle_outline, Aether.success, l.statusOk),
+      StatusLevel.warn => (Icons.error_outline, Aether.warn, l.statusWarn),
+      StatusLevel.down => (Icons.cancel_outlined, Aether.dangerC, l.statusDown),
+      StatusLevel.checking => (
+        Icons.hourglass_empty,
+        Aether.textMuted,
+        l.statusChecking,
+      ),
+    };
+    return ListTile(
+      leading: Icon(icon, color: color, size: 20),
+      title: Text(title),
+      subtitle: detail == null ? null : Text(detail),
+      trailing: Text(label, style: TextStyle(color: color, fontSize: 13)),
     );
   }
 }

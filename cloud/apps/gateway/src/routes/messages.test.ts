@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { attachments, messages, newId, runs, type Db } from "@ovid/db";
+import { accountSettings, attachments, byokKeysRepo, messages, newId, runs, type Db } from "@ovid/db";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import {
   messageDtoSchema,
@@ -123,6 +123,35 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     ]);
     return { messages: m[0]!.n as number, runs: r[0]!.n as number };
   }
+
+  it("BYOK sends bypass an exhausted Ovid allowance and pin the user's key and provider model in the job", async () => {
+    const handle = makeApp({ mintThrows: new MintInternalError(402, { detail: "Daily Ovid allowance reached" }, {}) });
+    const uid = testUid("msg-byok");
+    const sid = await createSession(handle, uid);
+    const key = await byokKeysRepo.create(db, {
+      userId: uid, providerId: "openai", endpoint: "https://api.openai.com/v1", label: null,
+      wrappedDek: Buffer.from("d"), iv: Buffer.from("i"), ciphertext: Buffer.from("c"), tag: Buffer.from("t"), status: "untested",
+    });
+    await accountSettings.patch(db, uid, { byokDefault: { keyId: key.id, model: "gpt-4.1-mini" } });
+
+    const res = await sendMessage(handle, uid, sid, { content: "Use my provider" });
+    expect(res.statusCode).toBe(202);
+    expect(handle.mint.calls).toEqual([]);
+    expect(handle.adds[0]!.data).toMatchObject({ byokKeyId: key.id, byokModel: "gpt-4.1-mini" });
+    expect(await tableCounts(sid)).toEqual({ messages: 1, runs: 1 });
+  });
+
+  it("a missing or foreign configured BYOK key fails before mint, message writes or enqueue", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-byok-missing");
+    const sid = await createSession(handle, uid);
+    await accountSettings.patch(db, uid, { byokDefault: { keyId: newId(), model: "gpt-4.1-mini" } });
+    const res = await sendMessage(handle, uid, sid, { content: "Never silently bill Ovid" });
+    expect(res.statusCode).toBe(409);
+    expect(handle.mint.calls).toEqual([]);
+    expect(handle.adds).toEqual([]);
+    expect(await tableCounts(sid)).toEqual({ messages: 0, runs: 0 });
+  });
 
   it("send → 202 queued with runId, exactly one queue add (jobId=runId, free-tier priority 2), persisted user message, touched session", async () => {
     const handle = makeApp();

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/ovid_cloud_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
@@ -80,15 +81,14 @@ void main() {
 
   testWidgets('ModelPickerSheet displays CURRENT badge and all past models in Recent section', (tester) async {
     final app = AppState.createForTest();
-    // A BYOK provider: the picker's recents card hides Ovid Cloud rows until
-    // the cloud catalogue is ready, and the catalogue never connects in
-    // tests — so the Recent section is only reachable through a keyed
-    // provider.
-    final p = app.providers.firstWhere(
-      (provider) => provider.id != AppState.ovidCloudProviderId,
-    );
+    // Only server-backed Ovid models belong in the picker. Device keys now
+    // migrate through Settings and must never reappear as selectable routes.
+    final p = app.providerById(AppState.ovidCloudProviderId)!;
     p.models = ['gpt-4o', 'claude-sonnet-4', 'deepseek-r1'];
-    p.apiKey = 'test-key';
+    OvidCloudService.I.setConnectionForTest(
+      app,
+      const CloudConnectionState(CloudConnectionStatus.ready),
+    );
 
     app.newSession();
     app.setModel(p.id, 'gpt-4o');

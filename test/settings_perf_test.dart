@@ -33,58 +33,30 @@ void main() {
 
   tearDown(AppState.resetTestInstance);
 
-  testWidgets('timeout slider drag persists exactly once, on release', (
+  testWidgets('hint radio selection persists exactly once without a slider', (
     tester,
   ) async {
     final backend = _CountingPreferences();
     SharedPreferencesStorePlatform.instance = backend;
     await tester.pumpWidget(const MaterialApp(home: SettingsScreen()));
-    // PR-6d renamed the row (Models section).
-    final tile = find.text('Response wait limit');
-    await tester.scrollUntilVisible(
-      tile,
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
+    final tile = find.text('Responses');
+    await tester.scrollUntilVisible(tile, 300, scrollable: find.byType(Scrollable).first);
     await tester.ensureVisible(tile);
     await tester.pumpAndSettle();
     await tester.tap(tile);
     await tester.pumpAndSettle();
-
-    final slider = find.byType(Slider);
-    // The screen's ListView builds lazily; PR-6d's preset list pushes the
-    // slider below the fold.
-    await tester.scrollUntilVisible(
-      slider,
-      200,
-      scrollable: find.byType(Scrollable).last,
-    );
-    await tester.pumpAndSettle();
-    final start = AppState.I.responseTimeoutSec;
+    final choice = find.byKey(const ValueKey('hint-60'));
+    await tester.scrollUntilVisible(choice, 200, scrollable: find.byType(Scrollable).last);
     var notifies = 0;
     void count() => notifies++;
     AppState.I.addListener(count);
     addTearDown(() => AppState.I.removeListener(count));
-
-    final gesture = await tester.startGesture(tester.getCenter(slider));
-    for (var i = 0; i < 20; i++) {
-      await gesture.moveBy(const Offset(-6, 0));
-      await tester.pump();
-    }
-    // Mid-drag: nothing persisted, no app-wide notify.
-    expect(backend.writes['flutter.ovid_response_timeout_sec'], isNull);
-    expect(notifies, 0);
-    await gesture.up();
+    await tester.tap(choice);
     await tester.pumpAndSettle();
-
     expect(backend.writes['flutter.ovid_response_timeout_sec'], 1);
-    expect(AppState.I.responseTimeoutSec, isNot(start));
-    expect(
-      (await SharedPreferences.getInstance()).getInt(
-        'ovid_response_timeout_sec',
-      ),
-      AppState.I.responseTimeoutSec,
-    );
+    expect(notifies, 1);
+    expect(AppState.I.responseTimeoutSec, 60);
+    expect((await SharedPreferences.getInstance()).getInt('ovid_response_timeout_sec'), 60);
   });
 
   test('chat export is written off the UI isolate as valid JSON', () async {

@@ -1,5 +1,6 @@
 import 'package:flutter/services.dart';
 
+import 'legal_links.dart';
 import 'state.dart';
 
 /// Android owns file staging, MIME detection and temporary content URI grants.
@@ -16,7 +17,7 @@ class NativeShare {
   }
 
   static Future<void> app() => _send('shareText', {
-    'text': 'Ovid — AI chat, agents & tools\nhttps://dhanuk.page.gd/ovid',
+    'text': 'Ovid Si: your AI agent in the cloud\n${LegalLinks.website}',
     'title': 'Share Ovid',
   });
 

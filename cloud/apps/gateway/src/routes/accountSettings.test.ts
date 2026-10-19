@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { accountSettings, byokKeysRepo, sessionState, users, type Db } from "@ovid/db";
+import { accountSettings, byokKeysRepo, sessionState, users, userPreferences, type Db } from "@ovid/db";
 import type { UiManifest } from "@ovid/shared";
 import { buildGateway, type GatewayDeps } from "../app.js";
 import type { WorkerClient, WorkerResult } from "../workerClient.js";
@@ -288,7 +288,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgr
     const uid = testUid("w4mem0");
     const list = await app.inject({ method: "GET", url: "/cloud/v1/memory", headers: authHeaders(uid) });
     expect(list.statusCode).toBe(200);
-    expect(list.json()).toEqual({ items: [] });
+    expect(list.json()).toMatchObject({ items: [], requiresSession: true });
     const put = await app.inject({
       method: "PUT",
       url: "/cloud/v1/memory/MEMORY.md",
@@ -303,38 +303,64 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgr
     const worker = fakeWorker();
     const app = makeApp({ worker });
     const uid = testUid("w4mem");
-    await createSession(app, uid);
-    worker.files.set(".ovid/memory/MEMORY.md", "# Me\n- dog: Bruno\n");
-    worker.files.set(".ovid/memory/work.md", "work notes");
+    const sid = await createSession(app, uid);
+    const memoryUrl = `/cloud/v1/memory?sessionId=${sid}`;
+    const fileUrl = (name: string) => `/cloud/v1/memory/${name}?sessionId=${sid}`;
+    worker.files.set(`.ovid/session-memory/${sid}/MEMORY.md`, "# Me\n- dog: Bruno\n");
+    worker.files.set(`.ovid/session-memory/${sid}/work.md`, "work notes");
 
-    const list = await app.inject({ method: "GET", url: "/cloud/v1/memory", headers: authHeaders(uid) });
+    const list = await app.inject({ method: "GET", url: memoryUrl, headers: authHeaders(uid) });
     expect(list.json().items.map((i: { name: string }) => i.name)).toEqual(["MEMORY.md", "work.md"]);
 
-    const read = await app.inject({ method: "GET", url: "/cloud/v1/memory/MEMORY.md", headers: authHeaders(uid) });
+    const read = await app.inject({ method: "GET", url: fileUrl("MEMORY.md"), headers: authHeaders(uid) });
     expect(read.statusCode).toBe(200);
     expect(read.json().content).toContain("Bruno");
     const revision = read.json().revision as string;
 
     const edit = await app.inject({
       method: "PUT",
-      url: "/cloud/v1/memory/MEMORY.md",
+      url: fileUrl("MEMORY.md"),
       headers: authHeaders(uid),
       payload: { content: "# Me\n", ifRevision: revision },
     });
     expect(edit.statusCode).toBe(200);
-    expect(worker.files.get(".ovid/memory/MEMORY.md")).toBe("# Me\n");
+    expect(worker.files.get(`.ovid/session-memory/${sid}/MEMORY.md`)).toBe("# Me\n");
 
     const stale = await app.inject({
       method: "PUT",
-      url: "/cloud/v1/memory/MEMORY.md",
+      url: fileUrl("MEMORY.md"),
       headers: authHeaders(uid),
       payload: { content: "again", ifRevision: revision },
     });
     expect(stale.statusCode).toBe(409);
 
-    const del = await app.inject({ method: "DELETE", url: "/cloud/v1/memory/work.md", headers: authHeaders(uid) });
+    const del = await app.inject({ method: "DELETE", url: fileUrl("work.md"), headers: authHeaders(uid) });
     expect(del.statusCode).toBe(204);
-    expect(worker.files.has(".ovid/memory/work.md")).toBe(false);
+    expect(worker.files.has(`.ovid/session-memory/${sid}/work.md`)).toBe(false);
+  });
+
+  it("memory API never chooses a recent/global chat implicitly and checks session ownership", async () => {
+    const worker = fakeWorker();
+    const app = makeApp({ worker });
+    const uid = testUid("w4iso");
+    const other = testUid("w4iso-other");
+    const a = await createSession(app, uid);
+    const b = await createSession(app, uid);
+    const foreign = await createSession(app, other);
+    worker.files.set(`.ovid/session-memory/${a}/MEMORY.md`, "A secret fact");
+    worker.files.set(".ovid/memory/MEMORY.md", "legacy global fact");
+    const get = (sid?: string) => app.inject({ method: "GET", url: `/cloud/v1/memory/MEMORY.md${sid === undefined ? '' : `?sessionId=${sid}`}`, headers: authHeaders(uid) });
+    expect((await get(a)).json().content).toBe("A secret fact");
+    expect((await get(b)).statusCode).toBe(404);
+    expect((await get()).statusCode).toBe(409);
+    expect((await get(foreign)).statusCode).toBe(404);
+    expect((await get("not-a-uuid")).statusCode).toBe(404);
+    await userPreferences.patch(db, uid, { shareSessionMemory: true });
+    expect((await get(b)).json().content).toBe("legacy global fact");
+    expect((await get(foreign)).statusCode).toBe(404);
+    await userPreferences.patch(db, uid, { shareSessionMemory: false });
+    expect((await get(b)).statusCode).toBe(404);
+    expect(worker.files.get(".ovid/memory/MEMORY.md")).toBe("legacy global fact");
   });
 
   it("memory: path-like or non-markdown names are refused before the worker", async () => {

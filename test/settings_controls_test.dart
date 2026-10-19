@@ -3,7 +3,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/model_limits.dart';
 import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -65,8 +64,10 @@ void main() {
       };
       await app.setNotificationsEnabled(true);
       await pumpSettings(tester);
+      setCloudNotificationsForTest = (v) async {};
+      addTearDown(() => setCloudNotificationsForTest = null);
       await tester.scrollUntilVisible(
-        find.text('Notifications'),
+        find.byKey(const ValueKey('notifications-blocked')),
         200,
         scrollable: find.byType(Scrollable).first,
       );
@@ -91,14 +92,20 @@ void main() {
       requested++;
       return PermissionStatus.granted;
     };
+    setCloudNotificationsForTest = (v) async {};
+    addTearDown(() => setCloudNotificationsForTest = null);
     await app.setNotificationsEnabled(false);
     await pumpSettings(tester);
+    final row = find.ancestor(
+      of: find.textContaining('Ovid Cloud sends no notifications'),
+      matching: find.byType(ListTile),
+    );
     await tester.scrollUntilVisible(
-      find.text('Notifications'),
+      row,
       200,
       scrollable: find.byType(Scrollable).first,
     );
-    await tester.tap(find.text('Notifications'));
+    await tester.tap(row);
     await tester.pump();
     await tester.pump();
     expect(requested, 1);
@@ -113,9 +120,9 @@ void main() {
     await app.setMemoryEnabled(false);
     await pumpSettings(tester);
     expect(app.effectiveShareSessionMemory, isFalse);
-    expect(find.textContaining('Requires Memory'), findsOneWidget);
+    expect(find.textContaining('Turn on Memory'), findsOneWidget);
     final tile = find.ancestor(
-      of: find.text('Share session memory'),
+      of: find.text('Share memory across chats'),
       matching: find.byType(ListTile),
     );
     final toggle = find.descendant(of: tile, matching: find.byType(Switch));
@@ -125,170 +132,127 @@ void main() {
     await app.setMemoryEnabled(true);
     await tester.pump();
     expect(app.effectiveShareSessionMemory, isTrue);
-    expect(find.textContaining('Requires Memory'), findsNothing);
+    expect(find.textContaining('Turn on Memory'), findsNothing);
   });
 
-  test('response wait limit is clamped to at least 30 s', () async {
+  test('the "still working" hint is clamped to 30 s … 10 min', () async {
     await app.setResponseTimeout(5);
-    expect(app.responseTimeoutSec, AppState.minResponseTimeoutSec);
-    expect(AppState.minResponseTimeoutSec, greaterThanOrEqualTo(30));
-    await app.setResponseTimeout(99999);
-    expect(app.responseTimeoutSec, AppState.maxResponseTimeoutSec);
+    expect(app.responseTimeoutSec, 30);
+    await app.setResponseTimeout(3600);
+    expect(app.responseTimeoutSec, 600);
+    expect(AppState.timeoutPresets.last, 600);
   });
 
-  testWidgets('wait limit slider starts at the minimum and warns below 60 s', (
+  test('answer length never exceeds the Ovid Cloud cap (8K)', () async {
+    await app.setMaxOutputTokens(32768);
+    expect(app.maxOutputTokens, 8192);
+    await app.setMaxOutputTokens(0);
+    expect(app.maxOutputTokens, 0);
+    expect(AppState.outputTokenPresets.every((v) => v <= 8192), isTrue);
+  });
+
+  testWidgets('Responses screen: honest copy, no context override, no 16K/32K', (
     tester,
   ) async {
-    await app.setResponseTimeout(30);
     await pumpSettings(tester);
-    await open(tester, 'Response wait limit');
-    final slider = tester.widget<Slider>(find.byType(Slider));
-    expect(slider.min, greaterThanOrEqualTo(30));
-    expect(find.byKey(const ValueKey('timeout-low-warning')), findsOneWidget);
-    expect(find.textContaining('not a cap on the'), findsOneWidget);
+    await open(tester, 'Responses');
+    expect(find.text('Answer length'.toUpperCase()), findsOneWidget);
+    expect(find.text('16K'), findsNothing);
+    expect(find.text('32K'), findsNothing);
+    expect(find.byKey(const ValueKey('context-info')), findsOneWidget);
+    expect(find.textContaining('giving up'), findsNothing);
+    expect(find.textContaining('never stops the run'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('output-4096')));
+    await tester.pumpAndSettle();
+    expect(app.maxOutputTokens, 4096);
+    await tester.tap(find.byKey(const ValueKey('hint-60')));
+    await tester.pumpAndSettle();
+    expect(app.responseTimeoutSec, 60);
   });
 
-  group('context window override', () {
-    ChatSession session(String model) {
-      final s = ChatSession(id: 'ctx', title: 'ctx', model: model);
-      app.sessions.add(s);
-      app.activeSessionId = s.id;
-      return s;
-    }
-
-    test('never exceeds the model window', () async {
-      final s = session('gpt-4o');
-      await app.setContextWindowOverride(1000000);
-      expect(
-        ModelLimits.effectiveContextWindow(
-          app.contextWindowOverride,
-          ModelLimits.contextWindowFor(s.model, s.providerId),
-        ),
-        128000,
-      );
-      expect(app.contextWindowOverride < ModelLimits.contextWindowFor(s.model, s.providerId), isFalse);
-      await app.setContextWindowOverride(32768);
-      expect(
-        ModelLimits.effectiveContextWindow(
-          app.contextWindowOverride,
-          ModelLimits.contextWindowFor(s.model, s.providerId),
-        ),
-        32768,
-      );
-      expect(app.contextWindowOverride < ModelLimits.contextWindowFor(s.model, s.providerId), isTrue);
-      expect(ModelLimits.effectiveContextWindow(0, 128000), 128000);
-    });
-
-    testWidgets('a 32K override shows "(override)"', (tester) async {
-      session('gpt-4o');
-      await app.setContextWindowOverride(32768);
-      await pumpSettings(tester);
-      await open(tester, 'Context & output');
-      expect(find.textContaining('32K tokens (override)'), findsOneWidget);
-      expect(find.textContaining('Model window: 128K'), findsOneWidget);
-      // 1M is larger than gpt-4o's window: not offered.
-      final oneM = find.ancestor(
-        of: find.text('1M'),
-        matching: find.byType(RadioListTile<int>),
-      );
-      expect(tester.widget<RadioListTile<int>>(oneM).enabled, isFalse);
-    });
+  test('a persisted context override is ignored (cloud compacts itself)', () async {
+    SharedPreferences.setMockInitialValues({'ovid_context_window_override': 32768});
+    AppState.resetTestInstance();
+    final fresh = AppState.createForTest();
+    await fresh.reloadShellPreferencesForTest();
+    expect(fresh.contextWindowOverride, 0);
   });
 
-  group('custom preset ids', () {
-    test('a built-in id is rejected and never shadows the built-in', () {
-      final before = PresetRegistry.all.length;
-      expect(PresetRegistry.validateNewCustomId('standard'), isNotNull);
-      expect(PresetRegistry.validateNewCustomId('Bad Id!'), isNotNull);
-      expect(
-        () => PresetRegistry.saveCustom(
-          const AgentPreset(id: 'standard', label: 'Shadow', description: ''),
-        ),
-        throwsArgumentError,
-      );
-      expect(PresetRegistry.all.length, before);
-      expect(PresetRegistry.byId('standard').label, 'Standard');
-    });
+  testWidgets('no placeholder rows: Permissions and Providers are gone', (
+    tester,
+  ) async {
+    await pumpSettings(tester);
+    expect(find.text('Permissions'), findsNothing);
+    expect(find.text('Providers'), findsNothing);
+    expect(find.text('Response wait limit'), findsNothing);
+    expect(find.text('Context & output'), findsNothing);
+    expect(find.textContaining('P3'), findsNothing);
+  });
 
-    test('generated ids are valid and unique', () {
-      final ids = {for (var i = 0; i < 50; i++) PresetRegistry.newCustomId()};
-      expect(ids.length, 50);
-      for (final id in ids) {
-        expect(PresetRegistry.customIdPattern.hasMatch(id), isTrue);
-        expect(id, startsWith('custom_'));
-      }
-    });
+  testWidgets('theme label says Auto is the default, not Dark', (tester) async {
+    await app.setThemeMode('dark');
+    await pumpSettings(tester);
+    expect(find.text('Dark (default)'), findsNothing);
+    expect(find.text('Dark'), findsWidgets);
+  });
 
-    testWidgets('duplicating Standard creates a custom preset and reveals it', (
-      tester,
-    ) async {
-      await pumpSettings(tester);
-      await open(tester, 'Agent presets');
-      final before = PresetRegistry.all.length;
-      await tester.tap(find.byTooltip('Duplicate as custom').first);
-      await tester.pumpAndSettle();
-      expect(find.text('Preset ID'), findsNothing);
-      await tester.enterText(find.byType(TextField), 'My standard');
-      await tester.tap(find.text('Duplicate'));
-      await tester.pumpAndSettle();
+  testWidgets('an emulator never reports a clean integrity result', (
+    tester,
+  ) async {
+    app.deviceSecurity = const {
+      'isEmulator': true,
+      'isRooted': false,
+      'isHookingFrameworkPresent': false,
+      'isDebuggerAttached': false,
+    };
+    app.securityChecked = true;
+    await pumpSettings(tester);
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('device-integrity')),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.textContaining('emulator'), findsOneWidget);
+    expect(find.textContaining('OK'), findsNothing);
+  });
 
-      expect(PresetRegistry.all.length, before + 1);
-      final created = PresetRegistry.customPresets.single;
-      expect(created.id, startsWith('custom_'));
-      expect(PresetRegistry.byId('standard').label, 'Standard');
-      expect(find.text("Created 'My standard'"), findsOneWidget);
-      // Scrolled to and expanded: its configuration is visible.
-      expect(find.text('My standard'), findsOneWidget);
-      expect(find.byKey(const ValueKey('preset-model-pick')), findsOneWidget);
-    });
+  testWidgets('Notifications switch updates the cloud push preference', (
+    tester,
+  ) async {
+    final sent = <bool>[];
+    setCloudNotificationsForTest = (v) async => sent.add(v);
+    addTearDown(() => setCloudNotificationsForTest = null);
+    NotificationPermissionAccess.status = () async => PermissionStatus.granted;
+    await app.setNotificationsEnabled(true);
+    await pumpSettings(tester);
+    final row = find.ancestor(
+      of: find.textContaining('get notified'),
+      matching: find.byType(ListTile),
+    );
+    await tester.scrollUntilVisible(row, 200, scrollable: find.byType(Scrollable).first);
+    await tester.tap(find.descendant(of: row, matching: find.byType(Switch)));
+    await tester.pump();
+    await tester.pump();
+    expect(sent, [false]);
+    expect(app.notificationsEnabled, isFalse);
+  });
 
-    testWidgets('model pin picker searches and stores provider + model', (
-      tester,
-    ) async {
-      app.providers.add(
-        ProviderConfig(
-          id: 'gw-a',
-          name: 'Gateway A',
-          description: '',
-          baseUrl: 'https://a.test/v1',
-          models: ['shared-model', 'alpha-only'],
-        ),
-      );
-      await app.saveCustomPreset(
-        const AgentPreset(id: 'custom_pin', label: 'Pin me', description: ''),
-      );
-      await pumpSettings(tester);
-      await open(tester, 'Agent presets');
-      await tester.scrollUntilVisible(
-        find.text('Pin me'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.tap(find.byTooltip('Configure denied tools').last);
-      await tester.pumpAndSettle();
-      await tester.scrollUntilVisible(
-        find.byKey(const ValueKey('preset-model-pick')),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.ensureVisible(
-        find.byKey(const ValueKey('preset-model-pick')),
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('preset-model-pick')));
-      await tester.pumpAndSettle();
-      await tester.enterText(
-        find.byKey(const ValueKey('preset-model-search')),
-        'alpha',
-      );
-      await tester.pump();
-      expect(find.text('shared-model'), findsNothing);
-      await tester.tap(find.text('alpha-only'));
-      await tester.pumpAndSettle();
-      final pinned = PresetRegistry.byId('custom_pin');
-      expect(pinned.model, 'alpha-only');
-      expect(pinned.modelProviderId, 'gw-a');
-      expect(AgentPreset.fromJson(pinned.toJson()).modelProviderId, 'gw-a');
-    });
+  testWidgets('a failed cloud push update leaves the switch unchanged', (
+    tester,
+  ) async {
+    setCloudNotificationsForTest = (v) async => throw StateError('offline');
+    addTearDown(() => setCloudNotificationsForTest = null);
+    NotificationPermissionAccess.status = () async => PermissionStatus.granted;
+    await app.setNotificationsEnabled(true);
+    await pumpSettings(tester);
+    final row = find.ancestor(
+      of: find.textContaining('get notified'),
+      matching: find.byType(ListTile),
+    );
+    await tester.scrollUntilVisible(row, 200, scrollable: find.byType(Scrollable).first);
+    await tester.tap(find.descendant(of: row, matching: find.byType(Switch)));
+    await tester.pump();
+    await tester.pump();
+    expect(app.notificationsEnabled, isTrue);
   });
 }

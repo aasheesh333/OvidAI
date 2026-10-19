@@ -29,7 +29,7 @@ void main() {
       await NativeShare.app();
       expect(calls.single.method, 'shareText');
       expect(calls.single.arguments, {
-        'text': 'Ovid — AI chat, agents & tools\nhttps://dhanuk.page.gd/ovid',
+        'text': 'Ovid Si: your AI agent in the cloud\nhttps://ovidsi.com',
         'title': 'Share Ovid',
       });
     },

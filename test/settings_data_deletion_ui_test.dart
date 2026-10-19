@@ -4,12 +4,55 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/cloud/cloud_rest.dart';
+import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/settings_actions.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/settings_action_widgets.dart';
 import 'package:ovid_ai/ui/settings_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+
+/// Ovid Cloud double for the export path (export reads the server, SE-008).
+class _ExportRest extends CloudRestClient {
+  _ExportRest() : super(headers: CloudHeaders.forTest(), restBase: 'http://test');
+
+  @override
+  Future<CloudPage<SessionDto>> listSessions({
+    int limit = 50,
+    String? cursor,
+  }) async => CloudPage(
+    items: [
+      SessionDto(
+        id: 'aaaaaaaa-0000-7000-8000-000000000001',
+        title: 'Chat',
+        mode: 'auto',
+        createdAt: DateTime.utc(2026, 1, 1),
+        updatedAt: DateTime.utc(2026, 1, 1),
+      ),
+    ],
+    nextCursor: null,
+  );
+
+  @override
+  Future<CloudPage<MessageDto>> pageMessages(
+    String sessionId, {
+    int limit = 50,
+    String? before,
+  }) async => CloudPage(
+    items: [
+      MessageDto(
+        id: '$sessionId-0',
+        sessionId: sessionId,
+        role: 'user',
+        content: 'secret plaintext',
+        createdAt: DateTime.utc(2026, 1, 1),
+      ),
+    ],
+    nextCursor: null,
+  );
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -150,7 +193,8 @@ void main() {
       );
       await tester.pump();
       // Export chats moved into Export data (PR-6d, F-144).
-      final row = find.text('Export data');
+      CloudRestClient.installForTest(_ExportRest());
+      final row = find.text('Export & import');
       await tester.scrollUntilVisible(
         row,
         300,

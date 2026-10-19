@@ -227,7 +227,11 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
   Widget build(BuildContext context) {
     final available = (widget.reset ?? SettingsActions.resetAll) != null;
     return Scaffold(
-      appBar: AppBar(title: const Text('Clear this device')),
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: const Text('Clear this device'),
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
