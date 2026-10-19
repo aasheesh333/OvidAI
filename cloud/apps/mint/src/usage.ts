@@ -565,6 +565,29 @@ export async function computeUsage(
   return { body, detail, settings: s };
 }
 
+/**
+ * The app-facing /usage payload = computeUsage body + plan/billing fields.
+ * SH-006/SH-021: `plans` are the LIVE plan table cards (planCards.ts),
+ * present whether or not Play billing is configured, so prices and plan
+ * facts never depend on Play. Billing merges billing_enabled /
+ * plan_expires_at / plan_auto_renews / plan_product_id on top. Shared with
+ * the admin lookup's `app_view` so the owner sees exactly what the app sees.
+ */
+export async function withAppPlanFields(
+  deps: MintDeps,
+  uid: string,
+  body: UsageBody,
+  settings: Settings,
+  billing?: BillingService,
+): Promise<UsageBody> {
+  return {
+    ...body,
+    plans: planCards(settings.plans, playProductsFor(deps.env, billing)),
+    billing_enabled: false,
+    ...(billing === undefined ? {} : await billing.usageFields(uid)),
+  };
+}
+
 function headerValue(v: string | string[] | undefined): string {
   if (typeof v === "string") return v;
   if (Array.isArray(v)) return v[0] ?? "";
@@ -611,16 +634,7 @@ export function registerUsageRoutes(
       }
     }
     const { body, settings } = await computeUsage(deps, uid);
-    // SH-006/SH-021: `plans` are the LIVE plan table cards (planCards.ts),
-    // present whether or not Play billing is configured, so prices and plan
-    // facts never depend on Play. Billing merges billing_enabled /
-    // plan_expires_at / plan_auto_renews / plan_product_id on top.
-    const payload: UsageBody = {
-      ...body,
-      plans: planCards(settings.plans, playProductsFor(deps.env, billing)),
-      billing_enabled: false,
-      ...(billing === undefined ? {} : await billing.usageFields(uid)),
-    };
+    const payload = await withAppPlanFields(deps, uid, body, settings, billing);
     if (deps.env.usageCacheS > 0) {
       await deps.redis.set(cacheKey, JSON.stringify(payload), "EX", deps.env.usageCacheS);
     }
