@@ -77,7 +77,14 @@ function subscription(
 class FakePlay implements PlayDeveloperApi {
   readonly tokens = new Map<string, unknown>();
   readonly calls: string[] = [];
+  readonly acks: Array<{ product: string; token: string }> = [];
   fail: Error | null = null;
+  ackFail: Error | null = null;
+
+  async acknowledgeSubscription(product: string, token: string): Promise<void> {
+    if (this.ackFail) throw this.ackFail;
+    this.acks.push({ product, token });
+  }
 
   async getSubscription(token: string): Promise<unknown> {
     this.calls.push(token);
@@ -226,6 +233,40 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
       { uid, tier: "3x", expiresAt: NOW + 30 * 86400 },
       { uid, tier: "3x", expiresAt: NOW + 30 * 86400 },
     ]);
+  });
+
+  // SH-002 belt and braces: the server acknowledges a verified, active,
+  // still-unacknowledged purchase itself, so a client that dies between
+  // verify and completePurchase cannot let Play refund it after 3 days.
+  it("acknowledges an active unacknowledged purchase server-side, exactly once", async () => {
+    play.tokens.set("tok-1", subscription({ uid, ack: false }));
+    const first = await verify();
+    expect(first.payload.acknowledge).toBe(true);
+    expect(play.acks).toEqual([{ product: "ovid_plus_monthly", token: "tok-1" }]);
+    // Play now reports it acknowledged: a re-verify (resume/restore) is a
+    // no-op for Google and identical for the client.
+    play.tokens.set("tok-1", subscription({ uid, ack: true }));
+    const second = await verify();
+    expect(second).toEqual(first);
+    expect(play.acks).toHaveLength(1);
+  });
+
+  it("never acknowledges pending, expired or foreign purchases", async () => {
+    play.tokens.set("tok-p", subscription({ uid, state: "SUBSCRIPTION_STATE_PENDING" }));
+    await verify("tok-p");
+    play.tokens.set("tok-e", subscription({ uid, expiry: NOW - 10 }));
+    await verify("tok-e");
+    play.tokens.set("tok-f", subscription({ uid: other }));
+    await codeOf(verify("tok-f"));
+    expect(play.acks).toEqual([]);
+  });
+
+  it("a failed server-side acknowledgement never fails verify (the client still acknowledges)", async () => {
+    play.tokens.set("tok-1", subscription({ uid, ack: false }));
+    play.ackFail = new Error("play down");
+    const { status, payload } = await verify();
+    expect(status).toBe(200);
+    expect(payload).toMatchObject({ ok: true, tier: "3x", acknowledge: true });
   });
 
   it("unverified or foreign purchases never set a paid tier", async () => {

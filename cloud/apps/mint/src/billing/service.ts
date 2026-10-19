@@ -20,7 +20,8 @@ import { createTierSink, type PublishTier, type TierSink } from "./tierSink.js";
  * `verify` is the only path that can bind a purchase token to an account;
  * `notify` is the RTDN path. Both recompute the user's best active purchase
  * from the DURABLE Postgres ledger (billing_purchases) and push the result
- * through the tier sink. Google is only ever read, never written.
+ * through the tier sink. The only Google write is the best-effort
+ * acknowledgement of a verified active purchase (SH-002).
  */
 
 const MAX_TOKEN = 4096;
@@ -204,6 +205,19 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
     const row = await store.record(token, entitlement, now, uid);
     const { tier, best } = await apply(uid);
     const active = row.status === "active";
+    if (active && !entitlement.acknowledged && api!.acknowledgeSubscription !== undefined) {
+      // SH-002: acknowledge server-side too, so a client that dies between
+      // this response and completePurchase cannot let Play auto-refund a
+      // purchase we already granted. Best effort: the tier is set, and the
+      // client acknowledges when it sees `acknowledge: true`.
+      try {
+        await api!.acknowledgeSubscription(row.productId, token);
+      } catch (err) {
+        console.log(
+          `[mint] billing: server-side acknowledge failed: ${err instanceof Error ? err.name : String(err)}`,
+        );
+      }
+    }
     const payload: Record<string, unknown> = {
       ok: active,
       status: row.status,

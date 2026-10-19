@@ -15,6 +15,13 @@ const RETRIES = 2;
 
 export interface PlayDeveloperApi {
   getSubscription(purchaseToken: string): Promise<unknown>;
+  /**
+   * `purchases.subscriptions.acknowledge` — the service's best-effort,
+   * server-side acknowledgement of a VERIFIED active purchase (SH-002). The
+   * client still acknowledges too (completePurchase); either is enough for
+   * Play. Optional so read-only fakes stay valid.
+   */
+  acknowledgeSubscription?(productId: string, purchaseToken: string): Promise<void>;
 }
 
 function statusOf(err: unknown): number | null {
@@ -41,6 +48,14 @@ export function createPlayApi(packageName: string, serviceAccountFile: string): 
     purchases: {
       subscriptionsv2: {
         get(params: { packageName: string; token: string }): Promise<{ data: unknown }>;
+      };
+      subscriptions: {
+        acknowledge(params: {
+          packageName: string;
+          subscriptionId: string;
+          token: string;
+          requestBody: Record<string, unknown>;
+        }): Promise<unknown>;
       };
     };
   }> | null = null;
@@ -94,6 +109,16 @@ export function createPlayApi(packageName: string, serviceAccountFile: string): 
         }
       }
       throw new BillingError(503, "play_unavailable");
+    },
+
+    async acknowledgeSubscription(productId: string, purchaseToken: string): Promise<void> {
+      const api = await client();
+      await api.purchases.subscriptions.acknowledge({
+        packageName,
+        subscriptionId: productId,
+        token: purchaseToken,
+        requestBody: {},
+      });
     },
   };
 }
