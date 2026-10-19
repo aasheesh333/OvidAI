@@ -12,12 +12,12 @@ The rules below apply to every wave:
 - **R2 Shared per user.** Studio workspace and cloud browser are one per user, shared across that user's sessions.
 - **R3 Screencast only while viewing.** Opening the Browser screen attaches to the agent's live browser and streams at 3–5 fps. Closing it stops the screencast, and the browser stays headless.
 - **R4 Truthful UI.** Every control either works end to end against the cloud, or is hidden. No "coming soon", no developer copy, no silent failures.
-- **R5 Test before fix.** Reproduce on the emulator, fix, then prove the fix on the emulator with a QA build that can pass App Check.
+- **R5 Test before fix.** Reproduce user-visible failures on the emulator and prove fixes there. Use deterministic local regression tests for server races. Owner decision: App Check is not required for the current sideload release; Firebase sign-in stays mandatory. While the emulator is closed for capacity work, mark runtime checks pending rather than claiming unit tests establish end-to-end acceptance.
 
 ## Wave 0 — make the app testable end to end (blocker for everything)
 | Item | Findings |
 |---|---|
-| App Check debug provider for QA builds (`--dart-define=OVID_APPCHECK_DEBUG=true`), with the debug token registered in Firebase. Release builds stay Play Integrity. | SH-001, EM-012 |
+| App Check off by default in the current sideload client (`OVID_APPCHECK=false`); gateway mode `optional`, Python consumers `APPCHECK_ENABLED=false`. Firebase ID-token verification remains required. Enabling Play Integrity later is a separate release decision, not an emulator-testing prerequisite. | SH-001, EM-012 |
 | App Check / mint failures become a typed error with a visible banner and retry. No unhandled exceptions. | EM-011, CT-011, CH-012, SH-009 |
 | Release build: targetSdk to current; archive Dart symbols and the R8 mapping. | EM-001, CT-017, CT-021 |
 
@@ -29,7 +29,7 @@ The rules below apply to every wave:
 | Event projection renders tool, artifact, todo, subagent, compaction and plan events; turn separation | CT-002, CH-004, CH-005, CH-018 |
 | Replay cursor and history: resume mid-run, no replay pile-up on first open, rich history | CH-002, CH-003, CH-006, CH-015, CH-021, CT-003 |
 | Data loss: outbox, attachments in a new chat, idempotent clientMsgId, queue persistence | CH-009, CH-033, CH-010, CH-011, CH-023 |
-| Server-side edit/delete/regenerate (or hide the actions on cloud chats) | CT-004, CH-024 |
+| Server-side edit/delete/regenerate (or hide the actions on cloud chats) | CT-004, CH-024 — **GATED safely; not released** |
 | Titles sync, unsubscribe on leave, run_merged, approval card fidelity, error copy | CH-013, CH-014, CH-016, CH-017, CH-019, CH-020, CH-031, CH-044 |
 | Session isolation (R1): memory toggles enforced server-side; @session tag pulls context only on request | SE-005, R1 |
 | Offline: probe Ovid not gstatic; one consistent offline model | SH-011, CH-035 |

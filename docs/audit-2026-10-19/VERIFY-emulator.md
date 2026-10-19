@@ -21,3 +21,26 @@ Production: gateway rebuilt with OVID_APPCHECK_MODE=optional, migration 0016 app
 | Run now + history | FE-012 | PASS — Running → "Last run: succeeded" | shots/61-62 |
 | Cancel schedule | — | PASS; P2 bug: confirm dialog said "The task is running now" after the run had succeeded (stale state) | shots/63-64 |
 | Tool cards in chat | CT-002, CH-004 | Not yet — Wave 1b in progress | shots/45-tool |
+
+## Recovery review — checks not covered by the emulator smoke pass
+
+- **ST-007 remains open for concurrent saves.** The integrated file service
+  checks a SHA-256 baseline, then renames the new file in a separate filesystem
+  operation. A disposable local reproduction against the built storage module
+  issued 12 conditional saves using the same baseline; all 12 succeeded in each
+  of three rounds and only the last content survived. The replacement Studio
+  agent reproduced this for both one session and distinct sessions sharing the
+  same user workspace. A fix and regression tests are in progress; no fix is
+  merged or verified here yet. Serial mismatch tests do not establish an atomic
+  compare-and-swap guarantee, especially against raw agent or other-process writes.
+- **Capacity above 1,800 active users is not established.** The capacity recovery
+  agent found the inherited runs contained timeouts, HTTP 503s, and excessive CPU;
+  fresh isolated measurements are pending. Connected WebSockets alone are not
+  evidence of successful concurrent model/tool/browser workloads.
+- **The emulator is now closed** at the owner's direction to leave resources for
+  capacity work. The working inference proxy is outside this task and untouched.
+- This log records the specific smoke checks above, not full product acceptance.
+  Artifact inventory, complete cloud sharing/search, image tool wiring, MCP/plugin
+  execution/management, collaboration inference, and durable asynchronous
+  subagents still need end-to-end verification and completion. Live subagent
+  cards alone do not prove durable background orchestration.

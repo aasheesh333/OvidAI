@@ -527,15 +527,52 @@ class CloudRestClient {
             'shareSessionMemory': ?shareSessionMemory,
           }));
 
+  /// GET /sessions/:id/messages. Always answers a [MessagePage] (Wave 1b:
+  /// the watermark + active run ride every page); [withEvents] also asks for
+  /// the page's settled agent activity (`events=1`) so a reload renders tool
+  /// rows, artifacts, intermediate text and errors.
   Future<CloudPage<MessageDto>> pageMessages(String sessionId,
-      {int limit = 50, String? before}) async {
+      {int limit = 50, String? before, bool withEvents = false}) async {
     final json =
         await getJson('/sessions/$sessionId/messages', query: <String, String>{
       'limit': '$limit',
       'before': ?before,
+      if (withEvents) 'events': '1',
     });
-    return CloudPage.fromJson(json, MessageDto.fromJson);
+    return MessagePage.fromJson(json);
   }
+
+  /// Wave 1b (CT-004): DELETE /sessions/:id/messages/:messageId — removes the
+  /// message and everything after it. Answers the number of rows removed.
+  /// 409 `session_busy` while a run is active.
+  Future<int> deleteMessagesFrom(String sessionId, String messageId) async {
+    final json = await deleteJson('/sessions/$sessionId/messages/$messageId');
+    return (json['deleted'] as num?)?.toInt() ?? 0;
+  }
+
+  /// Wave 1b (CT-004): POST /sessions/:id/messages/:messageId/regenerate —
+  /// drops the answer (and anything after it) and runs its prompt again.
+  Future<RegenerateResponse> regenerateMessage(
+    String sessionId,
+    String messageId, {
+    int? maxOutputTokens,
+  }) async =>
+      RegenerateResponse.fromJson(await postJson(
+        '/sessions/$sessionId/messages/$messageId/regenerate',
+        body: <String, Object>{'maxOutputTokens': ?maxOutputTokens},
+      ));
+
+  /// Wave 1b (CH-024): POST /sessions/:id/branch — a new server session seeded
+  /// with the history up to and including [messageId].
+  Future<SessionDto> branchSession(
+    String sessionId,
+    String messageId, {
+    String? title,
+  }) async =>
+      SessionDto.fromJson(await postJson(
+        '/sessions/$sessionId/branch',
+        body: <String, Object>{'messageId': messageId, 'title': ?title},
+      ));
 
   Future<RunCancelResponse> cancelRun(String runId) async =>
       RunCancelResponse.fromJson(await postJson('/runs/$runId/cancel'));

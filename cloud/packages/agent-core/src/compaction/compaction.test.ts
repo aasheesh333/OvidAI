@@ -573,6 +573,26 @@ describe("compactor", () => {
     expect(event.payload.folded).toBe(msgs.length - tail.length);
   });
 
+  it("R1 (Wave 1b): an ephemeral @-tag context row is never folded into the saved summary", async () => {
+    const { state, summarizeCalls, compactor } = setup();
+    await patchState(state, "s-eph");
+    const msgs = session(200);
+    // The referenced-session block sits early enough to land inside the fold.
+    msgs.splice(3, 0, {
+      role: "system",
+      content: "<referenced_session>OTHER-CHAT-SECRET</referenced_session>",
+      ephemeral: true,
+    });
+    const r = await compactor.maybeCompact({ sessionId: "s-eph", messages: msgs, windowTokens: 32_000 });
+    expect(r.compacted).toBe(true);
+    expect(summarizeCalls).toHaveLength(1);
+    expect(JSON.stringify(summarizeCalls[0])).not.toContain("OTHER-CHAT-SECRET");
+    const saved = (await state.get("s-eph")).compaction!;
+    expect(JSON.stringify(saved)).not.toContain("OTHER-CHAT-SECRET");
+    // The run that was tagged still sees it in its rebuilt request.
+    expect(r.messages.some((m) => m.content.includes("OTHER-CHAT-SECRET"))).toBe(true);
+  });
+
   it("replays each tool output exactly once in the summarizer prompt (review I1)", async () => {
     const { state, summarizeCalls, compactor } = setup();
     await patchState(state, "s2b");

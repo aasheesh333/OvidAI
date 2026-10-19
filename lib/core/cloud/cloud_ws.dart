@@ -378,9 +378,36 @@ class WsMultiplexer extends ChangeNotifier {
   /// subscription already exists, its next reconnect re-subscribes from
   /// [seq] (the current socket is not interrupted).
   void seedCursor(String sessionId, String? seq) {
+    // CH-015: a cache seed never moves a cursor BACKWARDS — an older cache
+    // high-water mark would replay (and duplicate) everything since it.
+    final current = _subs[sessionId]?.lastEventId ??
+        (_seededCursors.containsKey(sessionId)
+            ? _seededCursors[sessionId]
+            : _prefs?.getString('$_lastEventKey$sessionId'));
+    if (current != null && (seq == null || compareSeq(seq, current) < 0)) {
+      return;
+    }
     _seededCursors[sessionId] = seq;
     _subs[sessionId]?.lastEventId = seq;
     unawaited(_persistSeededCursor(sessionId, seq));
+  }
+
+  /// Wave 1b (CH-003): REBASES the replay cursor onto a fresh REST snapshot's
+  /// watermark — backwards too, because the projection was just rebuilt AT
+  /// that watermark — and, when the session is live, re-subscribes from it
+  /// so every event after the snapshot (including ones this socket already
+  /// delivered during the page request) replays into the rebuilt fold. The
+  /// gateway replaces a re-subscribe in place.
+  void rebaseCursor(String sessionId, String? seq) {
+    _seededCursors[sessionId] = seq;
+    _pendingCursors.remove(sessionId);
+    unawaited(_persistSeededCursor(sessionId, seq));
+    final sub = _subs[sessionId];
+    if (sub == null) return;
+    sub.lastEventId = seq;
+    if (_linkState == WsLinkState.online && _socket != null) {
+      _send(_subscribeFrame(sessionId, seq));
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -423,6 +450,7 @@ class WsMultiplexer extends ChangeNotifier {
     // duplicate, everything since).
     final last = sub.lastEventId;
     if (last != null) _seededCursors[sessionId] = last;
+    flushPendingCursors();
     if (_linkState == WsLinkState.online && _socket != null) {
       _send(<String, Object?>{'op': 'unsubscribe', 'sessionId': sessionId});
     }
@@ -451,6 +479,7 @@ class WsMultiplexer extends ChangeNotifier {
   Future<void> disconnect() async {
     _userDisconnecting = true;
     _wantLink = false;
+    flushPendingCursors();
     // Invalidate any in-flight connect chain (mint/handshake in progress):
     // its generation is now stale, so its next checkpoint aborts — and a
     // later connectIfNeeded() starts a FRESH chain instead of awaiting the
@@ -543,6 +572,7 @@ class WsMultiplexer extends ChangeNotifier {
   @override
   void dispose() {
     _wantLink = false;
+    flushPendingCursors();
     _generation++; // invalidate any in-flight connect chain
     _connectFuture = null;
     // Hygiene: a disposed link is down. Without this, a sync dispose inside
@@ -900,7 +930,8 @@ class WsMultiplexer extends ChangeNotifier {
     final cursor = sub.lastEventId;
     if (cursor != null && compareSeq(event.seq, cursor) <= 0) return;
     sub.lastEventId = event.seq;
-    _persistCursor(sub.sessionId, event.seq);
+    _persistCursorThrottled(sub.sessionId, event.seq,
+        force: _terminalTypes.contains(event.type));
     sub.events.add(event);
     if (_sessionEvents.hasListener && !_sessionEvents.isClosed) {
       _sessionEvents.add(event);
@@ -992,6 +1023,7 @@ class WsMultiplexer extends ChangeNotifier {
       for (final event in events) {
         _accept(sub, event);
       }
+      flushPendingCursors();
     } catch (err) {
       debugPrint('cloud ws: mirror catch-up failed for ${sub.sessionId}: '
           '$err');
@@ -1085,6 +1117,55 @@ class WsMultiplexer extends ChangeNotifier {
   // -------------------------------------------------------------------------
   // Cursor persistence
   // -------------------------------------------------------------------------
+
+  /// CH-021: at most one prefs write per session per this interval while a
+  /// run streams (the in-memory cursor stays authoritative); terminal
+  /// events, unsubscribe, disconnect and a finished mirror catch-up write
+  /// through immediately.
+  static const Duration cursorPersistInterval = Duration(seconds: 2);
+
+  static const Set<String> _terminalTypes = <String>{
+    'run_completed',
+    'run_failed',
+    'run_cancelled',
+  };
+
+  final Map<String, String> _pendingCursors = <String, String>{};
+  final Map<String, DateTime> _lastCursorWrite = <String, DateTime>{};
+  Timer? _cursorTimer;
+
+  void _persistCursorThrottled(String sessionId, String seq,
+      {bool force = false}) {
+    final now = DateTime.now();
+    final last = _lastCursorWrite[sessionId];
+    if (force ||
+        last == null ||
+        now.difference(last) >= cursorPersistInterval) {
+      _pendingCursors.remove(sessionId);
+      _lastCursorWrite[sessionId] = now;
+      _persistCursor(sessionId, seq);
+      return;
+    }
+    _pendingCursors[sessionId] = seq;
+    _cursorTimer ??= Timer(
+      cursorPersistInterval - now.difference(last),
+      flushPendingCursors,
+    );
+  }
+
+  /// Writes every throttled cursor now (also the timer's callback).
+  void flushPendingCursors() {
+    _cursorTimer?.cancel();
+    _cursorTimer = null;
+    if (_pendingCursors.isEmpty) return;
+    final now = DateTime.now();
+    final pending = Map<String, String>.of(_pendingCursors);
+    _pendingCursors.clear();
+    for (final entry in pending.entries) {
+      _lastCursorWrite[entry.key] = now;
+      _persistCursor(entry.key, entry.value);
+    }
+  }
 
   void _persistCursor(String sessionId, String seq) {
     unawaited(() async {

@@ -183,7 +183,13 @@ misleading. P2 = polish.
 
 ## B. Message actions and leftovers of the on-device architecture
 
-### CH-024 — P1 — Edit & resend, Delete message, Regenerate and Branch show on cloud chats but silently do nothing
+### CH-024 — P1 — **GATED in the cloud client (not released): safe server contract exists only as an explicit refusal**
+- Cloud chats no longer advertise Edit & resend, Delete from here, Regenerate, Branch, or run-failure regeneration Retry. The gateway ownership-first routes return `409 history_actions_unavailable` without minting, queueing, truncating, copying, or changing events.
+- This is deliberate R4 behavior: `activeForSession` followed by destructive mutation is not a cross-worker serialization protocol, and edit-then-send is not atomic. The eventual implementation needs a shared PostgreSQL session lock plus an atomic replacement-run transaction and durable queue outbox/recovery.
+- Branching remains limited/gated because a text-row copy is not a rich clone of attachments, events, tool state, compaction, or approvals.
+- Tests retain the fake REST contracts and assert the refusal preserves durable rows and dependencies; they do not claim the unavailable actions work.
+
+### CH-024 — Historical finding (resolved by safe gate; action remains unavailable) — Edit & resend, Delete message, Regenerate and Branch show on cloud chats but silently do nothing
 - **Where:** chat_screen.dart:5464-5481, 5539-5610, 5669-5676 (`_canChangeHistory` requires `session.messages[msgIndex]`, but cloud sessions keep `ChatSession.messages` empty, :1263-1269); state.dart:4215-4240 (`branchSessionFrom` over empty `src.messages` → null).
 - **Problem:** Every handler returns early with no snackbar. Regenerate also checks for a local provider ("Set up a provider for this chat before regenerating", :5578) and `provider.models.contains(session.model)`, both leftovers. There is no server truncate API.
 - **Fix:** Hide these actions for cloud sessions now. Then add a server `POST /sessions/:id/messages/:messageId/regenerate` (or truncate plus re-send) and a fork via `/import/sessions`, and implement Regenerate as a cloud re-send without the local-provider checks.

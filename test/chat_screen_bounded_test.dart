@@ -424,27 +424,10 @@ void main() {
     },
   );
 
-  testWidgets('missing legacy attachment paths leave original message intact', (
-    tester,
-  ) async {
-    a.messages
-      ..clear()
-      ..add(
-        Message(
-          role: 'user',
-          content: 'Original',
-          attachments: [MessageAttachment(name: 'legacy.txt', size: 3)],
-        ),
-      );
-    await pumpChat(tester);
-    await tester.tap(find.byTooltip('Edit & resend'));
-    await tester.pump();
-    expect(a.messages.single.content, 'Original');
-    expect(draft(tester), isEmpty);
-    expect(CloudAgentFacade.I.pendingAttachments, isEmpty);
-  });
-
-  testWidgets('earlier-message edit transfers files before truncation', (
+  // CT-004 / CH-024: history edits are server operations. A row the server
+  // does not store (a local-only row) offers no Edit & resend, and nothing
+  // is truncated or staged behind the user's back.
+  testWidgets('rows the server does not store offer no history edits', (
     tester,
   ) async {
     a.messages
@@ -453,36 +436,16 @@ void main() {
         Message(
           role: 'user',
           content: 'Original',
-          attachments: [
-            MessageAttachment(
-              name: 'source.txt',
-              path: '/workspace/source.txt',
-              size: 4,
-            ),
-          ],
+          attachments: [MessageAttachment(name: 'legacy.txt', size: 3)],
         ),
         Message(role: 'assistant', content: 'Previous answer'),
       ]);
     await pumpChat(tester);
-    await tester.tap(find.byTooltip('Edit & resend'));
-    await tester.pumpAndSettle();
-    final dialogField = find.descendant(
-      of: find.byType(AlertDialog),
-      matching: find.byType(TextField),
-    );
-    await tester.enterText(dialogField, 'Revised');
-    expect(find.textContaining('This removes the 1 message'), findsOneWidget);
-    await tester.tap(find.widgetWithText(TextButton, 'Edit & remove 1'));
-    await tester.pumpAndSettle();
-    expect(draft(tester), 'Revised');
-    expect(
-      CloudAgentFacade.I.pendingAttachments.single.path,
-      '/workspace/source.txt',
-    );
-    expect(a.messages, isEmpty);
-    // Let the Undo window expire.
-    await tester.pump(const Duration(seconds: 12));
-    await tester.pumpAndSettle();
+    expect(find.byTooltip('Edit & resend'), findsNothing);
+    expect(find.byTooltip('Regenerate'), findsNothing);
+    expect(a.messages, hasLength(2));
+    expect(draft(tester), isEmpty);
+    expect(CloudAgentFacade.I.pendingAttachments, isEmpty);
   });
 
   testWidgets('double-tapping Send runs a slash command once (F-131)', (
@@ -629,52 +592,6 @@ void main() {
       },
     );
   }
-
-  testWidgets('last-message edit retains attachments in composer', (
-    tester,
-  ) async {
-    a.messages
-      ..clear()
-      ..add(
-        Message(
-          role: 'user',
-          content: 'Original',
-          attachments: [
-            MessageAttachment(
-              name: 'example.txt',
-              size: 3,
-              path: '/workspace/example.txt',
-            ),
-          ],
-        ),
-      );
-    await pumpChat(tester);
-    await tester.tap(find.byTooltip('Edit & resend'));
-    await tester.pump();
-    expect(draft(tester), 'Original');
-    expect(
-      CloudAgentFacade.I.pendingAttachments.single.path,
-      '/workspace/example.txt',
-    );
-    // Let the Undo window expire.
-    await tester.pump(const Duration(seconds: 12));
-    await tester.pumpAndSettle();
-  });
-
-  testWidgets(
-    'edit does not destroy history when existing draft cannot transfer',
-    (tester) async {
-      a.messages
-        ..clear()
-        ..add(Message(role: 'user', content: 'Original'));
-      await pumpChat(tester);
-      await tester.enterText(composer, 'Unsubmitted draft');
-      await tester.tap(find.byTooltip('Edit & resend'));
-      await tester.pump();
-      expect(a.messages.single.content, 'Original');
-      expect(draft(tester), 'Unsubmitted draft');
-    },
-  );
 
   // CH-027 / ST-012: the Studio-mode composer chip used to open a "Sandbox
   // folder (Studio)" sheet that pinned a PHONE folder the cloud never saw. It

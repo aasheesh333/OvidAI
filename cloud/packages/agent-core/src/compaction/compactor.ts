@@ -462,7 +462,13 @@ export function createCompactor(deps: CompactorDeps): CompactorWithManual {
     const { sessionId, messages, windowTokens, from, cutoff } = o;
     const state = await deps.state.get(sessionId);
     const prior = CompactionLedger.of(state.compaction);
-    const span = messages.slice(from, cutoff);
+    // Wave 1b (R1): an ephemeral row (the @-tag referenced-session context)
+    // belongs to THIS run only — it is never summarized into the session's
+    // durable checkpoint, and it stays in the rebuilt request right after
+    // the checkpoint row so the tagged run keeps seeing it.
+    const rawSpan = messages.slice(from, cutoff);
+    const span = rawSpan.filter((m) => m.ephemeral !== true);
+    const keptEphemeral = rawSpan.filter((m) => m.ephemeral === true);
     // Cumulative: the previous ledger absorbs ONLY the new span. A session
     // with no ledger (fresh, or old LLM-only format) absorbs its whole
     // retained prefix and adopts the legacy summary as prior narrative.
@@ -519,7 +525,7 @@ export function createCompactor(deps: CompactorDeps): CompactorWithManual {
     });
 
     return {
-      messages: [stableCheckpointRow(checkpoint.text), ...messages.slice(cutoff)],
+      messages: [stableCheckpointRow(checkpoint.text), ...keptEphemeral, ...messages.slice(cutoff)],
       narrative: fresh,
       checkpoint,
       folded,

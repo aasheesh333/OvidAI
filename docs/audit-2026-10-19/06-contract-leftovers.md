@@ -128,16 +128,13 @@ Event types vs the client fold (event_projection.dart:407-450; the facade switch
 - **Impact:** Images, attachments, tool rows and approval history vanish whenever a session is reopened online, on reinstall, or on a second device.
 - **Fix:** Rebuild the transcript from the event mirror (`GET /events?tail=1` + `before` paging) rather than from messages, or extend MessageDto with attachments/artifacts/toolCalls.
 
-### CT-004 [P1] Edit, regenerate and delete history are local-only. The server transcript still holds the deleted turns.
-- **Client:**
-  - `_deleteHistoryFrom` → `AppState.deleteMessagesFrom` (chat_screen.dart:5681-5700; state.dart:4344), which only persists locally.
-  - Regenerate also requires a *local* configured provider whose model list contains `session.model` (chat_screen.dart:5576-5585). That is a leftover from on-device execution and blocks regenerate for cloud-only users.
-- **Server:** There is no message-delete or truncate route (messages.ts has only POST/GET). The worker reads history from DB (`messages.page`, runProcessor.ts:1915).
-- **Impact:**
-  - "Regenerate" and "edit and resend" send the prompt again, so the model sees the old answer plus a duplicate user turn.
-  - Deleted rows come back on the next `loadTranscript`.
-  - Regenerate is refused unless a local BYO provider exists.
-- **Fix:** Add `POST /sessions/:id/messages/truncate {fromMessageId}` (or `DELETE /messages/:id?cascade`) that soft-deletes rows and folds compaction state; call it from `_deleteHistoryFrom`. Remove the local provider gate for cloud sessions.
+### CT-004 [P1] **GATED, not released** — cloud history mutations return an ownership-first 409 `history_actions_unavailable` and preserve state.
+- **Current state (gate, 2026-10-19):**
+  - **Server:** `DELETE /sessions/:id/messages/:messageId`, `POST .../regenerate` and `POST /sessions/:id/branch` (cloud/apps/gateway/src/routes/messages.ts) validate ownership and target first (wrong owner and unknown id are the same 404), then return 409 `history_actions_unavailable` before any key mint, queue add, truncate or copy. Durable rows, event-mirror events, attachments, compaction state and run rows are provably untouched (messagesWave1b.test.ts snapshots all of them around each refused call). No bypass flag exists.
+  - **Client:** cloud chats no longer offer Edit & resend, Delete from here, Regenerate, Branch, or a run-failure Retry; `CloudAgentFacade.canEditHistory` is a constant `false` and the run-failed row explains in plain language that the chat is kept unchanged. Ordinary send, outbox Retry/Discard (stable clientMsgId), copy, report, rich history, Stop, approvals and drafts are all retained. The facade's wire methods remain behind the facade wire tests, but no UI control can reach them.
+  - Why a gate and not a fix: an idle check (`runs.activeForSession`) followed by a destructive mutation is not a cross-worker serialization protocol — a second device's send, a queued run start and the truncate race freely, and edit-then-send is not atomic (a crash between truncate and re-send loses the turn permanently). Branch as a capped text-row copy is not a rich fork (no attachments, events, tool state, compaction, approvals).
+- **Historical finding (pre-gate):** the actions showed on cloud chats but silently did nothing (local-only `AppState.deleteMessagesFrom`, regenerate gated on a local BYO provider, no server truncate route; the worker reads history from `messages.page`, runProcessor.ts:1915), so the model saw old answers plus duplicate turns and deleted rows returned on reload.
+- **Fix (future, not a small patch):** real enablement needs an atomic design — a shared PostgreSQL lock (e.g. advisory lock or transactional lock row) serializing history mutation against send across workers; a single transaction that truncates rows/events/compaction, creates the replacement run and writes a durable queue-outbox entry with crash recovery; and, for branch, a rich clone of attachments, events and session state rather than a text copy. Until that contract ships, the gate stays.
 
 ### CT-005 [P0 for Play builds] Google Play purchases cannot be verified: `/billing/verify` is 404 in production.
 - **Client:** ovid_cloud_service.dart:512 (`https://api.ovidsi.com/billing/verify`), :1101-1125. A 404 maps to `UpgradeResult.notAvailable`.

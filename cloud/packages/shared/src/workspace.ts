@@ -90,7 +90,9 @@ export interface WorkspaceFileRedirect {
  * Optional preconditions (Studio, ST-005/ST-007), at most one per request:
  *  - `ifMatchSha256`: lowercase sha256 hex of the bytes the client last saw;
  *    the write lands only when the file still has exactly those bytes, else
- *    409 `baseline_mismatch` (nothing written).
+ *    409 `baseline_mismatch` (nothing written). The check + replacement is
+ *    serialized against participating Studio mutations within one worker,
+ *    not raw agent/shell writes or other processes (not filesystem CAS).
  *  - `ifNoneMatch: "*"`: create-only; the write lands only when the path does
  *    not exist yet, else 409 `already_exists` (nothing written).
  */

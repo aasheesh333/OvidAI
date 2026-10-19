@@ -25,6 +25,7 @@ import { dirname, join } from "node:path";
 import type { ActivityTracker } from "./activity.js";
 import { KeyLayoutError, NotFoundError, PreconditionFailedError, WorkspaceStateError } from "./errors.js";
 import { assertParentInsideWorkspace } from "./hydrate.js";
+import { withWorkspaceMutation } from "./workspaceMutationLock.js";
 import { assertSafeRelPath } from "./keys.js";
 import { resolveWorkspaceDir, type SandboxUidResolver } from "./workspacePaths.js";
 
@@ -51,15 +52,9 @@ async function lstatOrNull(p: string): Promise<Awaited<ReturnType<typeof lstat>>
 
 /** The warm workspace dir + its realpath, or "not_warm" when it is absent. */
 async function warmRoot(
-  deps: WorkspaceOpsDeps,
+  dir: string,
   ref: WorkspaceOpsRef,
-): Promise<{ dir: string; realDir: string }> {
-  const dir = await resolveWorkspaceDir(
-    deps.sandboxUid,
-    deps.workspacesRoot,
-    ref.userId,
-    ref.sessionId,
-  );
+): Promise<{ realDir: string }> {
   let isDir = false;
   try {
     isDir = (await stat(dir)).isDirectory();
@@ -72,7 +67,7 @@ async function warmRoot(
       { code: "not_warm" },
     );
   }
-  return { dir, realDir: await realpath(dir) };
+  return { realDir: await realpath(dir) };
 }
 
 function kindOf(st: Awaited<ReturnType<typeof lstat>>): WorkspaceNodeKind {
@@ -88,25 +83,28 @@ export async function deleteWorkspacePath(
   opts: { recursive?: boolean } = {},
 ): Promise<{ path: string; type: WorkspaceNodeKind }> {
   const rel = assertSafeRelPath(ref.path);
-  const { dir, realDir } = await warmRoot(deps, ref);
+  const dir = await resolveWorkspaceDir(deps.sandboxUid, deps.workspacesRoot, ref.userId, ref.sessionId);
   const full = join(dir, rel);
-  await assertParentInsideWorkspace(realDir, dirname(full));
-  const st = await lstatOrNull(full);
-  if (st === null) {
-    throw new NotFoundError(`'${rel}' is not present in the workspace`);
-  }
-  const type = kindOf(st);
-  if (type === "dir") {
-    if (opts.recursive !== true && (await readdir(full)).length > 0) {
-      throw new PreconditionFailedError(`'${rel}' is not empty`, { code: "not_empty" });
+  return withWorkspaceMutation([full], async () => {
+    const { realDir } = await warmRoot(dir, ref);
+    await assertParentInsideWorkspace(realDir, dirname(full));
+    const st = await lstatOrNull(full);
+    if (st === null) {
+      throw new NotFoundError(`'${rel}' is not present in the workspace`);
     }
-    await rm(full, { recursive: true });
-  } else {
-    // rm on a symlink unlinks the link itself (never its target).
-    await rm(full);
-  }
-  await deps.activity.bump(ref.sessionId);
-  return { path: rel, type };
+    const type = kindOf(st);
+    if (type === "dir") {
+      if (opts.recursive !== true && (await readdir(full)).length > 0) {
+        throw new PreconditionFailedError(`'${rel}' is not empty`, { code: "not_empty" });
+      }
+      await rm(full, { recursive: true });
+    } else {
+      // rm on a symlink unlinks the link itself (never its target).
+      await rm(full);
+    }
+    await deps.activity.bump(ref.sessionId);
+    return { path: rel, type };
+  });
 }
 
 /** Move/rename a file or folder. Never overwrites the destination. */
@@ -122,38 +120,41 @@ export async function moveWorkspacePath(
   if (to.startsWith(`${from}/`)) {
     throw new KeyLayoutError("a folder cannot be moved into itself");
   }
-  const { dir, realDir } = await warmRoot(deps, ref);
+  const dir = await resolveWorkspaceDir(deps.sandboxUid, deps.workspacesRoot, ref.userId, ref.sessionId);
   const src = join(dir, from);
   const dest = join(dir, to);
-  await assertParentInsideWorkspace(realDir, dirname(src));
-  await assertParentInsideWorkspace(realDir, dirname(dest));
-  const st = await lstatOrNull(src);
-  if (st === null) {
-    throw new NotFoundError(`'${from}' is not present in the workspace`);
-  }
-  if ((await lstatOrNull(dest)) !== null) {
-    throw new PreconditionFailedError(`'${to}' already exists`, { code: "already_exists" });
-  }
-  await mkdir(dirname(dest), { recursive: true });
-  if (st.isDirectory()) {
-    // rename(2) fails on a non-empty destination dir; the lstat above covers
-    // the rest of the (tiny) window.
-    await rename(src, dest);
-  } else {
-    // Files and symlinks: link(2) is an atomic no-clobber create (EEXIST),
-    // then the old name goes.
-    try {
-      await link(src, dest);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-        throw new PreconditionFailedError(`'${to}' already exists`, { code: "already_exists" });
-      }
-      throw err;
+  return withWorkspaceMutation([src, dest], async () => {
+    const { realDir } = await warmRoot(dir, ref);
+    await assertParentInsideWorkspace(realDir, dirname(src));
+    await assertParentInsideWorkspace(realDir, dirname(dest));
+    const st = await lstatOrNull(src);
+    if (st === null) {
+      throw new NotFoundError(`'${from}' is not present in the workspace`);
     }
-    await rm(src);
-  }
-  await deps.activity.bump(ref.sessionId);
-  return { from, to };
+    if ((await lstatOrNull(dest)) !== null) {
+      throw new PreconditionFailedError(`'${to}' already exists`, { code: "already_exists" });
+    }
+    await mkdir(dirname(dest), { recursive: true });
+    if (st.isDirectory()) {
+      // The lock protects the destination check from other Studio mutations
+      // in this process; rename is not no-clobber against external writers.
+      await rename(src, dest);
+    } else {
+      // Files and symlinks: link(2) is an atomic no-clobber create (EEXIST),
+      // then the old name goes.
+      try {
+        await link(src, dest);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new PreconditionFailedError(`'${to}' already exists`, { code: "already_exists" });
+        }
+        throw err;
+      }
+      await rm(src);
+    }
+    await deps.activity.bump(ref.sessionId);
+    return { from, to };
+  });
 }
 
 /** Create a folder (and its parents). Idempotent for an existing folder. */
@@ -162,15 +163,18 @@ export async function makeWorkspaceDir(
   ref: WorkspaceOpsRef & { path: string },
 ): Promise<{ path: string; created: boolean }> {
   const rel = assertSafeRelPath(ref.path);
-  const { dir, realDir } = await warmRoot(deps, ref);
+  const dir = await resolveWorkspaceDir(deps.sandboxUid, deps.workspacesRoot, ref.userId, ref.sessionId);
   const full = join(dir, rel);
-  await assertParentInsideWorkspace(realDir, dirname(full));
-  const st = await lstatOrNull(full);
-  if (st !== null) {
-    if (st.isDirectory()) return { path: rel, created: false };
-    throw new PreconditionFailedError(`'${rel}' already exists`, { code: "already_exists" });
-  }
-  await mkdir(full, { recursive: true });
-  await deps.activity.bump(ref.sessionId);
-  return { path: rel, created: true };
+  return withWorkspaceMutation([full], async () => {
+    const { realDir } = await warmRoot(dir, ref);
+    await assertParentInsideWorkspace(realDir, dirname(full));
+    const st = await lstatOrNull(full);
+    if (st !== null) {
+      if (st.isDirectory()) return { path: rel, created: false };
+      throw new PreconditionFailedError(`'${rel}' already exists`, { code: "already_exists" });
+    }
+    await mkdir(full, { recursive: true });
+    await deps.activity.bump(ref.sessionId);
+    return { path: rel, created: true };
+  });
 }

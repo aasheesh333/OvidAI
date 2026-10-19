@@ -1,58 +1,61 @@
-/// Client-side transcript projection for Ovid Cloud session events (P8 Task 7).
+/// Client-side transcript projection for Ovid Cloud session events (P8 Task 7,
+/// extended by Wave 1b).
 ///
 /// Folds the multiplexer's (already seq-deduped) [CloudSessionEvent] stream
 /// for ONE session into the existing KEPT transcript model (`Message` /
 /// `MsgKind`, lib/core/state.dart) — the thin client's replacement for
-/// the retired local service's in-process streaming pipeline. Task 8's `CloudAgentFacade`
-/// creates one [TranscriptProjection] + [EventTranscriptProjector] per
-/// session and feeds it from `WsMultiplexer.subscribe(sessionId)`; the
-/// projector itself does no routing and no I/O.
+/// the retired local service's in-process streaming pipeline.
+/// `CloudAgentFacade` creates one [TranscriptProjection] +
+/// [EventTranscriptProjector] per session and feeds it from
+/// `WsMultiplexer.subscribe(sessionId)`; the projector itself does no
+/// routing and no I/O.
 ///
-/// The fold table is the binding contract (plan Task 7):
+/// The fold table is the binding contract:
 ///
 /// | Event | Projection |
 /// |---|---|
 /// | `run_started{runId}` | busy=true, activeRunId, live `streaming` bubble, statusLine cleared |
-/// | `message_delta{runId,text}` | epoch-gated append into the bubble's content + [TranscriptProjection.liveBubbleTicks] tick; the run's FIRST delta also ends the bubble's thinking phase — pre-delta content is kept as a settled reasoning row above the fresh answer body (`_beginLiveAnswer`), never as the answer's first characters |
-/// | `message_completed{messageId,content}` | bubble REPLACED by the server-authoritative text Message; activeRunId cleared (the double-apply guard) |
-/// | `run_started_retry{attempt,nextBackoffMs}` | the composer status line; stays busy; the failed attempt's partial is DISCARDED and a fresh empty bubble re-armed (ruling 1 — parity with the retired local service's `_discardLiveAttempt`) |
-/// | `run_failed{code,message?}` | busy=false, error fields, turn-tail row |
-/// | `run_cancelled{runId,reason?}` | busy=false, error fields, turn-tail row (the cancelled copy) |
-/// | `run_completed{runId}` | busy=false, statusLine cleared |
-/// | `system_note` | turn-tail row |
-/// | `approval_requested{approvalId,tool,kind,summary,detail,allowAlways,expiresAt?}` | [TranscriptProjection.pendingApproval] — the approval affordance. ONE prompt can be pending at a time: the run sits blocked in the worker's approval bridge until the user answers or the bridge timeout-denies |
-/// | `approval_resolved{approvalId,decision,reason?}` | pendingApproval cleared when the ids match (the timeout-deny spelling included) |
+/// | `message_delta{runId,text}` | epoch-gated append into the live bubble (a fresh bubble is armed lazily after a tool round, or for a run whose `run_started` the client never saw — CH-002) + [TranscriptProjection.liveBubbleTicks] tick; the run's FIRST delta also ends the bubble's thinking phase |
+/// | `message_segment{runId,content}` | Wave 1b (CH-005): the intermediate turn's settled text — the live bubble becomes a settled text row with that content (or a row is appended when no bubble streamed, e.g. a history rebuild) |
+/// | `message_completed{messageId,content}` | the live bubble REPLACED by the server-authoritative text Message (appended when no bubble is live); a message already present (same id) is replaced in place, never duplicated |
+/// | `run_started_retry{attempt,nextBackoffMs}` | the composer status line; stays busy; the failed attempt's partial is DISCARDED and a fresh empty bubble re-armed |
+/// | `run_failed{code,message?}` / `run_cancelled{runId,reason?}` | busy=false, error fields, still-running tool rows settle, turn-tail row |
+/// | `run_completed{runId,usage?}` | busy=false, statusLine cleared, [TranscriptProjection.lastUsage] |
+/// | `tool_started{runId,callId,name,args}` | the live bubble settles (CH-005 turn separation) and a `MsgKind.tool` row keyed by callId is appended (`running`) |
+/// | `tool_completed{callId,isError,content,truncated}` | that row's state, detail and summary |
+/// | `artifact_created{artifactId,name,sizeBytes,contentType,url,expiresAt}` | an artifact-chip row (consecutive artifacts share one row) |
+/// | `todo_updated{todos}` / `goal_updated{goal}` | [TranscriptProjection.todos] / [TranscriptProjection.goal] |
+/// | `plan_mode_changed{planMode}` | [TranscriptProjection.planMode] |
+/// | `subagent_started{childSessionId,childRunId,agentType,prompt}` | links the running `dispatch_agent` row to its child session (the live activity card) |
+/// | `subagent_completed{childRunId,status}` | that card's final state |
+/// | `compaction_completed{folded,retained}` | a `MsgKind.compact` row |
+/// | `workspace_hibernated` / `workspace_hydrated` | the "Waking your workspace…" phase of the next run |
+/// | `system_note{code,message?}` | a turn-tail row with plain-language copy for known codes; a note with nothing to say renders NOTHING (CH-018) |
+/// | `approval_requested` / `approval_resolved` | [TranscriptProjection.pendingApproval] |
 ///
-/// The terminal rows also clear a pending approval: a prompt can never
-/// outlive its run (the resolved event always precedes the terminal, so this
-/// is the defensive belt for a wire that skips it).
+/// Any OTHER event type is a NO-OP (forward compatibility).
 ///
-/// Every OTHER event type is a NO-OP (forward compatibility): the LANDED
-/// @ovid/shared union members the table does not cover yet (tool_started,
-/// tool_completed, artifact_created, workspace_hibernated, workspace_hydrated,
-/// todo_updated, goal_updated, plan_mode_changed, subagent_started,
-/// subagent_completed, compaction_completed) and any future type — later P8+
-/// tasks fold them.
-/// `run_cancelled` is the full processor's terminal for a user-initiated
-/// cancel (agent-core loop.ts `cancelled()`); the P2 compat sink still
-/// renders the same cancel as `run_failed{code:'cancelled'}` — both
-/// spellings fold to the same turn tail (see [_onRunCancelled]).
-///
-/// Payload field names mirror the BUILT emitters exactly (camelCase):
-/// cloud/apps/worker/src/runProcessor.ts (event-contract block). The server
-/// is the contract; when this file and the server disagree, fix this file.
+/// Payload field names mirror the BUILT emitters exactly (camelCase). The
+/// server is the contract; when this file and the server disagree, fix this
+/// file.
 library;
+
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
 import '../state.dart';
 import 'cloud_errors.dart';
 import 'cloud_ws.dart';
+import 'tool_labels.dart';
 
-/// The live approval prompt folded from `approval_requested` (the P3 Task 12
-/// gate, agent-core approvals.ts). Field names mirror the emitter exactly;
-/// the payload carries NO runId — the prompt belongs to whichever run the
-/// session had active, and the gate prompts one request at a time.
+/// `Message.toolName` marker of an artifact-chip row (Wave 1b CH-004): an
+/// assistant row whose [Message.attachments] are the run's created files.
+const String kArtifactRowTool = 'artifact_created';
+
+/// The live approval prompt folded from `approval_requested`. Field names
+/// mirror the emitter exactly; the payload carries NO runId — the prompt
+/// belongs to whichever run the session had active.
 @immutable
 class CloudApprovalPrompt {
   const CloudApprovalPrompt({
@@ -65,8 +68,6 @@ class CloudApprovalPrompt {
     this.expiresAt,
   });
 
-  /// The bridge's answer key — what `approval_resolved` clears by and the
-  /// client's `approval_response` op echoes.
   final String approvalId;
 
   /// The tool asking ("bash", "exit_plan_mode", …).
@@ -81,23 +82,38 @@ class CloudApprovalPrompt {
   /// Whether the card may offer "Always Allow" (plain tool approvals only).
   final bool allowAlways;
 
-  /// When the bridge timeout-denies (ISO-8601), or null for an attended
-  /// question/plan — those wait for the answer, there is no clock.
+  /// When the bridge timeout-denies, or null for an attended question/plan.
   final DateTime? expiresAt;
 }
 
+/// Token usage of the latest finished run (`run_completed.usage`, Wave 1b
+/// CH-028). [contextTokens] is the conversation's size after that run's
+/// last turn — what the context ring shows against the model window.
+@immutable
+class CloudRunUsage {
+  const CloudRunUsage({
+    required this.inputTokens,
+    required this.outputTokens,
+    required this.cacheReadTokens,
+    required this.contextTokens,
+  });
+
+  final int inputTokens;
+  final int outputTokens;
+  final int cacheReadTokens;
+  final int contextTokens;
+}
+
 /// The transcript + run-status state for ONE cloud session, folded from
-/// session events. Structural transcript changes (append / replace / settle /
-/// seed) notify listeners; per-delta content growth does NOT — it publishes
-/// through [liveBubbleTicks] instead, exactly like the retired local service's live-bubble
-/// tick, so a streaming token repaints only the tail row, never every widget
-/// listening to this notifier.
+/// session events. Structural transcript changes notify listeners; per-delta
+/// content growth does NOT — it publishes through [liveBubbleTicks] instead,
+/// so a streaming token repaints only the tail row.
 class TranscriptProjection extends ChangeNotifier {
   /// The transcript for this session, oldest-first.
   final List<Message> messages = <Message>[];
 
   /// Ticks once per accepted `message_delta` so only the live tail bubble
-  /// repaints. Replaces the retired local service's liveBubbleTicksFor (Task 8).
+  /// repaints.
   final ValueNotifier<int> liveBubbleTicks = ValueNotifier<int>(0);
 
   bool _busy = false;
@@ -107,28 +123,45 @@ class TranscriptProjection extends ChangeNotifier {
   String? _lastErrorMessage;
 
   /// The run's live streaming bubble (the `MsgKind.streaming` tail row).
-  /// Same library as [EventTranscriptProjector], which drives it.
   Message? _liveBubble;
+
+  /// The live bubble's text. A buffer, not repeated `String +` (CH-036):
+  /// the bubble's `content` is refreshed from it once per delta.
+  final StringBuffer _liveText = StringBuffer();
 
   /// Wall clock of the active run's `run_started` — the `elapsedMs` source.
   DateTime? _runStartedAt;
 
-  /// The session's live approval prompt, or null when nothing is waiting on
-  /// the user. Set by the `approval_requested` fold, cleared by
-  /// `approval_resolved`, the terminal folds, and [clearPendingApproval].
   CloudApprovalPrompt? _pendingApproval;
 
-  /// The live approval affordance (see [_pendingApproval]). The UI-facing
-  /// [Message] transcript is untouched by approvals — the chat renders the
-  /// prompt as the approval dock above the composer, not as a transcript row.
+  /// Tool rows by callId (tool_completed / subagent folds find them here).
+  final Map<String, Message> _toolRows = <String, Message>{};
+
+  /// A subagent's child run → the `dispatch_agent` row's callId.
+  final Map<String, String> _childRunToCall = <String, String>{};
+
+  /// Child run ids by child session id (the Jobs list's kill handle).
+  final Map<String, String> _childRunBySession = <String, String>{};
+
+  /// Runs this projection already saw terminate — a late delta for one of
+  /// them must never resurrect a bubble (the implicit-start guard, CH-002).
+  final Set<String> _settledRuns = <String>{};
+
+  List<Map<String, String>>? _todos;
+  Map<String, dynamic>? _goal;
+  bool _goalSet = false;
+  bool? _planMode;
+  CloudRunUsage? _lastUsage;
+  bool _workspaceAsleep = false;
+  bool _waking = false;
+
+  /// The live approval affordance. The UI-facing [Message] transcript is
+  /// untouched by approvals — the chat renders the prompt as the approval
+  /// dock above the composer, not as a transcript row.
   CloudApprovalPrompt? get pendingApproval => _pendingApproval;
 
-  /// Clears the prompt when [approvalId] is the live one — the facade's
-  /// optimistic dismiss once it has dispatched the user's
-  /// `approval_response`. Unlike the projector's folds this notifies
-  /// directly: it runs OUTSIDE an `apply`, so there is no apply-level
-  /// [_flushNotify] to piggyback on. A stale id (already superseded or
-  /// cleared) is a no-op.
+  /// Clears the prompt when [approvalId] is the live one. Notifies directly
+  /// (it runs outside an `apply`). A stale id is a no-op.
   void clearPendingApproval(String approvalId) {
     final live = _pendingApproval;
     if (live == null || live.approvalId != approvalId) return;
@@ -136,15 +169,23 @@ class TranscriptProjection extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Set by the mutators below; consumed by [_flushNotify] at the end of one
-  /// `apply` so a no-op fold notifies nothing.
+  /// Puts a prompt back (the facade's restore after an unconfirmed answer).
+  void restorePendingApproval(CloudApprovalPrompt prompt) {
+    if (_pendingApproval?.approvalId == prompt.approvalId) return;
+    _pendingApproval = prompt;
+    notifyListeners();
+  }
+
   bool _changed = false;
+
+  /// While a history rebuild folds a whole page, notifications are held and
+  /// published once at the end.
+  bool _batching = false;
 
   bool get busy => _busy;
 
   /// The run whose events fold into the live bubble, or null when no run is
-  /// in flight (message_completed and the terminal events clear it — the
-  /// message_completed double-apply guard depends on that clearing).
+  /// in flight.
   String? get activeRunId => _activeRunId;
 
   /// The composer status row ("Retrying in 9s… (attempt 3)").
@@ -154,16 +195,152 @@ class TranscriptProjection extends ChangeNotifier {
 
   String? get lastErrorMessage => _lastErrorMessage;
 
+  /// The session's todo list as last folded, or null when no `todo_updated`
+  /// was seen (the caller keeps whatever it had).
+  List<Map<String, String>>? get todos => _todos;
+
+  /// The session goal as last folded (null when cleared); see [goalFolded].
+  Map<String, dynamic>? get goal => _goal;
+
+  /// True once a `goal_updated` was folded (null [goal] then means "none").
+  bool get goalFolded => _goalSet;
+
+  /// The plan-mode flag as last folded, or null when never seen.
+  bool? get planMode => _planMode;
+
+  /// Usage of the latest completed run, or null.
+  CloudRunUsage? get lastUsage => _lastUsage;
+
+  /// Child run id of the subagent running in [childSessionId], or null.
+  String? childRunOf(String childSessionId) =>
+      _childRunBySession[childSessionId];
+
+  /// What the agent is doing right now, for the one phase-driven status row
+  /// (CH-037): "Waking your workspace", the running tool's activity, or
+  /// null (thinking / writing — the bubble itself shows that).
+  String? get activity {
+    if (!_busy) return null;
+    if (_waking) return 'Waking your workspace';
+    for (var i = messages.length - 1; i >= 0; i--) {
+      final m = messages[i];
+      if (m.role == 'user') break;
+      if (m.kind == MsgKind.tool && m.toolState == 'running') {
+        return m.toolSessionId != null && m.toolName == 'dispatch_agent'
+            ? 'Working with ${m.toolTitle ?? 'a subagent'}'
+            : _activityOf(m);
+      }
+    }
+    return null;
+  }
+
+  static String? _activityOf(Message m) {
+    final input = _decodeInput(m.toolInput);
+    return cloudToolLabel(m.toolName ?? '', input).activity;
+  }
+
+  static Map<String, dynamic> _decodeInput(String? raw) {
+    if (raw == null || raw.isEmpty) return const <String, dynamic>{};
+    try {
+      final d = jsonDecode(raw);
+      return d is Map<String, dynamic> ? d : const <String, dynamic>{};
+    } catch (_) {
+      return const <String, dynamic>{};
+    }
+  }
+
   /// Replaces the transcript with the offline/paged cache so events fold on
-  /// top (Task 9 seeds before subscribing; seed-vs-live reconciliation is
-  /// that task's, not this one's). A live bubble belonging to a run still in
-  /// flight stays at the tail so folding remains visible.
+  /// top. A live bubble belonging to a run still in flight stays at the tail.
   void seedFromHistory(List<Message> cached) {
     messages
       ..clear()
       ..addAll(cached);
+    _reindexToolRows();
     final live = _liveBubble;
     if (live != null && _busy) messages.add(live);
+    notifyListeners();
+  }
+
+  /// Rebuilds [_toolRows] from the current rows (after a seed).
+  void _reindexToolRows() {
+    _toolRows.clear();
+    for (final m in messages) {
+      final id = m.privateSyncId;
+      if (m.kind == MsgKind.tool && id.startsWith('tool:')) {
+        _toolRows[id.substring(5)] = m;
+      }
+    }
+  }
+
+  /// Takes over [other]'s complete state (Wave 1b history rebuild: a page is
+  /// folded into a scratch projection, then adopted in one notification).
+  void adopt(TranscriptProjection other) {
+    messages
+      ..clear()
+      ..addAll(other.messages);
+    _busy = other._busy;
+    _activeRunId = other._activeRunId;
+    _statusLine = other._statusLine;
+    _lastErrorCode = other._lastErrorCode;
+    _lastErrorMessage = other._lastErrorMessage;
+    _liveBubble = other._liveBubble;
+    _liveText
+      ..clear()
+      ..write(other._liveText.toString());
+    _runStartedAt = other._runStartedAt;
+    _pendingApproval = other._pendingApproval;
+    _toolRows
+      ..clear()
+      ..addAll(other._toolRows);
+    _childRunToCall
+      ..clear()
+      ..addAll(other._childRunToCall);
+    _childRunBySession
+      ..clear()
+      ..addAll(other._childRunBySession);
+    _settledRuns
+      ..clear()
+      ..addAll(other._settledRuns);
+    if (other._todos != null) _todos = other._todos;
+    if (other._goalSet) {
+      _goal = other._goal;
+      _goalSet = true;
+    }
+    if (other._planMode != null) _planMode = other._planMode;
+    if (other._lastUsage != null) _lastUsage = other._lastUsage;
+    _workspaceAsleep = other._workspaceAsleep;
+    _waking = other._waking;
+    notifyListeners();
+  }
+
+  /// Wave 1b (history edits): drops [index] and every later row — the
+  /// server already removed them. A live bubble among them is dropped too;
+  /// run state is untouched (the caller re-arms it for a new run).
+  void truncateAt(int index) {
+    if (index < 0 || index >= messages.length) return;
+    final removed = messages.sublist(index);
+    messages.removeRange(index, messages.length);
+    if (_liveBubble != null && removed.contains(_liveBubble)) {
+      _liveBubble = null;
+      _liveText.clear();
+    }
+    _reindexToolRows();
+    notifyListeners();
+  }
+
+  /// No run is active server-side (a history page said so) but the fold
+  /// still thinks one is — its terminal event was never seen. Settle it
+  /// quietly: the partial text stays, nothing shimmers, no Stop button.
+  void settleIdle() {
+    if (!_busy && _liveBubble == null && _pendingApproval == null) return;
+    final run = _activeRunId;
+    if (run != null) _settledRuns.add(run);
+    _busy = false;
+    _activeRunId = null;
+    _statusLine = null;
+    _pendingApproval = null;
+    _waking = false;
+    _settleRunningTools('stopped');
+    _settleLiveBubble();
     notifyListeners();
   }
 
@@ -175,8 +352,6 @@ class TranscriptProjection extends ChangeNotifier {
 
   // -------------------------------------------------------------------------
   // Internal mutators — same library as the projector, which drives them.
-  // Each records whether anything actually changed so [_flushNotify] can
-  // suppress notifications for no-op folds.
   // -------------------------------------------------------------------------
 
   void _setBusy(bool v) {
@@ -204,9 +379,13 @@ class TranscriptProjection extends ChangeNotifier {
     _changed = true;
   }
 
-  /// approvalId-keyed (not identity): re-folding the SAME prompt — a
-  /// defensively re-emitted request — keeps the one already shown instead of
-  /// churning a fresh object through the dock's arm guard.
+  void _setWaking(bool v) {
+    if (_waking == v) return;
+    _waking = v;
+    _changed = true;
+  }
+
+  /// approvalId-keyed (not identity).
   void _setPendingApproval(CloudApprovalPrompt? v) {
     if (_pendingApproval?.approvalId == v?.approvalId) return;
     _pendingApproval = v;
@@ -214,18 +393,19 @@ class TranscriptProjection extends ChangeNotifier {
   }
 
   /// Appends the run's live streaming bubble, settling any leftover bubble
-  /// from a previous run first (a missed terminal event must never stack a
-  /// second shimmering row).
+  /// first (a missed terminal event must never stack a second shimmer).
   void _appendLiveBubble(Message bubble) {
     _settleLiveBubble();
     _liveBubble = bubble;
+    _liveText
+      ..clear()
+      ..write(bubble.content);
     messages.add(bubble);
     _changed = true;
   }
 
-  /// Replaces the live streaming bubble with the finalized message at the
-  /// bubble's position (appends when no bubble is tracked — a defensive
-  /// path; the wire always pairs them).
+  /// Replaces the live streaming bubble with [finalized] at the bubble's
+  /// position (appends when no bubble is tracked).
   void _replaceLiveBubble(Message finalized) {
     final live = _liveBubble;
     final idx = live == null ? -1 : messages.indexOf(live);
@@ -235,18 +415,17 @@ class TranscriptProjection extends ChangeNotifier {
       messages.add(finalized);
     }
     _liveBubble = null;
+    _liveText.clear();
     _changed = true;
   }
 
   /// Replaces an ALREADY-PRESENT message (same `privateSyncId`) with the
-  /// server-authoritative [finalized] row and drops the live bubble. P8
-  /// Task 9: a replayed `message_completed` can overlap a REST/cache page
-  /// that already contained the message (the cache high-water-mark window);
-  /// the transcript must never grow a duplicate assistant row.
+  /// server-authoritative [finalized] row and drops the live bubble.
   void _replaceExistingMessage(String messageId, Message finalized) {
     final live = _liveBubble;
     if (live != null) messages.remove(live);
     _liveBubble = null;
+    _liveText.clear();
     final idx = messages.indexWhere((m) => m.privateSyncId == messageId);
     if (idx >= 0) {
       messages[idx] = finalized;
@@ -262,13 +441,12 @@ class TranscriptProjection extends ChangeNotifier {
   }
 
   /// Settles the live streaming bubble: one with partial content is promoted
-  /// to a settled text row (the partial output stays visible — the retired local service
-  /// stopped-turn parity), an empty one is removed outright. A `thinking:`
-  /// row must NEVER be left shimmering after a terminal event.
+  /// to a settled text row, an empty one is removed outright.
   void _settleLiveBubble() {
     final live = _liveBubble;
     if (live == null) return;
     _liveBubble = null;
+    _liveText.clear();
     if (live.content.isEmpty) {
       if (messages.remove(live)) _changed = true;
       return;
@@ -278,51 +456,32 @@ class TranscriptProjection extends ChangeNotifier {
     _changed = true;
   }
 
-  /// Discards the run's live streaming bubble — the failed attempt's partial
-  /// text can never be appended to the retry's output — and re-arms [fresh]
-  /// in its place at the tail. busy / activeRunId / statusLine are untouched:
-  /// a retry is not a terminal. The re-arm matters because a bare remove
-  /// would swallow the next attempt's whole stream (`message_delta` drops
-  /// when no bubble is tracked). No-op when no run is in flight.
-  ///
-  /// Controller ruling 1 (fix round 1): the retired local service's `_discardLiveAttempt`
-  /// parity (it discarded the partial before every retry).
+  /// Every still-running tool row of the turn becomes [state] (a terminal
+  /// can never leave a spinner behind).
+  void _settleRunningTools(String state) {
+    for (final m in _toolRows.values) {
+      if (m.toolState == 'running') {
+        m.toolState = state;
+        _changed = true;
+      }
+    }
+  }
+
+  /// Discards the live bubble and re-arms [fresh] in its place at the tail
+  /// (run_started_retry). No-op when no run is in flight.
   void _resetLiveBubble(Message fresh) {
     final live = _liveBubble;
     if (live == null) return;
     messages.remove(live);
     _liveBubble = fresh;
+    _liveText.clear();
     messages.add(fresh);
     _changed = true;
   }
 
-  /// The run's FIRST `message_delta` lands: the live bubble stops thinking
-  /// and the answer body begins. The cloud event stream has no separate
-  /// reasoning phase (the worker emits answer deltas only), so any content
-  /// the bubble already held is pre-answer noise, never the answer's first
-  /// characters: it is kept as a settled `reasoning` row inserted ABOVE the
-  /// bubble — the transcript model's reasoning carrier (`_ReasoningCard`
-  /// renders a reasoning row's content as the collapsed "Thought for Ns"
-  /// block; persisted rows carry their reasoning the same way) — and the
-  /// answer streams into a fresh body. The built wire always arms the bubble
-  /// EMPTY, so today the snapshot is a no-op; the fold stays correct for a
-  /// future emitter that streams a reasoning phase into the same bubble.
-  ///
-  /// The thinking flip is a STRUCTURAL change — the render gate switches from
-  /// the reasoning card to the answer path — so it records `_changed` and
-  /// the apply-level [_flushNotify] republishes the transcript once, exactly
-  /// like `message_completed`'s replace. The per-token tick alone repaints
-  /// only the tail row and would leave window caches keyed on `thinking`
-  /// stale. No-op once the bubble is already answering (idempotent on the
-  /// second-and-later deltas).
-  ///
-  /// HAZARD for a future reasoning-phase emitter: the UI's think-clock
-  /// (`_ThinkClock`, chat_screen.dart) snapshots whatever a frame showed on
-  /// the thinking bubble, so a bubble that streamed reasoning into `content`
-  /// across frames would render its snapshot BESIDE this row while live
-  /// (the clock dies with the bubble at `message_completed`; the reasoning
-  /// row is the durable carrier). Such an emitter should fold reasoning as
-  /// its own rows instead of into the live bubble's content.
+  /// The run's FIRST `message_delta` lands: the live bubble stops thinking.
+  /// Any content the bubble already held is kept as a settled reasoning row
+  /// inserted above it (the built wire always arms the bubble empty).
   void _beginLiveAnswer(Message live, DateTime now) {
     if (!live.thinking) return;
     final noise = live.content;
@@ -335,15 +494,9 @@ class TranscriptProjection extends ChangeNotifier {
         role: 'assistant',
         kind: MsgKind.reasoning,
         content: noise,
-        // The pre-answer phase's length: drives the row's "Thought for Ns"
-        // label (`_ReasoningCard._doneDuration`).
         elapsedMs: elapsedMs,
         time: now,
       );
-      // Directly above the bubble so the thought block precedes the answer
-      // it produced; appended defensively when the bubble is not tracked in
-      // `messages` yet (the wire always pairs them — `_replaceLiveBubble`
-      // parity).
       final idx = messages.indexOf(live);
       if (idx >= 0) {
         messages.insert(idx, thought);
@@ -351,15 +504,15 @@ class TranscriptProjection extends ChangeNotifier {
         messages.add(thought);
       }
       live.content = '';
+      _liveText.clear();
     }
     live.thinking = false;
     _changed = true;
   }
 
-  /// One notification per mutating `apply` (the projector calls this at the
-  /// end of every fold; no-op folds notify nothing).
+  /// One notification per mutating `apply`.
   void _flushNotify() {
-    if (!_changed) return;
+    if (!_changed || _batching) return;
     _changed = false;
     notifyListeners();
   }
@@ -367,11 +520,9 @@ class TranscriptProjection extends ChangeNotifier {
 
 /// Folds cloud session events into a [TranscriptProjection] target. Applies
 /// only events the multiplexer has already seq-deduped; re-checks anyway
-/// (monotonic seq guard) so the same event re-fed after later ones — same
-/// object or a stale replay — mutates once.
+/// (monotonic seq guard).
 class EventTranscriptProjector {
-  /// [clock] is injectable so tests can pin `elapsedMs` deterministically;
-  /// production uses the system clock.
+  /// [clock] is injectable so tests can pin `elapsedMs` deterministically.
   EventTranscriptProjector(this.target, {DateTime Function()? clock})
       : _clock = clock ?? _systemClock;
 
@@ -380,93 +531,175 @@ class EventTranscriptProjector {
 
   static DateTime _systemClock() => DateTime.now();
 
-  /// Max seq (numeric compare) already folded — the exactly-once guard at
-  /// O(1) memory. The multiplexer dedupes per-seq upstream; this catches
-  /// consumer re-feeds (A, B, A) and same-object double-applies alike.
+  /// Max seq already folded — the exactly-once guard at O(1) memory.
   String? _lastSeq;
 
-  /// Seeds (or clears, with null) the exactly-once cursor. P8 Task 9 calls
-  /// this with the offline cache's high-water mark BEFORE folding replayed
-  /// events: the seeded transcript already reflects every event at or below
-  /// the mark, so re-feeding one must be a no-op. Without this API the
-  /// private `_lastSeq` survives [TranscriptProjection.seedFromHistory] and
-  /// would either drop uncovered events or duplicate covered ones.
+  /// The timestamp rows get while a history rebuild folds (the event's own
+  /// `ts`, so reloaded rows keep their real times); null = live (clock).
+  DateTime? _replayTs;
+
+  DateTime _now() => _replayTs ?? _clock();
+
+  /// Seeds (or clears, with null) the exactly-once cursor.
   void seedCursor(String? seq) => _lastSeq = seq;
 
   /// The current high-water mark (test/observability seam).
   String? get cursor => _lastSeq;
 
-  /// Folds ONE event. Unknown/fold-table-absent types are ignored (never
-  /// throw — forward compatibility for P2/P3 event types). Payload fields
-  /// are parsed defensively: a known type with an off-contract payload folds
-  /// with nulls rather than throwing (the server's zod + typed emitters
-  /// make that a belt-and-suspenders path).
+  /// Wave 1b (CH-002/CH-003/CH-006): rebuilds [target] from one history
+  /// page — the page's rows (oldest-first) interleaved by time with the
+  /// page's settled events — so a reload shows tool rows, artifacts,
+  /// intermediate text, errors and a run still in flight exactly as they
+  /// streamed. Assistant rows that a `message_completed` in [events]
+  /// produces are taken from the event (it carries the same id and text).
+  /// When [activeRunId] is null the server has no run in flight: anything
+  /// the fold left running settles quietly. The exactly-once cursor ends at
+  /// [watermark] (the page's lastEventSeq) or the last event's seq.
+  ///
+  /// The fold runs on a scratch projection and is adopted in ONE
+  /// notification.
+  static void rebuild(
+    TranscriptProjection target,
+    EventTranscriptProjector projector, {
+    required List<Message> rows,
+    required List<CloudSessionEvent> events,
+    required String? watermark,
+    required String? activeRunId,
+  }) {
+    final scratch = foldPage(rows: rows, events: events);
+    if (activeRunId == null) scratch.settleIdle();
+    target.adopt(scratch);
+    String? cursor = watermark;
+    if (events.isNotEmpty) {
+      final last = events.last.seq;
+      if (cursor == null || _seqCompare(last, cursor) > 0) cursor = last;
+    }
+    projector.seedCursor(cursor);
+    scratch.dispose();
+  }
+
+  /// Folds one history page into a FRESH projection (no live state is
+  /// touched) — used directly for older pages, which are prepended.
+  static TranscriptProjection foldPage({
+    required List<Message> rows,
+    required List<CloudSessionEvent> events,
+  }) {
+    final scratch = TranscriptProjection();
+    final folder = EventTranscriptProjector(scratch);
+    scratch._batching = true;
+    final completedIds = <String>{
+      for (final e in events)
+        if (e.type == 'message_completed' && e.payload['messageId'] is String)
+          e.payload['messageId'] as String,
+    };
+    var ri = 0;
+    var ei = 0;
+    while (ri < rows.length || ei < events.length) {
+      final takeRow = ei >= events.length ||
+          (ri < rows.length && !rows[ri].time.isAfter(events[ei].ts));
+      if (takeRow) {
+        final row = rows[ri++];
+        if (row.role == 'assistant' &&
+            completedIds.contains(row.privateSyncId)) {
+          continue; // the event below rebuilds it in the right place
+        }
+        if (scratch.messages.any((m) => m.privateSyncId == row.privateSyncId)) {
+          continue;
+        }
+        // A user prompt starts a new turn: a bubble a lost terminal left
+        // open must not swallow the next answer.
+        if (row.role == 'user' && scratch._liveBubble != null) {
+          scratch._settleLiveBubble();
+        }
+        scratch.messages.add(row);
+      } else {
+        final event = events[ei++];
+        folder._replayTs = event.ts.toLocal();
+        folder.apply(event);
+      }
+    }
+    folder._replayTs = null;
+    scratch._batching = false;
+    scratch._changed = false;
+    return scratch;
+  }
+
+  /// Folds ONE event. Unknown types are ignored (never throw). Payload
+  /// fields are parsed defensively.
   void apply(CloudSessionEvent event) {
     final last = _lastSeq;
     if (last != null && _seqCompare(event.seq, last) <= 0) return;
     _lastSeq = event.seq;
+    final p = event.payload;
     switch (event.type) {
       case 'run_started':
-        _onRunStarted(event.payload);
-        break;
+        _onRunStarted(p);
       case 'message_delta':
-        _onMessageDelta(event.payload);
-        break;
+        _onMessageDelta(p);
+      case 'message_segment':
+        _onMessageSegment(p, event.seq);
       case 'message_completed':
-        _onMessageCompleted(event.payload);
-        break;
+        _onMessageCompleted(p);
       case 'run_started_retry':
-        _onRunStartedRetry(event.payload);
-        break;
+        _onRunStartedRetry(p);
       case 'run_failed':
-        _onRunFailed(event.payload);
-        break;
+        _onRunFailed(p);
       case 'run_cancelled':
-        _onRunCancelled(event.payload);
-        break;
+        _onRunCancelled(p);
       case 'run_completed':
-        _onRunCompleted();
-        break;
+        _onRunCompleted(p);
       case 'system_note':
-        _onSystemNote(event.payload);
-        break;
+        _onSystemNote(p);
       case 'approval_requested':
-        _onApprovalRequested(event.payload);
-        break;
+        _onApprovalRequested(p);
       case 'approval_resolved':
-        _onApprovalResolved(event.payload);
-        break;
+        _onApprovalResolved(p);
+      case 'tool_started':
+        _onToolStarted(p);
+      case 'tool_completed':
+        _onToolCompleted(p);
+      case 'artifact_created':
+        _onArtifactCreated(p, event.seq);
+      case 'todo_updated':
+        _onTodoUpdated(p);
+      case 'goal_updated':
+        _onGoalUpdated(p);
+      case 'plan_mode_changed':
+        final next = p['planMode'];
+        if (next is bool && target._planMode != next) {
+          target._planMode = next;
+          target._changed = true;
+        }
+      case 'subagent_started':
+        _onSubagentStarted(p);
+      case 'subagent_completed':
+        _onSubagentCompleted(p);
+      case 'compaction_completed':
+        _onCompactionCompleted(p, event.seq);
+      case 'workspace_hibernated':
+        target._workspaceAsleep = true;
+      case 'workspace_hydrated':
+        target._workspaceAsleep = false;
+        target._setWaking(false);
       default:
-        // Fold-table-absent type: no-op. Covers the LANDED @ovid/shared
-        // union members listed in the library doc and any future type.
-        //
-        // HAZARD for future emitters (P3 carry, review ruling 2): before
-        // the full processor landed, run_cancelled was union-only — no
-        // emitter — and sat in this branch, which left the projection stuck
-        // busy=true with a shimmering live bubble (the reason this switch
-        // now folds it like run_failed). Any future terminal-ish event type
-        // must update this switch in the same change as its emitter — fold
-        // it like run_failed (terminal-settle + busy=false) — or land its
-        // own client folding task.
+        // Fold-table-absent type: no-op. Any future TERMINAL-ish event type
+        // must update this switch in the same change as its emitter.
         return;
     }
     target._flushNotify();
   }
 
   // -------------------------------------------------------------------------
-  // Fold-table rows
+  // Run lifecycle
   // -------------------------------------------------------------------------
 
-  void _onRunStarted(Map<String, dynamic> payload) {
-    final runId = _str(payload, 'runId');
-    // Double-apply guard: a run_started for the run already active appends
-    // exactly one bubble.
-    if (runId != null && runId == target._activeRunId) return;
-    final now = _clock();
+  void _startRun(String? runId) {
+    final now = _now();
     target._setBusy(true);
     target._setActiveRunId(runId);
     target._setStatusLine(null);
     target._runStartedAt = now;
+    if (target._workspaceAsleep) target._setWaking(true);
     target._appendLiveBubble(Message(
       role: 'assistant',
       kind: MsgKind.streaming,
@@ -476,42 +709,82 @@ class EventTranscriptProjector {
     ));
   }
 
+  void _onRunStarted(Map<String, dynamic> payload) {
+    final runId = _str(payload, 'runId');
+    // Double-apply guard: a run_started for the run already active appends
+    // exactly one bubble.
+    if (runId != null && runId == target._activeRunId) return;
+    _startRun(runId);
+  }
+
   void _onMessageDelta(Map<String, dynamic> payload) {
     final runId = _str(payload, 'runId');
     final text = _str(payload, 'text');
-    if (text == null || text.isEmpty) return;
-    // Epoch gate: deltas for any run other than the active one are DROPPED
-    // (a stale or post-terminal delta must never land).
-    if (runId == null || runId != target._activeRunId) return;
-    final live = target._liveBubble;
-    if (live == null) return; // no bubble (missed run_started): nowhere to fold
-    // First delta of the run: end the thinking phase so the streamed text
-    // renders through the answer path, not inside the "Thinking…" card
-    // (the flip also snapshots any pre-delta content — `_beginLiveAnswer`).
-    target._beginLiveAnswer(live, _clock());
-    live.content = live.content + text;
-    // Per-token publication: the tick repaints ONLY the live tail row
-    // (live-bubble-tick parity) — the one-time thinking flip above is the
-    // structural exception, republished through the apply-level flush.
+    if (text == null || text.isEmpty || runId == null) return;
+    if (runId != target._activeRunId) {
+      // CH-002: a run whose run_started sits below the replay cursor (the
+      // chat was reopened mid-run) still streams — start it implicitly.
+      // A run this projection saw terminate, or a delta while ANOTHER run
+      // is active, stays dropped (the epoch gate).
+      if (target._activeRunId != null || target._settledRuns.contains(runId)) {
+        return;
+      }
+      _startRun(runId);
+    }
+    target._setWaking(false);
+    var live = target._liveBubble;
+    if (live == null) {
+      // After a tool round the next turn's text streams into a FRESH bubble
+      // below the tool rows (CH-005), never into the settled text above.
+      live = Message(
+        role: 'assistant',
+        kind: MsgKind.streaming,
+        thinking: false,
+        content: '',
+        time: _now(),
+      );
+      target._appendLiveBubble(live);
+    }
+    target._beginLiveAnswer(live, _now());
+    target._liveText.write(text);
+    live.content = target._liveText.toString();
     target.liveBubbleTicks.value++;
   }
 
+  void _onMessageSegment(Map<String, dynamic> payload, String seq) {
+    final runId = _str(payload, 'runId');
+    final content = _str(payload, 'content') ?? '';
+    if (runId != null && runId != target._activeRunId) return;
+    if (content.trim().isEmpty) {
+      target._settleLiveBubble();
+      return;
+    }
+    final live = target._liveBubble;
+    final settled = Message(
+      role: 'assistant',
+      kind: MsgKind.text,
+      content: content,
+      privateSyncId: 'seg:$seq',
+      time: live?.time ?? _now(),
+    );
+    target._replaceLiveBubble(settled);
+  }
+
   void _onMessageCompleted(Map<String, dynamic> payload) {
-    // Double-apply guard (Review Focus #2): message_completed clears
-    // activeRunId, so a second application is a no-op.
-    if (target._activeRunId == null) return;
-    final now = _clock();
+    final now = _now();
     final startedAt = target._runStartedAt;
-    int? elapsedMs = startedAt == null
+    final active = target._activeRunId != null;
+    int? elapsedMs = !active || startedAt == null
         ? null
         : now.difference(startedAt).inMilliseconds;
     if (elapsedMs != null && elapsedMs < 0) elapsedMs = 0;
     final messageId = _str(payload, 'messageId');
+    final run = target._activeRunId;
+    // Its answer is in: a late delta of this run must never re-open it.
+    if (run != null) target._settledRuns.add(run);
     final finalized = Message(
       role: 'assistant',
       kind: MsgKind.text,
-      // Server content/id authoritative (null messageId falls back to the
-      // Message ctor's production id).
       content: _str(payload, 'content') ?? '',
       privateSyncId: messageId,
       thinking: false,
@@ -520,9 +793,20 @@ class EventTranscriptProjector {
     );
     if (messageId != null &&
         target.messages.any((m) => m.privateSyncId == messageId)) {
-      // Task 9 replay overlap: the seeded cache already holds this message.
-      target._replaceExistingMessage(messageId, finalized);
+      // A replay overlapping a page that already holds this message.
+      if (active) {
+        target._replaceExistingMessage(messageId, finalized);
+      } else {
+        final idx =
+            target.messages.indexWhere((m) => m.privateSyncId == messageId);
+        if (target.messages[idx].content != finalized.content) {
+          target.messages[idx] = finalized;
+          target._changed = true;
+        }
+      }
     } else {
+      // CH-002: with no run active (its run_started was never seen) the
+      // answer still lands — appended after everything already shown.
       target._replaceLiveBubble(finalized);
     }
     target._setActiveRunId(null);
@@ -532,39 +816,38 @@ class EventTranscriptProjector {
     final attempt = _int(payload, 'attempt');
     final nextBackoffMs = _int(payload, 'nextBackoffMs');
     if (attempt == null || nextBackoffMs == null) return;
-    // Ruling 1 (controller-adopted, fix round 1): the failed attempt's
-    // partial is discarded and a FRESH empty bubble re-armed, so the retry
-    // streams fresh text (never attempt-N-partial + attempt-N+1 text). On
-    // the model_transient_exhausted path NO message_completed ever replaces
-    // the bubble, so without this reset the terminal-settle would bake the
-    // concatenated partials into a permanent settled row.
     target._resetLiveBubble(Message(
       role: 'assistant',
       kind: MsgKind.streaming,
       thinking: true,
       content: '',
-      time: _clock(),
+      time: _now(),
     ));
     target._setStatusLine(
         'Retrying in ${nextBackoffMs ~/ 1000}s… (attempt $attempt)');
-    // Stays busy: the run is still in flight (attempt is the one ABOUT to
-    // start — runProcessor.ts event contract).
+  }
+
+  void _terminal({required String toolState}) {
+    final run = target._activeRunId;
+    if (run != null) target._settledRuns.add(run);
+    target._setBusy(false);
+    target._setStatusLine(null);
+    target._setActiveRunId(null);
+    target._setWaking(false);
+    // A prompt cannot outlive its run.
+    target._setPendingApproval(null);
+    target._settleRunningTools(toolState);
+    target._settleLiveBubble();
   }
 
   void _onRunFailed(Map<String, dynamic> payload) {
     final code = _str(payload, 'code');
     final message = _str(payload, 'message');
-    target._setBusy(false);
     target._setLastError(code, message);
-    // Terminal: the composer must not keep a retry line up for a dead run,
-    // and the run is no longer active (a late delta has nowhere to land).
-    target._setStatusLine(null);
-    target._setActiveRunId(null);
-    // A prompt cannot outlive its run — the bridge settles before any
-    // terminal, so this only fires on a wire that skipped the resolved
-    // event (the defensive belt; run_cancelled shares it through here).
-    target._setPendingApproval(null);
-    target._settleLiveBubble();
+    _terminal(toolState: code == 'cancelled' ? 'stopped' : 'error');
+    final copy = code == null || code == 'cancelled'
+        ? null
+        : cloudErrorCopy(code, message: message);
     target._appendMessage(Message(
       role: 'assistant',
       kind: MsgKind.turnTail,
@@ -573,21 +856,21 @@ class EventTranscriptProjector {
       // server's own words.
       content: code == 'cancelled'
           ? (message ?? humanText(code!))
-          : code == null
+          : copy == null
               ? (message ?? '')
-              : cloudErrorCopy(code, message: message).text,
-      time: _clock(),
+              : copy.text,
+      // The ONE surface of a run-level failure (CH-019): the row knows its
+      // code (Retry / Pick model) and keeps the raw text behind "Details".
+      toolName: code == 'cancelled' ? 'run_cancelled' : 'run_failed',
+      toolSummary: code,
+      toolDetail: copy?.detail,
+      toolState: code == 'cancelled' ? 'stopped' : 'error',
+      time: _now(),
     ));
   }
 
-  /// The full processor's terminal for a user-initiated cancel (loop.ts
-  /// `cancelled()`): payload `{runId, reason?}` — no code/message. Folds as
-  /// the compat spelling the P2 sink renders for the same cancel,
-  /// `run_failed{code:'cancelled', message:CANCELLED_MESSAGE}`: the server's
-  /// `reason` verbatim when present, else the pinned copy (the server's
-  /// CANCELLED_MESSAGE and [humanText]'s 'cancelled' text are the same
-  /// string, 'Stopped by user.'). Delegates to [_onRunFailed] so the two
-  /// terminals can never drift apart.
+  /// The full processor's terminal for a user-initiated cancel: folds as
+  /// the compat spelling `run_failed{code:'cancelled'}`.
   void _onRunCancelled(Map<String, dynamic> payload) {
     final reason = _str(payload, 'reason');
     _onRunFailed(<String, dynamic>{
@@ -596,37 +879,314 @@ class EventTranscriptProjector {
     });
   }
 
-  void _onRunCompleted() {
-    target._setBusy(false);
-    target._setStatusLine(null);
-    // Terminal (same reasoning as run_failed). Normally a no-op pair: the
-    // wire always lands message_completed before run_completed.
-    target._setActiveRunId(null);
-    // Same prompt-outlives-run belt as _onRunFailed (a resolved question
-    // precedes run_completed on the built wire).
-    target._setPendingApproval(null);
+  void _onRunCompleted(Map<String, dynamic> payload) {
+    final usage = payload['usage'];
+    if (usage is Map) {
+      int n(String k) => (usage[k] is num) ? (usage[k] as num).toInt() : 0;
+      target._lastUsage = CloudRunUsage(
+        inputTokens: n('inputTokens'),
+        outputTokens: n('outputTokens'),
+        cacheReadTokens: n('cacheReadTokens'),
+        contextTokens: n('contextTokens'),
+      );
+      target._changed = true;
+    }
+    _terminal(toolState: 'ok');
+  }
+
+  // -------------------------------------------------------------------------
+  // Agent activity (Wave 1b CH-004)
+  // -------------------------------------------------------------------------
+
+  static Map<String, dynamic> _args(Map<String, dynamic> payload) {
+    final a = payload['args'] ?? payload['input'];
+    return a is Map ? Map<String, dynamic>.from(a) : const <String, dynamic>{};
+  }
+
+  /// The tool's identifying args as JSON, never a file body (the row's
+  /// expanded "input" and the subagent card's name/task source).
+  static String _inputJson(Map<String, dynamic> args) {
+    final small = <String, dynamic>{};
+    for (final e in args.entries) {
+      final v = e.value;
+      if (v is String) {
+        small[e.key] = v.length > 400 ? '${v.substring(0, 400)}…' : v;
+      } else if (v is num || v is bool || v == null) {
+        small[e.key] = v;
+      }
+    }
+    return jsonEncode(small);
+  }
+
+  void _onToolStarted(Map<String, dynamic> payload) {
+    final callId = _str(payload, 'callId');
+    final name = _str(payload, 'name') ?? 'tool';
+    if (callId == null || target._toolRows.containsKey(callId)) return;
+    final runId = _str(payload, 'runId');
+    if (runId != null &&
+        target._activeRunId == null &&
+        !target._settledRuns.contains(runId)) {
+      // CH-002: a tool of a run whose run_started was never seen.
+      target._setBusy(true);
+      target._setActiveRunId(runId);
+    }
+    target._setWaking(false);
+    // CH-005: the turn's text so far is closed above the tool row.
     target._settleLiveBubble();
+    final args = _args(payload);
+    final label = cloudToolLabel(name, args);
+    final row = Message(
+      role: 'assistant',
+      kind: MsgKind.tool,
+      toolName: name,
+      toolTitle: label.title,
+      toolSummary: label.summary,
+      toolInput: _inputJson(args),
+      toolState: 'running',
+      privateSyncId: 'tool:$callId',
+      time: _now(),
+    );
+    target._toolRows[callId] = row;
+    target._appendMessage(row);
+  }
+
+  void _onToolCompleted(Map<String, dynamic> payload) {
+    final callId = _str(payload, 'callId');
+    if (callId == null) return;
+    var row = target._toolRows[callId];
+    if (row == null) {
+      // Its start fell outside a history window: still show what ran.
+      final name = _str(payload, 'name') ?? 'tool';
+      final label = cloudToolLabel(name, const <String, dynamic>{});
+      row = Message(
+        role: 'assistant',
+        kind: MsgKind.tool,
+        toolName: name,
+        toolTitle: label.title,
+        toolSummary: '',
+        privateSyncId: 'tool:$callId',
+        time: _now(),
+      );
+      target._toolRows[callId] = row;
+      target._appendMessage(row);
+    }
+    final failed = payload['isError'] == true || payload['ok'] == false;
+    row.toolState = failed ? 'error' : 'ok';
+    final content = _str(payload, 'content') ?? '';
+    row.toolDetail = payload['truncated'] == true
+        ? '$content\n… (output truncated)'
+        : content;
+    if ((row.toolSummary ?? '').isEmpty && content.trim().isNotEmpty) {
+      final first = content.trim().split('\n').first;
+      row.toolSummary =
+          first.length > 120 ? '${first.substring(0, 119)}…' : first;
+    }
+    target._changed = true;
+  }
+
+  void _onArtifactCreated(Map<String, dynamic> payload, String seq) {
+    final name = _str(payload, 'name');
+    if (name == null) return;
+    // The presigned URL carries the artifact id (the re-mint key); the chip
+    // re-mints before opening, so an expired URL in history still works.
+    final attachment = MessageAttachment(
+      name: name,
+      size: _int(payload, 'sizeBytes') ?? 0,
+      url: _str(payload, 'url'),
+    );
+    // Consecutive artifacts of one turn share one chip row (the live bubble,
+    // when one is streaming, stays below it).
+    final msgs = target.messages;
+    var lastIdx = msgs.length - 1;
+    if (lastIdx >= 0 && identical(msgs[lastIdx], target._liveBubble)) {
+      lastIdx--;
+    }
+    final last = lastIdx < 0 ? null : msgs[lastIdx];
+    if (last != null && last.toolName == kArtifactRowTool) {
+      if (last.attachments.any((a) => a.url == attachment.url)) return;
+      last.attachments = <MessageAttachment>[...last.attachments, attachment];
+      target._changed = true;
+      return;
+    }
+    final live = target._liveBubble;
+    final row = Message(
+      role: 'assistant',
+      kind: MsgKind.text,
+      toolName: kArtifactRowTool,
+      toolState: 'ok',
+      attachments: <MessageAttachment>[attachment],
+      privateSyncId: 'art:$seq',
+      time: _now(),
+    );
+    if (live != null) {
+      // Keep the streaming bubble at the tail.
+      final idx = target.messages.indexOf(live);
+      if (idx >= 0) {
+        target.messages.insert(idx, row);
+        target._changed = true;
+        return;
+      }
+    }
+    target._appendMessage(row);
+  }
+
+  void _onTodoUpdated(Map<String, dynamic> payload) {
+    final raw = payload['todos'];
+    if (raw is! List) return;
+    target._todos = <Map<String, String>>[
+      for (final t in raw)
+        if (t is Map)
+          <String, String>{
+            for (final e in t.entries)
+              if (e.key is String && e.value is String)
+                e.key as String: e.value as String,
+          },
+    ];
+    target._changed = true;
+  }
+
+  void _onGoalUpdated(Map<String, dynamic> payload) {
+    final g = payload['goal'];
+    target._goal = g is Map ? Map<String, dynamic>.from(g) : null;
+    target._goalSet = true;
+    target._changed = true;
+  }
+
+  void _onSubagentStarted(Map<String, dynamic> payload) {
+    final childSessionId = _str(payload, 'childSessionId');
+    final childRunId = _str(payload, 'childRunId');
+    if (childSessionId == null) return;
+    Message? row;
+    String? callId;
+    // The dispatch_agent call that is waiting on this child: the newest
+    // running dispatch row not yet linked to a child.
+    for (final e in target._toolRows.entries.toList().reversed) {
+      final m = e.value;
+      if (m.toolName == 'dispatch_agent' &&
+          m.toolState == 'running' &&
+          m.toolSessionId == null) {
+        row = m;
+        callId = e.key;
+        break;
+      }
+    }
+    if (row == null) {
+      // No dispatch row (its start fell outside a history window): the card
+      // is still shown from the event alone.
+      callId = 'sub:${childRunId ?? childSessionId}';
+      final type = _str(payload, 'agentType') ?? 'Subagent';
+      row = Message(
+        role: 'assistant',
+        kind: MsgKind.tool,
+        toolName: 'dispatch_agent',
+        toolTitle: type,
+        toolSummary: _str(payload, 'prompt') ?? '',
+        toolInput: jsonEncode(<String, dynamic>{
+          'agentType': type,
+          'prompt': _str(payload, 'prompt') ?? '',
+        }),
+        toolState: 'running',
+        privateSyncId: 'tool:$callId',
+        time: _now(),
+      );
+      target._toolRows[callId] = row;
+      target._settleLiveBubble();
+      target._appendMessage(row);
+    }
+    row.toolSessionId = childSessionId;
+    final type = _str(payload, 'agentType');
+    if (type != null && type.isNotEmpty && type != 'general-purpose') {
+      row.toolTitle = type;
+    }
+    if (childRunId != null) {
+      target._childRunToCall[childRunId] = callId!;
+      target._childRunBySession[childSessionId] = childRunId;
+    }
+    target._changed = true;
+  }
+
+  void _onSubagentCompleted(Map<String, dynamic> payload) {
+    final childRunId = _str(payload, 'childRunId');
+    if (childRunId == null) return;
+    final callId = target._childRunToCall[childRunId];
+    final row = callId == null ? null : target._toolRows[callId];
+    if (row == null || row.toolState != 'running') return;
+    row.toolState = switch (_str(payload, 'status')) {
+      'failed' => 'error',
+      'cancelled' => 'stopped',
+      _ => 'ok',
+    };
+    target._changed = true;
+  }
+
+  void _onCompactionCompleted(Map<String, dynamic> payload, String seq) {
+    final folded = _int(payload, 'folded') ?? 0;
+    final row = Message(
+      role: 'assistant',
+      kind: MsgKind.compact,
+      content: folded > 0
+          ? 'Summarized $folded earlier message${folded == 1 ? '' : 's'} to '
+              'keep the conversation within the model\'s memory'
+          : 'Summarized earlier messages to keep the conversation within the '
+              'model\'s memory',
+      privateSyncId: 'compact:$seq',
+      time: _now(),
+    );
+    final live = target._liveBubble;
+    final idx = live == null ? -1 : target.messages.indexOf(live);
+    if (idx >= 0) {
+      target.messages.insert(idx, row);
+      target._changed = true;
+    } else {
+      target._appendMessage(row);
+    }
+  }
+
+  /// CH-018: plain-language copy for the notes the server emits without a
+  /// displayable text; null = render nothing.
+  static String? systemNoteText(Map<String, dynamic> payload) {
+    final code = _str(payload, 'code');
+    switch (code) {
+      case 'run_merged':
+        return 'Your follow-up was added to the running task.';
+      case 'command_blocked':
+        return _str(payload, 'message') ??
+            'A command was blocked for safety.';
+      case 'hook_block_ignored':
+      case 'compaction_summary_failed':
+      case 'hook_notification':
+      case 'warm_lru':
+        // Operator/plugin diagnostics: never shown as chat rows.
+        return null;
+      case 'hibernated':
+      case 'workspace_hibernated':
+        return null;
+    }
+    if (payload['scheduleId'] != null) {
+      final status = _str(payload, 'status');
+      return status == 'failed'
+          ? 'The scheduled run failed.'
+          : 'Scheduled run finished.';
+    }
+    final text = _str(payload, 'text') ?? _str(payload, 'message');
+    if (text == null || text.trim().isEmpty) return null;
+    return text;
   }
 
   void _onSystemNote(Map<String, dynamic> payload) {
+    final text = systemNoteText(payload);
+    if (text == null) return;
     target._appendMessage(Message(
       role: 'assistant',
       kind: MsgKind.turnTail,
-      content: _str(payload, 'text') ?? _str(payload, 'message') ?? '',
-      time: _clock(),
+      content: text,
+      time: _now(),
     ));
   }
 
-  /// `approval_requested{approvalId,tool,kind,summary,detail,allowAlways,
-  /// expiresAt?}` (agent-core approvals.ts — the sink emits BEFORE the bridge
-  /// starts its timeout clock, so the card always beats the auto-deny).
-  /// Replaces any standing prompt: the gate answers one request at a time,
-  /// so a second requested event means the first was settled off-wire (a
-  /// replay gap) and the live one is the truth.
   void _onApprovalRequested(Map<String, dynamic> payload) {
     final approvalId = _str(payload, 'approvalId');
     final tool = _str(payload, 'tool');
-    // Defensive: a prompt with no answer key could never be cleared.
     if (approvalId == null || approvalId.isEmpty || tool == null) return;
     final rawExpiresAt = payload['expiresAt'];
     target._setPendingApproval(CloudApprovalPrompt(
@@ -640,20 +1200,16 @@ class EventTranscriptProjector {
     ));
   }
 
-  /// `approval_resolved{approvalId,decision,reason?}` — exactly one per
-  /// prompt (the bridge settles once, first answer wins). Id-matched only:
-  /// a resolved for a superseded prompt never clears the live one.
   void _onApprovalResolved(Map<String, dynamic> payload) {
     final live = target._pendingApproval;
-    if (live == null) return; // nothing pending (a late/duplicate resolved)
+    if (live == null) return;
     final approvalId = _str(payload, 'approvalId');
     if (approvalId == null || approvalId != live.approvalId) return;
     target._setPendingApproval(null);
   }
 
   /// Human text for the run_failed codes whose server payloads carry no
-  /// message. Unmapped codes render the code verbatim — never a blank row,
-  /// never invented prose.
+  /// message.
   @visibleForTesting
   static String humanText(String code) {
     if (code == 'cancelled') return 'Stopped by user.';
@@ -671,11 +1227,7 @@ class EventTranscriptProjector {
       payload[key] is num ? (payload[key] as num).toInt() : null;
 
   /// Redis stream ids `"<ms>-<idx>"`, compared NUMERICALLY on both parts —
-  /// mirrors `WsMultiplexer.compareSeq` (and the gateway's `compareSeq`)
-  /// so the projector's exactly-once guard can never diverge from the
-  /// multiplexer's dedupe semantics. Duplicated here because that static is
-  /// `@visibleForTesting` (production code may not call it). A lexicographic
-  /// compare breaks the moment the millisecond part changes width.
+  /// mirrors `WsMultiplexer.compareSeq`.
   static int _seqCompare(String a, String b) {
     final ap = _seqParts(a);
     final bp = _seqParts(b);
@@ -683,6 +1235,9 @@ class EventTranscriptProjector {
     if (ap.$2 != bp.$2) return ap.$2 < bp.$2 ? -1 : 1;
     return 0;
   }
+
+  /// Public numeric seq compare (the facade's never-move-backwards guard).
+  static int compareSeq(String a, String b) => _seqCompare(a, b);
 
   static (int, int) _seqParts(String seq) {
     final dash = seq.indexOf('-');

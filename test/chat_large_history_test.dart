@@ -291,15 +291,14 @@ void main() {
       },
     );
 
-    testWidgets('feedback toggle repaints the row icon', (tester) async {
+      // CH-029: there is no server feedback route, so no thumbs are offered —
+    // a like that is never sent nor kept would mislead (R4).
+    testWidgets('answers offer no thumbs feedback (no server route)', (
+      tester,
+    ) async {
       await pumpSession(tester, [_msg('hi'), _answer('hello there')]);
-
-      expect(find.byIcon(Icons.thumb_up_alt_outlined), findsOneWidget);
-      await tester.tap(find.byIcon(Icons.thumb_up_alt_outlined));
-      await tester.pump();
-
-      expect(find.byIcon(Icons.thumb_up_alt), findsOneWidget);
       expect(find.byIcon(Icons.thumb_up_alt_outlined), findsNothing);
+      expect(find.byIcon(Icons.thumb_down_alt_outlined), findsNothing);
     });
 
     testWidgets('stream rebuilds preserve drafts across session switches', (

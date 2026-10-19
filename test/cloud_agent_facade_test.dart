@@ -129,6 +129,50 @@ class FakeCloudRest extends CloudRestClient {
       {Duration? timeout}) async {
     uploaded.add(bytes);
   }
+
+  // Wave 1b history edits.
+  final List<({String sessionId, String messageId})> truncated = [];
+  final List<({String sessionId, String messageId})> regenerated = [];
+  final List<({String sessionId, String messageId})> branched = [];
+  CloudApiException? historyError;
+  String regeneratePromptId = '';
+
+  @override
+  Future<int> deleteMessagesFrom(String sessionId, String messageId) async {
+    if (historyError != null) throw historyError!;
+    truncated.add((sessionId: sessionId, messageId: messageId));
+    return 2;
+  }
+
+  @override
+  Future<RegenerateResponse> regenerateMessage(
+    String sessionId,
+    String messageId, {
+    int? maxOutputTokens,
+  }) async {
+    if (historyError != null) throw historyError!;
+    regenerated.add((sessionId: sessionId, messageId: messageId));
+    return RegenerateResponse(
+      runId: 'run-regen',
+      promptMessageId: regeneratePromptId,
+    );
+  }
+
+  @override
+  Future<SessionDto> branchSession(
+    String sessionId,
+    String messageId, {
+    String? title,
+  }) async {
+    branched.add((sessionId: sessionId, messageId: messageId));
+    return SessionDto(
+      id: '0199aaaa-0000-7000-8000-00000000b001',
+      title: 'Branch',
+      mode: 'auto',
+      createdAt: DateTime.utc(2026, 10, 19),
+      updatedAt: DateTime.utc(2026, 10, 19),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +319,33 @@ void main() {
       expect(run.busy, isTrue);
       expect(run.lastErrorCode, isNull);
 
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('Wave1a pending:<clientMsgId> survives rich reseeding and is '
+        'confirmed under the actual server id without a duplicate', () async {
+      final h = await _build();
+      h.rest.sendGate = Completer<void>();
+      final send = h.facade.runTask('still sending', sessionId: 's1');
+      await pumpEventQueue();
+      final clientId = h.rest.sent.single.clientMsgId!;
+      expect(h.facade.projectionForTest('s1')!.messages.single.privateSyncId,
+          CloudAgentFacade.pendingRowId(clientId));
+      h.facade.seedRichTranscript('s1', rows: const [], events: const [],
+          watermark: '10-0', activeRunId: null);
+      expect(h.facade.projectionForTest('s1')!.messages.single.privateSyncId,
+          'pending:$clientId');
+      // A snapshot may even see the accepted row before the 202 reaches us.
+      h.facade.seedRichTranscript('s1', rows: [
+        Message(role: 'user', content: 'still sending', privateSyncId: 'msg-user-1'),
+      ], events: const [], watermark: '11-0', activeRunId: null);
+      h.rest.sendGate!.complete();
+      await send;
+      final rows = h.facade.projectionForTest('s1')!.messages
+          .where((m) => m.role == 'user').toList();
+      expect(rows, hasLength(1));
+      expect(rows.single.privateSyncId, 'msg-user-1');
       await h.ws.disconnect();
       h.facade.dispose();
     });
@@ -680,7 +751,8 @@ void main() {
       h.facade.dispose();
     });
 
-    test('a later run_started clears the previous run error', () async {
+    test('CH-019: a run failure has ONE surface — the inline failure row, '
+        'never the banner too', () async {
       final h = await _build();
       await h.facade.runTask('first', sessionId: 's1');
       final socket = await h.socket();
@@ -691,7 +763,12 @@ void main() {
         'message': 'boom',
       }));
       await pumpEventQueue();
-      expect(h.facade.runStateFor('s1').lastErrorCode, 'provider_error');
+      expect(h.facade.runStateFor('s1').lastErrorCode, isNull,
+          reason: 'no banner for a run-level failure');
+      final tail = h.facade.transcriptFor('s1')!.last;
+      expect(tail.kind, MsgKind.turnTail);
+      expect(tail.toolName, 'run_failed');
+      expect(tail.toolSummary, 'provider_error');
 
       await h.facade.runTask('second', sessionId: 's1');
       socket.server(_eventFrame('s1', '3-0', 'run_started', {'runId': 'run-2'}));
@@ -1024,7 +1101,8 @@ void main() {
       addTearDown(() => dir.delete(recursive: true));
       final big = File('${dir.path}/big.bin');
       final raf = await big.open(mode: FileMode.write);
-      await raf.truncate(25 * 1024 * 1024 + 1);
+      // CH-022: the SERVER's limit is 25,000,000 bytes (not 25 MiB).
+      await raf.truncate(CloudAgentFacade.maxAttachmentBytes + 1);
       await raf.close();
 
       final error =
@@ -1042,7 +1120,7 @@ void main() {
       addTearDown(() => dir.delete(recursive: true));
       final atLimit = File('${dir.path}/limit.bin');
       final raf = await atLimit.open(mode: FileMode.write);
-      await raf.truncate(25 * 1024 * 1024);
+      await raf.truncate(CloudAgentFacade.maxAttachmentBytes);
       await raf.close();
 
       final error =
@@ -1051,6 +1129,20 @@ void main() {
       expect(error, isNull);
       expect(h.facade.pendingAttachmentsForTest('s1'), hasLength(1));
 
+      h.facade.dispose();
+    });
+
+    test('CH-022: the limit is the server\'s 25,000,000 bytes and an empty '
+        'file is refused at staging time', () async {
+      expect(CloudAgentFacade.maxAttachmentBytes, 25000000);
+      final h = await _build();
+      final dir = await Directory.systemTemp.createTemp('facade-empty');
+      addTearDown(() => dir.delete(recursive: true));
+      final empty = File('${dir.path}/empty.txt')..writeAsBytesSync(const []);
+      final error =
+          await h.facade.attachFile(empty.path, 'empty.txt', sessionId: 's1');
+      expect(error, 'empty.txt is empty, so there is nothing to send.');
+      expect(h.facade.pendingAttachmentsForTest('s1'), isEmpty);
       h.facade.dispose();
     });
   });
@@ -1110,14 +1202,23 @@ void main() {
           'decision': 'allow',
         },
       ]);
-      // Optimistic dismiss: the card is gone without waiting for the
-      // server's approval_resolved echo.
-      expect(h.facade.pendingApproval, isNull);
+      // CH-017: the card stays up ("Sending…") until the server confirms.
+      expect(h.facade.pendingApproval, same(req));
+      expect(req.sending, isTrue);
 
-      // A stale second tap answers nothing (the bridge is
-      // first-resolution-wins server-side; the facade never re-sends).
+      // A second tap while the first is in flight answers nothing.
       expect(h.facade.approveRequest(req, true), isFalse);
       expect(_approvalFrames(socket), hasLength(1));
+
+      // The gateway's approval_ack confirms: the card goes away for good.
+      socket.server(<String, dynamic>{
+        'op': 'approval_ack',
+        'approvalId': 'ap-1',
+        'decision': 'allow',
+      });
+      await pumpEventQueue();
+      expect(h.facade.pendingApproval, isNull);
+      expect(h.facade.approveRequest(req, true), isFalse);
 
       await h.ws.disconnect();
       h.facade.dispose();
@@ -1220,6 +1321,63 @@ void main() {
       h.facade.dispose();
     });
 
+    test('CH-017: an unconfirmed answer brings the card back (timeout and '
+        'a session error frame)', () async {
+      final saved = CloudAgentFacade.approvalConfirmTimeout;
+      CloudAgentFacade.approvalConfirmTimeout =
+          const Duration(milliseconds: 30);
+      addTearDown(() => CloudAgentFacade.approvalConfirmTimeout = saved);
+      final h = await _build();
+      h.facade.subscribeForTest('s1');
+      final socket = await h.socket();
+      socket.server(_eventFrame(
+          's1', '1-0', 'approval_requested', _approvalPayload('ap-1')));
+      await pumpEventQueue();
+      final req = h.facade.pendingApproval!;
+      expect(h.facade.approveRequest(req, true), isTrue);
+      expect(req.sending, isTrue);
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(req.sending, isFalse, reason: 'no ack arrived: answer again');
+      expect(h.facade.pendingApproval, same(req));
+
+      expect(h.facade.approveRequest(req, false), isTrue);
+      socket.server(<String, dynamic>{
+        'op': 'error',
+        'code': 'unavailable',
+        'message': 'Approvals are unavailable.',
+        'sessionId': 's1',
+      });
+      await pumpEventQueue();
+      expect(req.sending, isFalse);
+      expect(_approvalFrames(socket), hasLength(2));
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('CH-017: a plan prompt keeps its kind, plan body and expiry', () async {
+      final h = await _build();
+      h.facade.subscribeForTest('s1');
+      final socket = await h.socket();
+      socket.server(_eventFrame('s1', '1-0', 'approval_requested', <String, dynamic>{
+        'approvalId': 'ap-plan',
+        'tool': 'exit_plan_mode',
+        'kind': 'plan',
+        'summary': 'Ready to build?',
+        'detail': 'Review this plan:\n\n1. Add the route\n2. Test it',
+        'allowAlways': false,
+        'expiresAt': '2026-10-19T12:00:00.000Z',
+      }));
+      await pumpEventQueue();
+      final req = h.facade.pendingApproval!;
+      expect(req.kind, 'plan');
+      expect(req.planBody, '1. Add the route\n2. Test it');
+      expect(req.expiresAt, DateTime.utc(2026, 10, 19, 12));
+      expect(req.allowAlways, isFalse);
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
     test('the test seam still shadows the live prompt', () async {
       final h = await _build();
       h.facade.subscribeForTest('s1');
@@ -1237,6 +1395,219 @@ void main() {
       expect(h.facade.pendingApproval?.approvalId, 'ap-1');
 
       await h.ws.disconnect();
+      h.facade.dispose();
+    });
+  });
+
+  group('Wave 1b', () {
+    const u1 = '0199aaaa-0000-7000-8000-000000000001';
+    const a1 = '0199aaaa-0000-7000-8000-000000000002';
+    const u2 = '0199aaaa-0000-7000-8000-000000000003';
+    const a2 = '0199aaaa-0000-7000-8000-000000000004';
+
+    setUp(() {
+      AppState.resetTestInstance();
+      final app = AppState.createForTest();
+      app.sessions
+        ..clear()
+        ..add(ChatSession(id: 's1', title: 'Active', model: 'm'));
+      app.activeSessionId = 's1';
+    });
+
+    tearDown(AppState.resetTestInstance);
+
+    Future<(_Harness, FakeCloudSocket)> seeded() async {
+      final h = await _build();
+      h.facade.seedTranscript('s1', <Message>[
+        Message(role: 'user', content: 'q1', privateSyncId: u1),
+        Message(role: 'assistant', content: 'a1', privateSyncId: a1),
+        Message(role: 'user', content: 'q2', privateSyncId: u2),
+        Message(role: 'assistant', content: 'a2', privateSyncId: a2),
+      ], null);
+      final socket = await h.socket();
+      return (h, socket);
+    }
+
+    test('CH-016: run_merged settles the merged run instead of leaving the '
+        'composer busy', () async {
+      final h = await _build();
+      h.facade.subscribeForTest('s1');
+      final socket = await h.socket();
+      socket.server(_eventFrame('s1', '1-0', 'run_started', {'runId': 'run-A'}));
+      await pumpEventQueue();
+      // A second send while run-A is active: the client tracks its run.
+      await h.facade.runTask('follow-up', sessionId: 's1');
+      await pumpEventQueue();
+      final tracked = h.facade.runStateFor('s1').runId;
+      socket.server(_eventFrame('s1', '2-0', 'system_note', {
+        'code': 'run_merged',
+        'mergedRunId': tracked,
+        'runId': 'run-A',
+      }));
+      await pumpEventQueue();
+      expect(h.facade.runStateFor('s1').runId, 'run-A',
+          reason: 'the tracked run is now the one that absorbed it');
+      socket.server(_eventFrame('s1', '3-0', 'run_completed', {'runId': 'run-A'}));
+      await pumpEventQueue();
+      expect(h.facade.busyFor('s1'), isFalse);
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('CH-028: subagents, the Jobs list and the context ring come from '
+        'real events', () async {
+      final h = await _build();
+      h.facade.subscribeForTest('s1');
+      final socket = await h.socket();
+      for (final f in <Map<String, Object?>>[
+        _eventFrame('s1', '1-0', 'run_started', {'runId': 'r1'}),
+        _eventFrame('s1', '1-1', 'tool_started', {
+          'runId': 'r1',
+          'callId': 'd1',
+          'name': 'dispatch_agent',
+          'args': {'prompt': 'edit files', 'agentType': 'CodeSubagent'},
+        }),
+        _eventFrame('s1', '1-2', 'subagent_started', {
+          'runId': 'r1',
+          'childSessionId': 'child-1',
+          'childRunId': 'cr-1',
+          'agentType': 'CodeSubagent',
+          'prompt': 'edit files',
+        }),
+      ]) {
+        socket.server(f);
+      }
+      await pumpEventQueue();
+      final subs = h.facade.subagentsOf('s1');
+      expect(subs.single.sessionId, 'child-1');
+      expect(subs.single.label, 'CodeSubagent');
+      expect(subs.single.finished, isFalse);
+      // The child session is watched: its tool activity feeds the card.
+      socket.server(_eventFrame('child-1', '1-0', 'run_started', {'runId': 'cr-1'}));
+      socket.server(_eventFrame('child-1', '1-1', 'tool_started', {
+        'runId': 'cr-1',
+        'callId': 'x',
+        'name': 'fs_edit',
+        'args': {'path': 'lib/a.dart'},
+      }));
+      await pumpEventQueue();
+      final jobs = h.facade.jobsFor('s1');
+      expect(jobs.single.name, 'CodeSubagent: Editing lib/a.dart');
+      h.facade.killJobFor('s1', jobs.single.id);
+      await pumpEventQueue();
+      expect(h.rest.cancelled, contains('cr-1'));
+
+      socket.server(_eventFrame('s1', '2-0', 'subagent_completed',
+          {'childRunId': 'cr-1', 'status': 'completed'}));
+      socket.server(_eventFrame('s1', '2-1', 'message_completed',
+          {'messageId': 'm1', 'content': 'done'}));
+      socket.server(_eventFrame('s1', '2-2', 'run_completed', {
+        'runId': 'r1',
+        'usage': {'inputTokens': 900, 'outputTokens': 100, 'contextTokens': 1000},
+      }));
+      await pumpEventQueue();
+      expect(h.facade.jobsFor('s1'), isEmpty);
+      expect(h.facade.measuredContextTokens(AppState.I.sessionById('s1')!), 1000);
+      expect(h.facade.sessionMessageTokens, 1000);
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('todo/goal/plan events reach the ChatSession the docks render', () async {
+      final h = await _build();
+      h.facade.subscribeForTest('s1');
+      final socket = await h.socket();
+      socket.server(_eventFrame('s1', '1-0', 'todo_updated', {
+        'todos': [
+          {'content': 'a', 'status': 'in_progress'},
+        ],
+      }));
+      socket.server(_eventFrame('s1', '1-1', 'goal_updated', {
+        'goal': {'objective': 'Ship', 'notes': ''},
+      }));
+      socket.server(_eventFrame('s1', '1-2', 'plan_mode_changed', {'planMode': true}));
+      await pumpEventQueue();
+      final s = AppState.I.sessionById('s1')!;
+      expect(s.todos, [
+        {'content': 'a', 'status': 'in_progress'},
+      ]);
+      expect(s.goal?['objective'], 'Ship');
+      expect(s.planMode, isTrue);
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('deleteFrom truncates on the server and locally', () async {
+      final (h, _) = await seeded();
+      final rows = h.facade.transcriptFor('s1')!;
+      await h.facade.deleteFrom('s1', rows[2]);
+      expect(h.rest.truncated.single, (sessionId: 's1', messageId: u2));
+      expect(h.facade.transcriptFor('s1')!.map((m) => m.content), ['q1', 'a1']);
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('regenerate re-runs on the server, trims after the prompt and shows '
+        'Stop for the new run', () async {
+      final (h, _) = await seeded();
+      h.rest.regeneratePromptId = u2;
+      final rows = h.facade.transcriptFor('s1')!;
+      await h.facade.regenerate('s1', rows[3]);
+      expect(h.rest.regenerated.single.messageId, a2);
+      expect(h.facade.transcriptFor('s1')!.map((m) => m.content),
+          ['q1', 'a1', 'q2']);
+      expect(h.facade.busyFor('s1'), isTrue);
+      expect(h.facade.runStateFor('s1').runId, 'run-regen');
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('retryFailedRun re-runs the last prompt in place (no duplicate row)', () async {
+      final (h, _) = await seeded();
+      h.rest.regeneratePromptId = u2;
+      await h.facade.retryFailedRun('s1');
+      expect(h.rest.regenerated.single.messageId, u2);
+      expect(h.rest.sent, isEmpty);
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('a busy session refuses edits with the server error; rows that the '
+        'server does not store are refused locally', () async {
+      final (h, _) = await seeded();
+      h.rest.historyError = CloudApiException(
+          status: 409, code: 'session_busy', message: 'busy');
+      final rows = h.facade.transcriptFor('s1')!;
+      await expectLater(h.facade.deleteFrom('s1', rows[0]),
+          throwsA(isA<CloudApiException>()));
+      expect(h.facade.transcriptFor('s1'), hasLength(4));
+      h.rest.historyError = null;
+      final tool = Message(
+          role: 'assistant', kind: MsgKind.tool, privateSyncId: 'tool:c1');
+      expect(CloudAgentFacade.isServerMessage(tool), isFalse);
+      await expectLater(h.facade.regenerate('s1', tool),
+          throwsA(isA<CloudApiException>()));
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('branchFrom returns the new server chat id', () async {
+      final (h, _) = await seeded();
+      final rows = h.facade.transcriptFor('s1')!;
+      final id = await h.facade.branchFrom('s1', rows[1]);
+      expect(id, '0199aaaa-0000-7000-8000-00000000b001');
+      expect(h.rest.branched.single, (sessionId: 's1', messageId: a1));
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('oldestServerMessageId skips rich rows (paging cursor)', () async {
+      final h = await _build();
+      h.facade.seedTranscript('s1', <Message>[
+        Message(role: 'assistant', kind: MsgKind.tool, privateSyncId: 'tool:c'),
+        Message(role: 'user', content: 'q', privateSyncId: u1),
+      ], null);
+      expect(h.facade.oldestServerMessageId('s1'), u1);
       h.facade.dispose();
     });
   });

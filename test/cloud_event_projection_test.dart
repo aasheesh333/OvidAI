@@ -494,7 +494,8 @@ void main() {
       expect(note.content, 'Command refused.');
     });
 
-    test('system_note: falls back to the payload text, then empty', () {
+    test('system_note: falls back to the payload text; nothing to say renders '
+        'NOTHING (CH-018)', () {
       final p = TranscriptProjection();
       final proj = EventTranscriptProjector(p);
       proj.apply(
@@ -502,8 +503,26 @@ void main() {
       expect(p.messages.single.content, 'Scheduler note');
 
       proj.apply(_ev('system_note', <String, dynamic>{}, seq: '1-2'));
-      expect(p.messages.last.content, isEmpty);
-      expect(p.messages, hasLength(2));
+      proj.apply(_ev('system_note', <String, dynamic>{'code': 'hook_block_ignored', 'reason': 'x'},
+          seq: '1-3'));
+      expect(p.messages, hasLength(1));
+    });
+
+    test('system_note: known codes get plain copy (run_merged, schedule)', () {
+      final p = TranscriptProjection();
+      final proj = EventTranscriptProjector(p);
+      proj.apply(_ev('system_note', <String, dynamic>{
+        'code': 'run_merged',
+        'mergedRunId': 'r2',
+        'runId': 'r1',
+      }));
+      proj.apply(_ev('system_note',
+          <String, dynamic>{'scheduleId': 's1', 'status': 'completed'},
+          seq: '1-2'));
+      expect(p.messages.map((m) => m.content), [
+        'Your follow-up was added to the running task.',
+        'Scheduled run finished.',
+      ]);
     });
   });
 
@@ -638,42 +657,6 @@ void main() {
       expect(notified, 0);
     });
 
-    test('LANDED union members absent from the fold table pass through as '
-        'no-ops', () {
-      final p = TranscriptProjection();
-      final proj = EventTranscriptProjector(p);
-      proj.apply(
-          _ev('run_started', <String, dynamic>{'runId': 'run-9'}, seq: '1-1'));
-      final len = p.messages.length;
-      final ticks = p.liveBubbleTicks.value;
-      var notifications = 0;
-      p.addListener(() => notifications++);
-
-      // Shapes per shared/src/events.ts union members a later P8 task folds.
-      proj.apply(_ev('tool_started',
-          <String, dynamic>{'runId': 'run-9', 'callId': 'c1', 'name': 'run_shell', 'input': {}},
-          seq: '1-2'));
-      proj.apply(_ev('tool_completed',
-          <String, dynamic>{'runId': 'run-9', 'callId': 'c1', 'name': 'run_shell', 'isError': false, 'content': 'ok', 'truncated': false},
-          seq: '1-3'));
-      proj.apply(_ev('approval_requested',
-          <String, dynamic>{'runId': 'run-9', 'callId': 'c1', 'name': 'fs_edit'},
-          seq: '1-4'));
-      // run_cancelled used to sit here as a union-only no-op; the full
-      // processor now emits it as its own terminal, so it folds (see the
-      // fold-table tests). subagent_started keeps the no-op coverage.
-      proj.apply(_ev('subagent_started',
-          <String, dynamic>{'runId': 'run-9', 'subagentId': 'sa-1'},
-          seq: '1-5'));
-      proj.apply(_ev('compaction_completed',
-          <String, dynamic>{'kept': 10}, seq: '1-6'));
-
-      expect(p.messages, hasLength(len));
-      expect(p.liveBubbleTicks.value, ticks);
-      expect(p.busy, isTrue); // untouched
-      expect(p.activeRunId, 'run-9');
-      expect(notifications, 0);
-    });
   });
 
   group('seedFromHistory', () {

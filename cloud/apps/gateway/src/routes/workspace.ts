@@ -465,9 +465,9 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: GatewayDeps)
       if (worker === null) return reply;
 
       // Hydrate-if-cold + one eviction-race retry (callWarmWorker). The
-      // preconditions are evaluated by the worker INSIDE its temp+rename
-      // write (ST-007), so a concurrent agent write between the client's
-      // last read and this PUT is a 409, never a silent overwrite.
+      // worker serializes precondition + replacement with overlapping Studio
+      // mutations in its process. Raw agent/shell and other-process writes
+      // do not participate: ST-007 is still partial for those races.
       const b64 = content.toString("base64");
       const preconditions = {
         ...(parsed.data.ifMatchSha256 !== undefined

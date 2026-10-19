@@ -978,11 +978,11 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get sessionDeleteImpactUndo =>
-      'You can undo for a few seconds; after that this chat cannot be recovered.';
+      'This deletes the chat and its history on all your devices. Files in your Studio workspace are kept. You can undo for a few seconds.';
 
   @override
   String sessionDeleteImpactDetails(String details) {
-    return 'This will permanently delete $details. You can undo for a few seconds; after that this chat cannot be recovered.';
+    return 'This deletes the chat and its history on all your devices, and $details. Files in your Studio workspace are kept. You can undo for a few seconds.';
   }
 
   @override

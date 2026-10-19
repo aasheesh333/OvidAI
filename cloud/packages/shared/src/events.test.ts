@@ -42,6 +42,8 @@ const allEventTypes = [
   "subagent_started",
   "subagent_completed",
   "compaction_completed",
+  // Wave 1b addition.
+  "message_segment",
 ] as const satisfies readonly SessionEventType[];
 
 // Compile-time exhaustiveness: true is assignable only when every
@@ -89,6 +91,7 @@ describe("sessionEvent", () => {
         t !== "artifact_created" &&
         t !== "workspace_hibernated" &&
         t !== "workspace_hydrated" &&
+        t !== "message_segment" &&
         !P3_EVENT_TYPES.includes(t as (typeof P3_EVENT_TYPES)[number]),
     );
     expect(oldTypes).toHaveLength(9);
@@ -166,8 +169,8 @@ describe("sessionEvent P3 Task 12 additions (additive)", () => {
     expect(sessionEvent(resolved)).toEqual(resolved);
   });
 
-  it("the union count is 12 + 9 = 21 members (no reordering, nothing removed)", () => {
-    expect(allEventTypes).toHaveLength(21);
+  it("the union count is 12 + 9 (+ Wave 1b's 1) members (no reordering, nothing removed)", () => {
+    expect(allEventTypes).toHaveLength(22);
     expect(allEventTypes.slice(0, 12)).toEqual([
       "run_started",
       "message_delta",
@@ -182,5 +185,22 @@ describe("sessionEvent P3 Task 12 additions (additive)", () => {
       "workspace_hibernated",
       "workspace_hydrated",
     ]);
+  });
+});
+
+// Wave 1b (CH-005/CH-006): an intermediate assistant turn's settled text —
+// emitted at the start of each tool round so live clients can close the
+// streaming bubble and a reloaded history can show what the agent said
+// between its tool calls. Appended at the END (additive only).
+describe("sessionEvent Wave 1b addition", () => {
+  it("message_segment is the 22nd member and round-trips", () => {
+    expect(allEventTypes).toHaveLength(22);
+    expect(allEventTypes[21]).toBe("message_segment");
+    const event = {
+      ...valid,
+      type: "message_segment",
+      payload: { runId: "r", content: "Let me look." },
+    } as const;
+    expect(sessionEvent(event)).toEqual(event);
   });
 });

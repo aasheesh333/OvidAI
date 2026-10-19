@@ -650,8 +650,10 @@ describe.skipIf(!TEST_DATABASE_URL)("createSubagentSupervisor (real postgres)", 
     await users.ensure(db, uid, null);
     const root = await sessions.create(db, uid, "root");
 
+    const childJobs: Array<Record<string, unknown>> = [];
     const engine: AgentEngine = {
       async run(job): Promise<void> {
+        childJobs.push(job as unknown as Record<string, unknown>);
         await messages.append(db, {
           sessionId: job.sessionId,
           role: "assistant",
@@ -679,10 +681,15 @@ describe.skipIf(!TEST_DATABASE_URL)("createSubagentSupervisor (real postgres)", 
 
     const handle = await supervisor.dispatch(
       parentCtx({ sessionId: root.id, userId: uid }),
-      { prompt: "real task" },
+      { prompt: "real task", agentType: "CodeSubagent" },
     );
 
     expect(handle.status()).toBe("completed");
+    // Wave 1b: the card names the agent, and the child never inherits the
+    // parent's @-tag context (R1) — only the dispatch prompt crosses.
+    expect(events[0]!.payload).toMatchObject({ agentType: "CodeSubagent", childSessionId: handle.sessionId });
+    expect(childJobs[0]).not.toHaveProperty("turnContext");
+    expect(childJobs[0]).not.toHaveProperty("sessionRefs");
     expect(handle.result()).toBe("real answer");
     expect(await sessions.get(db, handle.sessionId, uid)).not.toBeNull();
     // Durable lineage: root → child (the JSONB parent-link seam).

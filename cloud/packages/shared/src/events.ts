@@ -26,7 +26,12 @@ export type SessionEventType =
   | "run_cancelled"
   | "subagent_started"
   | "subagent_completed"
-  | "compaction_completed";
+  | "compaction_completed"
+  // Wave 1b (CH-005/CH-006): the settled text of an INTERMEDIATE assistant
+  // turn — {runId, content} — emitted when a turn ends in tool calls (the
+  // final turn's text rides message_completed). Clients that ignore it lose
+  // nothing they had before.
+  | "message_segment";
 
 export interface SessionEvent {
   sessionId: string;
@@ -63,6 +68,7 @@ export const sessionEventSchema: z.ZodType<SessionEvent> = z.object({
     "subagent_started",
     "subagent_completed",
     "compaction_completed",
+    "message_segment",
   ]),
   payload: z.record(z.string(), z.unknown()),
   ts: z.string().min(1),

@@ -115,6 +115,7 @@ class FakeChatRest extends CloudRestClient {
     String sessionId, {
     int limit = 50,
     String? before,
+    bool withEvents = false,
   }) async {
     paged.add((sessionId: sessionId, before: before, limit: limit));
     if (before != null && olderPageError != null) throw olderPageError!;
@@ -478,8 +479,10 @@ void main() {
       socket.server(_eventFrame('srv-1', '1-0', 'run_started', {'runId': 'run-1'}));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
-      // No delta yet: the tail is the live "Thinking…" card.
+      // CH-037: one phase status, not a second empty reasoning card.
       expect(find.textContaining('Thinking'), findsOneWidget);
+      expect(find.byKey(const ValueKey('chat-run-status')), findsOneWidget);
+      expect(find.byKey(const ValueKey('chat-reasoning-summary')), findsNothing);
 
       socket.server(_eventFrame('srv-1', '2-0', 'message_delta',
           {'runId': 'run-1', 'text': 'Cloud '}));
@@ -494,6 +497,7 @@ void main() {
       // until the run finishes.
       expect(find.textContaining('Cloud says hi'), findsWidgets);
       expect(find.textContaining('Thinking'), findsNothing);
+      expect(find.byKey(const ValueKey('chat-run-status')), findsNothing);
       expect(
           find.byKey(const ValueKey('chat-streaming-caret')), findsOneWidget);
 
@@ -769,7 +773,16 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
 
-      // The card dismissed optimistically…
+      // CH-017: the card stays up in its "Sending…" state until the server
+      // confirms the decision…
+      expect(find.byKey(const ValueKey('approval-sending')), findsOneWidget);
+      socket.server(<String, dynamic>{
+        'op': 'approval_ack',
+        'approvalId': 'ap-1',
+        'decision': 'allow',
+      });
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       expect(find.byKey(const ValueKey('approval-allow')), findsNothing);
       expect(find.byKey(const ValueKey('approval-deny')), findsNothing);
       // …and the answer went out on the multiplexed wire.
@@ -873,6 +886,31 @@ void main() {
       await h.close();
     },
   );
+
+  testWidgets('R4: a failed run has one human surface without destructive '
+      'regeneration Retry', (tester) async {
+    final h = await _bind();
+    addTearDown(() async {
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+    _addSession('srv-1');
+    await _pumpChat(tester);
+    await _send(tester, 'hello cloud');
+    final socket = h.socket();
+    socket.server(_eventFrame('srv-1', '1-0', 'run_started', {'runId': 'run-1'}));
+    socket.server(_eventFrame('srv-1', '2-0', 'run_failed', {
+      'code': 'model_terminal', 'message': 'provider diagnostic',
+    }));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(const ValueKey('run-failed-row')), findsOneWidget);
+    expect(find.byKey(const ValueKey('run-failed-retry')), findsNothing);
+    expect(find.text('Pick model'), findsNothing);
+    expect(find.textContaining('Your chat is kept unchanged.'), findsWidgets);
+    expect(find.text('Details'), findsOneWidget);
+    await h.close();
+  });
 
   // -------------------------------------------------------------------------
   // Older-server-page paging (chat P1: history past the first page)

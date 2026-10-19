@@ -588,6 +588,8 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
         childSessionId: child.sessionId,
         childRunId: first.runId,
         prompt: prompt.slice(0, 200),
+        // Wave 1b (additive): the live activity card's name.
+        agentType,
       });
 
       // Parent cancel cascades (p2_subagent_races parity). The listener is

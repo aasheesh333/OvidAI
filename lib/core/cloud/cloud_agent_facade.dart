@@ -155,6 +155,10 @@ class CloudAgentFacade extends ChangeNotifier
     _stallTimers.clear();
     _stallTicks.clear();
     _stalled.clear();
+    for (final timer in _approvalTimers.values) {
+      timer.cancel();
+    }
+    _approvalTimers.clear();
     notifyListeners();
   }
 
@@ -274,6 +278,10 @@ class CloudAgentFacade extends ChangeNotifier
   /// `_maxChatAttachments` is the same 20). Enforced here so a picker burst
   /// cannot stage past it.
   static const int _maxAttachments = 20;
+
+  /// The gateway's per-file cap (`ATTACHMENT_MAX_BYTES`,
+  /// cloud/apps/gateway/src/routes/attachments.ts) — 25,000,000 bytes.
+  static const int maxAttachmentBytes = 25000000;
 
   /// In-flight `attachFile` calls per session. The count check and the
   /// reservation happen before the first await, so concurrent picks cannot
@@ -520,19 +528,40 @@ class CloudAgentFacade extends ChangeNotifier
                 );
                 break;
               case 'plan_mode_changed':
-                // The agent left (or entered) plan mode server-side
-                // (exit_plan_mode): the Plan chip must follow, or the next
-                // send would put the session straight back into plan mode.
-                final next = event.payload['planMode'];
-                if (next is bool) {
-                  final session = AppState.I.sessionById(serverId) ??
-                      _localSessionFor(serverId);
-                  if (session != null && session.planMode != next) {
-                    session.planMode = next;
-                    session.planModePending = null;
-                    unawaited(AppState.I.persistSessions());
+              // The agent left (or entered) plan mode server-side
+              // (exit_plan_mode): the Plan chip must follow, or the next
+              // send would put the session straight back into plan mode.
+              case 'todo_updated':
+              case 'goal_updated':
+                _syncSessionState(serverId, state);
+                _notify();
+                break;
+              case 'subagent_started':
+                // The live activity card reads the child's own events.
+                final child = event.payload['childSessionId'];
+                if (child is String && child.isNotEmpty) {
+                  _watchChild(child);
+                }
+                break;
+              case 'system_note':
+                // CH-016: a queued run the server merged into the active
+                // one never gets its own terminal — settle it here or the
+                // composer shows Stop forever.
+                if (event.payload['code'] == 'run_merged') {
+                  final merged = event.payload['mergedRunId'];
+                  if (merged is String &&
+                      merged == state.runState.runId &&
+                      merged != state.projection.activeRunId) {
+                    final into = event.payload['runId'];
+                    state.runState = _copyRunState(
+                      state.runState,
+                      runId: into is String ? into : null,
+                      clearRunId: into is! String,
+                      busy: into is String,
+                    );
+                    state.queuedBehindActiveRun = false;
+                    _notify();
                   }
-                  _notify();
                 }
                 break;
             }
@@ -745,19 +774,12 @@ class CloudAgentFacade extends ChangeNotifier
       stopRequested: false,
       clearRunId: true,
     );
-    final failCode = payload['code'];
-    if (type == 'run_failed' && failCode is String && failCode != 'cancelled') {
-      final message = payload['message'];
-      _recordError(serverId, failCode, message is String ? message : '');
-    } else {
-      // run_completed, run_cancelled — and the queued-cancel spelling
-      // run_failed{code:'cancelled'} (CH-020): a user-initiated stop is not
-      // a failure and never raises the red error row.
-      // run_completed and run_cancelled clear the error surface: a
-      // user-initiated cancel is not a surfaced error (the projection fold
-      // appends the 'Stopped by user.' turn tail the user sees).
-      _clearError(serverId);
-    }
+    // CH-019: a RUN-level failure has exactly one surface — the inline
+    // failure row the projection appends (plain copy, Details, Retry, Pick
+    // model). The red banner is reserved for send-level errors, so it is
+    // cleared here for every terminal, failures included. CH-020: the
+    // queued-cancel spelling run_failed{code:'cancelled'} is a user stop.
+    _clearError(serverId);
     _notify();
     // Terminal cache write (Task 9 carry, Task 10): live deltas are not
     // persisted per-delta, so THIS is what makes a cold offline start show
@@ -774,14 +796,21 @@ class CloudAgentFacade extends ChangeNotifier
     final store = _store;
     if (store == null || _disposed) return;
     try {
+      // CH-015: the cache's cursor is the LIVE replay cursor at this
+      // terminal — the seq up to which the cached rows are authoritative —
+      // never the stale mark of the last REST page (which rewound the
+      // replay and duplicated every turn tail since).
+      final cursor = state.projector.cursor ?? await _ws.cursorFor(serverId);
       await store.persistTranscript(
         serverId,
-        // Pending rows live in the outbox, never in the read cache.
+        // Pending rows live in the outbox, never in the read cache; the
+        // settled projection has no live bubble at a terminal.
         [
           for (final m in state.projection.messages)
-            if (pendingClientMsgIdOf(m) == null) m,
+            if (pendingClientMsgIdOf(m) == null && m.kind != MsgKind.streaming)
+              m,
         ],
-        store.cachedCursorFor(serverId),
+        cursor,
       );
     } catch (_) {
       // A failed cache write never surfaces as a run error.
@@ -816,6 +845,11 @@ class CloudAgentFacade extends ChangeNotifier
   void _onStreamError(String serverId, Object error) {
     if (_disposed) return;
     if (error is CloudWsError) {
+      // CH-017: a refused approval answer brings its card straight back.
+      final sending = _approvalRequests[serverId];
+      if (sending != null && sending.sending && sending.approvalId != null) {
+        _restoreApproval(sending.approvalId!);
+      }
       _recordError(serverId, error.code, error.message);
       _notify();
     }
@@ -1140,6 +1174,26 @@ class CloudAgentFacade extends ChangeNotifier
     return id == null ? null : _sessions[id]?.projection.statusLine;
   }
 
+  /// CH-037: what the run is doing right now — "Waking your workspace",
+  /// the running tool's activity ("Searching the web for …"), the active
+  /// subagent — or null while it thinks or writes.
+  String? activityFor(String sessionId) {
+    final id = _serverId(sessionId);
+    return id == null ? null : _sessions[id]?.projection.activity;
+  }
+
+  /// CH-037: true while the answer text itself is streaming (the bubble's
+  /// caret is the status then — no second indicator).
+  bool writingFor(String sessionId) {
+    final id = _serverId(sessionId);
+    final rows = id == null ? null : _sessions[id]?.projection.messages;
+    if (rows == null || rows.isEmpty) return false;
+    final last = rows.last;
+    return last.kind == MsgKind.streaming &&
+        !last.thinking &&
+        last.content.isNotEmpty;
+  }
+
   /// True when [sessionId]'s live run has been silent — no event of any
   /// kind — for the response-timeout window (the Settings "Response wait
   /// limit"). A surface only: the run keeps streaming server-side, and the
@@ -1412,6 +1466,139 @@ class CloudAgentFacade extends ChangeNotifier
   /// True when [sessionId] has a prompt Retry can re-send.
   bool canRetryLastPrompt(String sessionId) =>
       _lastPrompts.containsKey(_serverId(sessionId) ?? sessionId);
+
+  // -------------------------------------------------------------------------
+  // Wave 1b (CT-004 / CH-024): history edits — server truncate, regenerate,
+  // branch. Every action is a real server operation; the local projection
+  // only mirrors what the server already did.
+  // -------------------------------------------------------------------------
+
+  /// A locally minted row id (`Message`'s 24 random bytes as hex) — never a
+  /// server message id.
+  static final RegExp _localIdShape = RegExp(r'^[0-9a-f]{48}$');
+
+  /// True when [m] is a row the server stores (a user prompt or a final
+  /// answer, keyed by its server message id) — the only rows history edits
+  /// can address. Tool rows, segments, artifact chips (`kind:` prefixed
+  /// ids), pending prompts and locally minted rows are not.
+  static bool isServerMessage(Message m) {
+    final id = m.privateSyncId;
+    return (m.role == 'user' || m.role == 'assistant') &&
+        m.kind == MsgKind.text &&
+        m.toolName == null &&
+        id.isNotEmpty &&
+        !id.contains(':') &&
+        !_localIdShape.hasMatch(id);
+  }
+
+  /// The oldest server-stored row of a loaded transcript — the `before`
+  /// cursor for the next older history page (rich rows carry other ids).
+  String? oldestServerMessageId(String sessionId) {
+    final rows = transcriptFor(sessionId);
+    if (rows == null) return null;
+    for (final m in rows) {
+      if (isServerMessage(m)) return m.privateSyncId;
+    }
+    return null;
+  }
+
+  Message? _lastServerPrompt(String sessionId) {
+    final rows = transcriptFor(sessionId);
+    if (rows == null) return null;
+    for (var i = rows.length - 1; i >= 0; i--) {
+      final m = rows[i];
+      if (m.role == 'user' && isServerMessage(m)) return m;
+    }
+    return null;
+  }
+
+  /// R4 release gate: idle checks alone do not serialize history changes
+  /// with another device's send. No mutable flag or test-only bypass.
+  bool canEditHistory(String sessionId) => false;
+
+  static const historyActionsUnavailableText =
+      'Your chat is kept unchanged. Changing earlier messages, retrying a '
+      'finished task and branching are unavailable.';
+
+  void _truncateLocal(String key, String fromMessageId, {bool keep = false}) {
+    final state = _sessions[key];
+    if (state == null) return;
+    final rows = state.projection.messages;
+    final idx = rows.indexWhere((m) => m.privateSyncId == fromMessageId);
+    if (idx < 0) return;
+    state.projection.truncateAt(keep ? idx + 1 : idx);
+    unawaited(_persistTerminal(key, state));
+  }
+
+  /// Deletes [message] and everything after it, on the server and here.
+  /// Throws [CloudApiException] (409 `session_busy` while a run is active).
+  Future<void> deleteFrom(String sessionId, Message message) async {
+    final key = _serverId(sessionId) ?? sessionId;
+    if (!isServerMessage(message)) {
+      throw CloudApiException(
+          status: 400, code: 'bad_request', message: 'This row cannot be deleted.');
+    }
+    await _rest.deleteMessagesFrom(key, message.privateSyncId);
+    _truncateLocal(key, message.privateSyncId);
+    _notify();
+  }
+
+  /// Edit & resend: the prompt and everything after it go, then [newText]
+  /// is sent as a fresh prompt through the normal send path.
+  Future<void> editAndResend(
+    String sessionId,
+    Message prompt,
+    String newText,
+  ) async {
+    await deleteFrom(sessionId, prompt);
+    await runTask(newText, sessionId: sessionId);
+  }
+
+  /// Runs [target]'s prompt again: an answer is replaced (it and everything
+  /// after it go); a prompt whose run failed is retried in place.
+  Future<void> regenerate(String sessionId, Message target) async {
+    final key = _serverId(sessionId) ?? sessionId;
+    if (!isServerMessage(target)) {
+      throw CloudApiException(
+          status: 400, code: 'bad_request', message: 'This row cannot be run again.');
+    }
+    final maxOut = AppState.I.maxOutputTokens;
+    final response = await _rest.regenerateMessage(
+      key,
+      target.privateSyncId,
+      maxOutputTokens: maxOut > 0 ? maxOut : null,
+    );
+    _truncateLocal(key, response.promptMessageId, keep: true);
+    final state = _stateFor(key, subscribe: true);
+    // Accepted, not started yet: Stop is offered until run_started lands.
+    _markAccepted(key, state, response.runId, true);
+  }
+
+  /// Retry after a RUN-level failure: re-runs the last server prompt in
+  /// place (no duplicate user row); falls back to re-sending the remembered
+  /// text when the prompt never reached the server.
+  Future<void> retryFailedRun(String sessionId) async {
+    final prompt = _lastServerPrompt(sessionId);
+    if (prompt == null) {
+      await retryLastPrompt(sessionId);
+      return;
+    }
+    _clearError(_serverId(sessionId) ?? sessionId);
+    await regenerate(sessionId, prompt);
+  }
+
+  /// Branch: a NEW server chat holding this chat's history up to and
+  /// including [message]. Returns the new chat's id.
+  Future<String> branchFrom(String sessionId, Message message) async {
+    final key = _serverId(sessionId) ?? sessionId;
+    if (!isServerMessage(message)) {
+      throw CloudApiException(
+          status: 400, code: 'bad_request', message: 'This row cannot start a branch.');
+    }
+    final dto = await _rest.branchSession(key, message.privateSyncId);
+    final store = _store;
+    return store == null ? dto.id : store.adoptServerSession(dto);
+  }
 
   @override
   Future<void> runTask(
@@ -1738,7 +1925,11 @@ class CloudAgentFacade extends ChangeNotifier
     final prompt = state.projection.pendingApproval;
     final cached = _approvalRequests[serverId];
     if (prompt == null) {
-      if (cached != null) _approvalRequests.remove(serverId);
+      if (cached != null) {
+        _approvalRequests.remove(serverId);
+        final id = cached.approvalId;
+        if (id != null) _approvalTimers.remove(id)?.cancel();
+      }
       return;
     }
     if (cached != null && cached.approvalId == prompt.approvalId) return;
@@ -1746,12 +1937,73 @@ class CloudAgentFacade extends ChangeNotifier
       tool: prompt.tool,
       summary: prompt.summary,
       detail: prompt.detail,
-      allowAlways: prompt.allowAlways,
+      allowAlways: prompt.allowAlways && prompt.kind == 'tool',
       approvalId: prompt.approvalId,
+      // CH-017: the kind, the plan text and the auto-deny clock survive
+      // into the card.
+      kind: prompt.kind,
+      expiresAt: prompt.expiresAt,
+      planBody: prompt.kind == 'plan' ? planBodyOf(prompt.detail) : null,
       // Best-effort mode tag: the server persists grants itself, so this is
       // row parity, not a decision input.
       modeName: AppState.I.sessionById(serverId)?.mode ?? '',
     );
+  }
+
+  /// The plan text of an `exit_plan_mode` prompt's detail: the gate frames
+  /// it as `lead-in + blank line + plan`, so everything after the first blank line
+  /// (or the whole detail when there is no lead-in).
+  @visibleForTesting
+  static String planBodyOf(String detail) {
+    final i = detail.indexOf('\n\n');
+    if (i < 0) return detail.trim();
+    final rest = detail.substring(i + 2).trim();
+    return rest.isEmpty ? detail.trim() : rest;
+  }
+
+  /// How long a tapped decision waits for the server's `approval_ack` (or
+  /// the durable `approval_resolved`) before the card comes back (CH-017).
+  @visibleForTesting
+  static Duration approvalConfirmTimeout = const Duration(seconds: 5);
+
+  /// One confirmation clock per answered approvalId.
+  final Map<String, Timer> _approvalTimers = <String, Timer>{};
+
+  StreamSubscription<Map<String, dynamic>>? _rawSub;
+
+  void _ensureRawListener() {
+    _rawSub ??= _ws.rawServerFrames.listen((frame) {
+      if (_disposed) return;
+      if (frame['op'] == 'approval_ack') {
+        final id = frame['approvalId'];
+        if (id is String) _confirmApproval(id);
+      }
+    });
+  }
+
+  /// The server accepted the decision: the card goes away for good.
+  void _confirmApproval(String approvalId) {
+    _approvalTimers.remove(approvalId)?.cancel();
+    String? serverId;
+    for (final entry in _approvalRequests.entries) {
+      if (entry.value.approvalId == approvalId) serverId = entry.key;
+    }
+    if (serverId == null) return;
+    _approvalRequests.remove(serverId);
+    _sessions[serverId]?.projection.clearPendingApproval(approvalId);
+    _notify();
+  }
+
+  /// The decision was never confirmed (frame dropped, gateway refused):
+  /// the card comes back so the user can answer again.
+  void _restoreApproval(String approvalId) {
+    _approvalTimers.remove(approvalId)?.cancel();
+    for (final req in _approvalRequests.values) {
+      if (req.approvalId == approvalId && req.sending) {
+        req.sending = false;
+        _notify();
+      }
+    }
   }
 
   /// Answers the bridge over the multiplexer's raw lane:
@@ -1777,14 +2029,22 @@ class CloudAgentFacade extends ChangeNotifier
       }
     }
     if (serverId == null) return false; // already answered or superseded
-    _approvalRequests.remove(serverId);
-    _sessions[serverId]?.projection.clearPendingApproval(approvalId);
+    final pending = _approvalRequests[serverId]!;
+    if (pending.sending) return false; // one answer in flight at a time
+    // CH-017: the card stays up ("Sending…") until the server confirms the
+    // decision — `approval_ack`, or the durable `approval_resolved` fold —
+    // and comes back if neither arrives (a dropped frame, a gateway error).
+    pending.sending = true;
+    _ensureRawListener();
+    _approvalTimers.remove(approvalId)?.cancel();
+    _approvalTimers[approvalId] =
+        Timer(approvalConfirmTimeout, () => _restoreApproval(approvalId));
     unawaited(_ws.sendRaw(<String, Object?>{
       'op': 'approval_response',
       'sessionId': serverId,
       'approvalId': approvalId,
       'decision': decision,
-    }));
+    }).catchError((Object _) => _restoreApproval(approvalId)));
     _notify();
     return true;
   }
@@ -1852,7 +2112,12 @@ class CloudAgentFacade extends ChangeNotifier
       } catch (_) {
         return 'file not found: $fileName';
       }
-      if (size > 25 * 1024 * 1024) {
+      // CH-022: the gateway's exact limit (25,000,000 bytes, `size > 0`),
+      // checked HERE so a file that cannot be sent never stages.
+      if (size <= 0) {
+        return '$fileName is empty, so there is nothing to send.';
+      }
+      if (size > maxAttachmentBytes) {
         return 'File is larger than the 25 MB cloud attachment limit.';
       }
       // Re-read the map after the await: a send that settled during the
@@ -1932,21 +2197,103 @@ class CloudAgentFacade extends ChangeNotifier
   // AgentSurface — jobs / context (P2 / P3)
   // -------------------------------------------------------------------------
 
+  /// CH-028: the Jobs list is the session's subagents that are still
+  /// working (the only background work the cloud agent runs for a chat).
+  /// The id is the card's position, stable for the life of the run.
   @override
   List<({int id, String name, String state, int elapsedSec, int outChars})>
-      jobsFor(String sessionId) =>
-          const []; // P2: job_* events
-
-  @override
-  void killJobFor(String sessionId, int jobId) {
-    // P2: job_* events. There is no cloud job handle to kill until the
-    // server emits them; the jobs popover stays empty via [jobsFor].
+      jobsFor(String sessionId) {
+    final rows = _subagentRows(sessionId);
+    final now = DateTime.now();
+    return [
+      for (var i = 0; i < rows.length; i++)
+        if (rows[i].toolState == 'running')
+          (
+            id: i,
+            name: subagentActivityLine(rows[i]),
+            state: 'running',
+            elapsedSec: now.difference(rows[i].time).inSeconds,
+            outChars: 0,
+          ),
+    ];
   }
 
+  /// Stops a running subagent from the Jobs list: its child run is
+  /// cancelled server-side (ownership is the child session's — the user's).
   @override
-  int measuredContextTokens(ChatSession s, {String systemPrompt = ''}) =>
-      0; // P3: usage events. chat_screen's % ring divides by
-         // contextWindowForSession(), which defaults to 1M — no div-by-zero.
+  void killJobFor(String sessionId, int jobId) {
+    final rows = _subagentRows(sessionId);
+    if (jobId < 0 || jobId >= rows.length) return;
+    final child = rows[jobId].toolSessionId;
+    final key = _serverId(sessionId);
+    final runId = child == null || key == null
+        ? null
+        : _sessions[key]?.projection.childRunOf(child);
+    if (runId == null) return;
+    unawaited(_rest.cancelRun(runId).then((_) {}, onError: (Object e) {
+      Diag.swallow('cloud.killSubagent', e);
+    }));
+  }
+
+  /// The `dispatch_agent` rows (subagent activity cards) of a session.
+  List<Message> _subagentRows(String sessionId) {
+    final key = _serverId(sessionId);
+    final state = key == null ? null : _sessions[key];
+    if (state == null) return const <Message>[];
+    return [
+      for (final m in state.projection.messages)
+        if (m.kind == MsgKind.tool &&
+            m.toolName == 'dispatch_agent' &&
+            m.toolSessionId != null)
+          m,
+    ];
+  }
+
+  /// The live activity line of a subagent card: "CodeSubagent: Editing
+  /// lib/main.dart" while its child works, the bare name otherwise.
+  String subagentActivityLine(Message card) {
+    final name = card.toolTitle ?? 'Subagent';
+    final child = card.toolSessionId;
+    if (card.toolState != 'running' || child == null) return name;
+    final activity = _sessions[child]?.projection.activity;
+    return activity == null ? name : '$name: $activity';
+  }
+
+  /// CH-028: the context ring reads the latest run's measured size
+  /// (`run_completed.usage.contextTokens`); 0 until a run reports usage.
+  @override
+  int measuredContextTokens(ChatSession s, {String systemPrompt = ''}) {
+    final key = _serverId(s.id);
+    return (key == null ? null : _sessions[key])
+            ?.projection
+            .lastUsage
+            ?.contextTokens ??
+        0;
+  }
+
+  /// The child session's live transcript for a subagent card (subscribing
+  /// on first use while the child runs).
+  void _watchChild(String childSessionId) {
+    if (_disposed) return;
+    _stateFor(childSessionId, subscribe: true);
+  }
+
+  /// Opens (or re-opens) a subagent's own transcript: subscribes the child
+  /// session and, the first time, pages its history so a finished child's
+  /// work is readable after a reload.
+  Future<void> openSubagentTranscript(String childSessionId) async {
+    if (_disposed) return;
+    final existing = _sessions[childSessionId];
+    _stateFor(childSessionId, subscribe: true);
+    final store = _store;
+    if (store == null) return;
+    if (existing != null && existing.projection.messages.isNotEmpty) return;
+    try {
+      await store.loadTranscript(childSessionId);
+    } catch (e) {
+      Diag.swallow('cloud.openSubagentTranscript', e);
+    }
+  }
 
   // -------------------------------------------------------------------------
   // AgentSurface — composer queue
@@ -2180,25 +2527,48 @@ class CloudAgentFacade extends ChangeNotifier
   // AgentSurface — context counters (P3)
   // -------------------------------------------------------------------------
 
+  CloudRunUsage? get _activeUsage {
+    final key = _serverId(null);
+    return key == null ? null : _sessions[key]?.projection.lastUsage;
+  }
+
+  /// The server reports one context total, not a system/tools split: the
+  /// meter shows it as messages (the honest bucket) and the split as 0.
   @override
-  int get sessionSystemTokens => 0; // P3: usage events
+  int get sessionSystemTokens => 0;
 
   @override
-  int get sessionToolTokens => 0; // P3: usage events
+  int get sessionToolTokens => 0;
 
   @override
-  int get sessionMessageTokens => 0; // P3: usage events
+  int get sessionMessageTokens => _activeUsage?.contextTokens ?? 0;
 
   @override
-  int get sessionCacheReadTokens => 0; // P3: usage events
+  int get sessionCacheReadTokens => _activeUsage?.cacheReadTokens ?? 0;
 
   // -------------------------------------------------------------------------
-  // AgentSurface — subagents (P3)
+  // AgentSurface — subagents (Wave 1b: from the subagent_* folds)
   // -------------------------------------------------------------------------
 
   @override
-  List<SubagentInfo> subagentsOf(String sessionId) =>
-      const <SubagentInfo>[]; // P3: subagent_* events
+  List<SubagentInfo> subagentsOf(String sessionId) {
+    final key = _serverId(sessionId) ?? sessionId;
+    final rows = _subagentRows(sessionId);
+    return [
+      for (var i = rows.length - 1; i >= 0; i--)
+        SubagentInfo(
+          id: 'sub-${i + 1}',
+          label: rows[i].toolTitle ?? 'Subagent',
+          sessionId: rows[i].toolSessionId!,
+          parentSessionId: key,
+          parentMode: mode,
+          prompt: rows[i].toolSummary ?? '',
+          agentType: rows[i].toolTitle ?? 'general-purpose',
+        )
+          ..finished = rows[i].toolState != 'running'
+          ..interrupted = rows[i].toolState == 'stopped',
+    ];
+  }
 
   // -------------------------------------------------------------------------
   // AgentSurface — browser header (Task 16)
@@ -2268,6 +2638,88 @@ class CloudAgentFacade extends ChangeNotifier
     // user just sent (CH-011): pending rows survive the re-seed.
     _restorePendingRows(serverSessionId, state);
     _notify();
+  }
+
+  @override
+  void seedRichTranscript(
+    String serverSessionId, {
+    required List<Message> rows,
+    required List<CloudSessionEvent> events,
+    required String? watermark,
+    required String? activeRunId,
+  }) {
+    if (_disposed) return;
+    final state = _stateFor(serverSessionId, subscribe: true);
+    EventTranscriptProjector.rebuild(
+      state.projection,
+      state.projector,
+      rows: rows,
+      events: events,
+      watermark: watermark,
+      activeRunId: activeRunId,
+    );
+    // CH-003: the live stream resumes strictly after the snapshot — never
+    // the whole event log on top of it — and anything this socket already
+    // delivered past the watermark replays into the rebuilt fold.
+    _ws.rebaseCursor(serverSessionId, state.projector.cursor);
+    if (activeRunId != null) {
+      // CH-002: a chat reopened mid-run shows Stop at once (a queued run
+      // too — it has not started, but it is the session's in-flight work).
+      if (state.terminalSettledRunId != activeRunId) {
+        state.runState = _copyRunState(
+          state.runState,
+          runId: activeRunId,
+          busy: true,
+        );
+        // A queued run (no run_started yet) still reads busy.
+        if (!state.projection.busy) state.queuedBehindActiveRun = true;
+      }
+    }
+    _syncSessionState(serverSessionId, state);
+    // A history page that lands after Send must not wipe the prompt the
+    // user just sent (CH-011): pending rows survive the re-seed.
+    _restorePendingRows(serverSessionId, state);
+    _notify();
+  }
+
+  /// Mirrors the projection's folded session state (todos, goal, plan mode)
+  /// into the local [ChatSession] the docks render from (CH-004).
+  void _syncSessionState(String serverId, _SessionCloudState state) {
+    final p = state.projection;
+    final session =
+        AppState.I.sessionById(serverId) ?? _localSessionFor(serverId);
+    if (session == null) return;
+    var changed = false;
+    final todos = p.todos;
+    if (todos != null && !_sameTodos(session.todos, todos)) {
+      session.todos
+        ..clear()
+        ..addAll(todos);
+      changed = true;
+    }
+    if (p.goalFolded && !mapEquals(session.goal, p.goal)) {
+      session.goal = p.goal == null ? null : Map<String, dynamic>.of(p.goal!);
+      changed = true;
+    }
+    final plan = p.planMode;
+    if (plan != null && session.planMode != plan) {
+      session.planMode = plan;
+      session.planModePending = null;
+      changed = true;
+    }
+    if (changed) {
+      unawaited(AppState.I.persistSessions());
+      AppState.I.refresh();
+    }
+  }
+
+  static bool _sameTodos(
+      List<Map<String, String>> a, List<Map<String, String>> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (!mapEquals(a[i], b[i])) return false;
+    }
+    return true;
   }
 
   @override
@@ -2492,6 +2944,12 @@ class CloudAgentFacade extends ChangeNotifier
     _stallTimers.clear();
     _stallTicks.clear();
     _stalled.clear();
+    for (final timer in _approvalTimers.values) {
+      timer.cancel();
+    }
+    _approvalTimers.clear();
+    unawaited(_rawSub?.cancel());
+    _rawSub = null;
     _orphanTicks.dispose();
     super.dispose();
   }

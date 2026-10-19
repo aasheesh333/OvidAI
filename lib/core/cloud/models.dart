@@ -55,6 +55,7 @@ class MessageDto {
     required this.role,
     required this.content,
     required this.createdAt,
+    this.attachments = const <MessageAttachmentDto>[],
   });
 
   factory MessageDto.fromJson(Map<String, dynamic> j) => MessageDto(
@@ -63,6 +64,10 @@ class MessageDto {
         role: j['role'] as String,
         content: j['content'] as String,
         createdAt: DateTime.parse(j['createdAt'] as String),
+        attachments: <MessageAttachmentDto>[
+          for (final a in (j['attachments'] as List? ?? const <dynamic>[]))
+            if (a is Map<String, dynamic>) MessageAttachmentDto.fromJson(a),
+        ],
       );
 
   final String id;
@@ -70,6 +75,89 @@ class MessageDto {
   final String role;
   final String content;
   final DateTime createdAt;
+
+  /// Wave 1b (CH-006): files sent with this user message (metadata only).
+  final List<MessageAttachmentDto> attachments;
+}
+
+/// Wave 1b: one file sent with a message (`MessageAttachmentDto`, rest.ts).
+class MessageAttachmentDto {
+  const MessageAttachmentDto({
+    required this.id,
+    required this.name,
+    required this.sizeBytes,
+  });
+
+  factory MessageAttachmentDto.fromJson(Map<String, dynamic> j) =>
+      MessageAttachmentDto(
+        id: j['id'] as String? ?? '',
+        name: j['name'] as String? ?? 'file',
+        sizeBytes: (j['sizeBytes'] as num?)?.toInt() ?? 0,
+      );
+
+  final String id;
+  final String name;
+  final int sizeBytes;
+}
+
+/// Wave 1b (`MessagePage`, rest.ts): the history page plus the snapshot's
+/// event watermark, the session's active run and — when asked with
+/// `events=1` — the page's settled agent activity (raw event JSON; the
+/// store decodes it). [hasWatermark] is false on a pre-Wave-1b server that
+/// answered no `lastEventSeq` key at all (distinct from a null watermark,
+/// which means "no events yet").
+class MessagePage extends CloudPage<MessageDto> {
+  const MessagePage({
+    required super.items,
+    required super.nextCursor,
+    this.hasWatermark = false,
+    this.lastEventSeq,
+    this.activeRunId,
+    this.activeRunStatus,
+    this.rawEvents,
+  });
+
+  factory MessagePage.fromJson(Map<String, dynamic> j) => MessagePage(
+        items: <MessageDto>[
+          for (final item in (j['items'] as List? ?? const <dynamic>[])
+              .whereType<Map<String, dynamic>>())
+            MessageDto.fromJson(item),
+        ],
+        nextCursor: j['nextCursor'] as String?,
+        hasWatermark: j.containsKey('lastEventSeq'),
+        lastEventSeq: j['lastEventSeq'] as String?,
+        activeRunId: (j['activeRun'] as Map?)?['runId'] as String?,
+        activeRunStatus: (j['activeRun'] as Map?)?['status'] as String?,
+        rawEvents: j['events'] is List
+            ? <Map<String, dynamic>>[
+                for (final e in j['events'] as List)
+                  if (e is Map) Map<String, dynamic>.from(e),
+              ]
+            : null,
+      );
+
+  final bool hasWatermark;
+  final String? lastEventSeq;
+  final String? activeRunId;
+  final String? activeRunStatus;
+
+  /// Null when the server sent no `events` (old server or not asked).
+  final List<Map<String, dynamic>>? rawEvents;
+}
+
+/// Wave 1b: `RegenerateResponse` (rest.ts) — the 202 of
+/// POST /sessions/:id/messages/:messageId/regenerate.
+class RegenerateResponse {
+  const RegenerateResponse({required this.runId, required this.promptMessageId});
+
+  factory RegenerateResponse.fromJson(Map<String, dynamic> j) =>
+      RegenerateResponse(
+        runId: j['runId'] as String,
+        promptMessageId: j['promptMessageId'] as String,
+      );
+
+  final String runId;
+  final String promptMessageId;
 }
 
 /// `Page<T>` (rest.ts) — named CloudPage here because Flutter already has a
@@ -651,6 +739,18 @@ class ApprovalRequest {
   /// and [CloudAgentFacade.approveRequest] answers them with false.
   final String? approvalId;
 
+  /// 'tool' | 'question' | 'plan' — the gate's prompt kind (CH-017). A
+  /// `plan` prompt renders the plan-review card, never a generic tool card.
+  final String kind;
+
+  /// When the server auto-denies an unanswered prompt (null = it waits).
+  final DateTime? expiresAt;
+
+  /// True between the user's tap and the server confirming the decision
+  /// (CH-017): the card stays up in a "Sending…" state and is restored if
+  /// the answer never reaches the server.
+  bool sending = false;
+
   ApprovalRequest({
     required this.tool,
     required this.summary,
@@ -660,6 +760,8 @@ class ApprovalRequest {
     this.allowAlways = false,
     this.modeName = '',
     this.approvalId,
+    this.kind = 'tool',
+    this.expiresAt,
   });
 }
 

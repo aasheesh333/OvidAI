@@ -1,5 +1,7 @@
 // PR-3b: the chat screen never silently loses typed text, history, queued
 // messages or goals.
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -7,10 +9,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/composer_drafts.dart';
+import 'package:ovid_ai/core/reset_coordinator.dart';
+import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
 import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
+
+/// A server-shaped (UUID) message id — rows the server stores.
+String _id(int n) => '0199aaaa-0000-7000-8000-${n.toString().padLeft(12, '0')}';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -77,6 +84,86 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
   }
 
+  test('CH-045: cold account B never loads account A composer drafts', () async {
+    AppState.resetTestInstance();
+    AppState.createForTest(sessionAccountIdForTest: 'account-a');
+    await ComposerDraftStore.I.load();
+    ComposerDraftStore.I.put('same-session-id', 'Private draft for A');
+    await ComposerDraftStore.I.flush();
+
+    AppState.resetTestInstance();
+    AppState.createForTest(sessionAccountIdForTest: 'account-b');
+    await ComposerDraftStore.I.load();
+    expect(ComposerDraftStore.I.draftFor('same-session-id'), isNull);
+
+    AppState.resetTestInstance();
+    AppState.createForTest(sessionAccountIdForTest: 'account-a');
+    await ComposerDraftStore.I.load();
+    expect(ComposerDraftStore.I.draftFor('same-session-id'), 'Private draft for A');
+  });
+
+  test('CH-045: unowned legacy drafts remain guest-only', () async {
+    ComposerDraftStore.I.put('same-session-id', 'Unowned guest draft');
+    await ComposerDraftStore.I.flush();
+    AppState.resetTestInstance();
+    AppState.createForTest(sessionAccountIdForTest: 'signed-in');
+    await ComposerDraftStore.I.load();
+    expect(ComposerDraftStore.I.draftFor('same-session-id'), isNull);
+  });
+
+  testWidgets('CH-045: a mounted composer clears on account handoff and '
+      'restores only the returning owner draft', (tester) async {
+    final root = await tester.runAsync(() => Directory.systemTemp.createTemp('draft-account-'));
+    SessionSearch.dbPathOverrideForTest = '${root!.path}/search.db';
+    addTearDown(() async {
+      await SessionSearch.I.close();
+      SessionSearch.dbPathOverrideForTest = null;
+      await root.delete(recursive: true);
+    });
+    AppState.resetTestInstance();
+    final app = AppState.createForTest(
+      sessionAccountIdForTest: 'account-a',
+      accountLifecycle: AccountLifecycleIntegration(
+        onFence: () {},
+        onRevoke: () async {},
+        onBind: (_, _) async {},
+        onClear: () async {},
+        onVerifyEmpty: () async => true,
+      ),
+    );
+    a = ChatSession(id: 'same-session-id', title: 'A', model: 'm');
+    app.sessions
+      ..clear()
+      ..add(a);
+    app.activeSessionId = a.id;
+    await pumpChat(tester);
+    await tester.enterText(composer, 'Private draft for A');
+    await tester.pump(const Duration(milliseconds: 600));
+
+    await tester.runAsync(() => app.transitionSessionAccount('account-b'));
+    app.sessions
+      ..clear()
+      ..add(ChatSession(id: a.id, title: 'B', model: 'm'));
+    app.activeSessionId = a.id;
+    app.refresh();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(draft(tester), isEmpty);
+    await tester.enterText(composer, 'Private draft for B');
+    await tester.pump(const Duration(milliseconds: 600));
+
+    await tester.runAsync(() => app.transitionSessionAccount('account-a'));
+    app.sessions
+      ..clear()
+      ..add(a);
+    app.activeSessionId = a.id;
+    app.refresh();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(draft(tester), 'Private draft for A');
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('draft survives recreating ChatScreen after process death', (
     tester,
   ) async {
@@ -98,69 +185,54 @@ void main() {
     expect(draft(tester), 'A long prompt I typed carefully');
   });
 
-  testWidgets('Regenerate explains why it cannot run', (tester) async {
+  // CT-004 / CH-024: history edits are server operations on server-stored
+  // rows. A local-only row offers no Regenerate (nothing it could re-run).
+  testWidgets('Regenerate is not offered on a row the server does not store', (
+    tester,
+  ) async {
     a.messages
       ..clear()
       ..addAll([
         Message(role: 'user', content: 'Question'),
         Message(role: 'assistant', content: 'Answer'),
       ]);
-    AppState.I.providers.single.models = ['other-model'];
     await pumpChat(tester);
-    await tester.tap(find.byTooltip('Regenerate'));
-    await tester.pump();
-    expect(find.textContaining('no longer available'), findsOneWidget);
+    expect(find.byTooltip('Regenerate'), findsNothing);
     expect(a.messages, hasLength(2));
-    await expireSnackBars(tester);
   });
 
-  testWidgets('edit dialog states how many later messages it removes', (
+  testWidgets('R4: edit & resend is hidden and existing history stays intact', (tester) async {
+    a.messages
+      ..clear()
+      ..addAll([
+        Message(role: 'user', content: 'First', privateSyncId: _id(1)),
+        Message(role: 'assistant', content: 'One', privateSyncId: _id(2)),
+        Message(role: 'user', content: 'Second', privateSyncId: _id(3)),
+        Message(role: 'assistant', content: 'Two', privateSyncId: _id(4)),
+      ]);
+    await pumpChat(tester);
+    expect(find.byTooltip('Edit & resend'), findsNothing);
+    expect(find.textContaining('Your chat is kept unchanged.'), findsOneWidget);
+    expect(a.messages.map((m) => m.content), ['First', 'One', 'Second', 'Two']);
+    expect(find.byType(AlertDialog), findsNothing);
+  });
+
+  testWidgets('R4: Delete from here is hidden without changing the transcript', (
     tester,
   ) async {
     a.messages
       ..clear()
       ..addAll([
-        Message(role: 'user', content: 'First'),
-        Message(role: 'assistant', content: 'One'),
-        Message(role: 'user', content: 'Second'),
-        Message(role: 'assistant', content: 'Two'),
-      ]);
-    await pumpChat(tester);
-    await tester.tap(find.byTooltip('Edit & resend').first);
-    await tester.pumpAndSettle();
-    expect(
-      find.textContaining('This removes the 3 messages after it'),
-      findsOneWidget,
-    );
-    await tester.tap(find.widgetWithText(TextButton, 'Edit & remove 3'));
-    await tester.pumpAndSettle();
-    expect(a.messages, isEmpty);
-    expect(draft(tester), 'First');
-
-    // Undo restores the transcript and takes the staged edit back.
-    await tester.tap(find.text('Undo'));
-    await tester.pumpAndSettle();
-    expect(a.messages.map((m) => m.content), ['First', 'One', 'Second', 'Two']);
-    expect(draft(tester), isEmpty);
-    await expireSnackBars(tester);
-  });
-
-  testWidgets('Delete message (formerly Revert) offers Undo', (tester) async {
-    a.messages
-      ..clear()
-      ..addAll([
-        Message(role: 'assistant', content: 'Hello'),
-        Message(role: 'user', content: 'Oops'),
+        Message(role: 'assistant', content: 'Hello', privateSyncId: _id(5)),
+        Message(role: 'user', content: 'Oops', privateSyncId: _id(6)),
       ]);
     await pumpChat(tester);
     expect(find.byTooltip('Revert'), findsNothing);
-    await tester.tap(find.byTooltip('Delete message'));
-    await tester.pumpAndSettle();
-    expect(a.messages.map((m) => m.content), ['Hello']);
-    await tester.tap(find.text('Undo'));
-    await tester.pumpAndSettle();
+    expect(find.byTooltip('More actions'), findsNothing);
+    expect(find.text('Delete from here'), findsNothing);
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.textContaining('Your chat is kept unchanged.'), findsOneWidget);
     expect(a.messages.map((m) => m.content), ['Hello', 'Oops']);
-    await expireSnackBars(tester);
   });
 
   testWidgets('pending approval disables Attach and the mic', (tester) async {
