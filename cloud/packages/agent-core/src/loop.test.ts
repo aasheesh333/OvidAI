@@ -58,7 +58,7 @@ const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 // ── fixtures ────────────────────────────────────────────────────────────────
 
 type Scripted =
-  | { text: string; deltas?: string[]; toolCalls?: AgentResponse["toolCalls"]; delayMs?: number }
+  | { text: string; deltas?: string[]; toolCalls?: AgentResponse["toolCalls"]; delayMs?: number; usage?: AgentResponse["usage"] }
   | { error: Error; delayMs?: number }
   | { abort: true };
 
@@ -109,7 +109,7 @@ function stubTransport(script: Scripted[]): {
         thinking: "",
         toolCalls: step.toolCalls ?? [],
         finishReason: step.toolCalls !== undefined && step.toolCalls.length > 0 ? "tool_calls" : "stop",
-        usage: null,
+        usage: step.usage ?? null,
       };
     },
   };
@@ -1761,5 +1761,82 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     await runAgentLoop(c.job, c.deps, c.rt);
     expect(c.requests[0]!.system.map((m) => m.content)).toEqual(["SYSTEM_PROMPT_V1"]);
     expect(c.requests[0]!.system.some((m) => m.volatile === true)).toBe(false);
+  });
+
+  // ── Wave 1b ──────────────────────────────────────────────────────────────
+
+  it("CH-005: an intermediate turn's text settles as message_segment before its tool round", async () => {
+    const echo = tool("echo_tool");
+    const c = await makeCtx({
+      tools: [echo],
+      script: [
+        { text: "Let me look.", toolCalls: [{ id: "c1", name: "echo_tool", args: {} }] },
+        { text: "Here is the summary." },
+      ],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect(types(c.events)).toEqual([
+      "run_started",
+      "message_delta",
+      "message_segment",
+      "tool_started",
+      "tool_completed",
+      "message_delta",
+      "message_completed",
+      "run_completed",
+    ]);
+    expect(payloads(c.events, "message_segment")).toEqual([
+      { runId: c.job.runId, content: "Let me look." },
+    ]);
+    expect(payloads(c.events, "message_completed")[0]).toMatchObject({ content: "Here is the summary." });
+  });
+
+  it("CH-005: a whitespace-only intermediate turn emits no segment", async () => {
+    const echo = tool("echo_tool");
+    const c = await makeCtx({
+      tools: [echo],
+      script: [
+        { text: "  ", toolCalls: [{ id: "c1", name: "echo_tool", args: {} }] },
+        { text: "done" },
+      ],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect(types(c.events)).not.toContain("message_segment");
+  });
+
+  it("CH-028: run_completed carries the run's summed usage and the last turn's context size", async () => {
+    const echo = tool("echo_tool");
+    const c = await makeCtx({
+      tools: [echo],
+      script: [
+        {
+          text: "",
+          toolCalls: [{ id: "c1", name: "echo_tool", args: {} }],
+          usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 40 },
+        },
+        { text: "done", usage: { inputTokens: 150, outputTokens: 20 } },
+      ],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect(payloads(c.events, "run_completed")[0]).toEqual({
+      runId: c.job.runId,
+      usage: { inputTokens: 250, outputTokens: 30, cacheReadTokens: 40, contextTokens: 170 },
+    });
+  });
+
+  it("CH-028: a run whose transport reports no usage keeps the bare run_completed payload", async () => {
+    const c = await makeCtx({ script: [{ text: "Hello" }] });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect(payloads(c.events, "run_completed")[0]).toEqual({ runId: c.job.runId });
+  });
+
+  it("R1: the @-tag turnContext row is marked ephemeral (the compactor never folds it)", async () => {
+    const c = await makeCtx({
+      turnContext: "REFERENCED",
+      script: [{ text: "answer" }],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    const row = c.requests[0]!.messages.find((m) => m.content === "REFERENCED");
+    expect(row).toMatchObject({ role: "system", ephemeral: true });
   });
 });

@@ -35,6 +35,13 @@ export interface AgentMessage {
    * never persisted and therefore cannot index a DB-rebuilt window.
    */
   id?: string;
+  /**
+   * Wave 1b (R1): a run-scoped row that must never outlive the run — the
+   * @-tag referenced-session context. The compactor never folds an
+   * ephemeral row into its saved summary (it keeps it in the rebuilt
+   * request instead). Never serialized to a provider.
+   */
+  ephemeral?: boolean;
   toolCallId?: string;        // role:"tool" — the ToolCall.id this answers
   toolCalls?: ToolCall[];     // role:"assistant"
   volatile?: boolean;         // true → never cache-marked, rides last (Task 3/7)

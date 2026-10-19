@@ -753,7 +753,10 @@ export async function runAgentLoop(
   // Wave 1a (R1): @-tagged session context for THIS run only.
   const turnContext = job.turnContext?.trim() ?? "";
   if (turnContext !== "") {
-    const row: AgentMessage = { role: "system", content: turnContext };
+    // Ephemeral: the compactor must never fold another session's context
+    // into THIS session's durable summary (R1 — context crosses sessions
+    // only for the run the user tagged it in).
+    const row: AgentMessage = { role: "system", content: turnContext, ephemeral: true };
     const lastIndex = msgs.length - 1;
     if (lastIndex >= 0 && msgs[lastIndex]!.role === "user") {
       msgs = [...msgs.slice(0, lastIndex), row, msgs[lastIndex]!];
@@ -768,6 +771,32 @@ export async function runAgentLoop(
   let overflowRecovered = false;
   let stopHookActive = false;
   let toolRounds = 0;
+
+  // Wave 1b (CH-028): the run's token usage, summed over every model turn
+  // that reported one; `contextTokens` is the conversation's size after the
+  // LAST turn (its prompt + its reply) — what the client's context ring
+  // shows against the model's window. Null until a
+  // transport reports usage (run_completed then stays `{runId}`).
+  let usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; contextTokens: number } | null = null;
+  const addUsage = (u: AgentResponse["usage"]): void => {
+    if (u === null || u === undefined) return;
+    const cacheRead = u.cacheReadTokens ?? 0;
+    usage = {
+      inputTokens: (usage?.inputTokens ?? 0) + u.inputTokens,
+      outputTokens: (usage?.outputTokens ?? 0) + u.outputTokens,
+      cacheReadTokens: (usage?.cacheReadTokens ?? 0) + cacheRead,
+      contextTokens: u.inputTokens + u.outputTokens,
+    };
+  };
+
+  // Wave 1b (CH-005/CH-006): an assistant turn that does NOT end the run
+  // (tool calls, a late steering drain, the todo nudge, a Stop veto) settles
+  // its text as message_segment, so the live bubble closes at the right
+  // place and a reloaded history shows it. Whitespace-only text is noise.
+  const segment = async (content: string): Promise<void> => {
+    if (content.trim() === "") return;
+    await emit("message_segment", { runId, content });
+  };
 
   const cancelled = async (): Promise<LoopResult> => {
     // P8-T1 / C1 EVENT-FIRST contract: the terminal event must precede the
@@ -1022,6 +1051,7 @@ export async function runAgentLoop(
         if (attempt.kind === "cancelled") return await cancelled();
         if (attempt.kind === "ok") {
           response = attempt.response;
+          addUsage(response.usage);
           break;
         }
         if (!overflowRecovered && looksLikeContextOverflow(attempt.message)) {
@@ -1070,6 +1100,7 @@ export async function runAgentLoop(
           { sessionId, activeRunId: runId },
         );
         if (late.length > 0) {
+          await segment(content);
           msgs.push({ role: "assistant", content });
           msgs.push(...late);
           continue;
@@ -1080,6 +1111,7 @@ export async function runAgentLoop(
         if (shouldSendTodoNudge(g, state.todos)) {
           const pending = pendingTodos(state.todos);
           g.todoNudgeSent = true;
+          await segment(content);
           msgs.push({ role: "assistant", content });
           msgs.push({ role: "user", content: todoNudgeMessage(pending) });
           continue;
@@ -1104,6 +1136,7 @@ export async function runAgentLoop(
         stopHookActive = stop.veto;
         if (stop.veto) {
           // Keep the final answer in the transcript AND the request.
+          await segment(content);
           msgs.push({ role: "assistant", content });
           msgs.push({ role: "user", content: vetoMessage(stop.reason) });
           continue;
@@ -1116,8 +1149,9 @@ export async function runAgentLoop(
           content,
         });
         await emit("message_completed", { messageId: assistant.id, content });
-        // P1 order: terminal event BEFORE the status flip.
-        await emit("run_completed", { runId });
+        // P1 order: terminal event BEFORE the status flip. Wave 1b: the
+        // run's usage rides the terminal (additive; absent when unknown).
+        await emit("run_completed", usage === null ? { runId } : { runId, usage });
         await runs.finish(deps.db, runId, "completed");
         return { status: "completed" };
       }
@@ -1125,6 +1159,7 @@ export async function runAgentLoop(
       // ── 10. tool round (sequential, Dart parity) ───────────────────────
       toolRounds += 1;
 
+      await segment(content);
       msgs.push({ role: "assistant", content, toolCalls });
 
       for (const call of toolCalls) {
