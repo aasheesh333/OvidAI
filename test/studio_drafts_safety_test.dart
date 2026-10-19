@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:ovid_ai/core/cloud/cloud_ws.dart';
 import 'package:ovid_ai/core/cloud/studio_remote_client.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/studio_drafts.dart';
@@ -30,7 +31,6 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     AppState.resetTestInstance();
     StudioDraftStore.I.disableForTest();
-    studioLoginPromptOverrideForTest = (_) {};
     StudioDraftStore.I.disableForTest();
     fake = FakeStudioGateway();
     remote = installFakeStudio(fake);
@@ -112,7 +112,10 @@ void main() {
         home: const Scaffold(body: Text('home')),
       ));
       nav.currentState!.push(MaterialPageRoute<void>(
-        builder: (_) => const StudioScreen(),
+        builder: (_) => StudioScreen(
+          workspaceKey: kFakeStudioSession,
+          agentEvents: Stream<CloudSessionEvent>.empty(),
+        ),
       ));
       await settle(tester);
 
@@ -136,7 +139,10 @@ void main() {
       expect(find.byType(StudioScreen), findsNothing);
 
       nav.currentState!.push(MaterialPageRoute<void>(
-        builder: (_) => const StudioScreen(),
+        builder: (_) => StudioScreen(
+          workspaceKey: kFakeStudioSession,
+          agentEvents: Stream<CloudSessionEvent>.empty(),
+        ),
       ));
       await settle(tester);
       expect(controller(tester).text, 'void a() {}');
@@ -160,7 +166,10 @@ void main() {
       setSurface(tester, const Size(360, 740));
 
       await tester.pumpWidget(
-        MaterialApp(theme: Aether.theme(), home: const StudioScreen()),
+        MaterialApp(theme: Aether.theme(), home: StudioScreen(
+          workspaceKey: kFakeStudioSession,
+          agentEvents: Stream<CloudSessionEvent>.empty(),
+        )),
       );
       await settle(tester);
       await tester.enterText(find.byKey(studioEditorFieldKey), 'typed');
@@ -170,10 +179,10 @@ void main() {
         matching: find.byType(EditableText),
       ));
 
-      await tester.tap(find.byTooltip('Toggle files'));
+      await tester.tap(find.byTooltip('Show files'));
       await settle(tester);
       expect(find.byType(StudioFileTree), findsOneWidget);
-      await tester.tap(find.byTooltip('Toggle files'));
+      await tester.tap(find.byTooltip('Hide files'));
       await settle(tester);
 
       final after = tester.state<EditableTextState>(find.descendant(
@@ -242,7 +251,9 @@ void main() {
         ),
       ));
       await tester.pumpAndSettle();
-      expect(find.text('Too large to open on device'), findsOneWidget);
+      expect(find.text('Too large to edit in Studio'), findsOneWidget);
+      expect(find.textContaining('terminal'), findsNothing,
+          reason: 'there is no terminal (ST-011)');
       expect(find.byType(TextField), findsNothing);
       expect(remote.fileBuffer(kFakeStudioSession)['big.txt'], isEmpty,
           reason: 'the content is never loaded into the editor');

@@ -76,3 +76,20 @@ export class FileTooLargeError extends StorageError {
     this.sizeBytes = opts.sizeBytes;
   }
 }
+
+/**
+ * A conditional workspace mutation lost its precondition (Studio, ST-005 /
+ * ST-007 / ST-008). Pinned codes:
+ *  - "baseline_mismatch": `ifMatchSha256` no longer matches the bytes on disk
+ *    (or the file is gone): the caller's view is stale;
+ *  - "already_exists": a create-only write / move / mkdir found the target;
+ *  - "not_empty": a non-recursive delete of a folder that still has entries.
+ */
+export class PreconditionFailedError extends StorageError {
+  constructor(
+    message: string,
+    opts: { code: "baseline_mismatch" | "already_exists" | "not_empty"; cause?: unknown },
+  ) {
+    super(message, { code: opts.code, cause: opts.cause });
+  }
+}

@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
@@ -23,16 +22,6 @@ class _NonlinearScaler extends TextScaler {
       fontSize <= 12 ? fontSize * 2 : fontSize * 1.5;
   @override
   double get textScaleFactor => 2;
-}
-
-class _FolderPicker extends FilePicker {
-  final Completer<String?> result = Completer<String?>();
-  @override
-  Future<String?> getDirectoryPath({
-    String? dialogTitle,
-    bool lockParentWindow = false,
-    String? initialDirectory,
-  }) => result.future;
 }
 
 void main() {
@@ -687,50 +676,18 @@ void main() {
     },
   );
 
-  testWidgets(
-    'workspace picker preserves existing probe and binds originating session',
-    (tester) async {
-      final dir = Directory.systemTemp.createTempSync('chat-workspace-');
-      addTearDown(() => dir.deleteSync(recursive: true));
-      final existing = File('${dir.path}/.ovid_probe')
-        ..writeAsStringSync('user file');
-      final picker = _FolderPicker();
-      FilePicker.platform = picker;
-      a.mode = 'studio';
-      a.workspaceFolder = '${dir.path}/old-workspace';
-      await pumpChat(tester);
-      await tester.longPress(find.text('old-workspace'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Select working folder'));
-      await tester.pumpAndSettle();
-      await switchTo(tester, b);
-      picker.result.complete(dir.path);
-      await tester.runAsync(() async {
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-      });
-      await tester.pump();
-      expect(existing.existsSync(), isTrue);
-      expect(existing.readAsStringSync(), 'user file');
-      expect(a.workspaceFolder, dir.path);
-      expect(b.workspaceFolder, isNull);
-      expect(dir.listSync().map((e) => e.path), [existing.path]);
-    },
-  );
-
-  testWidgets('working-folder sheet opens on tap with Open Studio first', (
+  // CH-027 / ST-012: the Studio-mode composer chip used to open a "Sandbox
+  // folder (Studio)" sheet that pinned a PHONE folder the cloud never saw. It
+  // is now a single chip that opens Studio — no device folder picker.
+  testWidgets('Studio mode shows one Studio chip and no folder picker', (
     tester,
   ) async {
     a.mode = 'studio';
     a.workspaceFolder = '/nonexistent/tap-workspace';
     await pumpChat(tester);
-    expect(find.byTooltip('Working folder'), findsOneWidget);
-    await tester.tap(find.text('tap-workspace'));
-    await tester.pumpAndSettle();
-    expect(find.text('Open Studio'), findsOneWidget);
-    expect(find.text('Select working folder'), findsOneWidget);
-    expect(
-      tester.getTopLeft(find.text('Open Studio')).dy,
-      lessThan(tester.getTopLeft(find.text('Select working folder')).dy),
-    );
+    expect(find.byKey(const ValueKey('composer-studio-chip')), findsOneWidget);
+    expect(find.text('tap-workspace'), findsNothing);
+    expect(find.byTooltip('Working folder'), findsNothing);
+    expect(find.text('Select working folder'), findsNothing);
   });
 }

@@ -3,8 +3,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:ovid_ai/core/cloud/cloud_ws.dart';
 import 'package:ovid_ai/core/cloud/studio_remote_client.dart';
-import 'package:ovid_ai/core/github_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/studio_drafts.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -30,7 +30,6 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     AppState.resetTestInstance();
     StudioDraftStore.I.disableForTest();
-    studioLoginPromptOverrideForTest = (_) {};
     final app = AppState.createForTest();
     app.sessions.add(ChatSession(
       id: kFakeStudioSession,
@@ -38,7 +37,6 @@ void main() {
       model: 'gpt-4o',
     ));
     app.activeSessionId = kFakeStudioSession;
-    await GitHubService.I.initialize();
 
     fake = FakeStudioGateway(
       files: {
@@ -55,10 +53,8 @@ void main() {
   });
 
   tearDown(() async {
-    studioLoginPromptOverrideForTest = null;
     remote.clearAll();
     StudioDraftStore.I.disableForTest();
-    await GitHubService.I.signOut();
     AppState.resetTestInstance();
   });
 
@@ -71,7 +67,10 @@ void main() {
 
   Future<void> pumpStudio(WidgetTester tester) async {
     await tester.pumpWidget(
-      MaterialApp(theme: Aether.theme(), home: const StudioScreen()),
+      MaterialApp(theme: Aether.theme(), home: StudioScreen(
+          workspaceKey: kFakeStudioSession,
+          agentEvents: Stream<CloudSessionEvent>.empty(),
+        )),
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 120));
@@ -106,7 +105,7 @@ void main() {
       setSurface(tester, const Size(360, 640));
       await pumpStudio(tester);
 
-      await tester.tap(find.byTooltip('Toggle files'));
+      await tester.tap(find.byTooltip('Show files'));
       await tester.pumpAndSettle();
 
       expect(find.text('FILES'), findsOneWidget);
@@ -155,7 +154,7 @@ void main() {
       expect(tree.width, greaterThanOrEqualTo(StudioMetrics.minTreeWidth));
       expect(sizeOf(tester, studioEditorPaneKey).width,
           greaterThanOrEqualTo(StudioMetrics.minEditorWidth));
-      expect(find.byTooltip('Toggle files'), findsOneWidget,
+      expect(find.byTooltip('Hide files'), findsOneWidget,
           reason: 'the tree toggle is always available');
     });
   });

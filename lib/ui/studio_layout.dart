@@ -15,8 +15,7 @@ import '../core/theme.dart';
 ///
 /// The repo already holds a 44dp invariant (see the overlay touch-target pin
 /// in `test/overlay_live_indicator_test.dart`); Studio's tab-close (≈20dp),
-/// terminal-tab close (11dp), "Save" (unpadded text) and file-tree rows
-/// (≈25dp) were all far under it.
+/// "Save" (unpadded text) and file-tree rows (≈25dp) were all far under it.
 const double kStudioTapTarget = 44;
 
 /// Smallest type Studio is allowed to render.
@@ -59,11 +58,9 @@ double _clamp(double v, double lo, double hi) =>
 // ── Pane keys (tests measure the layout through these) ──────────────────────
 const Key studioTreePaneKey = Key('studio-tree-pane');
 const Key studioEditorPaneKey = Key('studio-editor-pane');
-const Key studioTerminalPaneKey = Key('studio-terminal-pane');
 const Key studioTreeDividerKey = Key('studio-tree-divider');
 const Key studioTreeScrimKey = Key('studio-tree-scrim');
-const Key studioTerminalHandleKey = Key('studio-terminal-handle');
-const Key studioRepoBarKey = Key('studio-repo-bar');
+const Key studioWorkspaceBarKey = Key('studio-workspace-bar');
 
 /// Let variable-height chrome scroll when it would otherwise consume a pane.
 /// The content fills the remaining viewport and retains a usable minimum; this
@@ -106,8 +103,8 @@ class StudioPaneViewport extends StatelessWidget {
 /// Resolved Studio geometry for one layout pass.
 ///
 /// Built from the constraints of the region that actually holds the
-/// tree/editor/terminal split, so [terminalHeight] is derived from the height
-/// that is really left after the app bar, the repo bar and any banners.
+/// tree/editor split. There is no terminal pane: execution is agent-only and
+/// followed through the read-only run log.
 class StudioMetrics {
   const StudioMetrics._({
     required this.width,
@@ -115,8 +112,6 @@ class StudioMetrics {
     required this.treeDocked,
     required this.treeVisibleByDefault,
     required this.compactActions,
-    required this.terminalFits,
-    required this.terminalHeight,
     this.textScale = 1.0,
   });
 
@@ -141,21 +136,9 @@ class StudioMetrics {
   /// True when the app bar must fold secondary actions into an overflow menu.
   final bool compactActions;
 
-  /// False when the region is too short to hold both panes at their minimums;
-  /// the terminal then starts collapsed to its header bar.
-  final bool terminalFits;
-
-  /// The OS text scale the geometry was resolved with. Both minimums grow with
-  /// it: the terminal's header strip and command row scale, and so does the
-  /// editor's tab strip. Ignoring it clipped 13px of terminal at 2x.
+  /// The OS text scale the geometry was resolved with (the editor's tab
+  /// strip grows with it).
   final double textScale;
-
-  /// The OS text scale the geometry was resolved with. Both minimums grow with
-  /// it: the terminal's header strip and command row scale, and so does the
-  /// editor's tab strip. Ignoring it clipped 13px of terminal at 2x.
-
-  /// Default terminal pane height for this region.
-  final double terminalHeight;
 
   // ── Tunables ────────────────────────────────────────────────────────────
   static const double wideBreakpoint = kStudioWideBreakpoint;
@@ -165,26 +148,14 @@ class StudioMetrics {
   static const double minEditorWidth = 320;
   static const double minEditorHeight = 200;
 
-  static const double minTerminalHeight = 120;
-  static const double maxTerminalHeight = 320;
   static const double minTreeWidth = 180;
   static const double maxTreeWidth = 340;
 
-  /// Height of the collapsed terminal bar / drag handle.
-  static const double collapsedBarHeight = 44;
-
-  /// Height of the terminal's command row (a 48dp prefix-icon field plus its
-  /// padding and hairline). Together with the header strip it is the hard floor
-  /// for an *explicitly expanded* terminal: below that the pane overflows its
-  /// own chrome by ~13px.
-  static const double commandRowHeight = 60;
-
-  /// Share of the region the terminal takes by default.
-  static const double terminalShare = 0.30;
+  /// Height of one chrome strip (the editor's tab strip) at 1x text scale.
+  static const double stripHeight = 44;
 
   factory StudioMetrics.of(BoxConstraints c, {double textScale = 1.0}) {
     final w = c.maxWidth.isFinite ? c.maxWidth : wideBreakpoint;
-    final h = c.maxHeight.isFinite ? c.maxHeight : 800.0;
     final scale = (textScale.isFinite && textScale > 0) ? textScale : 1.0;
     final width = w >= wideBreakpoint
         ? StudioWidth.expanded
@@ -192,38 +163,20 @@ class StudioMetrics {
             ? StudioWidth.medium
             : StudioWidth.compact;
 
-    final minEditor = minEditorHeightFor(scale);
-    final minTerminal = minTerminalHeightFor(scale);
-    final roomForTerminal = h - minEditor;
-    final fits = roomForTerminal >= minTerminal;
-    final collapsedHeight = collapsedBarHeight * scale;
-
     return StudioMetrics._(
       width: width,
       treeWidth: _treeWidth(width, w),
       treeDocked: width != StudioWidth.compact,
       treeVisibleByDefault: width == StudioWidth.expanded,
       compactActions: width == StudioWidth.compact,
-      terminalFits: fits,
       textScale: scale,
-      terminalHeight: fits
-          ? _clamp(
-              h * terminalShare,
-              minTerminal,
-              math.min(math.max(maxTerminalHeight, minTerminal), roomForTerminal),
-            )
-          : math.min(collapsedHeight, math.max(0.0, roomForTerminal)),
     );
   }
 
   /// The editor's chrome (tab strip) grows with the OS text scale; its header
   /// is minHeight-based, so only the strip is added.
   static double minEditorHeightFor(double textScale) =>
-      minEditorHeight + (collapsedBarHeight * (math.max(1.0, textScale) - 1));
-
-  /// The terminal's header strip AND command row both scale.
-  static double minTerminalHeightFor(double textScale) =>
-      minTerminalHeight * math.max(1.0, textScale);
+      minEditorHeight + (stripHeight * (math.max(1.0, textScale) - 1));
 
   static double _treeWidth(StudioWidth width, double regionWidth) {
     final requested = switch (width) {
@@ -247,48 +200,6 @@ class StudioMetrics {
     return math.min(clamped, math.max(0.0, regionWidth - minEditorWidth));
   }
 
-  /// Clamps a user drag on the terminal divider.
-  double clampTerminalHeight(double requested, {required double regionHeight}) {
-    final minEditor = minEditorHeightFor(textScale);
-    final minTerminal = minTerminalHeightFor(textScale);
-    final room = regionHeight - minEditor;
-    if (room < minTerminal) {
-      return math.min(collapsedBarHeight * textScale, math.max(0.0, room));
-    }
-    final upper = math.min(
-      math.max(room, 0.0),
-      math.max(maxTerminalHeight, minTerminal),
-    );
-    final lower = math.min(minTerminal, upper);
-    if (requested.isNaN) return lower;
-    return _clamp(requested, lower, upper);
-  }
-
-  /// The height of an explicitly expanded terminal in a region too short for
-  /// both panes: bounded below by the terminal's own chrome and above by the
-  /// region, so honouring the user's tap can never overflow either pane.
-  double expandedTerminalHeight(
-    double requested, {
-    required double regionHeight,
-  }) {
-    final chrome =
-        (collapsedBarHeight + commandRowHeight) * math.max(1.0, textScale);
-    final floor = math.min(chrome, math.max(0.0, regionHeight));
-    if (requested.isNaN) return floor;
-    return _clamp(requested, floor, math.max(floor, regionHeight));
-  }
-
-  /// Terminal height for the current region: the editor-minimum clamp when
-  /// both panes fit, the chrome floor when the user explicitly expanded a
-  /// terminal into a region that is too short for both.
-  double resolveTerminalHeight(
-    double requested, {
-    required double regionHeight,
-  }) =>
-      terminalFits
-          ? clampTerminalHeight(requested, regionHeight: regionHeight)
-          : expandedTerminalHeight(requested, regionHeight: regionHeight);
-
   /// Clamps a user drag on the tree divider.
   double clampTreeWidth(double requested, {required double regionWidth}) {
     if (requested.isNaN || regionWidth <= 0) return 0;
@@ -307,9 +218,7 @@ class StudioMetrics {
       other.treeDocked == treeDocked &&
       other.treeVisibleByDefault == treeVisibleByDefault &&
       other.compactActions == compactActions &&
-      other.terminalFits == terminalFits &&
-      other.textScale == textScale &&
-      other.terminalHeight == terminalHeight;
+      other.textScale == textScale;
 
   @override
   int get hashCode => Object.hash(
@@ -318,14 +227,12 @@ class StudioMetrics {
         treeDocked,
         treeVisibleByDefault,
         compactActions,
-        terminalFits,
         textScale,
-        terminalHeight,
       );
 
   @override
   String toString() => 'StudioMetrics($width tree=$treeWidth '
-      'docked=$treeDocked terminal=$terminalHeight fits=$terminalFits)';
+      'docked=$treeDocked)';
 }
 
 /// An icon button that cannot render smaller than [kStudioTapTarget].

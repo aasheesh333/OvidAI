@@ -4,18 +4,18 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../core/cloud/cloud_agent_facade.dart';
+import '../core/cloud/cloud_ws.dart';
 import '../core/cloud/models.dart';
 import '../core/cloud/studio_files.dart';
 import '../core/cloud/studio_remote_client.dart';
-import '../core/github_service.dart';
 import '../core/state.dart';
 import '../core/studio_drafts.dart';
 import '../core/theme.dart';
-import 'github_login_sheet.dart';
 import 'studio_editor.dart';
 import 'studio_errors.dart';
 import 'studio_file_tree.dart';
 import 'studio_layout.dart';
+import 'trajectory_screen.dart';
 import 'widgets/aether_primitives.dart';
 
 // Studio's panes live in their own libraries; re-exported so callers (and the
@@ -23,61 +23,81 @@ import 'widgets/aether_primitives.dart';
 export 'studio_editor.dart' show StudioEditor, StudioEditorTabs;
 export 'studio_file_tree.dart' show StudioFileTree;
 
-/// Test seam: overrides the GitHub login prompt so host widget tests can
-/// assert the Studio auth gate without starting a real device flow.
-/// Production is null (the real modal bottom sheet).
-@visibleForTesting
-void Function(BuildContext context)? studioLoginPromptOverrideForTest;
+/// Route name Studio is pushed under (deep links / route-stack inspection).
+const String kStudioRouteName = '/studio';
 
-/// Studio — remote coding workspace: the P7 file tree/editor over the cloud
-/// workspace API.
+/// Opens Studio over the current route. The ONE entry point every Studio
+/// button uses (chat header, composer chip), so they cannot drift apart again
+/// (ST-001: every entry point had been swapped for a SnackBar).
+Future<void> openStudio(BuildContext context) =>
+    Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        settings: const RouteSettings(name: kStudioRouteName),
+        builder: (_) => const StudioScreen(),
+      ),
+    );
+
+/// Studio — a server-side IDE over the user's cloud workspace.
 ///
-/// There is deliberately NO interactive terminal (owner directive
-/// 2026-10-18): execution is agent-only. The model runs commands in the
-/// user's sandbox on their behalf, and the user follows what happened through
-/// the read-only run/trajectory log. The client cannot open, type into,
-/// resize or re-attach a PTY — the gateway refuses every pty_* frame.
+/// The workspace is ONE per user and shared by every chat (R2), so Studio is
+/// not bound to the active chat: it always shows [kStudioWorkspaceKey]'s
+/// bucket and switching chats never swaps files under the editor (ST-016).
 ///
-/// Local git UI (branch chips, sync progress, commit staging, credential env)
-/// is GONE: the server owns the workspace and the git tools. The layout is
-/// breakpoint-driven ([StudioMetrics]): below 840dp the file tree stops being
-/// docked, below 600dp it becomes an overlay, and on a short viewport the
-/// terminal collapses rather than squeezing the editor below a usable height.
+/// There is deliberately NO terminal (owner directive 2026-10-18): execution
+/// is agent-only. The model runs commands in the user's sandbox, and the user
+/// follows what happened in the read-only agent activity log (the app bar's
+/// "Agent activity" opens it). The gateway refuses every pty_* frame.
+///
+/// Freshness: the tree and open files reload on open, on app resume, on the
+/// refresh button and — debounced — whenever the agent finishes a
+/// file-changing tool or a run in any subscribed chat (ST-006).
+///
+/// The layout is breakpoint-driven ([StudioMetrics]): below 840dp the file
+/// tree stops being docked, below 600dp it becomes an overlay.
 class StudioScreen extends StatefulWidget {
-  /// Set when Studio is opened by a setup flow. [_handleInitialAuth] then
-  /// fires the one-time GitHub login prompt from its own branch instead of
-  /// the regular path, so the sheet can never pop twice.
-  final bool postInstallGithubPrompt;
-  const StudioScreen({super.key, this.postInstallGithubPrompt = false});
+  const StudioScreen({
+    super.key,
+    this.workspaceKey,
+    this.agentEvents,
+  });
+
+  /// The Studio bucket to show. Null (production) is the signed-in account's
+  /// workspace ([studioWorkspaceKeyFor]); tests bind a fake session.
+  final String? workspaceKey;
+
+  /// Session events that may change workspace files. Null listens to the
+  /// process WebSocket multiplexer ([WsMultiplexer.sessionEvents]).
+  final Stream<CloudSessionEvent>? agentEvents;
+
   @override
   State<StudioScreen> createState() => _StudioScreenState();
 }
 
-class _StudioScreenState extends State<StudioScreen> {
+class _StudioScreenState extends State<StudioScreen>
+    with WidgetsBindingObserver {
   /// User's explicit choice for the tree. Null means "use the breakpoint
   /// default", so rotating a phone to tablet width re-docks the tree instead
   /// of fighting the user's last decision on the old geometry.
   bool? _showFilesOverride;
 
-  /// User drags. Null means "use the breakpoint default"; every read goes
-  /// back through [StudioMetrics.clampTreeWidth] / [clampTerminalHeight] so a
-  /// stale drag value can never starve the editor after a rotation.
+  /// User drag. Null means "use the breakpoint default"; every read goes
+  /// back through [StudioMetrics.clampTreeWidth] so a stale drag value can
+  /// never starve the editor after a rotation.
   double? _treeWidthOverride;
 
-  bool _refreshing = false;
-  bool _handledInitialAuth = false;
-  String _sessionId = '';
-
-  /// Whether the active Studio bucket holds unsaved editor drafts. Kept in
-  /// its own notifier so the guard does not rebuild the screen per token.
+  /// Whether the bucket holds unsaved editor drafts. Kept in its own
+  /// notifier so the guard does not rebuild the screen per token.
   final ValueNotifier<bool> _hasDrafts = ValueNotifier(false);
   bool _leaving = false;
 
-  String get _sid => _sessionId;
-  StudioRemoteClient get _remote => StudioRemoteClient.I;
+  StreamSubscription<CloudSessionEvent>? _agentEventsSub;
 
-  late final Listenable _sessionSignals =
-      Listenable.merge([AppState.I, GitHubService.I, _remote, _hasDrafts]);
+  /// Resolved once: an account switch rebuilds the route stack anyway.
+  late String _sid = _keyFor(widget);
+
+  static String _keyFor(StudioScreen w) =>
+      w.workspaceKey ?? studioWorkspaceKeyFor(AppState.I.sessionAccountId);
+  StudioRemoteClient get _remote => StudioRemoteClient.I;
 
   void _syncDraftFlag() =>
       _hasDrafts.value = _remote.dirtyFiles(_sid).isNotEmpty;
@@ -85,29 +105,51 @@ class _StudioScreenState extends State<StudioScreen> {
   @override
   void initState() {
     super.initState();
-    _sessionId = AppState.I.activeSession?.id ?? '';
-    GitHubService.I.addListener(_handleInitialAuth);
-    AppState.I.addListener(_onWorkspaceChanged);
+    WidgetsBinding.instance.addObserver(this);
     _remote.tabsFor(_sid).addListener(_syncDraftFlag);
     _syncDraftFlag();
-    unawaited(GitHubService.I.retryRestoreFromUi());
+    _agentEventsSub = (widget.agentEvents ?? WsMultiplexer.I.sessionEvents)
+        .listen((event) =>
+            _remote.noteAgentEvent(_sid, event.type, event.payload));
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _handleInitialAuth();
-      _refreshTree();
+      if (mounted) _refresh();
     });
   }
 
   @override
+  void didUpdateWidget(StudioScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final next = _keyFor(widget);
+    if (next != _sid) {
+      _remote.tabsFor(_sid).removeListener(_syncDraftFlag);
+      _sid = next;
+      _remote.tabsFor(_sid).addListener(_syncDraftFlag);
+      _syncDraftFlag();
+      _refresh();
+    }
+  }
+
+  @override
   void dispose() {
-    GitHubService.I.removeListener(_handleInitialAuth);
-    AppState.I.removeListener(_onWorkspaceChanged);
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(_agentEventsSub?.cancel());
     _remote.tabsFor(_sid).removeListener(_syncDraftFlag);
     _hasDrafts.dispose();
     // Leaving Studio is a good moment to make sure drafts are on disk.
     unawaited(StudioDraftStore.I.flush());
     super.dispose();
   }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Coming back to the app: the agent may have changed files meanwhile.
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
+  /// Every refresh goes through here and the client's single-flight
+  /// [StudioRemoteClient.refreshWorkspace] (ST-019). Failures surface in the
+  /// one inline status strip — never as a toast (ST-010).
+  void _refresh() => unawaited(_remote.refreshWorkspace(_sid));
 
   /// Back with unsaved drafts: Save all / Discard / Cancel (F-071).
   Future<void> _confirmLeave() async {
@@ -137,8 +179,9 @@ class _StudioScreenState extends State<StudioScreen> {
           if (failed.isNotEmpty) {
             showStudioToast(
               context,
-              'Could not save ${failed.length} file(s)',
-              detail: failed.join(', '),
+              failed.length == 1
+                  ? 'Could not save ${failed.single.split('/').last}.'
+                  : 'Could not save ${failed.length} files.',
               error: true,
             );
             return;
@@ -150,55 +193,12 @@ class _StudioScreenState extends State<StudioScreen> {
     }
   }
 
-  void _onWorkspaceChanged() {
-    final next = AppState.I.activeSession?.id ?? '';
-    if (next == _sessionId) return;
-    _remote.tabsFor(_sid).removeListener(_syncDraftFlag);
-    setState(() => _sessionId = next);
-    _remote.tabsFor(_sid).addListener(_syncDraftFlag);
-    _syncDraftFlag();
-    unawaited(_refreshTree());
-  }
-
-  void _handleInitialAuth() {
-    final github = GitHubService.I;
-    if (!mounted || _handledInitialAuth) return;
-    if (widget.postInstallGithubPrompt) {
-      if (github.isInitializing) return;
-      _handledInitialAuth = true;
-      if (!github.isLoggedIn) {
-        (studioLoginPromptOverrideForTest ?? showGithubLoginSheet)(context);
-      }
-      return;
-    }
-    if (github.isLoggedIn) {
-      if (github.isInitializing || github.login == null) return;
-      _handledInitialAuth = true;
-      return;
-    }
-    if (github.isInitializing) return;
-    // A failed storage read is not a sign-out; retryRestoreFromUi() may
-    // recover it seconds later.
-    if (github.restoreFailed) return;
-    _handledInitialAuth = true;
-    (studioLoginPromptOverrideForTest ?? showGithubLoginSheet)(context);
-  }
-
-  /// Refreshes the P7 workspace tree (the <100 ms manifest path).
-  Future<void> _refreshTree() async {
-    if (_sid.isEmpty || _refreshing) return;
-    setState(() => _refreshing = true);
-    final snapshot = await _remote.syncStudioTabs(_sid);
-    if (!mounted) return;
-    setState(() => _refreshing = false);
-    if (snapshot == null && _remote.treeError(_sid) != null) {
-      showStudioToast(
-        context,
-        'Could not load the workspace tree',
-        detail: _remote.treeError(_sid),
-        error: true,
-      );
-    }
+  void _openAgentLog() {
+    final session = AppState.I.activeSession;
+    if (session == null) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => TrajectoryScreen(sessionId: session.id),
+    ));
   }
 
   void _toggleFiles() => setState(() {
@@ -210,15 +210,17 @@ class _StudioScreenState extends State<StudioScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (_sid.isEmpty) return const _NoSessionStudio();
     return AnimatedBuilder(
-      animation: _sessionSignals,
+      animation: _remote,
       builder: (context, _) {
         final compactActions =
             MediaQuery.sizeOf(context).width < StudioMetrics.mediumBreakpoint;
+        final noWorkspace = _remote.hasNoWorkspace(_sid);
         // On a compact width the tree is an overlay, so Android's back gesture
         // must dismiss it before it leaves the screen.
-        final treeOverlayOpen = compactActions && (_showFilesOverride ?? false);
+        final treeOverlayOpen = compactActions &&
+            (_showFilesOverride ?? false) &&
+            !noWorkspace;
         return ValueListenableBuilder<bool>(
           valueListenable: _hasDrafts,
           builder: (context, hasDrafts, child) => PopScope(
@@ -235,43 +237,50 @@ class _StudioScreenState extends State<StudioScreen> {
           ),
           child: Scaffold(
             backgroundColor: Aether.bg,
-            appBar: _appBar(compactActions),
+            appBar: _appBar(noWorkspace),
             body: SafeArea(
-              child: StudioPaneViewport(
-                // Keep the tab strip and a real editor viewport reachable
-                // even under a long approval or the software keyboard. (No
-                // terminal chrome any more — execution is agent-only.)
-                minContentHeight: 122 +
-                    math.max(1.0, MediaQuery.textScalerOf(context).scale(1.0)) *
-                        kStudioTapTarget,
-                chrome: [
-                  _WorkspaceBar(
-                    snapshot: _remote.snapshotFor(_sid),
-                    loading: _remote.treeLoading(_sid),
-                    onRefresh: _refreshing ? null : _refreshTree,
-                  ),
-                  // A run-blocking approval is impossible to miss — Approve
-                  // resolves the gate, Decline rejects it.
-                  _ApprovalBanner(
-                    onDecision: (a, ok) {
-                      // Bound to the request the banner rendered: a stale tap
-                      // must never resolve the NEXT pending approval.
-                      if (!CloudAgentFacade.I.approveRequest(a, ok)) return;
-                      if (!ok) {
-                        showStudioToast(context, 'Declined ${a.tool}');
-                      }
-                    },
-                  ),
-                  if (_remote.treeError(_sid) != null)
-                    _TreeErrorBanner(
-                      detail: _remote.treeError(_sid),
-                      onRetry: _refreshing ? null : _refreshTree,
+              child: noWorkspace
+                  ? _NoWorkspaceView(
+                      onRetry: _remote.treeLoading(_sid) ? null : _refresh,
+                    )
+                  : StudioPaneViewport(
+                      // Keep the tab strip and a real editor viewport
+                      // reachable even under a long approval or the software
+                      // keyboard.
+                      minContentHeight: 122 +
+                          math.max(1.0,
+                                  MediaQuery.textScalerOf(context).scale(1.0)) *
+                              kStudioTapTarget,
+                      chrome: [
+                        _WorkspaceBar(snapshot: _remote.snapshotFor(_sid)),
+                        // A run-blocking approval is impossible to miss —
+                        // Approve resolves the gate, Decline rejects it.
+                        _ApprovalBanner(
+                          onDecision: (a, ok) {
+                            // Bound to the request the banner rendered: a
+                            // stale tap must never resolve the NEXT pending
+                            // approval.
+                            if (!CloudAgentFacade.I.approveRequest(a, ok)) {
+                              return;
+                            }
+                            if (!ok) {
+                              showStudioToast(context, 'Declined ${a.tool}');
+                            }
+                          },
+                        ),
+                        _WorkspaceStatus(
+                          failure: _remote.treeFailure(_sid),
+                          loading: _remote.treeLoading(_sid) &&
+                              _remote.snapshotFor(_sid) == null,
+                          waking: _remote.isWaking(_sid),
+                          wakeTimedOut: _remote.wakeTimedOut(_sid),
+                          onRetry: _refresh,
+                          onWake: () =>
+                              unawaited(_remote.wakeWorkspace(_sid)),
+                        ),
+                      ],
+                      child: LayoutBuilder(builder: _workspace),
                     ),
-                  if (_refreshing)
-                    const _StatusBanner('Loading cloud workspace…'),
-                ],
-                child: LayoutBuilder(builder: _workspace),
-              ),
             ),
           ),
         );
@@ -279,8 +288,9 @@ class _StudioScreenState extends State<StudioScreen> {
     );
   }
 
-  PreferredSizeWidget _appBar(bool compactActions) {
+  PreferredSizeWidget _appBar(bool noWorkspace) {
     final showFiles = _showFilesOverride ?? _treeDefaultFor(context);
+    final loading = _remote.treeLoading(_sid);
     return AppBar(
       leading: const BackButton(),
       titleSpacing: 0,
@@ -294,27 +304,35 @@ class _StudioScreenState extends State<StudioScreen> {
         ),
       ),
       actions: [
+        if (!noWorkspace)
+          StudioIconButton(
+            icon: showFiles ? Icons.folder_open : Icons.folder_outlined,
+            tooltip: showFiles ? 'Hide files' : 'Show files',
+            onPressed: _toggleFiles,
+          ),
+        // The ONE refresh affordance (ST-019).
         StudioIconButton(
-          icon: showFiles ? Icons.folder_open : Icons.folder_outlined,
-          tooltip: 'Toggle files',
-          onPressed: _toggleFiles,
+          key: studioRefreshKey,
+          icon: Icons.refresh_rounded,
+          tooltip: 'Refresh files',
+          iconSize: 20,
+          onPressed: loading ? null : _refresh,
         ),
+        // Read-only agent execution log — Studio has no terminal.
         StudioIconButton(
-          icon: Icons.sync_rounded,
-          tooltip: 'Refresh workspace',
-          iconSize: 18,
-          color: Aether.accent,
-          onPressed: _refreshing ? null : _refreshTree,
+          key: studioAgentLogKey,
+          icon: Icons.timeline_outlined,
+          tooltip: 'Agent activity',
+          iconSize: 20,
+          onPressed: AppState.I.activeSession == null ? null : _openAgentLog,
         ),
-        _AccountChip(compact: compactActions),
-        const _AuthBadge(),
         const SizedBox(width: 4),
       ],
     );
   }
 
-  /// The tree/editor/terminal split for the height that is actually left
-  /// after the app bar, workspace bar and any banners.
+  /// The tree/editor split for the height that is actually left after the
+  /// app bar, workspace bar and any banners.
   Widget _workspace(BuildContext context, BoxConstraints c) {
     final m = StudioMetrics.of(
       c,
@@ -402,21 +420,69 @@ class _StudioScreenState extends State<StudioScreen> {
   }
 }
 
-class _NoSessionStudio extends StatelessWidget {
-  const _NoSessionStudio();
+/// App-bar refresh (tests target it).
+const Key studioRefreshKey = Key('studio-refresh');
+
+/// App-bar "Agent activity" (the read-only execution log).
+const Key studioAgentLogKey = Key('studio-agent-log');
+
+/// No server session exists yet, so there is no workspace to show (ST-002).
+/// A clear, calm state — not an error.
+class _NoWorkspaceView extends StatelessWidget {
+  const _NoWorkspaceView({required this.onRetry});
+
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Aether.bg,
-      appBar: AppBar(title: const Text('Studio')),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Text(
-            'Open a chat to use Studio.',
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 15, color: Aether.textMuted),
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.cloud_outlined, size: 32, color: Aether.textMuted),
+              const SizedBox(height: 12),
+              Semantics(
+                header: true,
+                child: Text(
+                  'No cloud workspace yet',
+                  textAlign: TextAlign.center,
+                  style: AetherType.title.copyWith(
+                    fontSize: 16,
+                    color: Aether.text,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                StudioFailure.forTree(StudioNoWorkspaceException()).message,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 14,
+                  height: 1.5,
+                  color: Aether.textMuted,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                alignment: WrapAlignment.center,
+                children: [
+                  OutlinedButton(
+                    onPressed: () => Navigator.of(context).maybePop(),
+                    child: const Text('Back to chat'),
+                  ),
+                  TextButton(
+                    onPressed: onRetry,
+                    child: const Text('Check again'),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
       ),
@@ -424,31 +490,25 @@ class _NoSessionStudio extends StatelessWidget {
   }
 }
 
-/// The cloud workspace identity bar (replaces the deleted local repo bar).
+/// The cloud workspace identity bar.
 class _WorkspaceBar extends StatelessWidget {
-  const _WorkspaceBar({
-    required this.snapshot,
-    required this.loading,
-    required this.onRefresh,
-  });
+  const _WorkspaceBar({required this.snapshot});
 
   final StudioTreeSnapshot? snapshot;
-  final bool loading;
-  final VoidCallback? onRefresh;
 
   @override
   Widget build(BuildContext context) {
     final scale = MediaQuery.textScalerOf(context).scale(1.0);
-    final state = snapshot?.state ?? (loading ? 'hydrating' : 'unknown');
-    final label = snapshot == null
-        ? (loading ? 'Loading workspace…' : 'Cloud workspace')
-        : 'Cloud workspace · $state · ${snapshot!.fileCount} files';
+    final count = snapshot?.fileCount;
+    final label = count == null
+        ? 'Your cloud workspace'
+        : 'Your cloud workspace · $count ${count == 1 ? 'file' : 'files'}';
     return Semantics(
       label: label,
       container: true,
       child: Container(
-        key: studioRepoBarKey,
-        constraints: BoxConstraints(minHeight: 48 * math.max(1.0, scale)),
+        key: studioWorkspaceBarKey,
+        constraints: BoxConstraints(minHeight: 40 * math.max(1.0, scale)),
         padding: const EdgeInsets.symmetric(horizontal: 12),
         decoration: BoxDecoration(
           color: Aether.surface,
@@ -459,383 +519,133 @@ class _WorkspaceBar extends StatelessWidget {
             Icon(Icons.cloud_outlined, size: 16, color: Aether.textMuted),
             const SizedBox(width: 8),
             Expanded(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  color: Aether.text,
-                ),
-              ),
-            ),
-            if (snapshot != null)
-              Tag(
-                snapshot!.source == 'manifest' ? 'MANIFEST' : 'LIVE',
-                color: Aether.textMuted,
-              ),
-            StudioIconButton(
-              icon: Icons.refresh,
-              tooltip: 'Refresh workspace',
-              iconSize: 18,
-              onPressed: onRefresh,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Workspace tree failure: a human sentence, with the raw text demoted to a
-/// secondary line and a real 44dp retry.
-class _TreeErrorBanner extends StatelessWidget {
-  const _TreeErrorBanner({required this.detail, required this.onRetry});
-
-  final String? detail;
-  final VoidCallback? onRetry;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      liveRegion: true,
-      label: 'Could not load the workspace tree.',
-      container: true,
-      child: Container(
-        width: double.infinity,
-        color: Aether.warn.withValues(alpha: 0.12),
-        padding: const EdgeInsets.only(left: 12, right: 2, top: 2, bottom: 2),
-        child: Row(
-          children: [
-            Icon(Icons.cloud_off_outlined, size: 16, color: Aether.warn),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Could not load the workspace tree',
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                        color: Aether.warn,
-                      ),
-                    ),
-                    if (detail != null && detail!.isNotEmpty)
-                      Text(
-                        StudioFailure.of(StateError(detail!)).message,
-                        style: TextStyle(
-                          fontSize: kStudioMinFontSize,
-                          color: Aether.textFaint,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            StudioIconButton(
-              icon: Icons.refresh,
-              tooltip: 'Retry',
-              iconSize: 18,
-              onPressed: onRetry,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _StatusBanner extends StatelessWidget {
-  const _StatusBanner(this.label);
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      liveRegion: true,
-      label: label,
-      container: true,
-      child: Container(
-        width: double.infinity,
-        color: Aether.accent.withValues(alpha: 0.12),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-        child: Row(
-          children: [
-            const SizedBox(
-              width: 13,
-              height: 13,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-            const SizedBox(width: 9),
-            Expanded(
-              child: Text(
-                label,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: Aether.text),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// GitHub connection state.
-///
-/// This used to be a bare 9×9px colour-only dot: green/amber/red with no
-/// shape, no text and no semantics, so it was invisible to a screen reader
-/// and unreadable for anyone with a colour vision deficiency. Each state now
-/// has its own silhouette, a semantics label and a tooltip.
-class _AuthBadge extends StatelessWidget {
-  const _AuthBadge();
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: GitHubService.I,
-      builder: (context, _) {
-        final gh = GitHubService.I;
-        final loggedIn = gh.isLoggedIn;
-        final unknown = !loggedIn && (gh.restoreFailed || gh.isInitializing);
-
-        final IconData icon;
-        final Color color;
-        final String label;
-        if (loggedIn) {
-          icon = Icons.check_circle;
-          color = Aether.success;
-          label = 'Signed in to GitHub';
-        } else if (unknown) {
-          icon = Icons.hourglass_top;
-          color = Aether.warn;
-          label = 'Checking your GitHub sign-in…';
-        } else {
-          icon = Icons.cancel;
-          color = Aether.danger;
-          label = 'Not signed in to GitHub';
-        }
-
-        return Semantics(
-          liveRegion: true,
-          label: label,
-          child: Tooltip(
-            message: label,
-            child: SizedBox(
-              width: 30,
-              height: kStudioTapTarget,
-              child: Center(child: Icon(icon, size: 16, color: color)),
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-/// ── GitHub account chip with avatar, login name, and sign-out menu ──
-class _AccountChip extends StatelessWidget {
-  const _AccountChip({required this.compact});
-
-  /// Below 600dp the chip drops its login text and chevron: the app bar has
-  /// back + title + tree toggle + refresh + auth badge to fit as well.
-  final bool compact;
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: GitHubService.I,
-      builder: (_, _) {
-        final gh = GitHubService.I;
-        if (!gh.isLoggedIn) {
-          return const SizedBox.shrink();
-        }
-        return PopupMenuButton<String>(
-          tooltip: 'GitHub account',
-          padding: EdgeInsets.zero,
-          position: PopupMenuPosition.under,
-          onSelected: (v) {
-            if (v == 'signout') _confirmSignOut(context, gh);
-          },
-          itemBuilder: (_) => [
-            PopupMenuItem(
-              enabled: false,
-              child: Row(
-                children: [
-                  _Avatar(url: gh.avatarUrl, size: 24),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          gh.name ?? gh.login ?? '',
-                          style: const TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        Text(
-                          '@${gh.login ?? ''}',
-                          style: TextStyle(
-                            fontSize: kStudioMinFontSize,
-                            color: Aether.textFaint,
-                          ),
-                        ),
-                      ],
-                    ),
+              child: ExcludeSemantics(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Aether.text,
                   ),
-                ],
-              ),
-            ),
-            const PopupMenuDivider(height: 6),
-            PopupMenuItem(
-              value: 'signout',
-              child: Row(
-                children: [
-                  Icon(Icons.logout, size: 16, color: Aether.danger),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Sign out',
-                    style: TextStyle(fontSize: 12.5, color: Aether.danger),
-                  ),
-                ],
-              ),
-            ),
-          ],
-          child: Semantics(
-            button: true,
-            label: 'GitHub account ${gh.login ?? ''}',
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(
-                minWidth: kStudioTapTarget,
-                minHeight: kStudioTapTarget,
-              ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 6),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _Avatar(url: gh.avatarUrl, size: 20),
-                    if (!compact) ...[
-                      const SizedBox(width: 6),
-                      Flexible(
-                        child: Text(
-                          gh.login ?? '',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Aether.textMuted,
-                          ),
-                        ),
-                      ),
-                      Icon(
-                        Icons.expand_more,
-                        size: 15,
-                        color: Aether.textFaint,
-                      ),
-                    ],
-                  ],
                 ),
               ),
             ),
-          ),
-        );
-      },
-    );
-  }
-
-  void _confirmSignOut(BuildContext context, GitHubService gh) {
-    showDialog(
-      context: context,
-      builder: (d) => AlertDialog(
-        title: const Text(
-          'Sign out of GitHub?',
-          style: TextStyle(fontSize: 15),
+          ],
         ),
-        content: const Text(
-          'The repo connection will be cleared. Your GitHub access token is '
-          'removed from this device only.',
-          style: TextStyle(fontSize: 12.5),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(d),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () async {
-              Navigator.pop(d);
-              try {
-                await gh.signOut();
-              } catch (e) {
-                if (!context.mounted) return;
-                showStudioToast(
-                  context,
-                  'Signed out, but the saved token could not be removed.',
-                  detail: StudioFailure.of(e).detail,
-                  error: true,
-                );
-              }
-            },
-            child: Text('Sign out', style: TextStyle(color: Aether.danger)),
-          ),
-        ],
       ),
     );
   }
 }
 
-class _Avatar extends StatelessWidget {
-  final String? url;
-  final double size;
-  const _Avatar({required this.url, required this.size});
+/// The ONE inline status surface for workspace loading (ST-009/ST-010):
+/// a load error with human copy and Retry, the waking progress of a cold
+/// workspace, or its timed-out state. Only errors are live regions (ST-020).
+class _WorkspaceStatus extends StatelessWidget {
+  const _WorkspaceStatus({
+    required this.failure,
+    required this.loading,
+    required this.waking,
+    required this.wakeTimedOut,
+    required this.onRetry,
+    required this.onWake,
+  });
+
+  final Object? failure;
+  final bool loading;
+  final bool waking;
+  final bool wakeTimedOut;
+  final VoidCallback onRetry;
+  final VoidCallback onWake;
 
   @override
   Widget build(BuildContext context) {
-    if (url == null || url!.isEmpty) {
-      return Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          color: Aether.surfaceRaised,
-          shape: BoxShape.circle,
-        ),
-        child: Icon(
-          Icons.person_outline,
-          size: size * 0.55,
-          color: Aether.textMuted,
-        ),
+    final failure = this.failure;
+    if (failure != null) {
+      return _strip(
+        key: studioStatusErrorKey,
+        icon: Icons.cloud_off_outlined,
+        color: Aether.warn,
+        text: StudioFailure.forTree(failure).message,
+        live: true,
+        action: TextButton(onPressed: onRetry, child: const Text('Retry')),
       );
     }
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(size / 2),
-      child: Image.network(
-        url!,
-        width: size,
-        height: size,
-        fit: BoxFit.cover,
-        cacheWidth: Aether.imageCacheWidth(context, logicalWidth: size),
-        errorBuilder: (_, _, _) => Container(
-          width: size,
-          height: size,
-          color: Aether.surfaceRaised,
-          child: Icon(
-            Icons.person_outline,
-            size: size * 0.55,
-            color: Aether.textMuted,
-          ),
+    if (wakeTimedOut) {
+      return _strip(
+        key: studioStatusWakeKey,
+        icon: Icons.hourglass_bottom_rounded,
+        color: Aether.warn,
+        text: 'Your workspace is taking longer than usual to wake up.',
+        live: true,
+        action: TextButton(onPressed: onWake, child: const Text('Try again')),
+      );
+    }
+    if (waking) {
+      return _strip(
+        key: studioStatusWakeKey,
+        progress: true,
+        color: Aether.accent,
+        text: 'Waking your workspace… Files appear when it is ready.',
+      );
+    }
+    if (loading) {
+      return _strip(
+        progress: true,
+        color: Aether.accent,
+        text: 'Loading your files…',
+      );
+    }
+    return const SizedBox.shrink();
+  }
+
+  Widget _strip({
+    Key? key,
+    IconData? icon,
+    bool progress = false,
+    required Color color,
+    required String text,
+    bool live = false,
+    Widget? action,
+  }) {
+    return Semantics(
+      key: key,
+      liveRegion: live,
+      container: true,
+      child: Container(
+        width: double.infinity,
+        color: color.withValues(alpha: 0.12),
+        padding: const EdgeInsets.only(left: 12, right: 4, top: 4, bottom: 4),
+        constraints: const BoxConstraints(minHeight: kStudioTapTarget),
+        child: Row(
+          children: [
+            if (progress)
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              Icon(icon, size: 16, color: color),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                text,
+                style: TextStyle(fontSize: 13, color: Aether.text),
+              ),
+            ),
+            ?action,
+          ],
         ),
       ),
     );
   }
 }
+
+/// Status strip keys (tests target them).
+const Key studioStatusErrorKey = Key('studio-status-error');
+const Key studioStatusWakeKey = Key('studio-status-wake');
 
 /// Approval banner shown above the Studio workspace whenever the active
 /// session has a pending agent approval. Rendered as an [AetherCard] warn

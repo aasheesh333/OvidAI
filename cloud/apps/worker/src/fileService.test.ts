@@ -429,6 +429,216 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         await app.close();
       }
     });
+
+    // -- Wave 2 Studio (ST-003, ST-005, ST-007, ST-008, ST-015) ---------------
+
+    it("GET tree for a workspace that was never created → 200 empty manifest (not 404)", async () => {
+      const app = appFor();
+      try {
+        const { uid, sid } = await seedSession();
+        const res = await app.inject({
+          method: "GET",
+          url: `/internal/sessions/${sid}/tree`,
+          headers: headers(uid),
+        });
+        expect(res.statusCode).toBe(200);
+        const tree = uiManifestSchema.parse((res.json() as { tree: unknown }).tree);
+        expect(tree.roots).toEqual([]);
+        expect(tree.totals).toEqual({ files: 0, dirs: 0, bytes: 0 });
+        expect(tree.truncated).toBe(false);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("GET tree?path=sub → that folder only, workspace-relative paths; missing folder → 404", async () => {
+      const app = appFor();
+      try {
+        const { uid, sid } = await seedWarm({
+          "src/a.ts": "a",
+          "src/deep/b.ts": "b",
+          "top.txt": "t",
+        });
+        const res = await app.inject({
+          method: "GET",
+          url: `/internal/sessions/${sid}/tree?path=src`,
+          headers: headers(uid),
+        });
+        expect(res.statusCode).toBe(200);
+        const tree = uiManifestSchema.parse((res.json() as { tree: unknown }).tree);
+        expect(tree.roots.map((n) => n.path).sort()).toEqual(["src/a.ts", "src/deep"]);
+
+        const missing = await app.inject({
+          method: "GET",
+          url: `/internal/sessions/${sid}/tree?path=nope`,
+          headers: headers(uid),
+        });
+        expect(missing.statusCode).toBe(404);
+        const bad = await app.inject({
+          method: "GET",
+          url: `/internal/sessions/${sid}/tree?path=../x`,
+          headers: headers(uid),
+        });
+        expect(bad.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("PUT ifMatchSha256 stale → 409 baseline_mismatch, bytes untouched; fresh → 200", async () => {
+      const app = appFor();
+      try {
+        const { uid, sid, dir } = await seedWarm({ "a.txt": "agent-wrote-this" });
+        const stale = await app.inject({
+          method: "PUT",
+          url: `/internal/sessions/${sid}/file?path=a.txt`,
+          headers: headers(uid),
+          payload: {
+            contentBase64: Buffer.from("draft").toString("base64"),
+            ifMatchSha256: sha256(Buffer.from("old")),
+          },
+        });
+        expect(stale.statusCode).toBe(409);
+        expect(stale.json()).toMatchObject({ error: { code: "baseline_mismatch" } });
+        expect(await readFile(join(dir, "a.txt"), "utf8")).toBe("agent-wrote-this");
+
+        const fresh = await app.inject({
+          method: "PUT",
+          url: `/internal/sessions/${sid}/file?path=a.txt`,
+          headers: headers(uid),
+          payload: {
+            contentBase64: Buffer.from("draft").toString("base64"),
+            ifMatchSha256: sha256(Buffer.from("agent-wrote-this")),
+          },
+        });
+        expect(fresh.statusCode).toBe(200);
+        expect(await readFile(join(dir, "a.txt"), "utf8")).toBe("draft");
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("PUT ifNoneMatch on an existing file → 409 already_exists", async () => {
+      const app = appFor();
+      try {
+        const { uid, sid, dir } = await seedWarm({ "README.md": "real" });
+        const res = await app.inject({
+          method: "PUT",
+          url: `/internal/sessions/${sid}/file?path=README.md`,
+          headers: headers(uid),
+          payload: { contentBase64: "", ifNoneMatch: true },
+        });
+        expect(res.statusCode).toBe(409);
+        expect(res.json()).toMatchObject({ error: { code: "already_exists" } });
+        expect(await readFile(join(dir, "README.md"), "utf8")).toBe("real");
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("DELETE file / folder (recursive) and the not_empty / not_found / not_warm errors", async () => {
+      const app = appFor();
+      try {
+        const { uid, sid, dir } = await seedWarm({ "a.txt": "x", "src/b.ts": "b" });
+        const del = await app.inject({
+          method: "DELETE",
+          url: `/internal/sessions/${sid}/file?path=a.txt`,
+          headers: headers(uid),
+        });
+        expect(del.statusCode).toBe(200);
+        expect(del.json()).toEqual({ path: "a.txt", type: "file" });
+        await expect(stat(join(dir, "a.txt"))).rejects.toBeTruthy();
+
+        const notEmpty = await app.inject({
+          method: "DELETE",
+          url: `/internal/sessions/${sid}/file?path=src`,
+          headers: headers(uid),
+        });
+        expect(notEmpty.statusCode).toBe(409);
+        expect(notEmpty.json()).toMatchObject({ error: { code: "not_empty" } });
+
+        const recursive = await app.inject({
+          method: "DELETE",
+          url: `/internal/sessions/${sid}/file?path=src&recursive=true`,
+          headers: headers(uid),
+        });
+        expect(recursive.statusCode).toBe(200);
+        expect(recursive.json()).toEqual({ path: "src", type: "dir" });
+
+        const missing = await app.inject({
+          method: "DELETE",
+          url: `/internal/sessions/${sid}/file?path=src`,
+          headers: headers(uid),
+        });
+        expect(missing.statusCode).toBe(404);
+
+        const { uid: coldUid, sid: coldSid } = await seedSession();
+        const cold = await app.inject({
+          method: "DELETE",
+          url: `/internal/sessions/${coldSid}/file?path=a.txt`,
+          headers: headers(coldUid),
+        });
+        expect(cold.statusCode).toBe(409);
+        expect(cold.json()).toMatchObject({ error: { code: "not_warm" } });
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("POST move renames without clobbering; POST mkdir creates folders", async () => {
+      const app = appFor();
+      try {
+        const { uid, sid, dir } = await seedWarm({ "a.txt": "a", "b.txt": "b" });
+        const clobber = await app.inject({
+          method: "POST",
+          url: `/internal/sessions/${sid}/move`,
+          headers: headers(uid),
+          payload: { from: "a.txt", to: "b.txt" },
+        });
+        expect(clobber.statusCode).toBe(409);
+        expect(clobber.json()).toMatchObject({ error: { code: "already_exists" } });
+        expect(await readFile(join(dir, "b.txt"), "utf8")).toBe("b");
+
+        const moved = await app.inject({
+          method: "POST",
+          url: `/internal/sessions/${sid}/move`,
+          headers: headers(uid),
+          payload: { from: "a.txt", to: "docs/a.txt" },
+        });
+        expect(moved.statusCode).toBe(200);
+        expect(moved.json()).toEqual({ from: "a.txt", to: "docs/a.txt" });
+        expect(await readFile(join(dir, "docs/a.txt"), "utf8")).toBe("a");
+
+        const bad = await app.inject({
+          method: "POST",
+          url: `/internal/sessions/${sid}/move`,
+          headers: headers(uid),
+          payload: { from: "../etc", to: "x" },
+        });
+        expect(bad.statusCode).toBe(400);
+
+        const made = await app.inject({
+          method: "POST",
+          url: `/internal/sessions/${sid}/mkdir`,
+          headers: headers(uid),
+          payload: { path: "new/folder" },
+        });
+        expect(made.statusCode).toBe(200);
+        expect(made.json()).toEqual({ path: "new/folder", created: true });
+        expect((await stat(join(dir, "new/folder"))).isDirectory()).toBe(true);
+
+        const overFile = await app.inject({
+          method: "POST",
+          url: `/internal/sessions/${sid}/mkdir`,
+          headers: headers(uid),
+          payload: { path: "b.txt" },
+        });
+        expect(overFile.statusCode).toBe(409);
+        expect(overFile.json()).toMatchObject({ error: { code: "already_exists" } });
+      } finally {
+        await app.close();
+      }
+    });
   },
 );
 

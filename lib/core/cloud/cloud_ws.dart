@@ -317,6 +317,17 @@ class WsMultiplexer extends ChangeNotifier {
   /// Server frames outside the session-event pipeline (see [_rawFrames]).
   Stream<Map<String, dynamic>> get rawServerFrames => _rawFrames.stream;
 
+  /// Every ACCEPTED (seq-deduped) session event of every subscribed session,
+  /// for read-only observers that are not the session's owner — Studio
+  /// refreshes the shared workspace on agent file events (ST-006). The
+  /// per-session [subscribe] streams are single-subscription and stay owned
+  /// by the facade. Broadcast: attach before the events you care about.
+  final StreamController<CloudSessionEvent> _sessionEvents =
+      StreamController<CloudSessionEvent>.broadcast();
+
+  /// See [_sessionEvents].
+  Stream<CloudSessionEvent> get sessionEvents => _sessionEvents.stream;
+
   /// Raw BINARY server frames — the P6 browser screencast (Task 16). The
   /// gateway sends image bytes only (it strips redis's 1-byte format prefix);
   /// the image format travels in the latest `browser_state`. Broadcast:
@@ -525,6 +536,7 @@ class WsMultiplexer extends ChangeNotifier {
     _subs.clear();
     unawaited(_rawFrames.close().catchError((Object _) {}));
     unawaited(_binaryFrames.close().catchError((Object _) {}));
+    unawaited(_sessionEvents.close().catchError((Object _) {}));
     super.dispose();
   }
 
@@ -861,6 +873,9 @@ class WsMultiplexer extends ChangeNotifier {
     sub.lastEventId = event.seq;
     _persistCursor(sub.sessionId, event.seq);
     sub.events.add(event);
+    if (_sessionEvents.hasListener && !_sessionEvents.isClosed) {
+      _sessionEvents.add(event);
+    }
   }
 
   /// The built server's LEGACY replay-degradation signals (ws.ts): internal

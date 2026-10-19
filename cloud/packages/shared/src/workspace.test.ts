@@ -7,8 +7,13 @@ import {
   artifactCreatedPayloadSchema,
   artifactDtoSchema,
   artifactUrlResponseSchema,
+  makeWorkspaceDirBodySchema,
+  moveWorkspacePathBodySchema,
   putWorkspaceFileBodySchema,
   uiManifestSchema,
+  workspaceDeleteResponseSchema,
+  workspaceMkdirResponseSchema,
+  workspaceMoveResponseSchema,
   workspaceFileRedirectSchema,
   workspaceFileResponseSchema,
   workspaceFileWriteResponseSchema,
@@ -217,6 +222,75 @@ describe("putWorkspaceFileBodySchema", () => {
     expect(() =>
       putWorkspaceFileBodySchema.parse({ path: "a", contentUtf8: "y", extra: 1 }),
     ).toThrow();
+  });
+
+  // Wave 2 (ST-005/ST-007): server-side write preconditions.
+  it("accepts an ifMatchSha256 precondition (lowercase sha256 hex only)", () => {
+    const sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    expect(
+      putWorkspaceFileBodySchema.parse({ path: "a", contentUtf8: "y", ifMatchSha256: sha }),
+    ).toEqual({ path: "a", contentUtf8: "y", ifMatchSha256: sha });
+    expect(() =>
+      putWorkspaceFileBodySchema.parse({ path: "a", contentUtf8: "y", ifMatchSha256: "abc" }),
+    ).toThrow();
+    expect(() =>
+      putWorkspaceFileBodySchema.parse({
+        path: "a",
+        contentUtf8: "y",
+        ifMatchSha256: sha.toUpperCase(),
+      }),
+    ).toThrow();
+  });
+
+  it("accepts ifNoneMatch:'*' (create-only) but never together with ifMatchSha256", () => {
+    expect(
+      putWorkspaceFileBodySchema.parse({ path: "a", contentUtf8: "", ifNoneMatch: "*" }),
+    ).toEqual({ path: "a", contentUtf8: "", ifNoneMatch: "*" });
+    expect(() =>
+      putWorkspaceFileBodySchema.parse({ path: "a", contentUtf8: "", ifNoneMatch: "yes" }),
+    ).toThrow();
+    expect(() =>
+      putWorkspaceFileBodySchema.parse({
+        path: "a",
+        contentUtf8: "",
+        ifNoneMatch: "*",
+        ifMatchSha256: "0".repeat(64),
+      }),
+    ).toThrow();
+  });
+});
+
+describe("Studio file-management schemas (ST-008)", () => {
+  it("move body is strict {from,to}", () => {
+    expect(moveWorkspacePathBodySchema.parse({ from: "a", to: "b" })).toEqual({
+      from: "a",
+      to: "b",
+    });
+    expect(() => moveWorkspacePathBodySchema.parse({ from: "a" })).toThrow();
+    expect(() => moveWorkspacePathBodySchema.parse({ from: "a", to: "b", x: 1 })).toThrow();
+    expect(() => moveWorkspacePathBodySchema.parse({ from: "", to: "b" })).toThrow();
+  });
+
+  it("mkdir body is strict {path}", () => {
+    expect(makeWorkspaceDirBodySchema.parse({ path: "src/new" })).toEqual({ path: "src/new" });
+    expect(() => makeWorkspaceDirBodySchema.parse({ path: "" })).toThrow();
+    expect(() => makeWorkspaceDirBodySchema.parse({ path: "a", recursive: true })).toThrow();
+  });
+
+  it("responses round-trip", () => {
+    expect(workspaceDeleteResponseSchema.parse({ path: "a", type: "dir" })).toEqual({
+      path: "a",
+      type: "dir",
+    });
+    expect(() => workspaceDeleteResponseSchema.parse({ path: "a", type: "pipe" })).toThrow();
+    expect(workspaceMoveResponseSchema.parse({ from: "a", to: "b" })).toEqual({
+      from: "a",
+      to: "b",
+    });
+    expect(workspaceMkdirResponseSchema.parse({ path: "a", created: false })).toEqual({
+      path: "a",
+      created: false,
+    });
   });
 });
 

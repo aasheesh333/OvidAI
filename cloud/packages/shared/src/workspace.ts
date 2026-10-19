@@ -84,11 +84,51 @@ export interface WorkspaceFileRedirect {
   expiresAt: string;
 }
 
-/** PUT /cloud/v1/sessions/:id/workspace/file body — exactly one content field. */
+/**
+ * PUT /cloud/v1/sessions/:id/workspace/file body — exactly one content field.
+ *
+ * Optional preconditions (Studio, ST-005/ST-007), at most one per request:
+ *  - `ifMatchSha256`: lowercase sha256 hex of the bytes the client last saw;
+ *    the write lands only when the file still has exactly those bytes, else
+ *    409 `baseline_mismatch` (nothing written).
+ *  - `ifNoneMatch: "*"`: create-only; the write lands only when the path does
+ *    not exist yet, else 409 `already_exists` (nothing written).
+ */
 export interface PutWorkspaceFileBody {
   path: string;
   contentBase64?: string;
   contentUtf8?: string;
+  ifMatchSha256?: string;
+  ifNoneMatch?: "*";
+}
+
+/** DELETE /cloud/v1/sessions/:id/workspace/file?path=…[&recursive=true] answer. */
+export interface WorkspaceDeleteResponse {
+  path: string;
+  type: "file" | "dir" | "symlink";
+}
+
+/** POST /cloud/v1/sessions/:id/workspace/move body (rename = same folder). */
+export interface MoveWorkspacePathBody {
+  from: string;
+  to: string;
+}
+
+/** POST /cloud/v1/sessions/:id/workspace/move answer. */
+export interface WorkspaceMoveResponse {
+  from: string;
+  to: string;
+}
+
+/** POST /cloud/v1/sessions/:id/workspace/mkdir body. */
+export interface MakeWorkspaceDirBody {
+  path: string;
+}
+
+/** POST /cloud/v1/sessions/:id/workspace/mkdir answer (`created:false` = already a folder). */
+export interface WorkspaceMkdirResponse {
+  path: string;
+  created: boolean;
 }
 
 /** PUT /cloud/v1/sessions/:id/workspace/file answer. */
@@ -174,13 +214,49 @@ export const putWorkspaceFileBodySchema: z.ZodType<PutWorkspaceFileBody> = z
     path: z.string().min(1),
     contentBase64: z.string().optional(),
     contentUtf8: z.string().optional(),
+    ifMatchSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/, "ifMatchSha256 must be a lowercase sha256 hex digest.")
+      .optional(),
+    ifNoneMatch: z.literal("*").optional(),
   })
   .strict()
   .refine(
     (body) =>
       (body.contentBase64 !== undefined ? 1 : 0) + (body.contentUtf8 !== undefined ? 1 : 0) === 1,
     { message: "Exactly one of 'contentBase64' or 'contentUtf8' is required." },
-  );
+  )
+  .refine((body) => !(body.ifMatchSha256 !== undefined && body.ifNoneMatch !== undefined), {
+    message: "'ifMatchSha256' and 'ifNoneMatch' cannot be combined.",
+  });
+
+export const workspaceDeleteResponseSchema: z.ZodType<WorkspaceDeleteResponse> = z.object({
+  path: z.string().min(1),
+  type: z.enum(["file", "dir", "symlink"]),
+});
+
+export const moveWorkspacePathBodySchema: z.ZodType<MoveWorkspacePathBody> = z
+  .object({
+    from: z.string().min(1),
+    to: z.string().min(1),
+  })
+  .strict();
+
+export const workspaceMoveResponseSchema: z.ZodType<WorkspaceMoveResponse> = z.object({
+  from: z.string().min(1),
+  to: z.string().min(1),
+});
+
+export const makeWorkspaceDirBodySchema: z.ZodType<MakeWorkspaceDirBody> = z
+  .object({
+    path: z.string().min(1),
+  })
+  .strict();
+
+export const workspaceMkdirResponseSchema: z.ZodType<WorkspaceMkdirResponse> = z.object({
+  path: z.string().min(1),
+  created: z.boolean(),
+});
 
 export const workspaceFileWriteResponseSchema: z.ZodType<WorkspaceFileWriteResponse> = z.object({
   path: z.string().min(1),

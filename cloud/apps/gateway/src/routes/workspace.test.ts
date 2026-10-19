@@ -15,6 +15,9 @@ import {
 } from "@ovid/queue";
 import { ACTIVITY_KEY_PREFIX, createActivityTracker, createStorage } from "@ovid/storage";
 import {
+  workspaceDeleteResponseSchema,
+  workspaceMkdirResponseSchema,
+  workspaceMoveResponseSchema,
   workspaceFileRedirectSchema,
   workspaceFileResponseSchema,
   workspaceFileWriteResponseSchema,
@@ -124,6 +127,9 @@ interface StubWorker {
   tree: StubSlot;
   file: StubSlot;
   put: StubSlot;
+  del: StubSlot;
+  move: StubSlot;
+  mkdir: StubSlot;
   close(): Promise<void>;
 }
 
@@ -161,6 +167,18 @@ async function startStubWorker(): Promise<StubWorker> {
       body: { path: "a.txt", sizeBytes: 5, sha256: "bb".repeat(32) },
     },
   };
+  const del: StubSlot = {
+    queue: [],
+    fallback: { status: 200, body: { path: "a.txt", type: "file" } },
+  };
+  const move: StubSlot = {
+    queue: [],
+    fallback: { status: 200, body: { from: "a.txt", to: "b.txt" } },
+  };
+  const mkdir: StubSlot = {
+    queue: [],
+    fallback: { status: 200, body: { path: "d", created: true } },
+  };
 
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -174,11 +192,18 @@ async function startStubWorker(): Promise<StubWorker> {
         userId: headerOf(req.headers["x-ovid-user-id"]),
         body: Buffer.concat(chunks).toString("utf8"),
       });
-      const slot = url.endsWith("/tree")
+      const pathname = url.split("?")[0]!;
+      const slot = pathname.endsWith("/tree")
         ? tree
-        : req.method === "PUT"
-          ? put
-          : file;
+        : pathname.endsWith("/move")
+          ? move
+          : pathname.endsWith("/mkdir")
+            ? mkdir
+            : req.method === "PUT"
+              ? put
+              : req.method === "DELETE"
+                ? del
+                : file;
       const r = slot.queue.length > 0 ? slot.queue.shift()! : slot.fallback;
       res.writeHead(r.status, { "content-type": "application/json" });
       res.end(JSON.stringify(r.body));
@@ -192,6 +217,9 @@ async function startStubWorker(): Promise<StubWorker> {
     tree,
     file,
     put,
+    del,
+    move,
+    mkdir,
     close: () =>
       new Promise<void>((resolve) => server.close(() => resolve())),
   };
@@ -233,6 +261,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       stub.tree.queue.length = 0;
       stub.file.queue.length = 0;
       stub.put.queue.length = 0;
+      stub.del.queue.length = 0;
+      stub.move.queue.length = 0;
+      stub.mkdir.queue.length = 0;
       stub.file.fallback = DEFAULT_FILE_FALLBACK;
     });
 
@@ -745,6 +776,264 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(stub.requests.filter((r) => r.method === "PUT")).toHaveLength(2);
     });
 
+    // -- Wave 2 Studio: write preconditions (ST-005 / ST-007) -----------------
+
+    it("PUT ifMatchSha256 is forwarded; worker 409 baseline_mismatch → 409 relayed (no retry, never 503)", async () => {
+      const app = makeApp();
+      const uid = testUid("w2-put-ifmatch");
+      const sid = await createSession(app, uid);
+      await seedRow(sid, uid, "warm");
+      const sha = "ab".repeat(32);
+      stub.put.queue.push({
+        status: 409,
+        body: { error: { code: "baseline_mismatch", message: "'a.txt' changed since it was opened" } },
+      });
+
+      const res = await app.inject({
+        method: "PUT",
+        url: `/cloud/v1/sessions/${sid}/workspace/file`,
+        headers: authHeaders(uid),
+        payload: { path: "a.txt", contentUtf8: "draft", ifMatchSha256: sha },
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe("baseline_mismatch");
+      const puts = stub.requests.filter((r) => r.method === "PUT");
+      expect(puts).toHaveLength(1);
+      expect(JSON.parse(puts[0]!.body)).toEqual({
+        contentBase64: Buffer.from("draft").toString("base64"),
+        ifMatchSha256: sha,
+      });
+    });
+
+    it("PUT ifNoneMatch:'*' is forwarded; worker 409 already_exists → 409 relayed", async () => {
+      const app = makeApp();
+      const uid = testUid("w2-put-ifnone");
+      const sid = await createSession(app, uid);
+      await seedRow(sid, uid, "warm");
+      stub.put.queue.push({
+        status: 409,
+        body: { error: { code: "already_exists", message: "'README.md' already exists" } },
+      });
+
+      const res = await app.inject({
+        method: "PUT",
+        url: `/cloud/v1/sessions/${sid}/workspace/file`,
+        headers: authHeaders(uid),
+        payload: { path: "README.md", contentUtf8: "", ifNoneMatch: "*" },
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe("already_exists");
+      const put = stub.requests.find((r) => r.method === "PUT")!;
+      expect(JSON.parse(put.body)).toEqual({ contentBase64: "", ifNoneMatch: true });
+    });
+
+    it("PUT with a malformed ifMatchSha256 → 400, no stub call", async () => {
+      const app = makeApp();
+      const uid = testUid("w2-put-badsha");
+      const sid = await createSession(app, uid);
+      const res = await app.inject({
+        method: "PUT",
+        url: `/cloud/v1/sessions/${sid}/workspace/file`,
+        headers: authHeaders(uid),
+        payload: { path: "a.txt", contentUtf8: "x", ifMatchSha256: "nope" },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(stub.requests).toEqual([]);
+    });
+
+    // -- Wave 2 Studio: delete / move / mkdir (ST-008) -------------------------
+
+    it("DELETE file → proxied with path (+recursive) and relays 200 / 404 / 409 not_empty", async () => {
+      const app = makeApp();
+      const uid = testUid("w2-del");
+      const sid = await createSession(app, uid);
+      await seedRow(sid, uid, "warm");
+
+      const ok = await app.inject({
+        method: "DELETE",
+        url: `/cloud/v1/sessions/${sid}/workspace/file?path=a.txt`,
+        headers: authHeaders(uid),
+      });
+      expect(ok.statusCode).toBe(200);
+      expect(workspaceDeleteResponseSchema.parse(ok.json())).toEqual({ path: "a.txt", type: "file" });
+      expect(stub.requests[0]).toMatchObject({
+        method: "DELETE",
+        url: `/internal/sessions/${sid}/file?path=a.txt`,
+        userId: uid,
+      });
+      expect(await redis.get(`${ACTIVITY_KEY_PREFIX}${sid}`)).not.toBeNull();
+
+      stub.requests.length = 0;
+      stub.del.queue.push({
+        status: 409,
+        body: { error: { code: "not_empty", message: "'src' is not empty" } },
+      });
+      const notEmpty = await app.inject({
+        method: "DELETE",
+        url: `/cloud/v1/sessions/${sid}/workspace/file?path=src`,
+        headers: authHeaders(uid),
+      });
+      expect(notEmpty.statusCode).toBe(409);
+      expect(notEmpty.json().error.code).toBe("not_empty");
+
+      const recursive = await app.inject({
+        method: "DELETE",
+        url: `/cloud/v1/sessions/${sid}/workspace/file?path=src&recursive=true`,
+        headers: authHeaders(uid),
+      });
+      expect(recursive.statusCode).toBe(200);
+      expect(stub.requests.at(-1)!.url).toBe(
+        `/internal/sessions/${sid}/file?path=src&recursive=true`,
+      );
+
+      stub.del.queue.push({ status: 404, body: { error: { code: "not_found", message: "gone" } } });
+      const gone = await app.inject({
+        method: "DELETE",
+        url: `/cloud/v1/sessions/${sid}/workspace/file?path=gone.txt`,
+        headers: authHeaders(uid),
+      });
+      expect(gone.statusCode).toBe(404);
+    });
+
+    it("DELETE ?path=../x or missing path → 400 with NO stub call", async () => {
+      const app = makeApp();
+      const uid = testUid("w2-del-bad");
+      const sid = await createSession(app, uid);
+      for (const url of [
+        `/cloud/v1/sessions/${sid}/workspace/file?path=..%2Fx`,
+        `/cloud/v1/sessions/${sid}/workspace/file`,
+      ]) {
+        const res = await app.inject({ method: "DELETE", url, headers: authHeaders(uid) });
+        expect(res.statusCode, url).toBe(400);
+      }
+      expect(stub.requests).toEqual([]);
+    });
+
+    it("cold row: DELETE that cannot warm in time → 202 hydrating, nothing deleted", async () => {
+      const app = makeApp({ hydrateWaitMs: 300 });
+      const uid = testUid("w2-del-cold");
+      const sid = await createSession(app, uid);
+      await seedRow(sid, uid, "cold");
+      const res = await app.inject({
+        method: "DELETE",
+        url: `/cloud/v1/sessions/${sid}/workspace/file?path=a.txt`,
+        headers: authHeaders(uid),
+      });
+      expect(res.statusCode).toBe(202);
+      expect(res.json()).toEqual({ status: "hydrating" });
+      expect(stub.requests.some((r) => r.method === "DELETE")).toBe(false);
+    });
+
+    it("POST move → proxied {from,to}; 409 already_exists relayed; bad body / traversal → 400", async () => {
+      const app = makeApp();
+      const uid = testUid("w2-move");
+      const sid = await createSession(app, uid);
+      await seedRow(sid, uid, "warm");
+
+      const ok = await app.inject({
+        method: "POST",
+        url: `/cloud/v1/sessions/${sid}/workspace/move`,
+        headers: authHeaders(uid),
+        payload: { from: "a.txt", to: "b.txt" },
+      });
+      expect(ok.statusCode).toBe(200);
+      expect(workspaceMoveResponseSchema.parse(ok.json())).toEqual({ from: "a.txt", to: "b.txt" });
+      expect(JSON.parse(stub.requests[0]!.body)).toEqual({ from: "a.txt", to: "b.txt" });
+      expect(stub.requests[0]!.url).toBe(`/internal/sessions/${sid}/move`);
+
+      stub.move.queue.push({
+        status: 409,
+        body: { error: { code: "already_exists", message: "'b.txt' already exists" } },
+      });
+      const clash = await app.inject({
+        method: "POST",
+        url: `/cloud/v1/sessions/${sid}/workspace/move`,
+        headers: authHeaders(uid),
+        payload: { from: "a.txt", to: "b.txt" },
+      });
+      expect(clash.statusCode).toBe(409);
+      expect(clash.json().error.code).toBe("already_exists");
+
+      stub.requests.length = 0;
+      for (const payload of [{ from: "a" }, { from: "../x", to: "y" }, { from: "a", to: "b", x: 1 }]) {
+        const res = await app.inject({
+          method: "POST",
+          url: `/cloud/v1/sessions/${sid}/workspace/move`,
+          headers: authHeaders(uid),
+          payload,
+        });
+        expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+      }
+      expect(stub.requests).toEqual([]);
+    });
+
+    it("POST mkdir → proxied {path}; 409 already_exists relayed", async () => {
+      const app = makeApp();
+      const uid = testUid("w2-mkdir");
+      const sid = await createSession(app, uid);
+      await seedRow(sid, uid, "warm");
+
+      const ok = await app.inject({
+        method: "POST",
+        url: `/cloud/v1/sessions/${sid}/workspace/mkdir`,
+        headers: authHeaders(uid),
+        payload: { path: "d" },
+      });
+      expect(ok.statusCode).toBe(200);
+      expect(workspaceMkdirResponseSchema.parse(ok.json())).toEqual({ path: "d", created: true });
+      expect(JSON.parse(stub.requests[0]!.body)).toEqual({ path: "d" });
+
+      stub.mkdir.queue.push({
+        status: 409,
+        body: { error: { code: "already_exists", message: "'d' already exists" } },
+      });
+      const clash = await app.inject({
+        method: "POST",
+        url: `/cloud/v1/sessions/${sid}/workspace/mkdir`,
+        headers: authHeaders(uid),
+        payload: { path: "d" },
+      });
+      expect(clash.statusCode).toBe(409);
+      expect(clash.json().error.code).toBe("already_exists");
+    });
+
+    // -- Wave 2 Studio: subtree of a pruned folder (ST-015) -------------------
+
+    it("GET tree?path=sub → live subtree from the worker; on a cold row → 409 not_warm (no worker call)", async () => {
+      const app = makeApp();
+      const uid = testUid("w2-subtree");
+      const sid = await createSession(app, uid);
+      await seedRow(sid, uid, "warm");
+
+      const res = await app.inject({
+        method: "GET",
+        url: `/cloud/v1/sessions/${sid}/workspace/tree?path=src`,
+        headers: authHeaders(uid),
+      });
+      expect(res.statusCode).toBe(200);
+      expect(workspaceTreeResponseSchema.parse(res.json()).source).toBe("live");
+      expect(stub.requests[0]!.url).toBe(`/internal/sessions/${sid}/tree?path=src`);
+
+      const sidCold = await createSession(app, uid);
+      await seedRow(sidCold, uid, "cold");
+      stub.requests.length = 0;
+      const cold = await app.inject({
+        method: "GET",
+        url: `/cloud/v1/sessions/${sidCold}/workspace/tree?path=src`,
+        headers: authHeaders(uid),
+      });
+      expect(cold.statusCode).toBe(409);
+      expect(cold.json().error.code).toBe("not_warm");
+      expect(stub.requests).toEqual([]);
+
+      const bad = await app.inject({
+        method: "GET",
+        url: `/cloud/v1/sessions/${sid}/workspace/tree?path=..%2Fx`,
+        headers: authHeaders(uid),
+      });
+      expect(bad.statusCode).toBe(400);
+    });
+
     // -- hydrate / hibernate controls ----------------------------------------
 
     it("POST hydrate state table: warm→200 warm, no-row→200 warm, cold→202 + manual job, hydrating→202, hibernating→409", async () => {
@@ -875,9 +1164,17 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       const stranger = testUid("t12-stranger");
       const sid = await createSession(app, owner);
 
-      const calls: Array<{ method: "GET" | "POST"; url: string }> = [
+      const calls: Array<{ method: "GET" | "POST" | "DELETE"; url: string; payload?: object }> = [
         { method: "GET", url: `/cloud/v1/sessions/${sid}/workspace/tree` },
+        { method: "GET", url: `/cloud/v1/sessions/${sid}/workspace/tree?path=src` },
         { method: "GET", url: `/cloud/v1/sessions/${sid}/workspace/file?path=a.txt` },
+        { method: "DELETE", url: `/cloud/v1/sessions/${sid}/workspace/file?path=a.txt` },
+        {
+          method: "POST",
+          url: `/cloud/v1/sessions/${sid}/workspace/move`,
+          payload: { from: "a", to: "b" },
+        },
+        { method: "POST", url: `/cloud/v1/sessions/${sid}/workspace/mkdir`, payload: { path: "d" } },
         { method: "POST", url: `/cloud/v1/sessions/${sid}/workspace/hydrate` },
         { method: "POST", url: `/cloud/v1/sessions/${sid}/workspace/hibernate` },
       ];
@@ -886,6 +1183,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
           method: call.method,
           url: call.url,
           headers: authHeaders(stranger),
+          ...(call.payload !== undefined ? { payload: call.payload } : {}),
         });
         expect(res.statusCode, call.url).toBe(404);
         expect(res.json().error.code).toBe("not_found");

@@ -28,16 +28,22 @@ import { join } from "node:path";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import type { Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
+import type { UiManifest } from "@ovid/shared";
 import {
   FileNotInArchiveError,
   FileTooLargeError,
   KeyLayoutError,
   NotFoundError,
+  PreconditionFailedError,
   StorageError,
   WorkspaceStateError,
   assertSafeRelPath,
   contentTypeFor,
+  deleteWorkspacePath,
+  liveSubtree,
   liveTree,
+  makeWorkspaceDir,
+  moveWorkspacePath,
   readWorkspaceFile,
   registerArtifact,
   resolveWorkspaceDir,
@@ -112,6 +118,17 @@ function decodeBase64(input: unknown): Buffer | null {
   return buf;
 }
 
+/** The manifest of a workspace that does not exist yet (ST-003). */
+function emptyManifest(): UiManifest {
+  return {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    truncated: false,
+    totals: { files: 0, dirs: 0, bytes: 0 },
+    roots: [],
+  };
+}
+
 async function isDirectory(path: string): Promise<boolean> {
   try {
     return (await stat(path)).isDirectory();
@@ -134,6 +151,11 @@ function sendEngineError(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof FileTooLargeError) {
     return fail(reply, 413, "file_too_large", err.message);
   }
+  if (err instanceof PreconditionFailedError) {
+    // baseline_mismatch | already_exists | not_empty — the gateway relays
+    // these 409s verbatim (only `not_warm` drives its re-warm retry).
+    return fail(reply, 409, err.code, err.message);
+  }
   if (err instanceof StorageError) {
     return fail(reply, 500, "internal", err.message);
   }
@@ -155,6 +177,11 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
     runs: deps.runs,
     eventMirror: deps.eventMirror,
   };
+  const opsDeps = {
+    sandboxUid: deps.sandboxUid,
+    workspacesRoot: deps.workspacesRoot,
+    activity: deps.activity,
+  };
 
   // -- internal-token gate (every route) ----------------------------------
   app.addHook("preHandler", async (req, reply) => {
@@ -168,11 +195,17 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
     }
   });
 
-  // -- GET /internal/sessions/:sid/tree -----------------------------------
-  app.get<{ Params: { sid: string } }>(
+  // -- GET /internal/sessions/:sid/tree[?path=sub] ------------------------
+  // ST-003: the agent workspace dir only exists once the agent has run a
+  // tool for this user. A workspace that was never created is EMPTY, not an
+  // error — 200 with an empty manifest so Studio renders its empty state.
+  // `?path=` (ST-015) lists one folder of a warm workspace (the "load the
+  // rest" of a pruned manifest directory); a missing folder is 404.
+  app.get<{ Params: { sid: string }; Querystring: { path?: string } }>(
     "/internal/sessions/:sid/tree",
     async (req, reply) => {
       const userId = String(req.headers["x-ovid-user-id"]);
+      const sub = req.query.path;
       try {
         const dir = await resolveWorkspaceDir(
           deps.sandboxUid,
@@ -180,10 +213,81 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
           userId,
           req.params.sid,
         );
+        if (typeof sub === "string" && sub !== "") {
+          const rel = assertSafeRelPath(sub);
+          if (!(await isDirectory(dir))) {
+            return fail(reply, 404, "not_found", `'${rel}' is not present in the workspace`);
+          }
+          return { tree: await liveSubtree(dir, rel) };
+        }
         if (!(await isDirectory(dir))) {
-          return fail(reply, 404, "not_found", `workspace ${req.params.sid} is not warm`);
+          return { tree: emptyManifest() };
         }
         return { tree: await liveTree(dir) };
+      } catch (err) {
+        return sendEngineError(reply, err);
+      }
+    },
+  );
+
+  // -- DELETE /internal/sessions/:sid/file?path=...[&recursive=true] ------
+  app.delete<{ Params: { sid: string }; Querystring: { path?: string; recursive?: string } }>(
+    "/internal/sessions/:sid/file",
+    async (req, reply) => {
+      const userId = String(req.headers["x-ovid-user-id"]);
+      const rawPath = req.query.path;
+      if (typeof rawPath !== "string" || rawPath === "") {
+        return fail(reply, 400, "bad_request", "query parameter 'path' is required");
+      }
+      try {
+        return await deleteWorkspacePath(
+          opsDeps,
+          { userId, sessionId: req.params.sid, path: rawPath },
+          { recursive: req.query.recursive === "true" },
+        );
+      } catch (err) {
+        return sendEngineError(reply, err);
+      }
+    },
+  );
+
+  // -- POST /internal/sessions/:sid/move {from,to} ------------------------
+  app.post<{ Params: { sid: string } }>(
+    "/internal/sessions/:sid/move",
+    async (req, reply) => {
+      const userId = String(req.headers["x-ovid-user-id"]);
+      const body = req.body as { from?: unknown; to?: unknown } | null | undefined;
+      if (typeof body?.from !== "string" || typeof body?.to !== "string") {
+        return fail(reply, 400, "bad_request", "body must be {from, to}");
+      }
+      try {
+        return await moveWorkspacePath(opsDeps, {
+          userId,
+          sessionId: req.params.sid,
+          from: body.from,
+          to: body.to,
+        });
+      } catch (err) {
+        return sendEngineError(reply, err);
+      }
+    },
+  );
+
+  // -- POST /internal/sessions/:sid/mkdir {path} --------------------------
+  app.post<{ Params: { sid: string } }>(
+    "/internal/sessions/:sid/mkdir",
+    async (req, reply) => {
+      const userId = String(req.headers["x-ovid-user-id"]);
+      const body = req.body as { path?: unknown } | null | undefined;
+      if (typeof body?.path !== "string" || body.path === "") {
+        return fail(reply, 400, "bad_request", "body must be {path}");
+      }
+      try {
+        return await makeWorkspaceDir(opsDeps, {
+          userId,
+          sessionId: req.params.sid,
+          path: body.path,
+        });
       } catch (err) {
         return sendEngineError(reply, err);
       }
@@ -330,17 +434,29 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
         return fail(reply, 400, "bad_request", "query parameter 'path' is required");
       }
 
-      const body = req.body as { contentBase64?: unknown } | null | undefined;
+      const body = req.body as
+        | { contentBase64?: unknown; ifMatchSha256?: unknown; ifNoneMatch?: unknown }
+        | null
+        | undefined;
       const content = decodeBase64(body?.contentBase64);
       if (content === null) {
         return fail(reply, 400, "bad_request", "contentBase64 must be valid base64");
       }
+      const ifMatchSha256 = body?.ifMatchSha256;
+      if (ifMatchSha256 !== undefined && (typeof ifMatchSha256 !== "string" || !/^[0-9a-f]{64}$/.test(ifMatchSha256))) {
+        return fail(reply, 400, "bad_request", "ifMatchSha256 must be a lowercase sha256 hex digest");
+      }
+      const ifNoneMatch = body?.ifNoneMatch === true || body?.ifNoneMatch === "*";
 
       try {
         const out = await writeWorkspaceFile(
           hydrateDeps,
           { userId, sessionId: req.params.sid, path: rawPath },
           content,
+          {
+            ...(typeof ifMatchSha256 === "string" ? { ifMatchSha256 } : {}),
+            ...(ifNoneMatch ? { ifNoneMatch: true } : {}),
+          },
         );
         return {
           path: out.path,

@@ -1164,10 +1164,29 @@ Directory localWorkspaceDirFor(String id) {
 }
 
 /// Default workspace deleter (the sandbox's userland deleter is gone).
-Future<void> _deleteLocalWorkspace(String id) async {
+///
+/// Deletes ONLY the app-owned scratch dir (`<systemTemp>/ovid_workspaces/<id>`)
+/// and never follows a user-pinned `workspaceFolder` (CH-026 / CT-019): a
+/// folder the user picked on shared storage (e.g. /sdcard/Documents/project)
+/// was deleted recursively on "Reset all data" and on chat delete, against
+/// the dialog's own promise "Not deleted: folders you picked outside the app".
+Future<void> _deleteLocalWorkspace(String id) => deleteLocalScratchWorkspace(id);
+
+/// See [_deleteLocalWorkspace]; public for the regression test.
+@visibleForTesting
+Future<void> deleteLocalScratchWorkspace(String id) async {
   try {
-    final dir = localWorkspaceDirFor(id);
-    if (dir.existsSync()) await dir.delete(recursive: true);
+    final safe = id.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    final root = Directory('${Directory.systemTemp.path}/ovid_workspaces');
+    final dir = Directory('${root.path}/$safe');
+    if (safe.isEmpty || safe == '.' || safe == '..') return;
+    if (!dir.existsSync()) return;
+    // A symlink planted at the scratch path must never redirect the delete.
+    if (FileSystemEntity.isLinkSync(dir.path)) {
+      await Link(dir.path).delete();
+      return;
+    }
+    await dir.delete(recursive: true);
   } catch (_) {
     // Reset must never fail on a missing/locked scratch dir.
   }

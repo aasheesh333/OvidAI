@@ -37,6 +37,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   readFile,
@@ -64,6 +65,7 @@ import {
   FileNotInArchiveError,
   FileTooLargeError,
   NotFoundError,
+  PreconditionFailedError,
   StorageError,
   WorkspaceStateError,
 } from "./errors.js";
@@ -369,7 +371,7 @@ async function loadIndex(
  * Checking before `mkdir -p` is load-bearing — a symlinked component inside
  * the workspace must not let directory creation land outside it.
  */
-async function assertParentInsideWorkspace(realDir: string, target: string): Promise<void> {
+export async function assertParentInsideWorkspace(realDir: string, target: string): Promise<void> {
   let probe = target;
   for (;;) {
     try {
@@ -736,10 +738,43 @@ export async function readWorkspaceFile(
 // writeWorkspaceFile — warm-only, atomic temp+rename
 // ---------------------------------------------------------------------------
 
+/** Optional preconditions for {@link writeWorkspaceFile}. */
+export interface WriteWorkspaceFileOpts {
+  /** The file must exist with exactly these bytes (sha256 hex), else "baseline_mismatch". */
+  ifMatchSha256?: string;
+  /** Create-only: the path must not exist yet, else "already_exists". */
+  ifNoneMatch?: boolean;
+}
+
+async function lstatOrNull(p: string): Promise<Awaited<ReturnType<typeof lstat>> | null> {
+  try {
+    return await lstat(p);
+  } catch {
+    return null;
+  }
+}
+
+/** Throws "baseline_mismatch" unless `dest` is a regular file hashing to `expected`. */
+async function assertCurrentSha(dest: string, rel: string, expected: string): Promise<void> {
+  const st = await lstatOrNull(dest);
+  if (st === null || !st.isFile()) {
+    throw new PreconditionFailedError(`'${rel}' no longer exists in the workspace`, {
+      code: "baseline_mismatch",
+    });
+  }
+  const current = sha256Hex(await readFile(dest));
+  if (current !== expected.toLowerCase()) {
+    throw new PreconditionFailedError(`'${rel}' changed since it was opened`, {
+      code: "baseline_mismatch",
+    });
+  }
+}
+
 export async function writeWorkspaceFile(
   deps: HydrateDeps,
   ref: { userId: string; sessionId: string; path: string },
   content: Buffer,
+  opts: WriteWorkspaceFileOpts = {},
 ): Promise<{ path: string; sizeBytes: number; sha256Hex: string }> {
   const rel = assertSafeRelPath(ref.path);
   const dir = await resolveWorkspaceDir(
@@ -762,6 +797,15 @@ export async function writeWorkspaceFile(
   // write outside the workspace. Checked BEFORE mkdir so no directory is
   // created through an escaping symlink.
   await assertParentInsideWorkspace(realDir, parent);
+
+  // Preconditions are checked BEFORE mkdir (a refused write leaves no new
+  // folders behind) and again right before the bytes land (below).
+  if (opts.ifMatchSha256 !== undefined) {
+    await assertCurrentSha(dest, rel, opts.ifMatchSha256);
+  }
+  if (opts.ifNoneMatch === true && (await lstatOrNull(dest)) !== null) {
+    throw new PreconditionFailedError(`'${rel}' already exists`, { code: "already_exists" });
+  }
   await mkdir(parent, { recursive: true });
 
   // Cheap du accounting: the delta from the file being replaced. Never a
@@ -778,7 +822,30 @@ export async function writeWorkspaceFile(
   try {
     await writeFile(tmp, content);
     await chmod(tmp, 0o644);
-    await rename(tmp, dest);
+    if (opts.ifNoneMatch === true) {
+      // Create-only: link(2) fails with EEXIST atomically, so a file that
+      // appeared after the check above is never clobbered.
+      try {
+        await link(tmp, dest);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new PreconditionFailedError(`'${rel}' already exists`, {
+            code: "already_exists",
+          });
+        }
+        throw err;
+      }
+      await rm(tmp, { force: true });
+    } else {
+      // Compare-and-swap: re-hash right before the rename so the window for
+      // a concurrent agent write is the rename itself, not a client round
+      // trip (ST-007). Agent tools write from another process, so this is
+      // the tightest guarantee available without a cross-process lock.
+      if (opts.ifMatchSha256 !== undefined) {
+        await assertCurrentSha(dest, rel, opts.ifMatchSha256);
+      }
+      await rename(tmp, dest);
+    }
   } catch (err) {
     await rm(tmp, { force: true }).catch(() => {});
     throw err;

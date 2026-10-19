@@ -1,22 +1,27 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
+import '../core/cloud/cloud_rest.dart';
 import '../core/cloud/studio_files.dart';
 import '../core/cloud/studio_remote_client.dart';
-import '../core/state.dart';
 import '../core/theme.dart';
 import 'studio_errors.dart';
+import 'studio_file_actions.dart';
 import 'studio_layout.dart';
 import 'widgets/aether_primitives.dart';
 
 // ── Studio file tree ────────────────────────────────────────────────────────
-// The explorer now binds to the P7 workspace manifest (StudioRemoteClient)
-// instead of the deleted local repo cache. Widget chrome survives; only the
-// data binding and the removed staging menu changed.
-//
-// Directories are derived from the server's nested FileNode tree (the built
-// `GET …/workspace/tree` response), so an empty directory is still a
-// directory and a failed fetch is a visible, retryable row.
+// The explorer binds to the user's cloud workspace manifest
+// (StudioRemoteClient). Directories come from the server's nested FileNode
+// tree, so an empty directory is still a directory and a failed file fetch is
+// a visible, retryable row. Rows open on tap; a long-press (or right-click)
+// opens rename / delete / new-file-here (ST-008). Folders the <5 KB manifest
+// pruned get a "Show N more" row that lists them from the live workspace
+// (ST-015).
+
+/// What one tree row is.
+enum StudioTreeRowKind { file, directory, more }
 
 /// One row of the tree.
 class StudioTreeNode {
@@ -25,9 +30,12 @@ class StudioTreeNode {
     required this.name,
     required this.isDirectory,
     required this.depth,
+    this.kind,
+    this.hiddenCount = 0,
   });
 
-  /// Full repository path, normalised (no leading `/`, no empty segments).
+  /// Full workspace path, normalised (no leading `/`, no empty segments). For
+  /// a [StudioTreeRowKind.more] row: the pruned folder's path.
   final String path;
 
   /// Leaf name shown in the row.
@@ -35,23 +43,45 @@ class StudioTreeNode {
 
   final bool isDirectory;
 
-  /// Indent level; 0 is the repository root.
+  /// Indent level; 0 is the workspace root.
   final int depth;
 
+  final StudioTreeRowKind? kind;
+
+  /// Entries the manifest left out of a pruned folder (a "more" row).
+  final int hiddenCount;
+
+  StudioTreeRowKind get rowKind =>
+      kind ??
+      (isDirectory ? StudioTreeRowKind.directory : StudioTreeRowKind.file);
+
+  bool get isMore => rowKind == StudioTreeRowKind.more;
+
   @override
-  String toString() => 'StudioTreeNode($path, dir=$isDirectory, d=$depth)';
+  String toString() => 'StudioTreeNode($path, dir=$isDirectory, d=$depth'
+      '${isMore ? ', more=$hiddenCount' : ''})';
 }
 
 String _leaf(String path) => path.substring(path.lastIndexOf('/') + 1);
 
+/// Entries of a folder the manifest did not include: siblings it dropped to
+/// stay under budget (`omitted`), or the whole content of a folder pruned at
+/// the depth cap (rollups with no children).
+int _hiddenEntries(FileNode dir) {
+  if (dir.omitted > 0) return dir.omitted;
+  if (dir.children.isEmpty) return (dir.files ?? 0) + (dir.dirs ?? 0);
+  return 0;
+}
+
 /// Flattens the server's nested manifest tree into rows, revealing the
-/// children of every directory in [expandedDirs]. Empty directories and
-/// directory rollups from a pruned manifest are preserved: the server's tree
-/// is authoritative (unlike the deleted path-set heuristic).
+/// children of every directory in [expandedDirs]. An expanded folder the
+/// manifest pruned ends with a "more" row — unless it is in [loadedDirs]
+/// (already listed from the live workspace).
 List<StudioTreeNode> flattenStudioTree(
   FileNode? root,
-  Set<String> expandedDirs,
-) {
+  Set<String> expandedDirs, {
+  Set<String> loadedDirs = const <String>{},
+}) {
   assert(() {
     debugStudioTreeBuilds++;
     return true;
@@ -74,6 +104,17 @@ List<StudioTreeNode> flattenStudioTree(
       ));
       if (child.isDir && expandedDirs.contains(child.path)) {
         walk(child, depth + 1);
+        final hidden = _hiddenEntries(child);
+        if (hidden > 0 && !loadedDirs.contains(child.path)) {
+          out.add(StudioTreeNode(
+            path: child.path,
+            name: 'Show $hidden more',
+            isDirectory: false,
+            depth: depth + 1,
+            kind: StudioTreeRowKind.more,
+            hiddenCount: hidden,
+          ));
+        }
       }
     }
   }
@@ -86,11 +127,15 @@ List<StudioTreeNode> flattenStudioTree(
 @visibleForTesting
 int debugStudioTreeBuilds = 0;
 
+/// Tree-row type size (ST-020: 12px mono was too small on a phone).
+const double kStudioTreeFontSize = 13.5;
+
 /// The cloud workspace file explorer bound to [StudioRemoteClient].
 class StudioFileTree extends StatefulWidget {
   const StudioFileTree({super.key, this.sessionId});
 
-  /// Explicit server-session binding (tests); null falls back to [AppState].
+  /// The Studio bucket key; null is the user's workspace
+  /// ([kStudioWorkspaceKey]).
   final String? sessionId;
 
   @override
@@ -104,42 +149,49 @@ class _StudioFileTreeState extends State<StudioFileTree> {
 
   Object? _treeKey;
   Set<String> _expandedAtBuild = const <String>{};
+  Set<String> _loadedAtBuild = const <String>{};
   List<StudioTreeNode> _tree = const [];
 
-  String get _sid => widget.sessionId ?? AppState.I.activeSession?.id ?? '';
+  String get _sid => widget.sessionId ?? kStudioWorkspaceKey;
   StudioRemoteClient get _remote => StudioRemoteClient.I;
 
   List<StudioTreeNode> _nodes() {
     final snapshot = _remote.snapshotFor(_sid);
+    final loaded = {
+      for (final dir in _expanded)
+        if (_remote.subtreeLoaded(_sid, dir)) dir,
+    };
     // The snapshot's IDENTITY does not change when the user expands a folder,
     // so the expansion set is part of the cache key. Keying on the snapshot
     // alone made a tap flip the chevron but never render the children.
     if (identical(snapshot, _treeKey) &&
-        setEquals(_expanded, _expandedAtBuild)) {
+        setEquals(_expanded, _expandedAtBuild) &&
+        setEquals(loaded, _loadedAtBuild)) {
       return _tree;
     }
     _treeKey = snapshot;
     _expandedAtBuild = Set<String>.of(_expanded);
-    return _tree = flattenStudioTree(snapshot?.root, _expanded);
+    _loadedAtBuild = loaded;
+    return _tree =
+        flattenStudioTree(snapshot?.root, _expanded, loadedDirs: loaded);
   }
 
   @override
   void initState() {
     super.initState();
-    // Opening the tree is the explicit refresh: the manifest is the <100 ms
-    // SLA path on the server. StudioScreen already refreshes the manifest on
-    // open; only fetch here when the tree is used standalone (tests) or the
-    // screen's refresh has not started yet. This keeps one GET per open.
+    // StudioScreen refreshes on open; a tree used standalone (tests) fetches
+    // here. refreshWorkspace is single-flight, so this never doubles a GET.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       if (_remote.snapshotFor(_sid) == null && !_remote.treeLoading(_sid)) {
-        _remote.syncStudioTabs(_sid);
+        _remote.refreshWorkspace(_sid);
       }
     });
   }
 
-  /// Opens a file, or toggles a directory.
+  /// Opens a file, toggles a directory, or loads a pruned folder.
   Future<void> _activate(StudioTreeNode node) async {
+    if (node.isMore) return _loadMore(node.path);
     if (node.isDirectory) {
       setState(() {
         if (!_expanded.remove(node.path)) _expanded.add(node.path);
@@ -165,8 +217,35 @@ class _StudioFileTreeState extends State<StudioFileTree> {
         _loading.remove(node.path);
         _failed.add(node.path);
       });
-      showStudioToast(context, StudioFailure.of(error).message, error: true);
+      showStudioToast(context, StudioFailure.messageOf(error), error: true);
     }
+  }
+
+  Future<void> _loadMore(String dir) async {
+    try {
+      await _remote.loadStudioSubtree(_sid, dir);
+    } catch (error) {
+      if (!mounted) return;
+      final waking = error is CloudApiException && error.code == 'not_warm';
+      showStudioToast(
+        context,
+        waking
+            ? 'Waking your workspace to list this folder — try again in a '
+                'moment.'
+            : StudioFailure.messageOf(error),
+        error: !waking,
+      );
+    }
+  }
+
+  void _showActions(StudioTreeNode node) {
+    if (node.isMore) return;
+    showStudioPathActions(
+      context,
+      _sid,
+      path: node.path,
+      isFolder: node.isDirectory,
+    );
   }
 
   @override
@@ -185,16 +264,20 @@ class _StudioFileTreeState extends State<StudioFileTree> {
           ),
           child: CustomScrollView(
             slivers: [
-              const SliverToBoxAdapter(child: _TreeHeader()),
+              SliverToBoxAdapter(
+                child: _TreeHeader(
+                  onNewFile: () => studioNewFile(context, _sid),
+                  onNewFolder: () => studioNewFolder(context, _sid),
+                ),
+              ),
               SliverToBoxAdapter(
                 child: Divider(height: 1, thickness: 1, color: Aether.hairline),
               ),
               if (nodes.isEmpty)
                 SliverToBoxAdapter(
                   child: _TreeEmpty(
-                    loading: _remote.treeLoading(_sid),
-                    error: _remote.treeError(_sid),
-                    onRetry: () => _remote.syncStudioTabs(_sid),
+                    loading: _remote.treeLoading(_sid) && snapshot == null,
+                    loaded: snapshot != null,
                   ),
                 )
               else
@@ -204,12 +287,9 @@ class _StudioFileTreeState extends State<StudioFileTree> {
                 ),
               SliverToBoxAdapter(
                 child: _TreeFooter(
-                  state: snapshot?.state ?? 'unknown',
                   ready: snapshot != null,
                   count: snapshot?.fileCount ?? 0,
                   truncated: snapshot?.truncated ?? false,
-                  loading: _remote.treeLoading(_sid),
-                  onRefresh: () => _remote.syncStudioTabs(_sid),
                 ),
               ),
             ],
@@ -220,16 +300,23 @@ class _StudioFileTreeState extends State<StudioFileTree> {
   }
 
   Widget _row(StudioTreeNode node, String? active) {
+    if (node.isMore) {
+      return _MoreRow(
+        node: node,
+        loading: _remote.subtreeLoading(_sid, node.path),
+        onActivate: () => _activate(node),
+      );
+    }
     final selected = !node.isDirectory && active == node.path;
-    final failed = _failed.contains(node.path);
-    final loading = _loading.contains(node.path);
     return _FileTreeRow(
       node: node,
       selected: selected,
-      failed: failed,
-      loading: loading,
+      failed: _failed.contains(node.path),
+      loading: _loading.contains(node.path),
+      dirty: !node.isDirectory && _remote.isStudioFileDirty(_sid, node.path),
       expanded: _expanded.contains(node.path),
       onActivate: () => _activate(node),
+      onActions: () => _showActions(node),
     );
   }
 }
@@ -246,16 +333,20 @@ class _FileTreeRow extends StatefulWidget {
     required this.selected,
     required this.failed,
     required this.loading,
+    required this.dirty,
     required this.expanded,
     required this.onActivate,
+    required this.onActions,
   });
 
   final StudioTreeNode node;
   final bool selected;
   final bool failed;
   final bool loading;
+  final bool dirty;
   final bool expanded;
   final VoidCallback onActivate;
+  final VoidCallback onActions;
 
   @override
   State<_FileTreeRow> createState() => _FileTreeRowState();
@@ -295,7 +386,9 @@ class _FileTreeRowState extends State<_FileTreeRow> {
         : node.isDirectory
             ? '${node.name}, folder, '
                 '${widget.expanded ? 'expanded' : 'collapsed'}'
-            : '${node.name}, file${selected ? ', open' : ''}';
+            : '${node.name}, file'
+                '${widget.dirty ? ', unsaved changes' : ''}'
+                '${selected ? ', open' : ''}';
 
     // Selected > hover > plain. Hover tint only when not already selected so
     // the accent overlay never gets swapped out from under the pointer.
@@ -312,79 +405,185 @@ class _FileTreeRowState extends State<_FileTreeRow> {
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
       cursor: SystemMouseCursors.click,
-      child: StudioTapTarget(
-        onTap: widget.onActivate,
-        label: label,
-        selected: selected,
-        minWidth: 0,
-        child: LayoutBuilder(builder: (context, constraints) => AnimatedContainer(
-          duration: const Duration(milliseconds: 110),
-          curve: Curves.easeOut,
-          color: background,
-          // Deep directory nesting must still leave room for the filename.
-          // The full path remains available through a tooltip.
+      child: Listener(
+        // Right-click / secondary tap opens the same actions as long-press.
+        onPointerDown: (event) {
+          if (event.kind == PointerDeviceKind.mouse &&
+              event.buttons == kSecondaryMouseButton) {
+            widget.onActions();
+          }
+        },
+        child: Semantics(
+          onLongPressHint: 'show file actions',
+          child: StudioTapTarget(
+            onTap: widget.onActivate,
+            onLongPress: widget.onActions,
+            label: label,
+            selected: selected,
+            minWidth: 0,
+            child: LayoutBuilder(
+              builder: (context, constraints) => AnimatedContainer(
+                duration: const Duration(milliseconds: 110),
+                curve: Curves.easeOut,
+                color: background,
+                // Deep directory nesting must still leave room for the
+                // filename. The full path remains available through a tooltip.
+                padding: EdgeInsets.only(
+                    left: indent.clamp(
+                        8.0, (constraints.maxWidth * 0.25).clamp(8.0, 80.0)),
+                    right: 8),
+                alignment: Alignment.centerLeft,
+                child: Row(
+                  children: [
+                    Icon(icon, size: 16, color: iconColor),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Tooltip(
+                        message: node.path,
+                        // Hover only: a touch long-press belongs to the row's
+                        // file actions, not to the tooltip.
+                        triggerMode: TooltipTriggerMode.manual,
+                        child: Text(
+                          node.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: kStudioTreeFontSize,
+                            fontFamily: Aether.mono,
+                            fontFamilyFallback: kStudioMonoFallback,
+                            fontWeight:
+                                selected ? FontWeight.w700 : FontWeight.w500,
+                            color: selected
+                                ? Aether.accent
+                                : failed
+                                    ? Aether.danger
+                                    : node.isDirectory
+                                        ? Aether.text
+                                        : Aether.textMuted,
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (widget.dirty)
+                      ExcludeSemantics(
+                        child: Padding(
+                          padding: const EdgeInsets.only(left: 6),
+                          child: Icon(Icons.circle,
+                              size: 7, color: Aether.warnLight),
+                        ),
+                      ),
+                    if (node.isDirectory)
+                      Icon(
+                        widget.expanded
+                            ? Icons.expand_more
+                            : Icons.chevron_right,
+                        size: 16,
+                        color: Aether.textFaint,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// "Show N more" under a folder the manifest pruned (ST-015).
+class _MoreRow extends StatelessWidget {
+  const _MoreRow({
+    required this.node,
+    required this.loading,
+    required this.onActivate,
+  });
+
+  final StudioTreeNode node;
+  final bool loading;
+  final VoidCallback onActivate;
+
+  @override
+  Widget build(BuildContext context) {
+    final indent = 8.0 + node.depth * 14.0;
+    final noun = node.hiddenCount == 1 ? 'item' : 'items';
+    return StudioTapTarget(
+      onTap: loading ? null : onActivate,
+      label: 'Show ${node.hiddenCount} more $noun in ${_leaf(node.path)}',
+      minWidth: 0,
+      child: LayoutBuilder(
+        builder: (context, constraints) => Container(
           padding: EdgeInsets.only(
-              left: indent.clamp(8.0, (constraints.maxWidth * 0.25).clamp(8.0, 80.0)),
+              left: indent.clamp(
+                  8.0, (constraints.maxWidth * 0.25).clamp(8.0, 80.0)),
               right: 8),
           alignment: Alignment.centerLeft,
           child: Row(
             children: [
-              Icon(icon, size: 15, color: iconColor),
+              if (loading)
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else
+                Icon(Icons.more_horiz, size: 16, color: Aether.accent),
               const SizedBox(width: 6),
               Expanded(
-                child: Tooltip(message: node.path, child: Text(
-                  node.name,
+                child: Text(
+                  'Show ${node.hiddenCount} more $noun',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontFamily: Aether.mono,
-                    fontFamilyFallback: kStudioMonoFallback,
-                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                    color: selected
-                        ? Aether.accent
-                        : failed
-                            ? Aether.danger
-                            : node.isDirectory
-                                ? Aether.text
-                                : Aether.textMuted,
-                  ),
-                )),
-              ),
-              if (node.isDirectory)
-                Icon(
-                  widget.expanded ? Icons.expand_more : Icons.chevron_right,
-                  size: 15,
-                  color: Aether.textFaint,
+                  style: TextStyle(fontSize: 13, color: Aether.accent),
                 ),
+              ),
             ],
           ),
-        )),
+        ),
       ),
     );
   }
 }
 
 class _TreeHeader extends StatelessWidget {
-  const _TreeHeader();
+  const _TreeHeader({required this.onNewFile, required this.onNewFolder});
+
+  final VoidCallback onNewFile;
+  final VoidCallback onNewFolder;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 12, 10, 10),
+      padding: const EdgeInsets.fromLTRB(14, 2, 2, 2),
       child: Row(
         children: [
           Icon(Icons.folder_copy_outlined, size: 14, color: Aether.textFaint),
           const SizedBox(width: 8),
-          Semantics(
-            header: true,
-            child: Text(
-              'FILES',
-              style: AetherType.label.copyWith(
-                letterSpacing: 1.4,
-                color: Aether.textFaint,
+          Expanded(
+            child: Semantics(
+              header: true,
+              child: Text(
+                'FILES',
+                style: AetherType.label.copyWith(
+                  letterSpacing: 1.4,
+                  color: Aether.textFaint,
+                ),
               ),
             ),
+          ),
+          StudioIconButton(
+            key: studioTreeNewFileKey,
+            icon: Icons.note_add_outlined,
+            tooltip: 'New file',
+            iconSize: 18,
+            onPressed: onNewFile,
+          ),
+          StudioIconButton(
+            key: studioTreeNewFolderKey,
+            icon: Icons.create_new_folder_outlined,
+            tooltip: 'New folder',
+            iconSize: 18,
+            onPressed: onNewFolder,
           ),
         ],
       ),
@@ -392,16 +591,17 @@ class _TreeHeader extends StatelessWidget {
   }
 }
 
+/// Tree header actions (tests target them).
+const Key studioTreeNewFileKey = Key('studio-tree-new-file');
+const Key studioTreeNewFolderKey = Key('studio-tree-new-folder');
+
+/// Empty tree body. Load errors are NOT repeated here — the screen's single
+/// status strip owns them (ST-010).
 class _TreeEmpty extends StatelessWidget {
-  const _TreeEmpty({
-    required this.loading,
-    required this.error,
-    required this.onRetry,
-  });
+  const _TreeEmpty({required this.loading, required this.loaded});
 
   final bool loading;
-  final String? error;
-  final VoidCallback onRetry;
+  final bool loaded;
 
   @override
   Widget build(BuildContext context) {
@@ -417,98 +617,47 @@ class _TreeEmpty extends StatelessWidget {
         ),
       );
     }
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              error == null
-                  ? 'No files yet —\nthe cloud workspace appears here.'
-                  : 'Could not load the workspace tree.',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 12.5,
-                height: 1.6,
-                color: Aether.textFaint,
-              ),
-            ),
-            if (error != null) ...[
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: onRetry,
-                icon: const Icon(Icons.refresh, size: 16),
-                label: const Text('Retry'),
-              ),
-            ],
-          ],
-        ),
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Text(
+        loaded
+            ? 'No files yet. Ask Ovid in chat to create some, or add one '
+                'with New file.'
+            : 'Your files appear here.',
+        textAlign: TextAlign.center,
+        style: TextStyle(fontSize: 13, height: 1.5, color: Aether.textMuted),
       ),
     );
   }
 }
 
+/// File count and the pruned-manifest hint. Not a live region: it changes on
+/// every refresh and must not re-announce (ST-020).
 class _TreeFooter extends StatelessWidget {
   const _TreeFooter({
-    required this.state,
     required this.ready,
     required this.count,
     required this.truncated,
-    required this.loading,
-    required this.onRefresh,
   });
 
-  final String state;
   final bool ready;
   final int count;
   final bool truncated;
-  final bool loading;
-  final VoidCallback onRefresh;
 
   @override
   Widget build(BuildContext context) {
-    final text = !ready
-        ? (loading ? 'Loading workspace…' : 'Not connected')
-        : '$state · $count files${truncated ? ' · pruned' : ''}';
+    if (!ready) return const SizedBox.shrink();
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         border: Border(top: BorderSide(color: Aether.hairline)),
       ),
-      child: Semantics(
-        liveRegion: true,
-        label: text,
-        child: Row(
-          children: [
-            Icon(
-              state == 'warm'
-                  ? Icons.cloud_done_outlined
-                  : state == 'hydrating'
-                      ? Icons.hourglass_top_rounded
-                      : Icons.cloud_off_outlined,
-              size: 15,
-              color: state == 'warm'
-                  ? Aether.success
-                  : state == 'hydrating'
-                      ? Aether.warn
-                      : Aether.textFaint,
-            ),
-            const SizedBox(width: 7),
-            Expanded(
-              child: Text(
-                text,
-                style: TextStyle(fontSize: 12, color: Aether.textMuted),
-              ),
-            ),
-            StudioIconButton(
-              icon: Icons.refresh,
-              tooltip: 'Refresh workspace',
-              iconSize: 16,
-              onPressed: loading ? null : onRefresh,
-            ),
-          ],
-        ),
+      child: Text(
+        truncated
+            ? '$count ${count == 1 ? 'file' : 'files'} · large folders load '
+                'when you open them'
+            : '$count ${count == 1 ? 'file' : 'files'}',
+        style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
       ),
     );
   }

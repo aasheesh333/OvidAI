@@ -9,21 +9,17 @@ import 'package:path_provider/path_provider.dart';
 import 'diag.dart';
 
 // ── Studio draft safety (screen review 06 §1, §4) ───────────────────────────
-// Unsaved editor buffers and uncommitted API-mode edits used to live only in
-// memory: Android process death (common while the user is in the browser for
-// GitHub sign-in or in the file picker) silently threw them away. This store
+// Unsaved editor buffers used to live only in memory: Android process death
+// (common while the user switches apps) silently threw them away. This store
 // keeps them in an app-private directory so they come back on the next open.
 
 /// Above this many characters a file opens in the read-only viewer first:
 /// a single `TextField` lays the whole text out as one paragraph.
 const int kStudioViewerThreshold = 256 * 1024;
 
-/// Hard cap for editing on device. Larger files are never loaded into the
-/// editor ("Too large — open in terminal").
+/// Hard cap for editing in Studio. Larger files are never loaded into the
+/// editor ("Too large to edit in Studio — ask the agent").
 const int kStudioEditHardCap = 1024 * 1024;
-
-/// Size above which UTF-8 decoding moves off the UI isolate.
-const int kStudioDecodeInIsolate = 200 * 1024;
 
 const int _sniffWindow = 8 * 1024;
 
