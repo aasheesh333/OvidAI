@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
 import 'package:ovid_ai/core/cloud/usage_history.dart';
 import 'package:ovid_ai/core/cloud_usage_store.dart';
+import 'package:ovid_ai/core/diag.dart';
 import 'package:ovid_ai/core/format.dart';
 import 'package:ovid_ai/core/image_studio.dart';
 import 'package:ovid_ai/core/ovid_cloud_service.dart';
@@ -506,7 +507,9 @@ void _openChat(BuildContext context, String serverId) {
   String id = serverId;
   try {
     id = CloudSessionStore.I.resolveLocalSessionId(serverId);
-  } catch (_) {}
+  } catch (e) {
+    Diag.swallow('usage.open_chat', e);
+  }
   if (AppState.I.sessionById(id) == null) return;
   AppState.I.selectSession(id);
   Navigator.of(context).popUntil((route) => route.isFirst);

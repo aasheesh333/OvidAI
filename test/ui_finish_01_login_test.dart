@@ -150,7 +150,7 @@ void main() {
         await _pumpGate(tester, service,
             size: viewport.size, scale: viewport.scale);
         expect(find.byType(OvidWordmark), findsOneWidget);
-        expect(find.textContaining('new account is created automatically'),
+        expect(find.textContaining('account is created the first time you sign in'),
             findsOneWidget);
         expect(find.byType(TextField), findsNothing);
         expect(find.text('Protected app'), findsNothing);

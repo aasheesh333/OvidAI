@@ -139,13 +139,20 @@ void main() {
     // Confirm path.
     await swipeAndPump();
     await tester.tap(find.widgetWithText(TextButton, 'Delete'));
-    await tester.pumpAndSettle();
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
     // Optimistic delete with Undo (PR-3b F-058): hidden at once, removed
     // durably once the Undo window closes.
     expect(AppState.I.isSessionDeletionPending('s1'), isTrue);
     expect(find.text('Cancel me'), findsNothing);
     await tester.pump(const Duration(seconds: 6));
-    await tester.pumpAndSettle();
+    // An emptied list may show the first-sync spinner (SH-017): bounded.
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    await tester.pump();
     expect(AppState.I.sessions.any((s) => s.id == 's1'), isFalse);
   });
 }
