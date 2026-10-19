@@ -178,6 +178,7 @@ class FakeStoreRest extends CloudRestClient {
     String sessionId, {
     int limit = 50,
     String? before,
+    bool withEvents = false,
   }) async {
     pageCalls.add((sessionId: sessionId, before: before, limit: limit));
     return CloudPage<MessageDto>(

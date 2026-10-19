@@ -46,6 +46,7 @@ class _EmptyRest extends CloudRestClient {
     String sessionId, {
     int limit = 50,
     String? before,
+    bool withEvents = false,
   }) async =>
       const CloudPage<MessageDto>(items: [], nextCursor: null);
 }

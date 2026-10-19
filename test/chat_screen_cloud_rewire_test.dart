@@ -115,6 +115,7 @@ class FakeChatRest extends CloudRestClient {
     String sessionId, {
     int limit = 50,
     String? before,
+    bool withEvents = false,
   }) async {
     paged.add((sessionId: sessionId, before: before, limit: limit));
     if (before != null && olderPageError != null) throw olderPageError!;
