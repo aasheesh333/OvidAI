@@ -28,6 +28,8 @@ import { randomUUID } from "node:crypto";
 
 import { messages, runs, type Db } from "@ovid/db";
 
+import { createDeltaCoalescer, deltaCoalesceMsFromEnv } from "./deltaCoalescer.js";
+
 import {
   isBudgetBoundary,
   newGuardState,
@@ -206,6 +208,11 @@ export interface LoopDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Injectable clock seam (P1 parity; the loop itself is clock-free). */
   now?: () => Date;
+  /**
+   * message_delta merge window (capacity wave): first delta immediate, then
+   * at most one event per window. Default OVID_DELTA_COALESCE_MS / 50 ms.
+   */
+  deltaCoalesceMs?: number;
 }
 
 /**
@@ -647,6 +654,7 @@ export async function runAgentLoop(
 ): Promise<LoopResult> {
   const sleep = deps.sleep ?? defaultSleep;
   const abortSignal = rt.signal ?? new AbortController().signal;
+  const coalesceMs = deps.deltaCoalesceMs ?? deltaCoalesceMsFromEnv(process.env);
   const { sessionId, runId, userId } = job;
   // Stale-sweep heartbeat: every emitted event proves the run is live, but an
   // UPDATE per emit would dwarf the event traffic itself — so the per-run
@@ -860,26 +868,30 @@ export async function runAgentLoop(
       await runs.bumpAttempt(deps.db, runId);
 
       // Per-attempt delta chain (P1 parity): order matches arrival order and
-      // a failed attempt's text is NEVER folded into the next attempt.
-      let flushed: Promise<void> = Promise.resolve();
+      // a failed attempt's text is NEVER folded into the next attempt. The
+      // coalescer merges deltas (first one immediate, then ≤1 event per
+      // window) so per-token events stop dominating redis/Postgres/WS load.
+      const deltas = createDeltaCoalescer(
+        async (text) => {
+          await emit("message_delta", { runId, text });
+        },
+        { windowMs: coalesceMs },
+      );
       try {
         const response = await transport.stream(
           request,
           {
             onTextDelta(text: string): void {
-              flushed = flushed
-                .then(() => emit("message_delta", { runId, text }))
-                .then(() => undefined);
-              flushed.catch(() => {});
+              deltas.push(text);
             },
           },
           abortSignal,
         );
-        await flushed;
+        await deltas.drain();
         if (isCancelled(rt)) return { kind: "cancelled" };
         return { kind: "ok", response };
       } catch (err) {
-        await flushed.catch(() => {});
+        await deltas.drain().catch(() => {});
         if (isCancelled(rt)) return { kind: "cancelled" };
         const message = messageOf(err);
 

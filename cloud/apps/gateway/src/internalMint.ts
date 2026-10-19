@@ -91,3 +91,30 @@ export function createInternalMintProvisioner(
     },
   };
 }
+
+/**
+ * @deprecated Admission is never cacheable. Mint's ensure endpoint combines
+ * setup with live ban, deletion-fence, quota and rate-limit decisions.
+ * Keep the old config/parser API compatible, but it cannot suppress a call.
+ * Any future setup-only cache must sit AFTER authoritative admission.
+ */
+export const DEFAULT_MINT_ENSURE_CACHE_MS = 0;
+/** Legacy knob: validated for compatibility, never used to cache admission. */
+export function mintEnsureCacheMsFromEnv(env: NodeJS.ProcessEnv): number {
+  const raw = env.OVID_MINT_ENSURE_CACHE_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_MINT_ENSURE_CACHE_MS;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0 || n > 600_000) {
+    throw new Error(`OVID_MINT_ENSURE_CACHE_MS must be an integer 0..600000, got: ${raw}`);
+  }
+  return n;
+}
+
+export function withEnsureKeyCache(
+  inner: InternalMintProvisioner,
+  _opts: { ttlMs: number; maxEntries?: number; now?: () => number },
+): InternalMintProvisioner {
+  // In particular, no single-flight: each send must make its own spending
+  // admission decision, including concurrent sends from the same account.
+  return inner;
+}

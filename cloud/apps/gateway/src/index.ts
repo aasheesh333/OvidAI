@@ -9,7 +9,7 @@ export * from "./wsPty.js";
 import { initializeApp } from "firebase-admin/app";
 import { Redis } from "ioredis";
 import type { FastifyInstance } from "fastify";
-import { createDb, newId, byokKeysRepo, imagesRepo, sharesRepo } from "@ovid/db";
+import { createDb, dbPoolOptionsFromEnv, newId, byokKeysRepo, imagesRepo, sharesRepo } from "@ovid/db";
 import {
   createCloudCleanup,
   createFirebaseAdmin,
@@ -62,7 +62,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
   // the Python share router is unavailable without it, not misconfigured.
   const shareBaseUrl = env.OVID_SHARE_BASE_URL?.trim() ?? "";
 
-  const db = createDb(cfg.databaseUrl);
+  // Pool size: OVID_DB_POOL_MAX / OVID_DB_IDLE_TIMEOUT_S (capacity wave);
+  // unset keeps the postgres.js default (10).
+  const db = createDb(cfg.databaseUrl, dbPoolOptionsFromEnv(env));
   // createQueues takes a connection OPTIONS OBJECT — a bare URL string would
   // be spread into garbage options by withBlockingSafeRetries. P5 Task 15:
   // opt into the plugin-installs queue (the gateway enqueues install/
@@ -252,6 +254,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       // Wave 1a: the send's `model` is validated against the mint's
       // published model groups (same mint redis as the key read).
       modelCatalog: createMintModelCatalog(redisMint),
+      // Mint ensures setup AND authoritative per-send admission (quota,
+      // account revocation/deletion and rate limits); never cache its verdict.
       mint: createInternalMintProvisioner(cfg.internalMintUrl, cfg.internalApiSecret),
       // Session event log shares the queue Redis; the worker (Task 9) appends
       // to the same instance, so gateway replay/live sees every event.

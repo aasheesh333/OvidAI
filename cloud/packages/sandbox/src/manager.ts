@@ -196,10 +196,46 @@ async function defaultDiskUsage(
   return { freeGb, warmGb: warmBytes / GB };
 }
 
+/**
+ * Capacity wave 2026-10-19: the default disk guard walks the WHOLE workspaces
+ * tree (a readdir + stat per file of every user). It ran on every cold
+ * attach, so a ramp of N new users cost O(N × total files) — profiled at
+ * >60 % of the worker's CPU during an 1800-user ramp, and the reason a first
+ * run took ~8 s to its first token. The guard is a coarse pressure check, so
+ * a result up to `ttlMs` old is fine; concurrent attaches share ONE walk.
+ */
+export const DISK_USAGE_CACHE_MS = 30_000;
+
+export function createCachedDiskUsage(
+  compute: () => Promise<{ freeGb: number; warmGb: number }>,
+  ttlMs: number = DISK_USAGE_CACHE_MS,
+  now: () => number = Date.now,
+): () => Promise<{ freeGb: number; warmGb: number }> {
+  let cached: { at: number; value: { freeGb: number; warmGb: number } } | null = null;
+  let inFlight: Promise<{ freeGb: number; warmGb: number }> | null = null;
+  return () => {
+    if (cached !== null && now() - cached.at < ttlMs) return Promise.resolve(cached.value);
+    if (inFlight !== null) return inFlight;
+    const started = now();
+    inFlight = compute()
+      .then((value) => {
+        cached = { at: started, value };
+        return value;
+      })
+      .finally(() => {
+        inFlight = null;
+      });
+    return inFlight;
+  };
+}
+
 export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
   const { config, cgroups, quota, launcher, rootfs } = deps;
   const clock = deps.clock ?? (() => new Date());
-  const diskUsage = deps.diskUsage ?? (() => defaultDiskUsage(config.workspacesRoot));
+  // Only the expensive DEFAULT is cached; an injected diskUsage (tests, a
+  // future incremental accountant) is called as-is.
+  const diskUsage =
+    deps.diskUsage ?? createCachedDiskUsage(() => defaultDiskUsage(config.workspacesRoot));
 
   const handles = new Map<string, ManagedHandle>();
   /** Concurrent attach for the same userId dedupes onto one create. */

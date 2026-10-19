@@ -9,6 +9,54 @@ export interface EventLog {
 
 const DEFAULT_MAX_LEN = 10_000;
 
+/**
+ * Time-based retention (capacity wave 2026-10-19). MAXLEN bounds ONE stream,
+ * but nothing bounded the NUMBER of streams: every session that ever ran kept
+ * up to 10k events in redis-q forever, and redis-q is `noeviction` — so the
+ * event log grew without bound until writes started failing. Each append now
+ * refreshes a TTL on the stream key: an idle session's live tail expires and
+ * history is served from the Postgres mirror (the REST events route), which
+ * is already the source of truth beyond the stream's trim window.
+ */
+export const DEFAULT_STREAM_TTL_SEC = 48 * 3600;
+
+/** OVID_EVENT_STREAM_TTL_S (60..30 days, default 48 h; 0 disables). */
+export function streamTtlSecFromEnv(env: NodeJS.ProcessEnv): number {
+  const raw = env.OVID_EVENT_STREAM_TTL_S;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_STREAM_TTL_SEC;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || (n !== 0 && (n < 60 || n > 30 * 86_400))) {
+    throw new Error(`OVID_EVENT_STREAM_TTL_S must be 0 or an integer 60..2592000, got: ${raw}`);
+  }
+  return n;
+}
+
+/**
+ * XADD + EXPIRE + PUBLISH in ONE round trip, atomically. The published
+ * envelope is the stored JSON with `"seq":"<id>"` spliced in before the
+ * closing brace (ARGV[2] is always a JSON object from JSON.stringify).
+ *   KEYS[1] stream, KEYS[2] channel
+ *   ARGV[1] maxLen, ARGV[2] stored JSON, ARGV[3] ttl seconds (0 = none)
+ */
+const APPEND_LUA = `
+local id = redis.call('XADD', KEYS[1], 'MAXLEN', ARGV[1], '*', 'e', ARGV[2])
+local ttl = tonumber(ARGV[3])
+if ttl > 0 then redis.call('EXPIRE', KEYS[1], ttl) end
+local body = ARGV[2]
+redis.call('PUBLISH', KEYS[2], string.sub(body, 1, -2) .. ',"seq":"' .. id .. '"}')
+return id
+`;
+
+type AppendCapable = Redis & {
+  ovidEventAppend(
+    stream: string,
+    channel: string,
+    maxLen: string,
+    stored: string,
+    ttl: string,
+  ): Promise<string>;
+};
+
 const streamKey = (sessionId: string): string => `sess:${sessionId}:events`;
 const liveChannel = (sessionId: string): string => `sess:${sessionId}:live`;
 
@@ -23,8 +71,16 @@ function decodeEntry(id: string, fields: string[]): SessionEvent {
   return { ...stored, seq: id };
 }
 
-export function createRedisEventLog(redis: Redis, opts?: { maxLen?: number }): EventLog {
-  const maxLen = opts?.maxLen ?? DEFAULT_MAX_LEN;
+export function createRedisEventLog(
+  redis: Redis,
+  opts?: { maxLen?: number; ttlSec?: number },
+): EventLog {
+  const maxLen = String(opts?.maxLen ?? DEFAULT_MAX_LEN);
+  const ttl = String(opts?.ttlSec ?? streamTtlSecFromEnv(process.env));
+  const r = redis as AppendCapable;
+  if (typeof r.ovidEventAppend !== "function") {
+    r.defineCommand("ovidEventAppend", { numberOfKeys: 2, lua: APPEND_LUA });
+  }
 
   return {
     async append(sessionId, type, payload) {
@@ -39,21 +95,19 @@ export function createRedisEventLog(redis: Redis, opts?: { maxLen?: number }): E
       // node are never trimmed at all (verified on redis 7.4: 12 appends with
       // "~ 5" leave XLEN 12). Exact trimming keeps the plan's trim contract
       // at any scale; its extra cost is a bounded listpack split per XADD.
-      const id = await redis.xadd(
+      // XADD → EXPIRE → PUBLISH run as one script (one round trip, atomic),
+      // and the envelope is serialized once.
+      const id = await r.ovidEventAppend(
         streamKey(sessionId),
-        "MAXLEN",
-        String(maxLen),
-        "*",
-        "e",
+        liveChannel(sessionId),
+        maxLen,
         JSON.stringify(stored),
+        ttl,
       );
-      if (id === null) {
-        throw new Error(`XADD returned null for stream ${streamKey(sessionId)}`);
+      if (typeof id !== "string" || id === "") {
+        throw new Error(`XADD returned no id for stream ${streamKey(sessionId)}`);
       }
-      const event: SessionEvent = { ...stored, seq: id };
-      // Fan out the same envelope (seq filled) to live subscribers.
-      await redis.publish(liveChannel(sessionId), JSON.stringify(event));
-      return event;
+      return { ...stored, seq: id };
     },
 
     async readSince(sessionId, lastSeq, limit) {

@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { Redis } from "ioredis";
-import { createDb, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
+import { createDb, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
 import {
   createCloudCleanup,
   createFirebaseAdmin,
@@ -402,7 +402,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     console.error("[worker] unhandled rejection (logged, not fatal)", err);
   });
 
-  const db = createDb(cfg.databaseUrl);
+  // Pool size: OVID_DB_POOL_MAX / OVID_DB_IDLE_TIMEOUT_S (capacity wave);
+  // unset keeps the postgres.js default (10).
+  const db = createDb(cfg.databaseUrl, dbPoolOptionsFromEnv(env));
   // The session event ledger shares the QUEUE Redis — the SAME instance the
   // gateway reads replay/live from (Task 8 concern), so every worker append is
   // visible to subscribed clients.

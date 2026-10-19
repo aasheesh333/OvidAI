@@ -288,6 +288,9 @@ export async function startMockLlmServer(
   let current = fallback;
   let gate = deferred();
   let chatRequests = 0;
+  let activeStreams = 0;
+  let peakActiveStreams = 0;
+  let completedStreams = 0;
   /** HTTP control gates by id; in-process `arm()` gates stay outside this map. */
   const remoteGates = new Map<string, Deferred>();
   let gateSeq = 0;
@@ -386,13 +389,18 @@ export async function startMockLlmServer(
         // Snapshot per request: a later arm() never mutates an in-flight stream.
         const script = { ...current, deltas: [...current.deltas] };
         const requestGate = gate;
-        await stream(
-          res,
-          script,
-          requestGate,
-          shouldEmitToolCall(script, body),
-          shouldGate(script, body) ? script.gateAfterDeltas : null,
-        );
+        activeStreams += 1;
+        peakActiveStreams = Math.max(peakActiveStreams, activeStreams);
+        try {
+          await stream(
+            res,
+            script,
+            requestGate,
+            shouldEmitToolCall(script, body),
+            shouldGate(script, body) ? script.gateAfterDeltas : null,
+          );
+          if (res.writableEnded) completedStreams += 1;
+        } finally { activeStreams -= 1; }
         return;
       }
 
@@ -442,6 +450,9 @@ export async function startMockLlmServer(
           gateAfterDeltas: current.gateAfterDeltas,
           gateMarker: current.gateMarker,
           requestsSeen: chatRequests,
+          activeStreams,
+          peakActiveStreams,
+          completedStreams,
           heldRequests,
           totalHeldRequests,
         });

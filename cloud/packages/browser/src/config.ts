@@ -227,7 +227,12 @@ export function loadBrowserEngineConfig(raw: NodeJS.ProcessEnv): BrowserEngineCo
     maxLiveBrowsers: positiveInt(raw, "MAX_LIVE_BROWSERS") ?? 4,
     tier1FallbackContexts: positiveInt(raw, "MAX_TIER1_FALLBACK_CONTEXTS") ?? 2,
     idleEvictMs: positiveInt(raw, "BROWSER_IDLE_EVICT_MS") ?? 15_000,
-    maxTier1Processes: positiveInt(raw, "MAX_TIER1_PROCESSES") ?? 8,
+    // The deploy env files (worker.env / .env.staging.example) spell this
+    // OVID_MAX_TIER1_PROCESSES; the loader only read MAX_TIER1_PROCESSES, so
+    // the configured 128 was silently ignored and the default 8 applied
+    // (capacity wave 2026-10-19). Both spellings are honoured; OVID_ wins.
+    maxTier1Processes:
+      positiveInt(raw, "OVID_MAX_TIER1_PROCESSES") ?? positiveInt(raw, "MAX_TIER1_PROCESSES") ?? 8,
     tier1TimeoutMs: positiveInt(raw, "TIER1_TIMEOUT_MS") ?? 20_000,
     maxActiveScreencasts: positiveInt(raw, "MAX_ACTIVE_SCREENCASTS") ?? 3,
     screencastLoadMax: positiveNumber(raw, "OVID_SCREENCAST_LOAD_MAX") ?? 6.0,

@@ -36,6 +36,7 @@ export * from "./tools/goalsTodos.js";
 export * from "./guards.js";
 export * from "./steering.js";
 export * from "./loop.js";
+export * from "./deltaCoalescer.js";
 export * from "./engine.js";
 // ── P3 Tasks 17–20 barrel completion (T16 review I3) ───────────────────────
 // The real hook/skill/command/compaction/subagent engines were landed by
