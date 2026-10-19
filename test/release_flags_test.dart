@@ -39,6 +39,15 @@ void main() {
     );
   });
 
+  test('no build enables App Check (OVID_APPCHECK) while off-Play', () {
+    // Owner decision 2026-10-19: the app is distributed outside Google Play,
+    // so Play Integrity cannot attest it. Enabling OVID_APPCHECK=true here
+    // must be a deliberate change made together with the gateway's
+    // OVID_APPCHECK_MODE=required and the mint's APPCHECK_ENABLED=true.
+    final workflow = File('.github/workflows/build.yml').readAsStringSync();
+    expect(workflow.contains('OVID_APPCHECK=true'), isFalse);
+  });
+
   test(
     'release defines reach AccountService',
     () {

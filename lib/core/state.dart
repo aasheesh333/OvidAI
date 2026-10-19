@@ -1346,10 +1346,12 @@ class AppState extends ChangeNotifier {
   void registerProductionAccountFeatures({FirebaseService? firebaseService}) {
     if (collaboration != null) return;
     final firebase = firebaseService ?? FirebaseService.I;
+    // Null unless OVID_APPCHECK=true (then real Play Integrity attestation,
+    // activated through the injected FirebaseService).
     final appCheck = CloudAppCheck(
       initializeFirebase: firebase.initialize,
       activatedByFirebase: () => firebase.accountService.enabled,
-    );
+    ).provider;
     collaboration = CollaborationProduction(
       // Each participant's turns run on THEIR device, model and key — except
       // on the thin client, where collab execution is read-only for now.
@@ -1358,7 +1360,7 @@ class AppState extends ChangeNotifier {
       accountReady: () => firebase.isAvailable && firebase.accountReady,
       currentUid: () => firebase.uid,
       accessToken: () => firebase.getIdToken(),
-      appCheckToken: appCheck.getToken,
+      appCheckToken: appCheck,
     );
     final collab = collaboration!;
     _accountLifecycle = AccountLifecycleIntegration.production(

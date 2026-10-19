@@ -113,12 +113,8 @@ class ContentReportService {
 
   factory ContentReportService.production() => ContentReportService(
     idToken: () => FirebaseService.I.getIdToken(),
-    appCheck: _cloudAppCheck.getToken,
-  );
-
-  static final _cloudAppCheck = CloudAppCheck(
-    initializeFirebase: () => FirebaseService.I.initialize(),
-    activatedByFirebase: () => FirebaseService.I.accountService.enabled,
+    // Null unless OVID_APPCHECK=true: no header and no requirement.
+    appCheck: CloudAppCheck.shared.provider,
   );
 
   final String baseUrl;

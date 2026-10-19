@@ -148,6 +148,7 @@ void main() {
         boots++;
       },
       activatedByFirebase: () => FirebaseService.I.accountService.enabled,
+      enabled: true,
     );
 
     expect(await check.getToken(), 'play-integrity-attestation');

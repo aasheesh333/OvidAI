@@ -38,6 +38,7 @@ void main() {
       final check = CloudAppCheck(
         initializeFirebase: () => boot.future,
         activatedByFirebase: () => false,
+        enabled: true,
       );
       final first = check.getToken();
       final second = check.getToken();
@@ -63,6 +64,7 @@ void main() {
       final check = CloudAppCheck(
         initializeFirebase: () async {},
         activatedByFirebase: () => true,
+        enabled: true,
       );
       token = null;
       await expectLater(
@@ -93,10 +95,44 @@ void main() {
           if (++attempts == 1) throw StateError('boot failed');
         },
         activatedByFirebase: () => false,
+        enabled: true,
       );
       await expectLater(check.getToken(), throwsA(isA<Exception>()));
       expect(await check.getToken(), 'sdk-attestation');
       expect(attempts, 2);
     },
   );
+
+  test('OVID_APPCHECK defaults to false (no App Check unless opted in)', () {
+    expect(kOvidAppCheck, isFalse);
+    expect(CloudAppCheck.shared.enabled, isFalse);
+    expect(CloudAppCheck.shared.provider, isNull);
+  });
+
+  test(
+    'disabled: never initializes, activates or requests a token',
+    () async {
+      var boots = 0;
+      final check = CloudAppCheck(
+        initializeFirebase: () async => boots++,
+        activatedByFirebase: () => false,
+        enabled: false,
+      );
+      expect(check.provider, isNull);
+      expect(await check.getToken(), isNull);
+      expect(await check.getToken(forceRefresh: true), isNull);
+      expect(boots, 0);
+      expect(calls, isEmpty);
+    },
+  );
+
+  test('enabled: provider is the token getter', () async {
+    final check = CloudAppCheck(
+      initializeFirebase: () async {},
+      activatedByFirebase: () => true,
+      enabled: true,
+    );
+    expect(check.provider, isNotNull);
+    expect(await check.provider!(), 'sdk-attestation');
+  });
 }

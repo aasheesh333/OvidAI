@@ -131,14 +131,16 @@ class CollaborationClient {
   CollaborationClient({
     required this.baseUri,
     required this.accessToken,
-    required this.appCheckToken,
+    this.appCheckToken,
     this.requestTimeout = const Duration(seconds: 30),
     http.Client? httpClient,
   }) : assert(requestTimeout > Duration.zero), _httpClient = httpClient ?? http.Client();
 
   final Uri baseUri;
   final Future<String?> Function() accessToken;
-  final Future<String?> Function() appCheckToken;
+  /// Null when App Check is off (`OVID_APPCHECK`, the default): no header
+  /// is sent and none is required. When set, a token is mandatory.
+  final Future<String?> Function()? appCheckToken;
   final http.Client _httpClient;
   final Duration requestTimeout;
 
@@ -425,11 +427,13 @@ class CollaborationClient {
     final String? appCheck;
     try {
       token = await accessToken();
-      appCheck = await appCheckToken();
+      appCheck = await appCheckToken?.call();
     } catch (_) {
       throw const CollaborationClientException('Credentials are temporarily unavailable.', code: 'credential_unavailable');
     }
-    if (token == null || token.trim().isEmpty || appCheck == null || appCheck.trim().isEmpty) {
+    if (token == null ||
+        token.trim().isEmpty ||
+        (appCheckToken != null && (appCheck == null || appCheck.trim().isEmpty))) {
       throw const CollaborationClientException('Credentials are temporarily unavailable.', code: 'credential_unavailable');
     }
     if (abort.isCompleted) throw const CollaborationClientException('Collaboration request timed out.', code: 'request_timeout');
@@ -446,7 +450,9 @@ class CollaborationClient {
       'Accept': 'application/json',
       'Cache-Control': 'no-store',
     };
-    headers['X-Firebase-AppCheck'] = appCheck;
+    if (appCheck != null && appCheck.trim().isNotEmpty) {
+      headers['X-Firebase-AppCheck'] = appCheck;
+    }
     if (body != null) headers['Content-Type'] = 'application/json';
     try {
       final response = await _httpClient.send(

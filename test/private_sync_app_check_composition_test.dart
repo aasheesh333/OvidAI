@@ -12,7 +12,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setupFirebaseCoreMocks();
   test(
-    'registered collaboration uses real CloudAppCheck activation when account flag is off',
+    'registered collaboration never touches App Check when OVID_APPCHECK is off',
     () async {
       SharedPreferences.setMockInitialValues({});
       FlutterSecureStorage.setMockInitialValues({});
@@ -26,9 +26,6 @@ void main() {
               if (call.method == 'FirebaseAppCheck#getToken') {
                 return 'sdk-attestation';
               }
-              if (call.method == 'FirebaseAppCheck#registerTokenListener') {
-                return 'token-events';
-              }
               return null;
             },
           );
@@ -37,18 +34,12 @@ void main() {
         initializeApp: () async {},
         configure: () async {},
       );
-      expect(firebase.accountService.enabled, false);
       app.registerProductionAccountFeatures(firebaseService: firebase);
-      expect(await app.collaboration!.appCheckToken(), 'sdk-attestation');
-      final activations = calls.where(
-        (c) => c.method == 'FirebaseAppCheck#activate',
-      );
-      expect(activations, hasLength(1));
-      expect(activations.single.arguments['androidProvider'], 'playIntegrity');
-      expect(
-        calls.where((c) => c.method == 'FirebaseAppCheck#getToken'),
-        hasLength(1),
-      );
+      // OVID_APPCHECK defaults to false: no provider is wired at all, so the
+      // collaboration client sends no X-Firebase-AppCheck header and never
+      // fails a request for lack of one.
+      expect(app.collaboration!.appCheckToken, isNull);
+      expect(calls, isEmpty);
       await app.collaboration!.release();
       AppState.resetTestInstance();
     },

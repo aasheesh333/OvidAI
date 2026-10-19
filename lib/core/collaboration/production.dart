@@ -154,7 +154,7 @@ class CollaborationProduction extends ChangeNotifier {
     required this.accountReady,
     required this.currentUid,
     required this.accessToken,
-    required this.appCheckToken,
+    this.appCheckToken,
     this.scheduler,
     http.Client Function()? httpClientFactory,
   }) : httpClientFactory = httpClientFactory ?? http.Client.new;
@@ -166,7 +166,8 @@ class CollaborationProduction extends ChangeNotifier {
   final bool Function() accountReady;
   final String? Function() currentUid;
   final Future<String?> Function() accessToken;
-  final Future<String?> Function() appCheckToken;
+  /// Null when App Check is off (`OVID_APPCHECK`, the default).
+  final Future<String?> Function()? appCheckToken;
   final http.Client Function() httpClientFactory;
   final CollaborationTimerScheduler? scheduler;
   String? _uid;
@@ -278,7 +279,9 @@ class CollaborationProduction extends ChangeNotifier {
       baseUri: _configuredHttpsEndpoint(endpoint)!,
       httpClient: _http,
       accessToken: () => _token(accessToken, epoch),
-      appCheckToken: () => _token(appCheckToken, epoch),
+      appCheckToken: appCheckToken == null
+          ? null
+          : () => _token(appCheckToken!, epoch),
     );
     _start();
     notifyListeners();

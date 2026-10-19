@@ -110,7 +110,7 @@ void main() {
       account.ready = false;
       pending.complete('token');
       expect(await token, isNull);
-      expect(await result.client.appCheckToken(), isNull);
+      expect(await result.client.appCheckToken!(), isNull);
     },
   );
 

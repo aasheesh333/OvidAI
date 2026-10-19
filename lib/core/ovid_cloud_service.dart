@@ -447,10 +447,8 @@ class OvidCloudService extends ChangeNotifier {
     return result;
   }
 
-  final _appCheck = CloudAppCheck(
-    initializeFirebase: () => FirebaseService.I.initialize(),
-    activatedByFirebase: () => FirebaseService.I.accountService.enabled,
-  );
+  /// The shared instance: returns null (no header) unless OVID_APPCHECK=true.
+  CloudAppCheck get _appCheck => CloudAppCheck.shared;
 
   Future<String> _appCheckToken({bool forceRefresh = false}) async {
     try {

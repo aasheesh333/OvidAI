@@ -46,7 +46,7 @@ class CollaborationCompositionFactory {
     required Uri baseUri,
     required http.Client httpClient,
     required Future<String?> Function() accessToken,
-    required Future<String?> Function() appCheckToken,
+    Future<String?> Function()? appCheckToken,
     required String sessionToken,
     required CollaborationStoreProvider store,
     required CollaborationTimerScheduler scheduler,
@@ -75,11 +75,13 @@ class CollaborationCompositionFactory {
         final token = await accessToken();
         return owns() ? token : null;
       },
-      appCheckToken: () async {
-        if (!owns()) return null;
-        final token = await appCheckToken();
-        return owns() ? token : null;
-      },
+      appCheckToken: appCheckToken == null
+          ? null
+          : () async {
+              if (!owns()) return null;
+              final token = await appCheckToken();
+              return owns() ? token : null;
+            },
       httpClient: httpClient,
     );
     final openedStore = await store(accountId);

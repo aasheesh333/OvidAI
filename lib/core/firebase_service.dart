@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'diag.dart';
+import 'cloud_app_check.dart';
 import 'account_service.dart';
 import 'account_session.dart';
 import 'state.dart';
@@ -92,7 +93,8 @@ class FirebaseService extends ChangeNotifier {
   String? get accountError => _accountSession.error;
   late final accountService = AccountService(
     idToken: (force) => getIdToken(forceRefresh: force),
-    appCheck: () => FirebaseAppCheck.instance.getToken(),
+    // OVID_APPCHECK off (default): no provider, no header, no requirement.
+    appCheck: kOvidAppCheck ? () => FirebaseAppCheck.instance.getToken() : null,
     currentUid: () => uid,
   );
   AccountDeletion? lastDeletionReceipt;
@@ -179,7 +181,8 @@ class FirebaseService extends ChangeNotifier {
     try {
       await _restoreConsent();
 
-      if (accountService.enabled) {
+      // Only a build with OVID_APPCHECK=true ever activates App Check.
+      if (kOvidAppCheck && accountService.enabled) {
         await FirebaseAppCheck.instance.activate(
           androidProvider: AndroidProvider.playIntegrity,
         );

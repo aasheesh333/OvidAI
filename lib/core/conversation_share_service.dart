@@ -145,15 +145,12 @@ class ConversationShareService {
       'OVID_PUBLIC_SHARE_ORIGIN',
       defaultValue: 'https://ovidsi.com',
     ),
-    appCheck: _cloudAppCheck.getToken,
+    // Null unless OVID_APPCHECK=true: no header and no requirement.
+    appCheck: CloudAppCheck.shared.provider,
     currentUid: () =>
         FirebaseService.I.accountReady ? FirebaseService.I.uid : null,
   );
 
-  static final _cloudAppCheck = CloudAppCheck(
-    initializeFirebase: () => FirebaseService.I.initialize(),
-    activatedByFirebase: () => FirebaseService.I.accountService.enabled,
-  );
   final String baseUrl;
   final String? publicOrigin;
   final Future<String?> Function() idToken;

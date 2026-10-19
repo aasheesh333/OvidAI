@@ -53,7 +53,7 @@ class AccountDeletion {
 class AccountService {
   AccountService({
     required this.idToken,
-    required this.appCheck,
+    this.appCheck,
     this.currentUid,
     this.enabled = const bool.fromEnvironment('OVID_ACCOUNT_ENABLED'),
     this.client,
@@ -61,7 +61,9 @@ class AccountService {
 
   final bool enabled;
   final Future<String?> Function(bool forceRefresh) idToken;
-  final Future<String?> Function() appCheck;
+  /// Null when App Check is off (`OVID_APPCHECK`, the default): no
+  /// attestation header is sent and none is required.
+  final Future<String?> Function()? appCheck;
   final String? Function()? currentUid;
   final http.Client? client;
   static const _base = 'https://api.ovidsi.com/account';
@@ -102,7 +104,7 @@ class AccountService {
     try {
       final expectedUid = currentUid?.call();
       final token = await idToken(refresh);
-      final attestation = await appCheck();
+      final attestation = await appCheck?.call();
       void checkIdentity() {
         if (currentUid != null &&
             (expectedUid == null || currentUid!() != expectedUid)) {
@@ -118,14 +120,15 @@ class AccountService {
           'Please sign in again to verify your account.',
         );
       }
-      if (attestation == null || attestation.isEmpty) {
+      if (appCheck != null && (attestation == null || attestation.isEmpty)) {
         throw const AccountException(
           'App verification is unavailable. Please retry on a configured build.',
         );
       }
       final headers = {
         'Authorization': 'Bearer $token',
-        'X-Firebase-AppCheck': attestation,
+        if (attestation != null && attestation.isNotEmpty)
+          'X-Firebase-AppCheck': attestation,
         'Content-Type': 'application/json',
       };
       final response =
