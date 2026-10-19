@@ -131,6 +131,79 @@ void main() {
     expect(res.status, 'queued');
   });
 
+  test(
+      'Wave 1a: sendMessage carries model / mode / planMode / presetId / '
+      'sessionRefs and reads the effective model back', () async {
+    late http.Request captured;
+    final mock = MockClient((request) async {
+      captured = request;
+      return http.Response(
+        jsonEncode({
+          'runId': 'r1',
+          'userMessageId': 'm1',
+          'status': 'queued',
+          'model': 'glm-5.3 · high',
+        }),
+        202,
+      );
+    });
+    final res = await _client(mock).sendMessage(
+      's1',
+      'hi',
+      clientMsgId: 'cm1',
+      turn: const CloudTurnOptions(
+        model: 'glm-5.3 · high',
+        mode: 'safe',
+        planMode: false,
+        presetId: 'code',
+        sessionRefs: ['0192f0a0-0000-7000-8000-000000000001'],
+      ),
+    );
+    expect(jsonDecode(captured.body), {
+      'content': 'hi',
+      'clientMsgId': 'cm1',
+      'model': 'glm-5.3 · high',
+      'mode': 'safe',
+      'planMode': false,
+      'presetId': 'code',
+      'sessionRefs': ['0192f0a0-0000-7000-8000-000000000001'],
+    });
+    expect(res.model, 'glm-5.3 · high');
+  });
+
+  test('Wave 1a: an empty turn adds no keys (older servers stay compatible)',
+      () async {
+    late http.Request captured;
+    final mock = MockClient((request) async {
+      captured = request;
+      return http.Response(
+          jsonEncode({'runId': 'r', 'userMessageId': 'm', 'status': 'queued'}),
+          202);
+    });
+    final res = await _client(mock).sendMessage('s1', 'hi');
+    expect(jsonDecode(captured.body), {'content': 'hi'});
+    expect(res.model, isNull);
+  });
+
+  test('Wave 1a: GET/PATCH /preferences (SE-005)', () async {
+    final calls = <http.Request>[];
+    final mock = MockClient((request) async {
+      calls.add(request);
+      return http.Response(
+          jsonEncode({'memoryEnabled': false, 'shareSessionMemory': false}),
+          200);
+    });
+    final rest = _client(mock);
+    final got = await rest.getPreferences();
+    expect(got.memoryEnabled, isFalse);
+    await rest.patchPreferences(memoryEnabled: false, shareSessionMemory: false);
+    expect(calls[0].method, 'GET');
+    expect(calls[0].url.toString(), '$_restBase/preferences');
+    expect(calls[1].method, 'PATCH');
+    expect(jsonDecode(calls[1].body),
+        {'memoryEnabled': false, 'shareSessionMemory': false});
+  });
+
   test('409 error envelope maps to CloudApiException(409, key_not_minted)',
       () async {
     final mock = MockClient((request) async => http.Response(
