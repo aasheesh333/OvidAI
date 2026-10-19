@@ -1181,9 +1181,12 @@ class CloudAgentFacade extends ChangeNotifier
     String key, {
     List<String> sessionRefs = const <String>[],
   }) {
+    // A queue drain addresses the chat by its SERVER id while the row is
+    // keyed by its local id — resolve through the id map too.
     final session = AppState.I.sessionById(localId ?? '') ??
-        AppState.I.sessionById(key);
-    final mode = _modes[key] ?? _persistedModeFor(localId, key);
+        AppState.I.sessionById(key) ??
+        _localSessionFor(key);
+    final mode = _modes[key] ?? _persistedModeFor(session?.id ?? localId, key);
     final preset = session?.presetId;
     return CloudTurnOptions(
       model: cloudModelWireId(session?.model),
@@ -2466,6 +2469,7 @@ class CloudAgentFacade extends ChangeNotifier
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _store?.removeListener(_notify);
     _connection?.removeListener(_onConnectivityChanged);
     _ws.removeListener(_onConnectivityChanged);
     for (final state in _sessions.values) {

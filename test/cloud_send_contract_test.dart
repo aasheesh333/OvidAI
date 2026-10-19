@@ -178,9 +178,13 @@ class _H {
 
 Future<_H> _build({
   List<String> knownServerIds = const ['srv-1', 'srv-2'],
+  Map<String, String> idMap = const <String, String>{},
   bool persistQueue = false,
 }) async {
   final prefs = await SharedPreferences.getInstance();
+  if (idMap.isNotEmpty) {
+    await prefs.setString(CloudSessionStore.idMapKey, jsonEncode(idMap));
+  }
   await prefs.setString(
       CloudSessionStore.knownServerIdsKey, jsonEncode(knownServerIds));
   final sockets = <_Socket>[];
@@ -272,6 +276,26 @@ void main() {
       expect(AgentMode.safe.label, 'Read-Only');
       expect(AgentMode.auto.label, 'General');
       expect(AgentMode.drive.label, 'Full Access');
+    });
+
+    test('a queued row of a mapped chat drains with THAT chat\'s settings',
+        () async {
+      final h = await _build(idMap: const {'l1': 'srv-1'});
+      final s = _session('l1', model: 'minimax-m3');
+      s.mode = 'drive';
+      await h.facade.runTask('first', sessionId: 'l1');
+      await pumpEventQueue();
+      h.socket.event('srv-1', '1-0', 'run_started', {'runId': 'run-1'});
+      await pumpEventQueue();
+      h.facade.enqueueMessage('second', sessionId: 'l1');
+      h.socket.event('srv-1', '2-0', 'run_completed', {'runId': 'run-1'});
+      await pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      await pumpEventQueue();
+      expect([for (final c in h.rest.sent) c.content], ['first', 'second']);
+      expect(h.rest.sent.last.turn.model, 'minimax-m3');
+      expect(h.rest.sent.last.turn.mode, 'drive');
+      await h.close();
     });
 
     test('@-tagged session ids ride the send (R1)', () async {
