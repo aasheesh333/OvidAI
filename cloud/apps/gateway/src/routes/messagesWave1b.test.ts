@@ -282,14 +282,6 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
     await finishRuns(sid);
     const answer = await messages.append(db, { sessionId: sid, role: "assistant", content: "old answer" });
 
-    const notAnswer = await h.app.inject({
-      method: "POST",
-      url: `/cloud/v1/sessions/${sid}/messages/${userMessageId}/regenerate`,
-      headers: authHeaders(uid),
-      payload: {},
-    });
-    expect(notAnswer.statusCode).toBe(400);
-
     const res = await h.app.inject({
       method: "POST",
       url: `/cloud/v1/sessions/${sid}/messages/${answer.id}/regenerate`,
@@ -321,6 +313,25 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
       payload: {},
     });
     expect(stranger.statusCode).toBe(404);
+  });
+
+  it("regenerate on a prompt whose run failed re-runs it and drops the failed attempt's events", async () => {
+    const h = makeApp();
+    const uid = testUid("w1b-retry");
+    const sid = await createSession(h, uid);
+    const u1 = await messages.append(db, { sessionId: sid, role: "user", content: "try this" });
+    await putEvent(sid, "run_failed", { code: "model_terminal" }, later(u1.createdAt, 5));
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/messages/${u1.id}/regenerate`,
+      headers: authHeaders(uid),
+      payload: {},
+    });
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toMatchObject({ promptMessageId: u1.id });
+    expect((await messages.page(db, sid, { limit: 10 })).rows.map((r) => r.id)).toEqual([u1.id]);
+    expect(await eventMirror.readSince(db, sid, null, 10)).toEqual([]);
+    expect(h.adds[h.adds.length - 1]!.data).toMatchObject({ prompt: "try this" });
   });
 
   it("regenerate refuses while a run is active", async () => {

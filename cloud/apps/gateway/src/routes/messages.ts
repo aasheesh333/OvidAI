@@ -791,12 +791,16 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     const parsed = regenerateBodySchema.safeParse(request.body ?? {});
     if (!parsed.success) return zodBadRequest(reply, parsed.error);
     if (!isUuid(messageId)) return notFound(reply, "Message not found.");
-    const answer = await messages.getInSession(deps.db, sessionId, messageId);
-    if (answer === null) return notFound(reply, "Message not found.");
-    if (answer.role !== "assistant") {
-      return badRequest(reply, "Only an assistant answer can be regenerated.");
+    const target = await messages.getInSession(deps.db, sessionId, messageId);
+    if (target === null) return notFound(reply, "Message not found.");
+    if (target.role !== "assistant" && target.role !== "user") {
+      return badRequest(reply, "Only an answer or a prompt can be run again.");
     }
-    const prompt = await messages.latestUserBefore(deps.db, sessionId, answer.id);
+    // An answer re-runs the prompt it replied to; a prompt (e.g. one whose
+    // run failed) re-runs itself. Either way everything after the prompt
+    // goes — including the failed attempt's events.
+    const prompt =
+      target.role === "user" ? target : await messages.latestUserBefore(deps.db, sessionId, target.id);
     if (prompt === null) return badRequest(reply, "This answer has no prompt to run again.");
     if ((await runs.activeForSession(deps.db, sessionId)) !== null) return sessionBusy(reply);
 
@@ -804,7 +808,10 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     const mintFailure = await provisionKey(deps, request, reply, uid, sessionId);
     if (mintFailure !== null) return mintFailure;
 
-    await messages.truncateFrom(deps.db, sessionId, answer.id, { eventsFrom: prompt.createdAt });
+    await messages.truncateFrom(deps.db, sessionId, prompt.id, {
+      eventsFrom: prompt.createdAt,
+      keepAnchor: true,
+    });
     const files = await attachments.forMessages(deps.db, sessionId, [prompt.id]);
     const run = await runs.create(deps.db, { sessionId, promptMessageId: prompt.id });
     try {

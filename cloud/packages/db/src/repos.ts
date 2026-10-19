@@ -571,7 +571,7 @@ export const messages = {
     db: Db,
     sessionId: string,
     fromId: string,
-    opts: { eventsFrom?: Date } = {},
+    opts: { eventsFrom?: Date; keepAnchor?: boolean } = {},
   ): Promise<number> {
     return db.transaction(async (tx) => {
       const anchorRows = await tx
@@ -581,9 +581,16 @@ export const messages = {
         .limit(1);
       const anchor = anchorRows[0];
       if (anchor === undefined) return 0;
+      // keepAnchor: everything AFTER the anchor goes, the anchor stays (a
+      // prompt re-run keeps its own row).
       const deleted = await tx
         .delete(messagesTable)
-        .where(and(eq(messagesTable.sessionId, sessionId), gte(messagesTable.id, fromId)))
+        .where(
+          and(
+            eq(messagesTable.sessionId, sessionId),
+            opts.keepAnchor === true ? gt(messagesTable.id, fromId) : gte(messagesTable.id, fromId),
+          ),
+        )
         .returning({ id: messagesTable.id });
       await tx
         .delete(sessionEventMirror)
@@ -602,7 +609,8 @@ export const messages = {
       if (stateRow !== undefined) {
         const json = stateRow.state as { compaction?: { cutoffMessageId?: string | null } | null };
         const cutoff = json.compaction?.cutoffMessageId ?? null;
-        if (json.compaction != null && (cutoff === null || cutoff >= fromId)) {
+        const removed = cutoff !== null && (opts.keepAnchor === true ? cutoff > fromId : cutoff >= fromId);
+        if (json.compaction != null && (cutoff === null || removed)) {
           await tx
             .update(sessionAgentStateTable)
             .set({ state: { ...stateRow.state, compaction: null } })

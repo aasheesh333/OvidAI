@@ -99,6 +99,15 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b repos (history window, truncate, br
     expect((await sessionState.get(db, sessionId)).compaction).toBeNull();
   });
 
+  it("truncateFrom keepAnchor removes only the rows after the anchor", async () => {
+    const { sessionId } = await freshSession();
+    const u1 = await messages.append(db, { sessionId, role: "user", content: "q" });
+    await messages.append(db, { sessionId, role: "assistant", content: "a" });
+    expect(await messages.truncateFrom(db, sessionId, u1.id, { keepAnchor: true })).toBe(1);
+    const left = await messages.page(db, sessionId, { limit: 10 });
+    expect(left.rows.map((r) => r.id)).toEqual([u1.id]);
+  });
+
   it("truncateFrom keeps a compaction whose boundary is before the cut", async () => {
     const { sessionId } = await freshSession();
     const m1 = await messages.append(db, { sessionId, role: "user", content: "one" });
