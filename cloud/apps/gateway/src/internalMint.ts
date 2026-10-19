@@ -93,22 +93,13 @@ export function createInternalMintProvisioner(
 }
 
 /**
- * Capacity wave 2026-10-19: per-uid positive cache in front of the signed
- * mint call. Every message send awaited a full mint round trip (ban check,
- * deletion fence, tier, free-cap read, key get-or-mint, plan) even when the
- * key already existed; the mint is one Node process, and an 1800-send burst
- * queued behind it for ~10 s (p95 send→202 10.1 s in the baseline run).
- *
- * Only SUCCESSES are cached, for `ttlMs` per (uid, platform); concurrent sends
- * of one uid share one in-flight call; errors (402/429/timeouts) are never
- * cached, so a refused user is re-checked on every send. The cost is a
- * free-cap check that can lag up to `ttlMs` — LiteLLM's per-user budget clock
- * stays the hard backstop on the model call itself. `ttlMs` 0 disables.
+ * @deprecated Admission is never cacheable. Mint's ensure endpoint combines
+ * setup with live ban, deletion-fence, quota and rate-limit decisions.
+ * Keep the old config/parser API compatible, but it cannot suppress a call.
+ * Any future setup-only cache must sit AFTER authoritative admission.
  */
-export const DEFAULT_MINT_ENSURE_CACHE_MS = 60_000;
-const MINT_CACHE_MAX_ENTRIES = 50_000;
-
-/** OVID_MINT_ENSURE_CACHE_MS (0 disables, max 10 min; default 60 s). */
+export const DEFAULT_MINT_ENSURE_CACHE_MS = 0;
+/** Legacy knob: validated for compatibility, never used to cache admission. */
 export function mintEnsureCacheMsFromEnv(env: NodeJS.ProcessEnv): number {
   const raw = env.OVID_MINT_ENSURE_CACHE_MS;
   if (raw === undefined || raw.trim() === "") return DEFAULT_MINT_ENSURE_CACHE_MS;
@@ -121,39 +112,9 @@ export function mintEnsureCacheMsFromEnv(env: NodeJS.ProcessEnv): number {
 
 export function withEnsureKeyCache(
   inner: InternalMintProvisioner,
-  opts: { ttlMs: number; maxEntries?: number; now?: () => number },
+  _opts: { ttlMs: number; maxEntries?: number; now?: () => number },
 ): InternalMintProvisioner {
-  if (opts.ttlMs <= 0) return inner;
-  const now = opts.now ?? Date.now;
-  const maxEntries = opts.maxEntries ?? MINT_CACHE_MAX_ENTRIES;
-  type Result = Awaited<ReturnType<InternalMintProvisioner["ensureKeyForUid"]>>;
-  const cache = new Map<string, { at: number; value: Result }>();
-  const inFlight = new Map<string, Promise<Result>>();
-  return {
-    ensureKeyForUid(uid, callOpts) {
-      const key = `${uid}\u0000${callOpts?.platform ?? ""}`;
-      const hit = cache.get(key);
-      if (hit !== undefined && now() - hit.at < opts.ttlMs) return Promise.resolve(hit.value);
-      const pending = inFlight.get(key);
-      if (pending !== undefined) return pending;
-      const started = now();
-      const p = inner
-        .ensureKeyForUid(uid, callOpts)
-        .then((value) => {
-          cache.delete(key); // re-insert at the end: Map order = age order
-          cache.set(key, { at: started, value });
-          while (cache.size > maxEntries) {
-            const oldest = cache.keys().next().value;
-            if (oldest === undefined) break;
-            cache.delete(oldest);
-          }
-          return value;
-        })
-        .finally(() => {
-          inFlight.delete(key);
-        });
-      inFlight.set(key, p);
-      return p;
-    },
-  };
+  // In particular, no single-flight: each send must make its own spending
+  // admission decision, including concurrent sends from the same account.
+  return inner;
 }

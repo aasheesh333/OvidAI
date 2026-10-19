@@ -21,7 +21,19 @@ function counting(
 }
 
 describe("withEnsureKeyCache", () => {
-  it("serves repeat sends of a uid from cache inside the TTL", async () => {
+  it.each([402, 403, 429])("rechecks admission after success and relays a new %s refusal within the TTL", async (status) => {
+    const refused = new MintInternalError(status, { detail: "revoked or quota exhausted" }, {});
+    const inner = counting(async (uid, n) => {
+      if (n > 1) throw refused;
+      return { key: `k-${uid}`, tier: "free", baseUrl: "" };
+    });
+    const mint = withEnsureKeyCache(inner, { ttlMs: 60_000 });
+    await mint.ensureKeyForUid("a");
+    await expect(mint.ensureKeyForUid("a")).rejects.toBe(refused);
+    expect(inner.calls).toHaveLength(2);
+  });
+
+  it("rechecks repeat sends of a uid inside the former TTL", async () => {
     let t = 0;
     const inner = counting();
     const mint = withEnsureKeyCache(inner, { ttlMs: 1_000, now: () => t });
@@ -32,13 +44,13 @@ describe("withEnsureKeyCache", () => {
       tier: "free",
       baseUrl: "http://llm",
     });
-    expect(inner.calls).toEqual(["a:"]);
+    expect(inner.calls).toEqual(["a:", "a:"]);
     t = 1_000;
     await mint.ensureKeyForUid("a");
-    expect(inner.calls).toEqual(["a:", "a:"]);
+    expect(inner.calls).toEqual(["a:", "a:", "a:"]);
   });
 
-  it("keys the cache by platform and shares one in-flight call per uid", async () => {
+  it("makes separate admission calls for concurrent sends and preserves platform", async () => {
     const inner = counting();
     const mint = withEnsureKeyCache(inner, { ttlMs: 60_000 });
     await Promise.all([
@@ -47,7 +59,7 @@ describe("withEnsureKeyCache", () => {
       mint.ensureKeyForUid("a", { platform: "web" }),
       mint.ensureKeyForUid("b"),
     ]);
-    expect(inner.calls.sort()).toEqual(["a:", "a:web", "b:"]);
+    expect(inner.calls.sort()).toEqual(["a:", "a:", "a:web", "b:"]);
   });
 
   it("never caches a refusal (402/429 stays fresh on every send)", async () => {
@@ -61,7 +73,7 @@ describe("withEnsureKeyCache", () => {
     expect(inner.calls).toHaveLength(2);
   });
 
-  it("bounds the cache (oldest evicted)", async () => {
+  it("does not cache either setup or spending decisions", async () => {
     const inner = counting();
     const mint = withEnsureKeyCache(inner, { ttlMs: 60_000, maxEntries: 2 });
     await mint.ensureKeyForUid("a");
@@ -69,7 +81,7 @@ describe("withEnsureKeyCache", () => {
     await mint.ensureKeyForUid("c"); // evicts a
     await mint.ensureKeyForUid("b");
     await mint.ensureKeyForUid("a");
-    expect(inner.calls).toEqual(["a:", "b:", "c:", "a:"]);
+    expect(inner.calls).toEqual(["a:", "b:", "c:", "b:", "a:"]);
   });
 
   it("ttlMs 0 returns the inner provisioner unchanged", () => {
@@ -79,9 +91,9 @@ describe("withEnsureKeyCache", () => {
 });
 
 describe("mintEnsureCacheMsFromEnv", () => {
-  it("defaults to 60 s and validates", () => {
-    expect(DEFAULT_MINT_ENSURE_CACHE_MS).toBe(60_000);
-    expect(mintEnsureCacheMsFromEnv({})).toBe(60_000);
+  it("defaults to disabled and validates legacy configuration", () => {
+    expect(DEFAULT_MINT_ENSURE_CACHE_MS).toBe(0);
+    expect(mintEnsureCacheMsFromEnv({})).toBe(0);
     expect(mintEnsureCacheMsFromEnv({ OVID_MINT_ENSURE_CACHE_MS: "0" })).toBe(0);
     expect(() => mintEnsureCacheMsFromEnv({ OVID_MINT_ENSURE_CACHE_MS: "-1" })).toThrow(
       /OVID_MINT_ENSURE_CACHE_MS/,
