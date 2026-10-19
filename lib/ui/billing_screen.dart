@@ -121,6 +121,10 @@ String upgradeResultMessage(UpgradeResult result, {String? planTitle}) =>
             'automatically.',
       UpgradeResult.nothingToRestore =>
         'No active subscription found for this Google account.',
+      UpgradeResult.confirming =>
+        'Payment received. Ovid is still confirming it with Google Play — '
+            'your plan starts automatically, and we retry every time you '
+            'open the app.',
       UpgradeResult.unknown => 'Could not complete the upgrade. Try again.',
     };
 

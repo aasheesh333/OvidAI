@@ -73,6 +73,12 @@ enum UpgradeResult {
   /// Restore found no active subscription for this Google account.
   nothingToRestore,
 
+  /// Google Play took the payment but Ovid could not confirm it yet (verify
+  /// unreachable / 404 / 5xx). The purchase stays unacknowledged, Play
+  /// re-delivers it and it is re-verified on the next launch/resume (SH-002).
+  /// Never "Nothing was charged".
+  confirming,
+
   /// Anything else.
   unknown,
 }

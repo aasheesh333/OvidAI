@@ -132,6 +132,7 @@ class PlayBillingService extends ChangeNotifier {
     BillingPlatform? platform,
     PlayPurchaseVerifier? verifier,
     String? Function()? uid,
+    this.purchaseTimeout = const Duration(minutes: 10),
   }) : _platform = platform ?? InAppPurchaseBillingPlatform(),
        _verifier = verifier ?? OvidCloudService.I.verifyPlayPurchase,
        _uid = uid ?? (() => FirebaseService.I.uid);
@@ -145,6 +146,14 @@ class PlayBillingService extends ChangeNotifier {
   final BillingPlatform _platform;
   final PlayPurchaseVerifier _verifier;
   final String? Function() _uid;
+
+  /// Upper bound on one purchase sheet (SH-014): if Play never delivers a
+  /// result for the product (sheet killed, Play Store force-stopped), the
+  /// waiter resolves `unknown` and the plan's button works again.
+  final Duration purchaseTimeout;
+
+  /// The uid whose purchases [_owned] / [_ownedTier] describe (SH-013).
+  String? _loadedFor;
 
   StreamSubscription<List<PurchaseDetails>>? _subscription;
   Future<void>? _loading;
@@ -199,9 +208,38 @@ class PlayBillingService extends ChangeNotifier {
 
   /// Connects to Play once, loads products and re-checks owned purchases
   /// (picks up purchases that were paid but not yet verified/acknowledged).
-  Future<void> ensureLoaded() => _loading ??= _load();
+  Future<void> ensureLoaded() {
+    // A different account than the one loaded: forget the previous one's
+    // plan and re-read this account's purchases (SH-013).
+    if (_loadedFor != _uid()) resetForAccount();
+    return _loading ??= _load();
+  }
+
+  /// Clears every per-account fact (owned plan, expiry, renewal, pending
+  /// purchase/restore waiters) so account B never sees account A's plan or
+  /// "Manage subscription". The Play connection and product catalogue are
+  /// device-wide and kept. The next [ensureLoaded] re-reads B's purchases.
+  void resetForAccount() {
+    final hadState =
+        _owned != null || _ownedTier != null || _expiresAt != null;
+    _owned = null;
+    _ownedTier = null;
+    _expiresAt = null;
+    _autoRenewing = null;
+    _loading = null;
+    _loadedFor = null;
+    for (final waiter in _waiting.values) {
+      if (!waiter.isCompleted) {
+        waiter.complete(const UpgradeOutcome(UpgradeResult.rejected));
+      }
+    }
+    _waiting.clear();
+    _finishRestore(const UpgradeOutcome(UpgradeResult.rejected));
+    if (hadState) notifyListeners();
+  }
 
   Future<void> _load() async {
+    _loadedFor = _uid();
     try {
       // Inside the try: without the platform plugin (tests, unsupported
       // devices) the stream getter throws; that simply means no Play.
@@ -285,7 +323,38 @@ class PlayBillingService extends ChangeNotifier {
       Diag.swallow('play_billing.buy', e);
       _resolve(product.id, UpgradeOutcome(_storeError('$e')));
     }
-    return waiter.future;
+    return waiter.future.timeout(
+      purchaseTimeout,
+      onTimeout: () {
+        if (identical(_waiting[product.id], waiter)) {
+          _waiting.remove(product.id);
+        }
+        return const UpgradeOutcome(UpgradeResult.unknown);
+      },
+    );
+  }
+
+  /// App resume: silently re-reads owned purchases so a payment that could
+  /// not be confirmed earlier ([UpgradeResult.confirming]) is re-verified
+  /// before Play's 3-day refund window closes. No-op until loaded.
+  Future<void> recheckOnResume() async {
+    if (!_loaded || !_available) return;
+    final uid = _uid();
+    if (uid == null || uid != _loadedFor) return;
+    try {
+      await _platform.restorePurchases(accountId: ovidPlayAccountId(uid));
+    } catch (e) {
+      Diag.swallow('play_billing.recheck', e);
+    }
+  }
+
+  /// Abandons a purchase sheet that Play never answered (the sheet's Cancel
+  /// after ~30 s). A late Play delivery is still verified by the stream
+  /// listener and re-verified on the next launch.
+  void abandonPurchase(String tier) {
+    final product = _products[tier];
+    if (product == null) return;
+    _resolve(product.id, const UpgradeOutcome(UpgradeResult.unknown));
   }
 
   /// "Restore purchases": re-reads owned subscriptions from Play and
@@ -389,6 +458,15 @@ class PlayBillingService extends ChangeNotifier {
         if (verdict.result == UpgradeResult.ok) {
           // Verified but not active (expired / replaced): nothing to grant.
           return UpgradeOutcome(UpgradeResult.rejected, tier: verdict.tier);
+        }
+        // Play took the money but Ovid could not confirm it (verify route
+        // missing, server down, offline). The purchase stays unacknowledged:
+        // Play re-delivers it and ensureLoaded/restore re-verifies it. Never
+        // tell a paying user "Nothing was charged" (SH-002).
+        if (verdict.result == UpgradeResult.notAvailable ||
+            verdict.result == UpgradeResult.unknown ||
+            verdict.result == UpgradeResult.offline) {
+          return UpgradeOutcome(UpgradeResult.confirming, tier: tier);
         }
         return UpgradeOutcome(verdict.result, tier: verdict.tier);
     }
