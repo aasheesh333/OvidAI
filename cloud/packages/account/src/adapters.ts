@@ -519,6 +519,10 @@ export function createCloudCleanup(deps: CloudCleanupDeps): CloudCleanup {
         await db.$client`DELETE FROM plugin_grants WHERE user_id = ${uid}`;
         await db.$client`DELETE FROM devices WHERE user_id = ${uid}`;
         await db.$client`DELETE FROM notifications WHERE user_id = ${uid}`;
+        // Wave 3 token ledger (no FK, so it would otherwise outlive the user).
+        if (await tableExists("run_usage")) {
+          await db.$client`DELETE FROM run_usage WHERE user_id = ${uid}`;
+        }
         await db.$client`DELETE FROM user_plan_overrides WHERE uid = ${uid}`;
         await db.$client`DELETE FROM mint_audit WHERE target->>'uid' = ${uid}`;
         await db.$client`DELETE FROM users WHERE uid = ${uid}`;
