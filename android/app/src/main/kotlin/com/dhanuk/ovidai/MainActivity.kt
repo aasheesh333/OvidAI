@@ -30,8 +30,6 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.URLConnection
-import java.util.concurrent.Executors
-import java.util.zip.ZipFile
 import com.android.installreferrer.api.InstallReferrerClient
 import com.android.installreferrer.api.InstallReferrerStateListener
 
@@ -129,17 +127,6 @@ class MainActivity : FlutterActivity() {
                             })
                         } catch (_: Exception) {
                             complete(null)
-                        }
-                    }
-                    "getNativeLibraryDir" -> {
-                        // This directory is exec-ALLOWED on Android 10+:
-                        // the PackageManager labels extracted native libs
-                        // with a special SELinux label that permits execve.
-                        val dir = applicationInfo.nativeLibraryDir
-                        if (dir != null) {
-                            result.success(dir)
-                        } else {
-                            result.error("UNAVAILABLE", "nativeLibraryDir is null", null)
                         }
                     }
                     "getSecurityStatus" -> {

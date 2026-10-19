@@ -343,11 +343,18 @@ class ReleaseInventoryTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(report['target_policy']['api36_floor_met'])
 
-    def test_release_candidate_accepts_target_28_non_debug_signed(self):
-        code, report = self.run_bundle_gate(target=28, certificate='a' * 64, mode='release')
+    def test_release_candidate_accepts_target_36_non_debug_signed(self):
+        # CI's sideload release candidate targets API 36 (EM-001 / CT-017).
+        code, report = self.run_bundle_gate(target=36, certificate='a' * 64, mode='release')
         self.assertEqual(code, 0)
-        self.assertFalse(report['target_policy']['api36_floor_met'])
+        self.assertTrue(report['target_policy']['api36_floor_met'])
         self.assertFalse(report['target_policy']['play_qualified'])
+
+    def test_release_candidate_rejects_a_legacy_artifact_against_the_36_contract(self):
+        code, report = self.run_bundle_gate(target=36, certificate='a' * 64,
+                                            mode='release', manifest_target=28)
+        self.assertEqual(code, 1)
+        self.assertTrue(any('inventory contract' in error for error in report['errors']))
 
     def test_release_candidate_accepts_any_non_debug_signer_without_pin(self):
         code, report = self.run_bundle_gate(target=28, certificate='', mode='release')

@@ -63,15 +63,14 @@ void main() {
       'android/app/src/play/AndroidManifest.xml',
     ).readAsStringSync();
 
-    test('the Dart define drives targetSdk 36 and drops the sandbox payload', () {
+    test('every build targets SDK 36 and drops the sandbox payload', () {
       expect(gradle, contains('"OVID_PLAY_BUILD=true"'));
-      expect(gradle, contains('val ovidPlayTargetSdk = 36'));
-      expect(
-        gradle,
-        contains(
-          'targetSdk = if (ovidPlayBuild) ovidPlayTargetSdk else ovidSideloadTargetSdk',
-        ),
-      );
+      // EM-001 / CT-017: the target-28 sideload profile existed only for the
+      // removed on-device sandbox (exec from app data).
+      expect(gradle, contains('val ovidTargetSdk = 36'));
+      expect(gradle, contains('targetSdk = ovidTargetSdk'));
+      expect(gradle, isNot(contains('ovidSideloadTargetSdk')));
+      expect(gradle, isNot(contains('ExpiredTargetSdkVersion')));
       // P8 Task 13 removed the bundled Termux userland from every build.
       expect(gradle, isNot(contains('libovid_bootstrap.so')));
       expect(

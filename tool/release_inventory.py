@@ -4,10 +4,10 @@
 Debug gates require valid structure/ABI/signature and the expected target. The
 release-candidate (`release`) and production gates additionally require a
 non-debuggable manifest; the release-candidate gate honors `--expected-target`
-(e.g. 28) and accepts any non-debug signer, verifying a pinned certificate only
-when one is supplied, and records 16 KB LOAD/RELRO and APK ZIP-alignment findings
-without enforcing them (a target-28 sideload candidate ships prebuilt ELF
-payloads that inherently fail them). Production gates additionally enforce 64-bit
+(CI passes 36 for every profile since the on-device sandbox and its target-28
+sideload build were removed) and accepts any non-debug signer, verifying a
+pinned certificate only when one is supplied, and records 16 KB LOAD/RELRO and
+APK ZIP-alignment findings without enforcing them. Production gates additionally enforce 64-bit
 LOAD/RELRO plus APK ZIP alignment, require target API 36+, and pin the signer to
 a required certificate SHA-256. None of these static checks establishes device
 or Play qualification.
@@ -16,7 +16,7 @@ Distribution profile (`--profile`): `sideload` (default) and `play` both ship
 NO on-device sandbox. The cloud migration (P8 Task 13) deleted the Termux/proot
 userland from every channel, so `libovid_bootstrap.so` must be ABSENT in both
 profiles and its presence is an error. The profile flag is kept because the
-Play build additionally differs in targetSdk and the manifest overlay.
+Play build additionally differs in the manifest overlay (both target API 36).
 
 The 16 KB findings are ELF properties, not packaging properties: the outer APK
 ZIP alignment is independent and already checked with `zipalign -P 16`, while
@@ -392,7 +392,7 @@ def main():
         else:
             report['alignment_scope'] = (
                 'release candidate: 16 KB alignment/RELRO recorded but not '
-                'enforced (target-28 sideload; not Play-qualified)'
+                'enforced (sideload release candidate; not Play-qualified)'
             )
         if kind == 'apk':
             report['manifest'] = apk_manifest(args.artifact, args.build_tools)

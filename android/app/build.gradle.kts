@@ -13,12 +13,11 @@ val ovidMinSdk = 23
 // to Gradle as the base64, comma-separated `dart-defines` property), so the
 // Dart feature gates (lib/core/distribution.dart) and the native packaging
 // below can never disagree. `-Povid.play=true` exists for Gradle-only tasks.
-// A Play build:
-//  * targets API 36 (Play's floor for new apps/updates since 2026-08-31);
-//  * ships no on-device Linux userland (removed in P8 Task 13);
-//  * merges src/play/AndroidManifest.xml, which removes every permission
-//    without a Play-approvable core use. Control mode and the on-device
-//    sandbox are absent from every channel (spec D5).
+// A Play build merges src/play/AndroidManifest.xml, which removes every
+// permission without a Play-approvable core use. Every build (Play and
+// sideload) targets API 36 and ships no on-device Linux userland (removed in
+// P8 Task 13). Control mode and the on-device sandbox are absent from every
+// channel (spec D5).
 val ovidPlayBuild: Boolean = run {
     val defines = (project.findProperty("dart-defines") as String?).orEmpty()
         .split(",").filter { it.isNotBlank() }
@@ -26,8 +25,10 @@ val ovidPlayBuild: Boolean = run {
     defines.any { it.trim() == "OVID_PLAY_BUILD=true" } ||
         project.findProperty("ovid.play")?.toString() == "true"
 }
-val ovidPlayTargetSdk = 36
-val ovidSideloadTargetSdk = 28
+// One target for every channel: API 36 (Play's floor for new apps/updates
+// since 2026-08-31). The old sideload target 28 existed only so the removed
+// on-device sandbox could exec binaries from app data (blocked for API 29+).
+val ovidTargetSdk = 36
 
 plugins {
     id("com.android.application")
@@ -117,25 +118,9 @@ android {
         applicationId = "com.dhanuk.ovidai"
         // Android 6.0 remains supported by the app shell.
         minSdk = ovidMinSdk
-        // The native sandbox execs bash/python/node from the app's files
-        // dir (Termux-style $PREFIX). Android 10+ blocks execve() AND
-        // exec-mmap of anything under /data/user/<u>/<pkg> for apps
-        // targeting API 29+ (SELinux neverallow on app_data_file) — the
-        // sandbox dies with EACCES no matter the ABI or file mode.
-        // Keep the legacy target until the immutable packaged-code architecture
-        // is implemented and measured from the app process. A target-only bump
-        // cannot qualify runtime behavior, downloaded code, or distribution.
-        // Play builds (OVID_PLAY_BUILD=true) target API 36 and ship without
-        // the sandbox payload; see ovidPlayBuild above.
-        targetSdk = if (ovidPlayBuild) ovidPlayTargetSdk else ovidSideloadTargetSdk
-
-        lint {
-            // targetSdk 28 is deliberate (see the comment above — Play's
-            // targetSdk floor is incompatible with app-data exec). This
-            // build is sideloaded, so the Play-policy lint that would
-            // fail lintVitalRelease on targetSdk < 33 does not apply.
-            disable += "ExpiredTargetSdkVersion"
-        }
+        // Execution is server-side (cloud thin client); nothing execs from
+        // app data any more, so sideload and Play builds share API 36.
+        targetSdk = ovidTargetSdk
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         // Share/Collab App Links host (/s/...). Must match the app's
@@ -169,15 +154,16 @@ android {
     }
 
     firebaseCrashlytics {
-        // Dart AOT obfuscates; native symbol/mapping uploads add nothing.
+        // Uploads stay off: CI archives the R8 mapping (plugin Java/Kotlin is
+        // obfuscated with -repackageclasses) and the Dart split-debug-info
+        // symbols as private workflow artifacts instead (CT-021).
         nativeSymbolUploadEnabled = false
         mappingFileUploadEnabled = false
     }
 }
 
 // Belt-and-suspenders: if the extension flags above are ignored, kill the
-// tasks outright. The 43MB zip-in-.so payloads have no debug symbols to
-// upload and mapping is meaningless for Dart AOT builds.
+// tasks outright. Symbolication uses the CI artifacts (see above).
 tasks.matching { it.name.startsWith("uploadCrashlytics") }.configureEach {
     enabled = false
 }

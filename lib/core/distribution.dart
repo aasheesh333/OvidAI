@@ -2,8 +2,9 @@
 ///
 /// A Google Play build is produced with `--dart-define=OVID_PLAY_BUILD=true`.
 /// The same define drives the native side (android/app/build.gradle.kts reads
-/// Flutter's forwarded dart-defines): targetSdk 36, no bundled Linux userland,
-/// and the src/play manifest overlay without the AccessibilityService.
+/// Flutter's forwarded dart-defines): the src/play manifest overlay without
+/// the AccessibilityService. Every build (Play or sideload) targets SDK 36 and
+/// bundles no Linux userland.
 ///
 /// P8 Task 20 collapsed the thin-client migration scaffolding: the app has no
 /// local execution path any more (spec NG3), so the cloud surfaces are plain
