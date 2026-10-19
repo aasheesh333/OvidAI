@@ -1169,6 +1169,37 @@ void main() {
     expect(mints, 1, reason: 'no reconnect after teardown');
     expect(spy.sockets, isEmpty);
   });
+
+  test('(v) account switch (SH-008): reset closes the link, drops every '
+      'subscription and cursor; the next connect mints a fresh ticket and '
+      'subscribes nothing of the previous account', () async {
+    final spy = SocketFactorySpy();
+    final store = await SharedPreferences.getInstance();
+    final ws = await _build(spy, prefs: store);
+    var done = false;
+    ws.subscribe('a-session').listen((_) {}, onDone: () => done = true);
+    await pumpEventQueue();
+    spy.sockets.single.server(_eventFrame('a-session', '5-0'));
+    await pumpEventQueue();
+    expect(store.getString('${_lastEventKey}a-session'), '5-0');
+
+    await ws.resetForAccountChange();
+    await pumpEventQueue();
+
+    expect(ws.linkState, WsLinkState.disconnected);
+    expect(spy.sockets.single.isClosed, isTrue);
+    expect(ws.subscriptionCountForTest, 0);
+    expect(done, isTrue, reason: "A's stream completes");
+    expect(store.getString('${_lastEventKey}a-session'), isNull);
+
+    await ws.connectIfNeeded();
+    await pumpEventQueue();
+    expect(spy.sockets, hasLength(2));
+    expect(spy.uris.last.queryParameters['ticket'], 'ticket-2');
+    expect(spy.sockets.last.sent, isEmpty,
+        reason: "no subscribe for the previous account's session");
+    await ws.disconnect();
+  });
 }
 
 class _PinningProbeException implements Exception {}

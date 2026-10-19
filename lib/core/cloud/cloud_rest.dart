@@ -200,9 +200,10 @@ class CloudRestClient {
   /// DELETE for endpoints that answer 204 with an empty body (P4
   /// `DELETE /schedules/:id`). A non-2xx answer still maps to
   /// [CloudApiException]; there is no response body to decode on success.
-  Future<void> delete(String path, {Duration? timeout}) async {
+  /// [body] is sent as JSON when given (`DELETE /devices {token}`).
+  Future<void> delete(String path, {Object? body, Duration? timeout}) async {
     final response =
-        await _authed('DELETE', _uri(path), null, timeout: timeout);
+        await _authed('DELETE', _uri(path), body, timeout: timeout);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw _toError(response);
     }
@@ -556,5 +557,12 @@ class CloudRestClient {
       {required String fcmToken, String platform = 'android'}) async {
     await postJson('/devices',
         body: <String, Object>{'token': fcmToken, 'platform': platform});
+  }
+
+  /// DELETE /devices — body `{"token": <fcm>}` (gateway devices.ts; the token
+  /// travels in the body because FCM tokens are not URL-safe). Owner-scoped
+  /// server-side: a token bound to another uid is a silent 204.
+  Future<void> unregisterDevice({required String fcmToken}) async {
+    await delete('/devices', body: <String, Object>{'token': fcmToken});
   }
 }
