@@ -14,6 +14,7 @@ import type { ActivityTracker, StorageAdapter } from "@ovid/storage";
 import { authHook, type Verifier } from "./auth.js";
 import { registerAccountRoutes, type AccountRouteDeps } from "./routes/account.js";
 import { registerArtifactRoutes } from "./routes/artifacts.js";
+import { registerArtifactVaultRoutes } from "./routes/artifactVault.js";
 import { registerAttachmentRoutes } from "./routes/attachments.js";
 import type { AttachmentPresigner } from "./routes/attachments.js";
 import { registerByokRoutes } from "./routes/byok.js";
@@ -335,6 +336,7 @@ export function buildGateway(
       registerImportRoutes(scope, deps);
       registerWorkspaceRoutes(scope, deps);
       registerArtifactRoutes(scope, deps);
+      registerArtifactVaultRoutes(scope, deps);
 
       // P5 Task 15: MCP servers/catalog/oauth (authed half), plugins, and the
       // REST system-response path. Each answers a loud 503 when its optional

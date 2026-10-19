@@ -35,6 +35,8 @@ class SessionArtifact {
     this.size,
     this.html,
     this.toolName,
+    this.cloudArtifactId,
+    this.cloudAccountId,
   });
 
   /// Stable across rebuilds and restarts (used by "Remove from list").
@@ -57,6 +59,18 @@ class SessionArtifact {
 
   /// The tool that produced a generated file (`file_write`, `fs_edit`, …).
   final String? toolName;
+
+  /// AUTHORITATIVE cloud identity (Artifact Vault): the gateway's row id for
+  /// this file in the account inventory, and the account it was listed
+  /// under. Local/transcript-derived artifacts have neither. Set together by
+  /// [VaultArtifact.toSessionArtifact]; a mint proves the current account
+  /// still matches [cloudAccountId] before any request leaves the device.
+  final String? cloudArtifactId;
+  final String? cloudAccountId;
+
+  /// True when this row came from the account Artifact Vault (authoritative
+  /// cloud identity), not from the local transcript projection.
+  bool get isCloudVault => cloudArtifactId != null;
 
   bool get isAbsolute => path != null && path!.startsWith('/');
 

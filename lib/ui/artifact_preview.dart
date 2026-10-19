@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../core/cloud/artifact_vault.dart';
 import '../core/cloud/cloud_rest.dart';
 import '../core/diag.dart';
 import '../core/native_share.dart';
@@ -73,12 +75,20 @@ String? _mimeFor(String name) => switch (artifactExtension(name)) {
 
 /// Opens the preview for [artifact]: an image viewer, a highlighted
 /// text/code viewer, the live HTML artifact, or an "open with" fallback.
+/// Cloud Vault artifacts (authoritative cloud identity) get [vaultClient] so
+/// preview/download/share mint a fresh capability on each action.
 Future<void> openArtifactPreview(
   BuildContext context,
-  SessionArtifact artifact,
-) => Navigator.of(context).push(
+  SessionArtifact artifact, {
+  ArtifactVaultClient? vaultClient,
+  ValueListenable<String?>? accountChanges,
+}) => Navigator.of(context).push(
   MaterialPageRoute<void>(
-    builder: (_) => ArtifactPreviewScreen(artifact: artifact),
+    builder: (_) => ArtifactPreviewScreen(
+      artifact: artifact,
+      vaultClient: vaultClient,
+      accountChanges: accountChanges,
+    ),
   ),
 );
 
@@ -341,16 +351,36 @@ class ArtifactCard extends StatelessWidget {
 }
 
 /// Full-screen artifact preview.
+///
+/// Cloud Vault artifacts (authoritative cloud identity + a [vaultClient])
+/// take the `_PreviewState.cloud` path: a fresh URL is minted on entry and
+/// re-minted on every download/share ACTION — never cached, never reusing
+/// the previous capability. A typed mint failure (missing object, incomplete
+/// upload, storage outage) shows an explicit error with retry; an account
+/// change clears the preview entirely so the old owner's capability can
+/// never be shared.
 class ArtifactPreviewScreen extends StatefulWidget {
-  const ArtifactPreviewScreen({super.key, required this.artifact});
+  const ArtifactPreviewScreen({
+    super.key,
+    required this.artifact,
+    this.vaultClient,
+    this.accountChanges,
+  });
 
   final SessionArtifact artifact;
+
+  /// The account Artifact Vault client; null for local/transcript previews.
+  final ArtifactVaultClient? vaultClient;
+
+  /// Current account notifications (`firebase:<uid>` or null). When the
+  /// account no longer matches the artifact's owner the preview is dropped.
+  final ValueListenable<String?>? accountChanges;
 
   @override
   State<ArtifactPreviewScreen> createState() => _ArtifactPreviewScreenState();
 }
 
-enum _PreviewState { image, text, html, tooLarge, missing, binary, remote }
+enum _PreviewState { image, text, html, tooLarge, missing, binary, remote, cloud }
 
 class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
   late final String? _host = resolveArtifactHostPath(widget.artifact);
@@ -363,14 +393,41 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
   /// preview opens.
   String? _freshUrl;
 
+  /// Cloud path: the last typed mint failure, if any.
+  CloudApiException? _cloudError;
+
+  /// Cloud path: the account changed away from the artifact's owner — the
+  /// preview (and its share affordance) is gone.
+  bool _accountLost = false;
+
   @override
   void initState() {
     super.initState();
     _state = _classify();
-    if (_state == _PreviewState.remote &&
+    widget.accountChanges?.addListener(_onAccountChanged);
+    if (_state == _PreviewState.cloud) {
+      unawaited(_mintCloudUrl());
+    } else if (_state == _PreviewState.remote &&
         widget.artifact.kind == ArtifactKind.image) {
       unawaited(_mintRemoteUrl());
     }
+  }
+
+  @override
+  void dispose() {
+    widget.accountChanges?.removeListener(_onAccountChanged);
+    super.dispose();
+  }
+
+  void _onAccountChanged() {
+    final current = widget.accountChanges!.value;
+    if (current == widget.artifact.cloudAccountId) return;
+    if (!mounted) return;
+    setState(() {
+      _accountLost = true;
+      _freshUrl = null;
+      _cloudError = null;
+    });
   }
 
   Future<void> _mintRemoteUrl() async {
@@ -379,9 +436,35 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
     setState(() => _freshUrl = fresh);
   }
 
+  /// Cloud path: mint a fresh capability for THIS preview. Every retry
+  /// re-mints; nothing is cached across actions.
+  Future<void> _mintCloudUrl() async {
+    final vault = widget.vaultClient;
+    if (vault == null) return;
+    try {
+      final minted = await vault.mintUrl(widget.artifact);
+      if (!mounted || _accountLost) return;
+      setState(() {
+        _freshUrl = minted.url;
+        _cloudError = null;
+      });
+    } on CloudApiException catch (e) {
+      if (!mounted || _accountLost) return;
+      setState(() {
+        _cloudError = e;
+        _freshUrl = null;
+      });
+    }
+  }
+
   _PreviewState _classify() {
     final a = widget.artifact;
     if (a.html != null) return _PreviewState.html;
+    // Cloud Vault rows carry authoritative identity and no local path/URL:
+    // availability is proven per-mint, never assumed from the row.
+    if (widget.vaultClient != null && a.isCloudVault) {
+      return _PreviewState.cloud;
+    }
     final host = _host;
     if (host == null) {
       return (a.url ?? '').isEmpty
@@ -417,11 +500,67 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
     );
   }
 
+  /// Cloud path: share mints AGAIN rather than reusing the preview's URL.
+  Future<void> _shareCloud() async {
+    final vault = widget.vaultClient;
+    if (vault == null) return;
+    await showNativeShare(context, () async {
+      final fresh = await vault.mintUrl(widget.artifact);
+      await NativeShare.link(fresh.url);
+    });
+  }
+
+  /// Cloud path: "Open with" also acts on a freshly minted URL.
+  Future<void> _openWithCloud() async {
+    final vault = widget.vaultClient;
+    if (vault == null) return;
+    final l10n = context.l10n;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final fresh = await vault.mintUrl(widget.artifact);
+      final opened = await launchUrl(
+        Uri.parse(fresh.url),
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened) {
+        messenger.showSnackBar(
+          SnackBar(content: Text(l10n.artifactNotOnDevice)),
+        );
+      }
+    } on CloudApiException {
+      messenger.showSnackBar(SnackBar(content: Text(l10n.artifactNotOnDevice)));
+    }
+  }
+
+  String _cloudErrorBody(String code, AppLocalizations l10n) {
+    if (code == 'artifact_unavailable') return l10n.artifactCloudUnavailableBody;
+    if (code == 'artifact_incomplete') return l10n.artifactCloudIncompleteBody;
+    return l10n.artifactCloudErrorBody;
+  }
+
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final a = widget.artifact;
-    final canShare = a.html == null && _state != _PreviewState.missing;
+    if (_accountLost) {
+      // The artifact belongs to the previous account: no name, no share
+      // affordance, no capability — only the sign-back-in explanation.
+      return Scaffold(
+        backgroundColor: Aether.bg,
+        appBar: AppBar(title: Text(l10n.artifactsTitle)),
+        body: SafeArea(
+          child: AetherEmptyState(
+            key: const ValueKey('artifact-cloud-error'),
+            icon: Icons.cloud_off_outlined,
+            title: l10n.artifactCloudAccountTitle,
+            message: l10n.artifactCloudAccountBody,
+          ),
+        ),
+      );
+    }
+    final canShare = a.html == null &&
+        _state != _PreviewState.missing &&
+        (_state != _PreviewState.cloud || _freshUrl != null);
     final meta = [
       artifactKindLabel(context, a.kind),
       if ((_size ?? a.size ?? 0) > 0) formatArtifactSize(_size ?? a.size!),
@@ -467,14 +606,22 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
             IconButton(
               tooltip: l10n.artifactShare,
               icon: const Icon(Icons.ios_share_rounded, size: 19),
-              onPressed: () => shareArtifact(context, a),
+              onPressed: () => _state == _PreviewState.cloud
+                  ? _shareCloud()
+                  : shareArtifact(context, a),
             ),
           if (canShare)
             PopupMenuButton<String>(
               tooltip: l10n.chatMenuMore,
               icon: const Icon(Icons.more_vert_rounded, size: 20),
               onSelected: (v) {
-                if (v == 'open') _openWith(context, a);
+                if (v == 'open') {
+                  if (_state == _PreviewState.cloud) {
+                    _openWithCloud();
+                  } else {
+                    _openWith(context, a);
+                  }
+                }
               },
               itemBuilder: (_) => [
                 if (canShare)
@@ -498,6 +645,57 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
         return SingleChildScrollView(
           padding: const EdgeInsets.all(12),
           child: HtmlArtifactView(artifact: a.html, sessionId: a.sessionId),
+        );
+      case _PreviewState.cloud:
+        if (_cloudError != null) {
+          return AetherEmptyState(
+            key: const ValueKey('artifact-cloud-error'),
+            icon: Icons.cloud_off_outlined,
+            title: l10n.artifactCloudMissingTitle,
+            message: _cloudErrorBody(_cloudError!.code, l10n),
+            action: AetherSecondaryButton(
+              key: const ValueKey('artifact-cloud-retry'),
+              label: l10n.actionRetry,
+              onPressed: () => unawaited(_mintCloudUrl()),
+            ),
+          );
+        }
+        final url = _freshUrl;
+        if (url == null) {
+          return const Center(
+            key: ValueKey('artifact-cloud-loading'),
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          );
+        }
+        if (a.kind == ArtifactKind.image) {
+          return Center(
+            key: const ValueKey('artifact-preview-image'),
+            child: InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 5,
+              child: Image.network(
+                url,
+                cacheWidth: Aether.imageCacheWidth(context),
+                errorBuilder: (_, _, _) => Icon(
+                  Icons.broken_image_outlined,
+                  size: 48,
+                  color: Aether.textFaint,
+                ),
+              ),
+            ),
+          );
+        }
+        return AetherEmptyState(
+          icon: artifactIcon(a.kind),
+          title: l10n.artifactNoPreviewTitle,
+          message: l10n.artifactNoPreviewBody,
+          action: AetherSecondaryButton(
+            label: l10n.artifactOpenWith,
+            onPressed: () => unawaited(_openWithCloud()),
+          ),
         );
       case _PreviewState.image:
         return Center(

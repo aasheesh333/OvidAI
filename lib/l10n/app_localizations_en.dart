@@ -966,6 +966,54 @@ class AppLocalizationsEn extends AppLocalizations {
   String get artifactNoPreviewBody => 'Open it with another app or share it.';
 
   @override
+  String get vaultTabGenerated => 'Created by Ovid';
+
+  @override
+  String get vaultTabUploaded => 'Uploaded by User';
+
+  @override
+  String get vaultTypeAll => 'All types';
+
+  @override
+  String get vaultSearchHint => 'Search files';
+
+  @override
+  String get vaultLoadMore => 'Load more';
+
+  @override
+  String get vaultErrorTitle => 'Couldn\'t load your files';
+
+  @override
+  String get vaultPolicyNote =>
+      'Files from every chat in your account. Links to open or share are temporary and expire about an hour after they are created.';
+
+  @override
+  String get vaultLocalScope =>
+      'On this device — only files saved locally are listed. Sign in to see every file in your account.';
+
+  @override
+  String get artifactCloudMissingTitle => 'File not available';
+
+  @override
+  String get artifactCloudUnavailableBody =>
+      'This file is no longer stored in Ovid Cloud.';
+
+  @override
+  String get artifactCloudIncompleteBody =>
+      'This file did not finish uploading. Remove and re-attach it.';
+
+  @override
+  String get artifactCloudErrorBody =>
+      'Ovid Cloud could not prepare this file. Check your connection and retry.';
+
+  @override
+  String get artifactCloudAccountTitle => 'Account changed';
+
+  @override
+  String get artifactCloudAccountBody =>
+      'This file belongs to a different account. Sign back in to open it.';
+
+  @override
   String get sessionRenameTitle => 'Rename session';
 
   @override
