@@ -47,6 +47,9 @@ interface Args {
   diskPaths: string[];
   label: string;
   json: string | null;
+  /** Worker file service for direct Studio reads (token: env CAP_INTERNAL_TOKEN). */
+  workerFileUrl: string | null;
+  envFile: string | null;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -66,13 +69,15 @@ function parseArgs(argv: string[]): Args {
     burstWindowMs: 1_000,
     runTimeoutMs: 90_000,
     baseUrl: "http://127.0.0.1:18082",
-    redisUrl: "redis://:staging@127.0.0.1:16379",
-    databaseUrl: "postgres://postgres:staging@127.0.0.1:15432/ovid_cloud_staging",
+    redisUrl: process.env.CAP_REDIS_URL ?? "redis://:staging@127.0.0.1:16379",
+    databaseUrl: process.env.CAP_DATABASE_URL ?? "postgres://postgres:staging@127.0.0.1:15432/ovid_cloud_staging",
     workerPidFile: "/tmp/opencode/ovid-staging-worker.pid",
     containerPrefix: "ovid-cloud-staging-",
     diskPaths: ["/workspaces-staging"],
     label: "capacity",
     json: null,
+    workerFileUrl: null,
+    envFile: null,
   };
   const num = (v: string | undefined, name: string): number => {
     const n = Number(v);
@@ -106,6 +111,8 @@ function parseArgs(argv: string[]): Args {
       case "--disk": a.diskPaths = v!.split(","); break;
       case "--label": a.label = v!; break;
       case "--json": a.json = v!; break;
+      case "--worker-file-url": a.workerFileUrl = v!; break;
+      case "--env-file": a.envFile = v!; break;
       default: throw new Error(`capacity: unknown argument ${k}`);
     }
   }
@@ -118,6 +125,15 @@ function sh(cmd: string, args: string[], timeoutMs = 20_000): Promise<string> {
       res(err ? "" : out),
     );
   });
+}
+
+/** Strip credentials even from malformed connection strings. */
+export function redactConnectionUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.password !== "") url.password = "REDACTED";
+    return url.toString();
+  } catch { return "[invalid URL]"; }
 }
 
 /** "1.2GiB / 2GiB" → MiB of the first figure. */
@@ -184,6 +200,13 @@ async function main(): Promise<void> {
   }
 
   const a = parseArgs(argv);
+  // Token for direct Studio reads: CAP_INTERNAL_TOKEN, else OVID_INTERNAL_TOKEN
+  // parsed (never sourced) from --env-file (the staging env file).
+  let internalToken = process.env.CAP_INTERNAL_TOKEN ?? "";
+  if (internalToken === "" && a.envFile !== null) {
+    const text = await readFile(a.envFile, "utf8");
+    internalToken = /^OVID_INTERNAL_TOKEN=(.*)$/m.exec(text)?.[1]?.trim() ?? "";
+  }
   const runTag = `cap-${Date.now().toString(36)}`;
   const epochMs = Date.now() + 3_000;
   const win = windowOf({ rampMs: a.rampMs, settleMs: a.settleMs, measureMs: a.measureMs });
@@ -250,7 +273,7 @@ async function main(): Promise<void> {
       let pgMirrorMb = 0;
       try {
         const [row] = await sql`
-          SELECT (SELECT count(*) FROM pg_stat_activity)::int AS conns,
+          SELECT (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database())::int AS conns,
                  pg_database_size(current_database())::bigint AS db,
                  COALESCE(pg_total_relation_size(to_regclass('session_event_mirror')), 0)::bigint AS mirror`;
         pgConnections = Number(row?.conns ?? 0);
@@ -321,7 +344,14 @@ async function main(): Promise<void> {
         runTag,
         epochMs,
         profile,
-        target: { baseUrl: a.baseUrl, wsBase },
+        target: {
+          baseUrl: a.baseUrl,
+          wsBase,
+          workerFile:
+            a.workerFileUrl !== null && internalToken !== ""
+              ? { url: a.workerFileUrl, token: internalToken }
+              : undefined,
+        },
       };
       return new Promise<ShardResult>((res, rej) => {
         const child = fork(self, ["--child", JSON.stringify(payload)], {
@@ -399,7 +429,7 @@ async function main(): Promise<void> {
   const report = {
     label: a.label,
     startedAt: new Date(epochMs).toISOString(),
-    args: a,
+    args: { ...a, databaseUrl: redactConnectionUrl(a.databaseUrl), redisUrl: redactConnectionUrl(a.redisUrl) },
     window: win,
     latency: merged,
     counters,

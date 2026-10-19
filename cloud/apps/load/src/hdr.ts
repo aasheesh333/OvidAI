@@ -72,14 +72,28 @@ export class LatencyHistogram {
     return h;
   }
 
-  summary(): { samples: number; p50: number; p95: number; p99: number; max: number; mean: number } {
+  summary(): {
+    samples: number;
+    p50: number;
+    p95: number;
+    p99: number;
+    max: number;
+    mean: number;
+    /** Percentiles are integer-ms upper bounds because samples use 1 ms buckets. */
+    percentileResolutionMs: number;
+    percentilesAreUpperBounds: boolean;
+  } {
+    const upperBound = (p: number): number => this.percentile(p);
+    const maxUpperBound = this.total === 0 ? 0 : Math.max(Math.ceil(this.max), upperBound(100));
     return {
       samples: this.total,
-      p50: this.percentile(50),
-      p95: this.percentile(95),
-      p99: this.percentile(99),
-      max: Math.round(this.max),
+      p50: upperBound(50),
+      p95: upperBound(95),
+      p99: upperBound(99),
+      max: maxUpperBound,
       mean: Math.round(this.mean() * 10) / 10,
+      percentileResolutionMs: 1,
+      percentilesAreUpperBounds: true,
     };
   }
 }

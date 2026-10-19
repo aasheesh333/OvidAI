@@ -49,6 +49,13 @@ export interface CapacityProfile {
 export interface CapacityTarget {
   baseUrl: string;
   wsBase: string;
+  /**
+   * When set, Studio reads go straight to the worker's internal file service
+   * (the gateway route is a thin proxy onto it). Staging needs this: the
+   * host firewall drops container→host traffic, so the staging gateway
+   * container cannot reach the host-run staging worker's file service.
+   */
+  workerFile?: { url: string; token: string } | undefined;
 }
 
 export interface ShardResult {
@@ -77,6 +84,8 @@ interface InFlight {
   burst: boolean;
   measured: boolean;
   firstTokenAt: number | null;
+  /** Wakes the owning user's loop when the run terminates. */
+  onDone: (() => void) | null;
 }
 
 const MAX_ERRORS = 50;
@@ -87,6 +96,18 @@ function sleep(ms: number): Promise<void> {
 
 function uniform(min: number, max: number): number {
   return min + Math.random() * Math.max(0, max - min);
+}
+
+/** Protocol evidence: a requested tool marker is not proof of execution. */
+export function recordCapacityEvent(counters: Record<string, number>, type: string, payload: Record<string, unknown>): void {
+  const field = ({ tool_started: "toolsStarted", tool_completed: "toolsCompleted", run_started: "runsStarted", run_merged: "runsMerged" } as Record<string, string>)[type];
+  if (field !== undefined) counters[field] = (counters[field] ?? 0) + 1;
+  if (type === "tool_completed" && (payload.ok === false || payload.isError === true)) counters.toolErrors = (counters.toolErrors ?? 0) + 1;
+}
+
+/** Start-to-start pacing; a slow reply may delay, but never overlaps a run. */
+export function nextSendAt(startMs: number, minMs: number, maxMs: number, random = Math.random()): number {
+  return startMs + minMs + random * Math.max(0, maxMs - minMs);
 }
 
 /**
@@ -195,17 +216,32 @@ export async function runCapacityShard(opts: {
     return { status: res.status, body };
   }
 
-  function onEvent(raw: WebSocket.RawData): void {
+  const browserLiveSessions = new Set<string>();
+  function onEvent(raw: WebSocket.RawData, isBinary = false): void {
+    if (isBinary) {
+      counters.browserFrames = (counters.browserFrames ?? 0) + 1;
+      return;
+    }
     const now = Date.now();
-    let msg: { op?: string; event?: { type?: string; ts?: string; payload?: Record<string, unknown> } };
+    let msg: { op?: string; sessionId?: string; state?: { live?: boolean; screencast?: boolean }; event?: { type?: string; ts?: string; payload?: Record<string, unknown> } };
     try {
       msg = JSON.parse(raw.toString()) as typeof msg;
     } catch {
       note("unparseable frame");
       return;
     }
+    if (msg.op === "browser_state") {
+      counters.browserStateMessages = (counters.browserStateMessages ?? 0) + 1;
+      if (msg.state?.live === true && typeof msg.sessionId === "string") {
+        browserLiveSessions.add(msg.sessionId);
+        counters.browserLiveUsersObserved = browserLiveSessions.size;
+      }
+      if (msg.state?.screencast === true) counters.browserScreencastStates = (counters.browserScreencastStates ?? 0) + 1;
+      return;
+    }
     if (msg.op !== "event" || msg.event === undefined) return;
     const ev = msg.event;
+    recordCapacityEvent(counters, ev.type ?? "", ev.payload ?? {});
     counters.eventsReceived! += 1;
     if (now >= measureStart && now < measureEnd && typeof ev.ts === "string") {
       h.wsLag.record(now - Date.parse(ev.ts));
@@ -226,6 +262,7 @@ export async function runCapacityShard(opts: {
       earlyDelta.delete(runId);
       if (run === undefined) return;
       inFlightAll.delete(runId);
+      run.onDone?.();
       if (ev.type === "run_completed") {
         counters.runsCompleted! += 1;
         if (run.measured) h.runTotal.record(now - run.t0);
@@ -273,7 +310,8 @@ export async function runCapacityShard(opts: {
     return ws;
   }
 
-  async function sendOne(uid: string, sessionId: string, burst: boolean): Promise<void> {
+  /** Returns the accepted run (null when the send failed). */
+  async function sendOne(uid: string, sessionId: string, burst: boolean): Promise<InFlight | null> {
     const t0 = Date.now();
     const measured = !burst && t0 >= measureStart && t0 < measureEnd;
     const sandbox = Math.random() < profile.toolShare;
@@ -289,7 +327,7 @@ export async function runCapacityShard(opts: {
     } catch (err) {
       counters.sendNetErrors! += 1;
       note(`send net error: ${err instanceof Error ? err.message : String(err)}`);
-      return;
+      return null;
     }
     const dt = Date.now() - t0;
     bump(statuses, String(res.status));
@@ -297,15 +335,15 @@ export async function runCapacityShard(opts: {
       if (res.status >= 500) counters.sends5xx! += 1;
       else counters.sends4xx! += 1;
       note(`send HTTP ${res.status} ${JSON.stringify(res.body).slice(0, 160)}`);
-      return;
+      return null;
     }
     counters.sendsAccepted! += 1;
     if (burst) counters.burstAccepted! += 1;
     if (measured) h.send202.record(dt);
     if (burst) h.burstSend202.record(dt);
     const runId = (res.body as { runId?: unknown } | null)?.runId;
-    if (typeof runId !== "string") return;
-    const run: InFlight = { t0, burst, measured, firstTokenAt: null };
+    if (typeof runId !== "string") return null;
+    const run: InFlight = { t0, burst, measured, firstTokenAt: null, onDone: null };
     const early = earlyDelta.get(runId);
     if (early !== undefined) {
       earlyDelta.delete(runId);
@@ -314,16 +352,72 @@ export async function runCapacityShard(opts: {
       if (burst) h.burstFirstToken.record(early - t0);
     }
     inFlightAll.set(runId, run);
+    runKeys.set(run, runId);
     maxInFlightRuns = Math.max(maxInFlightRuns, inFlightAll.size);
+    return run;
+  }
+
+  /**
+   * A real user reads the reply before typing the next message. A message
+   * sent while the user's previous run still streams is folded into that run
+   * as steering (no run of its own), which would make it unmeasurable — so
+   * each user waits for its previous run (bounded by runTimeoutMs).
+   */
+  async function awaitRun(run: InFlight | null): Promise<void> {
+    if (run === null || !inFlightAll.has(runKeyOf(run))) return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, profile.runTimeoutMs);
+      run.onDone = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+  }
+  const runKeys = new WeakMap<InFlight, string>();
+  const runKeyOf = (run: InFlight): string => runKeys.get(run) ?? "";
+
+  async function studioCall(
+    uid: string,
+    sessionId: string,
+    method: "GET" | "PUT",
+    suffix: string,
+    body?: unknown,
+  ): Promise<number> {
+    const wf = target.workerFile;
+    if (wf === undefined) {
+      const res = await api(uid, `/cloud/v1/sessions/${sessionId}/workspace${suffix}`, {
+        method,
+        ...(body === undefined ? {} : { body }),
+      });
+      return res.status;
+    }
+    const res = await fetch(
+      `${wf.url.replace(/\/+$/, "")}/internal/sessions/${sessionId}${suffix}`,
+      {
+        method,
+        headers: {
+          "x-ovid-internal-token": wf.token,
+          "x-ovid-user-id": uid,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      },
+    );
+    await res.arrayBuffer();
+    return res.status;
   }
 
   async function studioLoop(uid: string, sessionId: string): Promise<void> {
     // One small file, written once, then read back (tree + file) on a cadence.
+    const content = `# ${runTag}\n${"lorem ipsum ".repeat(200)}`;
     try {
-      await api(uid, `/cloud/v1/sessions/${sessionId}/workspace/file`, {
-        method: "PUT",
-        body: { path: "notes.md", contentUtf8: `# ${runTag}\n${"lorem ipsum ".repeat(200)}` },
-      });
+      if (target.workerFile === undefined) {
+        await studioCall(uid, sessionId, "PUT", "/file", { path: "notes.md", contentUtf8: content });
+      } else {
+        await studioCall(uid, sessionId, "PUT", "/file?path=notes.md", {
+          contentBase64: Buffer.from(content).toString("base64"),
+        });
+      }
     } catch {
       // counted on read
     }
@@ -331,17 +425,12 @@ export async function runCapacityShard(opts: {
     while (!stopping && Date.now() < stopSendsAt) {
       const t0 = Date.now();
       try {
-        const tree = await api(uid, `/cloud/v1/sessions/${sessionId}/workspace/tree`, { method: "GET" });
-        const file = await api(
-          uid,
-          `/cloud/v1/sessions/${sessionId}/workspace/file?path=notes.md`,
-          { method: "GET" },
-        );
-        const ok = tree.status === 200 && file.status === 200;
-        if (ok) counters.studioOk! += 1;
+        const tree = await studioCall(uid, sessionId, "GET", "/tree");
+        const file = await studioCall(uid, sessionId, "GET", "/file?path=notes.md");
+        if (tree === 200 && file === 200) counters.studioOk! += 1;
         else {
           counters.studioErrors! += 1;
-          bump(statuses, `studio_${tree.status}_${file.status}`);
+          bump(statuses, `studio_${tree}_${file}`);
         }
         if (t0 >= measureStart && t0 < measureEnd) h.studio.record(Date.now() - t0);
       } catch (err) {
@@ -404,29 +493,45 @@ export async function runCapacityShard(opts: {
       ws.off("message", onErr);
       if (counters.browserAttachErrors === errorsBefore) counters.browserAttachOk! += 1;
     }
-    if (i < profile.studioUsers) void studioLoop(uid, sessionId);
 
-    // Warm-up send (provisions the user's key) — not measured.
-    await sendOne(uid, sessionId, false);
-    let next = Date.now() + uniform(profile.sendEveryMinMs, profile.sendEveryMaxMs);
-    let burstDone = burstAt === null;
+    // Warm-up send (provisions the user's key, first sandbox attach) — not
+    // measured; the user waits for its reply like any other.
+    let lastSendStart = Date.now();
+    let last = await sendOne(uid, sessionId, false);
+    await awaitRun(last);
+    // Studio users start after the warm-up run: the workspace is warm now
+    // (the file service refuses writes to a cold workspace with not_warm).
+    if (i < profile.studioUsers) void studioLoop(uid, sessionId);
+    const quietMs = 15_000;
     const burstMine =
       burstAt === null ? Number.POSITIVE_INFINITY : burstAt + uniform(0, profile.burst!.windowMs);
+    let burstDone = burstAt === null;
+    const nextRegular = (): number => {
+      let at = nextSendAt(lastSendStart, profile.sendEveryMinMs, profile.sendEveryMaxMs);
+      // Keep the burst clean: no regular send in the 15 s before it, so (almost)
+      // every burst send gets its own run instead of steering a live one.
+      if (!burstDone && at >= burstMine - quietMs) at = Number.POSITIVE_INFINITY;
+      return at;
+    };
+    // Starts are paced from the previous start, NOT from completion; if a
+    // reply outlasts the interval it defers just that user's next send.
+    let next = nextRegular();
     while (Date.now() < stopSendsAt) {
       const wake = Math.min(next, burstDone ? Number.POSITIVE_INFINITY : burstMine, stopSendsAt);
       await sleep(wake - Date.now());
       const now = Date.now();
       if (now >= stopSendsAt) break;
+      lastSendStart = now;
       if (!burstDone && now >= burstMine) {
         burstDone = true;
-        await sendOne(uid, sessionId, true);
-        next = Date.now() + uniform(profile.sendEveryMinMs, profile.sendEveryMaxMs);
+        last = await sendOne(uid, sessionId, true);
+      } else if (now >= next) {
+        last = await sendOne(uid, sessionId, false);
+      } else {
         continue;
       }
-      if (now >= next) {
-        await sendOne(uid, sessionId, false);
-        next = Date.now() + uniform(profile.sendEveryMinMs, profile.sendEveryMaxMs);
-      }
+      await awaitRun(last);
+      next = nextRegular();
     }
   }
 
