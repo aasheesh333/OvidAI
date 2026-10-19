@@ -92,6 +92,7 @@ import {
   type ToolCall,
 } from "./liteLlm.js";
 import { createSandboxPort } from "./sandboxAdapter.js";
+import { usageFor, withUsageRecording } from "./usageRecorder.js";
 import { unattendedTimeoutPolicy, type UnattendedApprovalHook } from "./unattended.js";
 import { adaptAgentTools } from "./tools/agentToolAdapter.js";
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.js";
@@ -1102,7 +1103,7 @@ export function createAgentRunProcessor(
 
     // Cancel polling needs the live engine; the engine needs the transport.
     let engine: ReturnType<typeof createAgentEngine> | undefined;
-    const polled = withCancelPolling(legacy, {
+    const polled = withCancelPolling(withUsageRecording(legacy, usageFor(deps.db, userId, sessionId, runId)), {
       intervalMs: cancelCheckIntervalMs,
       isCancelRequested: () => runs.isCancelRequested(deps.db, runId),
       onCancel: async () => {
@@ -1964,7 +1965,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     // THIS run's token).
     let engine: ReturnType<typeof createAgentEngine> | undefined;
     const wrap = (base: AgentTransport): AgentTransport =>
-      withCancelPolling(base, {
+      withCancelPolling(withUsageRecording(base, usageFor(deps.db, userId, sessionId, runId)), {
         intervalMs: DEFAULT_CANCEL_CHECK_INTERVAL_MS,
         isCancelRequested: () => runs.isCancelRequested(deps.db, runId),
         onCancel: async () => {
