@@ -1,5 +1,6 @@
 export * from "./client.js";
 export * from "./repos.js";
+export * from "./artifactVault.js";
 export * from "./moneyRepos.js";
 export * from "./imagesRepos.js";
 export * from "./billingRepos.js";

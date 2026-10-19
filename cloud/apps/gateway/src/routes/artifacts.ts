@@ -74,6 +74,20 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: GatewayDeps):
     const row = await workspaceObjects.getArtifact(deps.db, artifactId, uid);
     if (row === null) return notFound(reply, "Artifact not found.");
 
+    // FE-005 regression (cross-session hole): the mint must match the SAME
+    // session the URL names — the artifact row's own session, when it has
+    // one, and never a session the caller merely also owns; a tampered
+    // association to a foreign session is rejected by getArtifact's owner
+    // scoping. Unknown/unset association → 404, same as every miss.
+    if (row.sessionId === null || row.sessionId !== sessionId) {
+      return notFound(reply, "Artifact not found.");
+    }
+    // Only live artifacts mint: a soft-deleted row (or a non-artifact kind
+    // reaching this route by id) is gone as far as downloads are concerned.
+    if (row.status !== "active" || row.kind !== "artifact") {
+      return notFound(reply, "Artifact not found.");
+    }
+
     // The presign seam (same mindset as the attachments route): a gateway
     // composed without storage answers loudly, never a silent no-op.
     if (deps.storage === undefined) {

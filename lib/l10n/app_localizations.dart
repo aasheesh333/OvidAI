@@ -1600,6 +1600,90 @@ abstract class AppLocalizations {
   /// **'Open it with another app or share it.'**
   String get artifactNoPreviewBody;
 
+  /// Artifact Vault tab: files Ovid produced across the account's chats.
+  ///
+  /// In en, this message translates to:
+  /// **'Created by Ovid'**
+  String get vaultTabGenerated;
+
+  /// Artifact Vault tab: files the user attached across the account's chats.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploaded by User'**
+  String get vaultTabUploaded;
+
+  /// Artifact Vault type filter: no file-type restriction.
+  ///
+  /// In en, this message translates to:
+  /// **'All types'**
+  String get vaultTypeAll;
+
+  /// Hint text of the Artifact Vault search field.
+  ///
+  /// In en, this message translates to:
+  /// **'Search files'**
+  String get vaultSearchHint;
+
+  /// Button at the end of the Artifact Vault list: fetches the next page.
+  ///
+  /// In en, this message translates to:
+  /// **'Load more'**
+  String get vaultLoadMore;
+
+  /// Artifact Vault error-state title when the inventory request failed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load your files'**
+  String get vaultErrorTitle;
+
+  /// Footnote in the Artifact Vault explaining account scope and link expiry.
+  ///
+  /// In en, this message translates to:
+  /// **'Files from every chat in your account. Links to open or share are temporary and expire about an hour after they are created.'**
+  String get vaultPolicyNote;
+
+  /// Footnote in the guest-only local Artifacts view explaining its scope.
+  ///
+  /// In en, this message translates to:
+  /// **'On this device — only files saved locally are listed. Sign in to see every file in your account.'**
+  String get vaultLocalScope;
+
+  /// Preview title when a cloud Vault file could not be fetched.
+  ///
+  /// In en, this message translates to:
+  /// **'File not available'**
+  String get artifactCloudMissingTitle;
+
+  /// Preview message for the typed artifact_unavailable mint failure.
+  ///
+  /// In en, this message translates to:
+  /// **'This file is no longer stored in Ovid Cloud.'**
+  String get artifactCloudUnavailableBody;
+
+  /// Preview message for the typed artifact_incomplete mint failure.
+  ///
+  /// In en, this message translates to:
+  /// **'This file did not finish uploading. Remove and re-attach it.'**
+  String get artifactCloudIncompleteBody;
+
+  /// Preview message for any other typed cloud mint failure.
+  ///
+  /// In en, this message translates to:
+  /// **'Ovid Cloud could not prepare this file. Check your connection and retry.'**
+  String get artifactCloudErrorBody;
+
+  /// Preview title when the file belongs to the previously signed-in account.
+  ///
+  /// In en, this message translates to:
+  /// **'Account changed'**
+  String get artifactCloudAccountTitle;
+
+  /// Preview message when the previewing account no longer owns the file.
+  ///
+  /// In en, this message translates to:
+  /// **'This file belongs to a different account. Sign back in to open it.'**
+  String get artifactCloudAccountBody;
+
   /// Rename-chat dialog title.
   ///
   /// In en, this message translates to:
