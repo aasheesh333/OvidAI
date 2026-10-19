@@ -54,14 +54,6 @@ void main() {
 
   /// Lets real async IO started in the fake zone finish: each round runs the
   /// real event loop, then flushes the fake zone's continuations.
-  Future<void> settleIo(WidgetTester tester) async {
-    for (var i = 0; i < 10; i++) {
-      await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 50)),
-      );
-      await tester.pump();
-    }
-  }
 
   testWidgets('image rows resolve the file asynchronously', (tester) async {
     final image = File('${workspace.path}/image.png')

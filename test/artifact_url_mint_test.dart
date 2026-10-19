@@ -97,7 +97,7 @@ void main() {
   group('mint-on-use', () {
     /// The preview Image resizes network images (Aether.imageCacheWidth), which
 /// wraps the provider in a ResizeImage — unwrap it to read the URL.
-String _networkUrl(Image image) {
+String networkUrlOf(Image image) {
   var provider = image.image;
   if (provider is ResizeImage) provider = provider.imageProvider;
   return (provider as NetworkImage).url;
@@ -135,7 +135,7 @@ testWidgets('the remote-image preview swaps in the minted URL', (
         '$_restBase/sessions/$_sessionId/artifacts/$_artifactId/url',
       );
       final image = tester.widget<Image>(find.byType(Image));
-      expect(_networkUrl(image), _presigned('fresh'));
+      expect(networkUrlOf(image), _presigned('fresh'));
     });
 
     testWidgets('a mint failure falls back to the stale persisted URL', (
@@ -164,7 +164,7 @@ testWidgets('the remote-image preview swaps in the minted URL', (
 
       // Better a maybe-working old URL than nothing.
       final image = tester.widget<Image>(find.byType(Image));
-      expect(_networkUrl(image), _presigned('stale'));
+      expect(networkUrlOf(image), _presigned('stale'));
     });
 
     testWidgets('the thumbnail renders stale first, then the minted URL', (
@@ -190,12 +190,12 @@ testWidgets('the remote-image preview swaps in the minted URL', (
       );
       // First frame: the persisted URL (the image cache may still honor it).
       var image = tester.widget<Image>(find.byType(Image));
-      expect(_networkUrl(image), _presigned('stale'));
+      expect(networkUrlOf(image), _presigned('stale'));
 
       await tester.pump();
       await tester.pump();
       image = tester.widget<Image>(find.byType(Image));
-      expect(_networkUrl(image), _presigned('fresh'));
+      expect(networkUrlOf(image), _presigned('fresh'));
     });
 
     testWidgets('sharing a cloud artifact shares a freshly minted URL', (
