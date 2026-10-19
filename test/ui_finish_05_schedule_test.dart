@@ -13,6 +13,7 @@ import 'package:ovid_ai/core/cloud/schedule_client.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/schedule_screen.dart';
+import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'support/schedule_fake.dart';
@@ -275,7 +276,8 @@ void main() {
       'time': '09:45',
       'tz': 'UTC',
     });
-    expect(fake.lastPatchBody!['description'], _description);
+    // FE-017: only what changed is sent — the untouched description is not.
+    expect(fake.lastPatchBody!.containsKey('description'), isFalse);
     expect(find.text('Edit schedule'), findsNothing);
     expect(tester.takeException(), isNull);
   });
@@ -317,6 +319,8 @@ void main() {
     await _menu(tester, 'Edit');
     fake.failPatchStatus = 400;
     fake.failPatchMessage = 'Schedule is not editable.';
+    // A real change: an untouched sheet closes without a PATCH (FE-017).
+    await tester.enterText(find.byKey(const ValueKey('schedule-title')), 'Renamed');
     await _reveal(tester, find.text('Save'));
     await tester.tap(find.text('Save'));
     await _frames(tester);
@@ -350,8 +354,8 @@ void main() {
     await tester.enterText(title, 'Check release queue');
     await _reveal(tester, time);
     await tester.enterText(time, '300');
-    await _reveal(tester, find.byIcon(Icons.add));
-    await tester.tap(find.byIcon(Icons.add));
+    await _reveal(tester, find.descendant(of: find.byType(AetherStepper), matching: find.byIcon(Icons.add)));
+    await tester.tap(find.descendant(of: find.byType(AetherStepper), matching: find.byIcon(Icons.add)));
     await _reveal(tester, find.text('Save'));
     await tester.tap(find.text('Save'));
     await _frames(tester);
@@ -361,7 +365,7 @@ void main() {
     });
     expect(fake.lastPatchBody!['maxRetries'], 3);
     expect(fake.lastPatchBody!['title'], 'Check release queue');
-    expect(fake.lastPatchBody!['description'], _description);
+    expect(fake.lastPatchBody!.containsKey('description'), isFalse);
   });
 
   testWidgets('pause resume and cancel mutate the saved task', (tester) async {
@@ -382,7 +386,7 @@ void main() {
       await tester.tap(find.text(action.label));
       await _frames(tester);
       expect(row['status'], action.status);
-      expect(find.text(action.status), findsOneWidget);
+      expect(find.text(scheduleStatusLabel(action.status)), findsOneWidget);
     }
 
     await _reveal(tester, find.byTooltip('Task actions'));
@@ -394,6 +398,6 @@ void main() {
     await tester.tap(find.text('Cancel task').last);
     await _frames(tester);
     expect(row['status'], 'cancelled');
-    expect(find.text('cancelled'), findsOneWidget);
+    expect(find.text('Cancelled'), findsOneWidget);
   });
 }

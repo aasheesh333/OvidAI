@@ -58,7 +58,7 @@ void main() {
     await tester.tap(find.text('Schedule'));
     await _settle(tester);
     await _settle(tester);
-    expect(find.text('Schedule · My work'), findsOneWidget);
+    expect(find.text('Schedules'), findsOneWidget);
     expect(find.textContaining('Ask the agent'), findsOneWidget);
   });
 
@@ -83,12 +83,14 @@ void main() {
     await _settle(tester);
 
     // The first few cards fit the viewport.
-    expect(find.text('pending'), findsOneWidget);
-    expect(find.text('paused'), findsOneWidget);
+    // FE-018: statuses read as words, never the raw enum.
+    expect(find.text('Active'), findsOneWidget);
+    expect(find.text('Paused'), findsOneWidget);
+    expect(find.text('pending'), findsNothing);
     expect(find.textContaining('2026'), findsWidgets);
     for (final status in ['completed', 'failed', 'cancelled']) {
       await tester.scrollUntilVisible(find.text('$status task'), 200);
-      expect(find.text(status), findsOneWidget);
+      expect(find.text(scheduleStatusLabel(status)), findsOneWidget);
     }
     expect(find.byTooltip('Task actions'), findsWidgets);
   });
@@ -108,7 +110,7 @@ void main() {
     await _settle(tester);
 
     expect(fake.byId('sc1')!['status'], 'cancelled');
-    expect(find.text('cancelled'), findsOneWidget);
+    expect(find.text('Cancelled'), findsOneWidget);
     expect(find.text('My task'), findsOneWidget);
   });
 
