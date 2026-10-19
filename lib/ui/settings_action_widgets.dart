@@ -135,7 +135,16 @@ class SettingsResetScreen extends StatefulWidget {
 
   /// Opens chat export; offered as "Export my chats first" in the confirm.
   final VoidCallback? onExport;
-  const SettingsResetScreen({super.key, this.reset, this.onExport});
+
+  /// Opens the account-deletion flow — the only path that deletes CLOUD data
+  /// (SE-003). Offered as a separate, clearly labelled action.
+  final VoidCallback? onDeleteAccount;
+  const SettingsResetScreen({
+    super.key,
+    this.reset,
+    this.onExport,
+    this.onDeleteAccount,
+  });
   @override
   State<SettingsResetScreen> createState() => _SettingsResetScreenState();
 }
@@ -150,18 +159,17 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
     final onExport = widget.onExport;
     final confirmed = await showAetherConfirmDialog(
       context,
-      title: 'Delete ALL data?',
+      title: 'Clear this device?',
       message:
-          'This permanently deletes from this device: chats and their '
-          'workspaces, search index, memory, usage history, API keys and '
-          'tokens, providers, plugins, MCP servers, presets, permission '
-          'grants, settings, uploaded skills, chat exports and backups, '
-          'browser cookies and profiles, and signs you out.\n\n'
-          'Not deleted: folders you picked outside the app, files you '
-          'already shared or saved elsewhere, the installed sandbox '
-          'runtime, and your Ovid account and cloud data (delete those '
-          'from Account). This cannot be undone.',
-      confirmLabel: 'Delete everything',
+          'This removes from THIS device: cached chats and their search '
+          'index, unsent drafts, settings, API keys and tokens saved on the '
+          'device, image receipts, and local backups. It also stops this '
+          "device's notifications and signs you out.\n\n"
+          'Not deleted: your Ovid account and everything in Ovid Cloud — '
+          'your chats, files, schedules and shared links come back when you '
+          'sign in again. To delete those, use Delete my account. '
+          'Clearing this device cannot be undone.',
+      confirmLabel: 'Clear this device',
       typeToConfirm: 'DELETE',
       extra: onExport == null
           ? null
@@ -187,7 +195,8 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
       final report = await reset();
       if (!mounted) return;
       if (report.success) {
-        const done = 'All data on this device was deleted.';
+        const done =
+            'This device was cleared. Your cloud chats are kept in Ovid Cloud.';
         setState(() => _result = done);
         // The reset signs out, so the gate under this stack now shows the
         // login screen. Return there instead of leaving signed-out settings
@@ -218,17 +227,18 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
   Widget build(BuildContext context) {
     final available = (widget.reset ?? SettingsActions.resetAll) != null;
     return Scaffold(
-      appBar: AppBar(title: const Text('Delete app data')),
+      appBar: AppBar(title: const Text('Clear this device')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
           const AetherSectionTitle(
-            eyebrow: 'Reset',
-            subtitle: 'Permanent, local-only erase of app-owned data.',
+            eyebrow: 'This device',
+            subtitle: 'Signs out and removes local cache. Your cloud chats '
+                'are kept.',
           ),
           const SizedBox(height: 12),
           AetherCard(
-            title: const Text('Delete app data'),
+            title: const Text('Clear this device'),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -243,8 +253,8 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
                 const SizedBox(height: 8),
                 Text(
                   available
-                      ? 'Deletes chats, keys, settings and other app data on this device after stopping active writers. Folders outside the app and your Ovid account are not affected. Any incomplete removal is reported for retry.'
-                      : 'Full reset unavailable in this build: the verified all-store reset worker is not connected. No data has been deleted.',
+                      ? 'Removes cached chats, drafts, settings and keys stored on this device, and signs you out. Everything in Ovid Cloud stays in your account. Any incomplete removal is reported for retry.'
+                      : 'Clearing this device is unavailable in this build. Nothing has been deleted.',
                   style: AetherType.body,
                 ),
               ],
@@ -252,14 +262,40 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
           ),
           const SizedBox(height: 16),
           SettingsActionButton(
-            label: _busy ? 'Deleting…' : 'Delete all data',
-            icon: Icons.delete_forever_outlined,
+            label: _busy ? 'Clearing…' : 'Clear this device',
+            icon: Icons.phonelink_erase_outlined,
             danger: true,
             onPressed: _busy || !available ? null : _delete,
           ),
           if (_busy) ...[
             const SizedBox(height: 12),
-            const LinearProgressIndicator(semanticsLabel: 'Deleting app data'),
+            const LinearProgressIndicator(
+              semanticsLabel: 'Clearing this device',
+            ),
+          ],
+          if (widget.onDeleteAccount != null) ...[
+            const SizedBox(height: 24),
+            AetherCard(
+              title: const Text('Delete my cloud data'),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Your chats, files, schedules, shared links and saved '
+                    'keys live in Ovid Cloud. Deleting them means deleting '
+                    'your Ovid account.',
+                    style: AetherType.body,
+                  ),
+                  const SizedBox(height: 12),
+                  SettingsActionButton(
+                    key: const ValueKey('reset-delete-account'),
+                    label: 'Delete my account…',
+                    icon: Icons.person_remove_outlined,
+                    onPressed: _busy ? null : widget.onDeleteAccount,
+                  ),
+                ],
+              ),
+            ),
           ],
           if (_result != null)
             Padding(

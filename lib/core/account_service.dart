@@ -137,7 +137,11 @@ class AccountService {
                   : client.post(
                       Uri.parse('$_base$path'),
                       headers: headers,
-                      body: body == null ? null : jsonEncode(body),
+                      // Never an empty body under a JSON content type:
+                      // Fastify rejects it with 400 FST_ERR_CTP_EMPTY_JSON_BODY
+                      // and every login would stick on "Confirming your
+                      // account" (SH-004).
+                      body: jsonEncode(body ?? const <String, dynamic>{}),
                     ))
               .timeout(const Duration(seconds: 20));
       if (response.statusCode != 200) {

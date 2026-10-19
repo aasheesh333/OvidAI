@@ -480,6 +480,92 @@ class _HistoryImportSheetState extends State<HistoryImportSheet> {
       '$count ${count == 1 ? one : many}';
 }
 
+/// Settings → Data controls → "Import chats from this device" (SE-015).
+///
+/// Reopens the import after "Not now". Rendered only while device-only chats
+/// exist (the same read-only plan the first-run step uses), so it is never a
+/// dead row. [service] / [account] are test seams.
+class ImportLocalChatsTile extends StatefulWidget {
+  const ImportLocalChatsTile({super.key, this.service, this.account});
+
+  final HistoryImportService? service;
+  final String? account;
+
+  @override
+  State<ImportLocalChatsTile> createState() => _ImportLocalChatsTileState();
+}
+
+class _ImportLocalChatsTileState extends State<ImportLocalChatsTile> {
+  HistoryImportPlan? _plan;
+  HistoryImportService? _service;
+  String? _account;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final account = widget.account ?? AppState.I.sessionAccountId;
+      if (account.isEmpty || account == 'guest') return;
+      final prefs = await SharedPreferences.getInstance();
+      final service = widget.service ??
+          productionHistoryImportService(prefs: prefs, account: account);
+      final plan = await service.plan();
+      if (!mounted) return;
+      setState(() {
+        _plan = plan;
+        _service = service;
+        _account = account;
+      });
+    } catch (e, st) {
+      Diag.swallow('settings.import_tile', e, st);
+    }
+  }
+
+  Future<void> _open() async {
+    await showHistoryImportSheet(
+      context,
+      service: _service,
+      account: _account,
+    );
+    if (mounted) await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final plan = _plan;
+    if (plan == null ||
+        plan.alreadyImported ||
+        plan.sessions == 0 ||
+        plan.messages == 0) {
+      return const SizedBox.shrink();
+    }
+    final chats = plan.sessions == 1 ? '1 chat' : '${plan.sessions} chats';
+    return ListTile(
+      key: const ValueKey('settings-import-local-chats'),
+      dense: true,
+      leading: Icon(
+        Icons.cloud_upload_outlined,
+        size: 19,
+        color: Aether.textMuted,
+      ),
+      title: const Text(
+        'Import chats from this device',
+        style: TextStyle(fontSize: 14),
+      ),
+      subtitle: Text(
+        '$chats saved only on this device · copy them to Ovid Cloud',
+        style: TextStyle(fontSize: 12, color: Aether.textFaint),
+      ),
+      trailing: const Icon(Icons.chevron_right, size: 18),
+      onTap: _open,
+    );
+  }
+}
+
 class _ImportFact extends StatelessWidget {
   const _ImportFact({required this.label, required this.value});
 

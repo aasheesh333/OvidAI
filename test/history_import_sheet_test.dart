@@ -513,4 +513,52 @@ void main() {
       expect(service.planCalls, 1);
     });
   });
+
+  group('Settings import entry (SE-015)', () {
+    Future<void> pumpTile(
+      WidgetTester tester,
+      _FakeHistoryImportService service,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ImportLocalChatsTile(
+              service: service,
+              account: 'firebase:u1',
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('offers the import while device-only chats exist', (
+      tester,
+    ) async {
+      final prefs = await _prefs(<String, Object>{
+        'ovid_cloud_import_skipped_u1': true,
+      });
+      final service = _FakeHistoryImportService(
+        prefs: prefs,
+        planResult: const HistoryImportPlan(
+          sessions: 2,
+          messages: 6,
+          alreadyImported: false,
+        ),
+      );
+      await pumpTile(tester, service);
+      expect(find.text('Import chats from this device'), findsOneWidget);
+      await tester.tap(find.text('Import chats from this device'));
+      await tester.pumpAndSettle();
+      expect(find.text('Import my chats'), findsOneWidget,
+          reason: '"Not now" is really for now: the sheet reopens');
+    });
+
+    testWidgets('is hidden with nothing to import', (tester) async {
+      final prefs = await _prefs();
+      final service = _FakeHistoryImportService(prefs: prefs);
+      await pumpTile(tester, service);
+      expect(find.text('Import chats from this device'), findsNothing);
+    });
+  });
 }

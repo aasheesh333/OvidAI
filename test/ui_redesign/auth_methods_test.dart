@@ -71,9 +71,11 @@ void main() {
       expect(find.text('Continue with Phone'), findsOneWidget);
       // Pre-amble instructional body copy is rendered.
       expect(
-        find.textContaining('configured social provider or phone'),
+        find.textContaining('account is created the first time you sign in'),
         findsOneWidget,
       );
+      // No developer wording (EM-002).
+      expect(find.textContaining('configured'), findsNothing);
     });
 
     testWidgets('link intent excludes already-linked providers', (

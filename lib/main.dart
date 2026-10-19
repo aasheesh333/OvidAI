@@ -407,7 +407,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Ovid',
+      title: 'Ovid Si',
       navigatorKey: appNavigatorKey,
       // Enables state restoration (navigator + restorable widgets) after the
       // OS kills the process in the background.
