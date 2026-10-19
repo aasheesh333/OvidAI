@@ -360,9 +360,7 @@ class SettingsScreen extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        signedIn
-                            ? (fb.displayName ?? fb.email ?? 'You')
-                            : 'You',
+                        signedIn ? fb.accountLabel : 'You',
                         style: const TextStyle(
                           fontSize: 15.5,
                           fontWeight: FontWeight.w700,
@@ -371,7 +369,7 @@ class SettingsScreen extends StatelessWidget {
                       const SizedBox(height: 2),
                       Text(
                         signedIn
-                            ? (fb.email ?? 'Signed in')
+                            ? fb.accountDetail
                             : 'Sign in to your account',
                         style: TextStyle(fontSize: 12, color: Aether.textFaint),
                       ),

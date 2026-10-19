@@ -105,6 +105,27 @@ class FirebaseService extends ChangeNotifier {
   String? get uid => _user?.uid;
   bool get emailVerified => _user?.emailVerified ?? false;
   String? get phoneNumber => _user?.phoneNumber;
+
+  /// What to call the signed-in user (SH-024): display name, then email,
+  /// then phone number, then "Ovid user" — never "Signed in / Signed in".
+  String get accountLabel {
+    for (final v in [displayName, email, phoneNumber]) {
+      final t = v?.trim();
+      if (t != null && t.isNotEmpty) return t;
+    }
+    return 'Ovid user';
+  }
+
+  /// The second line under [accountLabel]: the first identifier not already
+  /// used as the label, else the sign-in method.
+  String get accountDetail {
+    final label = accountLabel;
+    for (final v in [email, phoneNumber]) {
+      final t = v?.trim();
+      if (t != null && t.isNotEmpty && t != label) return t;
+    }
+    return phoneNumber != null ? 'Signed in with phone' : 'Signed in';
+  }
   final authProviders = AuthProviders();
   AuthIdentity? _authIdentity;
   AuthIdentity get _identity => _authIdentity ??= AuthIdentity(
