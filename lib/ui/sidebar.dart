@@ -7,6 +7,7 @@ import '../core/connection_service.dart';
 import '../core/firebase_service.dart';
 import '../core/session_history_store.dart';
 import '../core/theme.dart';
+import '../core/ovid_cloud_service.dart';
 import '../core/state.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
@@ -892,12 +893,10 @@ class _PlanPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final paid = tier != 'free';
-    final label = switch (tier) {
-      '3x' => 'Plus · 3×',
-      '7x' => 'Pro · 7×',
-      '15x' => 'Max · 15×',
-      _ => 'Free plan',
-    };
+    // Names and multipliers from the server plan table (SH-006).
+    final label = paid
+        ? '${ovidPlanName(tier)} · ${ovidMultiplierLabel(ovidPlanMultiplier(tier))}'
+        : 'Free plan';
     return AetherPill(
       label: label,
       color: paid ? Aether.accent : Aether.textMuted,
