@@ -105,6 +105,13 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+    # Log rotation (deploy audit 2026-10-18): cap json-file at 3×10m — the
+    # default grows unbounded. Applies on next container recreate.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # ── Storage (P7) — cache-class Redis (spec §10 redis-c) ───────────────────
   # Session-activity keys for the warm-workspace tracker/LRU. CACHE ONLY:
@@ -152,6 +159,13 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+    # Log rotation (deploy audit 2026-10-18): cap json-file at 3×10m — the
+    # default grows unbounded. Applies on next container recreate.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # Loopback egress proxies (P2): thin socat relays that give the HOST
   # systemd worker a stable 127.0.0.1 path to the live stack's postgres and
@@ -184,6 +198,13 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    # Log rotation (deploy audit 2026-10-18): cap json-file at 3×10m — the
+    # default grows unbounded. Applies on next container recreate.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   net-proxy-mint:
     image: alpine/socat:1.8.1.3
@@ -202,6 +223,13 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    # Log rotation (deploy audit 2026-10-18): cap json-file at 3×10m — the
+    # default grows unbounded. Applies on next container recreate.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   gateway:
     build:
@@ -265,6 +293,13 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+    # Log rotation (deploy audit 2026-10-18): cap json-file at 3×10m — the
+    # default grows unbounded. Applies on next container recreate.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # (No `worker` service any more — see the P2 note in the file header. The
   # worker runs on the host as systemd unit ovid-worker.service
@@ -351,3 +386,10 @@ services:
       - mintdata:/data
     networks: [internal]
     mem_limit: 1g
+    # Log rotation (deploy audit 2026-10-18): cap json-file at 3×10m — the
+    # default grows unbounded. Applies on next container recreate.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -12,7 +12,15 @@ Description=Ovid cloud worker (agent runs + SandboxManager)
 # docker.service: not a hard runtime dep (the worker talks to redis/postgres
 # over loopback proxies), but ordering after it keeps the proxy containers
 # up first on a fresh boot.
-After=network-online.target docker.service
+# ovid-sandbox-nft.service: deploy-audit #1 — the nft unit's own Before= only
+# ORDERS us after it; ordering alone never propagates its failure, so a box
+# where the filter unit failed at boot would happily run this worker with
+# UNFILTERED sandbox egress. Requires= + After= makes a failed/missing filter
+# unit fail this worker's start too, and the ExecStartPre table check below
+# catches the remaining gap (unit "active" but the table was deleted out from
+# under it).
+After=network-online.target docker.service ovid-sandbox-nft.service
+Requires=ovid-sandbox-nft.service
 Wants=network-online.target
 
 [Service]
@@ -45,6 +53,11 @@ Delegate=yes
 # ephemeral, so this must run on every boot: hence ExecStartPre, not a manual
 # one-off.
 ExecStartPre=/bin/sh -c 'echo "+cpu +memory +pids" > /sys/fs/cgroup/ovid-sandboxes.slice/cgroup.subtree_control'
+# Deploy-audit #1, belt to the Requires= above: fail this worker's start when
+# the egress table is not actually loaded (nft unit failed silently, table
+# deleted by hand, …). `nft list table` exits nonzero on a missing table,
+# which aborts ExecStart. The name is pinned by ovid-sandbox-nft.service.
+ExecStartPre=/usr/sbin/nft list table inet ovid_sandbox
 WorkingDirectory=/opt/ovid-cloud/repo/cloud
 EnvironmentFile=/opt/ovid-cloud/worker.env
 ExecStart=/usr/bin/node apps/worker/dist/main.js
