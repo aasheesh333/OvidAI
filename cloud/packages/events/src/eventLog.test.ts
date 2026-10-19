@@ -91,6 +91,39 @@ describe.skipIf(!TEST_REDIS_URL)("eventLog against real redis", () => {
     expect(new Date(e1.ts).toISOString()).toBe(e1.ts);
   });
 
+  it("append refreshes a TTL on the stream (time-based retention); ttlSec 0 disables it", async () => {
+    const s = newSid();
+    await createRedisEventLog(redis, { ttlSec: 3600 }).append(s, "run_started", { runId: "r" });
+    const ttl = await redis.ttl(streamKey(s));
+    expect(ttl).toBeGreaterThan(3500);
+    expect(ttl).toBeLessThanOrEqual(3600);
+
+    const s2 = newSid();
+    await createRedisEventLog(redis, { ttlSec: 0 }).append(s2, "run_started", { runId: "r" });
+    expect(await redis.ttl(streamKey(s2))).toBe(-1);
+  });
+
+  it("the published envelope equals the returned event (seq spliced in by the script)", async () => {
+    const log = createRedisEventLog(redis);
+    const s = newSid();
+    const got: SessionEvent[] = [];
+    const unsubscribe = await log.subscribe(s, (e) => got.push(e));
+    try {
+      const sent = await log.append(s, "message_delta", {
+        runId: "r",
+        text: 'quote " brace } unicode é \u{1F600}',
+      });
+      await waitFor(() => got.length === 1);
+      expect(got[0]).toEqual(sent);
+      // A second log on the same connection reuses the defined command.
+      const again = await createRedisEventLog(redis).append(s, "run_completed", { runId: "r" });
+      await waitFor(() => got.length === 2);
+      expect(got[1]).toEqual(again);
+    } finally {
+      await unsubscribe();
+    }
+  });
+
   it("readSince(null) replays all events in order; readSince(seq) excludes that seq; limit caps", async () => {
     const log = createRedisEventLog(redis);
     const s = newSid();
