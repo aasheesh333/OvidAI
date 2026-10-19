@@ -266,8 +266,31 @@ export interface ScheduleRunRef {
  *
  * All other add-time options stay the caller's responsibility: `jobId: runId`
  * (idempotent adds) and `priority` (1 = Pro, 2 = Free) — see Task 7.
+ *
+ * Retention (capacity wave 2026-10-19): without removal every settled job
+ * kept its ~1.4 KiB hash plus a `bull:agent-runs:completed` zset entry
+ * FOREVER — measured on the 200-user stub soak: 901 completed runs left
+ * 902 job keys and a 901-entry zset with no TTL, ~1.2 MiB/day at that rate
+ * and ~9x more at 1,800 users, against a `noeviction` redis-q. Removal is
+ * BOUNDED, not immediate (`{ age, count }`): the gateway's 503 retry and
+ * the reconciler re-enqueue stranded 'queued' runs through `jobId: runId`
+ * idempotent adds, so a completed record must survive long enough to keep
+ * that dedupe honest — 1 h comfortably covers the reconcile window, and the
+ * 5,000-job cap bounds the retained set even at burst rates. Nothing reads
+ * a completed agent-run job record (no getJob/getJobCounts consumer), so the
+ * only cost of removal is the retained-dedupe window itself.
  */
-export const AGENT_RUN_JOB_DEFAULTS = { attempts: 1 } as const;
+export const AGENT_RUN_JOB_DEFAULTS = {
+  attempts: 1,
+  removeOnComplete: { age: 3_600, count: 5_000 },
+} as const;
+
+/**
+ * The dedupe window retained for completed agent-run jobs — exported for
+ * tests and for operators sizing redis-q (`bull:agent-runs:*` high-water mark
+ * ≈ count × ~1.4 KiB).
+ */
+export const AGENT_RUN_RETAIN_COMPLETED = { ageSec: 3_600, count: 5_000 } as const;
 
 /** Default worker concurrency for agent-runs. */
 export const AGENT_RUNS_DEFAULT_CONCURRENCY = 8;

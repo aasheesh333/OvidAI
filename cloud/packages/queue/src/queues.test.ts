@@ -3,6 +3,7 @@ import type { ConnectionOptions, Job, Queue, Worker } from "bullmq";
 import {
   AGENT_RUN_JOB_DEFAULTS,
   AGENT_RUN_JOB_NAME,
+  AGENT_RUN_RETAIN_COMPLETED,
   AGENT_RUNS,
   AGENT_RUNS_DEFAULT_CONCURRENCY,
   AGENT_RUNS_STALLED_INTERVAL_MS,
@@ -182,6 +183,24 @@ describe("agentRunJobSchema", () => {
 describe("AGENT_RUN_JOB_DEFAULTS", () => {
   it("pins BullMQ attempts to 1 — model-call retries live inside the Task 9 processor; two retry layers would multiply (controller ruling)", () => {
     expect(AGENT_RUN_JOB_DEFAULTS.attempts).toBe(1);
+  });
+
+  it("retains completed jobs bounded: removeOnComplete {age,count} keeps the jobId dedupe window honest (capacity 2026-10-19)", () => {
+    // No immediate removal: the gateway's 503 retry and the reconciler
+    // re-enqueue stranded 'queued' runs through jobId:runId idempotent adds,
+    // so a settled record must survive the reconcile window. The count cap
+    // bounds the retained set even at burst rates (noeviction redis-q).
+    expect(AGENT_RUN_JOB_DEFAULTS.removeOnComplete).toEqual({
+      age: 3_600,
+      count: 5_000,
+    });
+    expect(AGENT_RUN_RETAIN_COMPLETED).toEqual({ ageSec: 3_600, count: 5_000 });
+    expect(AGENT_RUN_RETAIN_COMPLETED.ageSec).toBe(
+      AGENT_RUN_JOB_DEFAULTS.removeOnComplete.age,
+    );
+    expect(AGENT_RUN_RETAIN_COMPLETED.count).toBe(
+      AGENT_RUN_JOB_DEFAULTS.removeOnComplete.count,
+    );
   });
 });
 
@@ -481,6 +500,49 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs and storage queues against real red
 
     const stored = await queues.agentRuns.getJob(payload.runId);
     expect(stored?.opts.attempts).toBe(1);
+  });
+
+  it("retains a settled agent-run job for the dedupe window, and jobId dedupe holds while retained (capacity 2026-10-19)", async () => {
+    const processed: string[] = [];
+    const worker = trackWorker(
+      createAgentRunsWorker(connection, async (job) => {
+        processed.push(String(job.id));
+      }, { prefix: QUEUE_PREFIX }),
+    );
+
+    const payload = jobPayload();
+    const jobId = payload.runId;
+    await queues.agentRuns.add(AGENT_RUN_JOB_NAME, payload, { jobId });
+    const settled = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("timed out waiting for completion")),
+        5_000,
+      );
+      worker.once("completed", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    await settled;
+
+    // Retained, NOT immediately removed (unlike the storage queues' C2
+    // removeOnComplete:true): the record must survive the reconcile window
+    // so 503-retry / re-enqueue through jobId stays honest. The age applies
+    // as the job key's TTL (BullMQ behavior) — an hour wait is out of scope.
+    const retained = await queues.agentRuns.getJob(jobId);
+    expect(retained).toBeDefined();
+    expect(await retained!.getState()).toBe("completed");
+
+    // Dedupe holds while the record is retained: re-adding the same jobId
+    // returns the same job and does NOT process it again.
+    const reAdded = await queues.agentRuns.add(AGENT_RUN_JOB_NAME, payload, {
+      jobId,
+    });
+    expect(reAdded.id).toBe(jobId);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(processed).toEqual([jobId]);
+
+    await closeWorker(worker);
   });
 
   it("createAgentRunsWorker processes an added job with pinned defaults (concurrency 8, stalledInterval 30s)", async () => {
