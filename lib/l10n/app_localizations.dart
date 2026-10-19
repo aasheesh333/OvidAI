@@ -1216,10 +1216,10 @@ abstract class AppLocalizations {
   /// **'Delete'**
   String get actionDelete;
 
-  /// Tooltip of the chat header button that opens Studio (editor + terminal).
+  /// Tooltip of the chat header button that opens Studio (the cloud workspace file editor).
   ///
   /// In en, this message translates to:
-  /// **'Studio — code & terminal'**
+  /// **'Studio — your cloud files'**
   String get chatHeaderStudio;
 
   /// Tooltip of the chat header button that opens the in-app browser.

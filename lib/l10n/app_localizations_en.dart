@@ -722,7 +722,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get actionDelete => 'Delete';
 
   @override
-  String get chatHeaderStudio => 'Studio — code & terminal';
+  String get chatHeaderStudio => 'Studio — your cloud files';
 
   @override
   String get chatHeaderBrowser => 'Browser — agent & login';
