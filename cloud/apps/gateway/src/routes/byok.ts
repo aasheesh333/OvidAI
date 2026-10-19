@@ -2,7 +2,7 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
-import { byokKeysRepo, newId, users, type ByokKeyRow, type Db } from "@ovid/db";
+import { accountSettings, byokKeysRepo, newId, users, type ByokKeyRow, type Db } from "@ovid/db";
 import {
   byokRecordId,
   EndpointRejectedError,
@@ -189,6 +189,9 @@ export function registerByokRoutes(app: FastifyInstance, deps: ByokDeps): void {
     if (!removed) {
       return sendError(reply, 404, "not_found", "BYOK key not found.");
     }
+    // Wave 4 (SE-004): runs must never reference a deleted key — a default
+    // pointing at it falls back to Ovid models.
+    await accountSettings.clearByokDefaultIfKey(deps.db, request.principal.uid, id);
     return reply.code(204).send();
   });
 

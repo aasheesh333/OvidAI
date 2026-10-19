@@ -99,7 +99,7 @@ async function bumpActivity(deps: GatewayDeps, sessionId: string): Promise<void>
 
 /** The worker proxy is the route's core — absent means loud 503, never a silent no-op. */
 let warnedNoWorker = false;
-function workerOr503(deps: GatewayDeps, reply: FastifyReply) {
+export function workerOr503(deps: GatewayDeps, reply: FastifyReply) {
   if (deps.worker === undefined) {
     if (!warnedNoWorker) {
       warnedNoWorker = true;
@@ -119,7 +119,7 @@ function workerOr503(deps: GatewayDeps, reply: FastifyReply) {
 }
 
 /** 503 for every transport failure of the worker proxy. */
-function workerUnavailable(reply: FastifyReply): FastifyReply {
+export function workerUnavailable(reply: FastifyReply): FastifyReply {
   return sendError(
     reply,
     503,
@@ -133,7 +133,7 @@ function workerUnavailable(reply: FastifyReply): FastifyReply {
  * worker's code+message; anything else (and 409 outside the PUT retry path)
  * collapses to 503 — the gateway never invents detail it does not have.
  */
-function relayWorkerError(
+export function relayWorkerError(
   reply: FastifyReply,
   status: number,
   code: string,
@@ -164,7 +164,7 @@ const PRECONDITION_CODES = new Set(["baseline_mismatch", "already_exists", "not_
  * retries once warm), or 503 for queue/transport failures and a second
  * not_warm.
  */
-async function callWarmWorker<T>(
+export async function callWarmWorker<T>(
   deps: GatewayDeps,
   request: FastifyRequest,
   reply: FastifyReply,

@@ -22,3 +22,5 @@ export * from "./system.js";
 export * from "./triggers.js";
 export * from "./workspace.js";
 export * from "./ws.js";
+// Wave 4: account settings, custom presets, memory files, service status.
+export * from "./settings.js";

@@ -32,6 +32,8 @@ import {
 import { registerMcpServerRoutes } from "./routes/mcpServers.js";
 import { registerMessageRoutes } from "./routes/messages.js";
 import { registerPreferenceRoutes } from "./routes/preferences.js";
+import { registerAccountSettingsRoutes } from "./routes/accountSettings.js";
+import { registerMemoryRoutes } from "./routes/memory.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
 import { registerReportsRoutes } from "./routes/reports.js";
 import type { ReportsConfig } from "./routes/reports.js";
@@ -329,6 +331,9 @@ export function buildGateway(
       registerSessionRoutes(scope, deps);
       registerMessageRoutes(scope, deps);
       registerPreferenceRoutes(scope, deps);
+      // Wave 4: account settings (push, BYOK routing), custom presets, memory files.
+      registerAccountSettingsRoutes(scope, deps);
+      registerMemoryRoutes(scope, deps);
       registerEventRoutes(scope, deps);
       registerAttachmentRoutes(scope, deps);
       registerRunRoutes(scope, deps);
