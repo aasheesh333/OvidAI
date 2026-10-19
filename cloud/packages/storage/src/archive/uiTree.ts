@@ -21,7 +21,11 @@ import {
   type UiManifest,
 } from "@ovid/shared";
 
-import { StorageError } from "../errors.js";
+import { lstat, realpath } from "node:fs/promises";
+import { join, sep } from "node:path";
+
+import { NotFoundError, StorageError } from "../errors.js";
+import { assertSafeRelPath } from "../keys.js";
 import { walkWorkspace, type ArchiveIndex } from "./pack.js";
 
 export interface UiTreeOpts {
@@ -262,7 +266,15 @@ function fitManifest(m: UiManifest, maxBytes: number): UiManifest {
 // Public API
 // ---------------------------------------------------------------------------
 
-function treeFromRecs(recs: TreeRec[], opts: UiTreeOpts): UiManifest {
+/** Re-roots a subtree's node paths under `prefix` (in place). */
+function prefixPaths(nodes: FileTreeNode[], prefix: string): void {
+  for (const node of nodes) {
+    node.path = `${prefix}/${node.path}`;
+    if (node.children !== undefined) prefixPaths(node.children, prefix);
+  }
+}
+
+function treeFromRecs(recs: TreeRec[], opts: UiTreeOpts, pathPrefix?: string): UiManifest {
   const depth = Math.max(1, Math.floor(opts.depth ?? 2));
   const maxBytes = opts.maxBytes ?? UI_MANIFEST_MAX_BYTES;
   const now = opts.now ?? (() => new Date());
@@ -270,6 +282,8 @@ function treeFromRecs(recs: TreeRec[], opts: UiTreeOpts): UiManifest {
   const rawRoots = buildRawTree(recs);
   const roots = [...rawRoots.values()].map((r) => toNode(r, 1, depth));
   sortSiblings(roots);
+  // Prefixed BEFORE the budget fit: the longer paths are what goes on the wire.
+  if (pathPrefix !== undefined) prefixPaths(roots, pathPrefix);
 
   const manifest: UiManifest = {
     version: 1,
@@ -293,4 +307,36 @@ export async function liveTree(
 ): Promise<UiManifest> {
   const entries = await walkWorkspace(wsDir);
   return treeFromRecs(entries, opts);
+}
+
+/**
+ * Pruned UI tree of ONE folder of the live workspace (Studio's "load the
+ * rest" for a pruned/omitted directory, ST-015). Node paths stay
+ * workspace-relative (`src/deep/b.ts`, never `deep/b.ts`). The folder must be
+ * a real directory whose realpath stays inside the workspace — a symlinked
+ * folder is refused like every other jail escape (NotFoundError).
+ */
+export async function liveSubtree(
+  wsDir: string,
+  relDir: string,
+  opts: UiTreeOpts = {},
+): Promise<UiManifest> {
+  const rel = assertSafeRelPath(relDir);
+  const full = join(wsDir, rel);
+  let st: Awaited<ReturnType<typeof lstat>>;
+  try {
+    st = await lstat(full);
+  } catch {
+    throw new NotFoundError(`'${rel}' is not present in the workspace`);
+  }
+  if (!st.isDirectory()) {
+    throw new NotFoundError(`'${rel}' is not a folder`);
+  }
+  const realRoot = await realpath(wsDir);
+  const realFull = await realpath(full);
+  if (realFull !== realRoot && !realFull.startsWith(realRoot + sep)) {
+    throw new NotFoundError(`'${rel}' resolves outside the workspace`);
+  }
+  const entries = await walkWorkspace(full);
+  return treeFromRecs(entries, opts, rel);
 }
