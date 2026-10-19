@@ -12,15 +12,33 @@
 //     startedAt,finishedAt}; no `summary`.
 //   * DELETE answers 204 with an empty body.
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
+import 'package:ovid_ai/core/cloud/cloud_ws.dart';
 import 'package:ovid_ai/core/cloud/schedule_client.dart';
 
 const String _base = 'https://cloud.test/cloud/v1';
+
+/// A multiplexer whose link state a test can flip.
+class _FakeLinkWs extends WsMultiplexer {
+  _FakeLinkWs() : super(mintTicket: () async => 'ticket');
+
+  WsLinkState _link = WsLinkState.disconnected;
+
+  @override
+  WsLinkState get linkState => _link;
+
+  void setLink(WsLinkState value) {
+    if (_link == value) return;
+    _link = value;
+    notifyListeners();
+  }
+}
 
 Map<String, dynamic> _scheduleJson({
   String id = 'sc1',
@@ -324,6 +342,141 @@ void main() {
       expect(runs.first.startedAt, DateTime.utc(2026, 10, 17, 9, 0, 2));
       expect(runs.first.finishedAt, DateTime.utc(2026, 10, 17, 9, 0, 30));
       expect(runs.last.status, 'failed');
+    });
+  });
+
+  // ---- Wave 5 -----------------------------------------------------------
+
+  group('get() / runNow() (CT-015, FE-012)', () {
+    test('GET /schedules/:id parses one schedule', () async {
+      final gateway = _Gateway((request) async {
+        expect(request.method, 'GET');
+        expect(request.url.path, '/cloud/v1/schedules/sc1');
+        return _json(_scheduleJson());
+      });
+      final dto = await ScheduleClient(gateway.client()).get('sc1');
+      expect(dto.id, 'sc1');
+    });
+
+    test('POST /schedules/:id/run → the claimed occurrence', () async {
+      final gateway = _Gateway((request) async {
+        expect(request.method, 'POST');
+        expect(request.url.path, '/cloud/v1/schedules/sc1/run');
+        return _json(<String, Object?>{
+          'runId': 'r9',
+          'scheduleRun': _runJson(id: 'occ9', status: 'running'),
+        }, 202);
+      });
+      final result = await ScheduleClient(gateway.client()).runNow('sc1');
+      expect(result.runId, 'r9');
+      expect(result.scheduleRun.id, 'occ9');
+      expect(result.scheduleRun.status, 'running');
+    });
+
+    test('a busy chat surfaces the 409 envelope', () async {
+      final gateway = _Gateway((request) async => _json(
+            jsonDecode(_error('session_busy', "This schedule's chat is already running a task."))
+                as Object,
+            409,
+          ));
+      await expectLater(
+        ScheduleClient(gateway.client()).runNow('sc1'),
+        throwsA(isA<CloudApiException>()
+            .having((e) => e.code, 'code', 'session_busy')),
+      );
+    });
+  });
+
+  group('trigger equality + status helpers (FE-013, FE-017)', () {
+    test('equal triggers compare equal; any field change does not', () {
+      expect(ScheduleTrigger.every(300), ScheduleTrigger.every(300));
+      expect(ScheduleTrigger.every(300) == ScheduleTrigger.every(600), isFalse);
+      expect(
+        ScheduleTrigger.dailyAt('09:00', tz: 'UTC'),
+        ScheduleTrigger.dailyAt('09:00', tz: 'UTC'),
+      );
+      expect(
+        ScheduleTrigger.dailyAt('09:00', tz: 'UTC') ==
+            ScheduleTrigger.dailyAt('09:00', tz: 'Europe/Berlin'),
+        isFalse,
+      );
+      expect(
+        ScheduleTrigger.at(DateTime.utc(2031, 1, 1)),
+        ScheduleTrigger.at(DateTime.utc(2031, 1, 1)),
+      );
+    });
+
+    test('failed is editable and resumable; completed/cancelled are not', () {
+      ScheduleDto dto(String status) => ScheduleDto.fromJson(_scheduleJson(status: status));
+      expect(dto('failed').isEditable, isTrue);
+      expect(dto('failed').canResume, isTrue);
+      expect(dto('paused').canResume, isTrue);
+      expect(dto('pending').canResume, isFalse);
+      expect(dto('completed').isEditable, isFalse);
+      expect(dto('cancelled').isEditable, isFalse);
+      expect(dto('pending').canRunNow, isTrue);
+      expect(dto('completed').canRunNow, isFalse);
+    });
+  });
+
+  group('ScheduleLiveFeed (CT-014)', () {
+    test('subscribes while online, re-subscribes after a reconnect, emits system events, unsubscribes on stop',
+        () async {
+      final ws = _FakeLinkWs()..setLink(WsLinkState.online);
+      final raw = StreamController<Map<String, dynamic>>.broadcast();
+      final sent = <Map<String, Object?>>[];
+      final feed = ScheduleLiveFeed(
+        ws: ws,
+        rawFramesOverride: raw.stream,
+        sendOverride: (frame) async => sent.add(frame),
+      );
+      final events = <ScheduleSystemEvent>[];
+      final sub = feed.events.listen(events.add);
+      feed.start();
+      await Future<void>.delayed(Duration.zero);
+      expect(sent, <Map<String, Object?>>[
+        <String, Object?>{'op': 'subscribe_system'},
+      ]);
+
+      raw.add(<String, dynamic>{
+        'op': 'system',
+        'event': <String, dynamic>{
+          'type': 'schedule_run_succeeded',
+          'scheduleId': 'sc1',
+          'ts': '2026-10-19T10:00:00.000Z',
+          'payload': <String, dynamic>{'summary': 'done'},
+        },
+      });
+      raw.add(<String, dynamic>{'op': 'browser_state', 'sessionId': 'x'});
+      await Future<void>.delayed(Duration.zero);
+      expect(events.single.type, 'schedule_run_succeeded');
+      expect(events.single.scheduleId, 'sc1');
+
+      ws.setLink(WsLinkState.disconnected);
+      ws.setLink(WsLinkState.online);
+      await Future<void>.delayed(Duration.zero);
+      expect(sent.where((f) => f['op'] == 'subscribe_system'), hasLength(2));
+
+      feed.stop();
+      await Future<void>.delayed(Duration.zero);
+      expect(sent.last, <String, Object?>{'op': 'unsubscribe_system'});
+      await sub.cancel();
+      await raw.close();
+      feed.dispose();
+    });
+
+    test('never opens a connection by itself while offline', () async {
+      final ws = _FakeLinkWs();
+      final sent = <Map<String, Object?>>[];
+      final feed = ScheduleLiveFeed(
+        ws: ws,
+        rawFramesOverride: const Stream<Map<String, dynamic>>.empty(),
+        sendOverride: (frame) async => sent.add(frame),
+      );
+      feed.start();
+      await Future<void>.delayed(Duration.zero);
+      expect(sent, isEmpty);
+      feed.dispose();
     });
   });
 

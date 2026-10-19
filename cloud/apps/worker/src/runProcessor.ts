@@ -363,12 +363,13 @@ export interface FullRunDeps {
    */
   browserTools?: readonly CoreTool[];
   /**
-   * Ends this run's browser session: stops the screencast, captures and
-   * flushes `storageState`, closes the context and releases the pool slot.
-   * Called in the run's terminal `finally` so a context never outlives its
-   * run (the 15 s ephemeral lease is the backstop, not the contract).
+   * The run ended: release its hold on the user's browser. Wave 5 (R2): the
+   * browser is ONE per user, so the composition releases it (stop cast,
+   * flush `storageState`, close the context) only when this was the last
+   * run of the user that drove it and nobody is watching it live; otherwise
+   * the 15 s idle lease is the backstop.
    */
-  browserReleaseSession?: (sessionId: string) => Promise<void>;
+  browserReleaseSession?: (sessionId: string, userId: string, runId: string) => Promise<void>;
   /**
    * P5 Task 11 I4: release this run's MCP connections when it ends. Custom
    * stdio (and legacy SSE) connections are per-run; without this they would
@@ -2059,7 +2060,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       // P6: the browser context is per-run. Best-effort like the MCP release —
       // a finished run must never throw because teardown failed; the pool's
       // 15 s idle lease reaps anything this misses.
-      await deps.browserReleaseSession?.(sessionId).catch(() => {});
+      await deps.browserReleaseSession?.(sessionId, userId, runId).catch(() => {});
       await bumpActivity();
     }
   }) as FullAgentRunProcessor;

@@ -58,6 +58,11 @@ export class BrowserPoolBusyError extends Error {
 export interface BrowserPoolOptions {
   /** Called BEFORE context.close on idle eviction — the engine flushes storageState here. */
   onIdleEvict?(sessionId: string, context: BrowserContext): Promise<void>;
+  /**
+   * Wave 5 R3: a pinned handle is never idle-evicted (the engine pins a
+   * browser while someone is watching it). Evaluated at sweep time.
+   */
+  isPinned?(sessionId: string): boolean;
   /** Per-waiter queue timeout, default 30_000. */
   queueTimeoutMs?: number;
   /**
@@ -451,6 +456,7 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
     const evicted: string[] = [];
     for (const [sessionId, handle] of [...live]) {
       if (t - handle.lastTouch <= cfg.idleEvictMs) continue;
+      if (opts.isPinned?.(sessionId) === true) continue;
       live.delete(sessionId);
       evicted.push(sessionId);
       if (opts.onIdleEvict) await opts.onIdleEvict(sessionId, handle.context);

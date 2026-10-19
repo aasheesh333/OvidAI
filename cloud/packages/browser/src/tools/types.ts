@@ -25,8 +25,23 @@ import type { StorageStatePersistence } from "../stateStore.js";
 import { wireDownloads } from "./downloadWiring.js";
 
 export interface BrowserToolContext {
+  /**
+   * The BROWSER key: registry entry, pool slot and redis channels. The
+   * worker passes `userBrowserKey(userId)` (Wave 5 R2: one browser per user,
+   * shared across that user's sessions); tests may pass any id.
+   */
   sessionId: string;
   userId: string;
+  /**
+   * The chat session whose workspace receives screenshots/downloads. Absent
+   * ⇒ `sessionId` (the pre-Wave-5 one-browser-per-session layout).
+   */
+  workspaceSessionId?: string;
+}
+
+/** Workspace session for artifacts (see BrowserToolContext.workspaceSessionId). */
+export function artifactSessionId(ctx: BrowserToolContext): string {
+  return ctx.workspaceSessionId ?? ctx.sessionId;
 }
 
 export interface BrowserArtifactRef {

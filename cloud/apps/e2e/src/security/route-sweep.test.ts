@@ -315,6 +315,8 @@ interface Fixtures {
   scheduleA: ScheduleRow;
   /** Dedicated to the DELETE positive control (not mutated by reads). */
   scheduleDeleteA: ScheduleRow;
+  /** Wave 5 run-now positive control: its own idle chat (sessionA is busy with runA). */
+  scheduleRunNowA: ScheduleRow;
   pluginA: PluginRow;
   /** Dedicated to the DELETE positive control. */
   pluginDeleteA: PluginRow;
@@ -400,6 +402,7 @@ const OWNED_CASES: Record<string, Case> = {
   "POST /cloud/v1/runs/:id/cancel": { params: (f) => ({ id: f.runA.id }) },
   "GET /cloud/v1/schedules/:id": { params: (f) => ({ id: f.scheduleA.id }) },
   "GET /cloud/v1/schedules/:id/runs": { params: (f) => ({ id: f.scheduleA.id }) },
+  "POST /cloud/v1/schedules/:id/run": { params: (f) => ({ id: f.scheduleRunNowA.id }) },
   "PATCH /cloud/v1/schedules/:id": {
     params: (f) => ({ id: f.scheduleA.id }),
     body: { title: "foreign edit" },
@@ -569,6 +572,17 @@ describe("route sweep — 404 not 403", () => {
       maxRetries: 0,
       nextRunAt: new Date(Date.now() + 300_000),
     });
+    const runNowSessionA = await sessions.create(db, userA, "sweep run-now fixture");
+    const scheduleRunNowA = await schedules.create(db, {
+      userId: userA,
+      sessionId: runNowSessionA.id,
+      title: "A run-now schedule",
+      description: "sweep run-now fixture",
+      trigger: { kind: "every", seconds: 300 },
+      autonomy: "safe",
+      maxRetries: 0,
+      nextRunAt: new Date(Date.now() + 300_000),
+    });
     const pluginA = await plugins.upsert(db, {
       userId: userA,
       pluginId: "@ovid/sweep-plugin",
@@ -672,6 +686,7 @@ describe("route sweep — 404 not 403", () => {
       runA,
       scheduleA,
       scheduleDeleteA,
+      scheduleRunNowA,
       pluginA,
       pluginDeleteA,
       mcpA,

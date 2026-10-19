@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { BrowserToolDef, BrowserToolContext, BrowserToolResult } from "@ovid/browser";
-import { adaptBrowserTools, BROWSER_TOOL_TIMEOUT_MS } from "./browserToolAdapter.js";
+import { adaptBrowserTools, BROWSER_TOOL_TIMEOUT_MS, createUserBrowserLeases } from "./browserToolAdapter.js";
 import type { ToolContext } from "@ovid/agent-core";
 
 /**
@@ -57,15 +57,19 @@ describe("adaptBrowserTools", () => {
     expect(tool!.timeoutMs).toBe(BROWSER_TOOL_TIMEOUT_MS);
   });
 
-  it("passes the run's sessionId and userId to the browser context", async () => {
+  it("keys the browser by USER (one per user, Wave 5 R2) and sends artifacts to the run's session", async () => {
     const seen: BrowserToolContext[] = [];
     const [tool] = adaptBrowserTools([
       def("browser_open", { content: "ok" }, (_input, c) => seen.push({ ...c })),
     ]);
 
     await tool!.execute({ url: "https://example.com" }, ctx({ sessionId: "s-9", userId: "u-9" }));
+    await tool!.execute({ url: "https://example.com" }, ctx({ sessionId: "s-10", userId: "u-9" }));
 
-    expect(seen).toEqual([{ sessionId: "s-9", userId: "u-9" }]);
+    expect(seen).toEqual([
+      { sessionId: "user-u-9", userId: "u-9", workspaceSessionId: "s-9" },
+      { sessionId: "user-u-9", userId: "u-9", workspaceSessionId: "s-10" },
+    ]);
   });
 
   it("forwards the model's arguments unchanged", async () => {
@@ -127,12 +131,63 @@ describe("adaptBrowserTools", () => {
     // BrowserToolDef.execute takes no signal. Pinning the absence means a
     // future signature change is a deliberate act, not an accident.
     const spy = vi.fn((_input: unknown, c: BrowserToolContext) => {
-      expect(Object.keys(c).sort()).toEqual(["sessionId", "userId"]);
+      expect(Object.keys(c).sort()).toEqual(["sessionId", "userId", "workspaceSessionId"]);
       return Promise.resolve({ content: "ok" });
     });
     const [tool] = adaptBrowserTools([{ ...def("browser_wait_for", { content: "ok" }), execute: spy }]);
     return tool!.execute({}, ctx()).then(() => {
       expect(spy).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe("createUserBrowserLeases (Wave 5 R2: a run's end never kills another run's or a viewer's browser)", () => {
+  function engine(viewers = 0) {
+    return { releaseSession: vi.fn(async (_key: string) => {}), viewerCount: vi.fn((_key: string) => viewers) };
+  }
+
+  it("the last browsing run of a user releases the user's browser", async () => {
+    const e = engine();
+    const leases = createUserBrowserLeases(e);
+    const [tool] = adaptBrowserTools([def("browser_open", { content: "ok" })], leases);
+    await tool!.execute({}, ctx({ runId: "r1", userId: "u1" }));
+    await leases.releaseRun("u1", "r1");
+    expect(e.releaseSession).toHaveBeenCalledWith("user-u1");
+  });
+
+  it("two concurrent runs of one user: the first to end leaves the browser to the other", async () => {
+    const e = engine();
+    const leases = createUserBrowserLeases(e);
+    const [tool] = adaptBrowserTools([def("browser_open", { content: "ok" })], leases);
+    await tool!.execute({}, ctx({ runId: "r1", sessionId: "a", userId: "u1" }));
+    await tool!.execute({}, ctx({ runId: "r2", sessionId: "b", userId: "u1" }));
+    await leases.releaseRun("u1", "r1");
+    expect(e.releaseSession).not.toHaveBeenCalled();
+    await leases.releaseRun("u1", "r2");
+    expect(e.releaseSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("someone watching the live view keeps the browser (the pool's idle lease reaps it after they leave)", async () => {
+    const e = engine(1);
+    const leases = createUserBrowserLeases(e);
+    leases.note("u1", "r1");
+    await leases.releaseRun("u1", "r1");
+    expect(e.releaseSession).not.toHaveBeenCalled();
+  });
+
+  it("a run that never browsed releases nothing", async () => {
+    const e = engine();
+    const leases = createUserBrowserLeases(e);
+    await leases.releaseRun("u1", "r-none");
+    expect(e.releaseSession).not.toHaveBeenCalled();
+  });
+
+  it("users are independent", async () => {
+    const e = engine();
+    const leases = createUserBrowserLeases(e);
+    leases.note("u1", "r1");
+    leases.note("u2", "r2");
+    await leases.releaseRun("u1", "r1");
+    expect(e.releaseSession.mock.calls).toEqual([["user-u1"]]);
   });
 });

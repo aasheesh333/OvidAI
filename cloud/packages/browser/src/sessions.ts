@@ -71,6 +71,8 @@ export interface SessionBrowser {
   tabs: Page[];
   activeIndex: number;
   takeover: boolean;
+  /** Wave 5 FE-026: the gateway viewer that holds takeover (null when none / unknown). */
+  takeoverViewerId: string | null;
   lastActivityAt: number;
   console: ConsoleEntry[];
   network: NetworkEntry[];
@@ -98,8 +100,8 @@ export interface BrowserSessionRegistry {
   /** Closes the page (not the context), fixes activeIndex; refuses the last tab. */
   closeTab(sessionId: string, index: number): boolean;
   switchTab(sessionId: string, index: number): boolean;
-  /** false when session unknown. */
-  setTakeover(sessionId: string, enabled: boolean): boolean;
+  /** false when session unknown. `viewerId` records the controller (cleared on release). */
+  setTakeover(sessionId: string, enabled: boolean, viewerId?: string | null): boolean;
   /** TAKEOVER_REFUSAL when flagged, else null (unknown session ⇒ null). */
   refuseReasonIfTakeover(sessionId: string): string | null;
   /** lastActivityAt + handle.touch() — resets the pool's idle-eviction clock. */
@@ -145,6 +147,7 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
       tabs: [],
       activeIndex: 0,
       takeover: false,
+      takeoverViewerId: null,
       lastActivityAt: now(),
       console: [],
       network: [],
@@ -213,10 +216,11 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
     return true;
   }
 
-  function setTakeover(sessionId: string, enabled: boolean): boolean {
+  function setTakeover(sessionId: string, enabled: boolean, viewerId?: string | null): boolean {
     const s = sessions.get(sessionId);
     if (!s) return false;
     s.takeover = enabled;
+    s.takeoverViewerId = enabled ? (viewerId ?? null) : null;
     return true;
   }
 

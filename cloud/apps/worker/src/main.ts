@@ -72,7 +72,7 @@ import { createNotifier, createFcmPushSender } from "./notify.js";
 import { createPluginInstallProcessor } from "./pluginInstallProcessor.js";
 import { startWorkerPtyBridge } from "./ptyBridge.js";
 import { createSandboxPort, createStepLimiter } from "./sandboxAdapter.js";
-import { adaptBrowserTools } from "./browserToolAdapter.js";
+import { adaptBrowserTools, createUserBrowserLeases } from "./browserToolAdapter.js";
 import { createModelCatalogReader } from "./modelCapabilities.js";
 import { createSandboxSeam } from "./sandboxSeam.js";
 import { createScheduleFireProcessor, resyncScheduleMirror } from "./schedulerMirror.js";
@@ -601,6 +601,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       manager.workspaceDir(userId, sessionId),
   });
 
+  const browserLeases = createUserBrowserLeases(browser);
+
   // ---- P7 Task 8/9/10: state-hydrator engines + internal file service. ----
   // workspacesRoot is P2's resolved root (OVID_WORKSPACES_ROOT,
   // /workspaces/users by default): P7 MUST use the same root or the engines
@@ -792,8 +794,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     // pay for it.
     notifier,
     modelCatalog: modelCatalogReader,
-    browserTools: adaptBrowserTools(browser.tools),
-    browserReleaseSession: (sessionId: string) => browser.releaseSession(sessionId),
+    // Wave 5 (R2): ONE browser per user, shared across sessions — the leases
+    // keep a run's end from closing a browser another run (or a live viewer)
+    // still uses.
+    browserTools: adaptBrowserTools(browser.tools, browserLeases),
+    browserReleaseSession: (_sessionId: string, userId: string, runId: string) =>
+      browserLeases.releaseRun(userId, runId),
     // P5 Task 11 I4: kill the run's lazily spawned per-run MCP stdio/legacy
     // SSE connections when the run ends. (connectForRun is unnecessary here:
     // the first callTool spawns under its own run context and this releases

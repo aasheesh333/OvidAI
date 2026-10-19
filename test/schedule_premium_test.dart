@@ -90,7 +90,7 @@ void main() {
     await tester.tap(find.text('Cancel task').last);
     await _settle(tester);
     expect(fake.byId('sc1')!['status'], 'cancelled');
-    expect(find.text('cancelled'), findsOneWidget);
+    expect(find.text('Cancelled'), findsOneWidget);
     expect(find.text('Do not cancel accidentally'), findsOneWidget);
   });
 

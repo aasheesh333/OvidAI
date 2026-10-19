@@ -60,7 +60,9 @@ export type WsServerMsg =
   | { op: "pty_output"; ptyId: string; data: string; offset: number }
   | { op: "pty_exit"; ptyId: string; exitCode: number | null }
   // P6 Task 2 (browser channel) — additive discriminants only.
-  | { op: "browser_state"; sessionId: string; state: BrowserStateDto }
+  // `viewerId` (Wave 5 FE-026): THIS socket's viewer id, so the client can
+  // compare it with `state.takeoverViewerId`.
+  | { op: "browser_state"; sessionId: string; state: BrowserStateDto; viewerId?: string }
   // P3 Task 12 (approvals over WS) — additive discriminants only. Ack for a
   // published approval_response: the gateway echoes the approvalId and the
   // decision it forwarded to the worker bridge.
@@ -104,7 +106,11 @@ export type WsErrorCode =
   | "timeout"
   // P3 Task 12: approval_response on a composition with no approval
   // publisher wired (also sent by the browser channel's own fallback).
-  | "unavailable";
+  | "unavailable"
+  // browser_input/takeover without an attach for that id.
+  | "not_attached"
+  // Wave 5 FE-026: browser_input while ANOTHER viewer holds takeover.
+  | "not_controller";
 
 /**
  * Redis pub/sub channel carrying approval responses from the gateway to the
@@ -262,6 +268,7 @@ const wsServerMsgSchema: z.ZodType<WsServerMsg> = z.discriminatedUnion("op", [
     op: z.literal("browser_state"),
     sessionId: z.string().min(1),
     state: browserStateDtoSchema,
+    viewerId: z.string().min(1).optional(),
   }),
   z.object({
     op: z.literal("approval_ack"),

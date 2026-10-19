@@ -58,12 +58,23 @@ Map<String, dynamic> lastResultJson({
     };
 
 class FakeScheduleGateway {
-  FakeScheduleGateway(this.schedules, {this.runs = const {}});
+  FakeScheduleGateway(
+    this.schedules, {
+    Map<String, List<Map<String, dynamic>>>? runs,
+  }) : runs = runs ?? <String, List<Map<String, dynamic>>>{};
 
   /// Mutable rows; PATCH/DELETE apply to these maps so assertions can read
   /// the same state the screen reloads.
   final List<Map<String, dynamic>> schedules;
   final Map<String, List<Map<String, dynamic>>> runs;
+
+  int createCalls = 0;
+  Map<String, dynamic>? lastCreateBody;
+  int runNowCalls = 0;
+
+  /// When set, POST /:id/run answers this status (e.g. 409 session_busy).
+  int? failRunNowStatus;
+  String failRunNowMessage = "This schedule's chat is already running a task.";
 
   int listCalls = 0;
   int patchCalls = 0;
@@ -106,6 +117,66 @@ class FakeScheduleGateway {
         }, failListStatus!);
       }
       return _json({'items': schedules, 'nextCursor': null});
+    }
+
+    // Wave 5: POST /schedules (create), POST /schedules/:id/run (run now),
+    // GET /schedules/:id (one row).
+    if (request.method == 'POST' && path.endsWith('/schedules')) {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      createCalls++;
+      lastCreateBody = body;
+      final row = scheduleJson(
+        id: 'new${schedules.length + 1}',
+        sessionId: body['sessionId'] as String? ?? 'dedicated-${schedules.length + 1}',
+        title: body['title'] as String,
+        description: body['description'] as String,
+        trigger: (body['trigger'] as Map).cast<String, dynamic>(),
+        autonomy: body['autonomy'] as String? ?? 'safe',
+        maxRetries: (body['maxRetries'] as num?)?.toInt() ?? 0,
+      );
+      schedules.add(row);
+      return _json(row, 201);
+    }
+
+    if (request.method == 'POST' && path.endsWith('/run')) {
+      final id = segments[segments.length - 2];
+      final row = byId(id);
+      if (row == null) {
+        return _json({
+          'error': {'code': 'not_found', 'message': 'Schedule not found.'}
+        }, 404);
+      }
+      if (failRunNowStatus != null) {
+        return _json({
+          'error': {'code': 'session_busy', 'message': failRunNowMessage}
+        }, failRunNowStatus!);
+      }
+      runNowCalls++;
+      final run = <String, dynamic>{
+        'id': 'occ$runNowCalls',
+        'scheduleId': id,
+        'scheduledFor': DateTime.now().toUtc().toIso8601String(),
+        'runId': 'run$runNowCalls',
+        'status': 'running',
+        'attempt': 1,
+        'ranLate': false,
+        'error': null,
+        'startedAt': DateTime.now().toUtc().toIso8601String(),
+        'finishedAt': null,
+      };
+      (runs[id] ??= <Map<String, dynamic>>[]).insert(0, run);
+      return _json({'runId': run['runId'], 'scheduleRun': run}, 202);
+    }
+
+    if (request.method == 'GET' && segments.length >= 2 &&
+        segments[segments.length - 2] == 'schedules') {
+      final row = byId(segments.last);
+      if (row == null) {
+        return _json({
+          'error': {'code': 'not_found', 'message': 'Schedule not found.'}
+        }, 404);
+      }
+      return _json(row);
     }
 
     if (request.method == 'GET' && path.endsWith('/runs')) {

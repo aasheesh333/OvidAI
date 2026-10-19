@@ -11,6 +11,8 @@ import {
   type SystemEvent,
   type WsClientMsg,
   type WsServerMsg,
+  USER_BROWSER_ALIAS,
+  userBrowserKey,
 } from "@ovid/shared";
 import { isUuid } from "./routes/http.js";
 import type { TicketStore } from "./tickets.js";
@@ -344,6 +346,10 @@ export async function handleWsConnection(
   // ONE browser attach per socket (Task 9): holds the dedicated redis
   // publisher + subscriber; torn down on detach, replace, and socket close.
   let browserAttach: BrowserAttach | null = null;
+  // The id the client attached with (a chat id or USER_BROWSER_ALIAS): echoed
+  // on browser_state and matched by browser_input/takeover/detach. The redis
+  // key is always the USER's browser (Wave 5 R2).
+  let browserEchoId: string | null = null;
   // System channel detach (P5 Task 10): declared HERE (same teardown
   // bookkeeping block as session subs) but only SET after the ticket verify
   // proves the uid — a close that fires during the verify finds it null and
@@ -748,7 +754,7 @@ export async function handleWsConnection(
    */
   function requireBrowserAttach(sessionId: string): BrowserAttach | null {
     const attach = browserAttach;
-    if (attach === null || attach.sessionId !== sessionId) {
+    if (attach === null || browserEchoId !== sessionId) {
       send(socket, {
         op: "error",
         code: "not_attached",
@@ -773,8 +779,16 @@ export async function handleWsConnection(
     // Ownership FIRST, before any redis work — sessions.get is ownership-
     // scoped (null on unknown id AND wrong owner; the uuid shape guard keeps
     // client garbage away from the id column).
-    const owned = isUuid(sessionId) ? await sessions.get(deps.db, sessionId, uid) : null;
-    if (owned === null) {
+    // Wave 5: the cloud browser is ONE per user, so any owned chat — or the
+    // USER_BROWSER_ALIAS for a chat that has no server id yet — attaches to
+    // the same per-user browser.
+    const owned =
+      sessionId === USER_BROWSER_ALIAS
+        ? true
+        : isUuid(sessionId)
+          ? (await sessions.get(deps.db, sessionId, uid)) !== null
+          : false;
+    if (!owned) {
       send(socket, {
         op: "error",
         code: "forbidden",
@@ -789,18 +803,19 @@ export async function handleWsConnection(
     // the ctl channel sees leave(v1) strictly before join(v2).
     const previous = browserAttach;
     browserAttach = null;
+    browserEchoId = null;
     if (previous !== null) await previous.detach().catch(() => {});
 
     let attach: BrowserAttach | null = null;
     try {
       attach = await createBrowserAttach({
         redisFactory: deps.browser.redisFactory,
-        sessionId,
+        sessionId: userBrowserKey(uid),
         heartbeatMs: opts.browserHeartbeatMs ?? BROWSER_VIEWER_HEARTBEAT_MS,
         handlers: {
           onState: (state) => {
-            if (browserAttach !== attach) return; // replaced or torn down: ignore
-            send(socket, { op: "browser_state", sessionId, state });
+            if (browserAttach !== attach || attach === null) return; // replaced or torn down: ignore
+            send(socket, { op: "browser_state", sessionId, state, viewerId: attach.viewerId });
           },
           onFrame: (image) => {
             if (browserAttach !== attach) return; // replaced or torn down: ignore
@@ -831,14 +846,16 @@ export async function handleWsConnection(
       return;
     }
     browserAttach = attach;
+    browserEchoId = sessionId;
     // Deliberately NO ack frame: the client learns the attach worked from
     // the worker's first browser_state / binary frame (shared ws contract).
   }
 
   async function handleBrowserDetach(sessionId: string): Promise<void> {
     const attach = browserAttach;
-    if (attach === null || attach.sessionId !== sessionId) return; // idempotent no-op
+    if (attach === null || browserEchoId !== sessionId) return; // idempotent no-op
     browserAttach = null;
+    browserEchoId = null;
     await attach.detach().catch(() => {});
   }
 
@@ -1056,12 +1073,28 @@ export async function handleWsConnection(
         // `input` was zod-validated by the shared wsClientMsg parse above —
         // an off-schema event never gets this far (it answered bad_message).
         const attach = requireBrowserAttach(msg.sessionId);
-        if (attach !== null) attach.publishInput(msg.input);
+        if (attach === null) return;
+        // FE-026: while ANOTHER viewer (device) holds takeover, this one is
+        // read-only — refused here, never published to the worker.
+        if (!attach.mayInput()) {
+          send(socket, {
+            op: "error",
+            code: "not_controller",
+            message: "The browser is being controlled on another device.",
+            sessionId: msg.sessionId,
+          });
+          return;
+        }
+        attach.publishInput(msg.input);
         return;
       }
       case "browser_takeover": {
         const attach = requireBrowserAttach(msg.sessionId);
-        if (attach !== null) attach.publishCtl({ type: "takeover", enabled: msg.enabled });
+        // The controller's viewer id rides the ctl msg (FE-026): the worker
+        // records it and releases takeover when THAT viewer leaves.
+        if (attach !== null) {
+          attach.publishCtl({ type: "takeover", enabled: msg.enabled, viewerId: attach.viewerId });
+        }
         return;
       }
       case "approval_response":

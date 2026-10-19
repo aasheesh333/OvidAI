@@ -1725,6 +1725,108 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Five fields (minute hour day month weekday).'**
   String get scheduleCronHelper;
+
+  /// App bar title of the screen listing every scheduled task on the account.
+  ///
+  /// In en, this message translates to:
+  /// **'Schedules'**
+  String get schedulesTitle;
+
+  /// Button / tooltip / sheet title to create a scheduled task without the agent.
+  ///
+  /// In en, this message translates to:
+  /// **'New schedule'**
+  String get scheduleNew;
+
+  /// Filter chip: show the schedules of every chat.
+  ///
+  /// In en, this message translates to:
+  /// **'All chats'**
+  String get scheduleScopeAll;
+
+  /// Button that switches a daily/cron schedule to the phone's current time zone.
+  ///
+  /// In en, this message translates to:
+  /// **'Use device zone ({zone})'**
+  String scheduleUseDeviceZone(String zone);
+
+  /// Label above the choice of chat that receives a new schedule's results.
+  ///
+  /// In en, this message translates to:
+  /// **'Results go to'**
+  String get scheduleResultsGoTo;
+
+  /// Choice: a new schedule runs in its own new chat.
+  ///
+  /// In en, this message translates to:
+  /// **'A new chat'**
+  String get scheduleTargetNewChat;
+
+  /// Label above the preset chips (every hour, every day, custom) when creating a schedule.
+  ///
+  /// In en, this message translates to:
+  /// **'Quick start'**
+  String get scheduleQuickStart;
+
+  /// Recovery button on a failed schedule: open the editor.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit task'**
+  String get scheduleRecoverEdit;
+
+  /// Recovery button on a failed schedule: make it active again after review.
+  ///
+  /// In en, this message translates to:
+  /// **'Resume schedule'**
+  String get scheduleRecoverResume;
+
+  /// Recovery button on a failed schedule: run it a single time now.
+  ///
+  /// In en, this message translates to:
+  /// **'Run once now'**
+  String get scheduleRecoverRunOnce;
+
+  /// Menu action: run a scheduled task immediately (its schedule is unchanged).
+  ///
+  /// In en, this message translates to:
+  /// **'Run now'**
+  String get scheduleRunNow;
+
+  /// Menu action: create a new schedule pre-filled from this one.
+  ///
+  /// In en, this message translates to:
+  /// **'Duplicate'**
+  String get scheduleDuplicate;
+
+  /// Opens the chat that receives a schedule's results.
+  ///
+  /// In en, this message translates to:
+  /// **'Open chat'**
+  String get scheduleOpenChat;
+
+  /// Section title listing a schedule's past runs.
+  ///
+  /// In en, this message translates to:
+  /// **'Run history'**
+  String get scheduleRunHistory;
+
+  /// Run history is empty.
+  ///
+  /// In en, this message translates to:
+  /// **'No runs yet.'**
+  String get scheduleNoRuns;
+
+  /// Schedule status strip while the list is loading.
+  ///
+  /// In en, this message translates to:
+  /// **'Checking cloud scheduling…'**
+  String get scheduleStripChecking;
+
+  /// Schedule status strip when the list could not be loaded (never shown as active).
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t reach cloud scheduling'**
+  String get scheduleStripError;
 }
 
 class _AppLocalizationsDelegate

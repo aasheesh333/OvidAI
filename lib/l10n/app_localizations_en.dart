@@ -1060,4 +1060,57 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get scheduleCronHelper =>
       'Five fields (minute hour day month weekday).';
+
+  @override
+  String get schedulesTitle => 'Schedules';
+
+  @override
+  String get scheduleNew => 'New schedule';
+
+  @override
+  String get scheduleScopeAll => 'All chats';
+
+  @override
+  String scheduleUseDeviceZone(String zone) {
+    return 'Use device zone ($zone)';
+  }
+
+  @override
+  String get scheduleResultsGoTo => 'Results go to';
+
+  @override
+  String get scheduleTargetNewChat => 'A new chat';
+
+  @override
+  String get scheduleQuickStart => 'Quick start';
+
+  @override
+  String get scheduleRecoverEdit => 'Edit task';
+
+  @override
+  String get scheduleRecoverResume => 'Resume schedule';
+
+  @override
+  String get scheduleRecoverRunOnce => 'Run once now';
+
+  @override
+  String get scheduleRunNow => 'Run now';
+
+  @override
+  String get scheduleDuplicate => 'Duplicate';
+
+  @override
+  String get scheduleOpenChat => 'Open chat';
+
+  @override
+  String get scheduleRunHistory => 'Run history';
+
+  @override
+  String get scheduleNoRuns => 'No runs yet.';
+
+  @override
+  String get scheduleStripChecking => 'Checking cloud scheduling…';
+
+  @override
+  String get scheduleStripError => 'Couldn\'t reach cloud scheduling';
 }

@@ -11,6 +11,16 @@ function bareEnv(): NodeJS.ProcessEnv {
   return {};
 }
 
+describe("screencast frame-rate cap (Wave 5 R3)", () => {
+  it("OVID_SCREENCAST_MAX_FPS overrides the 4 fps default", () => {
+    expect(loadBrowserEngineConfig({ OVID_SCREENCAST_MAX_FPS: "5" }).screencast.maxFps).toBe(5);
+  });
+
+  it("a malformed OVID_SCREENCAST_MAX_FPS fails fast naming the variable", () => {
+    expect(() => loadBrowserEngineConfig({ OVID_SCREENCAST_MAX_FPS: "fast" })).toThrow(/OVID_SCREENCAST_MAX_FPS/);
+  });
+});
+
 describe("loadBrowserEngineConfig defaults", () => {
   it("returns the exact default admission numbers and screencast shape", () => {
     const cfg = loadBrowserEngineConfig(bareEnv());
@@ -27,7 +37,10 @@ describe("loadBrowserEngineConfig defaults", () => {
       height: 800,
       quality: 60,
       everyNthFrame: 2,
-      maxFramesInFlight: 2,
+      // Wave 5 R3: one frame in flight + a 4 fps cap ⇒ the effective live
+      // view is 3–5 fps and chromium never encodes frames nobody will see.
+      maxFramesInFlight: 1,
+      maxFps: 4,
     });
     expect(cfg.stateDir).toBeNull();
     expect(cfg.lightpandaBin).toBeNull();

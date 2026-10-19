@@ -25,6 +25,7 @@ import {
   SNAPSHOT_CAP,
   TEXT_OUTPUT_CAP,
   TOOL_ERROR_PREFIX,
+  artifactSessionId,
   capText,
   defineBrowserTool,
   pageInnerText,
@@ -284,7 +285,7 @@ function inspectionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       const quality: number | undefined = input.quality;
       return withSession(deps, ctx, async (_session, page) => {
         const bytes = await captureScreenshot(page, { type, quality });
-        const root = await deps.workspaceDir(ctx.userId, ctx.sessionId);
+        const root = await deps.workspaceDir(ctx.userId, artifactSessionId(ctx));
         const relDir = "browser/screenshots";
         const dir = join(root, relDir);
         await mkdir(dir, { recursive: true });

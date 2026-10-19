@@ -151,6 +151,21 @@ export const scheduleRunDtoSchema: z.ZodType<ScheduleRunDto> = z.object({
 });
 
 /**
+ * Wave 5 FE-012: `POST /cloud/v1/schedules/:id/run` → 202. One immediate
+ * occurrence was claimed and its run enqueued; the schedule's own
+ * `nextRunAt`/status are untouched.
+ */
+export interface ScheduleRunNowResponse {
+  runId: string;
+  scheduleRun: ScheduleRunDto;
+}
+
+export const scheduleRunNowResponseSchema: z.ZodType<ScheduleRunNowResponse> = z.object({
+  runId: z.string().min(1),
+  scheduleRun: scheduleRunDtoSchema,
+});
+
+/**
  * POST /cloud/v1/schedules body. Strict: an unknown key is a client bug, not
  * forward compatibility. `autonomy` defaults to "safe" and `maxRetries` to 0
  * in the service layer (absent here keeps the wire contract explicit).

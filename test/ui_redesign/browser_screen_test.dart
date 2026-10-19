@@ -76,7 +76,7 @@ void main() {
     await tester.pump();
   }
 
-  testWidgets('renders the cloud chrome, canvas and takeover affordance', (
+  testWidgets('renders the cloud chrome and canvas; no takeover before a live page (EM-019)', (
     tester,
   ) async {
     await pumpScreen(tester);
@@ -85,8 +85,7 @@ void main() {
     expect(find.byKey(const ValueKey('browser-tab-strip')), findsOneWidget);
     expect(find.byKey(const ValueKey('browser-url-field')), findsOneWidget);
     expect(find.byKey(const ValueKey('browser-canvas')), findsOneWidget);
-    expect(find.byKey(const ValueKey('browser-takeover')), findsOneWidget);
-    expect(find.text('Agent is driving — Take over'), findsOneWidget);
+    expect(find.byKey(const ValueKey('browser-takeover')), findsNothing);
     expect(find.byKey(const ValueKey('browser-release')), findsNothing);
     expect(tester.takeException(), isNull);
   });
@@ -95,38 +94,46 @@ void main() {
     await pumpScreen(tester);
     raw.add(<String, dynamic>{
       'op': 'browser_state',
-      'sessionId': 's1',
+      'sessionId': BrowserStreamClient.userAlias,
       'state': _state(),
     });
     await tester.pump();
 
     expect(find.text('Example page'), findsOneWidget);
     expect(find.text('example.test'), findsOneWidget);
+    expect(find.text('/page'), findsOneWidget);
     // The page title must never stand in for the address (spoof resistance).
     expect(find.text('Not secure'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('a server takeover ack swaps the chip to Release control', (
+  testWidgets('a server takeover ack swaps the chip to Resume agent', (
     tester,
   ) async {
     await pumpScreen(tester);
-    await tester.tap(find.byKey(const ValueKey('browser-takeover')));
+    raw.add(<String, dynamic>{
+      'op': 'browser_state',
+      'sessionId': BrowserStreamClient.userAlias,
+      'state': _state(),
+    });
+    await tester.pump();
+    await tester.tap(find.text('Take control'));
     await tester.pump();
 
-    // The request alone changes nothing: no optimistic flip.
-    expect(find.byKey(const ValueKey('browser-takeover')), findsOneWidget);
+    // The request alone changes nothing: no optimistic flip, just pending.
+    expect(find.byKey(const ValueKey('browser-takeover-pending')), findsOneWidget);
     expect(find.byKey(const ValueKey('browser-release')), findsNothing);
 
     raw.add(<String, dynamic>{
       'op': 'browser_state',
-      'sessionId': 's1',
+      'sessionId': BrowserStreamClient.userAlias,
       'state': _state(takeover: true),
     });
     await tester.pump();
 
     expect(find.byKey(const ValueKey('browser-release')), findsOneWidget);
-    expect(find.text('You are controlling the browser'), findsOneWidget);
+    expect(find.text("You're in control"), findsOneWidget);
+    expect(find.text('Resume agent'), findsOneWidget);
     expect(find.byKey(const ValueKey('browser-takeover')), findsNothing);
     expect(tester.takeException(), isNull);
   });

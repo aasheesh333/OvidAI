@@ -14,12 +14,21 @@
 ///     no `summary` field (`message` is the summary-equivalent).
 ///   * `ScheduleRunDto` has no `summary`.
 ///   * `create` defaults `maxRetries` to 0 (the service default), not 1.
+///
+/// Wave 5 additions: `GET /schedules/:id` ([ScheduleClient.get], CT-015),
+/// `POST /schedules/:id/run` ([ScheduleClient.runNow], FE-012), a failed
+/// schedule is editable and resumable (FE-013), trigger equality so an edit
+/// sends only what changed (FE-017), and [ScheduleLiveFeed] — the WS system
+/// channel the Schedule screen refreshes from (CT-014).
 library;
+
+import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'cloud_rest.dart';
+import 'cloud_ws.dart';
 import 'models.dart';
 
 
@@ -94,6 +103,26 @@ class ScheduleTrigger {
   final String? expr;
 
   bool get isRecurring => kind != 'at';
+
+  /// The same trigger with another IANA zone (daily/cron only).
+  ScheduleTrigger withTimeZone(String zone) => switch (kind) {
+        'daily_at' => ScheduleTrigger.dailyAt(time ?? '', tz: zone),
+        'cron' => ScheduleTrigger.cron(expr ?? '', tz: zone),
+        _ => this,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      other is ScheduleTrigger &&
+      other.kind == kind &&
+      other.at?.toUtc() == at?.toUtc() &&
+      other.seconds == seconds &&
+      other.time == time &&
+      other.tz == tz &&
+      other.expr == expr;
+
+  @override
+  int get hashCode => Object.hash(kind, at?.toUtc(), seconds, time, tz, expr);
 
   Map<String, Object?> toJson() => switch (kind) {
         'at' => {'kind': 'at', 'at': at!.toUtc().toIso8601String()},
@@ -207,6 +236,33 @@ class ScheduleDto {
 
   bool get isTerminal =>
       status == 'cancelled' || status == 'completed' || status == 'failed';
+
+  /// Wave 5 FE-013: a failed schedule is reviewed, edited and resumed;
+  /// only completed and cancelled rows are read-only.
+  bool get isEditable => status != 'cancelled' && status != 'completed';
+
+  /// Paused, or failed after review.
+  bool get canResume => status == 'paused' || status == 'failed';
+
+  /// "Run now" claims one immediate occurrence (pending/paused/failed).
+  bool get canRunNow => isEditable;
+}
+
+/// `POST /schedules/:id/run` → 202 (Wave 5 FE-012).
+@immutable
+class ScheduleRunNowResult {
+  const ScheduleRunNowResult({required this.runId, required this.scheduleRun});
+
+  factory ScheduleRunNowResult.fromJson(Map<String, dynamic> json) =>
+      ScheduleRunNowResult(
+        runId: json['runId'] as String? ?? '',
+        scheduleRun: ScheduleRunDto.fromJson(
+          (json['scheduleRun'] as Map).cast<String, dynamic>(),
+        ),
+      );
+
+  final String runId;
+  final ScheduleRunDto scheduleRun;
 }
 
 /// One occurrence in the results feed (`GET /schedules/:id/runs`).
@@ -346,6 +402,17 @@ class ScheduleClient {
         }));
   }
 
+  /// GET /schedules/:id — one schedule (a deep link opens without paging the
+  /// whole list; CT-015).
+  Future<ScheduleDto> get(String id) async =>
+      ScheduleDto.fromJson(await _rest.getJson('/schedules/$id'));
+
+  /// POST /schedules/:id/run — run one occurrence now. The schedule's own
+  /// next run and status are unchanged; a busy chat answers 409
+  /// `session_busy` (surfaced as [CloudApiException]).
+  Future<ScheduleRunNowResult> runNow(String id) async =>
+      ScheduleRunNowResult.fromJson(await _rest.postJson('/schedules/$id/run'));
+
   /// DELETE /schedules/:id — the server soft-cancels (204, empty body).
   Future<void> delete(String id) => _rest.delete('/schedules/$id');
 
@@ -411,5 +478,141 @@ class ScheduleClient {
       throw const FormatException('Invalid calendar date/time');
     }
     return DateTime.parse(value.replaceAll(' ', 'T'));
+  }
+}
+
+/// One scheduler event from the WS system channel (`{op:'system', event}`).
+@immutable
+class ScheduleSystemEvent {
+  const ScheduleSystemEvent({
+    required this.type,
+    required this.scheduleId,
+    this.payload = const <String, dynamic>{},
+  });
+
+  /// schedule_created | schedule_updated | schedule_deleted |
+  /// schedule_run_started | schedule_run_succeeded | schedule_run_failed |
+  /// schedule_run_paused.
+  final String type;
+  final String scheduleId;
+  final Map<String, dynamic> payload;
+}
+
+/// Live scheduler updates (CT-014): `subscribe_system` on the shared socket
+/// while a consumer is started, re-sent after every reconnect (the gateway
+/// drops the subscription with the socket), `unsubscribe_system` on stop.
+///
+/// It never opens the socket itself — the app shell keeps the link up; a
+/// subscription simply starts the next time the link is online.
+class ScheduleLiveFeed {
+  ScheduleLiveFeed({
+    required WsMultiplexer ws,
+    Stream<Map<String, dynamic>>? rawFramesOverride,
+    Future<void> Function(Map<String, Object?> frame)? sendOverride,
+  })  : _ws = ws,
+        _rawFrames = rawFramesOverride ?? ws.rawServerFrames,
+        // ignore: prefer_initializing_formals
+        _sendOverride = sendOverride;
+
+  static ScheduleLiveFeed? _instance;
+
+  /// Process-wide default over [WsMultiplexer.I].
+  static ScheduleLiveFeed get I =>
+      _instance ??= ScheduleLiveFeed(ws: WsMultiplexer.I);
+
+  @visibleForTesting
+  static void installForTest(ScheduleLiveFeed feed) => _instance = feed;
+
+  @visibleForTesting
+  static void resetForTest() => _instance = null;
+
+  final WsMultiplexer _ws;
+  final Stream<Map<String, dynamic>> _rawFrames;
+  final Future<void> Function(Map<String, Object?> frame)? _sendOverride;
+
+  final StreamController<ScheduleSystemEvent> _events =
+      StreamController<ScheduleSystemEvent>.broadcast();
+  StreamSubscription<Map<String, dynamic>>? _rawSub;
+  WsLinkState? _lastLink;
+  int _starts = 0;
+
+  /// Scheduler events while started.
+  Stream<ScheduleSystemEvent> get events => _events.stream;
+
+  /// True while at least one consumer has started the feed.
+  bool get active => _starts > 0;
+
+  Future<void> _send(Map<String, Object?> frame) async {
+    try {
+      final override = _sendOverride;
+      if (override != null) {
+        await override(frame);
+      } else {
+        await _ws.sendRaw(frame);
+      }
+    } catch (err) {
+      debugPrint('schedule live feed: send failed: $err');
+    }
+  }
+
+  /// Starts (ref-counted) the subscription.
+  void start() {
+    _starts++;
+    if (_starts > 1) return;
+    _rawSub = _rawFrames.listen(_onRaw, onError: (Object _) {});
+    _lastLink = _ws.linkState;
+    _ws.addListener(_onLink);
+    if (_ws.linkState == WsLinkState.online) {
+      unawaited(_send(<String, Object?>{'op': 'subscribe_system'}));
+    }
+  }
+
+  /// Stops one consumer; the last one unsubscribes.
+  void stop() {
+    if (_starts == 0) return;
+    _starts--;
+    if (_starts > 0) return;
+    _ws.removeListener(_onLink);
+    unawaited(_rawSub?.cancel());
+    _rawSub = null;
+    if (_ws.linkState == WsLinkState.online) {
+      unawaited(_send(<String, Object?>{'op': 'unsubscribe_system'}));
+    }
+  }
+
+  void _onLink() {
+    final link = _ws.linkState;
+    final previous = _lastLink;
+    _lastLink = link;
+    if (_starts == 0) return;
+    if (link == WsLinkState.online && previous != WsLinkState.online) {
+      unawaited(_send(<String, Object?>{'op': 'subscribe_system'}));
+    }
+  }
+
+  void _onRaw(Map<String, dynamic> frame) {
+    if (frame['op'] != 'system') return;
+    final raw = frame['event'];
+    if (raw is! Map) return;
+    final type = raw['type'];
+    final id = raw['scheduleId'];
+    if (type is! String || id is! String) return;
+    final payload = raw['payload'];
+    if (_events.isClosed) return;
+    _events.add(ScheduleSystemEvent(
+      type: type,
+      scheduleId: id,
+      payload: payload is Map
+          ? payload.cast<String, dynamic>()
+          : const <String, dynamic>{},
+    ));
+  }
+
+  void dispose() {
+    if (_starts > 0) {
+      _starts = 1;
+      stop();
+    }
+    unawaited(_events.close());
   }
 }
