@@ -887,6 +887,31 @@ void main() {
     },
   );
 
+  testWidgets('R4: a failed run has one human surface without destructive '
+      'regeneration Retry', (tester) async {
+    final h = await _bind();
+    addTearDown(() async {
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+    _addSession('srv-1');
+    await _pumpChat(tester);
+    await _send(tester, 'hello cloud');
+    final socket = h.socket();
+    socket.server(_eventFrame('srv-1', '1-0', 'run_started', {'runId': 'run-1'}));
+    socket.server(_eventFrame('srv-1', '2-0', 'run_failed', {
+      'code': 'model_terminal', 'message': 'provider diagnostic',
+    }));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(const ValueKey('run-failed-row')), findsOneWidget);
+    expect(find.byKey(const ValueKey('run-failed-retry')), findsNothing);
+    expect(find.text('Pick model'), findsNothing);
+    expect(find.textContaining('Your chat is kept unchanged.'), findsWidgets);
+    expect(find.text('Details'), findsOneWidget);
+    await h.close();
+  });
+
   // -------------------------------------------------------------------------
   // Older-server-page paging (chat P1: history past the first page)
   // -------------------------------------------------------------------------

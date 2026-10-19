@@ -5536,33 +5536,11 @@ class _RunFailedRow extends StatefulWidget {
 
 class _RunFailedRowState extends State<_RunFailedRow> {
   bool _details = false;
-  bool _retrying = false;
-
-  Future<void> _retry() async {
-    setState(() => _retrying = true);
-    try {
-      await CloudAgentFacade.I.retryFailedRun(widget.sessionId);
-    } catch (e) {
-      if (mounted) {
-        final text = e is CloudApiException
-            ? cloudErrorCopy(e.code, message: e.message).text
-            : 'That did not work. Check your connection and try again.';
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(text)));
-      }
-    } finally {
-      if (mounted) setState(() => _retrying = false);
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
     final m = widget.message;
-    final code = m.toolSummary ?? '';
     final detail = (m.toolDetail ?? '').trim();
-    final busy = _agent.busyFor(widget.sessionId);
-    final pickModel = code.startsWith('model_');
     return Semantics(
       liveRegion: true,
       child: Container(
@@ -5607,24 +5585,13 @@ class _RunFailedRowState extends State<_RunFailedRow> {
                     onPressed: () => setState(() => _details = !_details),
                     child: Text(_details ? 'Hide details' : 'Details'),
                   ),
-                if (pickModel && widget.latest)
-                  TextButton(
-                    onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'Pick another model from the model menu at the top, '
-                          'then tap Retry.',
-                        ),
-                      ),
-                    ),
-                    child: const Text('Pick model'),
+                Padding(
+                  padding: const EdgeInsets.only(left: 8, top: 8),
+                  child: Text(
+                    CloudAgentFacade.historyActionsUnavailableText,
+                    style: TextStyle(fontSize: 12, color: Aether.textMuted),
                   ),
-                if (widget.latest)
-                  TextButton(
-                    key: const ValueKey('run-failed-retry'),
-                    onPressed: busy || _retrying ? null : () => unawaited(_retry()),
-                    child: Text(_retrying ? 'Retrying…' : 'Retry'),
-                  ),
+                ),
               ],
             ),
           ],
@@ -5837,7 +5804,8 @@ class _MessageView extends StatelessWidget {
     // CH-029: thumbs feedback is not offered — there is no server feedback
     // route yet, and a like that is never sent or kept would be a lie.
     // Branch into a new chat from this answer (server-side copy).
-    if (!isUser && serverRow && !m.thinking && !session.isSubagent) {
+    if (CloudAgentFacade.I.canEditHistory(session.id as String) &&
+        !isUser && serverRow && !m.thinking && !session.isSubagent) {
       overflow.add((
         Icons.call_split,
         'Branch into a new chat',
@@ -5881,6 +5849,14 @@ class _MessageView extends StatelessWidget {
       child: Wrap(
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
+          if (serverRow && isLast && !session.isSubagent)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                CloudAgentFacade.historyActionsUnavailableText,
+                style: TextStyle(fontSize: 12, color: Aether.textMuted),
+              ),
+            ),
           ...items,
           if (!isUser && m.elapsedMs != null)
             Padding(

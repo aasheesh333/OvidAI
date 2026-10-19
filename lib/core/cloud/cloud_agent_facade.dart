@@ -1512,11 +1512,13 @@ class CloudAgentFacade extends ChangeNotifier
     return null;
   }
 
-  /// True while history edits are possible for [sessionId]: nothing in
-  /// flight (the server refuses edits while a run is queued or running).
-  /// (A failure — offline, refused — surfaces as an error the UI shows; the
-  /// local transcript changes only after the server confirmed.)
-  bool canEditHistory(String sessionId) => !busyFor(sessionId);
+  /// R4 release gate: idle checks alone do not serialize history changes
+  /// with another device's send. No mutable flag or test-only bypass.
+  bool canEditHistory(String sessionId) => false;
+
+  static const historyActionsUnavailableText =
+      'Your chat is kept unchanged. Changing earlier messages, retrying a '
+      'finished task and branching are unavailable.';
 
   void _truncateLocal(String key, String fromMessageId, {bool keep = false}) {
     final state = _sessions[key];

@@ -21,13 +21,10 @@ import {
   sendMessageBodySchema,
   type MessageDto,
   type MessagePage,
-  type RegenerateResponse,
   type SendMessageResponse,
   type SessionDto,
   type SessionEvent,
-  type TruncateMessagesResponse,
 } from "@ovid/shared";
-import { toSessionDto } from "./sessions.js";
 import type { GatewayDeps } from "../app.js";
 import { DEFAULT_MINT_TIMEOUT_MS, MintTimeoutError } from "../keys.js";
 import { badRequest, isUuid, notFound, parsePageLimit, queryValue, sendError, zodBadRequest } from "./http.js";
@@ -54,8 +51,17 @@ export function toMessageDto(
 export const HISTORY_EVENT_LIMIT = 2000;
 /** Wave 1b: the most streamed chunks folded into a live run's text. */
 const LIVE_DELTA_LIMIT = 20_000;
-/** Wave 1b: the most rows a branch copies (the newest ones up to the message). */
-const BRANCH_MESSAGE_LIMIT = 2000;
+// History mutation is deliberately unavailable until send and mutations
+// share a PostgreSQL serialization protocol and transactional job outbox.
+// In particular, activeForSession -> truncate is NOT a cross-worker guard.
+function historyActionsUnavailable(reply: FastifyReply): FastifyReply {
+  return sendError(
+    reply,
+    409,
+    "history_actions_unavailable",
+    "Your chat is kept unchanged. Changing earlier messages, retrying a finished task and branching are unavailable.",
+  );
+}
 
 /**
  * Events after which a live run's bubble starts fresh on the client: the
@@ -70,16 +76,6 @@ const BUBBLE_BOUNDARY_TYPES = new Set([
   "tool_completed",
   "run_started_retry",
 ]);
-
-/** Shown when history changes are refused because a run is still going. */
-function sessionBusy(reply: FastifyReply): FastifyReply {
-  return sendError(
-    reply,
-    409,
-    "session_busy",
-    "A task is still running in this chat. Stop it before changing the history.",
-  );
-}
 
 // The send body schema lives in @ovid/shared (sendMessageBodySchema) — the
 // one copy, documented there: content, attachmentIds (P8 Task 3),
@@ -220,7 +216,7 @@ function resetsAtEpochMs(headers: Readonly<Record<string, string>>): string | nu
 }
 
 /**
- * Key provisioning BEFORE any write (send and regenerate share it): null =
+ * Key provisioning BEFORE any write for ordinary send: null =
  * the key is there, proceed; otherwise the reply already sent. A deadline
  * breach is a retryable 503; mint 402/429 verdicts are re-enveloped for the
  * thin client with any resets-at forwarded as x-ovid-resets-at; everything
@@ -755,36 +751,27 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
 
   // -------------------------------------------------------------------------
   // Wave 1b (CT-004 / CH-024): history edits. Every route is ownership-first
-  // (wrong owner and unknown ids are the same 404) and refuses while a run is
-  // queued or running — the worker reads the history the edit would change.
+  // (wrong owner and unknown ids are the same 404). Mutations are release-
+  // gated, including while idle, until an atomic DB/outbox contract exists.
   // -------------------------------------------------------------------------
 
-  /** Delete a message and everything after it (also the edit-and-resend half). */
+  /** R4 gate: a separate destructive delete cannot implement atomic edit. */
   app.delete("/sessions/:id/messages/:messageId", async (request, reply) => {
     const { id: sessionId, messageId } = request.params as { id: string; messageId: string };
-    const { uid } = request.principal;
     if (!isUuid(sessionId)) return notFound(reply);
-    const session = await sessions.get(deps.db, sessionId, uid);
+    const session = await sessions.get(deps.db, sessionId, request.principal.uid);
     if (session === null) return notFound(reply);
     if (!isUuid(messageId)) return notFound(reply, "Message not found.");
-    const anchor = await messages.getInSession(deps.db, sessionId, messageId);
-    if (anchor === null) return notFound(reply, "Message not found.");
-    if ((await runs.activeForSession(deps.db, sessionId)) !== null) return sessionBusy(reply);
-    // An answer's own tool events precede its row: drop them from its
-    // prompt's time on, so history never shows a deleted turn's activity.
-    const prompt =
-      anchor.role === "assistant" ? await messages.latestUserBefore(deps.db, sessionId, anchor.id) : null;
-    const deleted = await messages.truncateFrom(deps.db, sessionId, anchor.id, {
-      ...(prompt !== null ? { eventsFrom: prompt.createdAt } : {}),
-    });
-    await sessions.touch(deps.db, sessionId);
-    return { deleted } satisfies TruncateMessagesResponse;
+    if ((await messages.getInSession(deps.db, sessionId, messageId)) === null) {
+      return notFound(reply, "Message not found.");
+    }
+    return historyActionsUnavailable(reply);
   });
 
   /** Drop an answer (and anything after it) and run its prompt again. */
   app.post("/sessions/:id/messages/:messageId/regenerate", async (request, reply) => {
     const { id: sessionId, messageId } = request.params as { id: string; messageId: string };
-    const { uid, email } = request.principal;
+    const { uid } = request.principal;
     if (!isUuid(sessionId)) return notFound(reply);
     const session = await sessions.get(deps.db, sessionId, uid);
     if (session === null) return notFound(reply);
@@ -796,56 +783,13 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     if (target.role !== "assistant" && target.role !== "user") {
       return badRequest(reply, "Only an answer or a prompt can be run again.");
     }
-    // An answer re-runs the prompt it replied to; a prompt (e.g. one whose
-    // run failed) re-runs itself. Either way everything after the prompt
-    // goes — including the failed attempt's events.
-    const prompt =
-      target.role === "user" ? target : await messages.latestUserBefore(deps.db, sessionId, target.id);
-    if (prompt === null) return badRequest(reply, "This answer has no prompt to run again.");
-    if ((await runs.activeForSession(deps.db, sessionId)) !== null) return sessionBusy(reply);
-
-    const user = await users.ensure(deps.db, uid, email);
-    const mintFailure = await provisionKey(deps, request, reply, uid, sessionId);
-    if (mintFailure !== null) return mintFailure;
-
-    await messages.truncateFrom(deps.db, sessionId, prompt.id, {
-      eventsFrom: prompt.createdAt,
-      keepAnchor: true,
-    });
-    const files = await attachments.forMessages(deps.db, sessionId, [prompt.id]);
-    const run = await runs.create(deps.db, { sessionId, promptMessageId: prompt.id });
-    try {
-      await deps.queues.agentRuns.add(
-        AGENT_RUN_JOB_NAME,
-        {
-          runId: run.id,
-          sessionId,
-          userId: uid,
-          prompt: prompt.content,
-          tier: user.tier,
-          ...(files.length > 0 ? { attachmentIds: files.map((f) => f.id) } : {}),
-          ...(parsed.data.maxOutputTokens !== undefined
-            ? { maxOutputTokens: parsed.data.maxOutputTokens }
-            : {}),
-        },
-        { jobId: run.id, priority: user.tier === "free" ? 2 : 1 },
-      );
-    } catch (err) {
-      request.log.error({ err, runId: run.id, sessionId }, "queue add failed; regenerate run left queued");
-      return sendError(reply, 503, "unavailable", "Run queue is temporarily unavailable; please retry shortly.");
-    }
-    if (deps.activity !== undefined) {
-      void deps.activity.bump(sessionId).catch(() => {});
-    }
-    await sessions.touch(deps.db, sessionId);
-    const body: RegenerateResponse = { runId: run.id, promptMessageId: prompt.id, status: "queued" };
-    return reply.code(202).send(body);
+    return historyActionsUnavailable(reply);
   });
 
   /** A new chat seeded with this chat's history up to and including a message. */
   app.post("/sessions/:id/branch", async (request, reply) => {
     const { id: sessionId } = request.params as { id: string };
-    const { uid, email } = request.principal;
+    const { uid } = request.principal;
     if (!isUuid(sessionId)) return notFound(reply);
     const session = await sessions.get(deps.db, sessionId, uid);
     if (session === null) return notFound(reply);
@@ -853,11 +797,6 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     if (!parsed.success) return zodBadRequest(reply, parsed.error);
     const anchor = await messages.getInSession(deps.db, sessionId, parsed.data.messageId);
     if (anchor === null) return notFound(reply, "Message not found.");
-    await users.ensure(deps.db, uid, email);
-    const rows = await messages.upTo(deps.db, sessionId, anchor.id, BRANCH_MESSAGE_LIMIT);
-    const title = parsed.data.title?.trim() || `${(session.title ?? "").trim() || "Chat"} (branch)`;
-    const created = await sessions.create(deps.db, uid, title);
-    await messages.copyInto(deps.db, created.id, rows);
-    return reply.code(201).send(toSessionDto(created));
+    return historyActionsUnavailable(reply);
   });
 }

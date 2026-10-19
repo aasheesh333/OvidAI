@@ -4,7 +4,7 @@
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { attachments, eventMirror, messages, newId, runs, type Db } from "@ovid/db";
+import { attachments, eventMirror, messages, newId, runs, sessionState, type Db } from "@ovid/db";
 import type { MessagePage, SessionEvent } from "@ovid/shared";
 import { buildGateway } from "../app.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
@@ -23,6 +23,7 @@ import {
 interface TestApp {
   app: FastifyInstance;
   adds: QueueAdd[];
+  mintCalls: string[];
 }
 
 describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", () => {
@@ -43,6 +44,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
 
   function makeApp(): TestApp {
     const { queues, adds } = stubQueues();
+    const mint = stubMint();
+    const mintCalls: string[] = [];
     const app = buildGateway({
       system: stubSystemBus(),
       db,
@@ -50,10 +53,10 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
       verifier: stubVerifier(),
       tickets: stubTickets(),
       keys: stubKeys(),
-      mint: stubMint(),
+      mint: { async ensureKeyForUid(uid) { mintCalls.push(uid); return mint.ensureKeyForUid(uid); } },
       events: noopEvents,
     });
-    const handle = { app, adds };
+    const handle = { app, adds, mintCalls };
     built.push(handle);
     return handle;
   }
@@ -200,16 +203,48 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
     expect(older.events!.map((e) => e.payload.callId)).toEqual(["old"]);
   });
 
+  const gatedActions = [
+    { method: "DELETE" as const, path: (sid: string, mid: string) => `/cloud/v1/sessions/${sid}/messages/${mid}` },
+    { method: "POST" as const, path: (sid: string, mid: string) => `/cloud/v1/sessions/${sid}/messages/${mid}/regenerate` },
+    { method: "POST" as const, path: (sid: string, _mid: string) => `/cloud/v1/sessions/${sid}/branch` },
+  ];
+
+  it.each(gatedActions)("R4 gate $method $path leaves all durable history and routing dependencies untouched", async ({ method, path }) => {
+    const h = makeApp();
+    const uid = testUid("w1b-gated");
+    const sid = await createSession(h, uid);
+    const prompt = await messages.append(db, { sessionId: sid, role: "user", content: "original prompt" });
+    const answer = await messages.append(db, { sessionId: sid, role: "assistant", content: "original answer" });
+    const attachmentId = newId();
+    await attachments.create(db, { id: attachmentId, sessionId: sid, userId: uid, name: "keep.txt", size: 5, r2Key: "keep" });
+    await attachments.linkToMessage(db, sid, [attachmentId], prompt.id);
+    await putEvent(sid, "tool_started", { callId: "keep-tool" }, later(prompt.createdAt, 1));
+    await sessionState.patch(db, sid, { compaction: { ledger: null, summary: "keep summary", cutoffMessageId: answer.id, compactedAtCount: 1 } });
+    const snapshot = async () => JSON.stringify(await Promise.all([
+      db.$client.unsafe("SELECT * FROM sessions WHERE user_id = $1 ORDER BY id", [uid]),
+      ...["messages", "attachments", "session_event_mirror", "session_agent_state", "runs"].map((table) =>
+        db.$client.unsafe(`SELECT * FROM ${table} WHERE session_id = $1`, [sid])),
+    ]));
+    const before = await snapshot();
+    const res = await h.app.inject({ method, url: path(sid, answer.id), headers: authHeaders(uid),
+      ...(method === "POST" ? { payload: { ...(path(sid, answer.id).endsWith("/branch") ? { messageId: answer.id } : {}) } } : {}) });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("history_actions_unavailable");
+    expect(await snapshot()).toBe(before);
+    expect(h.mintCalls).toEqual([]);
+    expect(h.adds).toEqual([]);
+  });
+
   // ── DELETE (truncate from a message) ───────────────────────────────────
 
-  it("DELETE removes the message and everything after it; ownership-scoped; refused while a run is active", async () => {
+  it("DELETE is ownership-scoped and release-gated while queued or idle", async () => {
     const h = makeApp();
     const uid = testUid("w1b-del");
     const sid = await createSession(h, uid);
     const u1 = await messages.append(db, { sessionId: sid, role: "user", content: "q1" });
     const a1 = await messages.append(db, { sessionId: sid, role: "assistant", content: "a1" });
     const u2 = await messages.append(db, { sessionId: sid, role: "user", content: "q2" });
-    await messages.append(db, { sessionId: sid, role: "assistant", content: "a2" });
+    const a2 = await messages.append(db, { sessionId: sid, role: "assistant", content: "a2" });
 
     const stranger = testUid("w1b-stranger");
     const foreign = await h.app.inject({
@@ -226,7 +261,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
       headers: authHeaders(uid),
     });
     expect(busy.statusCode).toBe(409);
-    expect(busy.json().error.code).toBe("session_busy");
+    expect(busy.json().error.code).toBe("history_actions_unavailable");
     await runs.finish(db, busyRun.id, "completed");
 
     const unknown = await h.app.inject({
@@ -241,13 +276,15 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
       url: `/cloud/v1/sessions/${sid}/messages/${u2.id}`,
       headers: authHeaders(uid),
     });
-    expect(ok.statusCode).toBe(200);
-    expect(ok.json()).toEqual({ deleted: 2 });
+    expect(ok.statusCode).toBe(409);
+    expect(ok.json().error.code).toBe("history_actions_unavailable");
     const left = await messages.page(db, sid, { limit: 10 });
-    expect(left.rows.map((r) => r.id)).toEqual([a1.id, u1.id]);
+    expect(left.rows.map((r) => r.id)).toEqual([a2.id, u2.id, a1.id, u1.id]);
+    expect(h.mintCalls).toEqual([]);
+    expect(h.adds).toEqual([]);
   });
 
-  it("DELETE of an answer also drops the tool events of the run that produced it", async () => {
+  it("DELETE gate preserves an answer and its tool events", async () => {
     const h = makeApp();
     const uid = testUid("w1b-del-a");
     const sid = await createSession(h, uid);
@@ -259,14 +296,15 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
       url: `/cloud/v1/sessions/${sid}/messages/${a1.id}`,
       headers: authHeaders(uid),
     });
-    expect(res.statusCode).toBe(200);
-    expect(await eventMirror.readSince(db, sid, null, 10)).toEqual([]);
-    expect((await messages.page(db, sid, { limit: 10 })).rows.map((r) => r.id)).toEqual([u1.id]);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("history_actions_unavailable");
+    expect((await eventMirror.readSince(db, sid, null, 10)).map((e) => e.payload.callId)).toEqual(["c"]);
+    expect((await messages.page(db, sid, { limit: 10 })).rows.map((r) => r.id)).toEqual([a1.id, u1.id]);
   });
 
   // ── regenerate ─────────────────────────────────────────────────────────
 
-  it("regenerate drops the answer and re-runs its prompt (same prompt row, its attachments), 202", async () => {
+  it("regenerate gate keeps the prompt, answer and linked attachments without another mint or queue call", async () => {
     const h = makeApp();
     const uid = testUid("w1b-regen");
     const sid = await createSession(h, uid);
@@ -282,28 +320,22 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
     await finishRuns(sid);
     const answer = await messages.append(db, { sessionId: sid, role: "assistant", content: "old answer" });
 
+    const mintCount = h.mintCalls.length;
+    const queuedCount = h.adds.length;
     const res = await h.app.inject({
       method: "POST",
       url: `/cloud/v1/sessions/${sid}/messages/${answer.id}/regenerate`,
       headers: authHeaders(uid),
       payload: { maxOutputTokens: 500 },
     });
-    expect(res.statusCode).toBe(202);
-    const body = res.json() as { runId: string; promptMessageId: string; status: string };
-    expect(body).toMatchObject({ promptMessageId: userMessageId, status: "queued" });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("history_actions_unavailable");
     const left = await messages.page(db, sid, { limit: 10 });
-    expect(left.rows.map((r) => r.id)).toEqual([userMessageId]);
-    const add = h.adds[h.adds.length - 1]!;
-    expect(add.data).toMatchObject({
-      runId: body.runId,
-      sessionId: sid,
-      userId: uid,
-      prompt: "summarize",
-      attachmentIds: [attId],
-      maxOutputTokens: 500,
-    });
-    expect(add.opts.jobId).toBe(body.runId);
-    expect(await runs.activeForSession(db, sid)).toMatchObject({ id: body.runId, promptMessageId: userMessageId });
+    expect(left.rows.map((r) => r.id)).toEqual([answer.id, userMessageId]);
+    expect((await attachments.forMessages(db, sid, [userMessageId])).map((a) => a.id)).toEqual([attId]);
+    expect(h.mintCalls).toHaveLength(mintCount);
+    expect(h.adds).toHaveLength(queuedCount);
+    expect(await runs.activeForSession(db, sid)).toBeNull();
 
     // A stranger can't regenerate; a busy session refuses.
     const stranger = await h.app.inject({
@@ -315,7 +347,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
     expect(stranger.statusCode).toBe(404);
   });
 
-  it("regenerate on a prompt whose run failed re-runs it and drops the failed attempt's events", async () => {
+  it("regenerate gate keeps a failed attempt and its events without sending a duplicate", async () => {
     const h = makeApp();
     const uid = testUid("w1b-retry");
     const sid = await createSession(h, uid);
@@ -327,11 +359,12 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
       headers: authHeaders(uid),
       payload: {},
     });
-    expect(res.statusCode).toBe(202);
-    expect(res.json()).toMatchObject({ promptMessageId: u1.id });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("history_actions_unavailable");
     expect((await messages.page(db, sid, { limit: 10 })).rows.map((r) => r.id)).toEqual([u1.id]);
-    expect(await eventMirror.readSince(db, sid, null, 10)).toEqual([]);
-    expect(h.adds[h.adds.length - 1]!.data).toMatchObject({ prompt: "try this" });
+    expect((await eventMirror.readSince(db, sid, null, 10)).map((e) => e.type)).toEqual(["run_failed"]);
+    expect(h.mintCalls).toEqual([]);
+    expect(h.adds).toEqual([]);
   });
 
   it("regenerate refuses while a run is active", async () => {
@@ -348,7 +381,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
       payload: {},
     });
     expect(res.statusCode).toBe(409);
-    expect(res.json().error.code).toBe("session_busy");
+    expect(res.json().error.code).toBe("history_actions_unavailable");
     expect((await messages.page(db, sid, { limit: 10 })).rows).toHaveLength(2);
   });
 
@@ -371,7 +404,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
         ...(method === "POST" ? { payload: {} } : {}),
       });
       expect(res.statusCode).toBe(409);
-      expect(res.json().error.code).toBe("session_busy");
+      expect(res.json().error.code).toBe("history_actions_unavailable");
     }
     expect((await messages.page(db, sid, { limit: 10 })).rows.map((m) => m.id)).toEqual([answer.id, prompt.id]);
     expect((await eventMirror.readSince(db, sid, null, 10)).map((e) => e.seq)).toEqual([approvalSeq]);
@@ -380,7 +413,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
 
   // ── branch ─────────────────────────────────────────────────────────────
 
-  it("branch creates a new owned session holding the history up to the message", async () => {
+  it("branch is ownership-scoped and gated rather than claiming a capped text copy is a rich fork", async () => {
     const h = makeApp();
     const uid = testUid("w1b-branch");
     const sid = await createSession(h, uid);
@@ -394,13 +427,13 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", ()
       headers: authHeaders(uid),
       payload: { messageId: a1.id },
     });
-    expect(res.statusCode).toBe(201);
-    const dto = res.json() as { id: string; title: string };
-    expect(dto.id).not.toBe(sid);
-    expect(dto.title).toBe("Trip plan (branch)");
-    const copied = (await get(h, uid, `/cloud/v1/sessions/${dto.id}/messages`)).json() as MessagePage;
-    expect(copied.items.map((m) => m.content).reverse()).toEqual(["q1", "a1"]);
-    expect(copied.items[1]!.createdAt).toBe(u1.createdAt.toISOString());
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("history_actions_unavailable");
+    const unchanged = (await get(h, uid, `/cloud/v1/sessions/${sid}/messages`)).json() as MessagePage;
+    expect(unchanged.items.map((m) => m.content).reverse()).toEqual(["q1", "a1", "q2"]);
+    expect(unchanged.items[2]!.createdAt).toBe(u1.createdAt.toISOString());
+    expect(h.mintCalls).toEqual([]);
+    expect(h.adds).toEqual([]);
 
     const foreign = await h.app.inject({
       method: "POST",

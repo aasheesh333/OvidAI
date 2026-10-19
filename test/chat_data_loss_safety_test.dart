@@ -201,8 +201,7 @@ void main() {
     expect(a.messages, hasLength(2));
   });
 
-  testWidgets('edit dialog states how many later messages it removes, and a '
-      'refused edit keeps the history', (tester) async {
+  testWidgets('R4: edit & resend is hidden and existing history stays intact', (tester) async {
     a.messages
       ..clear()
       ..addAll([
@@ -212,23 +211,13 @@ void main() {
         Message(role: 'assistant', content: 'Two', privateSyncId: _id(4)),
       ]);
     await pumpChat(tester);
-    await tester.tap(find.byTooltip('Edit & resend').first);
-    await tester.pumpAndSettle();
-    expect(
-      find.textContaining('This also removes the 3 messages after it'),
-      findsOneWidget,
-    );
-    await tester.tap(find.byKey(const ValueKey('edit-resend-send')));
-    await tester.pump();
-    await tester.pump(const Duration(seconds: 1));
-    // The test HTTP stack refuses every request: the server never truncated,
-    // so nothing local changes and the user is told.
+    expect(find.byTooltip('Edit & resend'), findsNothing);
+    expect(find.textContaining('Your chat is kept unchanged.'), findsOneWidget);
     expect(a.messages.map((m) => m.content), ['First', 'One', 'Second', 'Two']);
-    expect(find.byType(SnackBar), findsOneWidget);
-    await expireSnackBars(tester);
+    expect(find.byType(AlertDialog), findsNothing);
   });
 
-  testWidgets('Delete from here asks first; a refused delete keeps the rows', (
+  testWidgets('R4: Delete from here is hidden without changing the transcript', (
     tester,
   ) async {
     a.messages
@@ -239,16 +228,11 @@ void main() {
       ]);
     await pumpChat(tester);
     expect(find.byTooltip('Revert'), findsNothing);
-    await tester.tap(find.byTooltip('More actions').last);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Delete from here'));
-    await tester.pumpAndSettle();
-    expect(find.text('Delete this message?'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('confirm-delete-from')));
-    await tester.pump();
-    await tester.pump(const Duration(seconds: 1));
+    expect(find.byTooltip('More actions'), findsNothing);
+    expect(find.text('Delete from here'), findsNothing);
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.textContaining('Your chat is kept unchanged.'), findsOneWidget);
     expect(a.messages.map((m) => m.content), ['Hello', 'Oops']);
-    await expireSnackBars(tester);
   });
 
   testWidgets('pending approval disables Attach and the mic', (tester) async {

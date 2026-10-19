@@ -29,7 +29,7 @@ The rules below apply to every wave:
 | Event projection renders tool, artifact, todo, subagent, compaction and plan events; turn separation | CT-002, CH-004, CH-005, CH-018 |
 | Replay cursor and history: resume mid-run, no replay pile-up on first open, rich history | CH-002, CH-003, CH-006, CH-015, CH-021, CT-003 |
 | Data loss: outbox, attachments in a new chat, idempotent clientMsgId, queue persistence | CH-009, CH-033, CH-010, CH-011, CH-023 |
-| Server-side edit/delete/regenerate (or hide the actions on cloud chats) | CT-004, CH-024 |
+| Server-side edit/delete/regenerate (or hide the actions on cloud chats) | CT-004, CH-024 — **GATED safely; not released** |
 | Titles sync, unsubscribe on leave, run_merged, approval card fidelity, error copy | CH-013, CH-014, CH-016, CH-017, CH-019, CH-020, CH-031, CH-044 |
 | Session isolation (R1): memory toggles enforced server-side; @session tag pulls context only on request | SE-005, R1 |
 | Offline: probe Ovid not gstatic; one consistent offline model | SH-011, CH-035 |

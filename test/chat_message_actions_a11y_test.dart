@@ -60,7 +60,7 @@ void main() {
     await pump(tester);
     // CH-029: no thumbs on cloud rows (no server feedback route).
     expect(find.byTooltip('Good answer'), findsNothing);
-    for (final tip in ['Copy', 'More actions']) {
+    for (final tip in ['Copy', 'Report']) {
       final targets = find.byTooltip(tip);
       expect(targets, findsWidgets, reason: tip);
       for (final e in targets.evaluate()) {
@@ -69,11 +69,12 @@ void main() {
         expect(size.height, greaterThanOrEqualTo(48), reason: tip);
       }
     }
-    // Branch moved into the overflow menu.
-    expect(find.byTooltip('Branch into a new chat'), findsNothing);
-    await tester.tap(find.byTooltip('More actions').last);
-    await tester.pumpAndSettle();
-    expect(find.text('Branch into a new chat'), findsOneWidget);
+    // R4: no apparently-active destructive history controls until the
+    // server can atomically change history alongside sends on other devices.
+    for (final tip in ['Edit & resend', 'Regenerate', 'More actions', 'Branch into a new chat']) {
+      expect(find.byTooltip(tip), findsNothing);
+    }
+    expect(find.textContaining('Your chat is kept unchanged.'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
