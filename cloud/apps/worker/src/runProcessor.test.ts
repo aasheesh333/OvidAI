@@ -2512,6 +2512,44 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(wireText(sse.requests[0]!)).not.toContain(marker);
     });
 
+    it("R1: child loops inherit Memory OFF and isolated search, without parent or other chat history injection", async () => {
+      const seeded = await seedRun();
+      const marker = `childsecret${Date.now().toString(36)}`;
+      const parentMarker = `parentsecret${Date.now().toString(36)}`;
+      const other = await sessions.create(db, seeded.uid, "Other private chat");
+      createdSessions.push(other.id);
+      await messages.append(db, { sessionId: other.id, role: "user", content: `childlookup ${marker}` });
+      await messages.append(db, { sessionId: seeded.sessionId, role: "assistant", content: parentMarker });
+      await userPreferences.patch(db, seeded.uid, { memoryEnabled: false, shareSessionMemory: false });
+      const sbx = makeFakePort();
+      const sse = await startTurnSse([
+        toolCallTurn("call_child", "dispatch_agent", { prompt: "Search only your own task history" }),
+        toolCallTurn("call_search", "session_search", { query: "childlookup" }),
+        textTurn("child done"),
+        textTurn("parent done"),
+      ]);
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+      expect(sse.requests).toHaveLength(4);
+      for (const childRequest of sse.requests.slice(1, 3)) {
+        expect(toolNames(childRequest).filter((n) => n.startsWith("memory_"))).toEqual([]);
+        expect(wireText(childRequest)).not.toContain(marker);
+        expect(wireText(childRequest)).not.toContain(parentMarker);
+      }
+      const started = (await readEvents(seeded.sessionId)).find((e) => e.type === "subagent_started")!;
+      expect(started).toBeDefined();
+      const childEvents = await readEvents(String(started.payload.childSessionId));
+      const search = childEvents.find((e) => e.type === "tool_completed" && e.payload.name === "session_search")!;
+      expect(search).toBeDefined();
+      expect(String(search.payload.content)).not.toContain(marker);
+      expect(String(search.payload.content)).not.toContain(other.id);
+    });
+
     it("SE-005: Memory OFF removes every memory_* tool from the model's tool list", async () => {
       const seeded = await seedRun();
       const run = async (job: { data: AgentRunJob }) => {

@@ -1,5 +1,7 @@
 // PR-3b: the chat screen never silently loses typed text, history, queued
 // messages or goals.
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -7,6 +9,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/composer_drafts.dart';
+import 'package:ovid_ai/core/reset_coordinator.dart';
+import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
@@ -79,6 +83,86 @@ void main() {
     await tester.pump(const Duration(seconds: 12));
     await tester.pump(const Duration(seconds: 1));
   }
+
+  test('CH-045: cold account B never loads account A composer drafts', () async {
+    AppState.resetTestInstance();
+    AppState.createForTest(sessionAccountIdForTest: 'account-a');
+    await ComposerDraftStore.I.load();
+    ComposerDraftStore.I.put('same-session-id', 'Private draft for A');
+    await ComposerDraftStore.I.flush();
+
+    AppState.resetTestInstance();
+    AppState.createForTest(sessionAccountIdForTest: 'account-b');
+    await ComposerDraftStore.I.load();
+    expect(ComposerDraftStore.I.draftFor('same-session-id'), isNull);
+
+    AppState.resetTestInstance();
+    AppState.createForTest(sessionAccountIdForTest: 'account-a');
+    await ComposerDraftStore.I.load();
+    expect(ComposerDraftStore.I.draftFor('same-session-id'), 'Private draft for A');
+  });
+
+  test('CH-045: unowned legacy drafts remain guest-only', () async {
+    ComposerDraftStore.I.put('same-session-id', 'Unowned guest draft');
+    await ComposerDraftStore.I.flush();
+    AppState.resetTestInstance();
+    AppState.createForTest(sessionAccountIdForTest: 'signed-in');
+    await ComposerDraftStore.I.load();
+    expect(ComposerDraftStore.I.draftFor('same-session-id'), isNull);
+  });
+
+  testWidgets('CH-045: a mounted composer clears on account handoff and '
+      'restores only the returning owner draft', (tester) async {
+    final root = await tester.runAsync(() => Directory.systemTemp.createTemp('draft-account-'));
+    SessionSearch.dbPathOverrideForTest = '${root!.path}/search.db';
+    addTearDown(() async {
+      await SessionSearch.I.close();
+      SessionSearch.dbPathOverrideForTest = null;
+      await root.delete(recursive: true);
+    });
+    AppState.resetTestInstance();
+    final app = AppState.createForTest(
+      sessionAccountIdForTest: 'account-a',
+      accountLifecycle: AccountLifecycleIntegration(
+        onFence: () {},
+        onRevoke: () async {},
+        onBind: (_, _) async {},
+        onClear: () async {},
+        onVerifyEmpty: () async => true,
+      ),
+    );
+    a = ChatSession(id: 'same-session-id', title: 'A', model: 'm');
+    app.sessions
+      ..clear()
+      ..add(a);
+    app.activeSessionId = a.id;
+    await pumpChat(tester);
+    await tester.enterText(composer, 'Private draft for A');
+    await tester.pump(const Duration(milliseconds: 600));
+
+    await tester.runAsync(() => app.transitionSessionAccount('account-b'));
+    app.sessions
+      ..clear()
+      ..add(ChatSession(id: a.id, title: 'B', model: 'm'));
+    app.activeSessionId = a.id;
+    app.refresh();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(draft(tester), isEmpty);
+    await tester.enterText(composer, 'Private draft for B');
+    await tester.pump(const Duration(milliseconds: 600));
+
+    await tester.runAsync(() => app.transitionSessionAccount('account-a'));
+    app.sessions
+      ..clear()
+      ..add(a);
+    app.activeSessionId = a.id;
+    app.refresh();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(draft(tester), 'Private draft for A');
+    await tester.pumpWidget(const SizedBox());
+  });
 
   testWidgets('draft survives recreating ChatScreen after process death', (
     tester,

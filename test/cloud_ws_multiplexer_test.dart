@@ -1251,6 +1251,25 @@ void main() {
       await ws.disconnect();
     });
 
+    test('CH-014: unsubscribe and re-subscribe never reuse an older seed', () async {
+      final spy = SocketFactorySpy();
+      final ws = await _build(spy);
+      ws.seedCursor('s1', '2-0');
+      await _subscribeAndListen(ws, 's1');
+      final socket = spy.sockets.single;
+      socket.server(_eventFrame('s1', '9-0'));
+      await pumpEventQueue();
+      ws.unsubscribe('s1');
+      await pumpEventQueue();
+      expect(await ws.cursorFor('s1'), '9-0');
+      await _subscribeAndListen(ws, 's1');
+      expect(socket.lastSentJson(),
+          {'op': 'subscribe', 'sessionId': 's1', 'lastEventId': '9-0'});
+      ws.seedCursor('s1', '3-0');
+      expect(await ws.cursorFor('s1'), '9-0');
+      await ws.disconnect();
+    });
+
     test('CH-003: rebaseCursor re-subscribes from the snapshot watermark', () async {
       final spy = SocketFactorySpy();
       final ws = await _build(spy);

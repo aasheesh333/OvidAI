@@ -908,6 +908,8 @@ class _ChatScreenState extends State<ChatScreen>
   // showing A's text. We stash the current text on session switch and
   // restore the target session's draft (like DeepSeek web / ChatGPT web).
   final Map<String, String> _drafts = {};
+  late final AppState _draftApp;
+  late Object _draftOwner;
   String? _boundSessionId;
   final Map<String, int> _draftVersions = {};
   bool _restoringDraft = false;
@@ -932,8 +934,27 @@ class _ChatScreenState extends State<ChatScreen>
     }
   }
 
-  void _clearSubmittedDraft(String sid, String text, int version) {
-    if (!mounted || (_draftVersions[sid] ?? 0) != version) return;
+  void _onDraftAccountChanged() {
+    if (identical(_draftOwner, _draftApp.sessionAccountToken)) return;
+    _draftOwner = _draftApp.sessionAccountToken;
+    _restoringDraft = true;
+    _boundSessionId = null;
+    _drafts.clear();
+    _draftVersions.clear();
+    _queueEdits.clear();
+    _input.clear();
+    _restoringDraft = false;
+    final owner = _draftOwner;
+    unawaited(ComposerDraftStore.I.load().then((_) {
+      if (mounted && identical(owner, _draftOwner)) _restorePersistedDraft();
+    }));
+  }
+
+  void _clearSubmittedDraft(String sid, String text, int version, Object owner) {
+    if (!mounted || !identical(owner, _draftOwner) ||
+        (_draftVersions[sid] ?? 0) != version) {
+      return;
+    }
     if (_boundSessionId == sid) {
       if (_input.text != text) return;
       _input.clear();
@@ -1041,6 +1062,9 @@ class _ChatScreenState extends State<ChatScreen>
   @override
   void initState() {
     super.initState();
+    _draftApp = AppState.I;
+    _draftOwner = _draftApp.sessionAccountToken;
+    _draftApp.addListener(_onDraftAccountChanged);
     // The local approval gate (and its UI-mounted counter) died with the
     // retired service; server approvals are resolved by the facade.
     _input.addListener(_recordDraftEdit);
@@ -1258,6 +1282,7 @@ class _ChatScreenState extends State<ChatScreen>
 
   @override
   void dispose() {
+    _draftApp.removeListener(_onDraftAccountChanged);
     ConnectionService.I.removeListener(_onConnectivityForHistory);
     _fallbackNotice?.removeListener(_showModelFallbackNotice);
     unawaited(ComposerDraftStore.I.flush());
@@ -2109,10 +2134,12 @@ class _ChatScreenState extends State<ChatScreen>
                                 }
                                 final submitted = _input.text;
                                 final version = _draftVersions[s.id] ?? 0;
+                                final owner = _draftOwner;
                                 void clearSubmitted() => _clearSubmittedDraft(
                                   s.id,
                                   submitted,
                                   version,
+                                  owner,
                                 );
                                 final t = submitted.trim();
                                 if (t.isEmpty) return;

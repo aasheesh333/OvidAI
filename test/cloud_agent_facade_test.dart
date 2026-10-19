@@ -323,6 +323,33 @@ void main() {
       h.facade.dispose();
     });
 
+    test('Wave1a pending:<clientMsgId> survives rich reseeding and is '
+        'confirmed under the actual server id without a duplicate', () async {
+      final h = await _build();
+      h.rest.sendGate = Completer<void>();
+      final send = h.facade.runTask('still sending', sessionId: 's1');
+      await pumpEventQueue();
+      final clientId = h.rest.sent.single.clientMsgId!;
+      expect(h.facade.projectionForTest('s1')!.messages.single.privateSyncId,
+          CloudAgentFacade.pendingRowId(clientId));
+      h.facade.seedRichTranscript('s1', rows: const [], events: const [],
+          watermark: '10-0', activeRunId: null);
+      expect(h.facade.projectionForTest('s1')!.messages.single.privateSyncId,
+          'pending:$clientId');
+      // A snapshot may even see the accepted row before the 202 reaches us.
+      h.facade.seedRichTranscript('s1', rows: [
+        Message(role: 'user', content: 'still sending', privateSyncId: 'msg-user-1'),
+      ], events: const [], watermark: '11-0', activeRunId: null);
+      h.rest.sendGate!.complete();
+      await send;
+      final rows = h.facade.projectionForTest('s1')!.messages
+          .where((m) => m.role == 'user').toList();
+      expect(rows, hasLength(1));
+      expect(rows.single.privateSyncId, 'msg-user-1');
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
     test('uploads staged attachments before sending and clears the staging '
         'list on success', () async {
       final h = await _build();

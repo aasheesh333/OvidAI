@@ -1320,6 +1320,7 @@ class AppState extends ChangeNotifier {
        _memoryRootOverride = memoryRootForTest {
     _sessionPersistDebounce = sessionPersistDebounce ?? Duration.zero;
     _sessionAccountId = sessionAccountIdForTest ?? 'guest';
+    unawaited(ComposerDraftStore.I.bindAccount(_sessionAccountId));
     _persistedSessionDecoderForTest = persistedSessionDecoder;
     _sessionBootstrapDecoder =
         sessionBootstrapDecoder ??
@@ -1569,6 +1570,7 @@ class AppState extends ChangeNotifier {
     final token = _sessionAccountToken = Object();
     _sessionCleanupToken = Object();
     _sessionAccountId = account;
+    unawaited(ComposerDraftStore.I.bindAccount(account));
     _sessionAccountReady = false;
     _sessionNamespaceLoaded = false;
     _clearDeferredSessions();
