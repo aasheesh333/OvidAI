@@ -1603,12 +1603,17 @@ class OvidUsageToday {
     required this.inputTokens,
     required this.outputTokens,
     required this.images,
+    this.byModel = const {},
   });
 
   final int requests;
   final int inputTokens;
   final int outputTokens;
   final int images;
+
+  /// Server field `today.by_model`: the same counters per public model id
+  /// for the current allowance window (every device on the account).
+  final Map<String, OvidUsageToday> byModel;
 
   /// Null unless [value] is an object; missing/invalid counters read as 0.
   static OvidUsageToday? tryParse(Object? value) {
@@ -1618,11 +1623,18 @@ class OvidUsageToday {
       return v is num && v.isFinite && v >= 0 ? v.toInt() : 0;
     }
 
+    final raw = value['by_model'];
     return OvidUsageToday(
       requests: count('requests'),
       inputTokens: count('input_tokens'),
       outputTokens: count('output_tokens'),
       images: count('images'),
+      byModel: {
+        if (raw is Map)
+          for (final e in raw.entries)
+            if (e.key is String && e.value is Map)
+              e.key as String: OvidUsageToday.tryParse(e.value)!,
+      },
     );
   }
 }
