@@ -6019,7 +6019,10 @@ class _MessageView extends StatelessWidget {
         if (!m.thinking) ..._thoughtAbove(),
         if (hasBody && !m.thinking) _text(isUser),
         if (live) const _StreamingCaret(),
-        if (m.thinking) _ReasoningCard(m, expandedByDefault: true),
+        // CH-037: the cloud streams no reasoning, so an empty thinking
+        // bubble renders nothing — the status row below says what the run
+        // is doing (never two "thinking" indicators at once).
+        if (m.thinking && hasBody) _ReasoningCard(m, expandedByDefault: true),
       ],
     );
   }
@@ -7669,12 +7672,26 @@ class _TypingBubble extends StatelessWidget {
         // with no new widget, timer or screen the composer has to own.
         final stalled = sid != null && _agent.stalledFor(sid);
         final status = sid == null ? null : _agent.statusFor(sid);
+        // CH-037: ONE phase-driven status row. While the answer itself
+        // streams, its caret is the status — no second indicator.
+        if (!stalled &&
+            (status == null || status.trim().isEmpty) &&
+            sid != null &&
+            CloudAgentFacade.I.writingFor(sid)) {
+          return const SizedBox.shrink();
+        }
+        final activity = sid == null
+            ? null
+            : CloudAgentFacade.I.activityFor(sid);
         final label = stalled
             ? 'Still working…'
-            : (status == null || status.trim().isEmpty)
-                ? 'Working…'
-                : status.trim();
+            : (status != null && status.trim().isNotEmpty)
+                ? status.trim()
+                : activity != null
+                    ? '$activity…'
+                    : 'Thinking…';
         return Padding(
+          key: const ValueKey('chat-run-status'),
           padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 10),
           child: Row(
             children: [

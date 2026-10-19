@@ -1174,6 +1174,26 @@ class CloudAgentFacade extends ChangeNotifier
     return id == null ? null : _sessions[id]?.projection.statusLine;
   }
 
+  /// CH-037: what the run is doing right now — "Waking your workspace",
+  /// the running tool's activity ("Searching the web for …"), the active
+  /// subagent — or null while it thinks or writes.
+  String? activityFor(String sessionId) {
+    final id = _serverId(sessionId);
+    return id == null ? null : _sessions[id]?.projection.activity;
+  }
+
+  /// CH-037: true while the answer text itself is streaming (the bubble's
+  /// caret is the status then — no second indicator).
+  bool writingFor(String sessionId) {
+    final id = _serverId(sessionId);
+    final rows = id == null ? null : _sessions[id]?.projection.messages;
+    if (rows == null || rows.isEmpty) return false;
+    final last = rows.last;
+    return last.kind == MsgKind.streaming &&
+        !last.thinking &&
+        last.content.isNotEmpty;
+  }
+
   /// True when [sessionId]'s live run has been silent — no event of any
   /// kind — for the response-timeout window (the Settings "Response wait
   /// limit"). A surface only: the run keeps streaming server-side, and the

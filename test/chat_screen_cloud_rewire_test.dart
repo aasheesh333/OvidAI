@@ -479,8 +479,10 @@ void main() {
       socket.server(_eventFrame('srv-1', '1-0', 'run_started', {'runId': 'run-1'}));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
-      // No delta yet: the tail is the live "Thinking…" card.
+      // CH-037: one phase status, not a second empty reasoning card.
       expect(find.textContaining('Thinking'), findsOneWidget);
+      expect(find.byKey(const ValueKey('chat-run-status')), findsOneWidget);
+      expect(find.byKey(const ValueKey('chat-reasoning-summary')), findsNothing);
 
       socket.server(_eventFrame('srv-1', '2-0', 'message_delta',
           {'runId': 'run-1', 'text': 'Cloud '}));
@@ -495,6 +497,7 @@ void main() {
       // until the run finishes.
       expect(find.textContaining('Cloud says hi'), findsWidgets);
       expect(find.textContaining('Thinking'), findsNothing);
+      expect(find.byKey(const ValueKey('chat-run-status')), findsNothing);
       expect(
           find.byKey(const ValueKey('chat-streaming-caret')), findsOneWidget);
 
