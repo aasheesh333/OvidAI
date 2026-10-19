@@ -790,8 +790,14 @@ validate_env() {
   # memory.max (512 MB) is a ceiling, not a reservation. The REAL bound on
   # local work is OVID_MAX_CONCURRENT_TOOL_STEPS (200), applied around shell
   # and file steps only — never during LLM streaming.
-  [[ "$OVID_MAX_ACTIVE_SANDBOXES" == "1500" ]] \
-    || guard_fail "OVID_MAX_ACTIVE_SANDBOXES" "must be 1500 (got '$OVID_MAX_ACTIVE_SANDBOXES')"
+  # Capacity wave 2026-10-19: an env stays attached (holding a slot) for as
+  # long as its user is active — until the 3-min idle hibernation — so the
+  # cap must be >= the concurrently ACTIVE users, not the concurrent runs.
+  # 1800 active users at 1500 queued 300 users' runs on admission; the
+  # capacity runs need 2500-3000. Bounded at 4000 (uid block and slice math).
+  [[ "$OVID_MAX_ACTIVE_SANDBOXES" =~ ^[0-9]+$ ]] \
+    && (( OVID_MAX_ACTIVE_SANDBOXES >= 1500 && OVID_MAX_ACTIVE_SANDBOXES <= 4000 )) \
+    || guard_fail "OVID_MAX_ACTIVE_SANDBOXES" "must be an integer 1500..4000 (got '$OVID_MAX_ACTIVE_SANDBOXES')"
   require_var MAX_LIVE_BROWSERS
   # Live-context cap 48 with the ephemeral-lease model (15 s freeze +
   # resource diet). 48 x ~240 MB ≈ 11.5 GB is above the 6-8 GB browser budget
@@ -994,7 +1000,10 @@ live_snapshot() {
     while IFS= read -r line; do
       [[ -n "$line" ]] || continue
       name="${line%% *}"
-      rest="${line#* }"
+      # Machine state, not the human "Up 59 minutes" string: that text ages
+      # ("Up About an hour") and made `up` report LIVE STACK CHANGED on an
+      # untouched live stack (capacity wave 2026-10-19).
+      rest="$(docker inspect "$name" --format '{{.State.Status}}{{if .State.Health}} ({{.State.Health.Status}}){{end}}' 2>/dev/null || true)"
       started="$(docker inspect "$name" --format '{{.State.StartedAt}}' 2>/dev/null || true)"
       printf 'container=%s status=%s started_at=%s\n' "$name" "$rest" "$started" >> "$body"
     done <<< "$rows"
@@ -1012,7 +1021,7 @@ live_check() {
   sed 's/^/  /' "$tmp"
   code="$(sed -n 's/^healthz=//p' "$tmp")"
   total="$(grep -c '^container=' "$tmp" || true)"
-  up="$(grep -c '^container=.* status=Up' "$tmp" || true)"
+  up="$(grep -c '^container=.* status=running' "$tmp" || true)"
   rm -f "$tmp"
   [[ "$code" == "200" ]] || bad=1
   [[ "$total" -gt 0 && "$total" == "$up" ]] || bad=1
