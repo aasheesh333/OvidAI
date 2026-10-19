@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { fileManifests, sessions } from "@ovid/db";
 import {
   HYDRATE_JOB_NAME,
@@ -7,8 +7,13 @@ import {
 } from "@ovid/queue";
 import {
   DEFAULT_HYDRATE_WAIT_MS,
+  makeWorkspaceDirBodySchema,
+  moveWorkspacePathBodySchema,
   putWorkspaceFileBodySchema,
   uiManifestSchema,
+  type WorkspaceDeleteResponse,
+  type WorkspaceMkdirResponse,
+  type WorkspaceMoveResponse,
   type WorkspaceFileRedirect,
   type WorkspaceFileResponse,
   type WorkspaceFileWriteResponse,
@@ -22,7 +27,7 @@ import {
   shouldPresign,
 } from "@ovid/storage";
 import type { GatewayDeps } from "../app.js";
-import { WorkerUnavailableError } from "../workerClient.js";
+import { WorkerUnavailableError, type WorkerResult } from "../workerClient.js";
 import { badRequest, isUuid, notFound, queryValue, sendError, zodBadRequest } from "./http.js";
 
 /**
@@ -137,7 +142,111 @@ function relayWorkerError(
   if (status === 404) return sendError(reply, 404, "not_found", message);
   if (status === 400) return sendError(reply, 400, "bad_request", message);
   if (status === 413) return sendError(reply, 413, "file_too_large", message);
+  // Wave 2 Studio (ST-007/ST-008): a lost precondition is the client's
+  // signal to show its conflict UI — relayed verbatim, never collapsed to
+  // 503. `not_warm` is NOT in this set: it drives the re-warm retry.
+  if (status === 409 && PRECONDITION_CODES.has(code)) {
+    return sendError(reply, 409, code, message);
+  }
   return workerUnavailable(reply);
+}
+
+/** Worker 409 codes that mean "your precondition failed", relayed as 409. */
+const PRECONDITION_CODES = new Set(["baseline_mismatch", "already_exists", "not_empty"]);
+
+/**
+ * Hydrate-if-cold, then call the worker, with ONE re-warm + retry when the
+ * worker reports `not_warm` (the workspace was hibernated between awaitWarm
+ * and the call). Shared by every mutating route (PUT/DELETE/move/mkdir).
+ *
+ * Returns the worker result, or null when this helper already replied:
+ * 202 {status:'hydrating'} when hydration outlasts the wait (the client
+ * retries once warm), or 503 for queue/transport failures and a second
+ * not_warm.
+ */
+async function callWarmWorker<T>(
+  deps: GatewayDeps,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  ref: { sessionId: string; uid: string },
+  call: () => Promise<WorkerResult<T>>,
+): Promise<WorkerResult<T> | null> {
+  const warmUp = (): Promise<unknown> =>
+    awaitWarm(deps.db, deps.queues.hydrate, { sessionId: ref.sessionId, userId: ref.uid }, {
+      reason: "write",
+      timeoutMs: deps.hydrateWaitMs ?? DEFAULT_HYDRATE_WAIT_MS,
+      fileManifests,
+    });
+
+  // A timeout is NOT an error: the client gets 202 and retries on the
+  // workspace_hydrated event (the job is already queued — awaitWarm dedupes
+  // through the storage job id).
+  const warm = async (): Promise<boolean> => {
+    try {
+      await warmUp();
+      return true;
+    } catch (err) {
+      if (err instanceof WorkspaceStateError && err.code === "hydrate_timeout") {
+        reply.code(202).send({ status: "hydrating" });
+        return false;
+      }
+      request.log.error({ err, sessionId: ref.sessionId }, "awaitWarm failed on a workspace write");
+      sendError(
+        reply,
+        503,
+        "unavailable",
+        "The hydrate queue is temporarily unavailable; please retry shortly.",
+      );
+      return false;
+    }
+  };
+  const isNotWarm = (r: WorkerResult<T>): boolean =>
+    !r.ok && r.status === 409 && !PRECONDITION_CODES.has(r.error.error.code);
+
+  if (!(await warm())) return null;
+  let result: WorkerResult<T>;
+  try {
+    result = await call();
+  } catch (err) {
+    if (err instanceof WorkerUnavailableError) {
+      workerUnavailable(reply);
+      return null;
+    }
+    throw err;
+  }
+
+  // Eviction race: re-warm ONCE and retry; a second not_warm collapses to 503.
+  if (isNotWarm(result)) {
+    if (!(await warm())) return null;
+    try {
+      result = await call();
+    } catch (err) {
+      if (err instanceof WorkerUnavailableError) {
+        workerUnavailable(reply);
+        return null;
+      }
+      throw err;
+    }
+    if (isNotWarm(result)) {
+      request.log.warn({ sessionId: ref.sessionId }, "worker refused a write not_warm twice");
+      workerUnavailable(reply);
+      return null;
+    }
+  }
+  return result;
+}
+
+/** Path validation shared by the routes: KeyLayoutError → 400, else the normalized path. */
+function safeRel(reply: FastifyReply, raw: string): string | null {
+  try {
+    return assertSafeRelPath(raw);
+  } catch (err) {
+    if (err instanceof KeyLayoutError) {
+      badRequest(reply, err.message);
+      return null;
+    }
+    throw err;
+  }
 }
 
 export function registerWorkspaceRoutes(app: FastifyInstance, deps: GatewayDeps): void {
@@ -152,6 +261,48 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: GatewayDeps)
     if (session === null) return notFound(reply);
 
     const row = await fileManifests.get(deps.db, sessionId);
+
+    // ST-015: `?path=` lists ONE folder (the rest of a pruned manifest
+    // directory). Only a warm workspace has a live tree to list; a cold or
+    // hydrating one answers 409 not_warm so the client can wake it first.
+    const rawSub = queryValue((request.query as Record<string, string | string[] | undefined>).path);
+    if (rawSub !== null && rawSub !== "") {
+      const sub = safeRel(reply, rawSub);
+      if (sub === null) return reply;
+      if (row !== null && (row.state === "cold" || row.state === "hydrating")) {
+        return sendError(
+          reply,
+          409,
+          "not_warm",
+          "The workspace is asleep; wake it to list this folder.",
+        );
+      }
+      const subWorker = workerOr503(deps, reply);
+      if (subWorker === null) return reply;
+      let subLive;
+      try {
+        subLive = await subWorker.getTree(uid, sessionId, sub);
+      } catch (err) {
+        if (err instanceof WorkerUnavailableError) return workerUnavailable(reply);
+        throw err;
+      }
+      if (!subLive.ok) {
+        return relayWorkerError(
+          reply,
+          subLive.status,
+          subLive.error.error.code,
+          subLive.error.error.message,
+        );
+      }
+      const subBody: WorkspaceTreeResponse = {
+        sessionId,
+        state: "warm",
+        generation: row?.generation ?? 0,
+        source: "live",
+        tree: subLive.value.tree,
+      };
+      return reply.code(200).send(subBody);
+    }
 
     // Manifest path (the SLA path): cold or hydrating rows answer from the
     // stored pruned tree — zero worker calls, zero extraction. The stored
@@ -313,63 +464,21 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: GatewayDeps)
       const worker = workerOr503(deps, reply);
       if (worker === null) return reply;
 
-      const warmUp = (): Promise<unknown> =>
-        awaitWarm(deps.db, deps.queues.hydrate, { sessionId, userId: uid }, {
-          reason: "write",
-          timeoutMs: deps.hydrateWaitMs ?? DEFAULT_HYDRATE_WAIT_MS,
-          fileManifests,
-        });
-
-      // Hydrate-if-cold. A timeout is NOT an error: the client gets 202 and
-      // retries on the workspace_hydrated event (the job is already queued —
-      // awaitWarm dedupes through the storage job id).
-      try {
-        await warmUp();
-      } catch (err) {
-        if (err instanceof WorkspaceStateError && err.code === "hydrate_timeout") {
-          return reply.code(202).send({ status: "hydrating" });
-        }
-        request.log.error({ err, sessionId }, "awaitWarm failed on PUT");
-        return sendError(
-          reply,
-          503,
-          "unavailable",
-          "The hydrate queue is temporarily unavailable; please retry shortly.",
-        );
-      }
-
+      // Hydrate-if-cold + one eviction-race retry (callWarmWorker). The
+      // preconditions are evaluated by the worker INSIDE its temp+rename
+      // write (ST-007), so a concurrent agent write between the client's
+      // last read and this PUT is a 409, never a silent overwrite.
       const b64 = content.toString("base64");
-      let result;
-      try {
-        result = await worker.putFile(uid, sessionId, rel, b64);
-      } catch (err) {
-        if (err instanceof WorkerUnavailableError) return workerUnavailable(reply);
-        throw err;
-      }
-
-      // Eviction race: the workspace was hibernated between awaitWarm and
-      // the write. Re-warm ONCE and retry; a second 409 collapses to 503.
-      if (!result.ok && result.status === 409) {
-        try {
-          await warmUp();
-        } catch (err) {
-          if (err instanceof WorkspaceStateError && err.code === "hydrate_timeout") {
-            return reply.code(202).send({ status: "hydrating" });
-          }
-          request.log.error({ err, sessionId }, "awaitWarm retry failed on PUT 409");
-          return workerUnavailable(reply);
-        }
-        try {
-          result = await worker.putFile(uid, sessionId, rel, b64);
-        } catch (err) {
-          if (err instanceof WorkerUnavailableError) return workerUnavailable(reply);
-          throw err;
-        }
-        if (!result.ok && result.status === 409) {
-          request.log.warn({ sessionId }, "worker refused PUT not_warm twice");
-          return workerUnavailable(reply);
-        }
-      }
+      const preconditions = {
+        ...(parsed.data.ifMatchSha256 !== undefined
+          ? { ifMatchSha256: parsed.data.ifMatchSha256 }
+          : {}),
+        ...(parsed.data.ifNoneMatch === "*" ? { ifNoneMatch: true } : {}),
+      };
+      const result = await callWarmWorker(deps, request, reply, { sessionId, uid }, () =>
+        worker.putFile(uid, sessionId, rel, b64, preconditions),
+      );
+      if (result === null) return reply;
 
       if (!result.ok) {
         return relayWorkerError(
@@ -389,6 +498,97 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: GatewayDeps)
       return reply.code(200).send(body);
     },
   );
+
+  // -- DELETE file / folder (Wave 2 Studio, ST-008) ---------------------------
+
+  app.delete("/sessions/:id/workspace/file", async (request, reply) => {
+    const { id: sessionId } = request.params as { id: string };
+    const { uid } = request.principal;
+
+    if (!isUuid(sessionId)) return notFound(reply);
+    const session = await sessions.get(deps.db, sessionId, uid);
+    if (session === null) return notFound(reply);
+
+    const query = request.query as Record<string, string | string[] | undefined>;
+    const rawPath = queryValue(query.path);
+    if (rawPath === null) return badRequest(reply, "query parameter 'path' is required.");
+    const rel = safeRel(reply, rawPath);
+    if (rel === null) return reply;
+    const recursive = queryValue(query.recursive) === "true";
+
+    const worker = workerOr503(deps, reply);
+    if (worker === null) return reply;
+    const result = await callWarmWorker(deps, request, reply, { sessionId, uid }, () =>
+      worker.deleteFile(uid, sessionId, rel, recursive),
+    );
+    if (result === null) return reply;
+    if (!result.ok) {
+      return relayWorkerError(reply, result.status, result.error.error.code, result.error.error.message);
+    }
+    await bumpActivity(deps, sessionId);
+    const body: WorkspaceDeleteResponse = { path: result.value.path, type: result.value.type };
+    return reply.code(200).send(body);
+  });
+
+  // -- POST move / rename (Wave 2 Studio, ST-008) ------------------------------
+
+  app.post("/sessions/:id/workspace/move", async (request, reply) => {
+    const { id: sessionId } = request.params as { id: string };
+    const { uid } = request.principal;
+
+    if (!isUuid(sessionId)) return notFound(reply);
+    const session = await sessions.get(deps.db, sessionId, uid);
+    if (session === null) return notFound(reply);
+
+    const parsed = moveWorkspacePathBodySchema.safeParse(request.body ?? undefined);
+    if (!parsed.success) return zodBadRequest(reply, parsed.error);
+    const from = safeRel(reply, parsed.data.from);
+    if (from === null) return reply;
+    const to = safeRel(reply, parsed.data.to);
+    if (to === null) return reply;
+
+    const worker = workerOr503(deps, reply);
+    if (worker === null) return reply;
+    const result = await callWarmWorker(deps, request, reply, { sessionId, uid }, () =>
+      worker.movePath(uid, sessionId, from, to),
+    );
+    if (result === null) return reply;
+    if (!result.ok) {
+      return relayWorkerError(reply, result.status, result.error.error.code, result.error.error.message);
+    }
+    await bumpActivity(deps, sessionId);
+    const body: WorkspaceMoveResponse = { from: result.value.from, to: result.value.to };
+    return reply.code(200).send(body);
+  });
+
+  // -- POST mkdir (Wave 2 Studio, ST-008) --------------------------------------
+
+  app.post("/sessions/:id/workspace/mkdir", async (request, reply) => {
+    const { id: sessionId } = request.params as { id: string };
+    const { uid } = request.principal;
+
+    if (!isUuid(sessionId)) return notFound(reply);
+    const session = await sessions.get(deps.db, sessionId, uid);
+    if (session === null) return notFound(reply);
+
+    const parsed = makeWorkspaceDirBodySchema.safeParse(request.body ?? undefined);
+    if (!parsed.success) return zodBadRequest(reply, parsed.error);
+    const rel = safeRel(reply, parsed.data.path);
+    if (rel === null) return reply;
+
+    const worker = workerOr503(deps, reply);
+    if (worker === null) return reply;
+    const result = await callWarmWorker(deps, request, reply, { sessionId, uid }, () =>
+      worker.makeDir(uid, sessionId, rel),
+    );
+    if (result === null) return reply;
+    if (!result.ok) {
+      return relayWorkerError(reply, result.status, result.error.error.code, result.error.error.message);
+    }
+    await bumpActivity(deps, sessionId);
+    const body: WorkspaceMkdirResponse = { path: result.value.path, created: result.value.created };
+    return reply.code(200).send(body);
+  });
 
   // -- POST hydrate -----------------------------------------------------------
 

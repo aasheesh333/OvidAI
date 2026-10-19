@@ -391,6 +391,19 @@ const OWNED_CASES: Record<string, Case> = {
     body: {},
     ownerBody: { path: "notes.txt", contentUtf8: "hi" },
   },
+  // Wave 2 Studio file management (ST-008): ownership before any worker call.
+  "DELETE /cloud/v1/sessions/:id/workspace/file": {
+    params: (f) => ({ id: f.sessionA.id }),
+    ownerQuery: { path: "notes.txt" },
+  },
+  "POST /cloud/v1/sessions/:id/workspace/move": {
+    params: (f) => ({ id: f.sessionA.id }),
+    body: { from: "notes.txt", to: "moved.txt" },
+  },
+  "POST /cloud/v1/sessions/:id/workspace/mkdir": {
+    params: (f) => ({ id: f.sessionA.id }),
+    body: { path: "new-folder" },
+  },
   "POST /cloud/v1/sessions/:id/workspace/hydrate": {
     params: (f) => ({ id: f.sessionA.id }),
   },
@@ -799,6 +812,15 @@ describe("route sweep — 404 not 403", () => {
           ok: true as const,
           value: { path, sizeBytes: 2, sha256: "d".repeat(64) },
         };
+      },
+      async deleteFile(_uid: string, _sessionId: string, path: string) {
+        return { ok: true as const, value: { path, type: "file" as const } };
+      },
+      async movePath(_uid: string, _sessionId: string, from: string, to: string) {
+        return { ok: true as const, value: { from, to } };
+      },
+      async makeDir(_uid: string, _sessionId: string, path: string) {
+        return { ok: true as const, value: { path, created: true } };
       },
     };
     // The account routes are registered at the ROOT with their own auth; the
