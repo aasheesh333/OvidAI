@@ -1158,6 +1158,7 @@
   "memoryScopeShared": "Shared memory is on. These notes can be used by your chats. Turn off sharing in Settings to return to chat-only notes.",
   "@memoryScopeShared": {"description": "Memory screen: shared-scope explanation."},
   "memoryNeedChat": "Open a cloud chat first to manage its memory. A chat that has not been sent yet has no saved memory.",
+  "@memoryNeedChat": {"description": "Memory screen: no active chat guidance."},
   "@memoryIntro": {"description": "Screen intro."},
   "memoryEmpty": "Nothing saved yet. Ask Ovid to remember something in a chat.",
   "@memoryEmpty": {"description": "Empty state."},

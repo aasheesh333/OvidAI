@@ -3148,7 +3148,7 @@ abstract class AppLocalizations {
   /// **'Shared memory is on. These notes can be used by your chats. Turn off sharing in Settings to return to chat-only notes.'**
   String get memoryScopeShared;
 
-  /// No description provided for @memoryNeedChat.
+  /// Memory screen: no active chat guidance.
   ///
   /// In en, this message translates to:
   /// **'Open a cloud chat first to manage its memory. A chat that has not been sent yet has no saved memory.'**
