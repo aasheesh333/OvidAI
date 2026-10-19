@@ -7,6 +7,7 @@ import '../core/state.dart';
 import '../core/theme.dart';
 import 'profile_avatar.dart';
 import 'account_deletion_panel.dart';
+import 'user_error.dart';
 import '../core/auth_identity.dart';
 import '../core/auth_providers.dart';
 import 'auth_methods.dart';
@@ -126,7 +127,7 @@ class _AuthScreenState extends State<AuthScreen> {
       await fb.signOut();
     } catch (error) {
       if (!mounted) return;
-      setState(() => _signOutError = 'Could not sign out: $error');
+      setState(() => _signOutError = 'Could not sign out. ${friendlyError(error)}');
     } finally {
       if (mounted) setState(() => _signingOut = false);
     }

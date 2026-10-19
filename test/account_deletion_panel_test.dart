@@ -10,6 +10,44 @@ import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
 import 'package:ovid_ai/ui/widgets/external_link.dart';
 
 void main() {
+  for (final paid in [true, false]) {
+    testWidgets('deletion confirm ${paid ? 'warns about' : 'omits'} the Play '
+        'subscription (SH-012)', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: AccountDeletionPanel(
+              service: AccountService(
+                enabled: true,
+                idToken: (_) async => 'id',
+                client: MockClient(
+                  (_) async => http.Response(
+                    '{"state":"active","delete_after":null,"request_id":null}',
+                    200,
+                  ),
+                ),
+              ),
+              subscriptionActive: () => paid,
+              reauthenticate: (_) async => 'cancelled',
+              requestDeletion: (_) async => throw StateError('no submit'),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete your account'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('deletion-subscription-warning')),
+        paid ? findsOneWidget : findsNothing,
+      );
+      expect(find.textContaining('Local workspaces'), findsNothing);
+      await tester.tap(find.text('Keep account'));
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
   testWidgets('removed deletion panel ignores late successful provider proof', (
     tester,
   ) async {
@@ -252,7 +290,8 @@ void main() {
       verificationError = null;
       await submit();
       expect(submitted, 1);
-      expect(find.textContaining('2026-10-04T12:00:00.000Z'), findsOneWidget);
+      expect(find.textContaining('Oct 4'), findsWidgets);
+      expect(find.textContaining('T12:00:00.000Z'), findsNothing);
     },
   );
 

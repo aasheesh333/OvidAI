@@ -598,7 +598,7 @@ class FirebaseService extends ChangeNotifier {
       notifyListeners();
       return null;
     } catch (e) {
-      return 'Could not update name: $e';
+      return 'Could not update your name. Check your connection and try again.';
     }
   }
 
