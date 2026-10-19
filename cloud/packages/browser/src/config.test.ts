@@ -77,6 +77,19 @@ describe("loadBrowserEngineConfig overrides", () => {
     expect(cfg.maxLiveBrowsers).toBe(6);
   });
 
+  it("OVID_MAX_TIER1_PROCESSES (the deploy env spelling) is honoured and wins", () => {
+    expect(loadBrowserEngineConfig({}).maxTier1Processes).toBe(8);
+    expect(loadBrowserEngineConfig({ OVID_MAX_TIER1_PROCESSES: "128" }).maxTier1Processes).toBe(128);
+    expect(loadBrowserEngineConfig({ MAX_TIER1_PROCESSES: "16" }).maxTier1Processes).toBe(16);
+    expect(
+      loadBrowserEngineConfig({ OVID_MAX_TIER1_PROCESSES: "128", MAX_TIER1_PROCESSES: "16" })
+        .maxTier1Processes,
+    ).toBe(128);
+    expect(() => loadBrowserEngineConfig({ OVID_MAX_TIER1_PROCESSES: "0" })).toThrow(
+      /OVID_MAX_TIER1_PROCESSES/,
+    );
+  });
+
   it("OVID_BROWSER_ALLOW_HOSTS splits on commas and trims", () => {
     const cfg = loadBrowserEngineConfig({ OVID_BROWSER_ALLOW_HOSTS: "a.com, b.com" });
     expect(cfg.allowHosts).toEqual(["a.com", "b.com"]);
