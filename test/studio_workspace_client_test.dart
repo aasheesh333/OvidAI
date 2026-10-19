@@ -53,6 +53,24 @@ void main() {
     });
   });
 
+  test('account-scoped workspace buckets resolve through the anchor and '
+      'never share drafts across accounts', () async {
+    final fake = FakeStudioGateway(files: {'a.txt': 'x'});
+    final remote = installFakeStudio(fake);
+    final alice = studioWorkspaceKeyFor('alice');
+    final bob = studioWorkspaceKeyFor('bob');
+    expect(isStudioWorkspaceKey(alice), isTrue);
+    expect(isStudioWorkspaceKey('chat-123'), isFalse);
+
+    await remote.openStudioFile(alice, 'a.txt');
+    remote.updateStudioDraft(alice, 'a.txt', "alice's draft");
+
+    expect(fake.log.single,
+        'GET /cloud/v1/sessions/$_s/workspace/file?path=a.txt');
+    expect(remote.fileBuffer(bob), isEmpty);
+    expect(remote.dirtyFiles(bob), isEmpty);
+  });
+
   group('ST-009 typed tree failures', () {
     test('a failed tree load keeps the typed error, not a string', () async {
       final fake = FakeStudioGateway()..treeError = (503, 'unavailable');

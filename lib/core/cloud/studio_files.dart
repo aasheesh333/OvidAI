@@ -19,6 +19,15 @@ import '../studio_drafts.dart' show kStudioEditHardCap;
 /// resolves per call (see [StudioFilesClient.anchor]).
 const String kStudioWorkspaceKey = 'workspace';
 
+/// The workspace bucket of one signed-in account. Drafts persist per bucket,
+/// so scoping by account keeps one account's unsaved Studio edits from ever
+/// appearing for another account on the same device.
+String studioWorkspaceKeyFor(String account) => '$kStudioWorkspaceKey:$account';
+
+/// True for [kStudioWorkspaceKey] and every [studioWorkspaceKeyFor] key.
+bool isStudioWorkspaceKey(String key) =>
+    key == kStudioWorkspaceKey || key.startsWith('$kStudioWorkspaceKey:');
+
 /// P7 workspace file API — reconciled against the BUILT gateway routes
 /// (`cloud/apps/gateway/src/routes/workspace.ts`) and the shared wire types
 /// (`cloud/packages/shared/src/workspace.ts`), not the plan prose.
@@ -269,7 +278,7 @@ class StudioFilesClient {
   /// non-UUID path (ST-002).
   Future<String> _serverSessionId(String key) async {
     final String? id;
-    if (key == kStudioWorkspaceKey) {
+    if (isStudioWorkspaceKey(key)) {
       id = await anchor();
     } else {
       final store = _store;

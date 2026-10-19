@@ -57,13 +57,13 @@ Future<void> openStudio(BuildContext context) =>
 class StudioScreen extends StatefulWidget {
   const StudioScreen({
     super.key,
-    this.workspaceKey = kStudioWorkspaceKey,
+    this.workspaceKey,
     this.agentEvents,
   });
 
-  /// The Studio bucket to show. Production always uses the per-user
-  /// workspace; tests bind a fake session.
-  final String workspaceKey;
+  /// The Studio bucket to show. Null (production) is the signed-in account's
+  /// workspace ([studioWorkspaceKeyFor]); tests bind a fake session.
+  final String? workspaceKey;
 
   /// Session events that may change workspace files. Null listens to the
   /// process WebSocket multiplexer ([WsMultiplexer.sessionEvents]).
@@ -92,7 +92,11 @@ class _StudioScreenState extends State<StudioScreen>
 
   StreamSubscription<CloudSessionEvent>? _agentEventsSub;
 
-  String get _sid => widget.workspaceKey;
+  /// Resolved once: an account switch rebuilds the route stack anyway.
+  late String _sid = _keyFor(widget);
+
+  static String _keyFor(StudioScreen w) =>
+      w.workspaceKey ?? studioWorkspaceKeyFor(AppState.I.sessionAccountId);
   StudioRemoteClient get _remote => StudioRemoteClient.I;
 
   void _syncDraftFlag() =>
@@ -115,8 +119,10 @@ class _StudioScreenState extends State<StudioScreen>
   @override
   void didUpdateWidget(StudioScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.workspaceKey != widget.workspaceKey) {
-      _remote.tabsFor(oldWidget.workspaceKey).removeListener(_syncDraftFlag);
+    final next = _keyFor(widget);
+    if (next != _sid) {
+      _remote.tabsFor(_sid).removeListener(_syncDraftFlag);
+      _sid = next;
       _remote.tabsFor(_sid).addListener(_syncDraftFlag);
       _syncDraftFlag();
       _refresh();
