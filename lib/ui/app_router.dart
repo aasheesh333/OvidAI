@@ -121,6 +121,11 @@ class AppRouter {
   /// The AppState row id for [id], which may be a SERVER id (push payloads
   /// and links carry server UUIDs; chats created on this device keep their
   /// local id — FE-011).
+  static String? _localIdOrNull(String id) {
+    final local = _localId(id);
+    return AppState.I.sessionById(local) == null ? null : local;
+  }
+
   static String _localId(String id) {
     if (AppState.I.sessionById(id) != null) return id;
     try {
@@ -223,23 +228,18 @@ class AppRouter {
         AppState.I.selectSession(sessionId);
         return true;
       case ScheduleRoute(sessionId: final rawId):
-        final sessionId = _localId(rawId);
-        if (AppState.I.sessionById(sessionId) == null) {
-          // A schedule's server session that has not synced yet: same
-          // bounded reconcile as chats, then the schedule opens (FE-011).
-          unawaited(
-            _openCloudChatWhenReconciled(
-              navigator,
-              rawId,
-              notFound: () => notFound('Schedule'),
-              then: (id) => _pushSchedule(navigator, id),
-            ),
-          );
-          return true;
+        // The Schedule screen resolves server ids itself and lists every
+        // schedule, so it always opens — even for a schedule's dedicated
+        // server session that has not synced yet (FE-011). The chat is
+        // selected only when the id maps to a local row.
+        if (!_sessionId.hasMatch(rawId)) {
+          notFound('Schedule');
+          return false;
         }
         navigator.popUntil((r) => r.isFirst);
-        AppState.I.selectSession(sessionId);
-        _pushSchedule(navigator, sessionId);
+        final local = scheduleLocalSessionId(rawId) ?? _localIdOrNull(rawId);
+        if (local != null) AppState.I.selectSession(local);
+        _pushSchedule(navigator, rawId);
         return true;
       case SharedChatRoute() || SettingsRoute() || BrowserRoute():
         final page = _pageFor(route)!;

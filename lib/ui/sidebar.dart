@@ -524,15 +524,15 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                             compact: compact,
                             icon: Icons.schedule_outlined,
                             label: 'Schedule',
-                            enabled: hasSession,
-                            onTap: hasSession
-                                ? () => _navigateFromSidebar(
-                                    context,
-                                    (_) => ScheduleScreen(
-                                      sessionId: app.activeSessionId!,
-                                    ),
-                                  )
-                                : null,
+                            // Always available: with no chat open it lists
+                            // every schedule (Wave 5).
+                            enabled: true,
+                            onTap: () => _navigateFromSidebar(
+                              context,
+                              (_) => ScheduleScreen(
+                                sessionId: app.activeSessionId,
+                              ),
+                            ),
                           ),
                           // PR27/B2: trajectory moved here from the chat header
                           // (the header keeps only jobs + studio + browser).

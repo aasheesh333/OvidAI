@@ -182,23 +182,37 @@ void main() {
     expect(find.textContaining('not found'), findsNothing);
   });
 
-  testWidgets('a schedule tap for a not-yet-synced session reconciles, then '
-      'says "Schedule not found" only when it is really gone (FE-011)', (
+  testWidgets('a schedule tap opens the Schedule screen even before the '
+      'session synced, and selects a mapped local chat (FE-011)', (
     tester,
   ) async {
-    await _bindCloud(sessions: const []);
-    await pumpRoot(tester);
+    final local = ChatSession(
+      id: '1700000000000009',
+      title: 'Reminder chat',
+      model: 'auto',
+    );
+    AppState.I.sessions.add(local);
+    await _bindCloud(idMap: {'1700000000000009': 'srv-sched'});
+    final pushed = <String?>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorKey: nav,
+        scaffoldMessengerKey: messenger,
+        navigatorObservers: [_Observer(pushed)],
+        home: const Scaffold(body: Text('root')),
+      ),
+    );
     AppRouter.isAccountReady = () => true;
 
     AppRouter.open(
-      const ScheduleRoute('srv-gone'),
+      const ScheduleRoute('srv-sched'),
       navigatorKey: nav,
       messengerKey: messenger,
     );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(find.text('Schedule not found — it may have been deleted.'),
-        findsOneWidget);
+    expect(pushed.last, '/schedule/srv-sched');
+    expect(AppState.I.activeSessionId, '1700000000000009');
+    expect(find.textContaining('not found'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   test('CloudSessionStore.localIdFor maps server ids back', () async {
@@ -256,4 +270,12 @@ void main() {
       expect(await NativeRouteChannel.takePendingRoute(), isNull);
     });
   });
+}
+
+class _Observer extends NavigatorObserver {
+  _Observer(this.pushed);
+  final List<String?> pushed;
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      pushed.add(route.settings.name);
 }
