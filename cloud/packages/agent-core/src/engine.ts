@@ -51,6 +51,8 @@ export interface AgentEngine {
        * Absent = the provider's own default.
        */
       maxOutputTokens?: number;
+      /** Wave 1a (R1): @-tagged session context for this run only. */
+      turnContext?: string;
     },
   ): Promise<void>;
   /** Flips the run token and aborts the in-flight transport. false = no live run. */
@@ -116,6 +118,9 @@ export function createAgentEngine(deps: AgentEngineDeps): AgentEngine {
               : {}),
             ...(job.maxOutputTokens !== undefined
               ? { maxOutputTokens: job.maxOutputTokens }
+              : {}),
+            ...(job.turnContext !== undefined && job.turnContext !== ""
+              ? { turnContext: job.turnContext }
               : {}),
             unattended: job.unattended ?? false,
             ...(job.autonomy !== undefined ? { autonomy: job.autonomy } : {}),
