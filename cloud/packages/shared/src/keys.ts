@@ -84,19 +84,26 @@ export interface InternalMintProvisioner {
 }
 
 /**
- * A non-2xx response from the internal mint endpoint, carrying the status
- * and parsed body so the gateway can relay billing/rate-limit envelopes
- * (402/429) to the caller verbatim.
+ * A non-2xx response from the internal mint endpoint, carrying the status,
+ * parsed body and response headers (names lowercased) so the gateway can
+ * relay billing/rate-limit verdicts (402/429) to the caller — re-enveloped
+ * for the thin client, with any `x-ovid-resets-at` forwarded verbatim.
  */
 export class MintInternalError extends Error {
   readonly status: number;
   readonly body: unknown;
+  readonly headers: Readonly<Record<string, string>>;
 
-  constructor(status: number, body: unknown) {
+  constructor(
+    status: number,
+    body: unknown,
+    headers: Readonly<Record<string, string>> = {},
+  ) {
     super(`internal mint responded with HTTP ${status}`);
     this.name = "MintInternalError";
     this.status = status;
     this.body = body;
+    this.headers = headers;
   }
 }
 

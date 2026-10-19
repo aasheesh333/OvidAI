@@ -6,6 +6,7 @@ import type {
 } from "bullmq";
 import { z } from "zod";
 import {
+  MAX_OUTPUT_TOKENS_CAP,
   pluginSourceInputSchema,
   type PluginSourceInput,
 } from "@ovid/shared";
@@ -61,6 +62,13 @@ export interface AgentRunJob {
    */
   attachmentIds?: string[];
   /**
+   * The user's max completion tokens (additive, optional — old payloads
+   * still parse): the Settings "Max output tokens" pick as the gateway
+   * validated it (int 1..MAX_OUTPUT_TOKENS_CAP). The worker maps it onto
+   * the engine request's `maxTokens`. Absent = the provider's own default.
+   */
+  maxOutputTokens?: number;
+  /**
    * P9 Task 9 (additive, optional): the BYOK key row this run must use.
    * Present → the worker resolves it through the escrow provider and FAILS
    * the run (key_not_minted) if it cannot be decrypted; absent → the normal
@@ -101,6 +109,7 @@ export const agentRunJobSchema: z.ZodType<AgentRunJob> = z.object({
   prompt: z.string().min(1),
   tier: z.string().min(1).optional(),
   attachmentIds: z.array(z.string().min(1)).optional(),
+  maxOutputTokens: z.number().int().min(1).max(MAX_OUTPUT_TOKENS_CAP).optional(),
   byokKeyId: z.string().min(1).nullable().optional(),
   unattended: z.boolean().optional(),
   autonomy: z.enum(["safe", "auto"]).optional(),

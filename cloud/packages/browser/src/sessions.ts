@@ -15,7 +15,10 @@
  *  - popups: recorded and immediately CLOSED — server-side popups never
  *    render; `browser_popups open` re-opens one as a real tab.
  *  - takeover: exactly one controller at a time; while flagged, every
- *    browser tool is paused with TAKEOVER_REFUSAL.
+ *    browser tool is paused with TAKEOVER_REFUSAL. The flag is void
+ *    without a viewer — the engine releases it when the session's last
+ *    viewer disconnects (leave or stale sweep), so tools never stay
+ *    refused on an abandoned session.
  *
  * Ownership boundary (Review Focus): the POOL owns context closing —
  * `close()` removes the registry entry only; `closeTab` closes pages

@@ -41,6 +41,7 @@ import { createMemoryStateStore } from "./ports.js";
 import {
   BUDGET_CONTINUATION_NUDGE,
   runAgentLoop,
+  sleepUntilOrAbort,
   TOOL_EVENT_CONTENT_CAP,
   type LoopDeps,
   type NormalizedRunJob,
@@ -522,6 +523,65 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     expect(payloads(c.events, "run_started_retry")).toHaveLength(4);
     expect(types(c.events).slice(-1)).toEqual(["run_failed"]);
     expect((await c.runRow())!.status).toBe("failed");
+    // The row carries the canonical CODE, not the provider's prose: settle's
+    // classifyRunFailure matches last_error EXACTLY against
+    // RETRYABLE_RUN_CODES, so "503" would terminalize the scheduled
+    // occurrence instead of arming the retry ladder.
+    expect((await c.runRow())!.lastError).toBe("model_transient_exhausted");
+    // And the stale-sweep heartbeat stamped the row on the first emit: a
+    // long retry ladder must never look stranded to the sweeper.
+    expect((await c.runRow())!.lastActiveAt).toBeInstanceOf(Date);
+  });
+
+  it("cancel during a retry backoff resolves the run as cancelled, not 60 s later", async () => {
+    // The backoff sleep must lose to Stop: the fake sleeps the battery injects
+    // resolve immediately, so this one HANGS — only the abort race inside
+    // sleepUntilOrAbort can wake the ladder. Stop lands (what engine.cancel
+    // does: flip the token + abort the controller) while the 3 s backoff is
+    // nominally still running.
+    let slept = 0;
+    const c = await makeCtx({
+      script: [{ error: new TransientModelError("503") }],
+      sleep: () => {
+        slept += 1;
+        c.controller.abort();
+        c.rt.cancelled = true;
+        return new Promise<void>(() => {}); // never resolves on its own
+      },
+    });
+    const result = await runAgentLoop(c.job, c.deps, c.rt);
+
+    expect(slept).toBe(1);
+    expect(result).toMatchObject({ status: "cancelled", code: "cancelled" });
+    expect(types(c.events).slice(-1)).toEqual(["run_cancelled"]);
+    expect((await c.runRow())!.status).toBe("cancelled");
+  });
+
+  it("sleepUntilOrAbort resolves on the timer when no abort lands, and on abort alone when the timer hangs", async () => {
+    // Timer path: the sleep settles, the abort listener is removed.
+    const controller = new AbortController();
+    const slept: number[] = [];
+    await sleepUntilOrAbort(5, controller.signal, async (ms) => {
+      slept.push(ms);
+    });
+    expect(slept).toEqual([5]);
+    expect(controller.signal.aborted).toBe(false);
+
+    // Abort path: a hanging sleep (the cancel-mid-backoff shape above).
+    const hung = new AbortController();
+    const p = sleepUntilOrAbort(60_000, hung.signal, () => new Promise<void>(() => {}));
+    hung.abort();
+    await expect(p).resolves.toBeUndefined();
+
+    // Pre-aborted signal: no sleep is even armed.
+    const done = new AbortController();
+    done.abort();
+    let armed = false;
+    await sleepUntilOrAbort(60_000, done.signal, () => {
+      armed = true;
+      return Promise.resolve();
+    });
+    expect(armed).toBe(false);
   });
 
   it("a terminal model error fails immediately with model_terminal", async () => {

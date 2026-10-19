@@ -370,6 +370,39 @@ describe("createStepLimiter", () => {
     await expect(limiter.run(async () => "ok")).resolves.toBe("ok");
   });
 
+  it("transfers the permit on release — a new arrival in the wake window cannot over-admit", async () => {
+    // The pre-fix race: `release` decremented, THEN resolved the head waiter,
+    // whose continuation re-incremented a microtask later. A run() arriving in
+    // that window saw active < max and took a SECOND permit, so the bound was
+    // soft. One `await Promise.resolve()` hop lands exactly in the window:
+    // A's finally has run but the woken waiter (B) has not resumed yet.
+    const limiter = createStepLimiter(1);
+    let peak = 0;
+    const track = (name: string) =>
+      limiter.run(async () => {
+        peak = Math.max(peak, limiter.stats().active);
+        return name;
+      });
+    // Narrow the resolver to () => void so the manual release gate keeps the
+    // declaration's simple type (a Promise resolver takes a value).
+    let releaseA: () => void = () => {};
+    const a = limiter.run(
+      () =>
+        new Promise<string>((resolve) => {
+          releaseA = () => resolve('');
+        }),
+    );
+    const b = track("b"); // FIFO head — waits on A
+    releaseA();
+    await Promise.resolve(); // A transferred; B's continuation is still queued
+    const c = track("c"); // must queue behind the transferred permit
+
+    const results = await Promise.all([a.then(() => "a"), b, c]);
+    expect(results).toEqual(["a", "b", "c"]);
+    expect(peak).toBe(1); // never two steps inside a max-1 limiter
+    expect(limiter.stats()).toMatchObject({ active: 0, waiting: 0 });
+  });
+
   it("rejects a non-positive bound instead of silently running unbounded", () => {
     expect(() => createStepLimiter(0)).toThrow(/positive integer/);
     expect(() => createStepLimiter(-1)).toThrow(/positive integer/);

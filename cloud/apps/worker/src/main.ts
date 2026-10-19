@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { Redis } from "ioredis";
-import { createDb, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
+import { createDb, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
 import {
   createCloudCleanup,
   createFirebaseAdmin,
@@ -136,6 +136,13 @@ const STALE_SWEEP_INTERVAL_MS = 60_000;
 const DEFAULT_RUN_QUEUE_WAIT_MS = 600_000;
 /** P4 Task 10: the plan-pinned scheduler cadence (Dart: 15 s). */
 const DEFAULT_SCHEDULER_TICK_MS = 15_000;
+/**
+ * Audit P2 (mcp_oauth_flows retention): a row is created per flow start and
+ * consume() only marks it used — nothing deleted them. The sweep runs
+ * daily-ish; the cutoff keeps a one-day grace window for late callbacks.
+ */
+const OAUTH_FLOW_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const OAUTH_FLOW_SWEEP_GRACE_MS = 24 * 60 * 60 * 1000;
 /** P3 Task 16 defaults. */
 const DEFAULT_ANTHROPIC_BASE = "https://api.anthropic.com";
 const DEFAULT_WINDOW_TOKENS = 128_000;
@@ -385,6 +392,15 @@ export function createGitHubApiPort(deps: {
  */
 export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const cfg = loadWorkerEnv(env);
+
+  // Audit P1 (MCP client): a server→client request racing a close rejects
+  // inside fire-and-forget promise chains, and Node's default for an
+  // unhandled rejection is to kill the process. The contained sites now
+  // catch, but nothing here should ever be able to crash the worker — log
+  // and carry on (the rejection carries no state we can act on).
+  process.on("unhandledRejection", (err) => {
+    console.error("[worker] unhandled rejection (logged, not fatal)", err);
+  });
 
   const db = createDb(cfg.databaseUrl);
   // The session event ledger shares the QUEUE Redis — the SAME instance the
@@ -651,6 +667,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     sandboxUid,
     activity,
     fileManifests: fileManifestsRepo,
+    // Cross-session guard's runs half (liveSessionGuard): the wipe-before-
+    // extract must not destroy the per-user workspace a sibling run uses.
+    runs: runsRepo,
     eventMirror: eventMirrorRepo,
   };
   const warmDeps: WarmDeps = {
@@ -693,6 +712,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     port: cfg.workerFilePort,
     host: "0.0.0.0",
     fileManifests: fileManifestsRepo,
+    runs: runsRepo,
     eventMirror: eventMirrorRepo,
     workspaceObjects: workspaceObjectsRepo,
   });
@@ -847,8 +867,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   // Stale-run sweeper (fix-round ruling): with attempts:1, failed jobs are
   // never redelivered and a mid-run crash strands the run row in 'running'
   // forever — the sweeper terminalizes those (run_failed {code:"run_lost"}).
-  // Once at boot, then every 60 s; sweep errors are logged, never fatal (the
-  // next pass retries), and the interval must never hold the process open.
+  // A worker death mid-C1-wait strands 'queued' rows the same way (wave-2
+  // fix): those sweep as run_queue_wait_timeout. Once at boot, then every
+  // 60 s; sweep errors are logged, never fatal (the next pass retries), and
+  // the interval must never hold the process open.
   const sweep = async (label: string): Promise<void> => {
     try {
       const swept = await sweepStaleRuns(
@@ -908,6 +930,31 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     void sweepWarm("interval");
   }, SWEEP_INTERVAL_MS);
   warmSweeper.unref();
+
+  // Audit P2 (mcp_oauth_flows retention): the missing sweep the schema's
+  // mcp_oauth_flows_expires_at_idx was created for. Exact stale-run interval
+  // shape: once at boot ("boot" label), every 24 h after ("interval"),
+  // errors logged never fatal, .unref() so the process can exit, cleared in
+  // shutdown(). The query is index-served and cheap enough to skip entirely
+  // when it deletes nothing.
+  const sweepOauthFlows = async (label: string): Promise<void> => {
+    try {
+      const deleted = await mcpOauthFlows.deleteExpired(
+        db,
+        new Date(Date.now() - OAUTH_FLOW_SWEEP_GRACE_MS),
+      );
+      if (deleted > 0) {
+        console.log(`[worker] oauth-flow sweep (${label}): deleted ${deleted} expired flow(s)`);
+      }
+    } catch (err) {
+      console.error(`[worker] oauth-flow sweep (${label}) failed`, err);
+    }
+  };
+  await sweepOauthFlows("boot");
+  const oauthFlowSweeper = setInterval(() => {
+    void sweepOauthFlows("interval");
+  }, OAUTH_FLOW_SWEEP_INTERVAL_MS);
+  oauthFlowSweeper.unref();
 
   // ---- P9 Task 15: the durable account-deletion sweeper. ------------------
   // A completed deletion request survives a process restart because the
@@ -978,6 +1025,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     shuttingDown ??= (async () => {
       clearInterval(sweeper);
       clearInterval(warmSweeper);
+      clearInterval(oauthFlowSweeper);
       // P9 Task 15: stop the account sweeper before any connection closes —
       // stop() awaits the in-flight finalize pass (durable checkpoints mean a
       // forced kill is also safe).

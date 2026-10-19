@@ -86,6 +86,13 @@ export const MAX_MODEL_ATTEMPTS = 5;
 export const RETRY_BACKOFF_MS = [3_000, 9_000, 27_000, 60_000] as const;
 /** P2's tool-event content cap (worker tools/systemPrompt.ts:17). */
 export const TOOL_EVENT_CONTENT_CAP = 8_192;
+/**
+ * Heartbeat cadence for the stale-run sweeper (staleRuns.ts): the loop stamps
+ * runs.last_active_at at most this often, far under the sweeper's 10-minute
+ * stranded threshold (worker main.ts DEFAULT_RUN_STALE_MS), so a long run
+ * still emitting never looks stranded.
+ */
+export const RUN_HEARTBEAT_INTERVAL_MS = 30_000;
 export const CANCELLED_MESSAGE = "Stopped by user.";
 export const BUDGET_CONTINUATION_NUDGE =
   "[system] Continue the task from the last tool results. Do not restart; keep working until the task is complete, then give your final answer.";
@@ -107,6 +114,14 @@ export interface AgentRunJob {
   promptImages?: readonly AgentImage[];
   tier?: string;
   attachmentIds?: string[];
+  /**
+   * The user's max completion tokens (the Settings "Max output tokens" pick,
+   * gateway-validated to int 1..8192). The loop maps it onto every model
+   * request's `maxTokens` — both transports serialize that as `max_tokens`.
+   * Absent = the provider's own default (and the anthropic transport's own
+   * required 8192 floor).
+   */
+  maxOutputTokens?: number;
   // ── P3 Task 20 (additive child-loop seam) ────────────────────────────────
   // A subagent run is a normal engine run on a CHILD session; these fields
   // carry the facts the loop would otherwise read off the (absent) parent.
@@ -205,6 +220,33 @@ export interface LoopResult {
 
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Backoff sleep that loses to Stop: the retry ladder used to `await sleep()`
+ * bare, so a cancel landing mid-backoff waited out the full RETRY_BACKOFF_MS
+ * (up to 60 s) before the next isCancelled check — Stop visibly lagged.
+ * engine.cancel flips `rt.cancelled` AND aborts the run's controller, so
+ * racing the (injectable) sleep against the run's abort signal wakes the
+ * ladder the instant Stop lands. Callers re-check cancellation right after:
+ * the race also resolves on the plain timer, and isCancelled covers flag
+ * flips that never abort (isStale, direct rt.cancelled writes).
+ */
+export function sleepUntilOrAbort(
+  ms: number,
+  signal: AbortSignal,
+  sleep: (ms: number) => Promise<void> = defaultSleep,
+): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    // once: the listener cannot outlive the run it guards.
+    const onAbort = () => resolve();
+    signal.addEventListener("abort", onAbort, { once: true });
+    sleep(ms).then(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    });
+  });
+}
 
 const VALID_MODES: ReadonlySet<SessionMode> = new Set(["safe", "auto", "drive", "studio"]);
 
@@ -554,8 +596,27 @@ export async function runAgentLoop(
   const sleep = deps.sleep ?? defaultSleep;
   const abortSignal = rt.signal ?? new AbortController().signal;
   const { sessionId, runId, userId } = job;
-  const emit = (type: Parameters<EventSink["emit"]>[0], payload: Record<string, unknown>) =>
-    deps.sink.emit(type, payload);
+  // Stale-sweep heartbeat: every emitted event proves the run is live, but an
+  // UPDATE per emit would dwarf the event traffic itself — so the per-run
+  // emit wrapper stamps runs.last_active_at at most once per
+  // RUN_HEARTBEAT_INTERVAL_MS (a cheap in-memory timestamp check per emit;
+  // the write itself is a single-row UPDATE). The sweeper's stale test is
+  // COALESCE(last_active_at, started_at) < cutoff (repos.listStaleRunning),
+  // so a run longer than the sweep threshold that is still emitting never
+  // looks stranded. Both worker processors reach the loop through the engine,
+  // which makes THIS the one per-run emit chokepoint they share.
+  let lastHeartbeatMs = 0;
+  const emit = (
+    type: Parameters<EventSink["emit"]>[0],
+    payload: Record<string, unknown>,
+  ): Promise<unknown> => {
+    const nowMs = Date.now();
+    if (nowMs - lastHeartbeatMs >= RUN_HEARTBEAT_INTERVAL_MS) {
+      lastHeartbeatMs = nowMs;
+      void runs.bumpLastActive(deps.db, runId).catch(() => {});
+    }
+    return deps.sink.emit(type, payload);
+  };
 
   // ── key resolution precedes run_started (P1: key_not_minted has no
   // run_started event — runProcessor.ts:236–241) ────────────────────────────
@@ -662,13 +723,22 @@ export async function runAgentLoop(
       runId,
       ...(rt.cancelReason !== undefined ? { reason: rt.cancelReason } : {}),
     });
-    await runs.finish(deps.db, runId, "cancelled", CANCELLED_MESSAGE);
+    // The code, not the prose (every engine-path finish writes a code — see
+    // failed() below): the row's verdict column is machine-read, the
+    // human-readable message lives in the event.
+    await runs.finish(deps.db, runId, "cancelled", "cancelled");
     return { status: "cancelled", code: "cancelled", message: CANCELLED_MESSAGE };
   };
 
   const failed = async (code: string, message?: string): Promise<LoopResult> => {
     await emit("run_failed", { code, ...(message !== undefined ? { message } : {}) });
-    await runs.finish(deps.db, runId, "failed", message ?? code);
+    // The run row carries the canonical failure CODE, never the provider's
+    // prose: the scheduler's settle pass classifies retryability on an exact
+    // match of last_error against RETRYABLE_RUN_CODES (schedulerSettle.ts),
+    // so "upstream 500" terminalized the occurrence where
+    // model_transient_exhausted must arm the retry ladder. The message stays
+    // in the emitted event (same contract as runProcessor's model_terminal).
+    await runs.finish(deps.db, runId, "failed", code);
     return { status: "failed", code, ...(message !== undefined ? { message } : {}) };
   };
 
@@ -731,7 +801,11 @@ export async function runAgentLoop(
           g.turnsWithoutProgress += 1;
           const nextBackoffMs = RETRY_BACKOFF_MS[attempt]!;
           await emit("run_started_retry", { attempt: attempt + 2, nextBackoffMs });
-          await sleep(nextBackoffMs);
+          // Stop must not wait out the backoff (see sleepUntilOrAbort): race
+          // the sleep against the abort signal, then re-check immediately so
+          // the ladder lands cancelled rather than 60 s late.
+          await sleepUntilOrAbort(nextBackoffMs, abortSignal, sleep);
+          if (isCancelled(rt)) return { kind: "cancelled" };
           continue;
         }
         if (err instanceof TerminalModelError) {
@@ -878,6 +952,9 @@ export async function runAgentLoop(
           tools: marked.tools,
           ...(route!.effort !== null ? { effort: route!.effort } : {}),
           ...(route!.temperature !== undefined ? { temperature: route!.temperature } : {}),
+          // The user's Settings output cap → AgentRequest.maxTokens (the
+          // transports serialize it as max_tokens; absent = provider default).
+          ...(job.maxOutputTokens !== undefined ? { maxTokens: job.maxOutputTokens } : {}),
           cacheMode: route!.cacheMode,
           promptCacheKey: sessionId,
         };

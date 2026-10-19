@@ -58,7 +58,7 @@ export interface BrowserUidDrop {
   readonly wrapperPath: string;
   /** Directory Chromium may write downloads into. */
   readonly downloadsDir: string;
-  /** Environment for browser children: HOME/TMPDIR/XDG point at uid-owned dirs. */
+  /** Strict-allowlist environment for browser children (see buildBrowserChildEnv); HOME/TMPDIR/XDG point at uid-owned dirs. */
   readonly env: NodeJS.ProcessEnv;
   /** Remove the per-engine runtime tree. Idempotent; never throws. */
   cleanup(): Promise<void>;
@@ -83,6 +83,51 @@ const SETPRIV_CANDIDATES = [
   "/usr/sbin/setpriv",
   "/sbin/setpriv",
 ];
+
+/**
+ * Fallback PATH for browser children when the worker env has none — the
+ * standard distro search path; both engines are spawned by absolute path, so
+ * this only covers helpers that shell out by name.
+ */
+const CHILD_PATH_DEFAULT = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/**
+ * Worker-env variables the browser children are allowed to inherit. Keep this
+ * minimal and documented — the worker env carries OVID_MASTER_KEY, DB/R2
+ * credentials and LiteLLM keys, and browser processes face arbitrary web
+ * content, so nothing rides in without a reason:
+ *
+ *  - PATH: Chromium and Lightpanda are exec'd by absolute path (the shim and
+ *    the spawn use resolved binaries), but helpers they shell out to by name
+ *    (crashpad fallbacks, fontconfig helpers) resolve via PATH.
+ *  - LANG: Chromium derives its UI/content locale and encoding hints from it;
+ *    only forwarded when the worker has one set.
+ *
+ * Deliberately NOT inherited: proxy vars (browser egress is shaped by the
+ * nftables rules — an inherited proxy would reroute it), DISPLAY/WAYLAND
+ * (headless only), DBUS (Chromium degrades gracefully without it), and every
+ * credential the worker holds.
+ */
+const CHILD_ENV_ALLOWLIST = ["PATH", "LANG"] as const;
+
+/**
+ * Build the browser-child environment from a strict allowlist plus the
+ * uid-owned runtime dirs. Never spread `process.env` here.
+ */
+export function buildBrowserChildEnv(homeDir: string, tmpDir: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of CHILD_ENV_ALLOWLIST) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  if (env.PATH === undefined) env.PATH = CHILD_PATH_DEFAULT;
+  env.HOME = homeDir;
+  env.TMPDIR = tmpDir;
+  env.XDG_CACHE_HOME = join(homeDir, ".cache");
+  env.XDG_CONFIG_HOME = join(homeDir, ".config");
+  env.XDG_DATA_HOME = join(homeDir, ".local", "share");
+  return env;
+}
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -267,14 +312,7 @@ export async function prepareBrowserUidDrop(
   await chmod(wrapperPath, 0o755);
   await chown(wrapperPath, 0, 0);
 
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    HOME: homeDir,
-    TMPDIR: tmpDir,
-    XDG_CACHE_HOME: join(homeDir, ".cache"),
-    XDG_CONFIG_HOME: join(homeDir, ".config"),
-    XDG_DATA_HOME: join(homeDir, ".local", "share"),
-  };
+  const env = buildBrowserChildEnv(homeDir, tmpDir);
 
   if (opts.preflight !== false) {
     // 1. Prove Node can actually drop to the uid on this host (EPERM/EACCES

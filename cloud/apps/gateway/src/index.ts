@@ -47,6 +47,16 @@ import { createSystemHub } from "./systemChannel.js";
  */
 export async function main(env: NodeJS.ProcessEnv = process.env): Promise<FastifyInstance> {
   const cfg = loadGatewayEnv(env);
+
+  // Audit P1 (MCP client): a server→client request racing a close rejects
+  // inside fire-and-forget promise chains, and Node's default for an
+  // unhandled rejection is to kill the process. Log and carry on — installed
+  // at boot (never at import; index.ts stays a pure library) so it guards
+  // every promise the composed app ever starts.
+  process.on("unhandledRejection", (err) => {
+    console.error("[gateway] unhandled rejection (logged, not fatal)", err);
+  });
+
   // P9 Task 16: OVID_SHARE_BASE_URL is the ONLY source of receipt/viewer
   // URLs (never Host headers). It stays out of loadGatewayEnv deliberately —
   // the Python share router is unavailable without it, not misconfigured.

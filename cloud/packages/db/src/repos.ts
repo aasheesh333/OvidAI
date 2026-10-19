@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { uuidv7 } from "uuidv7";
 import type { MessageDto, SessionEvent, SessionEventType, UiManifest } from "@ovid/shared";
 import type { Db } from "./client.js";
@@ -200,7 +200,13 @@ export const sessions = {
     const rows = await db
       .select()
       .from(sessionsTable)
-      .where(and(eq(sessionsTable.id, sessionId), eq(sessionsTable.userId, userId)))
+      .where(
+        and(
+          eq(sessionsTable.id, sessionId),
+          eq(sessionsTable.userId, userId),
+          isNull(sessionsTable.deletedAt),
+        ),
+      )
       .limit(1);
     return rows[0] ?? null;
   },
@@ -213,15 +219,19 @@ export const sessions = {
     cursor?: string | null,
   ): Promise<{ rows: SessionRow[]; nextCursor: string | null }> {
     const key = decodeSessionCursor(cursor);
+    // deleted_at IS NULL: soft-deleted sessions never appear in the list —
+    // the client's refresh must not resurrect a deleted chat.
+    const alive = isNull(sessionsTable.deletedAt);
     const where = key
       ? and(
           eq(sessionsTable.userId, userId),
+          alive,
           or(
             lt(sessionsTable.updatedAt, key.updatedAt),
             and(eq(sessionsTable.updatedAt, key.updatedAt), lt(sessionsTable.id, key.id)),
           ),
         )
-      : eq(sessionsTable.userId, userId);
+      : and(eq(sessionsTable.userId, userId), alive);
     const found = await db
       .select()
       .from(sessionsTable)
@@ -263,7 +273,37 @@ export const sessions = {
     const rows = await db
       .update(sessionsTable)
       .set(set)
-      .where(and(eq(sessionsTable.id, sessionId), eq(sessionsTable.userId, userId)))
+      .where(
+        and(
+          eq(sessionsTable.id, sessionId),
+          eq(sessionsTable.userId, userId),
+          isNull(sessionsTable.deletedAt),
+        ),
+      )
+      .returning();
+    return rows[0] ?? null;
+  },
+
+  /**
+   * Ownership-scoped soft delete (DELETE /sessions/:id): UPDATE … SET
+   * deleted_at = now WHERE id AND userId AND deleted_at IS NULL RETURNING
+   * row. null = unknown id, wrong owner, OR already deleted (the gateway
+   * maps all three to the same 404 — no existence leaks, same as get).
+   * The row itself stays (messages/runs are history); every read path
+   * filters deleted_at IS NULL. `updatedAt` deliberately stays untouched:
+   * the row is invisible to ordering once deleted.
+   */
+  async softDelete(db: Db, sessionId: string, userId: string): Promise<SessionRow | null> {
+    const rows = await db
+      .update(sessionsTable)
+      .set({ deletedAt: new Date() })
+      .where(
+        and(
+          eq(sessionsTable.id, sessionId),
+          eq(sessionsTable.userId, userId),
+          isNull(sessionsTable.deletedAt),
+        ),
+      )
       .returning();
     return rows[0] ?? null;
   },
@@ -455,6 +495,41 @@ export const runs = {
   },
 
   /**
+   * Cross-session liveness guard, the runs half: the user's oldest
+   * still-active (queued|running) run on any session OTHER than
+   * `exceptSessionId`, or null. runs has no user_id, so user scoping rides
+   * the sessions join (the same shape as runs.get). P2's agent workspace is
+   * PER-USER (`{workspacesRoot}/{uid}/workspace`, shared by every session of
+   * the user), so a hydrate/hibernate keyed by one session must refuse to
+   * destroy that dir while a sibling session's run is still reading and
+   * writing it — the same hazard warmLru.reclaimColdResidue documents
+   * ("another session of the same user may still be warm and using that
+   * dir … removing it would destroy a live workspace"). Used by
+   * @ovid/storage's liveSessionGuard through the structural-mirror pattern
+   * (this package is never imported there; see hydrate.ts's header).
+   */
+  async activeForUserExcept(
+    db: Db,
+    userId: string,
+    exceptSessionId: string,
+  ): Promise<RunRow | null> {
+    const rows = await db
+      .select({ run: runsTable })
+      .from(runsTable)
+      .innerJoin(sessionsTable, eq(runsTable.sessionId, sessionsTable.id))
+      .where(
+        and(
+          eq(sessionsTable.userId, userId),
+          ne(runsTable.sessionId, exceptSessionId),
+          inArray(runsTable.status, [...ACTIVE_RUN_STATUSES]),
+        ),
+      )
+      .orderBy(asc(runsTable.createdAt), asc(runsTable.id))
+      .limit(1);
+    return rows[0]?.run ?? null;
+  },
+
+  /**
    * Single conditional UPDATE … WHERE id = $1 AND status = 'queued' — race-safe:
    * exactly one concurrent caller sees the row still queued. false = lost race
    * (or unknown/already-claimed id).
@@ -508,6 +583,20 @@ export const runs = {
   },
 
   /**
+   * Heartbeat stamp (stale-sweep fix round): marks the run as still-live.
+   * The engine's per-run emit wrapper throttles this to at most one write
+   * per RUN_HEARTBEAT_INTERVAL_MS, so a long run that keeps emitting never
+   * looks stranded to the sweeper. An unknown id (a child run with no row)
+   * updates nothing and throws nothing.
+   */
+  async bumpLastActive(db: Db, runId: string): Promise<void> {
+    await db
+      .update(runsTable)
+      .set({ lastActiveAt: new Date() })
+      .where(eq(runsTable.id, runId));
+  },
+
+  /**
    * Ownership-scoped fetch (owner = the run's session owner): null on unknown
    * id OR wrong owner, so the gateway maps both to the same 404 (the runs
    * cancel route's existence-leak rule, same as sessions.get).
@@ -517,7 +606,13 @@ export const runs = {
       .select({ run: runsTable })
       .from(runsTable)
       .innerJoin(sessionsTable, eq(runsTable.sessionId, sessionsTable.id))
-      .where(and(eq(runsTable.id, runId), eq(sessionsTable.userId, userId)))
+      .where(
+        and(
+          eq(runsTable.id, runId),
+          eq(sessionsTable.userId, userId),
+          isNull(sessionsTable.deletedAt),
+        ),
+      )
       .limit(1);
     return rows[0]?.run ?? null;
   },
@@ -533,7 +628,7 @@ export const runs = {
     const ownedSessions = db
       .select({ id: sessionsTable.id })
       .from(sessionsTable)
-      .where(eq(sessionsTable.userId, userId));
+      .where(and(eq(sessionsTable.userId, userId), isNull(sessionsTable.deletedAt)));
     const rows = await db
       .update(runsTable)
       .set({ cancelRequested: true })
@@ -563,20 +658,76 @@ export const runs = {
   },
 
   /**
-   * Runs stuck in 'running' whose startedAt is older than the cutoff, oldest
-   * first, capped at 100 per call (one sweeper batch). With BullMQ attempts:1
-   * a failed or crashed job is NEVER redelivered, so its run row would strand
+   * Runs stuck in 'running' whose LAST ACTIVITY is older than the cutoff,
+   * oldest first, capped at 100 per call (one sweeper batch). Activity is
+   * last_active_at — the engine's per-emit heartbeat — falling back to
+   * started_at for rows that predate the column (or never emitted): a long
+   * run still streaming deltas keeps its heartbeat fresh and stays invisible
+   * here, while a crashed worker's row goes quiet. With BullMQ attempts:1
+   * a failed or crashed job is NEVER redelivered, so a quiet row would strand
    * in 'running' forever; the worker's stale-run sweeper (apps/worker
-   * staleRuns.ts) uses this to terminalize them. NULL startedAt rows (cannot
-   * exist for 'running', but SQL semantics hold) are excluded by the `<`.
+   * staleRuns.ts) uses this to terminalize them. NULLs in BOTH columns
+   * (queued rows; cannot exist for 'running' with a heartbeat-less engine,
+   * but SQL semantics hold) are excluded by the `<`.
    */
   async listStaleRunning(db: Db, staleBefore: Date): Promise<RunRow[]> {
+    // ISO string, not the Date: with a raw-SQL left side drizzle cannot apply
+    // the timestamptz driver mapping, and postgres.js refuses a Date param
+    // under the declared timestamptz OID (the column-typed lt() calls map it;
+    // this expression-typed one must map it by hand).
+    const lastActive = sql`COALESCE(${runsTable.lastActiveAt}, ${runsTable.startedAt})`;
     return db
       .select()
       .from(runsTable)
-      .where(and(eq(runsTable.status, "running"), lt(runsTable.startedAt, staleBefore)))
-      .orderBy(asc(runsTable.startedAt))
+      .where(and(eq(runsTable.status, "running"), lt(lastActive, staleBefore.toISOString())))
+      .orderBy(asc(lastActive))
       .limit(100);
+  },
+
+  /**
+   * Runs stranded in 'queued' whose last activity is older than the cutoff —
+   * the worker-death-mid-C1-wait pathology. With BullMQ attempts:1 a job that
+   * dies while its run waits for the session turn is NEVER redelivered, so
+   * the row strands 'queued' forever while remaining the session's oldest
+   * active run (runs.activeForSession): every later run of that session then
+   * burns a full queue-wait plus a concurrency slot behind it. Queued rows
+   * have no started_at (only claimNext sets it) and never ran the engine's
+   * emit heartbeat, so age is COALESCE(last_active_at, created_at). Oldest
+   * first, capped at 100 per call — the same one-sweeper-batch bound as
+   * listStaleRunning. The sweeper terminalizes these with the SAME code the
+   * processor's own wait cap uses (run_queue_wait_timeout), so the client
+   * folds them identically.
+   */
+  async listStaleQueued(db: Db, staleBefore: Date): Promise<RunRow[]> {
+    // ISO string for the same driver-mapping reason as listStaleRunning.
+    const lastActive = sql`COALESCE(${runsTable.lastActiveAt}, ${runsTable.createdAt})`;
+    return db
+      .select()
+      .from(runsTable)
+      .where(and(eq(runsTable.status, "queued"), lt(lastActive, staleBefore.toISOString())))
+      .orderBy(asc(lastActive))
+      .limit(100);
+  },
+
+  /**
+   * The run's status + cancel flag in ONE pk-indexed read — the C1 wait loop's
+   * per-tick self check (runProcessor waitForSessionTurn): a waiter whose row
+   * was terminalized out from under it (gateway queued-cancel, stale-run
+   * sweeper) or whose cancel flag was set must exit its wait on the NEXT tick,
+   * not after the full 10-minute cap. null = unknown id (defensive; the row
+   * always exists while a worker waits on it — same stance as
+   * isCancelRequested).
+   */
+  async statusAndCancel(
+    db: Db,
+    runId: string,
+  ): Promise<{ status: string; cancelRequested: boolean } | null> {
+    const rows = await db
+      .select({ status: runsTable.status, cancelRequested: runsTable.cancelRequested })
+      .from(runsTable)
+      .where(eq(runsTable.id, runId))
+      .limit(1);
+    return rows[0] ?? null;
   },
 
   /** Atomically increments attempts and returns the new value (0 if run unknown). */
@@ -945,6 +1096,22 @@ export const mcpOauthFlows = {
       )
       .returning();
     return rows[0] ?? null;
+  },
+
+  /**
+   * Retention sweep: DELETE every flow whose expires_at predates the cutoff
+   * (the worker's daily pass passes now() - 1 day, keeping a grace window
+   * for late callbacks). consume() only marks rows `used` — nothing else ever
+   * deletes them, so this pass is what keeps abandoned flows from
+   * accumulating. Served by mcp_oauth_flows_expires_at_idx. Returns the
+   * number of rows deleted.
+   */
+  async deleteExpired(db: Db, cutoff: Date): Promise<number> {
+    const rows = await db
+      .delete(mcpOauthFlowsTable)
+      .where(lt(mcpOauthFlowsTable.expiresAt, cutoff))
+      .returning({ state: mcpOauthFlowsTable.state });
+    return rows.length;
   },
 };
 
@@ -1430,6 +1597,38 @@ export const fileManifests = {
   async remove(db: Db, sessionId: string): Promise<void> {
     await db.delete(fileManifestsTable).where(eq(fileManifestsTable.sessionId, sessionId));
   },
+
+  /**
+   * Cross-session liveness guard, the file_manifests half: true iff any
+   * OTHER session of the same user holds a row in state 'warm'. A warm row
+   * means some sibling session believes the per-user agent workspace
+   * (`{workspacesRoot}/{uid}/workspace`, shared by EVERY session of the user
+   * — see workspacePaths.ts) is its live data, so a hydrate/hibernate keyed
+   * by one session must refuse to wipe/evict the dir. The same hazard
+   * warmLru.reclaimColdResidue already guards for its own rm ("another
+   * session of the same user may still be warm and using that dir … removing
+   * it would destroy a live workspace"); the primary engines read this for
+   * the same rule. Rides the file_manifests_user_id_idx; LIMIT 1 — existence
+   * only, never the rows.
+   */
+  async hasOtherWarmSession(
+    db: Db,
+    userId: string,
+    exceptSessionId: string,
+  ): Promise<boolean> {
+    const rows = await db
+      .select({ sessionId: fileManifestsTable.sessionId })
+      .from(fileManifestsTable)
+      .where(
+        and(
+          eq(fileManifestsTable.userId, userId),
+          ne(fileManifestsTable.sessionId, exceptSessionId),
+          eq(fileManifestsTable.state, "warm"),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
+  },
 };
 
 export interface WorkspaceArchivePut {
@@ -1828,6 +2027,7 @@ export async function searchMessages(
 
   const where = and(
     eq(sessionsTable.userId, userId),
+    isNull(sessionsTable.deletedAt),
     sql`${messagesTable.searchVector} @@ ${tsQuery}`,
     o.sessionId !== undefined ? eq(messagesTable.sessionId, o.sessionId) : undefined,
   );

@@ -6,11 +6,13 @@ import { createDb, migrate, type Db } from "./client.js";
 import {
   fileManifests,
   newId,
+  runs,
   sessions,
   workspaceObjects,
 } from "./repos.js";
 import {
   fileManifests as fileManifestsTable,
+  runs as runsTable,
   users,
   workspaceObjects as workspaceObjectsTable,
 } from "./schema.js";
@@ -571,5 +573,80 @@ describe.skipIf(!TEST_DATABASE_URL)("storage repos against real postgres", () =>
     expect(await fileManifests.get(db, s.id)).toBeNull();
     // idempotent on unknown/already-removed
     await expect(fileManifests.remove(db, s.id)).resolves.toBeUndefined();
+  });
+
+  // -- cross-session liveness guard repos (P0: the per-user workspace) ------
+
+  it("hasOtherWarmSession: only OTHER sessions' WARM rows count; activeForUserExcept: only OTHER sessions' active runs", async () => {
+    const uid = await seedUser();
+    const uidOther = await seedUser();
+    const a = await sessions.create(db, uid, "guard-a");
+    const b = await sessions.create(db, uid, "guard-b");
+    const c = await sessions.create(db, uid, "guard-c"); // cold sibling
+    const other = await sessions.create(db, uidOther, "guard-other"); // other user, warm
+
+    // No rows at all yet — nothing is live.
+    expect(await fileManifests.hasOtherWarmSession(db, uid, a.id)).toBe(false);
+
+    // A warm sibling row (B) trips the manifest half; A's OWN row must not.
+    await fileManifests.upsertWarm(db, { sessionId: a.id, userId: uid, workspaceBytes: 1 });
+    expect(await fileManifests.hasOtherWarmSession(db, uid, a.id)).toBe(false);
+    await fileManifests.upsertWarm(db, { sessionId: b.id, userId: uid, workspaceBytes: 1 });
+    expect(await fileManifests.hasOtherWarmSession(db, uid, a.id)).toBe(true);
+    // A COLD sibling does not count.
+    await fileManifests.markCold(db, {
+      sessionId: b.id,
+      generation: 1,
+      archiveKey: `users/${uid}/workspaces/${b.id}.tar.zst`,
+      archiveBytes: 99,
+      archiveSha256: SHA_A,
+      entryCount: 1,
+      uiTree: uiTreeFixture(),
+    });
+    expect(await fileManifests.hasOtherWarmSession(db, uid, a.id)).toBe(false);
+    // ...and a cold-but-registered sibling row for C neither trips nor counts.
+    await fileManifests.upsertWarm(db, { sessionId: c.id, userId: uid, workspaceBytes: 1 });
+    await fileManifests.markCold(db, {
+      sessionId: c.id,
+      generation: 1,
+      archiveKey: `users/${uid}/workspaces/${c.id}.tar.zst`,
+      archiveBytes: 99,
+      archiveSha256: SHA_A,
+      entryCount: 1,
+      uiTree: uiTreeFixture(),
+    });
+    expect(await fileManifests.hasOtherWarmSession(db, uid, a.id)).toBe(false);
+    // Another user's warm row never counts (user scoping).
+    await fileManifests.upsertWarm(db, {
+      sessionId: other.id,
+      userId: uidOther,
+      workspaceBytes: 1,
+    });
+    expect(await fileManifests.hasOtherWarmSession(db, uid, a.id)).toBe(false);
+
+    // Runs half: a queued run on B trips it; A's own run and terminal runs
+    // on siblings do not; another user's run never does.
+    expect(await runs.activeForUserExcept(db, uid, a.id)).toBeNull();
+    await db.insert(runsTable).values({ id: newId(), sessionId: b.id, status: "queued" });
+    const active = await runs.activeForUserExcept(db, uid, a.id);
+    expect(active).not.toBeNull();
+    expect(active!.sessionId).toBe(b.id);
+    expect(await runs.activeForUserExcept(db, uid, b.id)).toBeNull(); // B's own run excluded
+    // B's run goes terminal → no longer live for A.
+    await db
+      .update(runsTable)
+      .set({ status: "completed" })
+      .where(eq(runsTable.sessionId, b.id));
+    expect(await runs.activeForUserExcept(db, uid, a.id)).toBeNull();
+    // A's OWN active run never counts (exceptSessionId).
+    await db.insert(runsTable).values({ id: newId(), sessionId: a.id, status: "running" });
+    expect(await runs.activeForUserExcept(db, uid, a.id)).toBeNull();
+    await db.insert(runsTable).values({ id: newId(), sessionId: other.id, status: "running" });
+    expect(await runs.activeForUserExcept(db, uid, a.id)).toBeNull(); // other user
+    await db.insert(runsTable).values({ id: newId(), sessionId: c.id, status: "completed" });
+    expect(await runs.activeForUserExcept(db, uid, a.id)).toBeNull(); // terminal
+    // uidOther's own run IS found when a DIFFERENT session id is excluded
+    // (exclusion is by session id — a.id is not even uidOther's).
+    expect(await runs.activeForUserExcept(db, uidOther, a.id)).not.toBeNull();
   });
 });

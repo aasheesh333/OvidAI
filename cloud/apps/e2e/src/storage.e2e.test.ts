@@ -405,6 +405,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         sandboxUid: async (userId: string) => userId,
         activity,
         fileManifests,
+        runs,
         eventMirror,
       };
 
@@ -452,6 +453,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         inlineMaxBytes: INLINE_MAX_BYTES,
         port: 0,
         fileManifests,
+        runs,
         eventMirror,
         workspaceObjects,
       });

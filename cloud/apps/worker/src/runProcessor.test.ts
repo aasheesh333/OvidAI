@@ -14,6 +14,7 @@ import {
   migrate,
   newId,
   runs,
+  sessionState,
   sessions,
   users,
   type Db,
@@ -671,6 +672,89 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       await runs.finish(db, two.older, "failed", "test cleanup");
     });
 
+    it("C1: the waiter terminalized externally mid-wait (stale-run sweeper) → exits on the NEXT tick, no duplicate terminal, model never called", async () => {
+      const two = await seedTwoRuns();
+      const { transport, calls } = stubTransport([{ kind: "ok", deltas: ["never"] }]);
+
+      // The injected sleep plays the queued-zombie sweeper: on run2's first
+      // poll-wait it terminalizes the WAITER itself — claim-then-emit, the
+      // sweeper's exact sequence (finish first, then append+mirror). The
+      // older run stays 'running', so ONLY the per-tick self check can end
+      // this wait; without it the job holds its slot the full 10-minute cap.
+      const deps = makeDeps(transport, {
+        sleep: async (ms) => {
+          sleeps.push(ms);
+          if (sleeps.length === 1) {
+            if (await runs.finish(db, two.newer, "failed", "run_queue_wait_timeout")) {
+              const event = await events.append(two.sessionId, "run_failed", {
+                runId: two.newer,
+                code: "run_queue_wait_timeout",
+              });
+              await eventMirror.put(db, event);
+            }
+          }
+        },
+      });
+
+      await createAgentRunProcessor(deps)({
+        data: { runId: two.newer, sessionId: two.sessionId, userId: two.uid, prompt: "p" },
+      });
+
+      expect(sleeps).toEqual([250]); // ONE poll interval: the next tick saw the terminal row
+      expect(calls).toHaveLength(0); // the model call is never started
+      // The sweeper's event ONLY — the waiter must not emit a second terminal.
+      const evts = await readEvents(two.sessionId);
+      expect(types(evts)).toEqual(["run_failed"]);
+      expect(evts[0]!.payload).toEqual({ runId: two.newer, code: "run_queue_wait_timeout" });
+      expect(await readMirror(two.sessionId)).toEqual(evts);
+      expect(await runRow(two.newer)).toMatchObject({
+        status: "failed",
+        attempts: 0,
+        lastError: "run_queue_wait_timeout",
+      });
+      expect(await runRow(two.older)).toMatchObject({ status: "running" });
+      // Hygiene: don't leave the seeded 'running' row stranded.
+      await runs.finish(db, two.older, "failed", "test cleanup");
+    });
+
+    it("C1: cancelRequested while waiting (the gateway's 'cancelling' verdict) → the waiter terminalizes cancelled on the next tick, model never called", async () => {
+      const two = await seedTwoRuns();
+      const { transport, calls } = stubTransport([{ kind: "ok", deltas: ["never"] }]);
+
+      // The gateway set the flag but could NOT remove the BullMQ job (this
+      // worker holds it, waiting) — terminalization is delegated to the
+      // worker's flag check, which before this fix only ran mid-stream,
+      // AFTER the claim that never comes. The wait loop must take the same
+      // path a mid-stream cancel takes.
+      const deps = makeDeps(transport, {
+        sleep: async (ms) => {
+          sleeps.push(ms);
+          if (sleeps.length === 1) {
+            await runs.requestCancel(db, two.newer, two.uid);
+          }
+        },
+      });
+
+      await createAgentRunProcessor(deps)({
+        data: { runId: two.newer, sessionId: two.sessionId, userId: two.uid, prompt: "p" },
+      });
+
+      expect(sleeps).toEqual([250]); // ONE poll interval, then the flag was seen
+      expect(calls).toHaveLength(0);
+      const evts = await readEvents(two.sessionId);
+      expect(types(evts)).toEqual(["run_failed"]);
+      expect(evts[0]!.payload).toEqual({ code: "cancelled", message: "Stopped by user." });
+      expect(await readMirror(two.sessionId)).toEqual(evts);
+      expect(await runRow(two.newer)).toMatchObject({
+        status: "cancelled",
+        attempts: 0,
+        lastError: "Stopped by user.",
+      });
+      expect(await runRow(two.older)).toMatchObject({ status: "running" });
+      // Hygiene: don't leave the seeded 'running' row stranded.
+      await runs.finish(db, two.older, "failed", "test cleanup");
+    });
+
     // -------------------------------------------------------------------------
     // P8 Task 1: cooperative cancel. The gateway sets runs.cancel_requested;
     // the processor polls it between streamed delta batches (throttled to one
@@ -709,6 +793,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(await readMirror(seeded.sessionId)).toEqual(evts);
       expect(await runRow(seeded.runId)).toMatchObject({
         status: "cancelled",
+        // The v0 path's own terminalizeCancelled (worker, not the engine
+        // loop) still writes the prose message.
         lastError: "Stopped by user.",
       });
       // Cancelled mid-stream: the partial assistant text is NEVER persisted.
@@ -1612,7 +1698,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(evts[3]!.payload).toEqual({ code: "cancelled", message: "Stopped by user." });
       expect(await runRow(seeded.runId)).toMatchObject({
         status: "cancelled",
-        lastError: "Stopped by user.",
+        // Canonical code, not prose (see the compat-path cancel test).
+        lastError: "cancelled",
       });
       expect(await readMirror(seeded.sessionId)).toEqual(evts);
       rmWs(sbx.workspaceDir);
@@ -1760,16 +1847,27 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
     /**
      * A local [OI]-dialect SSE mock: the Nth POST serves turns[N-1] (the last
-     * turn repeats). Every turn ends with `data: [DONE]`.
+     * turn repeats). Every turn ends with `data: [DONE]`. The recorded model
+     * pins which route the run actually took (the vision gate predicts it).
      */
     async function startTurnSse(
       turns: Array<Array<Record<string, unknown>>>,
     ): Promise<{
       url: string;
-      requests: Array<{ messages: ChatMessage[]; tools?: unknown }>;
+      requests: Array<{
+        messages: ChatMessage[];
+        tools?: unknown;
+        model?: string;
+        max_tokens?: number;
+      }>;
       close: () => Promise<void>;
     }> {
-      const requests: Array<{ messages: ChatMessage[]; tools?: unknown }> = [];
+      const requests: Array<{
+        messages: ChatMessage[];
+        tools?: unknown;
+        model?: string;
+        max_tokens?: number;
+      }> = [];
       const server = createServer((req, res) => {
         const chunks: Buffer[] = [];
         req.on("data", (c: Buffer) => chunks.push(c));
@@ -1777,8 +1875,15 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
           const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
             messages: ChatMessage[];
             tools?: unknown;
+            model?: string;
+            max_tokens?: number;
           };
-          requests.push({ messages: body.messages, tools: body.tools });
+          requests.push({
+            messages: body.messages,
+            tools: body.tools,
+            model: body.model,
+            max_tokens: body.max_tokens,
+          });
           const turn = turns[Math.min(requests.length - 1, turns.length - 1)]!;
           res.writeHead(200, { "content-type": "text/event-stream" });
           for (const event of turn) res.write(`data: ${JSON.stringify(event)}\n\n`);
@@ -2233,6 +2338,264 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(sbx.attachCalls.every((c) => c.tier === "free")).toBe(true);
       expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
       rmWs(sbx.workspaceDir);
+    });
+
+    // -------------------------------------------------------------------------
+    // Vision gate, full path (owner directive 2026-10-18). The compat path's
+    // gate (see the model_no_vision tests above) must hold on the PRODUCTION
+    // processor too: promptImages ride the engine run out to the provider
+    // wire, and a model that cannot see is refused before any bytes move.
+    // -------------------------------------------------------------------------
+
+    it("full processor: image attachment + a vision model pin → promptImages reach the engine run as an image_url content part", async () => {
+      const seeded = await seedRun();
+      // The /model pin selects a documented vision family while the fleet
+      // default ("full-default-model") is unknown → text-only. This pins the
+      // gate's effective-model resolution: it predicts the model the engine's
+      // routeFor will actually route to (the pin), not the fleet default.
+      await sessionState.patch(db, seeded.sessionId, { modelPin: "gpt-4o" });
+      const handleSbx = makeFakeSandbox();
+      const port = makeFakePort();
+      const a1 = await seedAttachment(seeded.sessionId, seeded.uid, "shot.png");
+
+      const downloads: string[] = [];
+      const storage = {
+        async getBuffer(key: string): Promise<Buffer | null> {
+          downloads.push(key);
+          return Buffer.from("png-bytes", "utf8");
+        },
+      };
+      const sse = await startTurnSse([textTurn("a photo")]);
+      const processor = createFullAgentRunProcessor(
+        makeFullDeps(sse.url, port.port, {
+          storage,
+          sandboxHandleFor: async () => handleSbx.handle,
+        }),
+      );
+      try {
+        await processor({
+          data: {
+            runId: seeded.runId,
+            sessionId: seeded.sessionId,
+            userId: seeded.uid,
+            prompt: "what is in this picture?",
+            attachmentIds: [a1.id],
+          },
+        });
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      // Materialized once into uploads/ alongside the prompt copy, and the
+      // run completed normally on the pinned model.
+      expect(downloads).toEqual([a1.r2Key]);
+      expect(
+        await readFile(join(handleSbx.workspaceDir, "uploads", "shot.png"), "utf8"),
+      ).toBe("png-bytes");
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+
+      // promptImages reached the engine's run: the turn went out on the wire
+      // as [OI] multimodal content parts — text first, then the data URL —
+      // riding exactly the model the gate predicted.
+      expect(sse.requests).toHaveLength(1);
+      expect(sse.requests[0]!.model).toBe("gpt-4o");
+      const msgs = sse.requests[0]!.messages;
+      const last = msgs[msgs.length - 1]!;
+      expect(last.role).toBe("user");
+      const parts = last.content as unknown as Array<Record<string, unknown>>;
+      expect(parts[0]).toMatchObject({ type: "text", text: "what is in this picture?" });
+      expect(parts[1]).toMatchObject({
+        type: "image_url",
+        image_url: {
+          url: `data:image/png;base64,${Buffer.from("png-bytes", "utf8").toString("base64")}`,
+        },
+      });
+      rmWs(handleSbx.workspaceDir);
+    });
+
+    it("full processor: job maxOutputTokens reaches the provider wire as max_tokens; absent → no max_tokens key", async () => {
+      // With the cap: the gateway-validated pick (Settings "Max output
+      // tokens") rides the job payload → engine run → AgentRequest.maxTokens
+      // → the openai transport's request body.
+      const seeded = await seedRun();
+      const port = makeFakePort();
+      const sse = await startTurnSse([textTurn("done")]);
+      const processor = createFullAgentRunProcessor(
+        makeFullDeps(sse.url, port.port),
+      );
+      try {
+        await processor({
+          data: {
+            runId: seeded.runId,
+            sessionId: seeded.sessionId,
+            userId: seeded.uid,
+            prompt: seeded.prompt,
+            maxOutputTokens: 2048,
+          },
+        });
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+      expect(sse.requests).toHaveLength(1);
+      expect(sse.requests[0]!.max_tokens).toBe(2048);
+
+      // Without the cap (auto): the key never lands on the wire — the
+      // provider's own default applies, byte-for-byte the pre-feature body.
+      const seeded2 = await seedRun();
+      const port2 = makeFakePort();
+      const sse2 = await startTurnSse([textTurn("done")]);
+      const processor2 = createFullAgentRunProcessor(
+        makeFullDeps(sse2.url, port2.port),
+      );
+      try {
+        await processor2(jobOf(seeded2));
+      } finally {
+        await processor2.close();
+        await sse2.close();
+      }
+      expect(await runRow(seeded2.runId)).toMatchObject({ status: "completed" });
+      expect(sse2.requests).toHaveLength(1);
+      expect(sse2.requests[0]!.max_tokens).toBeUndefined();
+    });
+
+    it("full processor: image attachment + a text-only model → run_failed{model_no_vision}, no attach, no download, no provider call, push sent", async () => {
+      const seeded = await seedRun();
+      // No model pin: the fleet default is the effective model, and it is
+      // unknown to the catalog and the family list → refused (basis unknown).
+      const handleSbx = makeFakeSandbox();
+      const port = makeFakePort();
+      const a1 = await seedAttachment(seeded.sessionId, seeded.uid, "shot.png");
+
+      const downloads: string[] = [];
+      const storage = {
+        async getBuffer(key: string): Promise<Buffer | null> {
+          downloads.push(key);
+          return Buffer.from("png-bytes", "utf8");
+        },
+      };
+      const handleCalls: string[] = [];
+      const pushes: Array<{ code: string; message: string; userId: string }> = [];
+      const notifier = {
+        async notifyAgentFailed(a: {
+          userId: string;
+          sessionId: string;
+          sessionTitle: string;
+          code: string;
+          message: string;
+        }): Promise<void> {
+          pushes.push({ code: a.code, message: a.message, userId: a.userId });
+        },
+      };
+      const sse = await startTurnSse([textTurn("never")]);
+      const processor = createFullAgentRunProcessor(
+        makeFullDeps(sse.url, port.port, {
+          storage,
+          notifier,
+          sandboxHandleFor: async (_uid, tier) => {
+            handleCalls.push(tier);
+            return handleSbx.handle;
+          },
+        }),
+      );
+      try {
+        await processor({
+          data: {
+            runId: seeded.runId,
+            sessionId: seeded.sessionId,
+            userId: seeded.uid,
+            prompt: "what is in this picture?",
+            attachmentIds: [a1.id],
+          },
+        });
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      // The refusal fired BEFORE any bytes moved: no sandbox handle, no
+      // storage download, and the engine's run never started (zero provider
+      // requests — the SSE mock was never hit).
+      expect(handleCalls).toEqual([]);
+      expect(downloads).toEqual([]);
+      expect(sse.requests).toEqual([]);
+
+      const evts = await readEvents(seeded.sessionId);
+      const failure = evts.find((e) => e.type === "run_failed");
+      expect(failure?.payload).toMatchObject({
+        code: "model_no_vision",
+        model: "full-default-model",
+        basis: "unknown",
+        imageCount: 1,
+      });
+      expect(String(failure?.payload.message)).toContain("does not support vision/image inputs");
+      expect(await runRow(seeded.runId)).toMatchObject({
+        status: "failed",
+        lastError: "model_no_vision",
+      });
+
+      // The push carries the same actionable copy.
+      expect(pushes).toHaveLength(1);
+      expect(pushes[0]).toMatchObject({ code: "model_no_vision", userId: seeded.uid });
+      expect(pushes[0]!.message).toContain("switch to a vision-capable model");
+      rmWs(handleSbx.workspaceDir);
+    });
+
+    it("full processor: the gate names the ROUTED model — a pinned text-only family is refused by name, not as the fleet default", async () => {
+      const seeded = await seedRun();
+      // The /model pin selects a documented TEXT-ONLY family
+      // (TEXT_ONLY_OVERRIDES in modelCapabilities.ts). The fleet default is
+      // likewise text-only, so only the model NAME in the refusal
+      // distinguishes "the gate resolved the pin" from "the gate assumed the
+      // default" — the audit's latent gap (a).
+      await sessionState.patch(db, seeded.sessionId, { modelPin: "deepseek-chat" });
+      const handleSbx = makeFakeSandbox();
+      const port = makeFakePort();
+      const a1 = await seedAttachment(seeded.sessionId, seeded.uid, "shot.png");
+
+      const storage = {
+        async getBuffer(): Promise<Buffer | null> {
+          return Buffer.from("png-bytes", "utf8");
+        },
+      };
+      const sse = await startTurnSse([textTurn("never")]);
+      const processor = createFullAgentRunProcessor(
+        makeFullDeps(sse.url, port.port, {
+          storage,
+          sandboxHandleFor: async () => handleSbx.handle,
+        }),
+      );
+      try {
+        await processor({
+          data: {
+            runId: seeded.runId,
+            sessionId: seeded.sessionId,
+            userId: seeded.uid,
+            prompt: "what is in this picture?",
+            attachmentIds: [a1.id],
+          },
+        });
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      expect(sse.requests).toEqual([]);
+      const evts = await readEvents(seeded.sessionId);
+      const failure = evts.find((e) => e.type === "run_failed");
+      expect(failure?.payload).toMatchObject({
+        code: "model_no_vision",
+        model: "deepseek-chat",
+        basis: "family",
+        imageCount: 1,
+      });
+      expect(await runRow(seeded.runId)).toMatchObject({
+        status: "failed",
+        lastError: "model_no_vision",
+      });
+      rmWs(handleSbx.workspaceDir);
     });
 
     // -------------------------------------------------------------------------

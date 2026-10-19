@@ -3,8 +3,9 @@ import { eq, inArray, sql } from "drizzle-orm";
 import postgres from "postgres";
 import type { SessionEvent } from "@ovid/shared";
 import { createDb, migrate, type Db } from "./client.js";
-import { eventMirror, messages, newId, runs, sessions, users as usersRepo } from "./repos.js";
+import { eventMirror, messages, mcpOauthFlows, newId, runs, sessions, users as usersRepo } from "./repos.js";
 import {
+  mcpOauthFlows as mcpOauthFlowsTable,
   runs as runsTable,
   sessions as sessionsTable,
   users,
@@ -372,7 +373,7 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
     expect(await runs.finish(db, newId(), "failed", "unknown")).toBe(false); // unknown id
   });
 
-  it("runs.listStaleRunning: only 'running' rows with startedAt older than the cutoff, oldest first", async () => {
+  it("runs.listStaleRunning: only 'running' rows with last activity older than the cutoff, oldest first", async () => {
     const uid = await seedUser();
     const s = await sessions.create(db, uid, "stale sweep");
     const m = await messages.append(db, { sessionId: s.id, role: "user", content: "go" });
@@ -381,25 +382,36 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
     const fresh = await runs.create(db, { sessionId: s.id, promptMessageId: m.id });
     const queued = await runs.create(db, { sessionId: s.id, promptMessageId: m.id });
     const finished = await runs.create(db, { sessionId: s.id, promptMessageId: m.id });
+    // The stale-sweep fix round's row: ancient startedAt, but a RECENT
+    // heartbeat (bumpLastActive) proves it is a long run still emitting —
+    // the sweeper must never terminalize it mid-flight.
+    const healthy = await runs.create(db, { sessionId: s.id, promptMessageId: m.id });
     expect(await runs.claimNext(db, stale.id)).toBe(true);
     expect(await runs.claimNext(db, fresh.id)).toBe(true);
     expect(await runs.claimNext(db, finished.id)).toBe(true);
+    expect(await runs.claimNext(db, healthy.id)).toBe(true);
     await runs.finish(db, finished.id, "completed");
 
     // Age the stale runner's started_at; make the QUEUED row ancient too
-    // (createdAt must never matter — only status + startedAt do).
+    // (createdAt must never matter — only status + activity do).
     await db.update(runsTable).set({ startedAt: new Date(BASE) }).where(eq(runsTable.id, stale.id));
     await db.update(runsTable).set({ createdAt: new Date(BASE) }).where(eq(runsTable.id, queued.id));
+    await db.update(runsTable).set({ startedAt: new Date(BASE) }).where(eq(runsTable.id, healthy.id));
+    await runs.bumpLastActive(db, healthy.id);
 
-    // Cutoff an hour after the aged start but far before fresh's (now).
+    // Cutoff an hour after the aged start but far before fresh's (now): the
+    // heartbeat-backed row is invisible to the sweep — COALESCE(last_active_at,
+    // started_at) is the age the sweeper measures, not started_at alone.
     const found = await runs.listStaleRunning(db, new Date(BASE + 3_600_000));
     expect(found.map((r) => r.id)).toEqual([stale.id]);
 
-    // Cutoff = now → both running rows, oldest startedAt first.
-    const both = await runs.listStaleRunning(db, new Date());
-    expect(both.map((r) => r.id)).toEqual([stale.id, fresh.id]);
+    // Cutoff comfortably after every activity (a wall-clock `now` could tie
+    // fresh's claim millisecond) → all three running rows, oldest activity
+    // first: stale's ancient started_at, fresh's claim, healthy's heartbeat.
+    const both = await runs.listStaleRunning(db, new Date(Date.now() + 60_000));
+    expect(both.map((r) => r.id)).toEqual([stale.id, fresh.id, healthy.id]);
 
-    // Cutoff before every startedAt → empty.
+    // Cutoff before every activity → empty.
     expect(await runs.listStaleRunning(db, new Date(BASE - 1))).toEqual([]);
 
     // Leave NO running rows behind: the worker's staleRuns suite reads this
@@ -407,7 +419,27 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
     // row with an aged started_at would be counted by its sweep.
     await runs.finish(db, stale.id, "failed", "test cleanup");
     await runs.finish(db, fresh.id, "failed", "test cleanup");
+    await runs.finish(db, healthy.id, "completed");
     expect(await runs.listStaleRunning(db, new Date())).toEqual([]);
+  });
+
+  it("runs.bumpLastActive stamps the heartbeat (a no-op write on an unknown id)", async () => {
+    const uid = await seedUser();
+    const s = await sessions.create(db, uid, "heartbeat");
+    const m = await messages.append(db, { sessionId: s.id, role: "user", content: "go" });
+    const run = await runs.create(db, { sessionId: s.id, promptMessageId: m.id });
+    expect(await runs.claimNext(db, run.id)).toBe(true);
+
+    const [before] = await db.select().from(runsTable).where(eq(runsTable.id, run.id));
+    expect(before!.lastActiveAt).toBeNull();
+    await runs.bumpLastActive(db, run.id);
+    const [after] = await db.select().from(runsTable).where(eq(runsTable.id, run.id));
+    expect(after!.lastActiveAt).toBeInstanceOf(Date);
+
+    // Unknown id: updates nothing, throws nothing (a child run with no row
+    // must not fail its supervisor's emit path).
+    await runs.bumpLastActive(db, newId());
+    await runs.finish(db, run.id, "failed", "test cleanup");
   });
 
   it("eventMirror: put idempotent on (sessionId, seq); readSince numeric-seq order + exclusivity", async () => {
@@ -517,6 +549,41 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
     const afterTier = await usersRepo.ensure(db, uid, "third@test.local");
     expect(afterTier.tier).toBe("pro");
     expect(afterTier.email).toBe("third@test.local");
+  });
+
+  describe("mcpOauthFlows.deleteExpired (retention sweep)", () => {
+    // The sweep the schema's mcp_oauth_flows_expires_at_idx was created for:
+    // consume() only marks rows used, so this suite owns exactly these flow
+    // rows (the top-level beforeAll drops and re-migrates the schema).
+    it("deletes flows expired past the cutoff; grace-window and live rows stay", async () => {
+      const uid = await seedUser();
+      const now = Date.now();
+      const DAY = 24 * 60 * 60 * 1000;
+      const seed = async (state: string, expiresAt: Date): Promise<void> => {
+        await mcpOauthFlows.create(db, { state, userId: uid, serverId: newId(), expiresAt });
+      };
+      // Two past the cutoff (one already consumed — consume() itself refuses
+      // expired rows, so mark it used directly — one abandoned), one expired
+      // 12 h ago (inside the 1-day grace window), one still live.
+      await seed("old-used", new Date(now - 3 * DAY));
+      await db
+        .update(mcpOauthFlowsTable)
+        .set({ used: true })
+        .where(eq(mcpOauthFlowsTable.state, "old-used"));
+      await seed("old-abandoned", new Date(now - 2 * DAY));
+      await seed("grace", new Date(now - 12 * 60 * 60 * 1000));
+      await seed("live", new Date(now + DAY));
+
+      const cutoff = new Date(now - DAY);
+      expect(await mcpOauthFlows.deleteExpired(db, cutoff)).toBe(2);
+      const remaining = await db
+        .select({ state: mcpOauthFlowsTable.state })
+        .from(mcpOauthFlowsTable);
+      expect(remaining.map((r) => r.state).sort()).toEqual(["grace", "live"]);
+
+      // Idempotent: a second pass over the same cutoff deletes nothing.
+      expect(await mcpOauthFlows.deleteExpired(db, cutoff)).toBe(0);
+    });
   });
 
   describe("users.allocateSandboxUid (sandbox uid pool)", () => {

@@ -34,7 +34,7 @@ import {
   stubSystemBus as sharedSystemBus,
   type TicketStub,
 } from "./test/stubs.js";
-import { compareSeq, MAX_SUBSCRIPTIONS_PER_CONNECTION, PTY_DISABLED_MESSAGE } from "./ws.js";
+import { compareSeq, MAX_SUBSCRIPTIONS_PER_CONNECTION, PTY_DISABLED_MESSAGE, REPLAY_LIMIT } from "./ws.js";
 import type { PtyOutMsg, RingChunkWire } from "@ovid/shared";
 import type { SystemHub } from "./systemChannel.js";
 
@@ -653,6 +653,64 @@ describe("gateway /cloud/ws (stub EventLog — deterministic replay/live race)",
       "freed slot accepts a new session",
     );
   }, 20_000);
+
+  // P0 fix (replay truncation): the `subscribed` ack carries the ADDITIVE
+  // `trimmed: true` exactly when the replay returned REPLAY_LIMIT events —
+  // "there may be more backlog you did not receive". Below the cap the field
+  // is ABSENT (older clients ignore it either way; the shared schema keeps
+  // it optional). Every frame below is parsed through the shared schema, so
+  // these tests also pin the wire contract itself.
+  function backlogStubEventLog(count: number): EventLog {
+    const backlog = Array.from({ length: count }, (_, i) => ev(`${i + 1}-0`, `delta-${i}`));
+    return {
+      append: async () => {
+        throw new Error("append is unused in the replay-truncation tests");
+      },
+      // Honors `limit` exactly like the XRANGE-backed redis log: at most
+      // `limit` events, oldest-first — a 600-event backlog caps at 500.
+      readSince: async (_sessionId, _lastSeq, limit) => backlog.slice(0, limit),
+      subscribe: async () => async () => {},
+    };
+  }
+
+  it("backlog > REPLAY_LIMIT (600 seeded) → subscribed carries trimmed:true and exactly 500 events replay", async () => {
+    const tickets = stubTickets();
+    const wsBase = await makeStubApp(backlogStubEventLog(600), tickets);
+    const client = await connectClient(wsBase, await tickets.mint("trimmer"));
+    clients.push(client);
+
+    client.send({ op: "subscribe", sessionId: RACE_SID });
+    await client.waitFor(
+      () => client.messages.filter((m) => m.op === "event").length >= REPLAY_LIMIT,
+      "all 500 capped replay events",
+      20_000,
+    );
+
+    expect(client.messages[0]).toEqual({ op: "subscribed", sessionId: RACE_SID, trimmed: true });
+    const seen = eventOps(client);
+    expect(seen).toHaveLength(REPLAY_LIMIT); // exactly the cap, not 600
+    expect(seen[0]!.seq).toBe("1-0");
+    expect(seen[REPLAY_LIMIT - 1]!.seq).toBe("500-0"); // oldest-first, nothing past the cap
+  }, 30_000);
+
+  it("backlog < REPLAY_LIMIT (499) → subscribed carries NO trimmed field", async () => {
+    const tickets = stubTickets();
+    const wsBase = await makeStubApp(backlogStubEventLog(REPLAY_LIMIT - 1), tickets);
+    const client = await connectClient(wsBase, await tickets.mint("untrimmed"));
+    clients.push(client);
+
+    client.send({ op: "subscribe", sessionId: RACE_SID });
+    await client.waitFor(
+      () => client.messages.filter((m) => m.op === "event").length >= REPLAY_LIMIT - 1,
+      "all 499 replay events",
+      20_000,
+    );
+
+    expect(client.messages[0]).toEqual({ op: "subscribed", sessionId: RACE_SID });
+    expect("trimmed" in client.messages[0]!).toBe(false); // field absent, not false
+    expect(eventOps(client)).toHaveLength(REPLAY_LIMIT - 1);
+    expect(eventOps(client)[REPLAY_LIMIT - 2]!.seq).toBe("499-0");
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------

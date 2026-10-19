@@ -21,6 +21,8 @@ import {
 class FakeTransport implements McpTransport {
   sent: JsonRpcMessage[] = [];
   started = false;
+  /** When set, send() throws this — a closed/closing transport (every real transport throws once closed). */
+  sendError: Error | undefined;
   private msgCb: ((m: JsonRpcMessage) => void) | undefined;
   private closeCb: ((info: { expected: boolean }) => void) | undefined;
 
@@ -28,6 +30,7 @@ class FakeTransport implements McpTransport {
     this.started = true;
   }
   async send(msg: JsonRpcMessage): Promise<void> {
+    if (this.sendError !== undefined) throw this.sendError;
     this.sent.push(msg);
   }
   onMessage(cb: (m: JsonRpcMessage) => void): void {
@@ -309,6 +312,45 @@ describe("request plumbing", () => {
     });
     t.push({ jsonrpc: "2.0", id: 1, result: { tools: [] } });
     await expect(p).resolves.toEqual({ tools: [] });
+  });
+});
+
+describe("server request racing a close (contained — never an unhandled rejection)", () => {
+  // Vitest fails the run on an unhandled rejection, so these tests passing at
+  // all is itself the "no crash" assertion; the console.debug spy proves the
+  // catch path (not just silence) handled the failure.
+  it("hooked response undeliverable on a closing transport: logged at debug, nothing sent", async () => {
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      const onServerRequest = vi.fn(async () => ({ jsonrpc: "2.0" as const, id: 7, result: { pong: true } }));
+      const { t, c } = makeClient({ hooks: { onServerRequest } });
+      // Every transport throws once closed (stdio/http/sse) — simulate the
+      // wire dying between the request arriving and our response leaving.
+      t.sendError = new Error("MCP stdio transport is closed");
+      t.push({ jsonrpc: "2.0", id: 7, method: "ping" });
+      await flush();
+      await flush();
+      expect(onServerRequest).toHaveBeenCalledTimes(1);
+      expect(t.sent).toEqual([]);
+      expect(debug).toHaveBeenCalledTimes(1);
+    } finally {
+      debug.mockRestore();
+    }
+  });
+
+  it("method-not-found reply on a closing transport (no hooks): same containment", async () => {
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      const { t, c } = makeClient();
+      t.sendError = new Error("MCP HTTP transport is closed");
+      t.push({ jsonrpc: "2.0", id: 9, method: "sampling/createMessage", params: {} });
+      await flush();
+      await flush();
+      expect(t.sent).toEqual([]);
+      expect(debug).toHaveBeenCalledTimes(1);
+    } finally {
+      debug.mockRestore();
+    }
   });
 });
 

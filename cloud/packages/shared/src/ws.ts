@@ -43,7 +43,14 @@ export type WsClientMsg =
   | { op: "unsubscribe_system" };
 
 export type WsServerMsg =
-  | { op: "subscribed"; sessionId: string }
+  // Replay-truncation signal (ADDITIVE optional field — older clients that
+  // don't know it ignore it): `trimmed: true` on a `subscribed` ack means
+  // the replay hit the gateway's REPLAY_LIMIT cap, so there MAY be more
+  // backlog the client did not receive; absent means the whole backlog was
+  // delivered. The Dart client consumes it at `case 'subscribed'`
+  // (cloud_ws.dart) to heal instead of silently rendering a truncated
+  // history.
+  | { op: "subscribed"; sessionId: string; trimmed?: boolean }
   | { op: "event"; event: SessionEvent }
   | { op: "pong" }
   | { op: "error"; code: string; message: string; sessionId?: string; ptyId?: string }
@@ -211,6 +218,10 @@ const wsServerMsgSchema: z.ZodType<WsServerMsg> = z.discriminatedUnion("op", [
   z.object({
     op: z.literal("subscribed"),
     sessionId: z.string().min(1),
+    // Optional on the wire (additive): the gateway sets it only when the
+    // replay was capped, so a deep-equal check against an uncapped ack
+    // still matches frames from older servers.
+    trimmed: z.boolean().optional(),
   }),
   z.object({
     op: z.literal("event"),

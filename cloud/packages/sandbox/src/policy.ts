@@ -72,6 +72,40 @@ function findMatchingParen(command: string, openIdx: number): number {
 }
 
 /**
+ * Index of the closing ` for the backtick span opened at `openIdx`, or
+ * `command.length` when unbalanced. Backticks do not nest, but quotes and
+ * escapes inside the span still shield a ` from closing it early — the same
+ * skipping rules `findMatchingParen` applies to parens.
+ */
+function findBacktickEnd(command: string, openIdx: number): number {
+  let i = openIdx + 1;
+  while (i < command.length) {
+    const c = command[i];
+    if (c === "'") {
+      const close = command.indexOf("'", i + 1);
+      i = close === -1 ? command.length : close + 1;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < command.length && command[j] !== '"') {
+        if (command[j] === "\\") j++;
+        j++;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (c === "\\") {
+      i += 2;
+      continue;
+    }
+    if (c === "`") return i;
+    i++;
+  }
+  return command.length;
+}
+
+/**
  * Approximates the output words of a command substitution: the LAST inner
  * segment's words minus its head. Exact for `echo`/`printf` — the realistic
  * evasion vector (`eval "$(echo gradle) build"`) — and merely conservative
@@ -96,9 +130,9 @@ const ASSIGNMENT_PREFIX_RE = /^[A-Za-z_][A-Za-z0-9_]*=$/;
  * at `;`, `&&`, `||`, `|`, `&`, `(`, `)`, newlines and here-doc bodies;
  * adjacent quoted fragments join into one word (`"g""cc"` → `gcc`); escapes
  * keep operator characters inside words. Command-substitution contents
- * (`$( … )`, including inside double quotes) are parsed as their own
- * segments, and their approximated output words take the substitution's
- * place in the parent segment.
+ * (`$( … )` and the legacy `` ` … ` `` form, including inside double quotes)
+ * are parsed as their own segments, and their approximated output words take
+ * the substitution's place in the parent segment.
  */
 function tokenize(command: string): Segment[] {
   const out: Segment[] = [];
@@ -121,6 +155,24 @@ function tokenize(command: string): Segment[] {
       out.push({ words, text: command.slice(segStart, endIdx).trim() });
     }
     words = [];
+  };
+
+  // Both substitution forms share one splice rule in unquoted context: the
+  // inner segments go to the output list verbatim (their heads must face the
+  // denylist exactly like a top-level command), and the approximated output
+  // words replace the substitution. Assignment RHS (review F2): real shells
+  // do not word-split substitution output in an assignment — join it into
+  // the pending word so it never lands in head position after assignment
+  // stripping. A fresh word: the output word-splits into the parent segment.
+  const spliceSubstitution = (inner: Segment[]) => {
+    out.push(...inner);
+    const output = substitutionOutputWords(inner);
+    if (hasWord && ASSIGNMENT_PREFIX_RE.test(word)) {
+      word += output.join(" ");
+    } else {
+      endWord();
+      for (const w of output) words.push(w);
+    }
   };
 
   while (i < command.length) {
@@ -213,6 +265,16 @@ function tokenize(command: string): Segment[] {
           i = Math.min(close + 1, command.length);
           continue;
         }
+        // Legacy backtick substitution runs inside double quotes too, with
+        // the same quoted-context rule: the output stays inside the word.
+        if (c === "`") {
+          const close = findBacktickEnd(command, i);
+          const inner = tokenize(command.slice(i + 1, close));
+          out.push(...inner);
+          word += substitutionOutputWords(inner).join(" ");
+          i = Math.min(close + 1, command.length);
+          continue;
+        }
         word += c;
         i++;
       }
@@ -269,19 +331,16 @@ function tokenize(command: string): Segment[] {
     if (ch === "$" && i + 1 < command.length && command[i + 1] === "(") {
       const open = i + 1;
       const close = findMatchingParen(command, open);
-      const inner = tokenize(command.slice(open + 1, close));
-      out.push(...inner);
-      const output = substitutionOutputWords(inner);
-      if (hasWord && ASSIGNMENT_PREFIX_RE.test(word)) {
-        // Assignment RHS (F2): real shells do not word-split substitution
-        // output in an assignment — join it into the pending word so it
-        // never lands in head position after assignment stripping.
-        word += output.join(" ");
-      } else {
-        // Fresh word: the output word-splits into the parent segment.
-        endWord();
-        for (const w of output) words.push(w);
-      }
+      spliceSubstitution(tokenize(command.slice(open + 1, close)));
+      i = Math.min(close + 1, command.length);
+      continue;
+    }
+
+    // Legacy backtick substitution in unquoted context — same recursive
+    // descent, same output approximation, same F2 assignment rule.
+    if (ch === "`") {
+      const close = findBacktickEnd(command, i);
+      spliceSubstitution(tokenize(command.slice(i + 1, close)));
       i = Math.min(close + 1, command.length);
       continue;
     }
@@ -426,6 +485,18 @@ function matchSegment(segment: Segment): PolicyVerdict | null {
 
   const head = basename(words[i]);
   const rest = words.slice(i + 1);
+
+  // Head-word indirection (founder directive 2026-10-18, evasion fix): a
+  // head that starts with an unexpanded `$NAME`/`${NAME}` reference
+  // (`X=nc; $X host 80`) resolves at runtime to a name this static pass
+  // cannot see, so a denylist match on the basename would be a no-op. The
+  // head word is opaque — refuse the segment. This is deliberately the
+  // minimal safe rule: benign variable usage puts assignments in prefix
+  // position (already stripped above) or expansions in argument position,
+  // neither of which is affected; only a `$`-headed segment is refused.
+  if (words[i].startsWith("$")) {
+    return { allowed: false, matched: `variable indirection (${words[i]})`, segment: text };
+  }
 
   // Recursive descent: shell -c '<command>' → parse the argument.
   if (SHELL_HEADS.has(head)) {

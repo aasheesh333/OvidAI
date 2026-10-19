@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_OUTPUT_TOKENS_CAP,
   attachmentDtoSchema,
   attachmentUploadResponseSchema,
   importReportSchema,
@@ -7,6 +8,7 @@ import {
   pageSchema,
   runCancelResponseSchema,
   sanitizeAttachmentName,
+  sendMessageBodySchema,
   sessionDtoSchema,
   sessionPatchSchema,
 } from "./rest.js";
@@ -72,6 +74,40 @@ describe("rest schemas", () => {
     expect(() => sessionPatchSchema.parse({ mode: "auto", extra: "x" })).toThrow();
     expect(() => sessionPatchSchema.parse({ title: "t", nope: 1 })).toThrow();
     expect(() => sessionPatchSchema.parse({ title: 42 })).toThrow();
+  });
+
+  it("sendMessageBodySchema parses content alone and with every additive field", () => {
+    expect(sendMessageBodySchema.parse({ content: "hi" })).toEqual({ content: "hi" });
+    expect(
+      sendMessageBodySchema.parse({
+        content: "hi",
+        attachmentIds: ["6f9619ff-8b86-d011-b42d-00cf4fc964ff"],
+        clientMsgId: "c-1",
+        maxOutputTokens: 8192,
+      }),
+    ).toEqual({
+      content: "hi",
+      attachmentIds: ["6f9619ff-8b86-d011-b42d-00cf4fc964ff"],
+      clientMsgId: "c-1",
+      maxOutputTokens: 8192,
+    });
+  });
+
+  it("sendMessageBodySchema rejects an unknown key, a bad uuid, and a malformed clientMsgId", () => {
+    expect(() => sendMessageBodySchema.parse({ content: "hi", extra: "x" })).toThrow();
+    expect(() => sendMessageBodySchema.parse({ content: "hi", attachmentIds: ["not-a-uuid"] })).toThrow();
+    expect(() => sendMessageBodySchema.parse({ content: "hi", clientMsgId: "" })).toThrow();
+    expect(() => sendMessageBodySchema.parse({ content: "hi", clientMsgId: "x".repeat(65) })).toThrow();
+    expect(() => sendMessageBodySchema.parse({})).toThrow();
+  });
+
+  it("sendMessageBodySchema caps maxOutputTokens at MAX_OUTPUT_TOKENS_CAP and rejects non-positive/non-integer values", () => {
+    expect(() => sendMessageBodySchema.parse({ content: "hi", maxOutputTokens: MAX_OUTPUT_TOKENS_CAP })).not.toThrow();
+    expect(() => sendMessageBodySchema.parse({ content: "hi", maxOutputTokens: MAX_OUTPUT_TOKENS_CAP + 1 })).toThrow();
+    expect(() => sendMessageBodySchema.parse({ content: "hi", maxOutputTokens: 0 })).toThrow();
+    expect(() => sendMessageBodySchema.parse({ content: "hi", maxOutputTokens: -1 })).toThrow();
+    expect(() => sendMessageBodySchema.parse({ content: "hi", maxOutputTokens: 2048.5 })).toThrow();
+    expect(() => sendMessageBodySchema.parse({ content: "hi", maxOutputTokens: "2048" })).toThrow();
   });
 
   it("messageDtoSchema parses a valid dto", () => {

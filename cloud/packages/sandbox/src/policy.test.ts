@@ -138,6 +138,21 @@ describe("splitShellSegments", () => {
     expect(segs).toContainEqual(["gradle", "build"]);
   });
 
+  it("backtick spans are parsed as inner segments, like $( )", () => {
+    const segs = splitShellSegments("echo `gradle build`");
+    expect(segs).toContainEqual(["gradle", "build"]);
+  });
+
+  it("unquoted backtick output word-splits into the parent segment", () => {
+    const segs = splitShellSegments("echo `echo a b`");
+    expect(segs).toContainEqual(["echo", "a", "b"]);
+  });
+
+  it("quoted backtick output stays inside the word", () => {
+    const segs = splitShellSegments('echo "`echo a b` x"');
+    expect(segs).toContainEqual(["echo", "a b x"]);
+  });
+
   it("command substitution output is approximated into the parent words", () => {
     // `eval "$(echo gradle) build"` must reach the checker as `gradle build`.
     const segs = splitShellSegments('eval "$(echo gradle) build"');
@@ -287,6 +302,62 @@ describe("checkCommandPolicy — pinned matching rules", () => {
   it("empty and whitespace-only commands are allowed", () => {
     expect(checkCommandPolicy("")).toEqual({ allowed: true });
     expect(checkCommandPolicy("   \n\t ")).toEqual({ allowed: true });
+  });
+
+  it("refuses $VAR-headed segments for every denylisted class (2026-10-18 evasion fix)", () => {
+    // `X=nc; $X host 80` slipped past layer 1: the head word `$X` is opaque
+    // to a static pass, so the basename denylist match was a no-op. The
+    // minimal safe rule: any `$`-headed segment is refused outright.
+    for (const cmd of [
+      "X=nc; $X example.com 80",
+      "X=cloudflared; $X tunnel --url http://x",
+      "X=tailscale; $X up --authkey x",
+      "X=xmrig; $X --donate-level 1",
+      "X=nc; ${X} host 80",
+      'X=nc; "$X" host 80',
+      "X=nc $X host 80", // prefix assignment inside the SAME segment
+      "env X=nc $X host 80",
+    ]) {
+      expect(checkCommandPolicy(cmd).allowed, cmd).toBe(false);
+    }
+  });
+
+  it("descends into shell -c and eval indirection", () => {
+    for (const cmd of [
+      "bash -c 'X=nc; $X host 80'",
+      "sh -lc '$CLOUDFLARED tunnel'",
+      "eval '$X nc host 80'",
+      "eval X=nc '$X host 80'",
+    ]) {
+      expect(checkCommandPolicy(cmd).allowed, cmd).toBe(false);
+    }
+  });
+
+  it("backtick spans are matched like $( ) substitutions", () => {
+    for (const cmd of [
+      "`cloudflared` tunnel --url http://localhost:8080",
+      "`gcc` hello.c",
+      "X=`nc`; $X host 80",
+      'eval "`echo gradle` build"',
+    ]) {
+      expect(checkCommandPolicy(cmd).allowed, cmd).toBe(false);
+    }
+  });
+
+  it("benign variable usage stays allowed", () => {
+    // Expansion in ARGUMENT position and assignments in PREFIX position are
+    // the benign shapes; only a `$`-headed segment is refused.
+    for (const cmd of [
+      "echo $PATH",
+      "echo ${HOME}",
+      "echo $X",
+      "FOO=1 node script.js",
+      'echo "gcc is great"',
+      "cat makefile",
+      "X=$(which make)", // F2 pin: assignment RHS never reaches head position
+    ]) {
+      expect(checkCommandPolicy(cmd), cmd).toEqual({ allowed: true });
+    }
   });
 });
 

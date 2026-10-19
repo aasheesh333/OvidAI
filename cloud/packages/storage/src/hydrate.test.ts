@@ -24,10 +24,11 @@ import {
   eventMirror as eventMirrorRepo,
   fileManifests as fileManifestsRepo,
   newId,
+  runs as runsRepo,
   sessions as sessionsRepo,
   workspaceObjects as workspaceObjectsRepo,
 } from "../../db/src/repos.js";
-import { users as usersTable } from "../../db/src/schema.js";
+import { users as usersTable, runs as runsTable } from "../../db/src/schema.js";
 import { createRedisEventLog } from "../../events/src/eventLog.js";
 
 import { createActivityTracker } from "./activity.js";
@@ -263,7 +264,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         clock: () => new Date(T0 + 200_000),
         fileManifests: fileManifestsRepo,
         workspaceObjects: workspaceObjectsRepo,
-        runs: { activeForSession: async () => null },
+        // Real repo: the fixture's single-session hibernate must also pass
+        // the cross-session guard (hasOtherWarmSession + activeForUserExcept).
+        runs: runsRepo,
         eventMirror: eventMirrorRepo,
         stuckHibernationScan: { listStuck: async () => [] },
       };
@@ -311,6 +314,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         activity,
         clock: () => new Date(opts.nowMs ?? T0),
         fileManifests: hydrateFileManifests,
+        // Real repo — the cross-session guard reads through it (liveSessionGuard).
+        runs: runsRepo,
         eventMirror: eventMirrorRepo,
       };
       return { deps, storage, activity };
@@ -447,6 +452,80 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       const h = makeHarness();
       const res = await hydrateWorkspace(h.deps, jobFor(uid, sid, 0));
       expect(res).toEqual({ status: "skipped", reason: "no_archive" });
+    });
+
+    // -- cross-session guard (P0: the per-USER workspace) --------------------
+    // workspaceDir is {root}/{uid}/workspace — ONE dir for EVERY session of
+    // the user — so the wipe-before-extract must refuse while a sibling
+    // session is live on it (warmLru.reclaimColdResidue's hazard, now
+    // enforced at the engine too).
+
+    it("rejects workspace_busy while a sibling session is warm; hydrates once it goes cold", async () => {
+      const uid = await seedUser();
+      const sidA = await seedSession(uid);
+      const sidB = await seedSession(uid);
+      const dir = workspaceDir(wsRoot, uid, sidA); // same dir for B (per-user)
+      await seedWorkspace(dir);
+      await seedWarmRow(uid, sidA);
+      const before = await snapshotTree(dir); // A's tree (pre-hibernate)
+      await hibernateFixture(uid, sidA); // A cold with a verified archive
+
+      // B re-warms the user's shared dir — a live sibling session.
+      await fileManifestsRepo.upsertWarm(db, { sessionId: sidB, userId: uid, workspaceBytes: 1 });
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "from-b.txt"), "written by live session B");
+      const liveTree = await snapshotTree(dir);
+
+      const h = makeHarness();
+      const err = await hydrateWorkspace(h.deps, jobFor(uid, sidA, 1), { workers: 1 }).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(WorkspaceStateError);
+      expect((err as WorkspaceStateError).code).toBe("workspace_busy");
+      // the sibling's live tree is UNTOUCHED and A's row never left cold
+      // (the guard runs before the beginHydration claim, so no stranded
+      // 'hydrating' row either)
+      expect(await snapshotTree(dir)).toEqual(liveTree);
+      expect(await manifestState(sidA)).toBe("cold");
+
+      // B goes cold and idle (its own hibernate landed; no active run) —
+      // now A's hydrate proceeds and restores A's archived tree.
+      await db.$client.unsafe(
+        `UPDATE file_manifests SET state = 'cold' WHERE session_id = $1`,
+        [sidB],
+      );
+      const res = await hydrateWorkspace(h.deps, jobFor(uid, sidA, 1), { workers: 1 });
+      expect(res.status).toBe("hydrated");
+      expect(await snapshotTree(dir)).toEqual(before);
+      expect(await manifestState(sidA)).toBe("warm");
+    });
+
+    it("rejects workspace_busy when a sibling session has a running run (no warm row)", async () => {
+      const uid = await seedUser();
+      const sidA = await seedSession(uid);
+      const sidB = await seedSession(uid);
+      const dir = workspaceDir(wsRoot, uid, sidA);
+      await seedWorkspace(dir);
+      await seedWarmRow(uid, sidA);
+      await hibernateFixture(uid, sidA); // dir gone, A cold
+
+      // B never hibernated (no row at all) but has an active run — its
+      // tools read/write the same per-user dir, so it is live.
+      await db.insert(runsTable).values({
+        id: newId(),
+        sessionId: sidB,
+        status: "running",
+        startedAt: new Date(),
+      });
+
+      const h = makeHarness();
+      const err = await hydrateWorkspace(h.deps, jobFor(uid, sidA, 1), { workers: 1 }).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(WorkspaceStateError);
+      expect((err as WorkspaceStateError).code).toBe("workspace_busy");
+      expect(await pathExists(dir)).toBe(false); // nothing was extracted
+      expect(await manifestState(sidA)).toBe("cold");
     });
 
     // -- crash remnant -------------------------------------------------------

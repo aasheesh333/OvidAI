@@ -62,6 +62,7 @@ import {
   findApplicableGrant,
   foldBoundaryFor,
   normalizeGrantHost,
+  parseModelEffort,
   presetById,
   resolveRoute,
   type AgentTransport,
@@ -152,7 +153,9 @@ import type { ToolContext, ToolResult } from "./tools/types.js";
  *                      — the cancelled variant (P8 Task 1) is emitted BOTH by
  *                      the gateway (queued-run cancel) and by this processor
  *                      (mid-stream abort after the throttled flag check).
- *   (the stale-run sweeper emits a third variant, {runId, code:"run_lost"} —
+ *   (the stale-run sweeper emits two further variants, both with runId —
+ *   {runId, code:"run_lost"} for crashed 'running' rows and
+ *   {runId, code:"run_queue_wait_timeout"} for queued C1-wait zombies —
  *   see staleRuns.ts)
  *
  * The FULL engine emits the P3 spellings (tool_started carries `args` and
@@ -726,7 +729,8 @@ function portBackedHandle(
 /**
  * The shared C1 gate: wait until this run is the oldest still-active run of
  * its session, bounded by runQueueWaitMs. Returns false when the cap was hit
- * (the failure event + run-row flip have already been emitted).
+ * OR the wait was cut short (the failure event + run-row flip have already
+ * been emitted by whoever owns that verdict — see the loop body).
  */
 async function waitForSessionTurn(o: {
   db: Db;
@@ -740,6 +744,27 @@ async function waitForSessionTurn(o: {
   for (;;) {
     const oldest = await runs.activeForSession(o.db, o.sessionId);
     if (oldest === null || oldest.id === o.runId) return true;
+    // Per-tick self check (wave-2 queued-zombie fix): `oldest` only proves
+    // SOMEONE is ahead of us — it says nothing about THIS run. Two external
+    // verdicts can land on the waiter while it polls:
+    //   * TERMINALIZED (gateway queued-cancel, stale-run sweeper): the row is
+    //     no longer queued|running and the terminal event is already theirs —
+    //     exit NOW, silently, or the slot burns the full 10-minute cap behind
+    //     a zombie `oldest` that will never flip.
+    //   * CANCEL REQUESTED (the gateway's "cancelling" verdict — the flag is
+    //     set but the job remove failed BECAUSE this worker holds it waiting):
+    //     exit via the same path a mid-stream cancel takes —
+    //     run_failed{cancelled} then the conditional 'cancelled' flip.
+    // ONE pk read per tick carries both halves (runs.statusAndCancel).
+    const self = await runs.statusAndCancel(o.db, o.runId);
+    if (self !== null && self.status !== "queued" && self.status !== "running") {
+      return false; // already terminalized elsewhere; the event is theirs, not ours
+    }
+    if (self?.cancelRequested === true) {
+      await o.emit("run_failed", { code: "cancelled", message: CANCELLED_MESSAGE });
+      await runs.finish(o.db, o.runId, "cancelled", CANCELLED_MESSAGE);
+      return false;
+    }
     if (Date.now() >= waitDeadline) {
       await o.emit("run_failed", { code: "run_queue_wait_timeout" });
       await runs.finish(o.db, o.runId, "failed", "run_queue_wait_timeout");
@@ -810,8 +835,14 @@ export function createAgentRunProcessor(
     // The wait is bounded by runQueueWaitMs. A waiting job occupies a worker
     // concurrency slot (deliberate: the alternative — requeueing — would
     // multiply BullMQ jobs per run); the 10-minute cap terminalizes waiters
-    // instead of deadlocking them. The run stays 'queued' while waiting, so
-    // the stale-run sweeper (which only sweeps 'running') never touches it.
+    // instead of deadlocking them. The run stays 'queued' while waiting: a
+    // LIVE waiter is invisible to the stale-run sweeper until it crosses the
+    // same threshold (staleRuns.ts then fails it with the identical
+    // run_queue_wait_timeout code), and a DEAD one — the worker crashed mid-
+    // wait — is exactly the queued zombie that sweeper half exists for.
+    // Each poll tick also re-checks the run's OWN status + cancel flag, so a
+    // waiter terminalized out from under it (gateway queued-cancel, sweeper)
+    // exits on the next tick instead of holding the slot the full cap.
     //
     // Terminal-event ordering: the previous run emits its terminal event
     // BEFORE its status flip (see the file header), and this loop unblocks
@@ -1131,6 +1162,12 @@ export function createAgentRunProcessor(
       ...(job.data.tier !== undefined ? { tier: job.data.tier } : {}),
       ...(job.data.attachmentIds !== undefined
         ? { attachmentIds: job.data.attachmentIds }
+        : {}),
+      // The Settings output cap rides the engine run exactly like the
+      // compat/full-path attachment fields: present only when the gateway
+      // forwarded one (the loop maps it onto every request's maxTokens).
+      ...(job.data.maxOutputTokens !== undefined
+        ? { maxOutputTokens: job.data.maxOutputTokens }
         : {}),
       ...(promptImages.length > 0 ? { promptImages } : {}),
     });
@@ -1559,6 +1596,27 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     const tier: "free" | "pro" = job.data.tier === "free" ? "free" : "pro";
     const runSandbox = deps.sandboxForTier?.(tier) ?? deps.sandbox;
 
+    // ---- session state snapshot (read ONCE per run) -----------------------
+    // Ruling R4's mode feed, the vision gate below and the prompt-hook
+    // evaluator all need the session's pinned state; a single read keeps the
+    // run self-consistent (the pin the gate judges is the pin this run
+    // composes against) and shrinks the gate's TOCTOU window to the
+    // snapshot-to-engine.run span.
+    //
+    // RESIDUAL WINDOW (accepted, documented): the loop re-reads state itself
+    // (loop.ts `deps.state.get`) before resolving the route, so a /model or
+    // preset switch landing between this snapshot and the engine's own read
+    // can still route to a model the gate never judged — and the gate's
+    // verdict can be stale for THIS run. Closing it fully would mean moving
+    // the capability question INTO the engine (coupling routing to capability
+    // policy); instead the window is bounded to this run's setup (attachment
+    // materialization, seconds at most) and the NEXT run re-gates on the
+    // fresh pin.
+    const sessionState = await state.get(sessionId);
+
+    /** Image attachments forwarded to the model (bounded; see the loop). */
+    const promptImages: AgentImage[] = [];
+
     // ---- attachments (never-silent) --------------------------------------
     // The compat path materializes into the attached workspace; the full
     // path needs a storage seam AND a P2 handle (host workspace). Without
@@ -1587,6 +1645,68 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
         await fail("attachment id has no attachment row for this session");
         return;
       }
+
+      // ---- Vision capability gate (owner directive 2026-10-18) ------------
+      // An image attachment is about to be sent to the model. A model that
+      // cannot see would either error mid-run or silently drop the visual
+      // context; either way the user pays for a broken run and finds out
+      // late. Refuse BEFORE any bytes move (this gate precedes the handle
+      // attach and every storage download), with copy they can act on, and
+      // push it so a backgrounded app still learns.
+      const imageRows = rows.filter((r) => imageMimeTypeFor(r.name) !== null);
+      if (imageRows.length > 0) {
+        // The effective model mirrors the engine's own `routeFor`
+        // (loop.ts → routing.ts resolveRoute): the session PRESET's G3 model
+        // pin outranks the /model pin, the effort suffix is stripped, and an
+        // absent/AUTO alias falls back to the fleet default exactly like
+        // `agentKeyFor`. Gating on `modelPin ?? defaultModel` alone would
+        // mis-gate a preset-driven session — the route the engine actually
+        // takes can come from the preset, and the audit's latent gap was
+        // exactly that divergence between the predicted and the routed model.
+        // (Today every built-in preset pins model:null, so in practice the
+        // /model pin decides — but the mirror keeps the gate honest the day
+        // a preset carries a model.)
+        const preset = presetById(sessionState.presetId);
+        const presetModel = preset === null ? null : preset.model;
+        const winnerRaw =
+          presetModel != null && presetModel.trim() !== ""
+            ? presetModel
+            : (sessionState.modelPin ?? "");
+        const { model: requested } = parseModelEffort(winnerRaw);
+        const model =
+          requested === "" || (AUTO_ALIASES as readonly string[]).includes(requested)
+            ? deps.defaultModel
+            : requested;
+        const catalog =
+          deps.modelCatalog === undefined ? null : await deps.modelCatalog().catch(() => null);
+        const decision = modelVisionSupport(model, catalog);
+        if (!decision.supports) {
+          const message = visionRefusalMessage(model);
+          await sink.emit("run_failed", {
+            code: "model_no_vision",
+            message,
+            model,
+            basis: decision.basis,
+            imageCount: imageRows.length,
+          });
+          await runs.finish(deps.db, runId, "failed", "model_no_vision");
+          // Best-effort: a push failure must never change the run outcome.
+          // ScheduleRunRef carries no title, and this path has no session row
+          // in hand. The notifier's generic title applies; the actionable
+          // copy is in the body either way.
+          await deps.notifier
+            ?.notifyAgentFailed({
+              userId,
+              sessionId,
+              sessionTitle: "",
+              code: "model_no_vision",
+              message,
+            })
+            .catch(() => {});
+          return;
+        }
+      }
+
       const handle = await deps.sandboxHandleFor(userId, tier);
       const uploadsDir = join(handle.workspaceDir, "uploads");
       await mkdir(uploadsDir, { recursive: true });
@@ -1596,12 +1716,23 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
           await fail(`attachment object not found: ${row.r2Key}`);
           return;
         }
+        // An image the model must SEE (owner directive 2026-10-18): the
+        // bytes ride the prompt as content parts, and the file also lands in
+        // the workspace so tools can still open it by path. Bounded — an
+        // unbounded base64 payload would blow the request size and the
+        // provider's own limits.
+        const mime = imageMimeTypeFor(row.name);
+        if (mime !== null && promptImages.length < MAX_PROMPT_IMAGES) {
+          const total = promptImages.reduce((n, i) => n + i.dataBase64.length, 0);
+          if (total + buffer.length * 4 / 3 <= MAX_PROMPT_IMAGE_BYTES) {
+            promptImages.push({ mimeType: mime, dataBase64: buffer.toString("base64") });
+          }
+        }
         await writeFile(join(uploadsDir, sanitizeAttachmentName(row.name)), buffer);
       }
     }
 
     // ---- mode feeding (ruling R4): job.mode ?? state.mode ?? "auto" ------
-    const sessionState = await state.get(sessionId);
     const mode = job.data.mode ?? sessionState.mode ?? "auto";
 
     // ---- Task 17/18/19 (T16 review I4): the real per-run engines ---------
@@ -1874,6 +2005,17 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       ...(job.data.tier !== undefined ? { tier: job.data.tier } : {}),
       ...(job.data.attachmentIds !== undefined
         ? { attachmentIds: job.data.attachmentIds }
+        : {}),
+      // The vision gate's payload (owner directive 2026-10-18): the bounded
+      // image set rides the run exactly as the compat path passes it, and the
+      // loop binds it to the current turn's user message as content parts.
+      ...(promptImages.length > 0 ? { promptImages } : {}),
+      // The Settings output cap, threaded exactly like promptImages: the
+      // gateway-validated pick (int 1..8192) reaches the loop's buildRequest
+      // as AgentRequest.maxTokens and the transports as max_tokens. Absent =
+      // the provider's own default.
+      ...(job.data.maxOutputTokens !== undefined
+        ? { maxOutputTokens: job.data.maxOutputTokens }
         : {}),
       // P4 Task 10: a scheduler-fired job carries `schedule`; that run has no
       // attending user, so it is unattended even though the scheduler's

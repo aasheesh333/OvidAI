@@ -243,6 +243,21 @@ export async function freeCapRemaining(deps: MintDeps, uid: string): Promise<num
   return Math.max(0, (await freeCapUsd(deps, uid)) - (await monthSpent(deps, uid)));
 }
 
+/**
+ * The monthly backstop's reset instant: LiteLLM's per-user budget clock
+ * (`user_info.budget_reset_at`) — the SAME 30-day clock userBudgetTarget arms
+ * for the free plan (cap over 30d), so when that budget is spent up it is
+ * this stamp the client counts down to. Null when LiteLLM reports no clock
+ * (user unknown, outage, budget never armed) or an unparseable stamp — the
+ * 402 then carries no x-ovid-resets-at and the client shows no countdown.
+ */
+export async function freeCapResetAt(deps: MintDeps, uid: string): Promise<Date | null> {
+  const raw = (await deps.litellm.userInfo(uid))?.budget_reset_at ?? null;
+  if (raw === null) return null;
+  const ms = Date.parse(raw);
+  return Number.isNaN(ms) ? null : new Date(ms);
+}
+
 async function tierBudgetWith(
   deps: MintDeps,
   uid: string,

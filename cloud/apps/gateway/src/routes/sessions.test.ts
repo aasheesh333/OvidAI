@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { newId, type Db } from "@ovid/db";
+import { eventMirror, messages, newId, runs, sessions, users, type Db } from "@ovid/db";
+import type { EventLog } from "@ovid/events";
+import type { QueueServices } from "@ovid/queue";
 import { pageSchema, sessionDtoSchema, type Page, type SessionDto } from "@ovid/shared";
 import { buildGateway } from "../app.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
@@ -430,6 +432,203 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway session routes (real postgres)", ()
     expect(sessionDtoSchema.parse(after.json()).title).toBe("mine");
   });
 
+  it("DELETE /sessions/:id → 204; GET 404s and the list hides the row (soft delete)", async () => {
+    const owner = testUid("sess-del");
+    const keep = await createSession(owner, "keep");
+    const doomed = await createSession(owner, "doomed");
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/cloud/v1/sessions/${doomed.id}`,
+      headers: authHeaders(owner),
+    });
+    expect(res.statusCode).toBe(204);
+    expect(res.body).toBe("");
+
+    // Soft delete, not a drop: the row (and its history) stays, but every
+    // read path filters deleted_at IS NULL.
+    const rows = await db.$client.unsafe(
+      "SELECT deleted_at FROM sessions WHERE id = $1",
+      [doomed.id],
+    );
+    expect(rows.length).toBe(1);
+    expect((rows[0] as unknown as { deleted_at: Date | null }).deleted_at).not.toBeNull();
+
+    const get = await app.inject({
+      method: "GET",
+      url: `/cloud/v1/sessions/${doomed.id}`,
+      headers: authHeaders(owner),
+    });
+    expect(get.statusCode).toBe(404);
+    expect(get.json().error.code).toBe("not_found");
+
+    // The list answers only the surviving session.
+    const list = await app.inject({
+      method: "GET",
+      url: "/cloud/v1/sessions",
+      headers: authHeaders(owner),
+    });
+    expect(sessionPage.parse(list.json()).items.map((s) => s.id)).toEqual([keep.id]);
+
+    // PATCH on a deleted id is the same 404 (the update filters deleted_at).
+    const patch = await app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/sessions/${doomed.id}`,
+      headers: authHeaders(owner),
+      payload: { title: "zombie" },
+    });
+    expect(patch.statusCode).toBe(404);
+
+    // Idempotent delete discipline: deleting it AGAIN answers the same 404
+    // the unknown-id path does — no existence leak, never a 500.
+    const again = await app.inject({
+      method: "DELETE",
+      url: `/cloud/v1/sessions/${doomed.id}`,
+      headers: authHeaders(owner),
+    });
+    expect(again.statusCode).toBe(404);
+    expect(again.json().error.code).toBe("not_found");
+  });
+
+  it("DELETE /sessions/:id wrong owner, unknown id, malformed id → the identical 404 (never 403/500)", async () => {
+    const owner = testUid("sess-del-404");
+    const stranger = testUid("sess-del-stranger");
+    const created = await createSession(owner, "mine");
+
+    const theirs = await app.inject({
+      method: "DELETE",
+      url: `/cloud/v1/sessions/${created.id}`,
+      headers: authHeaders(stranger),
+    });
+    expect(theirs.statusCode).toBe(404); // existence leak rule: 404, NOT 403
+
+    const unknown = await app.inject({
+      method: "DELETE",
+      url: `/cloud/v1/sessions/${newId()}`,
+      headers: authHeaders(owner),
+    });
+    expect(unknown.statusCode).toBe(404);
+    // Identical envelope — no existence leak between wrong-owner and unknown.
+    expect(theirs.json()).toEqual(unknown.json());
+    expect(theirs.json().error.code).toBe("not_found");
+
+    for (const bad of ["not-a-uuid", "1234567"]) {
+      const res = await app.inject({
+        method: "DELETE",
+        url: `/cloud/v1/sessions/${bad}`,
+        headers: authHeaders(owner),
+      });
+      expect(res.statusCode, bad).toBe(404);
+      expect(res.statusCode, `${bad} must never be a 500`).not.toBe(500);
+      expect(res.json().error.code).toBe("not_found");
+      expect(res.json().error.message).toBe("Session not found.");
+    }
+
+    // The 404 probes touched nothing.
+    const after = await app.inject({
+      method: "GET",
+      url: `/cloud/v1/sessions/${created.id}`,
+      headers: authHeaders(owner),
+    });
+    expect(after.statusCode).toBe(200);
+    expect(sessionDtoSchema.parse(after.json()).title).toBe("mine");
+  });
+
+  it("DELETE /sessions/:id with an active run → 204 and the run is cancelled", async () => {
+    // Local stubs (runs.test.ts pattern): the shared describe app's
+    // stubQueues has no agentRuns.remove, which would degrade the cancel to
+    // "cancelling"; this test pins the full queued-run terminalization.
+    const removes: string[] = [];
+    const appended: unknown[] = [];
+    // Unique seq per append — the mirror's PK is (session_id, seq).
+    let seq = 0;
+    const queues = {
+      agentRuns: {
+        add: async () => ({ id: "", name: "", data: undefined }),
+        remove: async (jobId: string) => {
+          removes.push(jobId);
+        },
+        client: Promise.resolve({ ping: async () => "PONG" }),
+      },
+    } as unknown as QueueServices;
+    const events = {
+      async append(sessionId: string, type: string, payload: Record<string, unknown>) {
+        const event = { sessionId, seq: `${++seq}-0`, type, payload, ts: new Date() };
+        appended.push(event);
+        return event;
+      },
+    } as unknown as EventLog;
+    const runApp = buildGateway({
+      system: stubSystemBus(),
+      db,
+      queues,
+      verifier: stubVerifier(),
+      tickets: stubTickets(),
+      keys: stubKeys(),
+      mint: stubMint(),
+      events,
+    });
+    try {
+      // Seed exactly what POST /messages leaves: user + session + prompt + a
+      // QUEUED run (plus a second still-active run — both must be cancelled).
+      const uid = testUid("sess-del-run");
+      await users.ensure(db, uid, `${uid}@stub.test`);
+      const session = await sessions.create(db, uid, "busy");
+      const prompt = await messages.append(db, {
+        sessionId: session.id,
+        role: "user",
+        content: "cancel me",
+      });
+      const run = await runs.create(db, {
+        sessionId: session.id,
+        promptMessageId: prompt.id,
+      });
+      const prompt2 = await messages.append(db, {
+        sessionId: session.id,
+        role: "user",
+        content: "and me",
+      });
+      const run2 = await runs.create(db, {
+        sessionId: session.id,
+        promptMessageId: prompt2.id,
+      });
+
+      const res = await runApp.inject({
+        method: "DELETE",
+        url: `/cloud/v1/sessions/${session.id}`,
+        headers: authHeaders(uid),
+      });
+      expect(res.statusCode).toBe(204);
+
+      // Both queued runs were terminalized with the cancelled verdict —
+      // the same run_failed{cancelled} the POST cancel route emits.
+      expect(removes.sort()).toEqual([run.id, run2.id].sort());
+      const rows = await db.$client.unsafe(
+        "SELECT status, last_error FROM runs WHERE session_id = $1 ORDER BY id",
+        [session.id],
+      );
+      for (const row of rows as unknown as Array<{ status: string; last_error: string | null }>) {
+        expect(row.status).toBe("cancelled");
+        expect(row.last_error).toBe("Stopped by user.");
+      }
+      expect(appended).toHaveLength(2);
+
+      // The run-failed events are mirrored exactly like the worker does.
+      const mirrored = await eventMirror.readSince(db, session.id, null, 50);
+      expect(mirrored.map((e) => e.type)).toEqual(["run_failed", "run_failed"]);
+
+      // And the session itself is soft-deleted.
+      const after = await runApp.inject({
+        method: "GET",
+        url: `/cloud/v1/sessions/${session.id}`,
+        headers: authHeaders(uid),
+      });
+      expect(after.statusCode).toBe(404);
+    } finally {
+      await runApp.close();
+    }
+  });
+
   it("all session routes answer 401 unauthenticated with the Task 6 envelope", async () => {
     const uid = testUid("sess-401");
     const created = await createSession(uid);
@@ -438,6 +637,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway session routes (real postgres)", ()
       { method: "GET" as const, url: "/cloud/v1/sessions" },
       { method: "GET" as const, url: `/cloud/v1/sessions/${created.id}` },
       { method: "PATCH" as const, url: `/cloud/v1/sessions/${created.id}`, payload: { title: "x" } },
+      { method: "DELETE" as const, url: `/cloud/v1/sessions/${created.id}` },
     ];
     for (const req of requests) {
       const res = await app.inject({ ...req, headers: {} });

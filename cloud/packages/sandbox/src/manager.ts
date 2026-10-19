@@ -37,7 +37,7 @@ import type { ExecRequest, ExecResult, JailContext } from "./types.js";
 const MB = 1024 * 1024;
 const GB = 1024 * 1024 * 1024;
 
-/** Workspace quota tier label: "free" or anything-else-is-"pro" (attach rule). */
+/** Workspace quota tier label: explicit "pro", anything-else-is-"free" (least-privilege attach rule). */
 type WorkspaceTier = "free" | "pro";
 
 /**
@@ -146,8 +146,11 @@ export interface SandboxManagerDeps {
 
 interface ManagedHandle extends SandboxHandle {
   readonly createdAt: Date;
-  /** Task 8 review F1 carry: the tier this env's workspace quota was applied with. */
-  readonly tier: WorkspaceTier;
+  /**
+   * Task 8 review F1 carry: the tier this env's workspace quota was applied
+   * with. Mutable: an upgrade-on-reattach (free→pro) rewrites it.
+   */
+  tier: WorkspaceTier;
   /** Task 9: kill every live leaf of this env (ptys/jobs/spawned) — FIRST. */
   killLeaves(): Promise<void>;
 }
@@ -326,9 +329,10 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
       for (const d of createdDirs) await chown(d, uid, uid);
 
       // Quotas: workspace tier-scoped, package cache fixed (byte math pinned:
-      // MB × 2^20). Tier: free → workspaceQuotaMb, anything else →
-      // proWorkspaceQuotaMb.
-      const tierLabel: WorkspaceTier = tier === "free" ? "free" : "pro";
+      // MB × 2^20). Tier: pro → proWorkspaceQuotaMb, anything else (incl. a
+      // no-tier attach — the ptyBridge shape) → the FREE workspaceQuotaMb —
+      // least privilege, the same rule workspaceDirFor applies below.
+      const tierLabel: WorkspaceTier = tier === "pro" ? "pro" : "free";
       const quotaMb = tierLabel === "free" ? config.workspaceQuotaMb : config.proWorkspaceQuotaMb;
       await quota.applyQuota(workspaceDir, workspaceProjectId(uid), quotaMb * MB);
       await quota.applyQuota(cacheDir, cacheProjectId(uid), config.storeQuotaMb * MB);
@@ -424,7 +428,23 @@ export function createSandboxManager(deps: SandboxManagerDeps): SandboxManager {
     opts?: { tier?: "free" | "pro" },
   ): Promise<SandboxHandle> {
     const existing = handles.get(userId);
-    if (existing !== undefined) return existing;
+    if (existing !== undefined) {
+      // Task 8 review F1 carry: a tier change on a LIVE env re-asserts the
+      // workspace quota only UPWARD (free→pro raises the project limit and
+      // the record). A lower requested tier would DOWNGRADE a live pro
+      // project — never; the recorded tier wins, the same rule
+      // workspaceDirFor applies below.
+      if (opts?.tier === "pro" && existing.tier === "free") {
+        await quota.applyQuota(
+          existing.workspaceDir,
+          workspaceProjectId(existing.uid),
+          config.proWorkspaceQuotaMb * MB,
+        );
+        existing.tier = "pro";
+        tierByUid.set(existing.uid, "pro");
+      }
+      return existing;
+    }
     const pending = inFlight.get(userId);
     if (pending !== undefined) return pending;
     const p = doAttach(userId, opts?.tier).finally(() => {

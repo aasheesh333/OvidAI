@@ -21,6 +21,7 @@ import {
   dropUsageCache,
   effectiveTier,
   freeCapRemaining,
+  freeCapResetAt,
   freeCapUsd,
   hookSpend,
   monthSpent,
@@ -197,6 +198,25 @@ describe.skipIf(!RUN)("window machinery (windows.ts)", () => {
       fake.failUserInfo = false;
     }
     expect(await monthSpent(deps, testUid("win-nouser"))).toBe(0);
+  });
+
+  it("freeCapResetAt reads the LiteLLM user budget clock; absent/garbage → null", async () => {
+    const uid = testUid("win-resetat");
+    fake.users.set(uid, {
+      spend: 2.5,
+      budget_duration: "30d",
+      budget_reset_at: "2026-11-01T08:09:10.500000Z",
+    });
+    expect((await freeCapResetAt(deps, uid))?.toISOString()).toBe("2026-11-01T08:09:10.500Z");
+
+    // LiteLLM reports no clock for the user (budget_reset_at: null).
+    fake.users.set(uid, { spend: 2.5, budget_duration: "30d", budget_reset_at: null });
+    expect(await freeCapResetAt(deps, uid)).toBeNull();
+    // User unknown → userInfo maps to null → no reset.
+    expect(await freeCapResetAt(deps, testUid("win-resetat-nouser"))).toBeNull();
+    // An unparseable stamp must never become a bogus countdown.
+    fake.users.set(uid, { spend: 2.5, budget_duration: "30d", budget_reset_at: "not-a-date" });
+    expect(await freeCapResetAt(deps, uid)).toBeNull();
   });
 
   it("tierBudget / userBudgetTarget: free uses the monthly cap and 30d", async () => {

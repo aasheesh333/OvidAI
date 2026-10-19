@@ -12,9 +12,15 @@
  *     probe navigates the page — the engine must not clobber user content),
  *   - viewer_leave ⇒ frames go quiet and screencastCount()===0,
  *   - input through the peer ⇒ the /click fixture flips to CLICKED (the full
- *     injection path, arrival-ordered),
+ *     injection path, arrival-ordered) — under takeover, the only state in
+ *     which the engine accepts viewer input,
+ *   - input WITHOUT takeover ⇒ dropped server-side: #out never flips until
+ *     the flag is set (exclusivity lives in the engine, not the client),
  *   - takeover ctl ⇒ registry flag + a tool call returns exactly
  *     TAKEOVER_REFUSAL,
+ *   - takeover + last viewer leaving ⇒ the flag releases (a subsequent tool
+ *     is NOT refused) and the release is published — the bridge's stale
+ *     sweep funnels through the same onViewersChange(0),
  *   - state publish includes url/title after browser_open via engine.tools,
  *   - idle eviction (injected clock + idleEvictMs:200) ⇒ {live:false} to the
  *     peer AND the persistence stub received the login_tok cookie state
@@ -308,7 +314,7 @@ describe.skipIf(!GATED)("BrowserEngine facade (real redis + chromium, harness pl
     expect(frameTap.received).toBe(atStop);
   });
 
-  it("input through the peer flips the /click fixture to CLICKED (end-to-end injection, arrival-ordered)", async () => {
+  it("input under takeover flips the /click fixture to CLICKED (end-to-end injection, arrival-ordered)", async () => {
     const sid = randomUUID();
     const stateTap = await openStateTap(sid);
     rig = await mkEngine();
@@ -323,12 +329,48 @@ describe.skipIf(!GATED)("BrowserEngine facade (real redis + chromium, harness pl
     // runs the webp probe, which navigates the page to its inline fixture and
     // back — the real client likewise waits for browser_state before input.
     await stateTap.waitForState((s) => s.screencast === true, 10_000);
+    // The engine only accepts viewer input under takeover — the client
+    // contract (input gates on the flag) pinned end to end.
+    await gw.publish(browserCtlChannel(sid), takeoverMsg(true));
+    await waitFor("registry takeover flag", () => rig!.engine.registry.get(sid)?.takeover === true);
 
     // #btn sits at left:20 top:20, 100x40 — (60, 40) is inside it.
     await gw.publish(browserInputChannel(sid), JSON.stringify({ type: "tap", x: 60, y: 40 }));
     const page = rig.engine.registry.activePage(sid)!;
     await waitFor(
       "#out === CLICKED",
+      async () => (await page.evaluate(() => document.getElementById("out")?.textContent)) === "CLICKED",
+    );
+  });
+
+  it("input without takeover is dropped server-side: #out never flips until the flag is set", async () => {
+    const sid = randomUUID();
+    const stateTap = await openStateTap(sid);
+    rig = await mkEngine();
+
+    await rig.engine.openSession(sid, "u1");
+    await tool(rig.engine, "browser_open").execute(
+      { url: server.url("/click") },
+      { sessionId: sid, userId: "u1" },
+    );
+    await gw.publish(browserCtlChannel(sid), joinMsg("v1"));
+    await stateTap.waitForState((s) => s.screencast === true, 10_000);
+
+    // A buggy or older client injects mid-automation (no takeover flag): the
+    // agent owns the page, so the engine must drop the event — the fixture
+    // flips synchronously on a real tap, so a quiet page proves the drop.
+    await gw.publish(browserInputChannel(sid), JSON.stringify({ type: "tap", x: 60, y: 40 }));
+    const page = rig.engine.registry.activePage(sid)!;
+    await sleep(600);
+    expect(await page.evaluate(() => document.getElementById("out")?.textContent)).not.toBe("CLICKED");
+
+    // The SAME event under takeover lands — the earlier silence was the
+    // flag, not a broken injection path.
+    await gw.publish(browserCtlChannel(sid), takeoverMsg(true));
+    await waitFor("registry takeover flag", () => rig!.engine.registry.get(sid)?.takeover === true);
+    await gw.publish(browserInputChannel(sid), JSON.stringify({ type: "tap", x: 60, y: 40 }));
+    await waitFor(
+      "#out === CLICKED after takeover",
       async () => (await page.evaluate(() => document.getElementById("out")?.textContent)) === "CLICKED",
     );
   });
@@ -351,6 +393,41 @@ describe.skipIf(!GATED)("BrowserEngine facade (real redis + chromium, harness pl
 
     const result = await tool(rig.engine, "browser_read").execute({}, { sessionId: sid, userId: "u1" });
     expect(result.content).toBe(TAKEOVER_REFUSAL);
+  });
+
+  it("the last viewer leaving releases takeover: flag false, release published, a subsequent tool is NOT refused", async () => {
+    const sid = randomUUID();
+    const tap = await openStateTap(sid);
+    rig = await mkEngine();
+
+    await rig.engine.openSession(sid, "u1");
+    await tool(rig.engine, "browser_open").execute(
+      { url: server.url("/") },
+      { sessionId: sid, userId: "u1" },
+    );
+    await gw.publish(browserCtlChannel(sid), joinMsg("v1"));
+    await gw.publish(browserCtlChannel(sid), takeoverMsg(true));
+    await tap.waitForState((s) => s.takeover === true);
+    const flagAt = tap.states.findIndex((s) => s.takeover === true);
+
+    // A mid-takeover disconnect (no takeover:false ctl ever arrives): the
+    // viewer just leaves. The flag must release on its own — otherwise every
+    // browser_* tool stays refused until idle eviction destroys the session.
+    await gw.publish(browserCtlChannel(sid), leaveMsg("v1"));
+    await waitFor(
+      "registry takeover flag released",
+      () => rig!.engine.registry.get(sid)?.takeover === false,
+    );
+    // The release is published too — a state AFTER the takeover:true one
+    // carries takeover:false, mirroring onTakeover's own publish.
+    await waitFor(
+      "a post-takeover state with takeover:false",
+      () => tap.states.slice(flagAt + 1).some((s) => s.takeover === false),
+    );
+
+    const result = await tool(rig.engine, "browser_read").execute({}, { sessionId: sid, userId: "u1" });
+    expect(result.content).not.toBe(TAKEOVER_REFUSAL);
+    expect(result.content.length).toBeGreaterThan(0);
   });
 
   it("state publish includes url/title after browser_open via engine.tools", async () => {

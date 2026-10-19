@@ -49,6 +49,7 @@ import { readIndex } from "./archive/readIndex.js";
 import { uiTree } from "./archive/uiTree.js";
 import { StorageError } from "./errors.js";
 import { r2Keys } from "./keys.js";
+import { anotherLiveSessionOfUser } from "./liveSessionGuard.js";
 import { openReader } from "./rangeReader.js";
 import { resolveWorkspaceDir, type SandboxUidResolver } from "./workspacePaths.js";
 
@@ -162,6 +163,16 @@ export interface FileManifestsRepo {
   ): Promise<void>;
   markWarm(db: DbLike, i: { sessionId: string; workspaceBytes: number | null }): Promise<void>;
   remove(db: DbLike, sessionId: string): Promise<void>;
+  /**
+   * Cross-session liveness guard, the file_manifests half (see
+   * liveSessionGuard.ts): true iff another session of the user holds a WARM
+   * row. The real @ovid/db repo gained this method with the guard.
+   */
+  hasOtherWarmSession(
+    db: DbLike,
+    userId: string,
+    exceptSessionId: string,
+  ): Promise<boolean>;
 }
 
 /** Mirror of @ovid/db's `workspaceObjects` repo namespace (T6 ruling shape). */
@@ -186,6 +197,16 @@ export interface WorkspaceObjectsRepo {
 /** Mirror of @ovid/db's `runs` repo namespace (null = no queued|running run). */
 export interface RunsRepo {
   activeForSession(db: DbLike, sessionId: string): Promise<unknown>;
+  /**
+   * Cross-session liveness guard, the runs half (see liveSessionGuard.ts):
+   * the user's oldest queued|running run on any OTHER session, or null. The
+   * real @ovid/db repo gained this method with the guard.
+   */
+  activeForUserExcept(
+    db: DbLike,
+    userId: string,
+    exceptSessionId: string,
+  ): Promise<unknown>;
 }
 
 /** Mirror of @ovid/db's `eventMirror` repo namespace. */
@@ -250,7 +271,13 @@ export interface HibernateDeps {
 
 export interface HibernateResult {
   status: "hibernated" | "skipped";
-  reason?: "not_warm" | "stale_generation" | "active_run" | "recent_activity" | "already_cold";
+  reason?:
+    | "not_warm"
+    | "stale_generation"
+    | "active_run"
+    | "recent_activity"
+    | "already_cold"
+    | "workspace_busy";
   generation?: number;
   archiveBytes?: number;
   ms?: number;
@@ -391,6 +418,18 @@ export async function hibernateWorkspace(
   const activeRun = await deps.runs.activeForSession(deps.db, job.sessionId);
   if (activeRun !== null) {
     return { status: "skipped", reason: "active_run" };
+  }
+  // P0 cross-session guard (AG1's user-scoped extension): the agent workspace
+  // is PER-USER — `{root}/{uid}/workspace` is shared by EVERY session of the
+  // user — so packing+evicting it for THIS session would destroy the live
+  // workspace of a sibling session (a WARM row or an active run). The same
+  // rule warmLru.reclaimColdResidue enforces for its own rm; here it runs in
+  // the verify phase, BEFORE the claim/pack/rm, so a busy workspace is a
+  // clean skip (row and dir untouched) the sweeper can re-enqueue later.
+  // Deliberately NOT exempted by reason "manual": the manual exemption only
+  // bypasses the idle heuristic, never a data-loss guard.
+  if (await anotherLiveSessionOfUser(deps.db, deps, job.userId, job.sessionId)) {
+    return { status: "skipped", reason: "workspace_busy" };
   }
   // The user came back: a fresh activity key beats the idle threshold. (A
   // missing key is UNKNOWN, not "long ago" — the sweeper's enqueue-side rule

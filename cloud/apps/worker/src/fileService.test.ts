@@ -152,6 +152,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         inlineMaxBytes: INLINE_MAX,
         port: 0,
         fileManifests: fileManifestsRepo,
+        runs: runsRepo,
         eventMirror: eventMirrorRepo,
         workspaceObjects: workspaceObjectsRepo,
         ...overrides,

@@ -387,13 +387,15 @@ describe("security — command-policy denylist (layer 1, portable)", () => {
     ).not.toMatch(rulePattern(prefix));
   });
 
-  it("documents the layer-1 boundaries (env indirection / base64) instead of pretending they are static", () => {
+  it("documents the layer-1 boundary (base64) instead of pretending it is static", () => {
     recordSecurityRun();
     expect(LAYER2_DENYLIST_CORPUS.length).toBeGreaterThan(0);
     for (const c of LAYER2_DENYLIST_CORPUS) {
-      // These are NOT statically decidable; the in-jail PATH shims are the
-      // defense (proven by the gated execution group). A regression that
-      // starts blocking them at layer 1 would be a false-positive change.
+      // Base64 payloads are NOT statically decodable; the in-jail PATH shims
+      // are the defense (proven by the gated execution group). A regression
+      // that starts blocking them at layer 1 would be a false-positive
+      // change. (Variable indirection moved to the layer-1 corpus with the
+      // 2026-10-18 evasion fix: `$`-headed segments are now refused.)
       expect(
         classifyCommand(c.command).allowed,
         `${c.id}: ${JSON.stringify(c.command)} is a documented layer-2 boundary`,

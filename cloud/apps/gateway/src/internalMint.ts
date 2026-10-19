@@ -16,9 +16,10 @@ import { DEFAULT_MINT_TIMEOUT_MS } from "./keys.js";
  * the auth hook has already established it, and no client credential crosses
  * this boundary.
  *
- * Non-2xx responses throw MintInternalError with the status and parsed body
- * preserved so the messages route can relay billing/rate-limit envelopes
- * (402/429) verbatim.
+ * Non-2xx responses throw MintInternalError with the status, parsed body and
+ * response headers (names lowercased) preserved so the messages route can
+ * relay billing/rate-limit verdicts (402/429) re-enveloped for the thin
+ * client — forwarding any `x-ovid-resets-at` the mint attached.
  */
 export function createInternalMintProvisioner(
   baseUrl: string,
@@ -66,7 +67,14 @@ export function createInternalMintProvisioner(
         }
       }
       if (!res.ok) {
-        throw new MintInternalError(res.status, parsed);
+        // Headers ride along (lowercased names — fetch already normalizes,
+        // toLowerCase is belt-and-braces) so a relayed 402 can forward the
+        // mint's `x-ovid-resets-at` to the client.
+        const headers: Record<string, string> = {};
+        res.headers.forEach((value, name) => {
+          headers[name.toLowerCase()] = value;
+        });
+        throw new MintInternalError(res.status, parsed, headers);
       }
 
       const key = (parsed as { key?: unknown } | null)?.key;

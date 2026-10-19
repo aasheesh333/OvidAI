@@ -8,11 +8,13 @@
  * - `expect: "layer1"` — P2's string-level interceptor
  *   (`checkCommandPolicy`) must refuse it with the exact §7 copy. This half
  *   runs on ANY host (no bwrap/cgroups needed) and is never skipped.
- * - `expect: "layer2"` — a documented layer-1 boundary: variable indirection
- *   (`G=gradle; $G build`) and base64 (`echo … | base64 -d | sh`) are not
- *   statically decidable, so only the rootfs PATH shims stop them. These
- *   entries are asserted ALLOWED at layer 1 and exercised in-jail by the
- *   gated execution test.
+ *   Variable indirection (`G=gradle; $G build`) lives here since the
+ *   2026-10-18 evasion fix: a `$`-headed segment is refused outright
+ *   because the head word's resolution is opaque to a static pass.
+ * - `expect: "layer2"` — a documented layer-1 boundary: base64
+ *   (`echo … | base64 -d | sh`) is not statically decodable, so only the
+ *   rootfs PATH shims stop it. These entries are asserted ALLOWED at
+ *   layer 1 and exercised in-jail by the gated execution test.
  *
  * `./gradlew` and the bare Gradle task words are layer-1-only: layer 2 is a
  * PATH shim, and `./gradlew` is a path, not a PATH lookup. The shim roster
@@ -183,9 +185,22 @@ function buildCorpus(): DenylistCase[] {
           : {}),
       });
     }
-    // Documented layer-1 boundaries (only meaningful for runnable shims).
+    // Variable indirection (`G=…; $G`) was a documented layer-1 boundary
+    // until the 2026-10-18 evasion fix: layer 1 now refuses any `$`-headed
+    // segment (the head word is opaque to a static pass), so the form is
+    // asserted blocked here. It stays an execution case: written to a file
+    // and run in-jail, the PATH shims must still refuse it.
     if (spec.execution) {
-      for (const form of ["env-indirection", "base64"] as const) {
+      cases.push({
+        id: `${spec.id}/env-indirection`,
+        base: spec.command,
+        form: "env-indirection",
+        command: commandFor("env-indirection", spec.command, spec.head),
+        expect: "layer1",
+        execution: true,
+        executionCommand: executionCommandFor("env-indirection", spec.command, spec.head),
+      });
+      for (const form of ["base64"] as const) {
         cases.push({
           id: `${spec.id}/${form}`,
           base: spec.command,

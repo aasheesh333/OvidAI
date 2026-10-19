@@ -473,6 +473,53 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(h.evictCalls).toHaveLength(0);
     });
 
+    // -- cross-session guard (P0: the per-USER workspace) --------------------
+    // workspaceDir is {root}/{uid}/workspace — ONE dir for EVERY session of
+    // the user — so hibernating session A must not pack+evict the dir while
+    // a sibling session of the same user is live on it.
+
+    it("skips workspace_busy: a warm sibling session keeps the shared dir (row untouched, no pack)", async () => {
+      const uid = await seedUser();
+      const sidA = await seedSession(uid);
+      const sidB = await seedSession(uid);
+      const dir = workspaceDir(wsRoot, uid, sidA); // same dir for B (per-user)
+      await seedWorkspace(dir);
+      await seedWarmRow(uid, sidA);
+      await seedWarmRow(uid, sidB); // the sibling is live
+
+      const h = makeHarness({ nowMs: T0 + 200_000 });
+      const res = await hibernateWorkspace(h.deps, jobFor(uid, sidA, 1));
+
+      expect(res).toEqual({ status: "skipped", reason: "workspace_busy" });
+      // verify-phase skip: no eviction, no pack, no upload, row still warm,
+      // and the sibling's live dir is fully intact
+      expect(h.evictCalls).toHaveLength(0);
+      expect(h.opsLog).toHaveLength(0);
+      expect(await pathExists(dir)).toBe(true);
+      expect(await readFile(join(dir, "a.txt"), "utf8")).toBe(A_TXT);
+      expect((await fileManifestsRepo.get(db, sidA))!.state).toBe("warm");
+      expect((await fileManifestsRepo.get(db, sidB))!.state).toBe("warm");
+    });
+
+    it("skips workspace_busy when a sibling session has a queued run (no warm row)", async () => {
+      const uid = await seedUser();
+      const sidA = await seedSession(uid);
+      const sidB = await seedSession(uid);
+      const dir = workspaceDir(wsRoot, uid, sidA);
+      await seedWorkspace(dir);
+      await seedWarmRow(uid, sidA);
+      // B never registered a row but holds a queued run — live on the dir.
+      await db.insert(runsTable).values({ id: newId(), sessionId: sidB, status: "queued" });
+
+      const h = makeHarness({ nowMs: T0 + 200_000 });
+      const res = await hibernateWorkspace(h.deps, jobFor(uid, sidA, 1));
+
+      expect(res).toEqual({ status: "skipped", reason: "workspace_busy" });
+      expect(h.evictCalls).toHaveLength(0);
+      expect(await pathExists(dir)).toBe(true);
+      expect((await fileManifestsRepo.get(db, sidA))!.state).toBe("warm");
+    });
+
     it("skips recent_activity: a bump 10 s old beats the 3-minute idle threshold", async () => {
       const uid = await seedUser();
       const sid = await seedSession(uid);

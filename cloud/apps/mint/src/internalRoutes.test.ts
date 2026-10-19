@@ -199,6 +199,36 @@ describe.skipIf(!RUN)("internal mint route (admin listener only)", () => {
     expect(fake.posts("/key/generate")).toHaveLength(0);
   });
 
+  it("free cap exhausted with a LiteLLM budget clock → 402 carries x-ovid-resets-at", async () => {
+    const uid = testUid("internal-cap-reset");
+    await usersRepo.ensure(db, uid, null);
+    // The backstop is the user budget over 30d, so the clock LiteLLM reports
+    // for it (user_info.budget_reset_at) is the countdown the client shows.
+    fake.users.set(uid, {
+      spend: 10.0,
+      budget_duration: "30d",
+      max_budget: 10,
+      budget_reset_at: "2026-11-01T08:09:10.500000Z",
+    });
+    const res = await mintInternal({ uid });
+    expect(res.statusCode).toBe(402);
+    // The hook's _iso shape (ovid_pools.py): whole-second UTC "Z". The
+    // gateway's forwarder normalizes to epoch ms for the client.
+    expect(res.headers["x-ovid-resets-at"]).toBe("2026-11-01T08:09:10Z");
+  });
+
+  it("free cap exhausted with no reported clock → 402 without x-ovid-resets-at", async () => {
+    const uid = testUid("internal-cap-noreset");
+    await usersRepo.ensure(db, uid, null);
+    fake.users.set(uid, { spend: 10.0, budget_duration: "30d", max_budget: 10 });
+    const res = await mintInternal({ uid });
+    expect(res.statusCode).toBe(402);
+    expect(res.json()).toEqual({ detail: "monthly free limit reached" });
+    // LiteLLM reports no reset for the user → the header is omitted entirely
+    // (graceful: the client just shows no countdown).
+    expect(res.headers["x-ovid-resets-at"]).toBeUndefined();
+  });
+
   it("the route does not exist on the public listener (404)", async () => {
     const res = await publicApp.inject({
       method: "POST",

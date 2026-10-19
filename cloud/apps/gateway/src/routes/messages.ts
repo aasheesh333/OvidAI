@@ -1,8 +1,7 @@
 import type { FastifyInstance } from "fastify";
-import { z } from "zod";
 import { attachments, messages, runs, sessions, users, type Db, type MessageRow } from "@ovid/db";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
-import { MintInternalError, type MessageDto, type Page, type SendMessageResponse } from "@ovid/shared";
+import { MintInternalError, sendMessageBodySchema, type MessageDto, type Page, type SendMessageResponse } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { DEFAULT_MINT_TIMEOUT_MS, MintTimeoutError } from "../keys.js";
 import { badRequest, isUuid, notFound, parsePageLimit, queryValue, sendError, zodBadRequest } from "./http.js";
@@ -19,20 +18,11 @@ export function toMessageDto(row: MessageRow): MessageDto {
   };
 }
 
-// content required non-empty string; .strict() rejects unknown keys.
-// attachmentIds (P8 Task 3, additive + optional): uuid-shaped ids of
-// attachments created via POST /sessions/:id/attachments; validated against
-// the session's attachment rows below (unknown or cross-session id → 400).
-// clientMsgId (P8 Task 4, additive + optional): caller-chosen idempotency
-// key (1–64 chars). A re-send with the same (session, clientMsgId) replays
-// the original answer instead of inserting a second message/run.
-const sendMessageBody = z
-  .object({
-    content: z.string(),
-    attachmentIds: z.array(z.string().uuid()).optional(),
-    clientMsgId: z.string().min(1).max(64).optional(),
-  })
-  .strict();
+// The send body schema lives in @ovid/shared (sendMessageBodySchema) — the
+// one copy, documented there: content, attachmentIds (P8 Task 3),
+// clientMsgId (P8 Task 4) and maxOutputTokens (the Settings "Max output
+// tokens" pick; validated int 1..MAX_OUTPUT_TOKENS_CAP, additive).
+const sendMessageBody = sendMessageBodySchema;
 
 /**
  * P8 Task 4: resolve a (sessionId, clientMsgId) that already exists.
@@ -126,6 +116,46 @@ async function ensureKeyBounded(deps: GatewayDeps, uid: string): Promise<void> {
   }
 }
 
+/**
+ * The mint's contract errors cross the wire as FastAPI-parity {"detail": …}
+ * bodies (HttpContractError — the legacy APK depends on that shape), which
+ * the thin client cannot parse: it reads only the gateway's
+ * {error:{code,message}} envelope (cloud_rest.dart _toError). Extract the
+ * human-readable detail for re-enveloping; a non-string/absent detail falls
+ * back to the client's own generic wording.
+ */
+function mintDetail(body: unknown): string {
+  if (typeof body === "string" && body.trim() !== "") return body;
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  return typeof detail === "string" && detail !== "" ? detail : "Ovid Cloud request failed.";
+}
+
+/**
+ * Client-mapped codes for relayed mint verdicts: 402 is the free-cap stop,
+ * and the client's whole 402 UX (outbox keeps the prompt, chat error row +
+ * resets-at countdown) is documented against `daily_limit_reached`
+ * (cloud_session_store.dart, chat_screen.dart's _CloudErrorRow). 429 has no
+ * dedicated client mapping — `rate_limited` matches the code the mint itself
+ * answers for LiteLLM 429s (mintRoutes.ts).
+ */
+function mintRelayCode(status: number): string {
+  return status === 402 ? "daily_limit_reached" : "rate_limited";
+}
+
+/**
+ * `x-ovid-resets-at` off the mint response, re-emitted as epoch ms — the
+ * exact shape the client's _resetsAt parses first (all-digits → epoch ms;
+ * anything else must be ISO). An ISO stamp from the mint is converted; a
+ * missing or unparseable value returns null (the client renders no countdown).
+ */
+function resetsAtEpochMs(headers: Readonly<Record<string, string>>): string | null {
+  const raw = (headers["x-ovid-resets-at"] ?? headers["resets-at"] ?? "").trim();
+  if (raw === "") return null;
+  if (/^\d+$/.test(raw)) return raw;
+  const ms = Date.parse(raw);
+  return Number.isNaN(ms) ? null : String(ms);
+}
+
 export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): void {
   app.post("/sessions/:id/messages", async (request, reply) => {
     const { id: sessionId } = request.params as { id: string };
@@ -197,9 +227,12 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
 
     // 4. Key provisioning BEFORE any write: if mint fails, no message row,
     //    no run row and no queue job are left behind (ordering pinned by
-    //    messages.test.ts). 402/429 envelopes are relayed verbatim; every
-    //    other failure collapses to 409 key_not_minted. P9 Task 9: mint is
-    //    called with the gateway's own verified uid (signed server-to-server).
+    //    messages.test.ts). 402/429 verdicts are re-enveloped for the thin
+    //    client (the mint's {"detail":…} shape is FastAPI parity, which the
+    //    client cannot parse) with any resets-at forwarded as
+    //    x-ovid-resets-at; every other failure collapses to 409 key_not_minted.
+    //    P9 Task 9: mint is called with the gateway's own verified uid
+    //    (signed server-to-server).
     try {
       await ensureKeyBounded(deps, uid);
     } catch (err) {
@@ -218,7 +251,12 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
         );
       }
       if (err instanceof MintInternalError && (err.status === 402 || err.status === 429)) {
-        return reply.code(err.status).send(err.body);
+        const response = reply.code(err.status);
+        const resetsAt = resetsAtEpochMs(err.headers);
+        if (resetsAt !== null) response.header("x-ovid-resets-at", resetsAt);
+        return response.send({
+          error: { code: mintRelayCode(err.status), message: mintDetail(err.body) },
+        });
       }
       request.log.warn({ err, sessionId }, "key provisioning failed; run not enqueued");
       return sendError(
@@ -274,7 +312,10 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
         // applies the tier-matched workspace quota (optional on the wire —
         // old consumers simply never see it). P8 Task 3: attachmentIds ride
         // the same way, present ONLY when the request sent a non-empty list
-        // (the job wire stays additive for pre-P8 consumers).
+        // (the job wire stays additive for pre-P8 consumers). maxOutputTokens
+        // rides identically: the Settings output cap, present only when the
+        // request sent one (the worker maps it onto the engine request's
+        // maxTokens; absent = the provider's own default).
         {
           runId: run.id,
           sessionId,
@@ -283,6 +324,9 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
           tier: user.tier,
           ...(requestedAttachmentIds.length > 0
             ? { attachmentIds: requestedAttachmentIds }
+            : {}),
+          ...(parsed.data.maxOutputTokens !== undefined
+            ? { maxOutputTokens: parsed.data.maxOutputTokens }
             : {}),
         },
         { jobId: run.id, priority },

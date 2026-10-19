@@ -75,6 +75,10 @@ export const sessions = pgTable(
     createdAt: timestamptz("created_at").notNull().defaultNow(),
     updatedAt: timestamptz("updated_at").notNull().defaultNow(),
     archivedAt: timestamptz("archived_at"),
+    // Soft delete (DELETE /sessions/:id): the row stays for audit/history but
+    // every read path filters `deleted_at IS NULL` — repos.sessions and the
+    // ownership joins in runs/searchMessages.
+    deletedAt: timestamptz("deleted_at"),
   },
   (t) => [index("sessions_user_id_idx").on(t.userId)],
 );
@@ -130,6 +134,11 @@ export const runs = pgTable(
     // endpoint, polled (throttled) by the worker between streamed delta
     // batches, which terminalizes the run as 'cancelled'.
     cancelRequested: boolean("cancel_requested").notNull().default(false),
+    // Stale-sweep fix: the engine's heartbeat — stamped at most once per
+    // RUN_HEARTBEAT_INTERVAL_MS by the loop's emit wrapper, so a long run
+    // still making progress never looks stranded. NULL = pre-heartbeat rows
+    // (and rows that never emitted); the sweeper falls back to startedAt.
+    lastActiveAt: timestamptz("last_active_at"),
     startedAt: timestamptz("started_at"),
     finishedAt: timestamptz("finished_at"),
     createdAt: timestamptz("created_at").notNull().defaultNow(),

@@ -88,14 +88,24 @@ export function createStepLimiter(max: number): StepLimiter {
         // FIFO: the earliest waiter is released first, so a burst of tool
         // calls executes in arrival order instead of starving.
         await new Promise<void>((resolve) => waiting.push(resolve));
+      } else {
+        // Only the FRESH admission counts itself — a woken waiter must not
+        // increment (see release below).
+        active += 1;
       }
-      active += 1;
       try {
         return await fn();
       } finally {
-        active -= 1;
+        // TRANSFER, not release-then-reacquire (sandbox releaseSlot parity,
+        // manager.ts): a decrement-then-wake let a run() admitted in the
+        // microtask window between the decrement and the head waiter's
+        // continuation see active < max and take a SECOND permit. Handing the
+        // count to the woken waiter keeps it at reality, so nobody jumps the
+        // queue — and the woken waiter's continuation must NOT increment,
+        // or the transfer double-counts.
         const next = waiting.shift();
-        if (next !== undefined) next();
+        if (next === undefined) active -= 1;
+        else next();
       }
     },
     stats: () => ({ active, waiting: waiting.length, max }),

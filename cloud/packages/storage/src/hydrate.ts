@@ -69,6 +69,7 @@ import {
 } from "./errors.js";
 import type { FileManifestRowView } from "./hibernate.js";
 import { assertSafeRelPath, r2Keys } from "./keys.js";
+import { anotherLiveSessionOfUser } from "./liveSessionGuard.js";
 import { openReader } from "./rangeReader.js";
 import { resolveWorkspaceDir, type SandboxUidResolver } from "./workspacePaths.js";
 
@@ -115,6 +116,29 @@ export interface HydrateFileManifestsRepo {
   ): Promise<unknown>;
   /** Failure restore: cold again, ONLY while the row is still 'hydrating'. */
   markColdRetry(db: HydrateDbLike, sessionId: string): Promise<void>;
+  /**
+   * Cross-session liveness guard, the file_manifests half (see
+   * liveSessionGuard.ts): true iff another session of the user holds a WARM
+   * row. The real @ovid/db repo gained this method with the guard.
+   */
+  hasOtherWarmSession(
+    db: HydrateDbLike,
+    userId: string,
+    exceptSessionId: string,
+  ): Promise<boolean>;
+}
+
+/**
+ * Mirror of the @ovid/db `runs` surface hydration needs — the cross-session
+ * guard's runs half (see liveSessionGuard.ts): the user's oldest
+ * queued|running run on any OTHER session, or null.
+ */
+export interface HydrateRunsRepo {
+  activeForUserExcept(
+    db: HydrateDbLike,
+    userId: string,
+    exceptSessionId: string,
+  ): Promise<unknown>;
 }
 
 /** Mirror of @ovid/events' `EventLog.append`. */
@@ -146,6 +170,12 @@ export interface HydrateDeps {
   clock?: () => Date;
   /** The real @ovid/db repo namespaces, injected by the wiring layer. */
   fileManifests: HydrateFileManifestsRepo;
+  /**
+   * The runs repo, for the cross-session guard only (see liveSessionGuard.ts):
+   * the wipe-before-extract must not destroy the per-user workspace while a
+   * sibling session's run is live on it.
+   */
+  runs: HydrateRunsRepo;
   eventMirror: HydrateEventMirror;
 }
 
@@ -395,6 +425,24 @@ export async function hydrateWorkspace(
   // session, which must answer already_warm rather than no_archive.
   if (row.archiveKey === null || row.archiveKey === "") {
     return { status: "skipped", reason: "no_archive" };
+  }
+  // P0 cross-session guard: the agent workspace is PER-USER —
+  // `{root}/{uid}/workspace` is shared by EVERY session of the user — so the
+  // wipe-before-extract below (and the failure-path wipe in the catch) would
+  // destroy the live workspace of a sibling session (a WARM row or an
+  // active run). warmLru.reclaimColdResidue refuses the same destroy for its
+  // own rm; here the check MUST run BEFORE the beginHydration claim: inside
+  // the try the catch's unconditional dir wipe would itself delete the live
+  // tree, and a thrown guard before the claim leaves the row cold (not
+  // stranded 'hydrating'), so BullMQ's attempts:3 retry converges once the
+  // sibling goes cold.
+  if (await anotherLiveSessionOfUser(deps.db, deps, job.userId, job.sessionId)) {
+    throw new WorkspaceStateError(
+      `hydrate of session ${job.sessionId} refused: another session of user ` +
+        `${job.userId} is live on the shared per-user workspace — the wipe would ` +
+        `destroy it (retry once the sibling session is cold and idle)`,
+      { code: "workspace_busy" },
+    );
   }
   if (!(await deps.fileManifests.beginHydration(deps.db, job.sessionId))) {
     return { status: "skipped", reason: "already_warm" };

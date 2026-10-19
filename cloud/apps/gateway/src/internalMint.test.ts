@@ -28,8 +28,8 @@ import {
  * The gateway no longer forwards a client Firebase token: it signs
  * {uid} with OVID_INTERNAL_API_SECRET and calls mint's ADMIN listener. The
  * route keeps the P10 deadline and the existing relay contract:
- *   402/429 → the billing envelope verbatim; anything else → 409
- *   key_not_minted.
+ *   402/429 → re-enveloped for the thin client ({error:{code,message}} +
+ *   any x-ovid-resets-at forwarded); anything else → 409 key_not_minted.
  */
 
 const SECRET = "sk-internal-t9-gateway-secret-0123456789abcdef";
@@ -42,7 +42,7 @@ interface Captured {
 }
 
 async function withMintServer(
-  respond: () => { status: number; body: string },
+  respond: () => { status: number; body: string; headers?: Record<string, string> },
   run: (ctx: { baseUrl: string; requests: Captured[] }) => Promise<void>,
 ): Promise<void> {
   const requests: Captured[] = [];
@@ -57,7 +57,7 @@ async function withMintServer(
         body: Buffer.concat(chunks).toString("utf8"),
       });
       const r = respond();
-      res.writeHead(r.status, { "content-type": "application/json" });
+      res.writeHead(r.status, { "content-type": "application/json", ...(r.headers ?? {}) });
       res.end(r.body);
     });
   });
@@ -124,10 +124,16 @@ describe("createInternalMintProvisioner", () => {
     );
   });
 
-  it("402 → MintInternalError carrying the status and parsed billing envelope", async () => {
+  it("402 → MintInternalError carrying the status, parsed body and response headers", async () => {
     const body = { detail: "monthly free limit reached" };
     await withMintServer(
-      () => ({ status: 402, body: JSON.stringify(body) }),
+      () => ({
+        status: 402,
+        body: JSON.stringify(body),
+        // The header shape the relay forwards (the Python hook's contract):
+        // an ISO stamp the gateway re-emits as epoch ms.
+        headers: { "X-Ovid-Resets-At": "2026-11-01T00:00:00Z" },
+      }),
       async ({ baseUrl }) => {
         const err = await createInternalMintProvisioner(baseUrl, SECRET)
           .ensureKeyForUid("uid-2")
@@ -135,6 +141,12 @@ describe("createInternalMintProvisioner", () => {
         expect(err).toBeInstanceOf(MintInternalError);
         expect((err as MintInternalError).status).toBe(402);
         expect((err as MintInternalError).body).toEqual(body);
+        // Header names arrive lowercased regardless of the wire casing (the
+        // raw server response also carries transport headers like
+        // transfer-encoding — only the contract headers are pinned).
+        const headers = (err as MintInternalError).headers;
+        expect(headers["content-type"]).toBe("application/json");
+        expect(headers["x-ovid-resets-at"]).toBe("2026-11-01T00:00:00Z");
       },
     );
   });
@@ -207,11 +219,12 @@ describe.skipIf(!TEST_DATABASE_URL)("messages route relays the internal-mint con
     return res.json().id as string;
   }
 
-  it("a 402 from mint is relayed verbatim and no message/run is written", async () => {
+  it("a 402 from mint is re-enveloped for the client (resets-at forwarded as epoch ms) and no message/run is written", async () => {
     const body = { detail: "monthly free limit reached" };
+    const resetsIso = "2026-11-01T00:00:00Z";
     const app = makeApp({
       async ensureKeyForUid() {
-        throw new MintInternalError(402, body);
+        throw new MintInternalError(402, body, { "x-ovid-resets-at": resetsIso });
       },
     });
     const uid = testUid("internal-402");
@@ -224,7 +237,13 @@ describe.skipIf(!TEST_DATABASE_URL)("messages route relays the internal-mint con
       payload: { content: "hello" },
     });
     expect(res.statusCode).toBe(402);
-    expect(res.json()).toEqual(body);
+    // The mint's {"detail":…} becomes the ApiError envelope the thin client
+    // parses, with the client's own 402 code (cloud_session_store.dart).
+    expect(res.json()).toEqual({
+      error: { code: "daily_limit_reached", message: "monthly free limit reached" },
+    });
+    // ISO from the mint → epoch ms, the shape cloud_rest.dart _resetsAt parses.
+    expect(res.headers["x-ovid-resets-at"]).toBe(String(Date.parse(resetsIso)));
 
     const counts = (await db.$client.unsafe(
       "SELECT (SELECT count(*)::int FROM messages WHERE session_id = $1) AS messages," +

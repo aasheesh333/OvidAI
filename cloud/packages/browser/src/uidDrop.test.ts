@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { loadBrowserEngineConfig } from "./config.js";
 import {
   BrowserUidDropError,
+  buildBrowserChildEnv,
   prepareBrowserUidDrop,
   renderUidWrapperScript,
 } from "./uidDrop.js";
@@ -106,6 +107,76 @@ describe("renderUidWrapperScript", () => {
   });
 });
 
+describe("buildBrowserChildEnv", () => {
+  /** Plant vars in process.env for the duration of one test; restores after. */
+  function withPlantedEnv(
+    planted: Record<string, string | undefined>,
+    fn: () => void | Promise<void>,
+  ): () => Promise<void> {
+    return async () => {
+      const saved: Record<string, string | undefined> = {};
+      for (const [key, value] of Object.entries(planted)) {
+        saved[key] = process.env[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      try {
+        await fn();
+      } finally {
+        for (const [key, value] of Object.entries(saved)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    };
+  }
+
+  it(
+    "contains the allowlisted keys + uid-owned dirs and no worker secrets",
+    withPlantedEnv(
+      {
+        FAKE_OVID_SECRET: "sk-never-reach-the-renderer",
+        HTTPS_PROXY: "http://worker-internal-proxy:8080",
+        LANG: "C.UTF-8",
+        PATH: "/usr/local/bin:/usr/bin:/bin",
+      },
+      () => {
+        const env = buildBrowserChildEnv("/runtime/home", "/runtime/tmp");
+        // Allowlisted passthrough.
+        expect(env.PATH).toBe("/usr/local/bin:/usr/bin:/bin");
+        expect(env.LANG).toBe("C.UTF-8");
+        // The uid-owned runtime dirs.
+        expect(env.HOME).toBe("/runtime/home");
+        expect(env.TMPDIR).toBe("/runtime/tmp");
+        expect(env.XDG_CACHE_HOME).toBe("/runtime/home/.cache");
+        expect(env.XDG_CONFIG_HOME).toBe("/runtime/home/.config");
+        expect(env.XDG_DATA_HOME).toBe("/runtime/home/.local/share");
+        // Worker credentials and proxy config must not ride into the child.
+        expect(env.FAKE_OVID_SECRET).toBeUndefined();
+        expect(env.HTTPS_PROXY).toBeUndefined();
+        expect(Object.keys(env).sort()).toEqual([
+          "HOME",
+          "LANG",
+          "PATH",
+          "TMPDIR",
+          "XDG_CACHE_HOME",
+          "XDG_CONFIG_HOME",
+          "XDG_DATA_HOME",
+        ]);
+      },
+    ),
+  );
+
+  it(
+    "defaults PATH when process.env has none, and omits an unset LANG",
+    withPlantedEnv({ PATH: undefined, LANG: undefined }, () => {
+      const env = buildBrowserChildEnv("/h", "/t");
+      expect(env.PATH).toBe("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+      expect(env.LANG).toBeUndefined();
+    }),
+  );
+});
+
 describe.skipIf(!IS_ROOT)("prepareBrowserUidDrop (root, host-gated)", () => {
   const roots: string[] = [];
 
@@ -126,26 +197,37 @@ describe.skipIf(!IS_ROOT)("prepareBrowserUidDrop (root, host-gated)", () => {
     const fakeChromium = join(root, "fake-chromium.sh");
     await writeFile(fakeChromium, "#!/bin/sh\nid -u\n", { mode: 0o755 });
 
-    const runtime = await prepareBrowserUidDrop(UID_CFG, {
-      getuid: () => 0,
-      preflight: false,
-      chromiumPath: fakeChromium,
-      runtimeRoot: root,
-    });
-    expect(runtime).not.toBeNull();
-    expect(runtime!.uid).toBe(230_000);
-    expect(runtime!.gid).toBe(230_000);
+    // A worker-style secret planted before preparation must not reach the
+    // child env — the spawn below runs with runtime.env.
+    const prevSecret = process.env.FAKE_OVID_SECRET;
+    process.env.FAKE_OVID_SECRET = "sk-never-reach-the-renderer";
+    try {
+      const runtime = await prepareBrowserUidDrop(UID_CFG, {
+        getuid: () => 0,
+        preflight: false,
+        chromiumPath: fakeChromium,
+        runtimeRoot: root,
+      });
+      expect(runtime).not.toBeNull();
+      expect(runtime!.uid).toBe(230_000);
+      expect(runtime!.gid).toBe(230_000);
 
-    // Playwright creates this dir root-owned 0700 before spawning the shim.
-    const profile = join(root, "playwright-profile");
-    await mkdir(profile, { mode: 0o700 });
-    expect((await stat(profile)).uid).toBe(0);
+      // Playwright creates this dir root-owned 0700 before spawning the shim.
+      const profile = join(root, "playwright-profile");
+      await mkdir(profile, { mode: 0o700 });
+      expect((await stat(profile)).uid).toBe(0);
 
-    const result = await run(runtime!.wrapperPath, [`--user-data-dir=${profile}`], runtime!.env);
-    expect(result.code).toBe(0);
-    expect(result.stdout.trim()).toBe("230000");
-    // The shim chowned the profile before exec — Chromium can write it.
-    expect((await stat(profile)).uid).toBe(230_000);
+      const result = await run(runtime!.wrapperPath, [`--user-data-dir=${profile}`], runtime!.env);
+      expect(result.code).toBe(0);
+      expect(result.stdout.trim()).toBe("230000");
+      // The child env carried no worker secret.
+      expect(runtime!.env.FAKE_OVID_SECRET).toBeUndefined();
+      // The shim chowned the profile before exec — Chromium can write it.
+      expect((await stat(profile)).uid).toBe(230_000);
+    } finally {
+      if (prevSecret === undefined) delete process.env.FAKE_OVID_SECRET;
+      else process.env.FAKE_OVID_SECRET = prevSecret;
+    }
   });
 
   it("fails the boot probe when the shim cannot exec the browser as the uid", async () => {

@@ -304,7 +304,7 @@ async function post(
   path: string,
   body: unknown,
   headers: Record<string, string>,
-): Promise<{ status: number; body: any }> {
+): Promise<{ status: number; body: any; headers: Record<string, string> }> {
   const res = await fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers,
@@ -317,7 +317,12 @@ async function post(
   } catch {
     // raw text body
   }
-  return { status: res.status, body: parsed };
+  return {
+    status: res.status,
+    body: parsed,
+    // Lowercased plain record — assertable like light-my-request headers.
+    headers: Object.fromEntries(res.headers.entries()),
+  };
 }
 
 describe.skipIf(!TEST_DATABASE_URL || !TEST_MINT_REDIS_URL)(
@@ -556,9 +561,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_MINT_REDIS_URL)(
     });
 
     // -----------------------------------------------------------------------
-    // Free-cap exhausted -> the gateway relays mint's 402 envelope
+    // Free-cap exhausted -> the gateway re-envelopes mint's 402 for the client
     // -----------------------------------------------------------------------
-    it("gateway messages relays mint's free-cap 402 envelope and leaves no run behind", async () => {
+    it("gateway messages re-envelopes mint's free-cap 402 (daily_limit_reached) and leaves no run behind", async () => {
       const uid = uniqueUid("t17-cap");
       createdUids.push(uid);
       await usersRepo.ensure(db, uid, null);
@@ -591,7 +596,16 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_MINT_REDIS_URL)(
         authHeaders(uid),
       );
       expect(res.status).toBe(402);
-      expect(res.body).toEqual({ detail: "monthly free limit reached" });
+      // The mint's FastAPI-parity {"detail":…} is re-enveloped as the
+      // ApiError shape the thin client parses (cloud_rest.dart _toError),
+      // under the client's own 402 code (cloud_session_store.dart). The
+      // mint attaches x-ovid-resets-at only when LiteLLM reports the user
+      // budget's clock (user_info.budget_reset_at); this fake user has none,
+      // so no header and the client shows no countdown.
+      expect(res.body).toEqual({
+        error: { code: "daily_limit_reached", message: "monthly free limit reached" },
+      });
+      expect(res.headers["x-ovid-resets-at"]).toBeUndefined();
 
       const counts = (await db.$client`
         SELECT

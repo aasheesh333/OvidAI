@@ -1,0 +1,1 @@
+ALTER TABLE "runs" ADD COLUMN "last_active_at" timestamp (3) with time zone;

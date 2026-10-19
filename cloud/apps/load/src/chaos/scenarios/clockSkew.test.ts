@@ -279,11 +279,21 @@ function barrierAfterSelect<T extends object>(db: T, latch: Latch): T {
   const select = (
     db as unknown as { select: (...args: unknown[]) => object }
   ).select.bind(db);
+  // The sweeper runs TWO selects per pass (running half + queued half — the
+  // zombie sweep), so a per-select barrier counts 4 arrivals. The F12
+  // property under test is about the RUNNING half's claim race; gate only
+  // the FIRST select per proxy. Callers pass one gated db per sweep, so
+  // the shared 2-party latch sees exactly one arrival from each sweep.
+  let gated = false;
   return new Proxy(db, {
     get(target, prop) {
       if (prop === "select") {
-        return (...args: unknown[]) =>
-          gateThenable(select(...args), latch);
+        return (...args: unknown[]) => {
+          const inner = select(...args);
+          if (gated) return inner;
+          gated = true;
+          return gateThenable(inner, latch);
+        };
       }
       const value = Reflect.get(target, prop);
       return typeof value === "function" ? value.bind(target) : value;
@@ -441,14 +451,17 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
       // F12 barrier: both sweeps complete listStaleRunning before either may
       // claim. Without it, a serialized interleaving would pass even if the
-      // implementation emitted before claiming.
+      // implementation emitted before claiming. One gated db PER SWEEP —
+      // each gates its first select (the running-half list), so the shared
+      // latch counts exactly two arrivals.
       const latch = createLatch(2);
-      const gatedDb = barrierAfterSelect(db, latch);
+      const gatedDbA = barrierAfterSelect(db, latch);
+      const gatedDbB = barrierAfterSelect(db, latch);
 
       // Both clocks call the run stale (cutoffs BASE+20min and BASE+15min).
       const counts = await Promise.all([
-        sweep(FORWARD_NOW, gatedDb),
-        sweep(FORWARD_NOW - 5 * 60_000, gatedDb),
+        sweep(FORWARD_NOW, gatedDbA),
+        sweep(FORWARD_NOW - 5 * 60_000, gatedDbB),
       ]);
       expect(latch.arrivals()).toBe(2);
       // Claim-then-emit: only one sweep may claim the row, even if both

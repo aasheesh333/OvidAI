@@ -1,9 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { sessions, users, type SessionRow } from "@ovid/db";
+import { runs, sessions, users, type SessionRow } from "@ovid/db";
 import { sessionPatchSchema, type Page, type SessionDto } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { isUuid, notFound, parsePageLimit, queryValue, zodBadRequest } from "./http.js";
+import { cancelActiveRun } from "./runs.js";
 
 // Session routes — all mounted inside the authenticated /cloud/v1 scope.
 
@@ -75,5 +76,36 @@ export function registerSessionRoutes(app: FastifyInstance, deps: GatewayDeps): 
     const row = await sessions.update(deps.db, id, request.principal.uid, parsed.data);
     if (row === null) return notFound(reply);
     return toSessionDto(row);
+  });
+
+  app.delete("/sessions/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    // Same shape guard as GET/PATCH: malformed id → the SAME 404 envelope as
+    // an unknown one, and it never reaches the db (client typos must not be
+    // able to produce a 500 from the uuid column binding).
+    if (!isUuid(id)) return notFound(reply);
+    // sessions.get is ownership-scoped AND filters deleted_at: unknown id,
+    // wrong owner, and already-deleted all come back null → the same 404.
+    const row = await sessions.get(deps.db, id, request.principal.uid);
+    if (row === null) return notFound(reply);
+
+    // Cancel any still-active run FIRST — a soft-deleted session must not
+    // leave a worker streaming into it. Same cooperative flow as POST
+    // /runs/:id/cancel (flag + best-effort job remove + queued-race
+    // terminalization), repeated once per active run (a session can hold
+    // several queued). The seen-set + pass bound stop the loop when a run
+    // only got flagged (the worker owns its terminalization — remove failed
+    // or it was already claimed) instead of spinning on it.
+    const seen = new Set<string>();
+    for (let pass = 0; pass < 10; pass++) {
+      const active = await runs.activeForSession(deps.db, id);
+      if (active === null || !seen.add(active.id)) break;
+      await cancelActiveRun(deps, request.log, request.principal.uid, active.id);
+    }
+
+    // Soft delete: the row (and its messages/runs) stays as history, but
+    // every read path filters deleted_at IS NULL from here on.
+    await sessions.softDelete(deps.db, id, request.principal.uid);
+    return reply.code(204).send();
   });
 }

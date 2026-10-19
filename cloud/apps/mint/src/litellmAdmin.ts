@@ -30,6 +30,17 @@ export interface KeyInfo {
   [field: string]: unknown;
 }
 
+/**
+ * /user/info row — LiteLLM's user info object (mint.py: data.user_info).
+ * `budget_reset_at` is the user budget's clock reset (LiteLLM ISO, null when
+ * no budget clock is running) — the 402 path's x-ovid-resets-at source.
+ */
+export interface UserInfo {
+  spend: number;
+  budget_duration?: string | null;
+  budget_reset_at?: string | null;
+}
+
 /** /spend/logs row (attribution is Task 5's job — this is the raw row). */
 export interface SpendLogRow {
   api_key?: string | null;
@@ -73,9 +84,7 @@ export interface LiteLlmAdmin {
   /** POST /key/delete {keys} — returns the HTTP status (0 = network error). */
   keyDelete(keys: string[]): Promise<number>;
   /** GET /user/info?user_id= — non-200 → null. */
-  userInfo(
-    userId: string,
-  ): Promise<{ spend: number; budget_duration?: string | null } | null>;
+  userInfo(userId: string): Promise<UserInfo | null>;
   /**
    * userInfo WITH the HTTP status: the budget-clock rule must tell a 404
    * (user unknown → send the duration) from an outage (status 0/5xx → leave
@@ -83,7 +92,7 @@ export interface LiteLlmAdmin {
    */
   userInfoStatus(userId: string): Promise<{
     status: number;
-    info: { spend: number; budget_duration?: string | null } | null;
+    info: UserInfo | null;
   }>;
   /** POST /user/update — returns the HTTP status (0 = network error). */
   userUpdate(body: Record<string, unknown>): Promise<number>;
@@ -177,7 +186,7 @@ export function createLiteLlmAdmin(
   /** user/info with the HTTP status (see userInfoStatus in the interface). */
   async function userInfoStatus(userId: string): Promise<{
     status: number;
-    info: { spend: number; budget_duration?: string | null } | null;
+    info: UserInfo | null;
   }> {
     try {
       const res = await request("/user/info", {
@@ -188,7 +197,11 @@ export function createLiteLlmAdmin(
         return { status: res.status, info: null };
       }
       const data = (await readJson(res)) as {
-        user_info?: { spend?: unknown; budget_duration?: unknown };
+        user_info?: {
+          spend?: unknown;
+          budget_duration?: unknown;
+          budget_reset_at?: unknown;
+        };
       };
       const info = data?.user_info ?? {};
       return {
@@ -199,6 +212,10 @@ export function createLiteLlmAdmin(
             info.budget_duration === undefined || info.budget_duration === null
               ? null
               : String(info.budget_duration),
+          budget_reset_at:
+            info.budget_reset_at === undefined || info.budget_reset_at === null
+              ? null
+              : String(info.budget_reset_at),
         },
       };
     } catch (err) {

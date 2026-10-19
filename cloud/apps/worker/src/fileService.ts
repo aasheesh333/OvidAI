@@ -47,6 +47,7 @@ import {
   type ArtifactWorkspaceObjectsRepo,
   type HydrateEventMirror,
   type HydrateFileManifestsRepo,
+  type HydrateRunsRepo,
   type SandboxUidResolver,
   type StorageAdapter,
 } from "@ovid/storage";
@@ -76,6 +77,8 @@ export interface FileServiceDeps {
   host?: string;
   /** T9-review I2: the real @ovid/db repos the hydration/artifacts engines need. */
   fileManifests: HydrateFileManifestsRepo;
+  /** The runs repo — the cross-session guard's runs half (liveSessionGuard). */
+  runs: HydrateRunsRepo;
   eventMirror: HydrateEventMirror;
   workspaceObjects: ArtifactWorkspaceObjectsRepo;
   /** Default DEFAULT_PRESIGN_TTL_SECONDS (3600) inside registerArtifact. */
@@ -149,6 +152,7 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
     sandboxUid: deps.sandboxUid,
     activity: deps.activity,
     fileManifests: deps.fileManifests,
+    runs: deps.runs,
     eventMirror: deps.eventMirror,
   };
 

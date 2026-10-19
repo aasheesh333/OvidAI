@@ -209,16 +209,55 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     expect(handle.mint.calls).toEqual([{ uid }]);
   });
 
-  it("ensureKey failure BEFORE any write: 402/429 relayed verbatim, everything else → 409 key_not_minted; zero adds, zero rows", async () => {
+  it("ensureKey failure BEFORE any write: 402/429 re-enveloped {error:{code,message}} + x-ovid-resets-at forwarded, everything else → 409 key_not_minted; zero adds, zero rows", async () => {
     const handle = makeApp(); // mint behavior re-stubbed per case below
     const uid = testUid("msg-mintfail");
     const sid = await createSession(handle, uid);
 
-    const paymentBody = { error: { code: "payment_required", message: "buy credits" } };
-    const rateBody = { error: { code: "rate_limited", message: "slow down" } };
-    const cases: Array<{ thrown: unknown; status: number; body?: unknown }> = [
-      { thrown: new MintInternalError(402, paymentBody), status: 402, body: paymentBody },
-      { thrown: new MintInternalError(429, rateBody), status: 429, body: rateBody },
+    // The mint answers FastAPI-parity {"detail": …}; the thin client parses
+    // only the gateway's ApiError envelope (cloud_rest.dart _toError) and
+    // keys its 402 UX off `daily_limit_reached` + the epoch-ms
+    // x-ovid-resets-at header (cloud_session_store.dart, chat_screen.dart).
+    const resetsIso = "2026-11-01T00:00:00Z";
+    const resetsMs = String(Date.parse(resetsIso));
+    const cases: Array<{
+      thrown: unknown;
+      status: number;
+      body?: { error: { code: string; message: string } };
+      resetsAt?: string;
+    }> = [
+      {
+        thrown: new MintInternalError(
+          402,
+          { detail: "monthly free limit reached" },
+          { "x-ovid-resets-at": resetsIso },
+        ),
+        status: 402,
+        body: { error: { code: "daily_limit_reached", message: "monthly free limit reached" } },
+        resetsAt: resetsMs, // ISO from the mint → epoch ms on the wire
+      },
+      {
+        thrown: new MintInternalError(
+          429,
+          { detail: "too many requests from this network — retry later" },
+          { "x-ovid-resets-at": resetsMs },
+        ),
+        status: 429,
+        body: {
+          error: {
+            code: "rate_limited",
+            message: "too many requests from this network — retry later",
+          },
+        },
+        resetsAt: resetsMs, // already epoch ms → passed through untouched
+      },
+      {
+        // No resets-at from the mint → no header (the client renders no
+        // countdown); the envelope still carries the verdict.
+        thrown: new MintInternalError(402, { detail: "monthly free limit reached" }),
+        status: 402,
+        body: { error: { code: "daily_limit_reached", message: "monthly free limit reached" } },
+      },
       // Non-relayable mint statuses and plain failures → generic 409.
       { thrown: new MintInternalError(500, { error: { code: "internal" } }), status: 409 },
       { thrown: new Error("mint connection refused"), status: 409 },
@@ -228,8 +267,9 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       const failing = makeApp({ mintThrows: c.thrown });
       const res = await sendMessage(failing, uid, sid, { content: "will not land" });
       expect(res.statusCode, String(c.status)).toBe(c.status);
-      if (c.status === 402 || c.status === 429) {
-        expect(res.json()).toEqual(c.body); // mint envelope preserved exactly
+      if (c.body !== undefined) {
+        expect(res.json()).toEqual(c.body); // client-shaped envelope
+        expect(res.headers["x-ovid-resets-at"]).toBe(c.resetsAt ?? undefined);
       } else {
         expect(res.json().error.code).toBe("key_not_minted");
         expect(typeof res.json().error.message).toBe("string");
@@ -616,6 +656,65 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       });
       expect("attachmentIds" in add.data).toBe(false);
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // maxOutputTokens (Settings "Max output tokens"): gateway-validated on the
+  // send wire, forwarded on the job payload exactly like attachmentIds —
+  // the key is present only when the request sent one (additive wire).
+  // -------------------------------------------------------------------------
+
+  it("send with maxOutputTokens → 202 and the enqueued job payload carries the cap", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-maxtok");
+    const sid = await createSession(handle, uid);
+
+    const res = await sendMessage(handle, uid, sid, {
+      content: "keep it short",
+      maxOutputTokens: 2048,
+    });
+    expect(res.statusCode).toBe(202);
+    expect(handle.adds).toHaveLength(1);
+    expect(handle.adds[0]!.data).toEqual({
+      runId: expect.any(String) as string,
+      sessionId: sid,
+      userId: uid,
+      prompt: "keep it short",
+      tier: "free",
+      maxOutputTokens: 2048,
+    });
+  });
+
+  it("absent maxOutputTokens → 202 and the job payload carries NO maxOutputTokens key", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-maxtok-none");
+    const sid = await createSession(handle, uid);
+
+    const res = await sendMessage(handle, uid, sid, { content: "auto is fine" });
+    expect(res.statusCode).toBe(202);
+    const add = handle.adds.at(-1)!;
+    expect(add.data).toEqual({
+      runId: expect.any(String) as string,
+      sessionId: sid,
+      userId: uid,
+      prompt: "auto is fine",
+      tier: "free",
+    });
+    expect("maxOutputTokens" in add.data).toBe(false);
+  });
+
+  it("maxOutputTokens above the cap, non-integer, or non-positive → 400 bad_request, nothing written or enqueued", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-maxtok-bad");
+    const sid = await createSession(handle, uid);
+
+    for (const maxOutputTokens of [8193, 0, -1, 2048.5, "2048"]) {
+      const res = await sendMessage(handle, uid, sid, { content: "x", maxOutputTokens });
+      expect(res.statusCode, JSON.stringify(maxOutputTokens)).toBe(400);
+      expect(res.json().error.code).toBe("bad_request");
+    }
+    expect(handle.adds).toHaveLength(0);
+    expect(await tableCounts(sid)).toEqual({ messages: 0, runs: 0 });
   });
 
   // -------------------------------------------------------------------------

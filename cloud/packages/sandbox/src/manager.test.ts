@@ -384,6 +384,58 @@ describe.skipIf(!isRoot)("quota recordings (byte math pinned)", () => {
     expect(fx.quota.calls[0]).toEqual([ws, 200001, 2_147_483_648]);
     expect(fx.quota.calls[1]).toEqual([cache, 300001, 2_147_483_648]);
   });
+
+  it("no tier: least privilege — the workspace quota is the FREE limit", async () => {
+    const fx = await freshFixture();
+    // The ptyBridge shape: attach(userId) with no tier at all. It must never
+    // silently get the PRO bytes (2048×2^20) that a defaulted label gave it.
+    await fx.manager.attach("u1");
+    const ws = join(fx.wsRoot, "200001", "workspace");
+    const cache = join(fx.wsRoot, "200001", ".home", ".cache");
+    expect(fx.quota.calls).toEqual([
+      [ws, 200001, 524_288_000],
+      [cache, 300001, 2_147_483_648],
+    ]);
+  });
+});
+
+describe.skipIf(!isRoot)("tier re-assert on reattach", () => {
+  it("attach free then attach pro upgrades the live project — tier sequence free→pro", async () => {
+    const fx = await freshFixture();
+    await fx.manager.attach("u1", { tier: "free" });
+    await fx.manager.attach("u1", { tier: "pro" });
+    const ws = join(fx.wsRoot, "200001", "workspace");
+    // The workspace project's applyQuota byte sequence: the free limit at
+    // create, then the PRO limit re-asserted on the live handle.
+    const wsCalls = fx.quota.calls.filter(([, pid]) => pid === workspaceProjectId(200001));
+    expect(wsCalls).toEqual([
+      [ws, workspaceProjectId(200001), 524_288_000],
+      [ws, workspaceProjectId(200001), 2_147_483_648],
+    ]);
+    // The record moved too: the workspaceDir seam re-asserts the PRO limit.
+    const p = await fx.manager.workspaceDir("u1", "sess-1");
+    const last = fx.quota.calls.filter(([, pid]) => pid === workspaceProjectId(200001)).pop();
+    expect(last).toEqual([p, workspaceProjectId(200001), 2_147_483_648]);
+  });
+
+  it("attach pro then attach free never downgrades the live project", async () => {
+    const fx = await freshFixture();
+    await fx.manager.attach("u1", { tier: "pro" });
+    await fx.manager.attach("u1", { tier: "free" });
+    // Exactly one workspace-project applyQuota: the PRO bytes from create —
+    // the lower requested tier re-asserts nothing.
+    const wsCalls = fx.quota.calls.filter(([, pid]) => pid === workspaceProjectId(200001));
+    expect(wsCalls).toHaveLength(1);
+    expect(wsCalls[0][2]).toBe(2_147_483_648);
+  });
+
+  it("reattach with the same tier re-asserts nothing", async () => {
+    const fx = await freshFixture();
+    await fx.manager.attach("u1", { tier: "free" });
+    await fx.manager.attach("u1", { tier: "free" });
+    const wsCalls = fx.quota.calls.filter(([, pid]) => pid === workspaceProjectId(200001));
+    expect(wsCalls).toHaveLength(1);
+  });
 });
 
 describe.skipIf(!isRoot)("recovery", () => {

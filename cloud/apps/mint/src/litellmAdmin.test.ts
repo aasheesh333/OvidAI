@@ -184,13 +184,34 @@ describe("key block/unblock/delete", () => {
 });
 
 describe("userInfo / userUpdate", () => {
-  it("userInfo maps {user_info:{spend,budget_duration}}", async () => {
+  it("userInfo maps {user_info:{spend,budget_duration,budget_reset_at}}", async () => {
     await startMock((_req, res) =>
-      json(res, 200, { user_info: { user_id: "uid-1", spend: 1.25, budget_duration: "30d" } }),
+      json(res, 200, {
+        user_info: {
+          user_id: "uid-1",
+          spend: 1.25,
+          budget_duration: "30d",
+          budget_reset_at: "2026-11-01T00:00:00.000000Z",
+        },
+      }),
     );
     const out = await admin().userInfo("uid-1");
-    expect(out).toEqual({ spend: 1.25, budget_duration: "30d" });
+    expect(out).toEqual({
+      spend: 1.25,
+      budget_duration: "30d",
+      budget_reset_at: "2026-11-01T00:00:00.000000Z",
+    });
     expect(lastQuery()).toEqual({ user_id: "uid-1" });
+
+    // No clock running (budget_reset_at absent/null) → the field reads null.
+    await startMock((_req, res) =>
+      json(res, 200, { user_info: { user_id: "uid-1", spend: 1.25 } }),
+    );
+    expect(await admin().userInfo("uid-1")).toEqual({
+      spend: 1.25,
+      budget_duration: null,
+      budget_reset_at: null,
+    });
   });
 
   it("userInfo 404 → null", async () => {

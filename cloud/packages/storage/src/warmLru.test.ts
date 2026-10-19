@@ -308,7 +308,12 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         clock: () => new Date(T0 + 200_000),
         fileManifests: fileManifestsRepo,
         workspaceObjects: workspaceObjectsRepo,
-        runs: { activeForSession: async () => null },
+        runs: {
+          activeForSession: async () => null,
+          // The guard's runs half: the fixture's single-session hibernate
+          // must pass the cross-session check (liveSessionGuard).
+          activeForUserExcept: async () => null,
+        },
         eventMirror: eventMirrorRepo,
         stuckHibernationScan: { listStuck: async () => [] },
       };

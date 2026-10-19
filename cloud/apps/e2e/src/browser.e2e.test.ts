@@ -65,7 +65,10 @@ import { acquireBrowserSuiteLock } from "../../../packages/browser/src/test/suit
  *   b. viewer attaches mid-"run" — browser_state {live:true} then ≥2 binary
  *      frames whose magic bytes match the state's frameFormat.
  *   c. viewer input — client JSON → gateway → redis → worker → Playwright →
- *      DOM (browser_find proves the DOM flipped).
+ *      DOM (browser_find proves the DOM flipped), under takeover: the
+ *      engine gates viewer input on the flag server-side, so the harness
+ *      (playing the gateway client) toggles takeover on before injecting
+ *      and off again afterwards, like the real client does.
  *   d. takeover — state flag, exact TAKEOVER_REFUSAL, release.
  *   e. storageState round-trip — releaseSession flush → openSession
  *      restores login_tok, AND the on-disk encrypted blob decodes with the
@@ -543,7 +546,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
     // ---- Leg c: input injection ----------------------------------------------
 
     it(
-      "leg c — input injection: client JSON → gateway → redis → worker → Playwright → DOM; the harness (playing the gateway CLIENT) queues input until browser_state{screencast:true} (I2 binding: the ENGINE does not gate input on the ~3 s webp probe — input sent early lands on the probe's data: fixture and is lost)",
+      "leg c — input injection: client JSON → gateway → redis → worker → Playwright → DOM; the harness (playing the gateway CLIENT) queues input until browser_state{screencast:true} and toggles takeover on first — the engine drops viewer input without the flag (I2 binding: the ENGINE does not gate input on the ~3 s webp probe — input sent early lands on the probe's data: fixture and is lost)",
       async () => {
         // Leg b's session: viewer attached, cast live.
         await tool("browser_open").execute({ url: server.url("/click") }, ctx(sidViewer));
@@ -561,12 +564,38 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
           15_000,
         );
 
-        // #btn sits at left:20 top:20, 100x40 — (70, 40) is inside it.
+        // Input exclusivity is enforced in the ENGINE, not just the client:
+        // viewer input lands only under takeover. Toggle it on like the real
+        // client does (and off again below, so leg d starts from a clean
+        // flag — its browser_evaluate would otherwise be refused).
+        viewer!.send({ op: "browser_takeover", sessionId: sidViewer, enabled: true });
+        await viewer!.waitFor(
+          () => browserStates(viewer!).some((s) => s.takeover),
+          "state frame with takeover:true",
+        );
+
+        // #btn sits at left:20 top:20, 100x40 — (70, 40) is inside it. The
+        // input is published BEFORE the release below, and the engine's one
+        // subscriber connection processes both in publish order — so the
+        // event is dispatched while the flag is up (a dropped-input
+        // regression would leave #out unset and fail the proof below).
         viewer!.send({
           op: "browser_input",
           sessionId: sidViewer,
           input: { type: "tap", x: 70, y: 40 },
         });
+
+        // Release the flag the way the real client does on control handback —
+        // BEFORE the DOM proof: browser_find is an agent tool, and every
+        // agent tool is refused while takeover is on (leg d's own pin).
+        viewer!.send({ op: "browser_takeover", sessionId: sidViewer, enabled: false });
+        await viewer!.waitFor(
+          () => {
+            const at = browserStates(viewer!).findIndex((s) => s.takeover);
+            return at !== -1 && browserStates(viewer!).slice(at + 1).some((s) => !s.takeover);
+          },
+          "state frame with takeover:false after the takeover:true one",
+        );
 
         // The DOM proof, through the agent's own tool on the same page.
         await waitForAsync(
@@ -584,6 +613,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
       "leg d — takeover: enabled:true → state takeover:true; browser_click returns exactly TAKEOVER_REFUSAL; enabled:false → the tool works again",
       async () => {
         const states = () => browserStates(viewer!);
+        // Leg c already published takeover frames — only states from THIS
+        // leg onward may satisfy the waits below.
+        const startAt = states().length;
 
         // Reset #out so the post-release click is provable (leg c already
         // set it to CLICKED; a fresh click must be distinguishable).
@@ -595,7 +627,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
 
         viewer!.send({ op: "browser_takeover", sessionId: sidViewer, enabled: true });
         await viewer!.waitFor(
-          () => states().some((s) => s.takeover),
+          () => states().slice(startAt).some((s) => s.takeover),
           "state frame with takeover:true",
         );
 
@@ -608,8 +640,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
         // (a state frame published by the engine's ctl handler).
         await viewer!.waitFor(
           () => {
-            const at = states().findIndex((s) => s.takeover);
-            return at !== -1 && states().slice(at + 1).some((s) => !s.takeover);
+            const legStates = states().slice(startAt);
+            const at = legStates.findIndex((s) => s.takeover);
+            return at !== -1 && legStates.slice(at + 1).some((s) => !s.takeover);
           },
           "state frame with takeover:false after the takeover:true one",
         );

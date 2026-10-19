@@ -28,6 +28,8 @@ export interface FakeUser {
   spend: number;
   budget_duration?: string | null;
   max_budget?: number | null;
+  /** LiteLLM's user budget clock reset (ISO); unset = no clock running. */
+  budget_reset_at?: string | null;
 }
 
 export interface FakeModel {

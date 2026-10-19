@@ -20,6 +20,11 @@
  *    fixture).
  *  - Viewer input is applied in redis arrival order (T7/T8 carry): one
  *    serial queue per session, never concurrent un-awaited dispatches.
+ *  - Viewer input is gated on takeover SERVER-side: without the flag the
+ *    agent owns the page and events are dropped (the client's own gate is
+ *    a nicety, not the boundary). The flag is likewise void without a
+ *    viewer — the last leave, or the bridge's stale-viewer sweep, releases
+ *    it; the pool's idle eviction destroys the whole entry instead.
  *  - The screencast follows the active tab: a 10 s unref'd monitor restarts
  *    the cast when `screencastPage !== activePage`, and steps down the
  *    quality ladder on viewer overflow or host load.
@@ -378,6 +383,14 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
 
   function onViewersChange(sessionId: string, viewers: number): void {
     if (viewers === 0) {
+      // Takeover is void without a viewer: its owner is gone, and a flag
+      // left set would brick every browser_* tool until idle eviction
+      // destroys the session. Both disconnect paths funnel through here —
+      // the explicit viewer_leave AND the bridge's stale-viewer sweep — so
+      // one reset covers them (idle eviction needs none: registry.close
+      // drops the whole entry). Mirrors onTakeover's set + publish.
+      registry.setTakeover(sessionId, false);
+      publishState(sessionId);
       void stopScreencast(sessionId);
       return;
     }
@@ -427,6 +440,17 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
           if (next === undefined) break;
           const page = registry.activePage(sessionId);
           if (page === null) continue; // session gone — drop the event
+          if (registry.get(sessionId)?.takeover !== true) {
+            // Input exclusivity enforced SERVER-side: without the takeover
+            // flag the agent owns the page, and a buggy or older client's
+            // event must never reach the Playwright channel. Dropped with a
+            // log only — the tool side's TAKEOVER_REFUSAL is the mirror for
+            // the tool half, but a client that should not be sending has no
+            // state change to signal. Checked at dispatch time, so a flag
+            // released mid-queue also guards the tail.
+            log(`dropping input event on session ${sessionId} — takeover is off`);
+            continue;
+          }
           try {
             // Viewer input is activity: reset the idle-eviction clock so an
             // interacting user never has the tab evicted mid-interaction.

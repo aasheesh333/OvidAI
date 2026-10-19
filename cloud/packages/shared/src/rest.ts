@@ -116,6 +116,43 @@ export function sanitizeAttachmentName(name: string): string {
   return out === "" ? "attachment" : out;
 }
 
+/**
+ * The send-message wire's output-length cap (the "Max output tokens"
+ * setting). The Dart client mirrors it as
+ * `CloudRestClient.maxOutputTokensWireCap` — keep the two in sync. Values
+ * above the cap degrade client-side to the cap instead of failing the send.
+ */
+export const MAX_OUTPUT_TOKENS_CAP = 8192;
+
+/**
+ * POST /cloud/v1/sessions/:id/messages request body. Content required
+ * non-empty string (the route 400s whitespace-only separately); .strict()
+ * rejects unknown keys.
+ *
+ * attachmentIds (P8 Task 3, additive + optional): uuid-shaped ids of
+ * attachments created via POST /sessions/:id/attachments; the route
+ * validates them against the session's attachment rows (unknown or
+ * cross-session id → 400).
+ *
+ * clientMsgId (P8 Task 4, additive + optional): caller-chosen idempotency
+ * key (1–64 chars). A re-send with the same (session, clientMsgId) replays
+ * the original answer instead of inserting a second message/run.
+ *
+ * maxOutputTokens (additive + optional): the user's max completion tokens
+ * (the Settings "Max output tokens" pick; 0/auto never sends the key). The
+ * gateway forwards it on the job payload and the worker maps it onto the
+ * engine request's `maxTokens` — both transports already serialize it
+ * (`max_tokens`). Older servers ignore the field.
+ */
+export const sendMessageBodySchema = z
+  .object({
+    content: z.string(),
+    attachmentIds: z.array(z.string().uuid()).optional(),
+    clientMsgId: z.string().min(1).max(64).optional(),
+    maxOutputTokens: z.number().int().min(1).max(MAX_OUTPUT_TOKENS_CAP).optional(),
+  })
+  .strict();
+
 /** Session interaction mode (spec D5) — "control" was retired; never re-add it. */
 export const sessionModeSchema = z.enum(["safe", "auto", "drive", "studio"]);
 

@@ -308,6 +308,9 @@ export const NOT_COVERED_OPTIONAL_DEPS: Array<{
 interface Fixtures {
   sessionA: SessionRow;
   sessionB: SessionRow;
+  /** Dedicated to the DELETE positive control (a successful soft-delete
+   *  hides the session from every later read, so it must not be sessionA). */
+  sessionDeleteA: SessionRow;
   runA: RunRow;
   scheduleA: ScheduleRow;
   /** Dedicated to the DELETE positive control (not mutated by reads). */
@@ -352,6 +355,13 @@ const OWNED_CASES: Record<string, Case> = {
   "PATCH /cloud/v1/sessions/:id": {
     params: (f) => ({ id: f.sessionA.id }),
     body: { title: "foreign edit" },
+  },
+  // The soft-delete route (chat delete P0): a foreign DELETE must answer the
+  // same 404 as every other session-scoped op. The positive control runs
+  // against the dedicated sessionDeleteA (a 204 hides the row from every
+  // later case, so it must not be sessionA).
+  "DELETE /cloud/v1/sessions/:id": {
+    params: (f) => ({ id: f.sessionDeleteA.id }),
   },
   "POST /cloud/v1/sessions/:id/messages": {
     params: (f) => ({ id: f.sessionA.id }),
@@ -522,6 +532,7 @@ describe("route sweep — 404 not 403", () => {
 
     const sessionA = await sessions.create(db, userA, "A session");
     const sessionB = await sessions.create(db, userB, "B session");
+    const sessionDeleteA = await sessions.create(db, userA, "sweep delete fixture");
     // Warm manifest so the workspace positive controls take the live path
     // (worker stubs below) instead of the never-registered seams.
     await fileManifests.upsertWarm(db, {
@@ -657,6 +668,7 @@ describe("route sweep — 404 not 403", () => {
     fixtures = {
       sessionA,
       sessionB,
+      sessionDeleteA,
       runA,
       scheduleA,
       scheduleDeleteA,

@@ -44,12 +44,13 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
     });
 
     afterAll(async () => {
-      // Terminalize any row this file leaves in 'running' (ours only) — a
-      // suite that tests stranded-run recovery must not strand rows itself,
-      // or re-runs and real-clock sweeps would see its leftovers.
+      // Terminalize any row this file leaves in 'running' or 'queued' (ours
+      // only) — a suite that tests stranded-run recovery must not strand rows
+      // itself, or re-runs and real-clock sweeps would see its leftovers
+      // (the fresh-queued fixtures are ancient under the real clock).
       for (const runId of seededRuns) {
         const row = await runRow(runId).catch(() => null);
-        if (row?.status === "running") {
+        if (row?.status === "running" || row?.status === "queued") {
           await runs.finish(db, runId, "failed", "staleRuns.test cleanup").catch(() => {});
         }
       }
@@ -74,7 +75,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
     /** Run on a fresh user/session, moved to `state` with pinned timestamps. */
     async function seedRun(
       state: "queued" | "running" | "completed",
-      opts: { startedAt?: Date; createdAt?: Date } = {},
+      opts: { startedAt?: Date; createdAt?: Date; lastActiveAt?: Date } = {},
     ): Promise<{ runId: string; sessionId: string }> {
       const userUid = uid("w9s");
       await users.ensure(db, userUid, `${userUid}@stub.test`);
@@ -99,6 +100,14 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         if (opts.startedAt !== undefined) {
           await db.$client.unsafe("UPDATE runs SET started_at = $1 WHERE id = $2", [
             opts.startedAt.toISOString(),
+            run.id,
+          ]);
+        }
+        if (opts.lastActiveAt !== undefined) {
+          // The engine loop's heartbeat stamp (repos.bumpLastActive), written
+          // here directly to pin the timestamp into the 2023 window.
+          await db.$client.unsafe("UPDATE runs SET last_active_at = $1 WHERE id = $2", [
+            opts.lastActiveAt.toISOString(),
             run.id,
           ]);
         }
@@ -163,17 +172,81 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       }
     });
 
-    it("queued runs (even ancient) and finished runs are never swept", async () => {
-      // Queued rows have startedAt NULL — age of createdAt must not matter.
-      const queued = await seedRun("queued", { createdAt: new Date(BASE - 86_400_000) });
+    it("finished runs are never swept (whatever their age)", async () => {
       const completed = await seedRun("completed", { startedAt: new Date(BASE - 86_400_000) });
 
       expect(await sweep()).toBe(0);
 
-      expect((await runRow(queued.runId)).status).toBe("queued");
       expect((await runRow(completed.runId)).status).toBe("completed");
-      expect(await readEvents(queued.sessionId)).toEqual([]);
       expect(await readEvents(completed.sessionId)).toEqual([]);
+    });
+
+    // -------------------------------------------------------------------------
+    // Queued C1-wait zombies (wave-2 fix): a worker death while the run waits
+    // for its session turn strands the row in 'queued' (attempts:1 — never
+    // redelivered), and the zombie stays the session's OLDEST active run, so
+    // every later run of that session burns a full wait behind it.
+    // -------------------------------------------------------------------------
+
+    it("queued C1-wait zombie older than the cutoff → swept with run_queue_wait_timeout in stream AND mirror, run failed, count 1", async () => {
+      // createdAt 30 min before the injected clock (> 10 min threshold). A
+      // queued row has no started_at and never heartbeats — created_at IS
+      // its activity.
+      const zombie = await seedRun("queued", { createdAt: new Date(BASE) });
+
+      expect(await sweep()).toBe(1);
+
+      const evts = await readEvents(zombie.sessionId);
+      expect(evts.map((e) => e.type)).toEqual(["run_failed"]);
+      // The processor's own wait-cap code — the client folds a swept zombie
+      // exactly like a live waiter that gave up.
+      expect(evts[0]!.payload).toEqual({ runId: zombie.runId, code: "run_queue_wait_timeout" });
+      expect(await readMirror(zombie.sessionId)).toEqual(evts);
+      expect(await runRow(zombie.runId)).toEqual({
+        status: "failed",
+        lastError: "run_queue_wait_timeout",
+      });
+
+      // Idempotent: the next sweep finds nothing (the row is terminal now).
+      expect(await sweep()).toBe(0);
+    });
+
+    it("fresh queued runs (including createdAt exactly AT the cutoff) → untouched, count 0, zero events", async () => {
+      const fresh = await seedRun("queued", { createdAt: new Date(CLOCK - 60_000) });
+      // COALESCE(last_active_at, created_at) < cutoff is STRICT: a row created
+      // exactly at the cutoff is not stale.
+      const boundary = await seedRun("queued", { createdAt: new Date(CUTOFF) });
+
+      expect(await sweep()).toBe(0);
+
+      for (const seeded of [fresh, boundary]) {
+        expect((await runRow(seeded.runId)).status).toBe("queued");
+        expect(await readEvents(seeded.sessionId)).toEqual([]);
+        expect(await readMirror(seeded.sessionId)).toEqual([]);
+      }
+    });
+
+    it("a stale running row and a stale queued zombie sweep in ONE pass, each with its own code, count 2", async () => {
+      const crashed = await seedRun("running", { startedAt: new Date(BASE) });
+      const zombie = await seedRun("queued", { createdAt: new Date(BASE + 60_000) });
+
+      expect(await sweep()).toBe(2);
+
+      // Crashed mid-run → run_lost; died waiting for the turn → the
+      // wait-cap code. The two halves never swap verdicts.
+      expect(await runRow(crashed.runId)).toEqual({ status: "failed", lastError: "run_lost" });
+      expect(await readEvents(crashed.sessionId)).toEqual([
+        expect.objectContaining({ payload: { runId: crashed.runId, code: "run_lost" } }),
+      ]);
+      expect(await runRow(zombie.runId)).toEqual({
+        status: "failed",
+        lastError: "run_queue_wait_timeout",
+      });
+      expect(await readEvents(zombie.sessionId)).toEqual([
+        expect.objectContaining({
+          payload: { runId: zombie.runId, code: "run_queue_wait_timeout" },
+        }),
+      ]);
     });
 
     it("two stale running runs → both swept in one pass, count 2, each with its own run_failed", async () => {
@@ -207,6 +280,43 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         status: "failed",
         lastError: "run_lost",
       });
+    });
+
+    it("a run with a recent last_active_at heartbeat is NOT swept, however old its startedAt; a quiet heartbeat is", async () => {
+      // Both runs started 30 min before the injected clock — ancient under
+      // the old startedAt-only rule, which swept healthy long runs mid-flight
+      // and armed a CONCURRENT scheduler retry behind the still-live original.
+      // The heartbeat separates them: this one emitted a minute ago.
+      const healthy = await seedRun("running", {
+        startedAt: new Date(BASE),
+        lastActiveAt: new Date(CLOCK - 60_000),
+      });
+      // Same age, but its last emit was 30 min ago — genuinely stranded.
+      const quiet = await seedRun("running", {
+        startedAt: new Date(BASE),
+        lastActiveAt: new Date(BASE),
+      });
+
+      expect(await sweep()).toBe(1);
+
+      expect((await runRow(healthy.runId)).status).toBe("running");
+      expect(await readEvents(healthy.sessionId)).toEqual([]);
+      expect(await readMirror(healthy.sessionId)).toEqual([]);
+      expect((await runRow(quiet.runId))).toEqual({
+        status: "failed",
+        lastError: "run_lost",
+      });
+    });
+
+    it("a last_active_at exactly AT the cutoff is fresh (the COALESCE comparison is strict)", async () => {
+      // startedAt ancient, heartbeat exactly at the cutoff → not stale.
+      const boundary = await seedRun("running", {
+        startedAt: new Date(BASE),
+        lastActiveAt: new Date(CUTOFF),
+      });
+
+      expect(await sweep()).toBe(0);
+      expect((await runRow(boundary.runId)).status).toBe("running");
     });
 
     it("injected clock is authoritative: a run the REAL clock would call stale is fresh under the 2023 clock", async () => {

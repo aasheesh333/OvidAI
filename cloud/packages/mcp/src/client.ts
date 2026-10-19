@@ -125,7 +125,12 @@ export class McpClient {
     this.requestTimeoutMs = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.hooks = opts?.hooks ?? {};
     transport.onMessage((m) => {
-      void this.handleMessage(m);
+      // Fire-and-forget by necessity (the transport callback cannot await),
+      // but NEVER unhandled: a server request racing a close must not take
+      // the host process down with an unhandledRejection.
+      void this.handleMessage(m).catch((err: unknown) => {
+        console.debug("[mcp-client] inbound message handler failed (contained)", err);
+      });
     });
     transport.onClose((info) => this.handleClose(info));
   }
@@ -308,14 +313,28 @@ export class McpClient {
           error: { code: -32603, message: err instanceof Error ? err.message : String(err) },
         };
       }
-      await this.transport.send(response);
+      await this.sendResponse(response);
       return;
     }
-    await this.transport.send({
+    await this.sendResponse({
       jsonrpc: "2.0",
       id: req.id,
       error: { code: -32601, message: `Method not found: ${req.method}` },
     });
+  }
+
+  /**
+   * A server→client response is best-effort: every transport throws once
+   * closed, and a request that races close() must not crash the host with an
+   * unhandled rejection. An undeliverable response on a closing transport is
+   * a no-op — logged at debug only.
+   */
+  private async sendResponse(response: JsonRpcResponse): Promise<void> {
+    try {
+      await this.transport.send(response);
+    } catch (err) {
+      console.debug("[mcp-client] server response undeliverable (transport closing or closed)", err);
+    }
   }
 
   private handleClose(info: { expected: boolean }): void {

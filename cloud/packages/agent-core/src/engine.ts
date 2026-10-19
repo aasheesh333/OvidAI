@@ -44,6 +44,13 @@ export interface AgentEngine {
        * calling run(), so a non-vision model never receives one.
        */
       promptImages?: readonly AgentImage[];
+      /**
+       * The user's max completion tokens (the Settings "Max output tokens"
+       * pick, gateway-validated int 1..8192) → the loop's AgentRunJob field
+       * of the same name → AgentRequest.maxTokens on every model call.
+       * Absent = the provider's own default.
+       */
+      maxOutputTokens?: number;
     },
   ): Promise<void>;
   /** Flips the run token and aborts the in-flight transport. false = no live run. */
@@ -106,6 +113,9 @@ export function createAgentEngine(deps: AgentEngineDeps): AgentEngine {
             prompt: job.prompt,
             ...(job.promptImages !== undefined && job.promptImages.length > 0
               ? { promptImages: job.promptImages }
+              : {}),
+            ...(job.maxOutputTokens !== undefined
+              ? { maxOutputTokens: job.maxOutputTokens }
               : {}),
             unattended: job.unattended ?? false,
             ...(job.autonomy !== undefined ? { autonomy: job.autonomy } : {}),

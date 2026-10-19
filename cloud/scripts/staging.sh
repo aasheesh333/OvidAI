@@ -1257,6 +1257,17 @@ cmd_worker_start() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     log "WARNING: not running as root — bwrap/cgroup sandboxing will fail unless the launcher is setuid"
   fi
+  # Deploy-audit #1, staging twin of the worker unit's ExecStartPre nft check:
+  # refuse to start the staging worker while the staging egress table is not
+  # loaded — its sandbox uids would run with unfiltered egress. Enforced only
+  # where the table could have been loaded (root + nft present); otherwise
+  # install_staging_egress already SKIPped loudly, so this warns the same way.
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]] && command -v nft >/dev/null 2>&1; then
+    nft list table inet "$STAGING_EGRESS_TABLE" >/dev/null 2>&1 \
+      || die "staging egress table inet $STAGING_EGRESS_TABLE not loaded — run '$0 up' first (refusing to start the staging worker with unfiltered sandbox egress)"
+  else
+    log "WARNING: cannot verify the staging egress table ($STAGING_EGRESS_TABLE) — not root or nft missing; the staging worker starts WITHOUT an egress filter"
+  fi
 
   log "starting staging worker (workspaces $OVID_WORKSPACES_ROOT, uid base $OVID_SANDBOX_UID_BASE)"
   # The worker's SandboxManager enables +cpu +memory +pids on ITS cgroup. A

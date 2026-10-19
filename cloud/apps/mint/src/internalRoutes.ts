@@ -8,7 +8,7 @@ import { requireInternalSignature } from "./internalAuth.js";
 import { litellmMintOrGet } from "./keyMint.js";
 import { requireNoDeletionFence } from "./mintRoutes.js";
 import { storedTier } from "./planMath.js";
-import { effectiveTier, freeCapRemaining, planFor } from "./windows.js";
+import { effectiveTier, freeCapRemaining, freeCapResetAt, isoUtc, planFor } from "./windows.js";
 
 /**
  * P9 Task 9 — the INTERNAL server-to-server mint route.
@@ -55,7 +55,17 @@ export function registerInternalRoutes(adminApp: FastifyInstance, deps: MintDeps
 
     const tier = await effectiveTier(deps, uid);
     if (tier === "free" && (await freeCapRemaining(deps, uid)) <= 0) {
-      throw new HttpContractError(402, "monthly free limit reached");
+      // The backstop IS LiteLLM's per-user budget clock (free plan: cap over
+      // 30d), so that clock's reset instant is what the client counts down
+      // to. Sent in the hook's shape (ovid_pools._iso: whole-second UTC "Z")
+      // so the 402 and the hook's 429 speak the same format — the gateway's
+      // forwarder normalizes to epoch ms either way. LiteLLM reporting no
+      // clock (user unknown, outage, budget never armed) omits the header;
+      // the client then renders no countdown.
+      const resetAt = await freeCapResetAt(deps, uid);
+      throw new HttpContractError(402, "monthly free limit reached", {
+        ...(resetAt === null ? {} : { "x-ovid-resets-at": isoUtc(resetAt) }),
+      });
     }
 
     const key = await litellmMintOrGet(deps, uid, tier, platform, deps.mintLock);

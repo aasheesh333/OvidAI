@@ -229,7 +229,14 @@ export function createWsSocketRegistry(): WsSocketRegistry {
 /** App-private close code (4000–4999 range) for a failed ticket handshake. */
 export const WS_CLOSE_UNAUTHENTICATED = 4401;
 
-/** Cap on events replayed to a client per subscribe (contract with the thin client). */
+/**
+ * Cap on events replayed to a client per subscribe (contract with the thin
+ * client). When a replay returns EXACTLY this many events the `subscribed`
+ * ack carries `trimmed: true` (see handleSubscribe): there may be more
+ * backlog the client did not receive. The cap stays 500 on purpose — raising
+ * it trades server memory on every reconnect; the durable fix is the client
+ * healing on the flag, not a bigger replay window.
+ */
 export const REPLAY_LIMIT = 500;
 
 /**
@@ -555,7 +562,18 @@ export async function handleWsConnection(
     // live callback can never interleave mid-flush (JS is single-threaded and
     // ws.send preserves call order). Contract: the `subscribed` ack arrives
     // BEFORE the replayed events.
-    send(socket, { op: "subscribed", sessionId });
+    //
+    // Exactly REPLAY_LIMIT replayed → the backlog MAY extend past the cap
+    // (readSince never returns more). Flag it via the ADDITIVE `trimmed`
+    // field on the ack (shared/ws.ts) so the client can heal — the Dart
+    // client consumes it at `case 'subscribed'` (cloud_ws.dart) — instead of
+    // silently rendering a truncated history. Absent below the cap; older
+    // clients ignore the field either way.
+    const subscribed: WsServerMsg =
+      replay.length === REPLAY_LIMIT
+        ? { op: "subscribed", sessionId, trimmed: true }
+        : { op: "subscribed", sessionId };
+    send(socket, subscribed);
     for (const event of replay) sendEvent(sub, event);
     sub.buffering = false;
     for (const event of sub.buffered.splice(0)) sendEvent(sub, event);
