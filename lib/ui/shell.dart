@@ -76,11 +76,16 @@ class OfflineBanner extends StatelessWidget {
                       color: Aether.warnLight,
                     ),
                     const SizedBox(width: 8),
-                    const Expanded(
+                    Expanded(
                       child: Text(
-                        "You're offline — messages can't be sent until the "
-                        'connection is back.',
-                        style: TextStyle(fontSize: 12, height: 1.3),
+                        // SH-011 / CH-035: messages are never blocked —
+                        // they wait in the outbox and send by themselves.
+                        c.ovidUnreachable
+                            ? "Ovid can't be reached right now. Messages you "
+                                'send will go out when it is back.'
+                            : "You're offline. Messages you send will go out "
+                                'when the connection is back.',
+                        style: const TextStyle(fontSize: 12, height: 1.3),
                       ),
                     ),
                     TextButton(

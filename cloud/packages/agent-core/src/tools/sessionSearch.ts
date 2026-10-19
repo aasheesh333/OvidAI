@@ -31,15 +31,27 @@ async function run(body: () => Promise<ToolResult>): Promise<ToolResult> {
   }
 }
 
-export function createSessionSearchTool(deps: { db: Db }): Tool {
+/**
+ * Wave 1a (owner rule R1 — session isolation): `crossSession` is the user's
+ * "Share session memory" preference. false (the DEFAULT, fail-closed) confines
+ * every search to the CALLING session: a `sessionId` naming another session is
+ * refused and any foreign row is dropped. true restores the cross-session
+ * search over every session the user owns.
+ */
+export function createSessionSearchTool(deps: { db: Db; crossSession?: boolean }): Tool {
   const { db } = deps;
+  const crossSession = deps.crossSession === true;
   return {
     spec: {
       name: "session_search",
-      description:
-        "Search your past session transcripts with full-text ranking and " +
-        "highlighted snippets. Quoted phrases match the literal phrase; " +
-        "bare terms are ANDed. Optionally scope to one session id.",
+      description: crossSession
+        ? "Search your past session transcripts with full-text ranking and " +
+          "highlighted snippets. Quoted phrases match the literal phrase; " +
+          "bare terms are ANDed. Optionally scope to one session id."
+        : "Search THIS session's transcript with full-text ranking and " +
+          "highlighted snippets. Quoted phrases match the literal phrase; " +
+          "bare terms are ANDed. Other sessions are private unless the user " +
+          "@-tags them or turns on Share session memory.",
       parameters: {
         type: "object",
         properties: {
@@ -80,13 +92,35 @@ export function createSessionSearchTool(deps: { db: Db }): Tool {
           return { content: "Error: sessionId must be a string.", isError: true };
         }
 
+        if (
+          !crossSession &&
+          typeof rawSessionId === "string" &&
+          rawSessionId !== "" &&
+          rawSessionId !== ctx.sessionId
+        ) {
+          return {
+            content:
+              "Error: other sessions are private. Searching them needs the user to " +
+              "@-tag the session or turn on Share session memory in Settings.",
+            isError: true,
+          };
+        }
+        const scope = crossSession
+          ? typeof rawSessionId === "string"
+            ? rawSessionId
+            : undefined
+          : ctx.sessionId;
+
         const res = await searchMessages(db, ctx.userId, query, {
           limit: typeof rawLimit === "number" ? rawLimit : undefined,
           offset: undefined,
-          sessionId: typeof rawSessionId === "string" ? rawSessionId : undefined,
+          sessionId: scope,
         });
-        if (res.rows.length === 0) return { content: "No matches." };
-        const lines = res.rows.map((r) => `${r.sessionId} ${r.messageId}: ${r.snippet}`);
+        const rows = crossSession
+          ? res.rows
+          : res.rows.filter((r) => r.sessionId === ctx.sessionId);
+        if (rows.length === 0) return { content: "No matches." };
+        const lines = rows.map((r) => `${r.sessionId} ${r.messageId}: ${r.snippet}`);
         return { content: lines.join("\n") };
       });
     },

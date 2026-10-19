@@ -24,6 +24,41 @@ export function createMintRedisKeyProvider(redisMint: Redis): KeyProvider {
   };
 }
 
+/** The mint's published model-group list (ovid_plans MODEL_GROUPS_KEY). */
+export const MODEL_GROUPS_KEY = "config:model_groups";
+
+/**
+ * Wave 1a (CH-007): the allowed model catalog for a send's `model` — the
+ * LiteLLM model-group names the mint publishes as a JSON list at
+ * `config:model_groups` in its db2 (the same redis the key read uses).
+ * Every plan may use every catalog model (allowances are price-based), so
+ * there is no per-plan filter. Cached for [ttlMs]; a missing/corrupt key or
+ * a redis error answers null (catalog unknown → the route fails open).
+ */
+export function createMintModelCatalog(
+  redisMint: Pick<Redis, "get">,
+  ttlMs = 60_000,
+  now: () => number = Date.now,
+): () => Promise<readonly string[] | null> {
+  let cached: { at: number; value: readonly string[] | null } | null = null;
+  return async () => {
+    if (cached !== null && now() - cached.at < ttlMs) return cached.value;
+    let value: readonly string[] | null = null;
+    try {
+      const raw = await redisMint.get(MODEL_GROUPS_KEY);
+      const parsed: unknown = raw === null ? null : JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const names = parsed.filter((n): n is string => typeof n === "string" && n !== "");
+        value = names.length > 0 ? names : null;
+      }
+    } catch {
+      value = null;
+    }
+    cached = { at: now(), value };
+    return value;
+  };
+}
+
 /**
  * Thrown when a mint call exceeds its deadline. The messages route maps it to
  * a bounded 503 `unavailable` (never a hung request, never a misleading

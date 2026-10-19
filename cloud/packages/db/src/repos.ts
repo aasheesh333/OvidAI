@@ -133,6 +133,65 @@ export const users = {
 };
 
 // ---------------------------------------------------------------------------
+// user preferences (Wave 1a — SE-005 / R1)
+// ---------------------------------------------------------------------------
+
+/** Structural copy of @ovid/shared's UserPreferences (kept in sync). */
+export interface UserPreferencesJson {
+  memoryEnabled: boolean;
+  shareSessionMemory: boolean;
+}
+
+function preferencesFrom(raw: unknown): UserPreferencesJson {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  return {
+    memoryEnabled: typeof o.memoryEnabled === "boolean" ? o.memoryEnabled : true,
+    shareSessionMemory: typeof o.shareSessionMemory === "boolean" ? o.shareSessionMemory : false,
+  };
+}
+
+export const userPreferences = {
+  /**
+   * The user's preferences with defaults applied (memory on, cross-session
+   * sharing OFF). An unknown user reads the defaults — fail-closed for R1.
+   */
+  async get(db: Db, uid: string): Promise<UserPreferencesJson> {
+    const [row] = await db
+      .select({ preferences: usersTable.preferences })
+      .from(usersTable)
+      .where(eq(usersTable.uid, uid));
+    return preferencesFrom(row?.preferences);
+  },
+
+  /**
+   * Merges [patch] into the stored preferences (provisioning the users row
+   * when absent) and returns the full effective preferences.
+   */
+  async patch(
+    db: Db,
+    uid: string,
+    patch: Partial<UserPreferencesJson>,
+  ): Promise<UserPreferencesJson> {
+    const clean: Record<string, boolean> = {};
+    if (typeof patch.memoryEnabled === "boolean") clean.memoryEnabled = patch.memoryEnabled;
+    if (typeof patch.shareSessionMemory === "boolean") {
+      clean.shareSessionMemory = patch.shareSessionMemory;
+    }
+    const [row] = await db
+      .insert(usersTable)
+      .values({ uid, preferences: clean })
+      .onConflictDoUpdate({
+        target: usersTable.uid,
+        set: {
+          preferences: sql`COALESCE(${usersTable.preferences}, '{}'::jsonb) || ${JSON.stringify(clean)}::jsonb`,
+        },
+      })
+      .returning({ preferences: usersTable.preferences });
+    return preferencesFrom(row?.preferences);
+  },
+};
+
+// ---------------------------------------------------------------------------
 // sessions
 // ---------------------------------------------------------------------------
 
@@ -209,6 +268,35 @@ export const sessions = {
       )
       .limit(1);
     return rows[0] ?? null;
+  },
+
+  /**
+   * Wave 1a (R1 @-mentions): the caller's live sessions whose title matches
+   * one of [titles] case-insensitively (trimmed). Ownership-scoped and
+   * deleted-filtered; returns {id, title} for every match (the caller decides
+   * what an ambiguous title means). Bounded: at most 20 titles are looked up.
+   */
+  async findByTitles(
+    db: Db,
+    userId: string,
+    titles: readonly string[],
+  ): Promise<Array<{ id: string; title: string }>> {
+    const wanted = [...new Set(titles.map((t) => t.trim().toLowerCase()).filter((t) => t !== ""))].slice(0, 20);
+    if (wanted.length === 0) return [];
+    const rows = await db
+      .select({ id: sessionsTable.id, title: sessionsTable.title })
+      .from(sessionsTable)
+      .where(
+        and(
+          eq(sessionsTable.userId, userId),
+          isNull(sessionsTable.deletedAt),
+          inArray(sql`lower(btrim(${sessionsTable.title}))`, wanted),
+        ),
+      )
+      .limit(200);
+    return rows
+      .filter((r): r is { id: string; title: string } => r.title !== null)
+      .map((r) => ({ id: r.id.trim(), title: r.title }));
   },
 
   /** Most recent activity first; keyset cursor over (updatedAt, id). Invalid cursors restart from the beginning. */

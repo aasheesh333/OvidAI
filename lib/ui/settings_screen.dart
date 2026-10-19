@@ -101,8 +101,8 @@ class SettingsScreen extends StatelessWidget {
                   icon: Icons.psychology_outlined,
                   title: 'Memory',
                   subtitleOn:
-                      'ON — personal and current-chat memory context & tools',
-                  subtitleOff: 'OFF — saved memory context & tools disabled',
+                      'ON — Ovid can save and recall facts you ask it to remember',
+                  subtitleOff: 'OFF — Ovid does not save or read memories',
                   getter: _getMemoryEnabled,
                   setter: _setMemoryEnabled,
                 ),
@@ -987,9 +987,9 @@ class _ShareMemoryTile extends StatelessWidget {
           title: 'Share session memory',
           listenable: app,
           subtitleOn:
-              'ON — the AI can search across all chats (memory_search).',
+              'ON — Ovid can search your other chats for context.',
           subtitleOff: memoryOn
-              ? 'OFF — cross-chat memory search is disabled.'
+              ? 'OFF — each chat only sees itself. Tag a chat with @ to include it.'
               : 'Requires Memory — turn Memory on to share it across chats.',
           getter: () => app.effectiveShareSessionMemory,
           setter: memoryOn

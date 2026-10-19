@@ -101,6 +101,7 @@ class SendMessageResponse {
     required this.runId,
     required this.userMessageId,
     required this.status,
+    this.model,
   });
 
   factory SendMessageResponse.fromJson(Map<String, dynamic> j) =>
@@ -108,6 +109,7 @@ class SendMessageResponse {
         runId: j['runId'] as String,
         userMessageId: j['userMessageId'] as String,
         status: j['status'] as String,
+        model: j['model'] as String?,
       );
 
   final String runId;
@@ -115,6 +117,87 @@ class SendMessageResponse {
 
   /// Always "queued" — the run executes async over WS.
   final String status;
+
+  /// The model the server will route this session to after the send: the
+  /// pinned catalog id, or "auto". Null from servers that predate the
+  /// per-turn settings (Wave 1a).
+  final String? model;
+}
+
+/// The per-turn settings that ride `POST /sessions/:id/messages` (Wave 1a,
+/// CT-001 / CH-001 / CH-007 / CH-008): the header model pick, the access
+/// mode chip, plan mode, the preset, and the sessions the user @-tagged.
+///
+/// The send body is the single source of truth: the gateway validates every
+/// field (model against the allowed catalog, preset against the built-in
+/// ids, session refs against the caller's own sessions) and persists the
+/// settings into the session's agent state before the run is queued, so the
+/// worker routes and gates the run with exactly what the user saw.
+class CloudTurnOptions {
+  const CloudTurnOptions({
+    this.model,
+    this.mode,
+    this.planMode,
+    this.presetId,
+    this.sessionRefs = const <String>[],
+  });
+
+  factory CloudTurnOptions.fromJson(Map<String, dynamic> j) => CloudTurnOptions(
+        model: j['model'] as String?,
+        mode: j['mode'] as String?,
+        planMode: j['planMode'] as bool?,
+        presetId: j['presetId'] as String?,
+        sessionRefs: <String>[
+          for (final id in (j['sessionRefs'] as List? ?? const <dynamic>[]))
+            if (id is String && id.isNotEmpty) id,
+        ],
+      );
+
+  static const CloudTurnOptions none = CloudTurnOptions();
+
+  /// A catalog id (optionally with an effort suffix `· high`) or "auto".
+  final String? model;
+
+  /// "safe" | "auto" | "drive" | "studio" — the [AgentMode] names.
+  final String? mode;
+  final bool? planMode;
+  final String? presetId;
+
+  /// Server ids of sessions the user explicitly @-tagged in this message.
+  /// Session context never crosses chats otherwise (owner rule R1).
+  final List<String> sessionRefs;
+
+  /// The wire fields (absent keys are omitted, never sent as null).
+  Map<String, Object> toJson() => <String, Object>{
+        if (model != null && model!.trim().isNotEmpty) 'model': model!,
+        'mode': ?mode,
+        'planMode': ?planMode,
+        if (presetId != null && presetId!.isNotEmpty) 'presetId': presetId!,
+        if (sessionRefs.isNotEmpty) 'sessionRefs': sessionRefs,
+      };
+}
+
+/// `GET/PATCH /cloud/v1/preferences` (Wave 1a, SE-005 / owner rule R1): the
+/// per-user memory switches the worker enforces on every run.
+class CloudUserPreferences {
+  const CloudUserPreferences({
+    required this.memoryEnabled,
+    required this.shareSessionMemory,
+  });
+
+  factory CloudUserPreferences.fromJson(Map<String, dynamic> j) =>
+      CloudUserPreferences(
+        memoryEnabled: j['memoryEnabled'] as bool? ?? true,
+        shareSessionMemory: j['shareSessionMemory'] as bool? ?? false,
+      );
+
+  /// Saved personal memory (memory_* tools) is available to the agent.
+  final bool memoryEnabled;
+
+  /// Cross-chat recall: the agent may search the user's OTHER chats. Off by
+  /// default — a chat's context never leaks into another chat unless the
+  /// user @-tags it or turns this on.
+  final bool shareSessionMemory;
 }
 
 /// `RunCancelResponse` (rest.ts, P8 Task 1) — the 202 answer of POST
@@ -279,6 +362,11 @@ class OutboxEntry {
     required this.createdAt,
     this.maxOutputTokens,
     this.account,
+    this.turn = CloudTurnOptions.none,
+    this.attachmentFiles = const <OutboxFile>[],
+    this.failedCode,
+    this.failedMessage,
+    this.attempts = 0,
   });
 
   factory OutboxEntry.fromJson(Map<String, dynamic> j) => OutboxEntry(
@@ -293,6 +381,17 @@ class OutboxEntry {
             DateTime.tryParse(j['createdAt'] as String? ?? '') ?? DateTime.now(),
         maxOutputTokens: j['maxOutputTokens'] as int?,
         account: j['account'] as String?,
+        turn: j['turn'] is Map
+            ? CloudTurnOptions.fromJson(
+                Map<String, dynamic>.from(j['turn'] as Map))
+            : CloudTurnOptions.none,
+        attachmentFiles: <OutboxFile>[
+          for (final f in (j['attachmentFiles'] as List? ?? const <dynamic>[]))
+            if (f is Map) OutboxFile.fromJson(Map<String, dynamic>.from(f)),
+        ],
+        failedCode: j['failedCode'] as String?,
+        failedMessage: j['failedMessage'] as String?,
+        attempts: j['attempts'] as int? ?? 0,
       );
 
   final String clientMsgId;
@@ -318,11 +417,39 @@ class OutboxEntry {
   /// only on pre-stamp rows, before the legacy migration runs.
   final String? account;
 
+  /// The per-turn settings captured when the user pressed Send (model, mode,
+  /// plan, preset, @-tagged sessions) — a later flush sends exactly these.
+  final CloudTurnOptions turn;
+
+  /// Files the user attached that are not uploaded yet (CH-033 / CH-035):
+  /// the flush uploads each one to the resolved server session and records
+  /// its id in [attachmentIds] before the send, so a prompt composed in a
+  /// brand-new or offline chat keeps its files.
+  final List<OutboxFile> attachmentFiles;
+
+  /// Non-null once the server REFUSED this prompt for a reason a retry
+  /// cannot fix by itself (a 4xx such as 400/402/403/404/413). The entry is
+  /// KEPT (never silently dropped — CH-009) and shown as "Not sent" with
+  /// Retry / Discard until the user decides.
+  final String? failedCode;
+  final String? failedMessage;
+
+  /// Delivery attempts that hit a transient failure (network, timeout, 429,
+  /// 5xx) — drives the retry backoff.
+  final int attempts;
+
+  bool get failed => failedCode != null;
+
   OutboxEntry copyWith({
     String? sessionId,
     List<String>? attachmentIds,
     int? maxOutputTokens,
     String? account,
+    List<OutboxFile>? attachmentFiles,
+    String? failedCode,
+    String? failedMessage,
+    bool clearFailure = false,
+    int? attempts,
   }) =>
       OutboxEntry(
         clientMsgId: clientMsgId,
@@ -332,18 +459,52 @@ class OutboxEntry {
         createdAt: createdAt,
         maxOutputTokens: maxOutputTokens ?? this.maxOutputTokens,
         account: account ?? this.account,
+        turn: turn,
+        attachmentFiles: attachmentFiles ?? this.attachmentFiles,
+        failedCode: clearFailure ? null : (failedCode ?? this.failedCode),
+        failedMessage:
+            clearFailure ? null : (failedMessage ?? this.failedMessage),
+        attempts: attempts ?? this.attempts,
       );
 
-  Map<String, dynamic> toJson() => <String, dynamic>{
-        'clientMsgId': clientMsgId,
-        'sessionId': sessionId,
-        'content': content,
-        if (attachmentIds.isNotEmpty) 'attachmentIds': attachmentIds,
-        // The server's zod `.datetime()` wants a Z-terminated stamp.
-        'createdAt': createdAt.toUtc().toIso8601String(),
-        if (maxOutputTokens != null) 'maxOutputTokens': maxOutputTokens,
-        if (account != null) 'account': account,
-      };
+  Map<String, dynamic> toJson() {
+    final turnJson = turn.toJson();
+    return <String, dynamic>{
+      'clientMsgId': clientMsgId,
+      'sessionId': sessionId,
+      'content': content,
+      if (attachmentIds.isNotEmpty) 'attachmentIds': attachmentIds,
+      // The server's zod `.datetime()` wants a Z-terminated stamp.
+      'createdAt': createdAt.toUtc().toIso8601String(),
+      if (maxOutputTokens != null) 'maxOutputTokens': maxOutputTokens,
+      if (account != null) 'account': account,
+      if (turnJson.isNotEmpty) 'turn': turnJson,
+      if (attachmentFiles.isNotEmpty)
+        'attachmentFiles': [for (final f in attachmentFiles) f.toJson()],
+      'failedCode': ?failedCode,
+      'failedMessage': ?failedMessage,
+      if (attempts > 0) 'attempts': attempts,
+    };
+  }
+}
+
+/// A not-yet-uploaded attachment of an [OutboxEntry]: the staged file on
+/// disk. Uploaded at flush time, once the target server session exists.
+class OutboxFile {
+  const OutboxFile({required this.name, required this.path, required this.size});
+
+  factory OutboxFile.fromJson(Map<String, dynamic> j) => OutboxFile(
+        name: j['name'] as String? ?? 'file',
+        path: j['path'] as String? ?? '',
+        size: (j['size'] as num?)?.toInt() ?? 0,
+      );
+
+  final String name;
+  final String path;
+  final int size;
+
+  Map<String, dynamic> toJson() =>
+      <String, dynamic>{'name': name, 'path': path, 'size': size};
 }
 
 /// Client-side run state assembled from WS session events (P8 later tasks
@@ -419,7 +580,7 @@ extension AgentModeX on AgentMode {
     AgentMode.auto =>
       'Runs shell and browser freely. Asks before pushing to the repo.',
     AgentMode.drive =>
-      'Full autonomous — kuch bhi, kahin bhi, no confirmation.',
+      'Full access. Runs anything, anywhere, without asking.',
     AgentMode.studio =>
       'Studio mode — files edit, terminal run, repo access free. '
           'Asks for confirmation before publishing or committing.',

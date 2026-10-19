@@ -309,7 +309,9 @@ void main() {
       expect(p.messages[0].thinking, isFalse);
       expect(p.messages[0].content, 'attempt-2 partial');
       expect(p.messages[1].kind, MsgKind.turnTail);
-      expect(p.messages[1].content, 'model_transient_exhausted');
+      // CH-019: plain language, never the raw code.
+      expect(p.messages[1].content,
+          'The model provider failed to answer. Try again or pick another model.');
       expect(p.busy, isFalse);
     });
 
@@ -356,7 +358,9 @@ void main() {
       expect(settled.thinking, isFalse);
       expect(settled.content, 'partial');
       expect(p.messages[1].kind, MsgKind.turnTail);
-      expect(p.messages[1].content, 'Upstream 500');
+      // CH-019: provider text is detail only — the row reads as plain language.
+      expect(p.messages[1].content,
+          'The model provider failed to answer. Try again or pick another model.');
 
       // No live bubble remains: a late delta has nowhere to fold.
       proj.apply(_ev('message_delta',
@@ -377,7 +381,7 @@ void main() {
       expect(p.messages, hasLength(1)); // only the turn tail
       expect(p.messages.single.kind, MsgKind.turnTail);
       expect(p.messages.single.content,
-          'No model API key is provisioned for this account.');
+          'Ovid could not set up model access for your account. Try again in a moment.');
     });
 
     test('run_failed clears the retry status line and activeRunId', () {
@@ -394,7 +398,8 @@ void main() {
 
       expect(p.statusLine, isNull); // never a retry line for a dead run
       expect(p.activeRunId, isNull); // terminal
-      expect(p.messages.last.content, 'model_transient_exhausted');
+      expect(p.messages.last.content,
+          'The model provider failed to answer. Try again or pick another model.');
     });
 
     test(

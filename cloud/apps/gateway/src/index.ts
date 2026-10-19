@@ -31,7 +31,7 @@ import { buildGateway, installShutdownHandlers } from "./app.js";
 import type { AccountRouteDeps } from "./routes/account.js";
 import { createFirebaseVerifier, createTestVerifier } from "./auth.js";
 import { loadGatewayEnv } from "./env.js";
-import { createMintRedisKeyProvider } from "./keys.js";
+import { createMintModelCatalog, createMintRedisKeyProvider } from "./keys.js";
 import { createInternalMintProvisioner } from "./internalMint.js";
 import { createTicketStore } from "./tickets.js";
 import { createWorkerClient } from "./workerClient.js";
@@ -249,6 +249,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       verifier,
       tickets: createTicketStore(redisQ),
       keys: createMintRedisKeyProvider(redisMint),
+      // Wave 1a: the send's `model` is validated against the mint's
+      // published model groups (same mint redis as the key read).
+      modelCatalog: createMintModelCatalog(redisMint),
       mint: createInternalMintProvisioner(cfg.internalMintUrl, cfg.internalApiSecret),
       // Session event log shares the queue Redis; the worker (Task 9) appends
       // to the same instance, so gateway replay/live sees every event.

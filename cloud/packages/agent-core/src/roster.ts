@@ -155,24 +155,38 @@ export function computeToolRoster(
  * ALL modes and is checked before any hook allow (Task 15); it is not a
  * modePolicy field for exactly that reason.
  */
-export function modePolicy(
-  mode: SessionMode,
-  planMode: boolean,
-): { canMutate: boolean; confineToWorkspace: boolean; approvalForOutside: boolean } {
+export interface ModePolicy {
+  /** false → identity-mutating tools are refused outright (plan; unattended Read-Only). */
+  canMutate: boolean;
+  confineToWorkspace: boolean;
+  approvalForOutside: boolean;
+  /**
+   * Wave 1a (CH-001): Read-Only's promise — "Asks for permission before every
+   * shell, browser, or write action." In an ATTENDED run every shell/code/job
+   * call, browser_* call, network fetch and mutating tool raises an approval
+   * card before dispatch (allow → it runs). An UNATTENDED Read-Only run (a
+   * `safe` schedule) has nobody to ask: mutating tools fall back to the
+   * outright canMutate:false denial and reads run.
+   */
+  askBeforeActions: boolean;
+}
+
+export function modePolicy(mode: SessionMode, planMode: boolean): ModePolicy {
   if (planMode) {
-    return { canMutate: false, confineToWorkspace: true, approvalForOutside: true };
+    return { canMutate: false, confineToWorkspace: true, approvalForOutside: true, askBeforeActions: false };
   }
   switch (mode) {
     case "safe":
-      // Read-Only: no mutation at all; reads stay inside the workspace.
-      return { canMutate: false, confineToWorkspace: true, approvalForOutside: true };
+      // Read-Only: every action asks first (attended); reads stay inside the
+      // workspace; unattended runs never mutate.
+      return { canMutate: false, confineToWorkspace: true, approvalForOutside: true, askBeforeActions: true };
     case "auto":
     case "studio":
       // General / Studio: mutate, workspace-confined, outside targets prompt.
-      return { canMutate: true, confineToWorkspace: true, approvalForOutside: true };
+      return { canMutate: true, confineToWorkspace: true, approvalForOutside: true, askBeforeActions: false };
     case "drive":
       // Full Access: mutate anywhere, no confirmation for outside targets.
-      return { canMutate: true, confineToWorkspace: false, approvalForOutside: false };
+      return { canMutate: true, confineToWorkspace: false, approvalForOutside: false, askBeforeActions: false };
   }
 }
 

@@ -28,6 +28,43 @@ void main() {
     AppState.resetTestInstance();
   });
 
+  test('SH-011: the probe asks Ovid itself, not a Google endpoint', () {
+    expect(ConnectionService.ovidProbeUrl, endsWith('/cloud/v1/health'));
+    expect(ConnectionService.ovidProbeUrl, startsWith('https://api.ovidsi.com'));
+  });
+
+  test('SH-011: Ovid down while the internet is up reads "Ovid unreachable"',
+      () async {
+    final c = ConnectionService.forTest(
+      status: ConnectionStatus.online,
+      reach: () async => false,
+      internetReach: () async => true,
+    );
+    await c.probe();
+    expect(c.offline, isTrue);
+    expect(c.ovidUnreachable, isTrue);
+    c.dispose();
+  });
+
+  testWidgets('SH-011: the banner names Ovid when only Ovid is unreachable',
+      (tester) async {
+    final c = ConnectionService.forTest(
+      status: ConnectionStatus.online,
+      reach: () async => false,
+      internetReach: () async => true,
+    );
+    ConnectionService.debugInstance = c;
+    await c.probe();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: Aether.theme(),
+        home: const Scaffold(body: OfflineBanner()),
+      ),
+    );
+    expect(find.textContaining("Ovid can't be reached"), findsOneWidget);
+    expect(find.textContaining('will go out when it is back'), findsOneWidget);
+  });
+
   test('offline re-check timer runs only while offline', () async {
     var reachable = false;
     final c = ConnectionService.forTest(
@@ -67,7 +104,7 @@ void main() {
     expect(find.byKey(const ValueKey('offline-banner')), findsNothing);
   });
 
-  testWidgets('Send is disabled with a "You\'re offline" tooltip', (
+  testWidgets('offline, Send stays enabled and says it will send later (SH-011)', (
     tester,
   ) async {
     final connection = ConnectionService.forTest(
@@ -91,8 +128,10 @@ void main() {
         matching: find.byType(AetherPrimaryButton),
       ),
     );
-    expect(send().onPressed, isNull);
-    expect(send().tooltip, "You're offline");
+    // CH-035 / SH-011: one offline model — the prompt queues in the
+    // outbox and its row says it sends when the connection is back.
+    expect(send().onPressed, isNotNull);
+    expect(send().tooltip, contains("you're offline"));
 
     await connection.probe(); // reach() defaults to reachable
     await tester.pump();

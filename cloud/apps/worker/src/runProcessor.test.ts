@@ -17,6 +17,7 @@ import {
   sessionState,
   sessions,
   users,
+  userPreferences,
   type Db,
 } from "@ovid/db";
 import { createRedisEventLog, type EventLog } from "@ovid/events";
@@ -2231,7 +2232,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       });
     });
 
-    it("full processor: mode:'safe' feeds modePolicy — write_file denied outright, no approval card", async () => {
+    it("full processor: UNATTENDED mode:'safe' (a safe schedule) — write_file denied outright, no approval card", async () => {
       const seeded = await seedRun();
       const sbx = makeFakePort();
       const sse = await startTurnSse([
@@ -2247,6 +2248,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
             userId: seeded.uid,
             prompt: seeded.prompt,
             mode: "safe",
+            unattended: true,
           },
         });
       } finally {
@@ -2260,6 +2262,228 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(String(completed.payload.content)).toContain("READ-ONLY MODE");
       expect(evts.some((e) => e.type === "approval_requested")).toBe(false);
       expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+    });
+
+    // Wave 1a (CH-001): the Read-Only chip "asks for permission before every
+    // shell, browser, or write action" — on the production processor.
+    for (const call of [
+      { name: "write_file", args: { path: "x.txt", content: "x" } },
+      { name: "run_shell", args: { command: "ls" } },
+    ]) {
+      it(`full processor: attended mode:'safe' asks before ${call.name}; a denial dispatches nothing`, async () => {
+        const seeded = await seedRun();
+        const sbx = makeFakePort({ exitCode: 0, stdout: "listing\n", stderr: "" });
+        const sse = await startTurnSse([toolCallTurn("call_s", call.name, call.args), textTurn("ok")]);
+        const processor = createFullAgentRunProcessor(
+          makeFullDeps(sse.url, sbx.port, { approvalTimeoutMs: 150 }),
+        );
+        try {
+          await processor({
+            data: {
+              runId: seeded.runId,
+              sessionId: seeded.sessionId,
+              userId: seeded.uid,
+              prompt: seeded.prompt,
+              mode: "safe",
+            },
+          });
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+
+        const evts = await readEvents(seeded.sessionId);
+        const requested = evts.find((e) => e.type === "approval_requested");
+        expect(requested?.payload).toMatchObject({ tool: call.name });
+        const completed = evts.find((e) => e.type === "tool_completed")!;
+        expect(completed.payload).toMatchObject({ name: call.name, isError: true, content: "DENIED by user" });
+        expect(sbx.execs).toEqual([]);
+        expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+      });
+    }
+
+    it("full processor: mode:'auto' writes with no approval card", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort();
+      const handleSbx = makeFakeSandbox();
+      const sse = await startTurnSse([
+        toolCallTurn("call_w", "write_file", { path: "x.txt", content: "x" }),
+        textTurn("ok"),
+      ]);
+      const processor = createFullAgentRunProcessor(
+        makeFullDeps(sse.url, sbx.port, {
+          approvalTimeoutMs: 150,
+          sandboxHandleFor: async () => handleSbx.handle,
+        }),
+      );
+      try {
+        await processor({
+          data: {
+            runId: seeded.runId,
+            sessionId: seeded.sessionId,
+            userId: seeded.uid,
+            prompt: seeded.prompt,
+            mode: "auto",
+          },
+        });
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(evts.some((e) => e.type === "approval_requested")).toBe(false);
+      const completed = evts.find((e) => e.type === "tool_completed")!;
+      expect(completed.payload).toMatchObject({ name: "write_file" });
+      expect(completed.payload.isError, String(completed.payload.content)).not.toBe(true);
+    });
+
+    // Wave 1a (CH-007): the model the user picked is the model the run uses.
+    it("full processor: the session's model pin (set by the send body) is the model on the provider wire", async () => {
+      const seeded = await seedRun();
+      await sessionState.patch(db, seeded.sessionId, { modelPin: "glm-5.3-picked" });
+      const sbx = makeFakePort();
+      const sse = await startTurnSse([textTurn("hi")]);
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+      expect(sse.requests[0]!.model).toBe("glm-5.3-picked");
+    });
+
+    // ---- Wave 1a (owner rule R1): session isolation -----------------------
+
+    const wireText = (req: { messages: ChatMessage[] }): string => JSON.stringify(req.messages);
+    const toolNames = (req: { tools?: unknown }): string[] =>
+      ((req.tools ?? []) as Array<{ function?: { name?: string } }>).map((t) => t.function?.name ?? "");
+
+    it("R1: by default session_search cannot read another session's messages; with Share session memory it can", async () => {
+      const marker = `zebracode${Date.now().toString(36)}`;
+      const seeded = await seedRun();
+      const otherSession = await sessions.create(db, seeded.uid, "Other chat");
+      createdSessions.push(otherSession.id);
+      await messages.append(db, { sessionId: otherSession.id, role: "user", content: `the secret is ${marker}` });
+
+      const runSearch = async (s: Seeded): Promise<string> => {
+        const sbx = makeFakePort();
+        const sse = await startTurnSse([
+          toolCallTurn("call_q", "session_search", { query: marker }),
+          textTurn("ok"),
+        ]);
+        const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+        try {
+          await processor(jobOf(s));
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+        const evts = await readEvents(s.sessionId);
+        const done = evts.filter((e) => e.type === "tool_completed").pop()!;
+        return String(done.payload.content);
+      };
+
+      const isolated = await runSearch(seeded);
+      expect(isolated).not.toContain(marker);
+      expect(isolated).not.toContain(otherSession.id);
+
+      await userPreferences.patch(db, seeded.uid, { shareSessionMemory: true });
+      const prompt2 = await messages.append(db, { sessionId: seeded.sessionId, role: "user", content: "again" });
+      const run2 = await runs.create(db, { sessionId: seeded.sessionId, promptMessageId: prompt2.id });
+      const shared = await runSearch({ ...seeded, runId: run2.id, prompt: "again", promptMessageId: prompt2.id });
+      expect(shared).toContain(otherSession.id);
+    });
+
+    it("R1: no sessionRefs → no other session's text reaches the model; sessionRefs → included for that run only", async () => {
+      const marker = `okapi${Date.now().toString(36)}`;
+      const seeded = await seedRun();
+      const otherSession = await sessions.create(db, seeded.uid, "Trip plan");
+      createdSessions.push(otherSession.id);
+      await messages.append(db, { sessionId: otherSession.id, role: "user", content: `we chose ${marker}` });
+      await messages.append(db, { sessionId: otherSession.id, role: "assistant", content: "noted" });
+
+      const runOnce = async (job: { data: AgentRunJob }) => {
+        const sbx = makeFakePort();
+        const sse = await startTurnSse([textTurn("ok")]);
+        const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+        try {
+          await processor(job);
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+        return sse.requests[0]!;
+      };
+
+      const plain = await runOnce(jobOf(seeded));
+      expect(wireText(plain)).not.toContain(marker);
+
+      const p2 = await messages.append(db, { sessionId: seeded.sessionId, role: "user", content: "use @[Trip plan]" });
+      const r2 = await runs.create(db, { sessionId: seeded.sessionId, promptMessageId: p2.id });
+      const tagged = await runOnce({
+        data: {
+          runId: r2.id,
+          sessionId: seeded.sessionId,
+          userId: seeded.uid,
+          prompt: "use @[Trip plan]",
+          sessionRefs: [otherSession.id],
+        },
+      });
+      expect(wireText(tagged)).toContain(marker);
+      expect(wireText(tagged)).toContain("Trip plan");
+
+      const p3 = await messages.append(db, { sessionId: seeded.sessionId, role: "user", content: "and now?" });
+      const r3 = await runs.create(db, { sessionId: seeded.sessionId, promptMessageId: p3.id });
+      const after = await runOnce({
+        data: { runId: r3.id, sessionId: seeded.sessionId, userId: seeded.uid, prompt: "and now?" },
+      });
+      expect(wireText(after)).not.toContain(marker);
+    });
+
+    it("R1: a sessionRef to another user's session is ignored by the worker", async () => {
+      const marker = `lynx${Date.now().toString(36)}`;
+      const seeded = await seedRun();
+      const stranger = uid("w1a-stranger");
+      await users.ensure(db, stranger, null);
+      const foreign = await sessions.create(db, stranger, "Foreign");
+      createdSessions.push(foreign.id);
+      await messages.append(db, { sessionId: foreign.id, role: "user", content: marker });
+      const sbx = makeFakePort();
+      const sse = await startTurnSse([textTurn("ok")]);
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      try {
+        await processor({ data: { ...jobOf(seeded).data, sessionRefs: [foreign.id] } });
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+      expect(wireText(sse.requests[0]!)).not.toContain(marker);
+    });
+
+    it("SE-005: Memory OFF removes every memory_* tool from the model's tool list", async () => {
+      const seeded = await seedRun();
+      const run = async (job: { data: AgentRunJob }) => {
+        const sbx = makeFakePort();
+        const sse = await startTurnSse([textTurn("ok")]);
+        const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+        try {
+          await processor(job);
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+        return toolNames(sse.requests[0]!);
+      };
+      const on = await run(jobOf(seeded));
+      expect(on.some((n) => n.startsWith("memory_"))).toBe(true);
+
+      await userPreferences.patch(db, seeded.uid, { memoryEnabled: false });
+      const p2 = await messages.append(db, { sessionId: seeded.sessionId, role: "user", content: "again" });
+      const r2 = await runs.create(db, { sessionId: seeded.sessionId, promptMessageId: p2.id });
+      const off = await run({ data: { runId: r2.id, sessionId: seeded.sessionId, userId: seeded.uid, prompt: "again" } });
+      expect(off.filter((n) => n.startsWith("memory_"))).toEqual([]);
     });
 
     it("full processor: provider egress admits the configured loopback LiteLLM origin, while a USER URL to it is still blocked", async () => {

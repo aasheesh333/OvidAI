@@ -57,6 +57,8 @@ class _AttachRest extends CloudRestClient {
     uploadedBytes.add(bytes.length);
   }
 
+  CloudTurnOptions lastTurn = CloudTurnOptions.none;
+
   @override
   Future<SendMessageResponse> sendMessage(
     String sessionId,
@@ -64,7 +66,9 @@ class _AttachRest extends CloudRestClient {
     List<String> attachmentIds = const [],
     String? clientMsgId,
     int? maxOutputTokens,
+    CloudTurnOptions turn = CloudTurnOptions.none,
   }) async {
+    lastTurn = turn;
     final gate = entered;
     if (gate != null && !gate.isCompleted) gate.complete();
     final wait = release;
@@ -250,7 +254,11 @@ void main() {
     rest.release = Completer<void>();
     final run = facade.runTask('read notes', sessionId: session.id);
     await rest.entered!.future;
-    expect(facade.pendingAttachments.map((a) => a.name), ['notes.txt']);
+    // CH-011 / CH-033: the sent files left the composer the moment Send
+    // was pressed — they ride the pending user row, not the staging list.
+    expect(facade.pendingAttachments, isEmpty);
+    final pendingRow = facade.transcriptFor(session.id)!.last;
+    expect(pendingRow.attachments.map((a) => a.name), ['notes.txt']);
     await attach('next.txt');
     final observed = <List<String>>[];
     void listener() => observed

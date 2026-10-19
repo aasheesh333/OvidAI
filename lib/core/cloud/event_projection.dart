@@ -46,6 +46,7 @@ library;
 import 'package:flutter/foundation.dart';
 
 import '../state.dart';
+import 'cloud_errors.dart';
 import 'cloud_ws.dart';
 
 /// The live approval prompt folded from `approval_requested` (the P3 Task 12
@@ -567,8 +568,14 @@ class EventTranscriptProjector {
     target._appendMessage(Message(
       role: 'assistant',
       kind: MsgKind.turnTail,
-      // Verbatim server string when present; humanText for the pinned codes.
-      content: message ?? (code == null ? '' : humanText(code)),
+      // CH-019: plain language from the shared copy table — never a raw
+      // snake_case code or provider exception text. A user stop keeps the
+      // server's own words.
+      content: code == 'cancelled'
+          ? (message ?? humanText(code!))
+          : code == null
+              ? (message ?? '')
+              : cloudErrorCopy(code, message: message).text,
       time: _clock(),
     ));
   }
@@ -649,14 +656,8 @@ class EventTranscriptProjector {
   /// never invented prose.
   @visibleForTesting
   static String humanText(String code) {
-    switch (code) {
-      case 'cancelled':
-        return 'Stopped by user.';
-      case 'key_not_minted':
-        return 'No model API key is provisioned for this account.';
-      default:
-        return code;
-    }
+    if (code == 'cancelled') return 'Stopped by user.';
+    return cloudErrorCopy(code).text;
   }
 
   // -------------------------------------------------------------------------
