@@ -407,6 +407,11 @@ class WsMultiplexer extends ChangeNotifier {
   void unsubscribe(String sessionId) {
     final sub = _subs.remove(sessionId);
     if (sub == null) return; // idempotent
+    // CH-014: a later re-subscribe must resume from THIS subscription's
+    // high-water mark — never from an older seed (which would replay, and
+    // duplicate, everything since).
+    final last = sub.lastEventId;
+    if (last != null) _seededCursors[sessionId] = last;
     if (_linkState == WsLinkState.online && _socket != null) {
       _send(<String, Object?>{'op': 'unsubscribe', 'sessionId': sessionId});
     }

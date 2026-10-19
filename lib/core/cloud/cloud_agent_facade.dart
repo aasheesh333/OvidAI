@@ -19,15 +19,18 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../connection_service.dart';
 import '../diag.dart';
 import '../state.dart';
 import 'agent_surface.dart';
+import 'cloud_errors.dart';
 import 'cloud_rest.dart';
 import 'cloud_session_store.dart';
 import 'cloud_ws.dart';
@@ -42,6 +45,7 @@ class CloudAgentFacade extends ChangeNotifier
     required WsMultiplexer ws,
     required CloudSessionStore? store,
     Duration Function()? stallWindowFor,
+    this.persistQueue = false,
   })  : _rest = rest, // ignore: prefer_initializing_formals
         _ws = ws, // ignore: prefer_initializing_formals
         _store = store, // ignore: prefer_initializing_formals
@@ -55,10 +59,19 @@ class CloudAgentFacade extends ChangeNotifier
       _lastOffline = s.offline;
       _connection!.addListener(_onConnectivityChanged);
       _ws.addListener(_onConnectivityChanged);
+      // Pending-row states ("Sending…", "Waiting for connection", "Not
+      // sent") are derived from the outbox: any outbox change repaints.
+      s.addListener(_notify);
     } else {
       _connection = null;
     }
+    if (persistQueue) unawaited(_loadPersistedQueues());
   }
+
+  /// When true the composer queue (rows typed while a run is busy) is
+  /// persisted per account, so process death cannot lose it (CH-023).
+  /// Test fixtures that do not care leave it off.
+  final bool persistQueue;
 
   final CloudRestClient _rest;
   final WsMultiplexer _ws;
@@ -85,6 +98,7 @@ class CloudAgentFacade extends ChangeNotifier
         rest: CloudRestClient.I,
         ws: WsMultiplexer.I,
         store: CloudSessionStore.I,
+        persistQueue: true,
       );
 
   /// Replaces the singleton — test wiring only.
@@ -116,6 +130,8 @@ class CloudAgentFacade extends ChangeNotifier
     }
     _tickNotifiers.clear();
     _queues.clear();
+    _queuesLoaded = false;
+    if (persistQueue) unawaited(_loadPersistedQueues());
     _draining.clear();
     _sending.clear();
     _attachments.clear();
@@ -127,6 +143,10 @@ class CloudAgentFacade extends ChangeNotifier
     _titlePatches.clear();
     _activeRunForTest.clear();
     _approvalRequests.clear();
+    _pendingRows.clear();
+    _lastPrompts.clear();
+    _released.clear();
+    _recent.clear();
     pendingApprovalForTest = null;
     _lastHardStop = null;
     for (final timer in _stallTimers.values) {
@@ -162,6 +182,11 @@ class CloudAgentFacade extends ChangeNotifier
     // closes the multiplexer's stream; idempotent for a never-subscribed id).
     _ws.unsubscribe(id);
     _queues.remove(id);
+    unawaited(_persistQueues());
+    _pendingRows.remove(id);
+    _lastPrompts.remove(id);
+    _released.remove(id);
+    _recent.remove(id);
     _draining.remove(id);
     _sending.remove(id);
     _attachments.remove(id);
@@ -379,11 +404,31 @@ class CloudAgentFacade extends ChangeNotifier
     return _store?.serverIdFor(id) ?? id;
   }
 
-  /// The projection + projector for one server session, subscribing on first
-  /// use. Idempotent.
-  _SessionCloudState _stateFor(String serverId) {
+  /// True when [key] is (as far as this process knows) a SERVER session id
+  /// — one a WS subscription may name. An unmapped local id (a brand-new
+  /// chat before its first send landed) is not: subscribing it would only
+  /// earn a server error.
+  bool _isServerKey(String key) {
+    final store = _store;
+    if (store == null) return true;
+    return store.knownServerIdFor(key) == key;
+  }
+
+  /// The projection + projector for one session, subscribing on first use
+  /// when [key] is a server id ([subscribe] false defers the subscription —
+  /// a pending first send of an unmapped chat renders before the server id
+  /// exists). Idempotent; a released (unsubscribed) session re-subscribes.
+  _SessionCloudState _stateFor(String serverId, {bool? subscribe}) {
     final existing = _sessions[serverId];
-    if (existing != null) return existing;
+    if (existing != null) {
+      _released.remove(serverId);
+      if (existing.subscription == null &&
+          (subscribe ?? _isServerKey(serverId))) {
+        _subscribe(serverId, existing);
+      }
+      _touchRecent(serverId);
+      return existing;
+    }
 
     final projection = TranscriptProjection();
     final state = _SessionCloudState(
@@ -414,6 +459,22 @@ class CloudAgentFacade extends ChangeNotifier
       () => ticks.value = projection.liveBubbleTicks.value,
     );
 
+    // Prompts still in the outbox (queued offline, waiting for a retry, or
+    // refused and waiting for the user) render as pending user rows — also
+    // after a cold start, so a composed prompt is never invisible (CH-009).
+    _restorePendingRows(serverId, state);
+
+    if (subscribe ?? _isServerKey(serverId)) _subscribe(serverId, state);
+    _touchRecent(serverId);
+    // Rows restored from the persisted composer queue (CH-023) leave once
+    // the session is idle.
+    if (_queues[serverId]?.isNotEmpty == true) {
+      scheduleMicrotask(() => unawaited(_drainQueue(serverId)));
+    }
+    return state;
+  }
+
+  void _subscribe(String serverId, _SessionCloudState state) {
     state.subscription = _ws.subscribe(serverId).listen(
           (CloudSessionEvent event) {
             if (_disposed) return;
@@ -458,13 +519,130 @@ class CloudAgentFacade extends ChangeNotifier
                   activeBefore,
                 );
                 break;
+              case 'plan_mode_changed':
+                // The agent left (or entered) plan mode server-side
+                // (exit_plan_mode): the Plan chip must follow, or the next
+                // send would put the session straight back into plan mode.
+                final next = event.payload['planMode'];
+                if (next is bool) {
+                  final session = AppState.I.sessionById(serverId) ??
+                      _localSessionFor(serverId);
+                  if (session != null && session.planMode != next) {
+                    session.planMode = next;
+                    session.planModePending = null;
+                    unawaited(AppState.I.persistSessions());
+                  }
+                  _notify();
+                }
+                break;
             }
           },
           onError: (Object error) => _onStreamError(serverId, error),
         );
-
-    return state;
   }
+
+  /// The local row mapped to [serverId], if any.
+  ChatSession? _localSessionFor(String serverId) {
+    for (final s in AppState.I.sessions) {
+      if (_store?.serverIdFor(s.id) == serverId) return s;
+    }
+    return null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Subscription lifetime (CH-014): only the chats the user is looking at,
+  // or that have work in flight, stay subscribed.
+  // -------------------------------------------------------------------------
+
+  /// Most-recently-used subscribed sessions, oldest first.
+  final List<String> _recent = <String>[];
+
+  /// Sessions the user navigated away from while they still had work in
+  /// flight; they unsubscribe as soon as that work settles.
+  final Set<String> _released = <String>{};
+
+  /// The server's per-connection cap is 64; stay far below it.
+  static const int maxLiveSubscriptions = 16;
+
+  void _touchRecent(String key) {
+    _recent.remove(key);
+    _recent.add(key);
+    _enforceSubscriptionCap();
+  }
+
+  /// True while [key] must keep its live subscription: it is on screen, a
+  /// run is in flight or queued, an approval waits, or prompts wait in the
+  /// outbox.
+  bool _mustStaySubscribed(String key) {
+    final active = _serverId(null);
+    if (active == key) return true;
+    if (_sending.contains(key) || _busyForRun(key)) return true;
+    if (_approvalRequests.containsKey(key)) return true;
+    if (_queues[key]?.isNotEmpty == true) return true;
+    final store = _store;
+    if (store != null && store.outboxFor(key).isNotEmpty) return true;
+    return false;
+  }
+
+  /// The user left [localOrServerId]'s chat. Its WS subscription is
+  /// dropped now — or, when work is still in flight, as soon as it settles.
+  /// The projection stays in memory and the replay cursor is kept, so
+  /// coming back re-subscribes cheaply from where it stopped.
+  void releaseSession(String localOrServerId) {
+    if (_disposed) return;
+    final key = _serverId(localOrServerId) ?? localOrServerId;
+    if (!_sessions.containsKey(key)) return;
+    _released.add(key);
+    _maybeUnsubscribe(key);
+  }
+
+  /// The user opened [localOrServerId]'s chat: (re)subscribe it if it has a
+  /// live projection or is a known server session.
+  void activateSession(String localOrServerId) {
+    if (_disposed) return;
+    final key = _serverId(localOrServerId) ?? localOrServerId;
+    _released.remove(key);
+    if (_sessions.containsKey(key) || (_store != null && _isServerKey(key))) {
+      _stateFor(key);
+    }
+  }
+
+  void _maybeUnsubscribe(String key) {
+    final state = _sessions[key];
+    if (state == null || state.subscription == null) {
+      _released.remove(key);
+      return;
+    }
+    if (_mustStaySubscribed(key)) return;
+    _released.remove(key);
+    _recent.remove(key);
+    unawaited(state.subscription?.cancel());
+    state.subscription = null;
+    _ws.unsubscribe(key);
+  }
+
+  void _enforceSubscriptionCap() {
+    var live = _sessions.values.where((s) => s.subscription != null).length;
+    if (live <= maxLiveSubscriptions) return;
+    for (final key in List<String>.of(_recent)) {
+      if (live <= maxLiveSubscriptions) break;
+      final state = _sessions[key];
+      if (state == null || state.subscription == null) continue;
+      if (_mustStaySubscribed(key)) continue;
+      _recent.remove(key);
+      unawaited(state.subscription?.cancel());
+      state.subscription = null;
+      _ws.unsubscribe(key);
+      live--;
+    }
+  }
+
+  /// Subscribed session ids, for tests.
+  @visibleForTesting
+  Set<String> get subscribedSessionsForTest => <String>{
+        for (final e in _sessions.entries)
+          if (e.value.subscription != null) e.key,
+      };
 
   /// True when [event] is a terminal the session has ALREADY settled — the
   /// server may emit BOTH spellings of one cancel (the full processor's
@@ -567,13 +745,14 @@ class CloudAgentFacade extends ChangeNotifier
       stopRequested: false,
       clearRunId: true,
     );
-    if (type == 'run_failed') {
-      final code = payload['code'];
+    final failCode = payload['code'];
+    if (type == 'run_failed' && failCode is String && failCode != 'cancelled') {
       final message = payload['message'];
-      if (code is String) {
-        _recordError(serverId, code, message is String ? message : '');
-      }
+      _recordError(serverId, failCode, message is String ? message : '');
     } else {
+      // run_completed, run_cancelled — and the queued-cancel spelling
+      // run_failed{code:'cancelled'} (CH-020): a user-initiated stop is not
+      // a failure and never raises the red error row.
       // run_completed and run_cancelled clear the error surface: a
       // user-initiated cancel is not a surfaced error (the projection fold
       // appends the 'Stopped by user.' turn tail the user sees).
@@ -586,6 +765,9 @@ class CloudAgentFacade extends ChangeNotifier
     // offline READ CACHE.
     unawaited(_persistTerminal(serverId, state));
     unawaited(_drainQueue(serverId));
+    if (_released.contains(serverId)) {
+      scheduleMicrotask(() => _maybeUnsubscribe(serverId));
+    }
   }
 
   Future<void> _persistTerminal(String serverId, _SessionCloudState state) async {
@@ -594,7 +776,11 @@ class CloudAgentFacade extends ChangeNotifier
     try {
       await store.persistTranscript(
         serverId,
-        state.projection.messages,
+        // Pending rows live in the outbox, never in the read cache.
+        [
+          for (final m in state.projection.messages)
+            if (pendingClientMsgIdOf(m) == null) m,
+        ],
         store.cachedCursorFor(serverId),
       );
     } catch (_) {
@@ -663,8 +849,86 @@ class CloudAgentFacade extends ChangeNotifier
     for (final entry in _busyNotifiers.entries) {
       entry.value.value = busyFor(entry.key);
     }
+    _persistQueuesIfChanged();
     notifyListeners();
   }
+
+  // -------------------------------------------------------------------------
+  // Composer-queue persistence (CH-023)
+  // -------------------------------------------------------------------------
+
+  static const String queuePrefKey = 'ovid_cloud_composer_queue';
+  bool _queuesLoaded = false;
+  String? _lastQueueSnapshot;
+
+  String _queueSnapshot() => jsonEncode(<String, Object>{
+        for (final e in _queues.entries)
+          if (e.value.isNotEmpty)
+            e.key: [for (final row in e.value) row.toJson()],
+      });
+
+  void _persistQueuesIfChanged() {
+    if (!persistQueue || !_queuesLoaded) return;
+    final snapshot = _queueSnapshot();
+    if (snapshot == _lastQueueSnapshot) return;
+    _lastQueueSnapshot = snapshot;
+    unawaited(_writeQueues(snapshot));
+  }
+
+  Future<void> _persistQueues() async {
+    if (!persistQueue || !_queuesLoaded) return;
+    final snapshot = _queueSnapshot();
+    _lastQueueSnapshot = snapshot;
+    await _writeQueues(snapshot);
+  }
+
+  Future<void> _writeQueues(String snapshot) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+          AppState.I.accountScopedPrefKey(queuePrefKey), snapshot);
+    } catch (e, s) {
+      Diag.swallow('cloud.persistQueue', e, s);
+    }
+  }
+
+  Future<void> _loadPersistedQueues() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw =
+          prefs.getString(AppState.I.accountScopedPrefKey(queuePrefKey));
+      if (raw != null && raw.isNotEmpty) {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          for (final e in decoded.entries) {
+            final rows = e.value;
+            if (e.key is! String || rows is! List) continue;
+            final queue = _queues.putIfAbsent(
+                e.key as String, () => <_QueuedCloudMessage>[]);
+            final known = {for (final r in queue) r.id};
+            for (final r in rows) {
+              if (r is! Map) continue;
+              final row = _QueuedCloudMessage.fromJson(
+                  Map<String, dynamic>.from(r));
+              if (row.text.trim().isEmpty || !known.add(row.id)) continue;
+              queue.add(row);
+              if (row.id >= _nextQueueId) _nextQueueId = row.id + 1;
+            }
+          }
+        }
+      }
+    } catch (e, s) {
+      Diag.swallow('cloud.loadQueue', e, s);
+    }
+    _queuesLoaded = true;
+    _lastQueueSnapshot = _queueSnapshot();
+    if (_disposed) return;
+    for (final key in _queues.keys.toList()) {
+      if (_sessions.containsKey(key)) unawaited(_drainQueue(key));
+    }
+    notifyListeners();
+  }
+
 
   static CloudRunState _copyRunState(
     CloudRunState s, {
@@ -896,6 +1160,256 @@ class CloudAgentFacade extends ChangeNotifier
     return _tickNotifierFor(id);
   }
 
+  // -------------------------------------------------------------------------
+  // Per-turn settings (Wave 1a — CT-001, CH-001, CH-007, CH-008)
+  // -------------------------------------------------------------------------
+
+  /// The wire model id for a session's header pick: an empty pick or the
+  /// legacy "Select a provider" sentinel means server routing ("auto") —
+  /// exactly what the header label shows as "Auto".
+  static String cloudModelWireId(String? model) {
+    final m = model?.trim() ?? '';
+    if (m.isEmpty || m == 'Select a provider') return 'auto';
+    return m;
+  }
+
+  /// The settings the user can SEE for [localId]/[key] right now: header
+  /// model, access-mode chip, Plan chip and preset. They ride every send so
+  /// the server routes and gates the run with exactly these values.
+  CloudTurnOptions turnOptionsFor(
+    String? localId,
+    String key, {
+    List<String> sessionRefs = const <String>[],
+  }) {
+    final session = AppState.I.sessionById(localId ?? '') ??
+        AppState.I.sessionById(key);
+    final mode = _modes[key] ?? _persistedModeFor(localId, key);
+    final preset = session?.presetId;
+    return CloudTurnOptions(
+      model: cloudModelWireId(session?.model),
+      mode: mode.name,
+      planMode: session?.planMode ?? false,
+      presetId: (preset == null || preset.isEmpty) ? null : preset,
+      sessionRefs: sessionRefs,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Pending user rows (CH-011): the prompt shows in the transcript the
+  // moment Send is pressed, keyed by its clientMsgId, and is swapped for the
+  // confirmed row when the server accepts it.
+  // -------------------------------------------------------------------------
+
+  static const String _pendingPrefix = 'pending:';
+
+  /// The transcript row id of a not-yet-confirmed prompt.
+  static String pendingRowId(String clientMsgId) => '$_pendingPrefix$clientMsgId';
+
+  /// The clientMsgId behind a pending row, or null for a confirmed row.
+  static String? pendingClientMsgIdOf(Message m) =>
+      m.privateSyncId.startsWith(_pendingPrefix)
+          ? m.privateSyncId.substring(_pendingPrefix.length)
+          : null;
+
+  /// Pending rows per session key (survive a transcript re-seed).
+  final Map<String, List<Message>> _pendingRows = <String, List<Message>>{};
+
+  /// The delivery state of a pending row, for the bubble's status line.
+  PendingSendState? pendingStateOf(Message m) {
+    final id = pendingClientMsgIdOf(m);
+    if (id == null) return null;
+    final entry = _store?.outboxEntry(id);
+    if (entry != null && entry.failed) return PendingSendState.failed;
+    if (entry != null && (_store?.offline ?? false)) {
+      return PendingSendState.waitingForNetwork;
+    }
+    if (entry != null && entry.attempts > 0) return PendingSendState.retrying;
+    return PendingSendState.sending;
+  }
+
+  /// The refusal behind a failed pending row ("Not sent" copy), or null.
+  OutboxEntry? pendingEntryOf(Message m) {
+    final id = pendingClientMsgIdOf(m);
+    return id == null ? null : _store?.outboxEntry(id);
+  }
+
+  void _addPendingRow(
+    _SessionCloudState state,
+    String key,
+    String clientMsgId,
+    String content,
+    List<({String name, String path, int size})> files,
+  ) {
+    final rowId = pendingRowId(clientMsgId);
+    if (state.projection.messages.any((m) => m.privateSyncId == rowId)) return;
+    final row = Message(
+      role: 'user',
+      kind: MsgKind.text,
+      content: content,
+      privateSyncId: rowId,
+      attachments: [
+        for (final f in files) MessageAttachment(name: f.name, size: f.size),
+      ],
+    );
+    _pendingRows.putIfAbsent(key, () => <Message>[]).add(row);
+    state.projection.messages.add(row);
+    state.projection.notifyListeners();
+  }
+
+  void _restorePendingRows(String key, _SessionCloudState state) {
+    final known = <String>{
+      for (final m in state.projection.messages) m.privateSyncId,
+    };
+    var changed = false;
+    for (final row in _pendingRows[key] ?? const <Message>[]) {
+      if (known.add(row.privateSyncId)) {
+        state.projection.messages.add(row);
+        changed = true;
+      }
+    }
+    final store = _store;
+    if (store != null) {
+      for (final entry in store.outboxFor(key)) {
+        final rowId = pendingRowId(entry.clientMsgId);
+        if (!known.add(rowId)) continue;
+        final row = Message(
+          role: 'user',
+          kind: MsgKind.text,
+          content: entry.content,
+          privateSyncId: rowId,
+          time: entry.createdAt,
+          attachments: [
+            for (final f in entry.attachmentFiles)
+              MessageAttachment(name: f.name, size: f.size),
+          ],
+        );
+        _pendingRows.putIfAbsent(key, () => <Message>[]).add(row);
+        state.projection.messages.add(row);
+        changed = true;
+      }
+    }
+    if (changed) state.projection.notifyListeners();
+  }
+
+  /// Swaps the pending row for [clientMsgId] for the confirmed server row
+  /// (same position — CH-011), or drops it when the confirmed row is
+  /// already present (a replay, or a history page that raced the 202).
+  void _confirmPendingRow(
+    String key,
+    String clientMsgId,
+    String userMessageId,
+    String content,
+  ) {
+    final state = _sessions[key];
+    final rowId = pendingRowId(clientMsgId);
+    _pendingRows[key]?.removeWhere((m) => m.privateSyncId == rowId);
+    if (_pendingRows[key]?.isEmpty == true) _pendingRows.remove(key);
+    if (state == null) return;
+    final messages = state.projection.messages;
+    final index = messages.indexWhere((m) => m.privateSyncId == rowId);
+    final already = messages.any((m) => m.privateSyncId == userMessageId);
+    if (index >= 0) {
+      final pending = messages[index];
+      if (already) {
+        messages.removeAt(index);
+      } else {
+        messages[index] = Message(
+          role: 'user',
+          kind: MsgKind.text,
+          content: pending.content,
+          privateSyncId: userMessageId,
+          time: pending.time,
+          attachments: pending.attachments,
+        );
+      }
+    } else if (!already) {
+      messages.add(Message(
+        role: 'user',
+        kind: MsgKind.text,
+        content: content,
+        privateSyncId: userMessageId,
+      ));
+    }
+    state.projection.notifyListeners();
+  }
+
+  /// Drops a pending row (the user discarded the prompt).
+  void _removePendingRow(String key, String clientMsgId) {
+    final rowId = pendingRowId(clientMsgId);
+    _pendingRows[key]?.removeWhere((m) => m.privateSyncId == rowId);
+    final state = _sessions[key];
+    if (state == null) return;
+    final before = state.projection.messages.length;
+    state.projection.messages.removeWhere((m) => m.privateSyncId == rowId);
+    if (state.projection.messages.length != before) {
+      state.projection.notifyListeners();
+    }
+  }
+
+  /// Retry on a "Not sent" row: delivers again with the SAME clientMsgId,
+  /// so a prompt the server did accept can never run twice (CH-010).
+  Future<void> retryPendingSend(String clientMsgId) async {
+    final store = _store;
+    if (store == null) return;
+    final entry = store.outboxEntry(clientMsgId);
+    if (entry == null) return;
+    final key = _serverId(entry.sessionId) ?? entry.sessionId;
+    _clearError(key);
+    _notify();
+    await store.retryOutboxEntry(clientMsgId);
+    final after = store.outboxEntry(clientMsgId);
+    if (after != null && after.failed) {
+      _recordError(
+        _serverId(after.sessionId) ?? after.sessionId,
+        after.failedCode!,
+        after.failedMessage ?? '',
+        resetsAt: store.outboxErrorResetsAt,
+      );
+    }
+    _notify();
+  }
+
+  /// Discard on a queued or "Not sent" row: the only path that removes a
+  /// composed prompt without delivering it.
+  Future<void> discardPendingSend(String clientMsgId) async {
+    final store = _store;
+    final entry = store?.outboxEntry(clientMsgId);
+    final key = entry == null
+        ? null
+        : (_serverId(entry.sessionId) ?? entry.sessionId);
+    await store?.discardOutboxEntry(clientMsgId);
+    if (key != null) {
+      _removePendingRow(key, clientMsgId);
+      _clearError(key);
+    } else {
+      for (final k in _pendingRows.keys.toList()) {
+        _removePendingRow(k, clientMsgId);
+      }
+    }
+    _notify();
+  }
+
+  /// The last prompt sent per session — the run-failure Retry re-sends it.
+  final Map<String, ({String text, CloudTurnOptions turn})> _lastPrompts =
+      <String, ({String text, CloudTurnOptions turn})>{};
+
+  /// Re-sends the last prompt of [sessionId] after a RUN-level failure
+  /// (run_lost, model_*, …). A failed run consumed its clientMsgId, so this
+  /// is deliberately a new send.
+  Future<void> retryLastPrompt(String sessionId) async {
+    final key = _serverId(sessionId) ?? sessionId;
+    final last = _lastPrompts[key];
+    if (last == null) return;
+    _clearError(key);
+    _notify();
+    await runTask(last.text,
+        sessionId: sessionId, sessionRefs: last.turn.sessionRefs);
+  }
+
+  /// True when [sessionId] has a prompt Retry can re-send.
+  bool canRetryLastPrompt(String sessionId) =>
+      _lastPrompts.containsKey(_serverId(sessionId) ?? sessionId);
+
   @override
   Future<void> runTask(
     String originalPrompt, {
@@ -903,13 +1417,19 @@ class CloudAgentFacade extends ChangeNotifier
     bool freshTurn = true,
     ChatSession? expandRefsFor,
     List<({String name, String path, int size})>? attachments,
+    String? clientMsgId,
+    List<String> sessionRefs = const <String>[],
+    VoidCallback? onQueued,
   }) async {
     // freshTurn/expandRefsFor are local-loop concepts; the cloud run is
     // admitted server-side. They stay in the signature for AgentSurface
     // parity only.
-    String? id = _serverId(sessionId);
-    if (id == null) {
-      _recordError('', 'no_session', 'No chat session is selected.');
+    final localId = (sessionId != null && sessionId.isNotEmpty)
+        ? sessionId
+        : AppState.I.activeSessionId;
+    final key = localId == null ? null : _serverId(localId);
+    if (localId == null || key == null) {
+      _recordError('', 'no_session', 'Start a chat first.');
       _notify();
       return;
     }
@@ -925,157 +1445,162 @@ class CloudAgentFacade extends ChangeNotifier
             CloudRestClient.maxOutputTokensWireCap)
         : null;
 
-    // Double-send guard (chat P1): `busyFor` flips only when the POST
-    // response lands, so a second tap while the first send is between its
-    // synchronous entry and that POST would dispatch a SECOND run — double
-    // spend. The flag is claimed here, BEFORE the first await (the
-    // `_drainQueue` re-entrancy guard, applied to the direct send that
-    // never had it), and released when the POST settles either way. A
-    // re-entrant call queues behind the in-flight send; its row leaves on
-    // the first send's terminal, in order.
-    if (!_sending.add(id)) {
-      if (store != null && sessionId != null && sessionId.isNotEmpty) {
-        // Resolve like the primary path so the row lands under the key
-        // every later `_serverId` resolves to — an unmapped local id can
-        // move to its server id while the first send is in the create.
-        try {
-          id = await store.ensureServerSession(sessionId);
-        } on CloudApiException catch (e) {
-          _recordError(sessionId, e.code, e.message, resetsAt: e.resetsAt);
-          _notify();
-          return;
-        }
-      }
-      if (store?.offline ?? false) {
-        await store!.enqueue(
-          id,
-          originalPrompt,
-          maxOutputTokens: maxOutputTokens,
-        );
-        return;
-      }
-      _enqueueRow(id, originalPrompt, attachments ?? _attachments[id]);
+    // Double-send guard (chat P1): a second tap while the first send is
+    // between its synchronous entry and the server's answer queues behind
+    // it instead of dispatching a second run. Claimed before the first
+    // await, released when the send settles either way.
+    if (!_sending.add(key)) {
+      _enqueueRow(key, originalPrompt,
+          attachments ?? _attachments.remove(key), sessionRefs: sessionRefs);
+      onQueued?.call();
       return;
     }
-    final guardKeys = <String>{id};
+    final guardKeys = <String>{key};
     try {
-      // Create-on-first-send (Task 9): an unmapped LOCAL session gets its
-      // server session before the first POST — the store's shared in-flight
-      // future keeps concurrent first sends to one create. Server ids the
-      // store already knows pass through `ensureServerSession` untouched.
-      if (store != null && sessionId != null && sessionId.isNotEmpty) {
-        try {
-          final resolved = await store.ensureServerSession(sessionId);
-          if (resolved != id) {
-            // The guard was keyed on the local id; the fresh server id is
-            // what every later `_serverId` resolves to, so claim it too or
-            // a second tap after the create would slip past the guard.
-            _sending.add(resolved);
-            guardKeys.add(resolved);
-          }
-          id = resolved;
-        } on CloudApiException catch (e) {
-          _recordError(sessionId, e.code, e.message, resetsAt: e.resetsAt);
-          _notify();
-          return;
+      // ONE idempotency key per user send (CH-010): minted here (or handed
+      // in by a retry) and kept with the prompt until the server confirms.
+      final msgId = (clientMsgId != null && clientMsgId.isNotEmpty)
+          ? clientMsgId
+          : CloudSessionStore.newClientMsgId();
+
+      // Snapshot the staged files BEFORE any await or server-id assignment
+      // (CH-033): in a brand-new chat they are keyed by the LOCAL id, and the
+      // first send must carry them whatever id the chat ends up with. The
+      // prompt owns them from here; files staged later belong to the next
+      // message.
+      final staged = List<({String name, String path, int size})>.from(
+        attachments ?? _attachments[key] ?? const [],
+      );
+      final live = _attachments[key];
+      if (attachments == null && live != null) {
+        for (final sent in staged) {
+          final index = live.indexWhere((a) =>
+              a.name == sent.name && a.path == sent.path && a.size == sent.size);
+          if (index >= 0) live.removeAt(index);
         }
+        if (live.isEmpty) _attachments.remove(key);
       }
 
-      if (store?.offline ?? false) {
-        // Checked BEFORE `_stateFor` so an enqueue-only send does not open a
-        // subscription (review round 1, Minor 3).
-        await store!.enqueue(
-          id,
-          originalPrompt,
-          maxOutputTokens: maxOutputTokens,
-        );
+      final turn = turnOptionsFor(localId, key, sessionRefs: sessionRefs);
+      _lastPrompts[key] = (text: originalPrompt, turn: turn);
+
+      // The prompt is on screen immediately (CH-011), in order, before any
+      // network round trip — including the first send of a new chat.
+      final state = _stateFor(key, subscribe: _isServerKey(key));
+      _addPendingRow(state, key, msgId, originalPrompt, staged);
+      _clearError(key);
+      _notify();
+
+      if (store == null) {
+        onQueued?.call();
+        await _sendDirect(key, state, originalPrompt, msgId, staged, turn,
+            maxOutputTokens);
         return;
       }
 
-      final state = _stateFor(id);
-
-      final staged = List<({String name, String path, int size})>.from(
-        attachments ?? _attachments[id] ?? const [],
+      // Durable FIRST: the prompt (with its files, settings and key) is in
+      // the account-scoped outbox before anything touches the network, so a
+      // timeout, a 429, a 401 or process death can never lose it (CH-009).
+      await store.enqueue(
+        localId,
+        originalPrompt,
+        clientMsgId: msgId,
+        maxOutputTokens: maxOutputTokens,
+        turn: turn,
+        attachmentFiles: [
+          for (final f in staged)
+            OutboxFile(name: f.name, path: f.path, size: f.size),
+        ],
       );
-      // Whether this send queues behind a live run (server FIFO). Captured
-      // before the await: busyFor can change while the POST is in flight.
-      // `_busyForRun` — this send already holds the in-flight flag and must
-      // not read its own POST as a live run.
-      final queuedBehindActiveRun = _busyForRun(id);
-      // The composer decides queue-vs-send on `busyFor`; flip it for the
-      // in-flight window too.
-      _notify();
-
-      try {
-        final attachmentIds = <String>[];
-        for (final attachment in staged) {
-          final upload = await _rest.createAttachment(
-            id,
-            name: attachment.name,
-            size: attachment.size,
-          );
-          final bytes = await File(attachment.path).readAsBytes();
-          await _rest.uploadAttachmentBytes(upload, bytes);
-          attachmentIds.add(upload.attachmentId);
-        }
-
-        final response = await _rest.sendMessage(
-          id,
-          originalPrompt,
-          attachmentIds: attachmentIds,
-          clientMsgId: _newClientMsgId(),
-          maxOutputTokens: maxOutputTokens,
-        );
-
-        // Optimistic user row. privateSyncId = the server's userMessageId is
-        // the Task 9 dedupe key when history is paged back in.
-        state.projection.messages.add(Message(
-          role: 'user',
-          kind: MsgKind.text,
-          content: originalPrompt,
-          privateSyncId: response.userMessageId,
-        ));
-        state.projection.notifyListeners();
-
-        // Review carry (T8 round 1): a terminal event for THIS run can arrive
-        // while the POST is in flight. Resurrecting busy after that would
-        // leave the composer showing Stop for a dead run.
-        if (state.terminalSettledRunId != response.runId) {
-          state.runState = CloudRunState(runId: response.runId, busy: true);
-          state.queuedBehindActiveRun = queuedBehindActiveRun;
-        }
-        // Clear only the snapshot this send carried. A file staged while the
-        // POST was in flight belongs to the NEXT message and must survive
-        // (the retired local service's `_acknowledgeAttachments` contract).
-        final live = _attachments[id];
-        if (live != null) {
-          for (final sent in staged) {
-            final index = live.indexWhere((a) =>
-                a.name == sent.name &&
-                a.path == sent.path &&
-                a.size == sent.size);
-            if (index >= 0) live.removeAt(index);
-          }
-          if (live.isEmpty) _attachments.remove(id);
-        }
-        // A freshly accepted send clears any stale recorded error (mode PATCH
-        // failures, a previous 402) — Task 10's composer decides draft
-        // acceptance on `runState.lastErrorCode == null`.
-        _clearError(id);
-        _notify();
-      } on CloudApiException catch (e) {
-        _recordError(id, e.code, e.message, resetsAt: e.resetsAt);
-        _notify();
-      } catch (e) {
-        _recordError(id, 'internal', '$e');
-        _notify();
+      onQueued?.call();
+      // Deliver now when online; offline it waits for the reconnect flush
+      // (and the pending row says so).
+      await store.flushOutbox();
+      final resolved = _serverId(localId) ?? key;
+      if (resolved != key) guardKeys.add(resolved);
+      final entry = store.outboxEntry(msgId);
+      if (entry != null && entry.failed) {
+        _recordError(resolved, entry.failedCode!, entry.failedMessage ?? '',
+            resetsAt: store.outboxErrorResetsAt);
       }
+    } catch (e, s) {
+      // Never an unhandled exception out of a send (CH-012).
+      Diag.swallow('cloud.runTask', e, s);
+      _recordError(key, cloudFailureCode(e), e is CloudApiException ? e.message : '');
     } finally {
-      // The POST settled (or the send aborted): the in-flight window is
-      // over and the composer falls back to run-tracking busy state.
+      // The send settled (accepted, queued or refused): the in-flight window
+      // is over and the composer falls back to run-tracking busy state.
       _sending.removeAll(guardKeys);
       _notify();
     }
+  }
+
+  /// Store-less send (unit-test compositions): upload, POST, swap the row.
+  Future<void> _sendDirect(
+    String id,
+    _SessionCloudState state,
+    String prompt,
+    String clientMsgId,
+    List<({String name, String path, int size})> staged,
+    CloudTurnOptions turn,
+    int? maxOutputTokens,
+  ) async {
+    // Whether this send queues behind a live run (server FIFO). Captured
+    // before the await: busyFor can change while the POST is in flight.
+    final queuedBehindActiveRun = _busyForRun(id);
+    try {
+      final attachmentIds = <String>[];
+      for (final attachment in staged) {
+        final upload = await _rest.createAttachment(
+          id,
+          name: attachment.name,
+          size: attachment.size,
+        );
+        final bytes = await File(attachment.path).readAsBytes();
+        await _rest.uploadAttachmentBytes(upload, bytes);
+        attachmentIds.add(upload.attachmentId);
+      }
+      final response = await _rest.sendMessage(
+        id,
+        prompt,
+        attachmentIds: attachmentIds,
+        clientMsgId: clientMsgId,
+        maxOutputTokens: maxOutputTokens,
+        turn: turn,
+      );
+      _confirmPendingRow(id, clientMsgId, response.userMessageId, prompt);
+      _markAccepted(id, state, response.runId, queuedBehindActiveRun);
+    } catch (e) {
+      // Without an outbox the row cannot wait: it leaves and the error row
+      // explains (the text is still recoverable through Retry).
+      _removePendingRow(id, clientMsgId);
+      if (staged.isNotEmpty) {
+        _attachments.putIfAbsent(id, () => []).insertAll(0, staged);
+      }
+      _recordError(id, cloudFailureCode(e),
+          e is CloudApiException ? e.message : '',
+          resetsAt: e is CloudApiException ? e.resetsAt : null);
+      _notify();
+    }
+  }
+
+  /// Arms run tracking for an accepted send.
+  void _markAccepted(
+    String id,
+    _SessionCloudState state,
+    String runId,
+    bool queuedBehindActiveRun,
+  ) {
+    // Review carry (T8 round 1): a terminal event for THIS run can arrive
+    // while the POST is in flight. Resurrecting busy after that would leave
+    // the composer showing Stop for a dead run.
+    if (state.terminalSettledRunId != runId) {
+      state.runState = CloudRunState(runId: runId, busy: true);
+      state.queuedBehindActiveRun = queuedBehindActiveRun;
+    }
+    // A freshly accepted send clears any stale recorded error.
+    _clearError(id);
+    _notify();
   }
 
   @override
@@ -1113,6 +1638,8 @@ class CloudAgentFacade extends ChangeNotifier
   Future<void> _cancelRun(_SessionCloudState state) async {
     final runId = state.runState.runId;
     if (runId == null || !state.runState.busy) return;
+    // CH-044: one cancel per run. Further taps while "Stopping…" are no-ops.
+    if (state.runState.stopRequested) return;
     state.runState = _copyRunState(state.runState, stopRequested: true);
     _notify();
     try {
@@ -1147,13 +1674,11 @@ class CloudAgentFacade extends ChangeNotifier
     }
   }
 
-  /// A fresh 32-hex idempotency key for `sendMessage.clientMsgId` (Task 4).
-  static String _newClientMsgId() {
-    final random = Random.secure();
-    return List<String>.generate(
-      16,
-      (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
-    ).join();
+  /// True while a Stop for [sessionId]'s run is in flight ("Stopping…").
+  bool stoppingFor(String sessionId) {
+    final id = _serverId(sessionId);
+    final state = id == null ? null : _sessions[id];
+    return state != null && state.runState.busy && state.runState.stopRequested;
   }
 
   // -------------------------------------------------------------------------
@@ -1448,7 +1973,8 @@ class CloudAgentFacade extends ChangeNotifier
   }
 
   @override
-  void enqueueMessage(String text, {String? sessionId}) {
+  void enqueueMessage(String text,
+      {String? sessionId, List<String> sessionRefs = const <String>[]}) {
     if (text.trim().isEmpty) return;
     final id = _serverId(sessionId);
     if (id == null) return;
@@ -1458,7 +1984,7 @@ class CloudAgentFacade extends ChangeNotifier
     // to the NEXT message: the drain hands the row its own list, so the
     // direct-send fallback never lends later files to an earlier row.
     final staged = _attachments.remove(id);
-    _enqueueRow(id, text, staged);
+    _enqueueRow(id, text, staged, sessionRefs: sessionRefs);
     if (!busyFor(id)) unawaited(_drainQueue(id));
   }
 
@@ -1469,8 +1995,9 @@ class CloudAgentFacade extends ChangeNotifier
   void _enqueueRow(
     String serverId,
     String text,
-    List<({String name, String path, int size})>? staged,
-  ) {
+    List<({String name, String path, int size})>? staged, {
+    List<String> sessionRefs = const <String>[],
+  }) {
     _queues
         .putIfAbsent(serverId, () => <_QueuedCloudMessage>[])
         .add(_QueuedCloudMessage(
@@ -1478,6 +2005,7 @@ class CloudAgentFacade extends ChangeNotifier
           text,
           attachments: List<({String name, String path, int size})>.from(
               staged ?? const []),
+          sessionRefs: sessionRefs,
         ));
     _notify();
   }
@@ -1620,14 +2148,17 @@ class CloudAgentFacade extends ChangeNotifier
         head.text,
         sessionId: serverId,
         attachments: head.attachments,
+        sessionRefs: head.sessionRefs,
       );
+      // With an outbox the row is now durable there (delivered, retrying, or
+      // "Not sent" with Retry) — never re-queued, never lost. Without one,
+      // a failed send goes back to the head of the queue.
       final state = _sessions[serverId];
-      final failed = state != null &&
+      final failed = _store == null &&
+          state != null &&
           !state.runState.busy &&
           state.runState.lastErrorCode != null;
       if (failed && !_disposed) {
-        // Never drop a user's queued message on a send failure; the error is
-        // surfaced through run state.
         queue.insert(0, head);
         dispatched = false;
         _notify();
@@ -1709,43 +2240,12 @@ class CloudAgentFacade extends ChangeNotifier
     }
   }
 
-  /// Offline attachments semantics (Task 9 owns the T8 carry): the bytes
-  /// stayed staged on disk while offline, because an attachment id can only
-  /// be minted by the gateway. On reconnect they are uploaded first and the
-  /// ids are attached to the queued entry; a failure leaves them staged for
-  /// the next flip and the flush still runs (sending the text alone).
+  /// Offline attachments semantics: queued prompts carry their own staged
+  /// files (`OutboxEntry.attachmentFiles`) and the flush uploads them to the
+  /// resolved server session before sending — nothing rides along with an
+  /// unrelated later message any more (CH-035).
   Future<void> _flushAfterReconnect(CloudSessionStore store) async {
     if (_disposed) return;
-    for (final entry in store.outboxEntries) {
-      // P0 privacy: skip-and-retain another account's prompt. `outboxEntries`
-      // is already account-filtered; this guard keeps the invariant even if
-      // a future caller widens the getter — a foreign entry must never
-      // trigger a session create or an upload under the wrong credentials.
-      // Null never owns (fail-closed, like the store's own filter).
-      if (entry.account != AppState.I.sessionAccountId) {
-        continue;
-      }
-      final staged = _attachments[entry.sessionId];
-      if (staged == null || staged.isEmpty) continue;
-      try {
-        final serverId = await store.ensureServerSession(entry.sessionId);
-        final ids = <String>[];
-        for (final attachment in staged) {
-          final upload = await _rest.createAttachment(
-            serverId,
-            name: attachment.name,
-            size: attachment.size,
-          );
-          final bytes = await File(attachment.path).readAsBytes();
-          await _rest.uploadAttachmentBytes(upload, bytes);
-          ids.add(upload.attachmentId);
-        }
-        await store.setAttachmentIds(entry.clientMsgId, ids);
-        _attachments.remove(entry.sessionId);
-      } catch (_) {
-        // Keep them staged; the flush below is still safe.
-      }
-    }
     await store.flushOutbox();
     if (!_disposed) _notify();
   }
@@ -1757,10 +2257,13 @@ class CloudAgentFacade extends ChangeNotifier
     String? cursor,
   ) {
     if (_disposed) return;
-    final state = _stateFor(serverSessionId);
+    final state = _stateFor(serverSessionId, subscribe: true);
     state.projection.seedFromHistory(messages);
     state.projector.seedCursor(cursor);
     _ws.seedCursor(serverSessionId, cursor);
+    // A history page that lands after Send must not wipe the prompt the
+    // user just sent (CH-011): pending rows survive the re-seed.
+    _restorePendingRows(serverSessionId, state);
     _notify();
   }
 
@@ -1782,28 +2285,98 @@ class CloudAgentFacade extends ChangeNotifier
   }
 
   @override
-  void appendSentUserMessage(
+  void outboxDelivered(
     String serverSessionId,
-    String userMessageId,
-    String content,
+    OutboxEntry entry,
+    SendMessageResponse response,
   ) {
     if (_disposed) return;
-    final state = _stateFor(serverSessionId);
-    // A clientMsgId replay returns the ORIGINAL userMessageId: the row is
-    // already present, so the outbox must not append a second one.
-    if (state.projection.messages
-        .any((m) => m.privateSyncId == userMessageId)) {
-      return;
+    final queuedBehindActiveRun = _busyForRun(serverSessionId);
+    final state = _stateFor(serverSessionId, subscribe: true);
+    // A clientMsgId replay returns the ORIGINAL userMessageId: dedupe keeps
+    // it to one row.
+    _confirmPendingRow(serverSessionId, entry.clientMsgId,
+        response.userMessageId, entry.content);
+    _markAccepted(serverSessionId, state, response.runId, queuedBehindActiveRun);
+  }
+
+  /// Every per-session surface keyed by a chat's LOCAL id moves to its new
+  /// server id the moment the server assigns it (CH-033): staged files,
+  /// queued rows, the optimistic mode, recorded errors, pending rows and the
+  /// projection itself — then the projection subscribes under the server id.
+  @override
+  void sessionMapped(String localSessionId, String serverSessionId) {
+    if (_disposed || localSessionId == serverSessionId) return;
+    void move<V>(Map<String, V> map, V Function(V into, V from)? merge) {
+      final from = map.remove(localSessionId);
+      if (from == null) return;
+      final into = map[serverSessionId];
+      map[serverSessionId] =
+          into == null || merge == null ? from : merge(into, from);
     }
-    state.projection.messages.add(Message(
-      role: 'user',
-      kind: MsgKind.text,
-      content: content,
-      privateSyncId: userMessageId,
-    ));
-    state.projection.notifyListeners();
+
+    move<List<({String name, String path, int size})>>(
+        _attachments, (a, b) => [...a, ...b]);
+    move<List<_QueuedCloudMessage>>(_queues, (a, b) => [...a, ...b]);
+    move<AgentMode>(_modes, null);
+    move<(String, String)>(_errors, null);
+    move<DateTime?>(_errorResetsAt, null);
+    move<List<Message>>(_pendingRows, (a, b) => [...a, ...b]);
+    move<({String text, CloudTurnOptions turn})>(_lastPrompts, null);
+    final reservations = _attachmentReservations.remove(localSessionId);
+    if (reservations != null) {
+      _attachmentReservations[serverSessionId] =
+          (_attachmentReservations[serverSessionId] ?? 0) + reservations;
+    }
+    if (_sending.remove(localSessionId)) _sending.add(serverSessionId);
+    final ticks = _tickNotifiers.remove(localSessionId);
+    if (ticks != null) {
+      _tickNotifiers.putIfAbsent(serverSessionId, () => ticks);
+    }
+    final state = _sessions.remove(localSessionId);
+    if (state != null && !_sessions.containsKey(serverSessionId)) {
+      final moved = _SessionCloudState(
+          serverSessionId, state.projection, state.projector)
+        ..runState = state.runState
+        ..terminalSettledRunId = state.terminalSettledRunId
+        ..queuedBehindActiveRun = state.queuedBehindActiveRun;
+      unawaited(state.subscription?.cancel());
+      _sessions[serverSessionId] = moved;
+      moved.projection.addListener(
+          () => _onProjectionChanged(serverSessionId, moved));
+      final t = _tickNotifierFor(serverSessionId);
+      moved.projection.liveBubbleTicks.addListener(
+        () => t.value = moved.projection.liveBubbleTicks.value,
+      );
+      _subscribe(serverSessionId, moved);
+      _recent.remove(localSessionId);
+      _touchRecent(serverSessionId);
+    }
     _notify();
   }
+
+  // -------------------------------------------------------------------------
+  // Memory preferences (SE-005 / owner rule R1)
+  // -------------------------------------------------------------------------
+
+  /// Pushes the Settings memory switches to the server, which enforces them
+  /// on every run (memory tools, cross-chat search). Fire-and-forget: a
+  /// failure is retried on the next boot or toggle.
+  Future<void> syncPreferences() async {
+    try {
+      final app = AppState.I;
+      await _rest.patchPreferences(
+        memoryEnabled: app.memoryEnabled,
+        shareSessionMemory: app.effectiveShareSessionMemory,
+      );
+    } catch (e, s) {
+      Diag.swallow('cloud.syncPreferences', e, s);
+    }
+  }
+
+  /// [syncPreferences] when a facade is installed (Settings toggles).
+  static void syncPreferencesIfInstalled() =>
+      unawaited(_instance?.syncPreferences());
 
   // -------------------------------------------------------------------------
   // Test seams
@@ -1819,7 +2392,7 @@ class CloudAgentFacade extends ChangeNotifier
   /// (see [liveBubbleTicksFor]); runs and cache loads still do.
   @visibleForTesting
   void subscribeForTest(String sessionId) {
-    _stateFor(_serverId(sessionId) ?? sessionId);
+    _stateFor(_serverId(sessionId) ?? sessionId, subscribe: true);
   }
 
   // -------------------------------------------------------------------------
@@ -1947,15 +2520,64 @@ class _QueuedCloudMessage {
     this.id,
     this.text, {
     List<({String name, String path, int size})>? attachments,
+    this.sessionRefs = const <String>[],
   }) : attachments = List<({String name, String path, int size})>.from(
             attachments ?? const []);
 
+  factory _QueuedCloudMessage.fromJson(Map<String, dynamic> j) =>
+      _QueuedCloudMessage(
+        (j['id'] as num?)?.toInt() ?? 0,
+        j['text'] as String? ?? '',
+        attachments: [
+          for (final a in (j['attachments'] as List? ?? const <dynamic>[]))
+            if (a is Map)
+              (
+                name: a['name'] as String? ?? 'file',
+                path: a['path'] as String? ?? '',
+                size: (a['size'] as num?)?.toInt() ?? 0,
+              ),
+        ],
+        sessionRefs: [
+          for (final r in (j['sessionRefs'] as List? ?? const <dynamic>[]))
+            if (r is String) r,
+        ],
+      );
+
+  Map<String, Object> toJson() => <String, Object>{
+        'id': id,
+        'text': text,
+        if (attachments.isNotEmpty)
+          'attachments': [
+            for (final a in attachments)
+              {'name': a.name, 'path': a.path, 'size': a.size},
+          ],
+        if (sessionRefs.isNotEmpty) 'sessionRefs': sessionRefs,
+      };
+
   final int id;
   String text;
+
+  /// Sessions the user @-tagged in this row (R1) — they ride its send.
+  final List<String> sessionRefs;
 
   /// The files staged when this row was queued — the row's OWN attachments
   /// (chat P1), snapshotted at enqueue time. The drain passes them to
   /// `runTask` explicitly, so anything staged later belongs to the next
   /// message, never to an earlier queued row.
   final List<({String name, String path, int size})> attachments;
+}
+
+/// Delivery state of a pending (not yet confirmed) user row.
+enum PendingSendState {
+  /// The POST is in flight.
+  sending,
+
+  /// A transient failure happened; the app retries by itself with backoff.
+  retrying,
+
+  /// Offline: it sends automatically when Ovid is reachable again.
+  waitingForNetwork,
+
+  /// The server refused it; the user can retry or discard.
+  failed,
 }

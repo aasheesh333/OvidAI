@@ -31,6 +31,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show File;
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -39,6 +40,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../connection_service.dart';
 import '../session_history_store.dart';
 import '../state.dart';
+import 'cloud_errors.dart';
 import 'cloud_rest.dart';
 import 'cloud_ws.dart';
 import 'models.dart';
@@ -57,14 +59,21 @@ abstract class CloudTranscriptSink {
   /// Prepends an OLDER page to the transcript (keyset paging backwards).
   void prependTranscript(String serverSessionId, List<Message> messages);
 
-  /// Records a user row after a successful send. Implementations MUST dedupe
-  /// by `privateSyncId == userMessageId` so a clientMsgId replay never
-  /// appends a second optimistic message.
-  void appendSentUserMessage(
+  /// A queued prompt was ACCEPTED by the server (202, including a Task 4
+  /// clientMsgId replay). Implementations swap the optimistic pending row
+  /// for the confirmed one and MUST dedupe by
+  /// `privateSyncId == response.userMessageId`, so a replay never appends a
+  /// second user row.
+  void outboxDelivered(
     String serverSessionId,
-    String userMessageId,
-    String content,
+    OutboxEntry entry,
+    SendMessageResponse response,
   );
+
+  /// A local session just got its server id (create-on-first-send). Every
+  /// per-session surface keyed by the local id (staged files, queue,
+  /// optimistic rows, mode) must move to the server id — CH-033.
+  void sessionMapped(String localSessionId, String serverSessionId);
 }
 
 /// One cached transcript row: messages oldest-first + the seq up to which
@@ -84,6 +93,7 @@ class CloudSessionStore extends ChangeNotifier {
     SharedPreferences? prefs,
     ConnectionService? connection,
     WsMultiplexer? ws,
+    this.autoRetry = true,
   })  : _rest = rest, // ignore: prefer_initializing_formals
         _cache = cache, // ignore: prefer_initializing_formals
         _prefs = prefs, // ignore: prefer_initializing_formals
@@ -91,6 +101,12 @@ class CloudSessionStore extends ChangeNotifier {
         _ws = ws ?? WsMultiplexer.I {
     _ready = _load();
   }
+
+  /// When true (production), a transient delivery failure (network,
+  /// timeout, 429, 5xx) schedules its own retry with exponential backoff, so
+  /// a prompt never waits for a connectivity flip that may never come
+  /// (CH-009). Tests that drive the flush by hand turn it off.
+  final bool autoRetry;
 
   // -------------------------------------------------------------------------
   // Persistence keys / namespaces
@@ -187,6 +203,7 @@ class CloudSessionStore extends ChangeNotifier {
     SessionHistoryRepository? cache,
     ConnectionService? connection,
     WsMultiplexer? ws,
+    this.autoRetry = false,
   })  : _rest = rest ?? CloudRestClient(),
         _cache = cache ?? SessionHistoryRepository.I,
         _prefs = null,
@@ -265,6 +282,8 @@ class CloudSessionStore extends ChangeNotifier {
 
   @override
   void dispose() {
+    _retryTimer?.cancel();
+    _retryTimer = null;
     _transcriptSink = null;
     super.dispose();
   }
@@ -315,7 +334,7 @@ class CloudSessionStore extends ChangeNotifier {
     String localSessionId, {
     String? title,
   }) async {
-    await _ready;
+    if (!_loaded) await _ready;
     final mapped = _idMap[localSessionId];
     if (mapped != null) return mapped;
     // An id we already know to be a SERVER id must never be created again
@@ -336,16 +355,35 @@ class CloudSessionStore extends ChangeNotifier {
 
   Future<String> _createServerSession(String localId, String? title) async {
     final session = AppState.I.sessionById(localId);
+    // CH-013: the placeholder "New chat" is never sent as a real title —
+    // the server would echo it back and overwrite the auto-title later.
+    final candidate = (title != null && title.trim().isNotEmpty)
+        ? title
+        : session?.title;
     final dto = await _rest.createSession(
-      title: (title != null && title.trim().isNotEmpty)
-          ? title
-          : session?.title,
+      title: isPlaceholderTitle(candidate) ? null : candidate,
     );
     _idMap[localId] = dto.id;
     _knownServerIds.add(dto.id);
     await _persistIds();
+    // Outbox rows composed under the local id now belong to the server id.
+    var moved = false;
+    for (var i = 0; i < _outbox.length; i++) {
+      if (_outbox[i].sessionId == localId) {
+        _outbox[i] = _outbox[i].copyWith(sessionId: dto.id);
+        moved = true;
+      }
+    }
+    if (moved) await _persistOutbox();
+    _transcriptSink?.sessionMapped(localId, dto.id);
     notifyListeners();
     return dto.id;
+  }
+
+  /// True for an empty title or the "New chat" placeholder (CH-013).
+  static bool isPlaceholderTitle(String? title) {
+    final t = title?.trim() ?? '';
+    return t.isEmpty || t == 'New chat';
   }
 
   // -------------------------------------------------------------------------
@@ -370,7 +408,7 @@ class CloudSessionStore extends ChangeNotifier {
   /// * The id map entry is dropped either way, so a locally re-created chat
   ///   with the same id gets a fresh server session on its next send.
   Future<void> deleteServerSession(String localOrServerId) async {
-    await _ready;
+    if (!_loaded) await _ready;
     final serverId = knownServerIdFor(localOrServerId);
     if (serverId == null) return; // never synced: nothing lives on the server
     _deletedServerIds.add(serverId);
@@ -409,7 +447,7 @@ class CloudSessionStore extends ChangeNotifier {
   /// (the map is preserved; no duplicate appears). Local sessions without a
   /// server id stay untouched until their first send.
   Future<void> refreshSessions() async {
-    await _ready;
+    if (!_loaded) await _ready;
     // Tombstone retry: deletes that never reached the server (an offline
     // delete, a failed DELETE) are re-fired here; the tombstone clears only
     // when the server confirms the row is gone. Runs before the page walk so
@@ -470,7 +508,17 @@ class CloudSessionStore extends ChangeNotifier {
 
   void _applyDto(ChatSession session, SessionDto dto) {
     final title = dto.title;
-    if (title != null && title.isNotEmpty) session.title = title;
+    if (!isPlaceholderTitle(title)) {
+      session.title = title!;
+    } else if (!isPlaceholderTitle(session.title)) {
+      // CH-013: the server still holds the placeholder (or nothing) while
+      // this device has a real title — keep ours and heal the server copy
+      // instead of reverting the sidebar to "New chat".
+      final local = session.title;
+      unawaited(_rest
+          .patchSession(dto.id, title: local)
+          .then((_) {}, onError: (Object _) {}));
+    }
     session.mode = dto.mode;
     session.updatedAt = dto.updatedAt;
   }
@@ -502,7 +550,7 @@ class CloudSessionStore extends ChangeNotifier {
     List<Message> messages,
     String? cursor,
   ) async {
-    await _ready;
+    if (!_loaded) await _ready;
     final entry = _CachedTranscript(
       messages: _dedupe(messages),
       cursor: cursor,
@@ -522,7 +570,7 @@ class CloudSessionStore extends ChangeNotifier {
     String? before,
     int limit = 50,
   }) async {
-    await _ready;
+    if (!_loaded) await _ready;
 
     // The cursor is read BEFORE the page request: everything at or below it
     // is reflected by the REST snapshot, so the replay can safely resume
@@ -547,6 +595,9 @@ class CloudSessionStore extends ChangeNotifier {
       if (before == null) await _seedFromCache(serverSessionId);
       rethrow;
     }
+
+    // The server answered for this id: it is a server session.
+    _knownServerIds.add(serverSessionId);
 
     final fetched = <Message>[
       // The wire is newest-first; the transcript is oldest-first.
@@ -747,30 +798,94 @@ class CloudSessionStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Queues [content] durably. The entry gets a fresh 32-hex `clientMsgId`
-  /// (Task 4 idempotency), is stamped with the account signed in NOW (P0
-  /// privacy: only that account can ever deliver or see it) and is persisted
-  /// before this future completes, so a process kill cannot lose it.
-  /// [maxOutputTokens] is the Settings output cap captured at enqueue time
-  /// (null = auto) and rides the flush's sendMessage.
-  Future<void> enqueue(
+  /// Queues [content] durably and returns the stored entry. [clientMsgId]
+  /// is the Task 4 idempotency key minted when the user pressed Send — the
+  /// SAME key rides every retry of this prompt, so a timed-out POST that the
+  /// gateway did accept can never become a second run (CH-010). The entry is
+  /// stamped with the account signed in NOW (P0 privacy: only that account
+  /// can ever deliver or see it) and persisted before this future
+  /// completes, so a process kill cannot lose it. [maxOutputTokens] (null =
+  /// auto), [turn] (model / mode / plan / preset / @-tagged sessions) and
+  /// [attachmentFiles] (staged files not uploaded yet) ride the flush.
+  Future<OutboxEntry> enqueue(
     String sessionId,
     String content, {
     List<String> attachmentIds = const <String>[],
     int? maxOutputTokens,
+    String? clientMsgId,
+    CloudTurnOptions turn = CloudTurnOptions.none,
+    List<OutboxFile> attachmentFiles = const <OutboxFile>[],
   }) async {
-    await _ready;
+    if (!_loaded) await _ready;
     final target = serverIdFor(sessionId) ?? sessionId;
-    _outbox.add(OutboxEntry(
-      clientMsgId: _newClientMsgId(),
+    final key = (clientMsgId != null && clientMsgId.isNotEmpty)
+        ? clientMsgId
+        : newClientMsgId();
+    final existing = _outbox.indexWhere((e) => e.clientMsgId == key);
+    final entry = OutboxEntry(
+      clientMsgId: key,
       sessionId: target,
       content: content,
       attachmentIds: attachmentIds,
       createdAt: DateTime.now(),
       maxOutputTokens: maxOutputTokens,
       account: AppState.I.sessionAccountId,
-    ));
+      turn: turn,
+      attachmentFiles: attachmentFiles,
+    );
+    if (existing >= 0) {
+      // A retry of the same prompt: keep its queue position.
+      _outbox[existing] = entry;
+    } else {
+      _outbox.add(entry);
+    }
     await _persistOutbox();
+    notifyListeners();
+    return entry;
+  }
+
+  /// The queued entry for [clientMsgId] owned by the current account, or
+  /// null (delivered, discarded, never queued).
+  OutboxEntry? outboxEntry(String clientMsgId) {
+    for (final entry in _outbox) {
+      if (entry.clientMsgId == clientMsgId && _ownedByCurrentAccount(entry)) {
+        return entry;
+      }
+    }
+    return null;
+  }
+
+  /// The server's answer for a prompt this process delivered (kept so a
+  /// direct send can read its own outcome after the flush).
+  SendMessageResponse? deliveredResponse(String clientMsgId) =>
+      _delivered[clientMsgId];
+
+  final Map<String, SendMessageResponse> _delivered =
+      <String, SendMessageResponse>{};
+
+  /// The user tapped Retry on a "Not sent" prompt: clear the refusal and
+  /// deliver again with the SAME clientMsgId.
+  Future<void> retryOutboxEntry(String clientMsgId) async {
+    if (!_loaded) await _ready;
+    final index = _outbox.indexWhere(
+        (e) => e.clientMsgId == clientMsgId && _ownedByCurrentAccount(e));
+    if (index < 0) return;
+    _outbox[index] = _outbox[index].copyWith(clearFailure: true, attempts: 0);
+    await _persistOutbox();
+    notifyListeners();
+    await flushOutbox();
+  }
+
+  /// The user discarded a queued or "Not sent" prompt. The only way a
+  /// composed prompt ever leaves the outbox without being delivered.
+  Future<void> discardOutboxEntry(String clientMsgId) async {
+    if (!_loaded) await _ready;
+    final before = _outbox.length;
+    _outbox.removeWhere(
+        (e) => e.clientMsgId == clientMsgId && _ownedByCurrentAccount(e));
+    if (_outbox.length == before) return;
+    await _persistOutbox();
+    if (_ownedOutboxView.every((e) => !e.failed)) _outboxError = null;
     notifyListeners();
   }
 
@@ -780,7 +895,7 @@ class CloudSessionStore extends ChangeNotifier {
     String clientMsgId,
     List<String> attachmentIds,
   ) async {
-    await _ready;
+    if (!_loaded) await _ready;
     final index =
         _outbox.indexWhere((entry) => entry.clientMsgId == clientMsgId);
     if (index < 0) return;
@@ -789,23 +904,33 @@ class CloudSessionStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Sends the outbox in FIFO order.
+  /// Sends the outbox in FIFO order (per session).
   ///
   /// * success (including a Task 4 `clientMsgId` replay) → remove, continue;
-  /// * 402 `daily_limit_reached` → keep the remainder, surface, stop (retry
-  ///   after the allowance resets / the next connectivity flip);
   /// * 409 `run_conflict` → the prompt was already accepted → remove;
-  /// * any other 4xx → remove + surface (the entry can never succeed);
-  /// * 5xx / network → stop, keep the remainder, retry on the next flip.
+  /// * transient (network, timeout, 408/425/429, 5xx) → KEEP it and
+  ///   everything behind it, schedule a backoff retry (honouring
+  ///   `x-ovid-resets-at` for 429), stop;
+  /// * refused (400/401/402/403/404/413, a missing attachment file) → KEEP
+  ///   it, marked failed with the reason ("Not sent" + Retry / Discard in the
+  ///   chat), and hold that session's later prompts behind it so the order
+  ///   never flips. Nothing is ever dropped silently (CH-009).
   ///
   /// A RETAINED foreign entry (another account's prompt left in the queue by
   /// an account switch) is skipped, never sent and never dropped — it stays
   /// under its owner's key until that account signs in again.
+  ///
+  /// Concurrent calls coalesce: a call that lands while a flush is running
+  /// makes that flush run one more pass, and returns when it ends — so an
+  /// entry enqueued mid-flush is always attempted before the caller resumes.
   Future<void> flushOutbox() async {
-    await _ready;
+    if (!_loaded) await _ready;
     final pending = _flushFuture;
-    if (pending != null) return pending;
-    final future = _flushOutbox();
+    if (pending != null) {
+      _flushAgain = true;
+      return pending;
+    }
+    final future = _flushLoop();
     _flushFuture = future;
     try {
       await future;
@@ -814,73 +939,176 @@ class CloudSessionStore extends ChangeNotifier {
     }
   }
 
+  bool _flushAgain = false;
+  Timer? _retryTimer;
+
+  Future<void> _flushLoop() async {
+    do {
+      _flushAgain = false;
+      await _flushOutbox();
+    } while (_flushAgain && !offline);
+  }
+
   Future<void> _flushOutbox() async {
     if (offline) return;
-    for (final entry in List<OutboxEntry>.of(_outbox)) {
-      if (!_outbox.contains(entry)) continue;
+    final held = <String>{};
+    for (final id in [for (final e in _outbox) e.clientMsgId]) {
+      // Re-read by key: a session create mid-flush rewrites entries.
+      final index = _outbox.indexWhere((e) => e.clientMsgId == id);
+      if (index < 0) continue;
+      final entry = _outbox[index];
       // P0 privacy: skip-and-RETAIN another account's prompt. Delivering it
       // here would send account A's text under B's credentials; dropping it
       // would lose A's composed prompt. It flushes when its owner returns.
       if (!_ownedByCurrentAccount(entry)) continue;
-      String serverId;
-      try {
-        serverId = await ensureServerSession(entry.sessionId);
-      } catch (e) {
-        _outboxError = (
-          code: e is CloudApiException ? e.code : 'network',
-          message: e is CloudApiException ? e.message : '$e',
-        );
-        notifyListeners();
-        return; // keep the prompt; retry later
+      if (entry.failed) {
+        held.add(entry.sessionId);
+        continue;
       }
-      try {
-        final response = await _rest.sendMessage(
-          serverId,
-          entry.content,
-          attachmentIds: entry.attachmentIds,
-          clientMsgId: entry.clientMsgId,
-          maxOutputTokens: entry.maxOutputTokens,
-        );
-        _transcriptSink?.appendSentUserMessage(
-          serverId,
-          response.userMessageId,
-          entry.content,
-        );
-        _outbox.remove(entry);
-        await _persistOutbox();
-        notifyListeners();
-      } on CloudApiException catch (e) {
-        if (e.status >= 500 || e.status == 402) {
-          // Transient / allowance: keep the entry and everything behind it.
-          _outboxError = (code: e.code, message: e.message);
-          notifyListeners();
-          return;
-        }
-        if (e.status == 409 && e.code == 'run_conflict') {
-          // Already accepted (Task 4 idempotency): the entry is done.
-          _outbox.remove(entry);
-          await _persistOutbox();
-          notifyListeners();
-          continue;
-        }
-        // Other 4xx: this prompt can never succeed — drop it, surface why.
-        _outboxError = (code: e.code, message: e.message);
-        _outbox.remove(entry);
-        await _persistOutbox();
-        notifyListeners();
-      } catch (e) {
-        _outboxError = (code: 'network', message: '$e');
-        notifyListeners();
-        return; // keep the remainder
-      }
+      if (held.contains(entry.sessionId)) continue;
+      final outcome = await _deliver(entry);
+      if (outcome == CloudFailureKind.transient) return;
+      if (outcome == CloudFailureKind.refused) held.add(entry.sessionId);
     }
-    // A fully-drained queue clears the stale error (Task 10's chip). Foreign
-    // retained entries do not hold the chip: they are not this account's.
-    if (_ownedOutboxView.isEmpty && _outboxError != null) {
+    // A fully-delivered queue clears the stale error (Task 10's chip).
+    // Foreign retained entries do not hold the chip: they are not this
+    // account's.
+    if (_ownedOutboxView.every((e) => !e.failed) && _outboxError != null) {
       _outboxError = null;
       notifyListeners();
     }
   }
+
+  /// Delivers one entry: resolve (or create) the server session, upload any
+  /// staged files, POST with the entry's own clientMsgId. Null = delivered.
+  Future<CloudFailureKind?> _deliver(OutboxEntry original) async {
+    var entry = original;
+    try {
+      final serverId = await ensureServerSession(entry.sessionId);
+      entry = _current(entry);
+      if (entry.sessionId != serverId) {
+        entry = await _replaceEntry(entry, entry.copyWith(sessionId: serverId));
+      }
+      // Staged files upload to the RESOLVED server session (CH-033): ids are
+      // recorded one by one, so a retry never re-uploads a finished file.
+      for (final file in List<OutboxFile>.of(entry.attachmentFiles)) {
+        final upload = await _rest.createAttachment(
+          serverId,
+          name: file.name,
+          size: file.size,
+        );
+        final bytes = await File(file.path).readAsBytes();
+        await _rest.uploadAttachmentBytes(upload, bytes);
+        entry = await _replaceEntry(
+          entry,
+          entry.copyWith(
+            attachmentIds: <String>[...entry.attachmentIds, upload.attachmentId],
+            attachmentFiles: <OutboxFile>[
+              for (final f in entry.attachmentFiles)
+                if (!identical(f, file)) f,
+            ],
+          ),
+        );
+      }
+      final response = await _rest.sendMessage(
+        serverId,
+        entry.content,
+        attachmentIds: entry.attachmentIds,
+        clientMsgId: entry.clientMsgId,
+        maxOutputTokens: entry.maxOutputTokens,
+        turn: entry.turn,
+      );
+      _outbox.removeWhere((e) => e.clientMsgId == entry.clientMsgId);
+      _delivered[entry.clientMsgId] = response;
+      if (_delivered.length > 64) _delivered.remove(_delivered.keys.first);
+      await _persistOutbox();
+      _transcriptSink?.outboxDelivered(serverId, entry, response);
+      notifyListeners();
+      return null;
+    } catch (e) {
+      final kind = classifyCloudFailure(e);
+      final code = cloudFailureCode(e);
+      final message = e is CloudApiException ? e.message : '$e';
+      switch (kind) {
+        case CloudFailureKind.alreadyAccepted:
+          // Already accepted (Task 4 idempotency): the entry is done.
+          _outbox.removeWhere((x) => x.clientMsgId == entry.clientMsgId);
+          await _persistOutbox();
+          notifyListeners();
+          return null;
+        case CloudFailureKind.transient:
+          final current = _current(entry);
+          final attempts = current.attempts + 1;
+          await _replaceEntry(current, current.copyWith(attempts: attempts));
+          _outboxError = (code: code, message: message);
+          _scheduleRetry(
+            attempts,
+            e is CloudApiException && e.status == 429 ? e.resetsAt : null,
+          );
+          notifyListeners();
+          return kind;
+        case CloudFailureKind.refused:
+          final current = _current(entry);
+          await _replaceEntry(
+            current,
+            current.copyWith(failedCode: code, failedMessage: message),
+          );
+          _outboxError = (code: code, message: message);
+          _lastFailureResetsAt =
+              e is CloudApiException ? e.resetsAt : null;
+          notifyListeners();
+          return kind;
+      }
+    }
+  }
+
+  DateTime? _lastFailureResetsAt;
+
+  /// `x-ovid-resets-at` of the last refused delivery (402 countdown).
+  DateTime? get outboxErrorResetsAt => _lastFailureResetsAt;
+
+  /// The live copy of [entry] (it may have been rewritten mid-delivery).
+  OutboxEntry _current(OutboxEntry entry) {
+    for (final e in _outbox) {
+      if (e.clientMsgId == entry.clientMsgId) return e;
+    }
+    return entry;
+  }
+
+  Future<OutboxEntry> _replaceEntry(OutboxEntry old, OutboxEntry next) async {
+    final index = _outbox.indexWhere((e) => e.clientMsgId == old.clientMsgId);
+    if (index >= 0) {
+      _outbox[index] = next;
+      await _persistOutbox();
+    }
+    return next;
+  }
+
+  /// Exponential backoff: 2 s, 4 s, 8 s … capped at 60 s; a 429 with a
+  /// reset instant waits until then (capped at 10 min).
+  @visibleForTesting
+  static Duration retryDelay(int attempts, {DateTime? resetsAt, DateTime? now}) {
+    final exp = Duration(seconds: min(60, 2 << (min(max(attempts, 1), 6) - 1)));
+    if (resetsAt == null) return exp;
+    final wait = resetsAt.difference(now ?? DateTime.now());
+    if (wait <= exp) return exp;
+    return wait > const Duration(minutes: 10)
+        ? const Duration(minutes: 10)
+        : wait;
+  }
+
+  void _scheduleRetry(int attempts, DateTime? resetsAt) {
+    if (!autoRetry) return;
+    _retryTimer?.cancel();
+    _retryTimer = Timer(retryDelay(attempts, resetsAt: resetsAt), () {
+      _retryTimer = null;
+      unawaited(flushOutbox().catchError((Object _) {}));
+    });
+  }
+
+  /// A fresh 32-hex idempotency key (Task 4). Minted ONCE per user send and
+  /// kept across every retry of that prompt (CH-010).
+  static String newClientMsgId() => _newClientMsgId();
 
   static String _newClientMsgId() {
     final random = Random.secure();
