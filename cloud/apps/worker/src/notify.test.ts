@@ -9,6 +9,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  accountSettings,
   createDb,
   devices,
   migrate,
@@ -99,6 +100,38 @@ describe.skipIf(!TEST_DATABASE_URL)("createNotifier (real postgres)", () => {
     expect(rows).toHaveLength(2);
     expect(rows.every((r) => r.status === "sent" && r.deviceToken !== null)).toBe(true);
     expect(new Set(rows.map((r) => r.deviceToken))).toEqual(new Set(["tok-a", "tok-b"]));
+  });
+
+  it("Wave 4 (SE-010): Notifications off → no push to any device, inbox keeps a skipped row", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-off", userId: uid, platform: "android" });
+    await accountSettings.patch(db, uid, { notificationsEnabled: false });
+    const { sent, push } = stubPush();
+    const notifier = createNotifier({ db, push });
+
+    await notifier.notifyAgentFailed({
+      userId: uid,
+      sessionId: "ses-off",
+      sessionTitle: "Report",
+      code: "model_error",
+      message: "boom",
+    });
+
+    expect(sent).toHaveLength(0);
+    const rows = await inbox(uid);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe("skipped_disabled");
+
+    // Back on → push resumes.
+    await accountSettings.patch(db, uid, { notificationsEnabled: true });
+    await notifier.notifyAgentFailed({
+      userId: uid,
+      sessionId: "ses-off",
+      sessionTitle: "Report",
+      code: "model_error",
+      message: "boom",
+    });
+    expect(sent).toHaveLength(1);
   });
 
   it("(a) 48-cap title and markdown-stripped summary", async () => {

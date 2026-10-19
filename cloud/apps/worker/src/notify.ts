@@ -12,7 +12,7 @@
 
 import { readFileSync } from "node:fs";
 
-import { devices, notifications, type Db } from "@ovid/db";
+import { accountSettings, devices, notifications, type Db } from "@ovid/db";
 import {
   chatRoute,
   notificationChannelFor,
@@ -225,6 +225,34 @@ export function createNotifier(deps: NotifierDeps): Notifier {
     route: string;
     data: Record<string, string>;
   }): Promise<void> {
+    // Wave 4 (SE-010): the user's Notifications switch. Off = no push to any
+    // device; the attempt is still kept in the inbox so nothing is lost. A
+    // settings read failure fails OPEN (push is the documented default).
+    let pushEnabled = true;
+    try {
+      pushEnabled = (await accountSettings.get(deps.db, args.userId)).notificationsEnabled;
+    } catch (err) {
+      console.error("[notify] settings read failed; sending", err);
+    }
+    if (!pushEnabled) {
+      try {
+        await notifications.record(deps.db, {
+          userId: args.userId,
+          deviceToken: null,
+          kind: args.kind,
+          channel: notificationChannelFor(args.kind),
+          title: args.title,
+          body: args.body,
+          route: args.route,
+          data: args.data,
+          status: "skipped_disabled",
+        });
+      } catch (err) {
+        console.error("[notify] inbox record failed", err);
+      }
+      return;
+    }
+
     let userDevices;
     try {
       userDevices = await devices.listForUser(deps.db, args.userId);

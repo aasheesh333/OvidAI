@@ -855,7 +855,7 @@ export const notifications = pgTable(
     body: text("body").notNull(),
     route: text("route").notNull(),
     data: jsonb("data").notNull().$type<Record<string, string>>(),
-    status: text("status").notNull().default("sent"), // sent|failed|skipped_no_devices
+    status: text("status").notNull().default("sent"), // sent|failed|skipped_no_devices|skipped_disabled (Wave 4: push off)
     error: text("error"),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
