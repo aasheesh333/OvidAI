@@ -480,17 +480,14 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
     expect(fields.plan_expires_at).toBe(iso(NOW + 30 * 86400));
     expect(fields.plan_auto_renews).toBe(true);
     expect(fields.plan_product_id).toBe("ovid_plus_monthly");
-    const plans = fields.plans as { tier: string; product_id?: string; features: string[] }[];
-    expect(plans.map((p) => p.tier)).toEqual(["free", "3x", "7x", "15x"]);
-    expect(plans[1]!.product_id).toBe("ovid_plus_monthly");
-    expect(plans[0]!.product_id).toBeUndefined();
-    expect(plans.every((p) => p.features.length > 0)).toBe(true);
+    // SH-006: plan cards come from the live plan table (usage.ts/planCards),
+    // never from the old hard-coded TIERS copy here.
+    expect(fields).not.toHaveProperty("plans");
+    expect(service.products).toEqual(PRODUCTS);
   });
 
-  it("usageFields(null) omits the plan_* fields but still lists plans", async () => {
+  it("usageFields(null) omits the plan_* fields", async () => {
     const fields = await service.usageFields(null);
-    expect(fields.billing_enabled).toBe(true);
-    expect(fields).not.toHaveProperty("plan_expires_at");
-    expect((fields.plans as unknown[]).length).toBe(4);
+    expect(fields).toEqual({ billing_enabled: true });
   });
 });

@@ -23,6 +23,7 @@ import {
 import type { SpendLogRow } from "./litellmAdmin.js";
 import type { BillingService } from "./billing/service.js";
 import { getOverride, getSettings, userFreeDaily } from "./settings.js";
+import { planCards, playProductsFor } from "./planCards.js";
 import {
   currentWindowStart,
   floatOr,
@@ -441,7 +442,7 @@ export function modelEstimates(
 export async function computeUsage(
   deps: MintDeps,
   uid: string,
-): Promise<{ body: UsageBody; detail: AdminUsageDetail }> {
+): Promise<{ body: UsageBody; detail: AdminUsageDetail; settings: Settings }> {
   const s = await getSettings({ db: deps.db });
   const plan = await planFor(deps, uid, s);
   const freeDaily = await userFreeDaily({ db: deps.db }, uid);
@@ -561,7 +562,7 @@ export async function computeUsage(
     window_start: isoUtc(start),
     remaining_usd: pyRound6(remaining),
   };
-  return { body, detail };
+  return { body, detail, settings: s };
 }
 
 function headerValue(v: string | string[] | undefined): string {
@@ -609,12 +610,17 @@ export function registerUsageRoutes(
         }
       }
     }
-    const { body } = await computeUsage(deps, uid);
-    // Task 10 billing merge point: payload = {...body, ...usageFields(uid)}
-    // (billing_enabled / plan_expires_at / plan_auto_renews / plan_product_id
-    // / plans — exactly the server/billing README contract).
-    const payload: UsageBody =
-      billing === undefined ? body : { ...body, ...(await billing.usageFields(uid)) };
+    const { body, settings } = await computeUsage(deps, uid);
+    // SH-006/SH-021: `plans` are the LIVE plan table cards (planCards.ts),
+    // present whether or not Play billing is configured, so prices and plan
+    // facts never depend on Play. Billing merges billing_enabled /
+    // plan_expires_at / plan_auto_renews / plan_product_id on top.
+    const payload: UsageBody = {
+      ...body,
+      plans: planCards(settings.plans, playProductsFor(deps.env, billing)),
+      billing_enabled: false,
+      ...(billing === undefined ? {} : await billing.usageFields(uid)),
+    };
     if (deps.env.usageCacheS > 0) {
       await deps.redis.set(cacheKey, JSON.stringify(payload), "EX", deps.env.usageCacheS);
     }

@@ -36,6 +36,8 @@ const BODY_KEYS = [
   "month_free_spent_usd", "month_free_cap_usd", "requests_today", "budget_window",
   "remaining_pct", "plan", "plan_name", "window", "resets_at", "today",
   "remaining_fraction", "pools", "models",
+  // SH-006/SH-021: live plan cards + the billing flag, even without Play.
+  "plans", "billing_enabled",
 ];
 
 describe.skipIf(!RUN)("POST /usage (usage.ts)", () => {
@@ -199,6 +201,67 @@ describe.skipIf(!RUN)("POST /usage (usage.ts)", () => {
       },
     });
     expect(JSON.stringify(body)).not.toContain("auto-oss");
+  });
+
+  it("plans[]: the live plan table (SH-006) with billing off — prices/facts never depend on Play", async () => {
+    const uid = testUid("usage-plans");
+    await user(uid, "7x");
+    const original = await getSettings({ db });
+    try {
+      await storeSettings(
+        { db, redis },
+        {
+          ...original,
+          plans: original.plans.map((p) =>
+            p.id === "max" ? { ...p, enabled: false } : p.id === "pro" ? { ...p, mult: 25 } : p,
+          ),
+        },
+      );
+      await dropUsageCache(deps, [uid]);
+      const body = await getUsage(uid);
+      expect(body.billing_enabled).toBe(false);
+      const plans = body.plans as Record<string, unknown>[];
+      expect(plans.map((p) => [p.tier, p.id, p.name, p.price_usd, p.mult, p.window, p.product_id])).toEqual([
+        ["free", "free", "Free", 0, 1, "24h", null],
+        ["3x", "starter", "Starter", 5, 3, "24h", "ovid_plus_monthly"],
+        ["7x", "pro", "Pro", 25, 25, "24h", "ovid_pro_monthly"],
+      ]);
+      expect(plans[2]!.features).toContain("About 25x the Free allowance");
+      // The card for the user's plan is the one whose tier /usage reports.
+      expect(plans.find((p) => p.tier === body.tier)?.name).toBe(body.plan_name);
+    } finally {
+      await storeSettings({ db, redis }, original);
+    }
+  });
+
+  it("with a BillingService, plan_* fields merge in and plans stay the live table", async () => {
+    const billingApp = buildMintApps({
+      ...deps,
+      billing: {
+        configured: true,
+        products: { sku_pro: "7x" },
+        verify: async () => ({ status: 200, payload: {} }),
+        notify: async () => {},
+        usageFields: async () => ({ billing_enabled: true, plan_product_id: "sku_pro" }),
+      },
+    }).publicApp;
+    try {
+      const uid = testUid("usage-billing");
+      await user(uid, "7x");
+      const res = await billingApp.inject({
+        method: "POST",
+        url: "/usage",
+        headers: { authorization: `Bearer ${uid}`, "x-firebase-appcheck": "x" },
+      });
+      const body = res.json() as Record<string, unknown>;
+      expect(body.billing_enabled).toBe(true);
+      expect(body.plan_product_id).toBe("sku_pro");
+      const plans = body.plans as Record<string, unknown>[];
+      expect(plans.map((p) => p.product_id)).toEqual([null, null, "sku_pro", null]);
+      expect(plans.map((p) => p.mult)).toEqual([1, 3, 23, 43]);
+    } finally {
+      await billingApp.close();
+    }
   });
 
   it("models[]: README per-model remaining, auto conservative members, image and unpriced rows", async () => {

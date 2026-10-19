@@ -11,12 +11,7 @@ import type { MintEnv } from "../env.js";
 import { BillingError, evaluate } from "./domain.js";
 import type { PlayDeveloperApi } from "./play.js";
 import { createPlayApi } from "./play.js";
-import {
-  DEFAULT_PLAN_FEATURES,
-  TIERS,
-  accountHash,
-  loadProducts,
-} from "./products.js";
+import { accountHash, loadProducts } from "./products.js";
 import { createTierSink, type PublishTier, type TierSink } from "./tierSink.js";
 
 /**
@@ -70,6 +65,8 @@ export interface BillingVerifyResult {
 
 export interface BillingService {
   readonly configured: boolean;
+  /** Play product id -> tier (3x/7x/15x); planCards maps plans to products. */
+  readonly products: Record<string, string>;
   verify(uid: string, body: unknown): Promise<BillingVerifyResult>;
   notify(envelope: unknown): Promise<void>;
   usageFields(uid: string | null): Promise<Record<string, unknown>>;
@@ -297,16 +294,6 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
   async function usageFields(uid: string | null): Promise<Record<string, unknown>> {
     const fields: Record<string, unknown> = {
       billing_enabled: configured,
-      plans: TIERS.map((tier) => {
-        const plan: Record<string, unknown> = {
-          tier,
-          features: DEFAULT_PLAN_FEATURES[tier] ?? [],
-        };
-        if (tier !== "free") {
-          plan.product_id = Object.entries(products).find(([, t]) => t === tier)?.[0] ?? null;
-        }
-        return plan;
-      }),
     };
     if (configured && uid !== null && uid !== "") {
       const best = await store.effective(uid, Math.trunc(clock()));
@@ -323,6 +310,7 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
     get configured() {
       return configured;
     },
+    products,
     verify,
     notify,
     usageFields,

@@ -10,7 +10,8 @@ import type { MintDeps } from "./app.js";
 import { HttpContractError } from "./app.js";
 import { litellmMintOrGet } from "./keyMint.js";
 import { projectModelCatalog } from "./catalog.js";
-import { findPlan, storedTier, windowStr } from "./planMath.js";
+import { planCards, playProductsFor } from "./planCards.js";
+import { findPlan, storedTier } from "./planMath.js";
 import { createProjection } from "./projection.js";
 import { getSettings } from "./settings.js";
 import { rememberEmail } from "./verifier.js";
@@ -203,19 +204,15 @@ export function registerMintRoutes(publicApp: FastifyInstance, deps: MintDeps): 
     return reply.send({ ok: true, tier });
   });
 
-  /** GET /plans — enabled plans only (ids/aliases match user:{uid}:tier). */
+  /**
+   * GET /plans — enabled plans only (ids/aliases match user:{uid}:tier).
+   * The same live cards POST /usage returns as `plans` (SH-006); the legacy
+   * id/name/price_usd/aliases/window fields are part of each card.
+   */
   publicApp.get("/plans", async (_request, reply) => {
     const settings = await getSettings({ db: deps.db });
     return reply.send({
-      plans: settings.plans
-        .filter((p) => p.enabled)
-        .map((p) => ({
-          id: p.id,
-          name: p.name,
-          price_usd: p.price_usd,
-          aliases: p.aliases,
-          window: windowStr(p.window_hours),
-        })),
+      plans: planCards(settings.plans, playProductsFor(deps.env, deps.billing)),
     });
   });
 

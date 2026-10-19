@@ -42,6 +42,7 @@ function stubBilling(overrides: Partial<BillingService> = {}): BillingService {
     verify: async () => ({ status: 200, payload: { ok: true, status: "active" } }),
     notify: async () => {},
     usageFields: async () => ({}),
+    products: {},
     ...overrides,
   };
 }
