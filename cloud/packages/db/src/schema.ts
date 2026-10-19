@@ -2,6 +2,7 @@ import {
   bigint,
   boolean,
   char,
+  check,
   customType,
   doublePrecision,
   index,
@@ -85,6 +86,25 @@ export const sessions = pgTable(
   },
   (t) => [index("sessions_user_id_idx").on(t.userId)],
 );
+
+// R1 private agent memory: deliberately NOT in the shared sandbox/Studio tree.
+// Account removal cascades; session-scoped rows cascade on hard chat deletion.
+// Soft-deleted chats cannot read/write memory (repository ownership checks).
+export const privateMemoryFiles = pgTable("private_memory_files", {
+  userId: text("user_id").notNull().references(() => users.uid, { onDelete: "cascade" }),
+  scope: text("scope").notNull(), // "shared" or an owned session UUID
+  sessionId: char("session_id", { length: 36 }).references(() => sessions.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  content: text("content").notNull(),
+  revision: char("revision", { length: 64 }).notNull(),
+  updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+}, (t) => [
+  primaryKey({ columns: [t.userId, t.scope, t.name] }),
+  index("private_memory_session_id_idx").on(t.sessionId),
+  check("private_memory_scope_check", sql`(${t.scope} = 'shared' AND ${t.sessionId} IS NULL) OR (${t.sessionId} IS NOT NULL AND ${t.scope} = ${t.sessionId})`),
+  check("private_memory_content_size_check", sql`octet_length(${t.content}) <= 32768`),
+  check("private_memory_name_check", sql`length(${t.name}) <= 80 AND ${t.name} ~ '^[A-Za-z0-9][A-Za-z0-9_-]*(\\.[A-Za-z0-9_-]+)*\\.md$' AND (lower(${t.name}) <> 'memory.md' OR ${t.name} = 'MEMORY.md')`),
+]);
 
 export const messages = pgTable(
   "messages",
@@ -184,9 +204,11 @@ export const attachments = pgTable(
     name: text("name").notNull(),
     size: integer("size").notNull(),
     r2Key: text("r2_key").notNull(),
+    // Wave 1b committed migration 0018: preserve its generated schema baseline.
+    messageId: char("message_id", { length: 36 }),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
-  (t) => [index("attachments_session_id_idx").on(t.sessionId)],
+  (t) => [index("attachments_session_id_idx").on(t.sessionId), index("attachments_message_id_idx").on(t.messageId)],
 );
 
 export type UserRow = typeof users.$inferSelect;

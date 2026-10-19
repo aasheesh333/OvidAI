@@ -1,9 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { accountSettings, byokKeysRepo, sessionState, users, userPreferences, type Db } from "@ovid/db";
-import type { UiManifest } from "@ovid/shared";
 import { buildGateway, type GatewayDeps } from "../app.js";
-import type { WorkerClient, WorkerResult } from "../workerClient.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
   authHeaders,
@@ -17,68 +15,9 @@ import {
 } from "../test/stubs.js";
 
 // Wave 4 — /settings, /presets, /sessions/:id/preset and /memory against
-// real Postgres; the worker file service is an in-memory fake.
-
-function fakeWorker(): WorkerClient & { files: Map<string, string> } {
-  const files = new Map<string, string>();
-  const ok = <T>(value: T): WorkerResult<T> => ({ ok: true, value }) as WorkerResult<T>;
-  const fail = <T>(status: number, code: string): WorkerResult<T> =>
-    ({ ok: false, status, error: { error: { code, message: code } } }) as WorkerResult<T>;
-  const sha = async (s: string) =>
-    (await import("node:crypto")).createHash("sha256").update(s, "utf8").digest("hex");
-  return {
-    files,
-    async getTree(_u, _s, sub) {
-      const prefix = `${sub}/`;
-      const names = [...files.keys()].filter((k) => k.startsWith(prefix));
-      if (names.length === 0) return fail(404, "not_found");
-      const tree: UiManifest = {
-        version: 1,
-        generatedAt: new Date().toISOString(),
-        truncated: false,
-        totals: { files: names.length, dirs: 0, bytes: 0 },
-        roots: names.map((p) => ({
-          name: p.slice(prefix.length),
-          path: p,
-          type: "file" as const,
-          sizeBytes: files.get(p)!.length,
-        })),
-      };
-      return ok({ tree });
-    },
-    async getFile(_u, _s, path) {
-      const c = files.get(path);
-      if (c === undefined) return fail(404, "not_found");
-      return ok({
-        kind: "content" as const,
-        path,
-        sizeBytes: c.length,
-        sha256Hex: await sha(c),
-        contentType: "text/markdown",
-        contentBase64: Buffer.from(c, "utf8").toString("base64"),
-      });
-    },
-    async putFile(_u, _s, path, b64, pre) {
-      const content = Buffer.from(b64, "base64").toString("utf8");
-      const current = files.get(path);
-      if (pre?.ifMatchSha256 !== undefined && (current === undefined || (await sha(current)) !== pre.ifMatchSha256)) {
-        return fail(409, "baseline_mismatch");
-      }
-      files.set(path, content);
-      return ok({ path, sizeBytes: content.length, sha256: await sha(content) });
-    },
-    async deleteFile(_u, _s, path) {
-      if (!files.delete(path)) return fail(404, "not_found");
-      return ok({ path, type: "file" as const });
-    },
-    async movePath() {
-      return fail(400, "bad_request");
-    },
-    async makeDir() {
-      return fail(400, "bad_request");
-    },
-  };
-}
+// real Postgres. R1: the /memory API rides the private_memory_files store
+// (migration 0019) directly — no worker file service, no workspace paths,
+// no legacy .ovid/memory access.
 
 describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgres)", () => {
   let db: Db;
@@ -284,7 +223,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgr
   // -- /memory -----------------------------------------------------------------
 
   it("memory: no chat yet → empty list and a write asks to start a chat", async () => {
-    const app = makeApp({ worker: fakeWorker() });
+    const app = makeApp();
     const uid = testUid("w4mem0");
     const list = await app.inject({ method: "GET", url: "/cloud/v1/memory", headers: authHeaders(uid) });
     expect(list.statusCode).toBe(200);
@@ -299,17 +238,21 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgr
     expect(put.json().error.code).toBe("no_workspace");
   });
 
-  it("memory: list, read, edit with revision, conflict, delete", async () => {
-    const worker = fakeWorker();
-    const app = makeApp({ worker });
+  it("memory: list, read, edit with revision, conflict, delete — private DB store only", async () => {
+    const app = makeApp();
     const uid = testUid("w4mem");
     const sid = await createSession(app, uid);
     const memoryUrl = `/cloud/v1/memory?sessionId=${sid}`;
     const fileUrl = (name: string) => `/cloud/v1/memory/${name}?sessionId=${sid}`;
-    worker.files.set(`.ovid/session-memory/${sid}/MEMORY.md`, "# Me\n- dog: Bruno\n");
-    worker.files.set(`.ovid/session-memory/${sid}/work.md`, "work notes");
+    const put = (name: string, content: string, ifRevision?: string) =>
+      app.inject({ method: "PUT", url: fileUrl(name), headers: authHeaders(uid), payload: { content, ifRevision } });
+
+    // Facts arrive through the private store, never through workspace files.
+    expect((await put("MEMORY.md", "# Me\n- dog: Bruno\n")).statusCode).toBe(200);
+    expect((await put("work.md", "work notes")).statusCode).toBe(200);
 
     const list = await app.inject({ method: "GET", url: memoryUrl, headers: authHeaders(uid) });
+    expect(list.json().scope).toBe("chat");
     expect(list.json().items.map((i: { name: string }) => i.name)).toEqual(["MEMORY.md", "work.md"]);
 
     const read = await app.inject({ method: "GET", url: fileUrl("MEMORY.md"), headers: authHeaders(uid) });
@@ -324,7 +267,6 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgr
       payload: { content: "# Me\n", ifRevision: revision },
     });
     expect(edit.statusCode).toBe(200);
-    expect(worker.files.get(`.ovid/session-memory/${sid}/MEMORY.md`)).toBe("# Me\n");
 
     const stale = await app.inject({
       method: "PUT",
@@ -336,35 +278,48 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgr
 
     const del = await app.inject({ method: "DELETE", url: fileUrl("work.md"), headers: authHeaders(uid) });
     expect(del.statusCode).toBe(204);
-    expect(worker.files.has(`.ovid/session-memory/${sid}/work.md`)).toBe(false);
+    expect((await app.inject({ method: "GET", url: fileUrl("work.md"), headers: authHeaders(uid) })).statusCode).toBe(404);
   });
 
-  it("memory API never chooses a recent/global chat implicitly and checks session ownership", async () => {
-    const worker = fakeWorker();
-    const app = makeApp({ worker });
+  it("memory API never chooses a recent/global chat implicitly, checks ownership, and sharing only opens the shared scope", async () => {
+    const app = makeApp();
     const uid = testUid("w4iso");
     const other = testUid("w4iso-other");
     const a = await createSession(app, uid);
     const b = await createSession(app, uid);
     const foreign = await createSession(app, other);
-    worker.files.set(`.ovid/session-memory/${a}/MEMORY.md`, "A secret fact");
-    worker.files.set(".ovid/memory/MEMORY.md", "legacy global fact");
+    await app.inject({
+      method: "PUT",
+      url: `/cloud/v1/memory/MEMORY.md?sessionId=${a}`,
+      headers: authHeaders(uid),
+      payload: { content: "A secret fact" },
+    });
     const get = (sid?: string) => app.inject({ method: "GET", url: `/cloud/v1/memory/MEMORY.md${sid === undefined ? '' : `?sessionId=${sid}`}`, headers: authHeaders(uid) });
     expect((await get(a)).json().content).toBe("A secret fact");
     expect((await get(b)).statusCode).toBe(404);
     expect((await get()).statusCode).toBe(409);
     expect((await get(foreign)).statusCode).toBe(404);
     expect((await get("not-a-uuid")).statusCode).toBe(404);
+    // Sharing ON opens the SHARED scope; it never imports A's isolated fact.
     await userPreferences.patch(db, uid, { shareSessionMemory: true });
-    expect((await get(b)).json().content).toBe("legacy global fact");
+    expect((await get(b)).statusCode).toBe(404);
+    expect((await app.inject({ method: "GET", url: `/cloud/v1/memory?sessionId=${b}`, headers: authHeaders(uid) })).json().scope).toBe("shared");
+    await app.inject({
+      method: "PUT",
+      url: `/cloud/v1/memory/MEMORY.md?sessionId=${b}`,
+      headers: authHeaders(uid),
+      payload: { content: "explicitly shared fact" },
+    });
+    expect((await get(a)).json().content).toBe("explicitly shared fact");
     expect((await get(foreign)).statusCode).toBe(404);
+    // Sharing OFF again re-isolates: B loses the shared scope, A keeps its own fact.
     await userPreferences.patch(db, uid, { shareSessionMemory: false });
     expect((await get(b)).statusCode).toBe(404);
-    expect(worker.files.get(".ovid/memory/MEMORY.md")).toBe("legacy global fact");
+    expect((await get(a)).json().content).toBe("A secret fact");
   });
 
-  it("memory: path-like or non-markdown names are refused before the worker", async () => {
-    const app = makeApp({ worker: fakeWorker() });
+  it("memory: path-like or non-markdown names are refused before the store", async () => {
+    const app = makeApp();
     const uid = testUid("w4memx");
     for (const name of ["..%2Fsecrets.md", "notes.txt", "memory.md", ".hidden.md"]) {
       const res = await app.inject({ method: "GET", url: `/cloud/v1/memory/${name}`, headers: authHeaders(uid) });

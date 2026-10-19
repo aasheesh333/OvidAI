@@ -181,6 +181,24 @@ export interface MemoryFileDto {
   revision: string;
 }
 
+/** Private DB memory, never a path visible to shared Studio/shell/file tools. */
+export interface PrivateMemoryNamespace {
+  sessionId: string;
+  shared: boolean;
+}
+export interface PrivateMemoryStore {
+  list(uid: string, scope: PrivateMemoryNamespace): Promise<MemoryFileSummary[]>;
+  read(uid: string, scope: PrivateMemoryNamespace, name: string): Promise<MemoryFileDto | null>;
+  save(uid: string, scope: PrivateMemoryNamespace, name: string, content: string, ifRevision?: string): Promise<MemoryFileDto>;
+  remove(uid: string, scope: PrivateMemoryNamespace, name: string): Promise<boolean>;
+}
+export class PrivateMemoryError extends Error {
+  constructor(readonly code: "not_found" | "baseline_mismatch" | "bad_request" | "limit_reached" | "unavailable", message: string) {
+    super(message);
+    this.name = "PrivateMemoryError";
+  }
+}
+
 export const memoryPutBodySchema = z
   .object({
     content: z.string().max(32 * 1024),

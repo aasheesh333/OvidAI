@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { join } from "node:path";
-import { attachments, eventMirror, grantsRepo, messages, runs, sessions, userPreferences, type Db } from "@ovid/db";
+import { attachments, createPrivateMemoryStore, eventMirror, grantsRepo, messages, runs, sessions, userPreferences, type Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
 import type { AgentRunJob } from "@ovid/queue";
 import {
@@ -1456,6 +1456,11 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
 
   const workerRegistry = createToolRegistry();
 
+  // R1: the production memory adapter — the private_memory_files store ONLY.
+  // There is deliberately NO SandboxPort fallback and no legacy .ovid/memory
+  // read: memory facts must never land in the shared workspace filesystem.
+  const privateMemory = createPrivateMemoryStore(deps.db);
+
   /**
    * Per-run registry: the sandbox-backed tools bind the run's TIERED port
    * (review I2) and the skill catalog/tool bind the run's userId (the catalog
@@ -1504,9 +1509,12 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       ...createGitTools({ sandbox: o.sandbox, approvals, github: deps.github }),
       ...createRepoTools({ github: deps.github }),
       // Memory OFF removes the whole family — memory_save too (the roster's
-      // harness exemption would otherwise keep it advertised).
+      // harness exemption would otherwise keep it advertised). The tools are
+      // bound to the PRIVATE DB store only: no sandbox/workspace fallback, so
+      // an agent's memory facts never exist in the shared Studio filesystem
+      // and child runs (same roster projection) inherit the same boundary.
       ...(o.memoryEnabled ? createMemoryTools({
-        sandbox: o.sandbox,
+        store: privateMemory,
         shareSessionMemory: o.shareSessionMemory,
         referencedSessionIds: o.referencedSessionIds,
       }) : []),

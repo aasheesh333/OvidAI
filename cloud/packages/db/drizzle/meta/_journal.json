@@ -127,6 +127,20 @@
       "when": 1792395650373,
       "tag": "0017_run_usage",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1792403291783,
+      "tag": "0018_attachment_message",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1792405552666,
+      "tag": "0019_private_memory",
+      "breakpoints": true
     }
   ]
 }
