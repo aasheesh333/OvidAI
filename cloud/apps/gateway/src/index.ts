@@ -85,7 +85,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
   const firebaseApp =
     cfg.authMode === "firebase" ? initializeApp() : null;
   const verifier =
-    firebaseApp !== null ? createFirebaseVerifier(firebaseApp) : createTestVerifier();
+    firebaseApp !== null
+      ? createFirebaseVerifier(firebaseApp, { appCheckMode: cfg.appCheckMode })
+      : createTestVerifier();
+  if (cfg.authMode === "firebase" && cfg.appCheckMode !== "required") {
+    console.warn(
+      `[gateway] OVID_APPCHECK_MODE=${cfg.appCheckMode}: App Check is ` +
+        (cfg.appCheckMode === "off" ? "ignored" : "verified only when sent") +
+        " (Firebase ID tokens are still required)",
+    );
+  }
 
   // P9 Task 15: the legacy account lifecycle. It is opt-in through
   // OVID_ACCOUNT_FIREBASE_APP_IDS (no new REQUIRED gateway env): without a
@@ -109,7 +118,13 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
           "Configure R2 before enabling deletion in production.",
       );
     }
-    const admin = createFirebaseAdmin(firebaseApp, accountAppIds);
+    const admin = createFirebaseAdmin(
+      firebaseApp,
+      accountAppIds,
+      {},
+      // The /account/* routes honour the same OVID_APPCHECK_MODE.
+      { appCheckMode: cfg.appCheckMode },
+    );
     const deletionStore = createPostgresDeletionStore(db);
     const lifecycle = createLifecycle({
       store: deletionStore,

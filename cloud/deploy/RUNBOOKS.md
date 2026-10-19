@@ -966,6 +966,7 @@ env files first and validate before restart.
 | `LITELLM_SALT_KEY` | `/opt/ovid-gateway/.env` | HARDENING C: encrypts provider keys in the LiteLLM DB. Rotation requires re-entering every provider credential. High effort. |
 | `POSTGRES_PASSWORD` / `DATABASE_URL` | live `.env`; cloud env for `ovid_cloud` | `ALTER ROLE … PASSWORD` inside the container → update env → recreate dependents. Brief DB-auth outage. |
 | Firebase App Check / project ids | `.env` | Update only with a coordinated client release. |
+| `OVID_APPCHECK_MODE` (gateway) / `APPCHECK_ENABLED` (mint, Python `server/mint/mint.py` and TS `cloud/apps/mint`) | gateway `.env`; mint container env | Gateway: `required` (default) / `optional` / `off` (`cloud/apps/gateway/src/env.ts`); covers `/cloud/v1/*`, the WS ticket, reports, shares and `/account/*`. ID tokens are always verified. The app's `OVID_APPCHECK` define defaults to false (off-Play distribution), so those builds need gateway `optional`/`off` **and** mint `APPCHECK_ENABLED=false`. Change, restart gateway/mint, verify a send from a sideloaded build. Switch back to `required` + `APPCHECK_ENABLED=true` only together with a release built with `--dart-define=OVID_APPCHECK=true`. |
 
 Commands common to every rotation:
 

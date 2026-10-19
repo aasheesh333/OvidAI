@@ -200,6 +200,51 @@ describe("createFirebaseAdmin", () => {
     await expect(admin.delete("missing")).resolves.toBeUndefined();
   });
 
+  describe("App Check mode (gateway OVID_APPCHECK_MODE)", () => {
+    const claims = { uid: "alice", auth_time: 1000, firebase: { sign_in_provider: "google.com" } };
+
+    it("required (default) rejects a missing attestation", async () => {
+      const auth = fakeAuth({ verifyIdToken: vi.fn(async () => claims) });
+      const appCheck = { verifyToken: vi.fn(async () => { throw new Error("empty"); }) };
+      const admin = createFirebaseAdmin({} as App, new Set(["android-app"]), {
+        auth: auth as never,
+        appCheck: appCheck as never,
+      });
+      await expect(admin.verify("token", "")).rejects.toMatchObject({ status: 401 });
+      expect(auth.verifyIdToken).not.toHaveBeenCalled();
+    });
+
+    it("optional accepts a missing attestation but verifies a present one", async () => {
+      const auth = fakeAuth({ verifyIdToken: vi.fn(async () => claims) });
+      const appCheck = fakeAppCheck("other-app");
+      const admin = createFirebaseAdmin(
+        {} as App,
+        new Set(["android-app"]),
+        { auth: auth as never, appCheck: appCheck as never },
+        { appCheckMode: "optional" },
+      );
+      await expect(admin.verify("token", "")).resolves.toMatchObject({ uid: "alice" });
+      expect(appCheck.verifyToken).not.toHaveBeenCalled();
+      await expect(admin.verify("token", "attestation")).rejects.toMatchObject({
+        code: "invalid_attestation",
+      });
+    });
+
+    it("off ignores the attestation; the ID token is still verified", async () => {
+      const auth = fakeAuth({ verifyIdToken: vi.fn(async () => claims) });
+      const appCheck = fakeAppCheck("other-app");
+      const admin = createFirebaseAdmin(
+        {} as App,
+        new Set(["android-app"]),
+        { auth: auth as never, appCheck: appCheck as never },
+        { appCheckMode: "off" },
+      );
+      await expect(admin.verify("token", "garbage")).resolves.toMatchObject({ uid: "alice" });
+      expect(appCheck.verifyToken).not.toHaveBeenCalled();
+      expect(auth.verifyIdToken).toHaveBeenCalledWith("token", true);
+    });
+  });
+
   it("refuses an empty App Check allowlist", () => {
     expect(() => createFirebaseAdmin({} as App, new Set())).toThrow(
       "App Check app ID allowlist is required",

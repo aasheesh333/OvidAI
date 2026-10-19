@@ -6,6 +6,9 @@ import {
 } from "firebase-admin/auth";
 import { getAppCheck, type AppCheck } from "firebase-admin/app-check";
 import type { FastifyReply, preHandlerHookHandler } from "fastify";
+import type { AppCheckMode } from "./env.js";
+
+export type { AppCheckMode } from "./env.js";
 
 export interface AuthPrincipal {
   uid: string;
@@ -57,10 +60,25 @@ function unauthenticated(reply: FastifyReply): FastifyReply {
 // the generic envelope regardless, so details stay server-side by design.
 class UnauthenticatedError extends Error {}
 
+export interface FirebaseVerifierOptions {
+  /**
+   * OVID_APPCHECK_MODE. `required` (default): a missing token is rejected
+   * before the ID token is inspected and a present one must verify.
+   * `optional`: verify when present, accept when absent. `off`: never look at
+   * the App Check token. The ID token is verified in every mode.
+   */
+  appCheckMode?: AppCheckMode;
+  /** Test seam: replaces the lazily-constructed firebase-admin services. */
+  services?: () => {
+    auth: Pick<Auth, "verifyIdToken">;
+    appCheck: Pick<AppCheck, "verifyToken">;
+  };
+}
+
 /**
- * Production verifier: Firebase ID token + App Check on every handshake.
+ * Production verifier: Firebase ID token + App Check per [appCheckMode].
  *
- * The plan pins App Check on every request, so a MISSING App Check token is
+ * In `required` mode (the default) a MISSING App Check token is
  * rejected before the ID token is ever inspected. Both verifications run
  * against the caller-supplied app (initialized from ADC /
  * GOOGLE_APPLICATION_CREDENTIALS by the composition root, never here); the
@@ -68,13 +86,20 @@ class UnauthenticatedError extends Error {}
  * this module importable — and the missing-App-Check path testable — without
  * credentials.
  */
-export function createFirebaseVerifier(app: App): Verifier {
-  let services: { auth: Auth; appCheck: AppCheck } | null = null;
+export function createFirebaseVerifier(
+  app: App,
+  options: FirebaseVerifierOptions = {},
+): Verifier {
+  const mode: AppCheckMode = options.appCheckMode ?? "required";
+  let services: {
+    auth: Pick<Auth, "verifyIdToken">;
+    appCheck: Pick<AppCheck, "verifyToken">;
+  } | null = null;
   return async (idToken, appCheckToken) => {
-    if (appCheckToken === null) {
+    if (mode === "required" && appCheckToken === null) {
       throw new UnauthenticatedError("missing App Check token");
     }
-    services ??= { auth: getAuth(app), appCheck: getAppCheck(app) };
+    services ??= options.services?.() ?? { auth: getAuth(app), appCheck: getAppCheck(app) };
     let decoded: DecodedIdToken;
     // The CLIENT always receives the one generic envelope (alg/kid/expiry
     // details are an oracle we must not leak). The SERVER log, however, must
@@ -87,10 +112,13 @@ export function createFirebaseVerifier(app: App): Verifier {
     } catch (err) {
       throw new UnauthenticatedError(`id token rejected: ${describeAuthError(err)}`);
     }
-    try {
-      await services.appCheck.verifyToken(appCheckToken);
-    } catch (err) {
-      throw new UnauthenticatedError(`app check rejected: ${describeAuthError(err)}`);
+    // `off` ignores the header; `optional` verifies only a present token.
+    if (mode !== "off" && appCheckToken !== null) {
+      try {
+        await services.appCheck.verifyToken(appCheckToken);
+      } catch (err) {
+        throw new UnauthenticatedError(`app check rejected: ${describeAuthError(err)}`);
+      }
     }
     return {
       uid: decoded.uid,

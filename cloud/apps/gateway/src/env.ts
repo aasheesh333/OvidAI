@@ -1,3 +1,14 @@
+/**
+ * OVID_APPCHECK_MODE — how the gateway treats `X-Firebase-AppCheck`.
+ * - `required` (default): a missing or invalid token is rejected.
+ * - `optional`: a present token is verified (invalid = rejected); an absent
+ *   one is accepted.
+ * - `off`: the header is ignored.
+ * The Firebase ID token is verified identically in every mode.
+ */
+export type AppCheckMode = "required" | "optional" | "off";
+const APP_CHECK_MODES: readonly AppCheckMode[] = ["required", "optional", "off"];
+
 export interface GatewayEnv {
   nodeEnv: string;
   port: number;
@@ -49,6 +60,8 @@ export interface GatewayEnv {
    * the Caddy snippet proxies it verbatim — no rewrite.
    */
   mcpRedirectUri: string;
+  /** OVID_APPCHECK_MODE (default `required`). See [AppCheckMode]. */
+  appCheckMode: AppCheckMode;
 }
 
 const DEFAULT_PORT = 8081;
@@ -205,6 +218,16 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
     throw new Error("OVID_MCP_REDIRECT_URI must be an absolute http(s) URL");
   }
 
+  // Defaults to `required` so a missing variable never silently weakens
+  // attestation; anything outside the three modes fails at boot.
+  const appCheckModeRaw = raw.OVID_APPCHECK_MODE?.trim().toLowerCase() || "required";
+  if (!(APP_CHECK_MODES as readonly string[]).includes(appCheckModeRaw)) {
+    throw new Error(
+      `OVID_APPCHECK_MODE must be "required", "optional" or "off", got: ${raw.OVID_APPCHECK_MODE}`,
+    );
+  }
+  const appCheckMode = appCheckModeRaw as AppCheckMode;
+
   return {
     nodeEnv,
     port,
@@ -224,5 +247,6 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
     redisCUrl,
     masterKey: requiredMasterKey(),
     mcpRedirectUri,
+    appCheckMode,
   };
 }

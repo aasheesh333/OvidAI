@@ -32,6 +32,17 @@ export interface FirebaseAdminOverrides {
   appCheck?: Pick<AppCheck, "verifyToken">;
 }
 
+/**
+ * Mirrors the gateway's OVID_APPCHECK_MODE: `required` (default) verifies
+ * every attestation; `optional` verifies only a non-empty one; `off` ignores
+ * it. The Firebase ID token is verified in every mode.
+ */
+export type AccountAppCheckMode = "required" | "optional" | "off";
+
+export interface FirebaseAdminOptions {
+  appCheckMode?: AccountAppCheckMode;
+}
+
 export type FirebaseAdminAdapter = AdminAdapter & {
   verify(
     token: string,
@@ -58,7 +69,9 @@ export function createFirebaseAdmin(
   app: App,
   allowedAppIds: Set<string>,
   overrides: FirebaseAdminOverrides = {},
+  options: FirebaseAdminOptions = {},
 ): FirebaseAdminAdapter {
+  const appCheckMode: AccountAppCheckMode = options.appCheckMode ?? "required";
   if (allowedAppIds.size === 0) {
     throw new Error("App Check app ID allowlist is required");
   }
@@ -78,14 +91,19 @@ export function createFirebaseAdmin(
   return {
     async verify(token, attestation, opts = {}) {
       try {
-        const check = await svc().appCheck.verifyToken(attestation);
-        // firebase-admin v14 returns `appId`; the decoded token shape (and
-        // Python's SDK) spells it `app_id` — accept both structurally.
-        const appId =
-          (check as { appId?: unknown }).appId ??
-          (check as { app_id?: unknown }).app_id;
-        if (typeof appId !== "string" || !allowedAppIds.has(appId)) {
-          throw new AccountError("invalid_attestation", 401);
+        const verifyAttestation =
+          appCheckMode === "required" ||
+          (appCheckMode === "optional" && attestation !== "");
+        if (verifyAttestation) {
+          const check = await svc().appCheck.verifyToken(attestation);
+          // firebase-admin v14 returns `appId`; the decoded token shape (and
+          // Python's SDK) spells it `app_id` — accept both structurally.
+          const appId =
+            (check as { appId?: unknown }).appId ??
+            (check as { app_id?: unknown }).app_id;
+          if (typeof appId !== "string" || !allowedAppIds.has(appId)) {
+            throw new AccountError("invalid_attestation", 401);
+          }
         }
         let claims: DecodedIdToken;
         try {
