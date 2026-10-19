@@ -1107,7 +1107,7 @@ class _SessionTileState extends State<_SessionTile> {
                                 children: [
                                   Expanded(
                                     child: Text(
-                                      summary.model,
+                                      ovidModelLabel(summary.model),
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
