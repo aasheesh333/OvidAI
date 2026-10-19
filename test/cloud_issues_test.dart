@@ -121,6 +121,25 @@ void main() {
       expect(issues.value!.resetsAt, isNotNull);
     });
 
+    test('only an accepted message send clears a quota issue', () async {
+      final issues = CloudIssues()
+        ..reportFailure(CloudApiException(
+            status: 402, code: 'daily_limit_reached', message: 'x'));
+      final rest = client(
+        MockClient((request) async => http.Response(
+            request.url.path.endsWith('/auth/ticket')
+                ? '{"ticket":"t"}'
+                : '{"runId":"r","messageId":"m","queued":false}',
+            200)),
+        issues,
+      );
+      await rest.postJson('/auth/ticket');
+      expect(issues.value?.kind, CloudIssueKind.quota,
+          reason: 'a WS ticket mint is not a billable success');
+      await rest.postJson('/sessions/s/messages', body: const {});
+      expect(issues.value, isNull);
+    });
+
     test('unreachable then recovered clears the issue', () async {
       final issues = CloudIssues();
       var fail = true;

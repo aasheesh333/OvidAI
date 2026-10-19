@@ -106,8 +106,8 @@ class CloudIssues extends ValueNotifier<CloudIssue?> {
   }
 
   /// A call succeeded. Clears session, attestation and transport issues; a
-  /// quota issue clears only when a [billable] call (a POST) succeeds, since
-  /// a successful read says nothing about the allowance.
+  /// quota issue clears only when a [billable] call (an accepted message
+  /// send) succeeds, since other calls say nothing about the allowance.
   void reportSuccess({bool billable = false}) {
     final current = value;
     if (current == null) return;

@@ -243,7 +243,10 @@ class CloudRestClient {
       rethrow;
     }
     if (response.statusCode >= 200 && response.statusCode < 300) {
-      _issues.reportSuccess(billable: method == 'POST');
+      // Only an accepted message send proves the allowance is back; a WS
+      // ticket or session create succeeding says nothing about it.
+      _issues.reportSuccess(
+          billable: method == 'POST' && uri.path.endsWith('/messages'));
     } else {
       _issues.reportFailure(_toError(response));
     }
