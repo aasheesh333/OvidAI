@@ -66,6 +66,10 @@ class FakeStoreRest extends CloudRestClient {
   Map<String, List<MessageDto>> messagesBySession =
       const <String, List<MessageDto>>{};
 
+  /// Wave 1b: a rich page (watermark + events) answered when asked with
+  /// `withEvents`, per session.
+  Map<String, MessagePage> richPages = <String, MessagePage>{};
+
   /// DELETE /sessions/:id wire log.
   final List<String> deleteCalls = <String>[];
 
@@ -181,6 +185,8 @@ class FakeStoreRest extends CloudRestClient {
     bool withEvents = false,
   }) async {
     pageCalls.add((sessionId: sessionId, before: before, limit: limit));
+    final rich = richPages[sessionId];
+    if (rich != null && withEvents) return rich;
     return CloudPage<MessageDto>(
       items: messagesBySession[sessionId] ?? const <MessageDto>[],
       nextCursor: null,
@@ -253,6 +259,9 @@ class _FakeSocket implements CloudSocket {
   @override
   void sendText(String frame) => sent.add(frame);
 
+  /// A server → client text frame.
+  void server(String frame) => _frames.add(frame);
+
   @override
   Future<void> close([int? code, String? reason]) async {
     if (!_closed.isClosed) await _closed.close();
@@ -276,6 +285,25 @@ class _RecordingSink implements CloudTranscriptSink {
   @override
   void prependTranscript(String serverSessionId, List<Message> messages) {
     prepended.add(messages);
+  }
+
+  List<Message>? richRows;
+  List<CloudSessionEvent>? richEvents;
+  String? richWatermark;
+  String? richActiveRunId;
+
+  @override
+  void seedRichTranscript(
+    String serverSessionId, {
+    required List<Message> rows,
+    required List<CloudSessionEvent> events,
+    required String? watermark,
+    required String? activeRunId,
+  }) {
+    richRows = rows;
+    richEvents = events;
+    richWatermark = watermark;
+    richActiveRunId = activeRunId;
   }
 
   final List<({String local, String server})> mapped =
@@ -1368,6 +1396,175 @@ void main() {
       await pumpEventQueue();
       expect(AppState.I.sessionById('l1')!.title, 'Budget review');
       expect(h.rest.titlePatches.single, (id: 'srv-1', title: 'Budget review'));
+    });
+  });
+
+  group('Wave 1b rich history (CH-002 / CH-003 / CH-006 / CH-015)', () {
+    Map<String, dynamic> ev(String type, Map<String, dynamic> payload,
+            String seq, int minute, {int second = 0}) =>
+        <String, dynamic>{
+          'sessionId': 'srv-1',
+          'seq': seq,
+          'type': type,
+          'payload': payload,
+          'ts': DateTime.utc(2026, 10, 17, 12, minute, second).toIso8601String(),
+        };
+
+    MessagePage page({
+      required List<MessageDto> items,
+      required List<Map<String, dynamic>> events,
+      String? watermark,
+      String? activeRunId,
+    }) =>
+        MessagePage(
+          items: items,
+          nextCursor: null,
+          hasWatermark: true,
+          lastEventSeq: watermark,
+          activeRunId: activeRunId,
+          activeRunStatus: activeRunId == null ? null : 'running',
+          rawEvents: events,
+        );
+
+    test('a rich page seeds rows + events + watermark and caches the settled '
+        'fold with the watermark as its cursor', () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+      h.rest.richPages = <String, MessagePage>{
+        'srv-1': page(
+          items: <MessageDto>[
+            _msg('m2', 'assistant', 'done', minute: 5),
+            MessageDto(
+              id: 'm1',
+              sessionId: 'srv-1',
+              role: 'user',
+              content: 'make a chart',
+              createdAt: DateTime.utc(2026, 10, 17, 12, 1),
+              attachments: const <MessageAttachmentDto>[
+                MessageAttachmentDto(id: 'a1', name: 'data.csv', sizeBytes: 12),
+              ],
+            ),
+          ],
+          events: <Map<String, dynamic>>[
+            ev('run_started', {'runId': 'r1'}, '10-0', 2),
+            ev('tool_started', {'runId': 'r1', 'callId': 'c1', 'name': 'run_code', 'args': {}}, '10-1', 3),
+            ev('tool_completed', {'callId': 'c1', 'name': 'run_code', 'isError': false, 'content': 'ok'}, '10-2', 4),
+            ev('message_completed', {'messageId': 'm2', 'content': 'done'}, '10-3', 5, second: 1),
+            ev('run_completed', {'runId': 'r1'}, '10-4', 5, second: 2),
+          ],
+          watermark: '10-4',
+        ),
+      };
+      final sink = _RecordingSink();
+      h.store.transcriptSink = sink;
+
+      await h.store.loadTranscript('srv-1');
+
+      expect(sink.richWatermark, '10-4');
+      expect(sink.richActiveRunId, isNull);
+      expect(sink.richEvents, hasLength(5));
+      expect(sink.richRows!.first.attachments.single.name, 'data.csv');
+      expect(sink.seeded, isNull, reason: 'the rich path replaces the plain seed');
+      final cached = h.store.cachedTranscriptFor('srv-1')!;
+      expect(cached.map((m) => m.kind).toList(),
+          <MsgKind>[MsgKind.text, MsgKind.tool, MsgKind.text]);
+      expect(h.store.cachedCursorFor('srv-1'), '10-4');
+    });
+
+    test('a run in flight caches the cursor from BEFORE its run_started', () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+      h.rest.richPages = <String, MessagePage>{
+        'srv-1': page(
+          items: <MessageDto>[_msg('m1', 'user', 'count', minute: 1)],
+          events: <Map<String, dynamic>>[
+            ev('workspace_hydrated', {'sessionId': 'srv-1'}, '9-0', 1, second: 30),
+            ev('run_started', {'runId': 'r1'}, '10-0', 2),
+            ev('message_delta', {'runId': 'r1', 'text': '1 2'}, '10-7', 3),
+          ],
+          watermark: '10-7',
+          activeRunId: 'r1',
+        ),
+      };
+      h.store.transcriptSink = _RecordingSink();
+      await h.store.loadTranscript('srv-1');
+      expect(h.store.cachedCursorFor('srv-1'), '9-0');
+      expect(h.store.cachedTranscriptFor('srv-1')!.map((m) => m.content),
+          <String>['count'], reason: 'the live bubble is never cached');
+    });
+
+    test('the facade rebuilds mid-run with Stop and re-subscribes from the '
+        'watermark — never the whole log (CH-002 / CH-003)', () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      h.rest.richPages = <String, MessagePage>{
+        'srv-1': page(
+          items: <MessageDto>[_msg('m1', 'user', 'count', minute: 1)],
+          events: <Map<String, dynamic>>[
+            ev('run_started', {'runId': 'r1'}, '10-0', 2),
+            ev('message_delta', {'runId': 'r1', 'text': '1 2 3'}, '10-7', 3),
+          ],
+          watermark: '10-7',
+          activeRunId: 'r1',
+        ),
+      };
+      final facade = CloudAgentFacade(rest: h.rest, ws: h.ws, store: h.store);
+      addTearDown(facade.dispose);
+
+      await h.store.loadTranscript('srv-1');
+      await pumpEventQueue();
+
+      final projection = facade.projectionForTest('srv-1')!;
+      expect(projection.messages.last.content, '1 2 3');
+      expect(facade.busyFor('srv-1'), isTrue, reason: 'Stop is offered');
+      expect(facade.runStateFor('srv-1').runId, 'r1');
+      final subscribes = <Map<String, dynamic>>[
+        for (final raw in h.socket.sent)
+          if (jsonDecode(raw) case final Map<String, dynamic> f
+              when f['op'] == 'subscribe' && f['sessionId'] == 'srv-1')
+            f,
+      ];
+      expect(subscribes, isNotEmpty);
+      expect(subscribes.last['lastEventId'], '10-7');
+
+      // The live stream continues into the same bubble.
+      h.socket.server(jsonEncode(<String, dynamic>{
+        'op': 'event',
+        'event': ev('message_delta', {'runId': 'r1', 'text': ' 4'}, '10-8', 4),
+      }));
+      await pumpEventQueue();
+      expect(projection.messages.last.content, '1 2 3 4');
+    });
+
+    test('the terminal cache write records the LIVE cursor, not the last page '
+        'mark (CH-015)', () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      h.rest.richPages = <String, MessagePage>{
+        'srv-1': page(
+          items: <MessageDto>[_msg('m1', 'user', 'q', minute: 1)],
+          events: const <Map<String, dynamic>>[],
+          watermark: '5-0',
+        ),
+      };
+      final facade = CloudAgentFacade(rest: h.rest, ws: h.ws, store: h.store);
+      addTearDown(facade.dispose);
+      await h.store.loadTranscript('srv-1');
+      await pumpEventQueue();
+      for (final e in <Map<String, dynamic>>[
+        ev('run_started', {'runId': 'r2'}, '6-0', 2),
+        ev('message_completed', {'messageId': 'm2', 'content': 'a'}, '6-1', 3),
+        ev('run_completed', {'runId': 'r2'}, '6-2', 4),
+      ]) {
+        h.socket.server(jsonEncode(<String, dynamic>{'op': 'event', 'event': e}));
+      }
+      await pumpEventQueue();
+      await pumpEventQueue();
+      expect(h.store.cachedCursorFor('srv-1'), '6-2');
+      expect(h.store.cachedTranscriptFor('srv-1')!.map((m) => m.content),
+          <String>['q', 'a']);
     });
   });
 }

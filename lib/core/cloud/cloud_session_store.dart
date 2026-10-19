@@ -43,6 +43,7 @@ import '../state.dart';
 import 'cloud_errors.dart';
 import 'cloud_rest.dart';
 import 'cloud_ws.dart';
+import 'event_projection.dart';
 import 'models.dart';
 
 /// Receives cache loads from [CloudSessionStore] so the live projection can
@@ -58,6 +59,20 @@ abstract class CloudTranscriptSink {
 
   /// Prepends an OLDER page to the transcript (keyset paging backwards).
   void prependTranscript(String serverSessionId, List<Message> messages);
+
+  /// Wave 1b (CH-002/CH-003/CH-006): rebuilds the session transcript from a
+  /// rich history page — [rows] (oldest-first) interleaved with the page's
+  /// settled [events] — and resumes the live stream strictly after
+  /// [watermark] (the page's lastEventSeq), never replaying the event log on
+  /// top of the snapshot. [activeRunId] is the run the server still has in
+  /// flight (null = none).
+  void seedRichTranscript(
+    String serverSessionId, {
+    required List<Message> rows,
+    required List<CloudSessionEvent> events,
+    required String? watermark,
+    required String? activeRunId,
+  });
 
   /// A queued prompt was ACCEPTED by the server (202, including a Task 4
   /// clientMsgId replay). Implementations swap the optimistic pending row
@@ -491,6 +506,24 @@ class CloudSessionStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Wave 1b (branch): makes a session the server just created (e.g. a
+  /// branch) a first-class local chat at once, without a full refresh.
+  /// Returns its id (the server id — server sessions are keyed by it).
+  Future<String> adoptServerSession(SessionDto dto) async {
+    if (!_loaded) await _ready;
+    _knownServerIds.add(dto.id);
+    final existing = AppState.I.sessionById(dto.id);
+    if (existing != null) {
+      _applyDto(existing, dto);
+    } else {
+      AppState.I.sessions.add(_sessionFromDto(dto));
+    }
+    await _persistIds();
+    AppState.I.notifyListeners();
+    notifyListeners();
+    return dto.id;
+  }
+
   ChatSession _sessionFromDto(SessionDto dto) => ChatSession(
         id: dto.id,
         title: (dto.title == null || dto.title!.isEmpty)
@@ -589,6 +622,7 @@ class CloudSessionStore extends ChangeNotifier {
         serverSessionId,
         limit: limit,
         before: before,
+        withEvents: true,
       );
     } catch (_) {
       // A network failure on the newest page still opens the read cache.
@@ -603,6 +637,52 @@ class CloudSessionStore extends ChangeNotifier {
       // The wire is newest-first; the transcript is oldest-first.
       for (final dto in page.items.reversed) _messageFromDto(dto),
     ];
+
+    // Wave 1b: a server that answers the watermark + events gets the rich
+    // path — the transcript is rebuilt from rows AND agent activity, and the
+    // live stream resumes after the snapshot's watermark (CH-003).
+    if (page is MessagePage && page.hasWatermark && page.rawEvents != null) {
+      final events = <CloudSessionEvent>[
+        for (final raw in page.rawEvents!)
+          if (_decodeEvent(raw) case final CloudSessionEvent e) e,
+      ];
+      final folded = EventTranscriptProjector.foldPage(
+        rows: _dedupe(fetched),
+        events: events,
+      );
+      final settled = <Message>[
+        for (final m in folded.messages)
+          if (m.kind != MsgKind.streaming) m,
+      ];
+      folded.dispose();
+      if (before == null) {
+        final entry = _CachedTranscript(
+          messages: settled,
+          cursor: _settledCursor(events, page.lastEventSeq, page.activeRunId),
+        );
+        await _writeCache(serverSessionId, entry);
+        _cacheMemory[serverSessionId] = entry;
+        _transcriptSink?.seedRichTranscript(
+          serverSessionId,
+          rows: _dedupe(fetched),
+          events: events,
+          watermark: page.lastEventSeq,
+          activeRunId: page.activeRunId,
+        );
+        notifyListeners();
+        return;
+      }
+      final existing =
+          await _readCache(serverSessionId) ?? _cacheMemory[serverSessionId];
+      final merged = _dedupe(<Message>[...settled, ...?existing?.messages]);
+      final entry =
+          _CachedTranscript(messages: merged, cursor: existing?.cursor);
+      await _writeCache(serverSessionId, entry);
+      _cacheMemory[serverSessionId] = entry;
+      _transcriptSink?.prependTranscript(serverSessionId, settled);
+      notifyListeners();
+      return;
+    }
 
     if (before == null) {
       final messages = _dedupe(fetched);
@@ -651,7 +731,39 @@ class CloudSessionStore extends ChangeNotifier {
         // replay dedupe (Task 4's userMessageId equals it).
         privateSyncId: dto.id,
         time: dto.createdAt,
+        // CH-006: the files sent with this prompt render as chips.
+        attachments: <MessageAttachment>[
+          for (final a in dto.attachments)
+            MessageAttachment(name: a.name, size: a.sizeBytes),
+        ],
       );
+
+  static CloudSessionEvent? _decodeEvent(Map<String, dynamic> raw) {
+    try {
+      return CloudSessionEvent.fromJson(raw);
+    } catch (_) {
+      return null; // an off-contract event never fails the page
+    }
+  }
+
+  /// The cache's replay cursor for a rich page: the watermark — unless a
+  /// run is still in flight, whose live text the cache does NOT hold; then
+  /// the seq just before that run started, so an offline cold start replays
+  /// the run from its beginning instead of losing its first tokens.
+  static String? _settledCursor(
+    List<CloudSessionEvent> events,
+    String? watermark,
+    String? activeRunId,
+  ) {
+    if (activeRunId == null) return watermark;
+    for (var i = events.length - 1; i >= 0; i--) {
+      final e = events[i];
+      if (e.type == 'run_started' && e.payload['runId'] == activeRunId) {
+        return i == 0 ? null : events[i - 1].seq;
+      }
+    }
+    return watermark;
+  }
 
   static List<Message> _dedupe(List<Message> messages) {
     final seen = <String>{};

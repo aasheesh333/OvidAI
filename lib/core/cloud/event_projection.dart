@@ -312,6 +312,21 @@ class TranscriptProjection extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Wave 1b (history edits): drops [index] and every later row — the
+  /// server already removed them. A live bubble among them is dropped too;
+  /// run state is untouched (the caller re-arms it for a new run).
+  void truncateAt(int index) {
+    if (index < 0 || index >= messages.length) return;
+    final removed = messages.sublist(index);
+    messages.removeRange(index, messages.length);
+    if (_liveBubble != null && removed.contains(_liveBubble)) {
+      _liveBubble = null;
+      _liveText.clear();
+    }
+    _reindexToolRows();
+    notifyListeners();
+  }
+
   /// No run is active server-side (a history page said so) but the fold
   /// still thinks one is — its terminal event was never seen. Settle it
   /// quietly: the partial text stays, nothing shimmers, no Stop button.

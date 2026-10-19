@@ -1190,6 +1190,87 @@ void main() {
     expect(mints, 1, reason: 'no reconnect after teardown');
     expect(spy.sockets, isEmpty);
   });
+
+  group('Wave 1b cursor discipline', () {
+    test('CH-021: a token stream writes the cursor at most once per interval; '
+        'a terminal writes through at once', () async {
+      final spy = SocketFactorySpy();
+      final store = await SharedPreferences.getInstance();
+      final ws = await _build(spy, prefs: store);
+      await _subscribeAndListen(ws, 's1');
+      final socket = spy.sockets.single;
+      socket.server(_eventFrame('s1', '5-0'));
+      await pumpEventQueue();
+      expect(store.getString('${_lastEventKey}s1'), '5-0',
+          reason: 'the first event writes through');
+      for (var i = 1; i <= 20; i++) {
+        socket.server(_eventFrame('s1', '5-$i'));
+      }
+      await pumpEventQueue();
+      expect(store.getString('${_lastEventKey}s1'), '5-0',
+          reason: 'per-token writes are deferred');
+      socket.server(<String, dynamic>{
+        'op': 'event',
+        'event': <String, dynamic>{
+          'sessionId': 's1',
+          'seq': '6-0',
+          'type': 'run_completed',
+          'payload': <String, dynamic>{'runId': 'r'},
+          'ts': '2026-10-16T10:00:00.000Z',
+        },
+      });
+      await pumpEventQueue();
+      expect(store.getString('${_lastEventKey}s1'), '6-0');
+      await ws.disconnect();
+    });
+
+    test('CH-021: deferred cursors flush on disconnect', () async {
+      final spy = SocketFactorySpy();
+      final store = await SharedPreferences.getInstance();
+      final ws = await _build(spy, prefs: store);
+      await _subscribeAndListen(ws, 's1');
+      final socket = spy.sockets.single;
+      socket.server(_eventFrame('s1', '5-0'));
+      socket.server(_eventFrame('s1', '5-1'));
+      await pumpEventQueue();
+      await ws.disconnect();
+      await pumpEventQueue();
+      expect(store.getString('${_lastEventKey}s1'), '5-1');
+    });
+
+    test('CH-015: a cache seed never moves the cursor backwards', () async {
+      final spy = SocketFactorySpy();
+      final ws = await _build(spy);
+      await _subscribeAndListen(ws, 's1');
+      spy.sockets.single.server(_eventFrame('s1', '9-0'));
+      await pumpEventQueue();
+      ws.seedCursor('s1', '3-0');
+      expect(await ws.cursorFor('s1'), '9-0');
+      ws.seedCursor('s1', '10-0');
+      expect(await ws.cursorFor('s1'), '10-0');
+      await ws.disconnect();
+    });
+
+    test('CH-003: rebaseCursor re-subscribes from the snapshot watermark', () async {
+      final spy = SocketFactorySpy();
+      final ws = await _build(spy);
+      final (events, _) = await _subscribeAndListen(ws, 's1');
+      final socket = spy.sockets.single;
+      socket.server(_eventFrame('s1', '9-0'));
+      await pumpEventQueue();
+      ws.rebaseCursor('s1', '7-0');
+      expect(socket.lastSentJson(),
+          {'op': 'subscribe', 'sessionId': 's1', 'lastEventId': '7-0'});
+      // The replay after the watermark is accepted again (the rebuilt fold
+      // needs it), duplicates past it still drop.
+      socket.server(_eventFrame('s1', '8-0'));
+      socket.server(_eventFrame('s1', '9-0'));
+      socket.server(_eventFrame('s1', '9-0'));
+      await pumpEventQueue();
+      expect(events.map((e) => e.seq), ['9-0', '8-0', '9-0']);
+      await ws.disconnect();
+    });
+  });
 }
 
 class _PinningProbeException implements Exception {}

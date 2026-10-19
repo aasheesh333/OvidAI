@@ -739,6 +739,18 @@ class ApprovalRequest {
   /// and [CloudAgentFacade.approveRequest] answers them with false.
   final String? approvalId;
 
+  /// 'tool' | 'question' | 'plan' — the gate's prompt kind (CH-017). A
+  /// `plan` prompt renders the plan-review card, never a generic tool card.
+  final String kind;
+
+  /// When the server auto-denies an unanswered prompt (null = it waits).
+  final DateTime? expiresAt;
+
+  /// True between the user's tap and the server confirming the decision
+  /// (CH-017): the card stays up in a "Sending…" state and is restored if
+  /// the answer never reaches the server.
+  bool sending = false;
+
   ApprovalRequest({
     required this.tool,
     required this.summary,
@@ -748,6 +760,8 @@ class ApprovalRequest {
     this.allowAlways = false,
     this.modeName = '',
     this.approvalId,
+    this.kind = 'tool',
+    this.expiresAt,
   });
 }
 
