@@ -1,0 +1,149 @@
+{
+  "report": {
+    "startedAt": "2026-10-19T04:09:34.405Z",
+    "durationMs": 120049,
+    "users": 10,
+    "runsStarted": 60,
+    "runsCompleted": 60,
+    "runsFailed": 0,
+    "runsFailedUnattributed": 0,
+    "eventDelivery": {
+      "p50Ms": 1,
+      "p95Ms": 2,
+      "p99Ms": 3,
+      "samples": 300
+    },
+    "replay": {
+      "p95Ms": 0,
+      "maxMs": 0,
+      "reconnects": 30,
+      "samples": 0
+    },
+    "integrity": {
+      "lostEvents": 0,
+      "duplicateEvents": 0,
+      "gapsVsMirror": 0
+    },
+    "admission": {
+      "maxObservedActiveSandboxes": 1,
+      "queuedAtCap": 1,
+      "queuedAtCapBasis": "accepted-not-started-peak",
+      "rejectedAtCap": 0,
+      "rejectedAtCapBasis": "run_failed",
+      "ptySandboxBusy": 0,
+      "ptySandboxUnavailable": 0,
+      "acceptedNotTerminal": 0,
+      "spikeDrainMs": 0,
+      "spikeRuns": 0,
+      "spikeHeldRequests": 0
+    },
+    "memory": {
+      "gatewayMaxRssMb": 629,
+      "hostMemAvailableMinMb": 14433,
+      "workerMaxRssMb": 190
+    },
+    "harness": {
+      "maxPendingFrames": 0,
+      "latencyFloorP95Ms": 0.11050399999658111,
+      "invalidFrames": 0
+    },
+    "scheduleRuns": {
+      "created": 0,
+      "fired": 0,
+      "duplicated": 0,
+      "missed": 0
+    },
+    "thresholdFailures": [],
+    "notes": [
+      "admission.queuedAtCap is a PROXY (peak accepted runs with no run_started/terminal event: session-turn queue + sandbox admission). Exact sandbox queue depth is not exposed by the worker; a server-side admission gauge is required for that."
+    ]
+  },
+  "thresholds": [
+    {
+      "metric": "eventDelivery.p95Ms",
+      "op": "lte",
+      "value": 250,
+      "rationale": "loopback + mock-LLM pacing excluded (append-ts → client receipt)"
+    },
+    {
+      "metric": "eventDelivery.p99Ms",
+      "op": "lte",
+      "value": 1000,
+      "rationale": "steady-state window only"
+    },
+    {
+      "metric": "integrity.lostEvents",
+      "op": "eq",
+      "value": 0,
+      "rationale": "ground-truth readSince diff"
+    },
+    {
+      "metric": "integrity.duplicateEvents",
+      "op": "eq",
+      "value": 0,
+      "rationale": "ground-truth readSince diff"
+    },
+    {
+      "metric": "integrity.gapsVsMirror",
+      "op": "eq",
+      "value": 0,
+      "rationale": "session_event_mirror diff"
+    },
+    {
+      "metric": "admission.rejectedAtCap",
+      "op": "eq",
+      "value": 0,
+      "rationale": "admission queues, never rejects (§9)"
+    },
+    {
+      "metric": "runsFailed",
+      "op": "eq",
+      "value": 0,
+      "rationale": "G1/AG1 — no expected failures in a clean run"
+    },
+    {
+      "metric": "harness.maxPendingFrames",
+      "op": "lte",
+      "value": 64,
+      "rationale": "Review Focus #2 — client event queues drain"
+    },
+    {
+      "metric": "harness.latencyFloorP95Ms",
+      "op": "lte",
+      "value": 50,
+      "rationale": "Review Focus #2 — the harness is not the bottleneck"
+    },
+    {
+      "metric": "eventDelivery.samples",
+      "op": "gt",
+      "value": 0,
+      "rationale": "positive data: at least one delivered event was measured"
+    },
+    {
+      "metric": "runsStarted",
+      "op": "gt",
+      "value": 0,
+      "rationale": "positive data: the scenario actually started runs"
+    },
+    {
+      "metric": "runsCompleted",
+      "op": "gt",
+      "value": 0,
+      "rationale": "positive data: runs reached a terminal completed event"
+    },
+    {
+      "metric": "harness.invalidFrames",
+      "op": "eq",
+      "value": 0,
+      "rationale": "positive data: no off-contract server frames were accepted"
+    },
+    {
+      "metric": "scheduleRuns.created",
+      "op": "gt",
+      "value": 0,
+      "whenProfileFieldPositive": "schedules",
+      "rationale": "positive data: schedules were created under the session-owning uid (0/0/0 ledger is not PASS)"
+    }
+  ],
+  "failures": []
+}
