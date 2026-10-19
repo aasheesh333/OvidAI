@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { SessionEvent } from "./events.js";
 
 export interface SessionDto {
   id: string;
@@ -15,12 +16,78 @@ export interface MessageDto {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
   createdAt: string;
+  /**
+   * Wave 1b (additive, CH-006): the files sent with this (user) message.
+   * Absent when there are none.
+   */
+  attachments?: MessageAttachmentDto[];
+}
+
+/** Wave 1b: one file sent with a message (metadata only — never a URL). */
+export interface MessageAttachmentDto {
+  id: string;
+  name: string;
+  sizeBytes: number;
 }
 
 export interface Page<T> {
   items: T[];
   nextCursor: string | null;
 }
+
+/**
+ * Wave 1b (additive, CH-002/CH-003/CH-006): GET /sessions/:id/messages also
+ * answers
+ *  - `lastEventSeq`: the session's newest durable event seq at read time —
+ *    the replay cursor a client subscribes from so the event log is never
+ *    replayed on top of this snapshot (null = no events yet);
+ *  - `activeRun`: the run still queued/running, so a chat reopened mid-run
+ *    shows Stop and the live answer;
+ *  - `events` (only with `?events=1`): this page's settled agent activity —
+ *    the non-delta events in the page's time window up to `lastEventSeq`,
+ *    plus ONE coalesced `message_delta` carrying the active run's
+ *    in-progress text — so a reload renders tool rows, artifacts,
+ *    intermediate text and errors exactly as they streamed.
+ */
+export interface MessagePage extends Page<MessageDto> {
+  lastEventSeq?: string | null;
+  activeRun?: { runId: string; status: "queued" | "running" } | null;
+  events?: SessionEvent[];
+}
+
+/** Wave 1b: DELETE /sessions/:id/messages/:messageId answer (truncate from there). */
+export interface TruncateMessagesResponse {
+  deleted: number;
+}
+
+/**
+ * Wave 1b: POST /sessions/:id/messages/:messageId/regenerate — the answer
+ * (and everything after it) is removed and the prompt it replied to runs
+ * again. `maxOutputTokens` mirrors the send body's cap.
+ */
+export const regenerateBodySchema = z
+  .object({
+    maxOutputTokens: z.number().int().min(1).max(8192).optional(),
+  })
+  .strict();
+
+export interface RegenerateResponse {
+  runId: string;
+  /** The user message the new run answers (unchanged by the regenerate). */
+  promptMessageId: string;
+  status: "queued";
+}
+
+/**
+ * Wave 1b: POST /sessions/:id/branch — a NEW session seeded with this
+ * session's messages up to and including `messageId`. Answers 201 SessionDto.
+ */
+export const branchSessionBodySchema = z
+  .object({
+    messageId: z.string().uuid(),
+    title: z.string().max(200).optional(),
+  })
+  .strict();
 
 export interface SendMessageResponse {
   runId: string;
@@ -266,6 +333,9 @@ export const messageDtoSchema: z.ZodType<MessageDto> = z.object({
   role: z.enum(["user", "assistant", "system", "tool"]),
   content: z.string(),
   createdAt: z.string().min(1),
+  attachments: z
+    .array(z.object({ id: z.string().min(1), name: z.string(), sizeBytes: z.number().int().nonnegative() }))
+    .optional(),
 });
 
 export function pageSchema<T>(inner: z.ZodType<T>): z.ZodType<Page<T>> {
