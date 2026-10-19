@@ -180,6 +180,11 @@ export interface LoopDeps {
   memoryEnabled?: boolean;
   githubConnected?: boolean;
   /**
+   * Wave 4 (SE-007): the preset registry for this run — the built-ins plus
+   * the user's custom presets. Absent = built-ins only (`presetById`).
+   */
+  presets?: (id: string | null) => AgentPreset | null;
+  /**
    * P3 Task 16: spill oversized tool output to `.spill/` before the event /
    * tool row (default true). The P2-compat path passes false so P2's caps
    * stay byte-for-byte identical.
@@ -600,14 +605,17 @@ function vetoMessage(reason: string | null): string {
   );
 }
 
-function presetFor(state: SessionAgentState): AgentPreset | null {
-  return presetById(state.presetId);
+function presetFor(
+  state: SessionAgentState,
+  deps: Pick<LoopDeps, "presets">,
+): AgentPreset | null {
+  return (deps.presets ?? presetById)(state.presetId);
 }
 
 function rosterContext(
   state: SessionAgentState,
   mode: SessionMode,
-  deps: Pick<LoopDeps, "memoryEnabled" | "githubConnected">,
+  deps: Pick<LoopDeps, "memoryEnabled" | "githubConnected" | "presets">,
   isSubagent = false,
 ): RosterContext {
   return {
@@ -618,7 +626,7 @@ function rosterContext(
     // Absent = the T15 default (true) for callers that never wired them.
     memoryEnabled: deps.memoryEnabled ?? true,
     githubConnected: deps.githubConnected ?? true,
-    preset: presetFor(state),
+    preset: presetFor(state, deps),
     activeSkillScopes: state.activeSkillScopes,
   };
 }
@@ -672,7 +680,7 @@ export async function runAgentLoop(
         userId,
         requestedModel: s.modelPin,
         preset: (() => {
-          const p = presetFor(s);
+          const p = presetFor(s, deps);
           return p === null ? null : { model: p.model, temperature: p.temperature };
         })(),
       },
@@ -896,7 +904,7 @@ export async function runAgentLoop(
       const mode: SessionMode = job.mode ?? state.mode ?? "auto";
 
       // ── 3. rebuild the system prompt; stable block swapped in place ────
-      const preset = presetFor(state);
+      const preset = presetFor(state, deps);
       const parts = await buildSystemPrompt({
         mode,
         planMode: state.planMode,

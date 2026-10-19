@@ -31,7 +31,7 @@ import { messages, runs, sessionState, sessions, type Db } from "@ovid/db";
 import { nativeToolsFor } from "./claudeCodeTools.js";
 import type { AgentEngine } from "./engine.js";
 import type { EventSink, HookEngine, HookStopResult, SessionStateStore } from "./ports.js";
-import { presetById } from "./presets.js";
+import { presetById, type AgentPreset } from "./presets.js";
 import { canonicalTools } from "./promptCache.js";
 import { CHILD_DENIED_TOOLS, computeToolRoster } from "./roster.js";
 import type { ToolContext, ToolRegistry, ToolSpec } from "./types.js";
@@ -308,6 +308,8 @@ export interface SubagentSupervisorDeps {
   /** Composition flags (T16) — the same defaults as the loop when absent. */
   memoryEnabled?: boolean;
   githubConnected?: boolean;
+  /** Wave 4 (SE-007): built-ins + the user's custom presets (absent = built-ins). */
+  presets?: (id: string | null) => AgentPreset | null;
   now?: () => number;
 }
 
@@ -535,7 +537,7 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
           isSubagent: parent.isSubagent,
           memoryEnabled: deps.memoryEnabled ?? true,
           githubConnected: deps.githubConnected ?? true,
-          preset: presetById(parentState.presetId),
+          preset: (deps.presets ?? presetById)(parentState.presetId),
           activeSkillScopes: parentState.activeSkillScopes,
         },
         deps.registry.all().map((tool) => tool.spec),

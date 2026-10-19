@@ -7,7 +7,9 @@ import type { AddressInfo } from "node:net";
 import { Redis } from "ioredis";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  accountSettings,
   createDb,
+  customPresets,
   attachments,
   eventMirror,
   messages,
@@ -2444,6 +2446,63 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       const run2 = await runs.create(db, { sessionId: seeded.sessionId, promptMessageId: prompt2.id });
       const shared = await runSearch({ ...seeded, runId: run2.id, prompt: "again", promptMessageId: prompt2.id });
       expect(shared).toContain(otherSession.id);
+    });
+
+    it("Wave 4 (SE-004): a BYOK default routes every model call to the user's key — Ovid's LiteLLM sees nothing", async () => {
+      const seeded = await seedRun();
+      const keyId = newId();
+      await accountSettings.patch(db, seeded.uid, { byokDefault: { keyId, model: "gpt-4.1-mini" } });
+      const seen: Array<string | null | undefined> = [];
+      const keys: KeyResolver = {
+        async resolveForRun(_uid, ctx) {
+          seen.push(ctx.byokKeyId);
+          // The escrow cannot decrypt this key → the run must FAIL, never
+          // fall back onto Ovid's metered LiteLLM key.
+          return ctx.byokKeyId ? null : { kind: "litellm", key: "sk-ovid", baseUrl: "" };
+        },
+      };
+      const sbx = makeFakePort();
+      const sse = await startTurnSse([textTurn("ok")]);
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port, { keys }));
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen.every((id) => id === keyId)).toBe(true);
+      expect(sse.requests).toHaveLength(0);
+      const evts = await readEvents(seeded.sessionId);
+      expect(evts.some((e) => e.type === "run_failed" && e.payload.code === "key_not_minted")).toBe(true);
+    });
+
+    it("Wave 4 (SE-007): a custom preset applied to the session pins its temperature and drops denied tools from the request", async () => {
+      const seeded = await seedRun();
+      await customPresets.upsert(db, seeded.uid, {
+        id: "custom-no-shell",
+        label: "No shell",
+        description: "",
+        deniedTools: ["run_shell", "run_code"],
+        model: null,
+        temperature: 0.2,
+      });
+      await sessionState.patch(db, seeded.sessionId, { presetId: "custom-no-shell" });
+      const sbx = makeFakePort();
+      const sse = await startTurnSse([textTurn("ok")]);
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+      const req = sse.requests[0] as unknown as { tools?: Array<{ function: { name: string } }> };
+      const names = (req.tools ?? []).map((t) => t.function.name);
+      expect(names.length).toBeGreaterThan(0);
+      expect(names).not.toContain("run_shell");
+      expect(names).not.toContain("run_code");
+      expect(names).toContain("web_search");
     });
 
     it("R1: no sessionRefs → no other session's text reaches the model; sessionRefs → included for that run only", async () => {

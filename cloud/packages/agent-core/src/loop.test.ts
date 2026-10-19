@@ -47,6 +47,7 @@ import {
   type NormalizedRunJob,
   type RunTime,
 } from "./loop.js";
+import { presetById, type AgentPreset } from "./presets.js";
 import { TOOL_TIMEOUT_MESSAGE } from "./tools/spill.js";
 import { createSandboxTools } from "./tools/sandboxTools.js";
 import { convertMessagesToAnthropic } from "./transport/anthropic.js";
@@ -688,6 +689,51 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     // through the permission projection (the pre-fix behavior).
     const top = await makeCtx({ tools: [shell], script: script() });
     await runAgentLoop(top.job, top.deps, top.rt);
+    expect(shell.calls).toHaveLength(1);
+  });
+
+  it("Wave 4 (SE-007): a custom preset's denied tool is off the roster and refused if called; temperature applies", async () => {
+    const shell = tool("run_shell");
+    const read = tool("file_read");
+    const custom: AgentPreset = {
+      id: "custom-no-shell",
+      label: "No shell",
+      description: "",
+      allowedTools: [],
+      deniedTools: ["run_shell"],
+      persona: "",
+      model: null,
+      modelProviderId: null,
+      temperature: 0.25,
+    };
+    const c = await makeCtx({
+      tools: [shell, read],
+      statePatch: { presetId: "custom-no-shell" },
+      script: [
+        { text: "", toolCalls: [{ id: "c1", name: "run_shell", args: { command: "uname -a" } }] },
+        { text: "done" },
+      ],
+    });
+    c.deps.presets = (id) => (id === custom.id ? custom : presetById(id));
+    const result = await runAgentLoop(c.job, c.deps, c.rt);
+
+    expect(result.status).toBe("completed");
+    expect(c.requests[0]!.tools.map((t) => t.name)).not.toContain("run_shell");
+    expect(c.requests[0]!.temperature).toBe(0.25);
+    expect(shell.calls).toHaveLength(0);
+    const row = c.requests[1]!.messages.find((m) => m.role === "tool")!;
+    expect(row.content).toContain("DENIED: run_shell");
+
+    // Without the run's registry the id is unknown → standard (shell allowed).
+    const plain = await makeCtx({
+      tools: [shell],
+      statePatch: { presetId: "custom-no-shell" },
+      script: [
+        { text: "", toolCalls: [{ id: "c1", name: "run_shell", args: { command: "uname -a" } }] },
+        { text: "done" },
+      ],
+    });
+    await runAgentLoop(plain.job, plain.deps, plain.rt);
     expect(shell.calls).toHaveLength(1);
   });
 

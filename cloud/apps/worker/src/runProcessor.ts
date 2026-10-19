@@ -81,6 +81,7 @@ import {
 } from "@ovid/agent-core";
 import { createRedisApprovalBridge } from "./approvalBridge.js";
 import { agentKeyFor } from "./keyResolver.js";
+import { loadRunAccountContext, runKeyAdapter } from "./runAccount.js";
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   TerminalModelError,
@@ -1546,16 +1547,20 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     // P9 Task 9: the per-run resolution context and the agent-core adapter.
     // Both the engine and the auxiliary model calls (hooks/compaction) ride
     // the SAME resolved key for this run.
-    const runKeyCtx = {
-      unattended: job.data.unattended ?? job.data.schedule !== undefined,
-      byokKeyId: job.data.byokKeyId ?? null,
-    };
-    const keys = {
-      async resolve(uid: string, requestedModel: string) {
-        const key = await deps.keys.resolveForRun(uid, runKeyCtx);
-        return key === null ? null : agentKeyFor(key, requestedModel, deps.defaultModel);
+    // Wave 4 (SE-004 / SE-007): the user's BYOK default and custom presets,
+    // read once per run. A BYOK default routes every model call of this run
+    // to the user's own key (not metered on the Ovid allowance).
+    const account = await loadRunAccountContext(deps.db, userId);
+    const keys = runKeyAdapter({
+      resolver: deps.keys,
+      ctx: {
+        unattended: job.data.unattended ?? job.data.schedule !== undefined,
+        byokKeyId: job.data.byokKeyId ?? null,
       },
-    };
+      byokDefault: account.byokDefault,
+      defaultModel: deps.defaultModel,
+    });
+    const presetFor = account.presets;
 
     // ---- C1: the identical single-active-run-per-session contract --------
     const turn = await waitForSessionTurn({
@@ -1691,7 +1696,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
         // (Today every built-in preset pins model:null, so in practice the
         // /model pin decides — but the mirror keeps the gate honest the day
         // a preset carries a model.)
-        const preset = presetById(sessionState.presetId);
+        const preset = presetFor(sessionState.presetId);
         const presetModel = preset === null ? null : preset.model;
         const winnerRaw =
           presetModel != null && presetModel.trim() !== ""
@@ -1776,7 +1781,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     // returns null (fail-open, the pinned hook contract).
     const promptEvaluator = async (prompt: string): Promise<string | null> => {
       try {
-        const preset = presetById(sessionState.presetId);
+        const preset = presetFor(sessionState.presetId);
         const route = await resolveRoute(
           {
             userId,
@@ -1878,6 +1883,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       registry: lateRegistry,
       memoryEnabled,
       githubConnected,
+      presets: presetFor,
     });
     const subagentTools = createSubagentTools({
       supervisor: subagentSupervisor,
@@ -1937,7 +1943,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     const commandRunner = createCommandRunner({
       state,
       skills,
-      presets: presetById,
+      presets: presetFor,
       compact: async (sid) => {
         const page = await messages.page(deps.db, sid, { limit: HISTORY_LIMIT });
         const history = [...page.rows]
@@ -2019,6 +2025,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       windowTokens,
       memoryEnabled,
       githubConnected,
+      presets: presetFor,
       ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
     });
     // Late-bound seams for the subagent tools (see their construction above).
