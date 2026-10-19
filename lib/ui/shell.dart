@@ -164,7 +164,16 @@ class TelemetryConsentPrompter {
 
   void maybeAsk() {
     final context = _context?.call();
-    if (_showing || _shown || context == null || !context.mounted) return;
+    if (context == null) return;
+    unawaited(askOnce(context));
+  }
+
+  /// One step of the first-run sequence (SH-031, EM-005): shows the dialog
+  /// when consent was never asked and completes when the user chose (or at
+  /// once when there is nothing to ask), so the next prompt never stacks on
+  /// top of this one.
+  Future<void> askOnce(BuildContext context) async {
+    if (_showing || _shown || !context.mounted) return;
     if (!isAvailable()) return;
     if (consentAsked()) {
       _stopListening();
@@ -173,14 +182,14 @@ class TelemetryConsentPrompter {
     _showing = true;
     _shown = true;
     _stopListening();
-    showDialog<void>(
+    await showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (d) => PopScope(
         canPop: false,
         child: AlertDialog(
           title: const Text(
-            'Help improve Ovid AI?',
+            'Help improve Ovid Si?',
             style: TextStyle(fontSize: 16),
           ),
           content: const Text(
@@ -231,7 +240,6 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
   /// 3 s for the app's whole lifetime.
   late final AppState _persistApp = AppState.I;
   bool _persistWarned = false;
-  final _consent = TelemetryConsentPrompter.firebase();
 
   void _onPersistStateChanged() {
     final failed = _persistApp.lastSessionPersistFailed;
@@ -244,9 +252,8 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Ask for telemetry consent once (Play policy) after first frame.
-    _consent.attach(() => context);
-    // First-run welcome notice moved to LoginGate (post-login overlay).
+    // Telemetry consent is one step of LoginGate's first-run sequence
+    // (welcome → notifications → consent → import), never stacked here.
     // Durability watchdog.
     _persistApp.addListener(_onPersistStateChanged);
     _persistWarned = _persistApp.lastSessionPersistFailed;
@@ -256,7 +263,6 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
   void dispose() {
     _persistApp.removeListener(_onPersistStateChanged);
     WidgetsBinding.instance.removeObserver(this);
-    _consent.detach();
     super.dispose();
   }
 

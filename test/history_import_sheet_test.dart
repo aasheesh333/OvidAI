@@ -184,17 +184,19 @@ void main() {
 
     expect(find.text('3 chats · 7 messages'), findsOneWidget);
     expect(find.text('Import my chats'), findsOneWidget);
-    expect(find.text('Skip for now'), findsOneWidget);
+    expect(find.text('Not now'), findsOneWidget);
     expect(
       find.textContaining('Chat transcripts: messages, roles, and timestamps.'),
       findsOneWidget,
     );
     expect(find.textContaining('Ovid Cloud, for this account only.'), findsOneWidget);
     expect(
-      find.textContaining('Session event ledgers and memory files'),
+      find.textContaining('activity logs and memory notes'),
       findsOneWidget,
     );
-    expect(find.textContaining('no server endpoint'), findsOneWidget);
+    // No developer copy (EM-004) and a way back (SE-015).
+    expect(find.textContaining('endpoint'), findsNothing);
+    expect(find.textContaining('Import chats from this device'), findsOneWidget);
     expect(service.planCalls, 1);
     expect(service.runCalls, 0, reason: 'consent is not implied');
   });
@@ -213,7 +215,7 @@ void main() {
     );
 
     await _openSheet(tester, service: service, prefs: prefs);
-    await tester.tap(find.text('Skip for now'));
+    await tester.tap(find.text('Not now'));
     await tester.pumpAndSettle();
 
     expect(prefs.getBool('ovid_cloud_import_skipped_u1'), isTrue);
@@ -260,7 +262,9 @@ void main() {
 
     expect(service.runCalls, 1);
     expect(service.lastConsent, isTrue);
-    expect(find.text('ledger'), findsOneWidget);
+    expect(find.text('Finishing up…'), findsOneWidget,
+        reason: 'internal stage names never reach the screen');
+    expect(find.text('ledger'), findsNothing);
     final bar = tester.widget<LinearProgressIndicator>(
       find.byType(LinearProgressIndicator),
     );

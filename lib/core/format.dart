@@ -58,3 +58,60 @@ String formatCompactDuration(Duration d) {
   final remMin = totalMin % 60;
   return remMin > 0 ? '${totalHours}h ${remMin}m' : '${totalHours}h';
 }
+
+const _monthAbbr = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', //
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/// Local wall-clock date and time: `Oct 20, 11:30 AM` (the year is added
+/// when it differs from [now]'s). Never a raw ISO string (SH-016, SH-022).
+String formatLocalDateTime(DateTime value, {DateTime? now}) {
+  final t = value.toLocal();
+  final ref = (now ?? DateTime.now()).toLocal();
+  final hour12 = t.hour % 12 == 0 ? 12 : t.hour % 12;
+  final minute = t.minute.toString().padLeft(2, '0');
+  final ampm = t.hour < 12 ? 'AM' : 'PM';
+  final year = t.year == ref.year ? '' : ', ${t.year}';
+  return '${_monthAbbr[t.month - 1]} ${t.day}$year, $hour12:$minute $ampm';
+}
+
+/// Local calendar day: `Oct 20` (with the year when not [now]'s year).
+String formatLocalDay(DateTime value, {DateTime? now}) {
+  final t = value.toLocal();
+  final ref = (now ?? DateTime.now()).toLocal();
+  final year = t.year == ref.year ? '' : ', ${t.year}';
+  return '${_monthAbbr[t.month - 1]} ${t.day}$year';
+}
+
+/// Coarse time until [value]: `in 5 h 12 m`, `in 12 m`, `in 2 d 3 h`,
+/// `in under a minute`; `now` once it has passed.
+String formatTimeUntil(DateTime value, {DateTime? now}) {
+  final left = value.toUtc().difference((now ?? DateTime.now()).toUtc());
+  if (left.inSeconds <= 0) return 'now';
+  if (left.inMinutes < 1) return 'in under a minute';
+  final days = left.inDays;
+  final hours = left.inHours % 24;
+  final minutes = left.inMinutes % 60;
+  if (days > 0) return hours > 0 ? 'in $days d $hours h' : 'in $days d';
+  if (left.inHours > 0) {
+    return minutes > 0
+        ? 'in ${left.inHours} h $minutes m'
+        : 'in ${left.inHours} h';
+  }
+  return 'in $minutes m';
+}
+
+/// `Resets in 5 h 12 m · Oct 19, 1:45 PM` for an allowance window.
+String formatResetLabel(DateTime resetsAt, {DateTime? now}) {
+  final until = formatTimeUntil(resetsAt, now: now);
+  final at = formatLocalDateTime(resetsAt, now: now);
+  return until == 'now' ? 'Resetting now' : 'Resets $until · $at';
+}
+
+/// A deadline with its countdown: `Oct 20, 11:30 AM (in 23 h)`.
+String formatDeadline(DateTime deadline, {DateTime? now}) {
+  final until = formatTimeUntil(deadline, now: now);
+  final at = formatLocalDateTime(deadline, now: now);
+  return until == 'now' ? '$at (due now)' : '$at ($until)';
+}

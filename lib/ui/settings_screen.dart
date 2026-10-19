@@ -5,7 +5,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../core/distribution.dart';
+import '../core/notification_permission.dart';
 import '../core/cloud/byok_client.dart';
+
+export '../core/notification_permission.dart' show NotificationPermissionAccess;
 import '../core/app_info.dart';
 import '../core/native_share.dart';
 import '../core/firebase_service.dart';
@@ -1005,24 +1008,6 @@ class _ShareMemoryTile extends StatelessWidget {
   }
 }
 
-/// Seam over the OS notification permission so the Settings row can be
-/// exercised in tests without the platform channel.
-class NotificationPermissionAccess {
-  NotificationPermissionAccess._();
-
-  static Future<PermissionStatus> Function() status = () =>
-      Permission.notification.status;
-  static Future<PermissionStatus> Function() request = () =>
-      Permission.notification.request();
-  static Future<bool> Function() openSettings = openAppSettings;
-
-  @visibleForTesting
-  static void reset() {
-    status = () => Permission.notification.status;
-    request = () => Permission.notification.request();
-    openSettings = openAppSettings;
-  }
-}
 
 /// Notifications switch that reflects the OS permission, not just the
 /// preference: turning it ON asks Android for POST_NOTIFICATIONS, and a

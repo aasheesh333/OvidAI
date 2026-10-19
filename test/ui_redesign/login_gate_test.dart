@@ -213,7 +213,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('2026-10-10'), findsOneWidget);
+      // Local, human date — never the raw ISO string (SH-022).
+      expect(find.textContaining('Oct 10'), findsOneWidget);
+      expect(find.textContaining('2026-10-10'), findsNothing);
       expect(
         find.textContaining('Signing in did not cancel deletion'),
         findsOneWidget,
