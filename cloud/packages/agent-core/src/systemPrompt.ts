@@ -91,12 +91,13 @@ const MODE_INFO: Record<SessionMode, ModeInfo> = {
     label: "Read-Only",
     hint: "Read-only. Asks for permission before every shell, browser, or write action.",
     extra: `MODE RESTRICTIONS (Read-Only): you are in a read-only session. You may read
-files, list directories, search, browse pages and run read-only shell commands.
-The following are HARD-BLOCKED and will fail if you try them: file_write,
-fs_edit (create/str_replace/insert), commit, git_clone, git_push, git_pull,
-job_start, job_kill, browser typing/clicking.
-Do not attempt them — instead explain what needs to change and ask the user
-to switch to General or Studio mode.`,
+files, list directories and search freely. EVERY shell command, code run, job,
+browser action, network fetch and write (file_write, fs_edit
+create/str_replace/insert, commit, git_clone, git_push, git_pull, job_start,
+job_kill, browser typing/clicking) asks the user for permission first, and
+fails if they decline. In a scheduled run nobody can approve, so writes are
+HARD-BLOCKED there. Prefer reading; ask for a write only when it is clearly
+needed, and if declined explain what needs to change.`,
   },
   // Dart: 'General' / 'Runs shell and browser freely. Asks before pushing to
   // the repo.' — cloud wording: workspace-confined, approvals outside.

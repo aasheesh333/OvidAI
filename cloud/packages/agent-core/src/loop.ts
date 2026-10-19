@@ -122,6 +122,13 @@ export interface AgentRunJob {
    * required 8192 floor).
    */
   maxOutputTokens?: number;
+  /**
+   * Wave 1a (R1): context from sessions the user explicitly @-tagged in this
+   * message, already framed by the worker. Inserted as a system row right
+   * before the current user turn of THIS run only — never persisted, so it
+   * never leaks into a later run.
+   */
+  turnContext?: string;
   // ── P3 Task 20 (additive child-loop seam) ────────────────────────────────
   // A subagent run is a normal engine run on a CHILD session; these fields
   // carry the facts the loop would otherwise read off the (absent) parent.
@@ -424,6 +431,43 @@ function isMutatingTool(name: string, args: Record<string, unknown>): boolean {
   return MUTATING_TOOLS.has(name);
 }
 
+/** Tool families Read-Only asks about even when they do not mutate (Wave 1a). */
+const SAFE_MODE_ASK_TOOLS: ReadonlySet<string> = new Set([
+  "run_shell",
+  "run_code",
+  "job_start",
+  "job_kill",
+  "fetch_url",
+  "web_search",
+]);
+
+/**
+ * Read-Only's ask set: every shell/code/job call (read-only commands too),
+ * every browser_* call, network fetches, and every mutating tool. Pure reads
+ * (file_read, fs_glob/grep, memory_read, session_search, todo/goal, skill)
+ * never ask.
+ */
+function safeModeNeedsApproval(name: string, args: Record<string, unknown>): boolean {
+  return (
+    SAFE_MODE_ASK_TOOLS.has(name) ||
+    name.startsWith("browser_") ||
+    isMutatingTool(name, args)
+  );
+}
+
+function safeModeApprovalDetail(name: string, args: Record<string, unknown>): string {
+  const shell = destructivePayloadOf(name, args);
+  if (shell !== null && shell !== "") return shell;
+  let text: string;
+  try {
+    text = JSON.stringify(args);
+  } catch {
+    text = "";
+  }
+  if (text.length > 2000) text = `${text.slice(0, 2000)}…`;
+  return `${name} ${text}`.trim();
+}
+
 const READ_ONLY_DENIAL =
   "READ-ONLY MODE: this action is blocked. The user " +
   "selected Read-Only — you may read, search, browse and run " +
@@ -704,6 +748,17 @@ export async function runAgentLoop(
       // Same text (the gateway persisted the composer line): the images still
       // belong to this turn, so attach them to that row.
       msgs[msgs.length - 1] = { ...last, images: promptImages };
+    }
+  }
+  // Wave 1a (R1): @-tagged session context for THIS run only.
+  const turnContext = job.turnContext?.trim() ?? "";
+  if (turnContext !== "") {
+    const row: AgentMessage = { role: "system", content: turnContext };
+    const lastIndex = msgs.length - 1;
+    if (lastIndex >= 0 && msgs[lastIndex]!.role === "user") {
+      msgs = [...msgs.slice(0, lastIndex), row, msgs[lastIndex]!];
+    } else {
+      msgs = [...msgs, row];
     }
   }
 
@@ -1190,7 +1245,48 @@ export async function runAgentLoop(
         // prompts. `bypassPermission` only skips the ordinary user prompt —
         // the hard gates above are checked FIRST and never widened by a hook.
         const policy = modePolicy(mode, state.planMode);
-        if (result === null && !policy.canMutate && isMutatingTool(call.name, effectiveArgs)) {
+        // Wave 1a (CH-001): attended Read-Only asks before every shell,
+        // browser, network or write action. A user decision — so a hook's
+        // bypassPermission never skips it — and an allow lets it run.
+        let safeModeAsked = false;
+        if (
+          result === null &&
+          policy.askBeforeActions &&
+          !job.unattended &&
+          safeModeNeedsApproval(call.name, effectiveArgs)
+        ) {
+          safeModeAsked = true;
+          const decision = await deps.approvals.approve(
+            {
+              sessionId,
+              runId,
+              userId,
+              mode,
+              planMode: state.planMode,
+              unattended: job.unattended,
+              signal: abortSignal,
+            },
+            {
+              approvalId: randomUUID(),
+              kind: "tool",
+              tool: call.name,
+              summary: `Read-Only mode: allow ${call.name}?`,
+              detail: safeModeApprovalDetail(call.name, effectiveArgs),
+              allowAlways: false,
+              pathTargets: [],
+              hostTargets: [],
+            },
+          );
+          if (decision !== "allow" && decision !== "always") {
+            result = { content: "DENIED by user", isError: true };
+          }
+        }
+        if (
+          result === null &&
+          !safeModeAsked &&
+          !policy.canMutate &&
+          isMutatingTool(call.name, effectiveArgs)
+        ) {
           result = {
             content: state.planMode ? planModeDenial(call.name) : READ_ONLY_DENIAL,
             isError: true,

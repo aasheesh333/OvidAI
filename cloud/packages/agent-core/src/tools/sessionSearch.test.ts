@@ -47,7 +47,7 @@ describe("session_search tool", () => {
       ],
       total: 2,
     });
-    const tool = createSessionSearchTool({ db: stubDb });
+    const tool = createSessionSearchTool({ db: stubDb, crossSession: true });
     const res = await tool.execute({ query: "needle" }, ctx());
     expect(res.isError).toBeFalsy();
     expect(res.content).toBe("sA m1: →needle← in A\nsB m2: a →needle← too");
@@ -61,13 +61,50 @@ describe("session_search tool", () => {
 
   it("passes sessionId and limit through to the repo", async () => {
     mockedSearch.mockResolvedValue({ rows: [], total: 0 });
-    const tool = createSessionSearchTool({ db: stubDb });
+    const tool = createSessionSearchTool({ db: stubDb, crossSession: true });
     await tool.execute({ query: "x", sessionId: "s9", limit: 5 }, ctx());
     expect(mockedSearch).toHaveBeenCalledWith(stubDb, "u1", "x", {
       limit: 5,
       offset: undefined,
       sessionId: "s9",
     });
+  });
+
+  // Wave 1a (R1): without "Share session memory" the search never leaves the
+  // current session.
+  it("defaults to the CURRENT session only (no cross-session context)", async () => {
+    mockedSearch.mockResolvedValue({ rows: [], total: 0 });
+    const tool = createSessionSearchTool({ db: stubDb });
+    await tool.execute({ query: "x" }, ctx());
+    expect(mockedSearch).toHaveBeenCalledWith(stubDb, "u1", "x", {
+      limit: undefined,
+      offset: undefined,
+      sessionId: "s1",
+    });
+  });
+
+  it("crossSession:false refuses another session's id without querying", async () => {
+    const tool = createSessionSearchTool({ db: stubDb, crossSession: false });
+    const res = await tool.execute({ query: "x", sessionId: "s9" }, ctx());
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain("Share session memory");
+    expect(mockedSearch).not.toHaveBeenCalled();
+    mockedSearch.mockResolvedValue({ rows: [], total: 0 });
+    await tool.execute({ query: "x", sessionId: "s1" }, ctx());
+    expect(mockedSearch).toHaveBeenCalledTimes(1);
+  });
+
+  it("crossSession:false drops rows from other sessions defensively", async () => {
+    mockedSearch.mockResolvedValue({
+      rows: [
+        { messageId: "m1", sessionId: "s1", role: "user", rank: 0.9, snippet: "mine" },
+        { messageId: "m2", sessionId: "sB", role: "user", rank: 0.5, snippet: "other" },
+      ],
+      total: 2,
+    });
+    const tool = createSessionSearchTool({ db: stubDb });
+    const res = await tool.execute({ query: "x" }, ctx());
+    expect(res.content).toBe("s1 m1: mine");
   });
 
   it("zero rows → 'No matches.'", async () => {

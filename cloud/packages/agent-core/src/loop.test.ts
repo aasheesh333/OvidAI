@@ -363,6 +363,8 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     roster?: ToolSpec[];
     isSubagent?: boolean;
     windowTokens?: number;
+    unattended?: boolean;
+    turnContext?: string;
   }): Promise<Ctx & { transport: AgentTransport; seedRunId: string; runRow: () => Promise<RunRow | null> }> {
     const seeded = o.preSeeded ?? (await seedSession());
     const { userId, sessionId } = seeded;
@@ -399,7 +401,8 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
       sessionId,
       userId,
       prompt,
-      unattended: false,
+      unattended: o.unattended ?? false,
+      ...(o.turnContext !== undefined ? { turnContext: o.turnContext } : {}),
       ...(o.mode !== undefined ? { mode: o.mode } : {}),
       ...(o.roster !== undefined ? { roster: o.roster } : {}),
       ...(o.isSubagent !== undefined ? { isSubagent: o.isSubagent } : {}),
@@ -731,10 +734,13 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     expect(payloads(c.events, "tool_completed")[0]).toMatchObject({ ok: false });
   });
 
-  it("mode policy denies a mutating tool in safe mode with the Read-Only copy", async () => {
+  it("unattended safe mode denies a mutating tool outright with the Read-Only copy", async () => {
     const writer = tool("file_write");
+    const approvals = recordingApprovals("allow");
     const c = await makeCtx({
       tools: [writer],
+      approvals,
+      unattended: true,
       statePatch: { mode: "safe" },
       script: [
         { text: "", toolCalls: [{ id: "c1", name: "file_write", args: { path: "a.txt", content: "x" } }] },
@@ -744,8 +750,107 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     await runAgentLoop(c.job, c.deps, c.rt);
 
     expect(writer.calls).toHaveLength(0);
+    expect(approvals.requests).toHaveLength(0);
     const row = c.requests[1]!.messages.find((m) => m.role === "tool")!;
     expect(row.content.startsWith("READ-ONLY MODE: this action is blocked.")).toBe(true);
+  });
+
+  // Wave 1a (CH-001): Read-Only "asks for permission before every shell,
+  // browser, or write action".
+  for (const call of [
+    { name: "file_write", args: { path: "a.txt", content: "x" } },
+    { name: "run_shell", args: { command: "ls" } },
+    { name: "browser_navigate", args: { url: "https://example.com" } },
+    { name: "fetch_url", args: { url: "https://example.com" } },
+  ]) {
+    it(`safe mode asks before ${call.name} and does not dispatch it when denied`, async () => {
+      const t = tool(call.name);
+      const approvals = recordingApprovals("deny");
+      const c = await makeCtx({
+        tools: [t],
+        approvals,
+        statePatch: { mode: "safe" },
+        script: [
+          { text: "", toolCalls: [{ id: "c1", name: call.name, args: call.args }] },
+          { text: "done" },
+        ],
+      });
+      await runAgentLoop(c.job, c.deps, c.rt);
+
+      expect(approvals.requests).toHaveLength(1);
+      expect(approvals.requests[0]).toMatchObject({ kind: "tool", tool: call.name, allowAlways: false });
+      expect(t.calls).toHaveLength(0);
+      const row = c.requests[1]!.messages.find((m) => m.role === "tool")!;
+      expect(row.content).toBe("DENIED by user");
+    });
+
+    it(`safe mode runs ${call.name} once the user allows it`, async () => {
+      const t = tool(call.name);
+      const approvals = recordingApprovals("allow");
+      const c = await makeCtx({
+        tools: [t],
+        approvals,
+        mode: "safe",
+        script: [
+          { text: "", toolCalls: [{ id: "c1", name: call.name, args: call.args }] },
+          { text: "done" },
+        ],
+      });
+      await runAgentLoop(c.job, c.deps, c.rt);
+
+      expect(approvals.requests).toHaveLength(1);
+      expect(t.calls).toHaveLength(1);
+    });
+  }
+
+  it("safe mode does not ask before a pure read", async () => {
+    const reader = tool("file_read");
+    const approvals = recordingApprovals("deny");
+    const c = await makeCtx({
+      tools: [reader],
+      approvals,
+      statePatch: { mode: "safe" },
+      script: [
+        { text: "", toolCalls: [{ id: "c1", name: "file_read", args: { path: "a.txt" } }] },
+        { text: "done" },
+      ],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect(approvals.requests).toHaveLength(0);
+    expect(reader.calls).toHaveLength(1);
+  });
+
+  it("auto mode writes inside the workspace with no approval", async () => {
+    const writer = tool("file_write");
+    const approvals = recordingApprovals("deny");
+    const c = await makeCtx({
+      tools: [writer],
+      approvals,
+      script: [
+        { text: "", toolCalls: [{ id: "c1", name: "file_write", args: { path: "a.txt", content: "x" } }] },
+        { text: "done" },
+      ],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect(approvals.requests).toHaveLength(0);
+    expect(writer.calls).toHaveLength(1);
+  });
+
+  it("turnContext rides this run as a system row right before the current prompt, never persisted", async () => {
+    const c = await makeCtx({
+      turnContext: "REFERENCED-SESSION-CONTEXT",
+      prompt: "what did we decide?",
+      script: [{ text: "answer" }],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+
+    const msgs = c.requests[0]!.messages;
+    const last = msgs[msgs.length - 1]!;
+    const beforeLast = msgs[msgs.length - 2]!;
+    expect(last).toMatchObject({ role: "user", content: "what did we decide?" });
+    expect(beforeLast).toMatchObject({ role: "system", content: "REFERENCED-SESSION-CONTEXT" });
+    const stored = await messages.page(db, c.job.sessionId, { limit: 50 });
+    expect(stored.rows.some((r) => r.content.includes("REFERENCED-SESSION-CONTEXT"))).toBe(false);
   });
 
   it("mode policy prompts for an outside-workspace path in auto mode", async () => {
@@ -867,6 +972,28 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     expect(row.content).toBe("DENIED by user");
   });
 
+  it("bypassPermission never skips the Read-Only ask (attended)", async () => {
+    const writer = tool("file_write");
+    const approvals = recordingApprovals("deny");
+    const hooks = recordingHooks({
+      listeners: ["pre_tool"],
+      gate: { decision: "allow", bypassPermission: true, reason: null, decidedByPlugin: "p1", deniedByPlugin: null },
+    });
+    const c = await makeCtx({
+      tools: [writer],
+      hooks,
+      approvals,
+      statePatch: { mode: "safe" },
+      script: [
+        { text: "", toolCalls: [{ id: "c1", name: "file_write", args: { path: "a.txt", content: "x" } }] },
+        { text: "done" },
+      ],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect(approvals.requests).toHaveLength(1);
+    expect(writer.calls).toHaveLength(0);
+  });
+
   it("bypassPermission skips the ordinary prompt but never widens the hard mode gate", async () => {
     const writer = tool("file_write");
     const approvals = recordingApprovals("allow");
@@ -878,6 +1005,7 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
       tools: [writer],
       hooks,
       approvals,
+      unattended: true,
       statePatch: { mode: "safe" },
       script: [
         { text: "", toolCalls: [{ id: "c1", name: "file_write", args: { path: "/etc/x", content: "x" } }] },
