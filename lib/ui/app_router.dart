@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../core/cloud/cloud_session_store.dart';
+import '../core/firebase_service.dart';
 import '../core/share_link_resolver.dart'
     show ShareLinkResolver, ShareViewerRoute;
 import '../core/state.dart';
@@ -62,6 +63,73 @@ class AppRouter {
 
   static final _sessionId = RegExp(r'^[A-Za-z0-9_\-:.]{1,128}$');
 
+  /// Whether app destinations may open: a signed-in, admitted account with
+  /// its session namespace bound. External opens ([open]) are refused (and
+  /// queued) otherwise, so a notification tap or link can never put
+  /// Settings or the browser above the login screen (SH-007), and a cold
+  /// start link waits for hydration instead of "Chat not found" (SH-019).
+  static bool Function() isAccountReady = () =>
+      FirebaseService.I.isAvailable && FirebaseService.I.accountReady;
+
+  static AppRoute? _pending;
+
+  /// The external route waiting for the account (tests/diagnostics).
+  static AppRoute? get pendingRoute => _pending;
+
+  @visibleForTesting
+  static void resetForTest() {
+    _pending = null;
+    isAccountReady = () =>
+        FirebaseService.I.isAvailable && FirebaseService.I.accountReady;
+  }
+
+  /// Entry point for EXTERNAL sources (notification taps, App Links, the
+  /// native channel). Share links open in any state (they are public
+  /// read-only views). Anything else opens only when [isAccountReady];
+  /// otherwise the latest one is parked and [drainPending] opens it once the
+  /// account is ready. Returns false only when the navigator is not attached.
+  static bool open(
+    AppRoute route, {
+    GlobalKey<NavigatorState>? navigatorKey,
+    GlobalKey<ScaffoldMessengerState>? messengerKey,
+  }) {
+    if (route is! SharedChatRoute && !isAccountReady()) {
+      _pending = route;
+      return true;
+    }
+    return go(route, navigatorKey: navigatorKey, messengerKey: messengerKey);
+  }
+
+  /// Opens the parked external route, if any (called when an account
+  /// becomes ready and its sessions have been reconciled). The route is
+  /// dropped when the account signed out again meanwhile.
+  static bool drainPending({
+    GlobalKey<NavigatorState>? navigatorKey,
+    GlobalKey<ScaffoldMessengerState>? messengerKey,
+  }) {
+    final route = _pending;
+    if (route == null || !isAccountReady()) return false;
+    final opened =
+        go(route, navigatorKey: navigatorKey, messengerKey: messengerKey);
+    if (opened) _pending = null;
+    return opened;
+  }
+
+  /// Signed out: a parked route belongs to nobody now.
+  static void clearPending() => _pending = null;
+
+  /// The AppState row id for [id], which may be a SERVER id (push payloads
+  /// and links carry server UUIDs; chats created on this device keep their
+  /// local id — FE-011).
+  static String _localId(String id) {
+    if (AppState.I.sessionById(id) != null) return id;
+    try {
+      return CloudSessionStore.I.resolveLocalSessionId(id);
+    } catch (_) {
+      return id;
+    }
+  }
+
   /// Parse a path (`/c/abc`) or an `https://ovidsi.com/...` link. Share
   /// links are delegated to [ShareLinkResolver]. Returns null for anything
   /// that is not an app destination.
@@ -116,13 +184,13 @@ class AppRouter {
   }) {
     final navigator = (navigatorKey ?? appNavigatorKey).currentState;
     if (navigator == null) return false;
-    void notFound() {
+    void notFound([String what = 'Chat']) {
       final messenger =
           (messengerKey ?? appScaffoldMessengerKey).currentState ??
           ScaffoldMessenger.maybeOf(navigator.context);
       messenger?.showSnackBar(
-        const SnackBar(
-          content: Text('Chat not found — it may have been deleted.'),
+        SnackBar(
+          content: Text('$what not found — it may have been deleted.'),
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -132,7 +200,8 @@ class AppRouter {
       case HomeRoute():
         navigator.popUntil((r) => r.isFirst);
         return true;
-      case ChatRoute(:final sessionId):
+      case ChatRoute(sessionId: final rawId):
+        final sessionId = _localId(rawId);
         if (AppState.I.sessionById(sessionId) == null) {
           // P8 Task 10: `/c/<id>` accepts SERVER ids. A server row not yet
           // reconciled into AppState (a warm-app notification tap) is
@@ -153,19 +222,24 @@ class AppRouter {
         navigator.popUntil((r) => r.isFirst);
         AppState.I.selectSession(sessionId);
         return true;
-      case ScheduleRoute(:final sessionId):
+      case ScheduleRoute(sessionId: final rawId):
+        final sessionId = _localId(rawId);
         if (AppState.I.sessionById(sessionId) == null) {
-          notFound();
-          return false;
+          // A schedule's server session that has not synced yet: same
+          // bounded reconcile as chats, then the schedule opens (FE-011).
+          unawaited(
+            _openCloudChatWhenReconciled(
+              navigator,
+              rawId,
+              notFound: () => notFound('Schedule'),
+              then: (id) => _pushSchedule(navigator, id),
+            ),
+          );
+          return true;
         }
         navigator.popUntil((r) => r.isFirst);
         AppState.I.selectSession(sessionId);
-        navigator.push(
-          MaterialPageRoute(
-            builder: (_) => ScheduleScreen(sessionId: sessionId),
-            settings: RouteSettings(name: '/schedule/$sessionId'),
-          ),
-        );
+        _pushSchedule(navigator, sessionId);
         return true;
       case SharedChatRoute() || SettingsRoute() || BrowserRoute():
         final page = _pageFor(route)!;
@@ -186,8 +260,9 @@ class AppRouter {
   /// handlers); on failure the caller-supplied [notFound] feedback is shown.
   static Future<void> _openCloudChatWhenReconciled(
     NavigatorState navigator,
-    String sessionId, {
+    String rawId, {
     required void Function() notFound,
+    void Function(String localId)? then,
   }) async {
     try {
       await CloudSessionStore.I.ready.timeout(_reconcileTimeout);
@@ -197,12 +272,23 @@ class AppRouter {
       // lookup so the user still gets an answer.
     }
     if (!navigator.mounted) return;
+    final sessionId = _localId(rawId);
     if (AppState.I.sessionById(sessionId) == null) {
       notFound();
       return;
     }
     navigator.popUntil((r) => r.isFirst);
     AppState.I.selectSession(sessionId);
+    then?.call(sessionId);
+  }
+
+  static void _pushSchedule(NavigatorState navigator, String sessionId) {
+    navigator.push(
+      MaterialPageRoute(
+        builder: (_) => ScheduleScreen(sessionId: sessionId),
+        settings: RouteSettings(name: '/schedule/$sessionId'),
+      ),
+    );
   }
 
   /// Notification tap → that chat, visible.
