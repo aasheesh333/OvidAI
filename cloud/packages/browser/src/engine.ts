@@ -99,6 +99,10 @@ export interface BrowserEngine {
   /** Builds a BrowserStateDto from the registry + screencast status → bridge.publishState. */
   publishState(sessionId: string): void;
   screencastCount(): number;
+  /** Attached viewers of a browser key (gateway viewer_join minus leaves/sweeps). */
+  viewerCount(sessionId: string): number;
+  /** True while the engine listens on the key's ctl/input channels. */
+  isWatching(sessionId: string): boolean;
   /** releaseSession(all live, flushing state) → bridge.close → research.close → pool.close; idempotent. */
   close(): Promise<void>;
 }
@@ -146,6 +150,9 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     now,
     uidDrop,
     onIdleEvict: (sessionId: string, context: BrowserContext) => onPoolIdleEvict(sessionId, context),
+    // Wave 5 R3: a browser someone is watching is never idle-evicted; once
+    // the last viewer leaves it idles headless until the normal lease ends.
+    isPinned: (sessionId: string) => bridge.viewerCount(sessionId) > 0,
   });
 
   const bridge = createRedisBrowserBridge({
@@ -155,7 +162,8 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     handlers: {
       onViewersChange: (sessionId: string, viewers: number) => onViewersChange(sessionId, viewers),
       onInput: (sessionId: string, event: BrowserInputEvent) => onInput(sessionId, event),
-      onTakeover: (sessionId: string, enabled: boolean) => onTakeover(sessionId, enabled),
+      onTakeover: (sessionId: string, enabled: boolean, viewerId?: string) =>
+        onTakeover(sessionId, enabled, viewerId),
     },
   });
 
@@ -259,6 +267,9 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       }
       casts.set(sessionId, { handle, page, stepIndex: 0 });
       publishState(sessionId);
+      // Wave 5: a static page emits no damage frame after start — capture one
+      // so the viewer leaves its loading state at once.
+      void handle.refresh().catch((err: unknown) => log(`initial frame failed for session ${sessionId}`, err));
     } finally {
       starting.delete(sessionId);
     }
@@ -334,6 +345,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       url: null,
       title: null,
       takeover: false,
+      takeoverViewerId: null,
       screencast: false,
       frameFormat: currentFormat(),
       viewport: { width: cfg.screencast.width, height: cfg.screencast.height },
@@ -353,6 +365,34 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     }
   }
 
+  /**
+   * Wave 5: the worker drives the engine through TOOLS only (never
+   * openSession), so the first publish of a live session is where the engine
+   * starts listening for viewers. Without this a viewer's viewer_join was
+   * never seen on the production path and no frame was ever cast. After the
+   * subscribe lands the state is republished: an attached gateway re-sends
+   * its join on a live, non-casting state (browserChannel.ts), which starts
+   * the cast for a viewer who opened the Browser screen BEFORE the agent
+   * opened its first page.
+   */
+  const watchStarting = new Set<string>();
+  function ensureWatched(sessionId: string): void {
+    if (closePromise !== null || bridge.isWatching(sessionId) || watchStarting.has(sessionId)) return;
+    watchStarting.add(sessionId);
+    void bridge
+      .watch(sessionId)
+      .then(
+        () => {
+          if (registry.get(sessionId) !== null) publishState(sessionId);
+          // Released/evicted while subscribing: never leave a watch behind.
+          else return bridge.unwatch(sessionId);
+          return undefined;
+        },
+        (err: unknown) => log(`browser watch failed for ${sessionId}`, err),
+      )
+      .finally(() => watchStarting.delete(sessionId));
+  }
+
   function publishState(sessionId: string): void {
     const session = registry.get(sessionId);
     if (session === null) {
@@ -360,6 +400,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       bridge.publishState(sessionId, deadState(sessionId));
       return;
     }
+    ensureWatched(sessionId);
     const page = session.tabs[session.activeIndex] ?? session.handle.page;
     const viewport = page.viewportSize() ?? { width: cfg.screencast.width, height: cfg.screencast.height };
     bridge.publishState(sessionId, {
@@ -368,6 +409,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       url: page.url(),
       title: titleCache.get(sessionId) ?? null,
       takeover: session.takeover,
+      takeoverViewerId: session.takeover ? session.takeoverViewerId : null,
       screencast: casts.has(sessionId),
       frameFormat: currentFormat(),
       viewport,
@@ -381,7 +423,13 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   // Bridge handlers
   // -------------------------------------------------------------------------
 
+  /** Last seen viewer count per key — tells a join (increase) from a leave. */
+  const viewerCounts = new Map<string, number>();
+
   function onViewersChange(sessionId: string, viewers: number): void {
+    const previous = viewerCounts.get(sessionId) ?? 0;
+    if (viewers === 0) viewerCounts.delete(sessionId);
+    else viewerCounts.set(sessionId, viewers);
     if (viewers === 0) {
       // Takeover is void without a viewer: its owner is gone, and a flag
       // left set would brick every browser_* tool until idle eviction
@@ -394,8 +442,33 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       void stopScreencast(sessionId);
       return;
     }
+    // FE-026: takeover belongs to ONE viewer. When that viewer is gone
+    // (leave or stale sweep) while others still watch, release it — the
+    // remaining viewers must not inherit someone else's control.
+    const session = registry.get(sessionId);
+    if (
+      session !== null &&
+      session.takeover &&
+      session.takeoverViewerId !== null &&
+      !bridge.hasViewer(sessionId, session.takeoverViewerId)
+    ) {
+      registry.setTakeover(sessionId, false);
+      publishState(sessionId);
+    }
     if (viewers > cfg.maxActiveScreencasts) {
       void stepDown(sessionId);
+      return;
+    }
+    const cast = casts.get(sessionId);
+    if (cast !== undefined && viewers > previous) {
+      // A viewer joined an already-running cast: it has seen neither the
+      // state nor a frame yet. Republish the state and restart the cast so
+      // chromium emits a fresh frame even on a static page.
+      publishState(sessionId);
+      void cast.handle.refresh().catch(async (err: unknown) => {
+        log(`screencast refresh failed for session ${sessionId} — stopping`, err);
+        await stopScreencast(sessionId);
+      });
       return;
     }
     if (casts.has(sessionId) || starting.has(sessionId)) return;
@@ -467,8 +540,8 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     })();
   }
 
-  function onTakeover(sessionId: string, enabled: boolean): void {
-    registry.setTakeover(sessionId, enabled);
+  function onTakeover(sessionId: string, enabled: boolean, viewerId?: string): void {
+    registry.setTakeover(sessionId, enabled, viewerId ?? null);
     publishState(sessionId);
   }
 
@@ -572,6 +645,8 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     releaseSession,
     publishState,
     screencastCount: () => casts.size,
+    viewerCount: (sessionId: string) => bridge.viewerCount(sessionId),
+    isWatching: (sessionId: string) => bridge.isWatching(sessionId),
     close,
   };
 }

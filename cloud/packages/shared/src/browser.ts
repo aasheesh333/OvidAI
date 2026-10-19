@@ -60,6 +60,13 @@ export interface BrowserStateDto {
   frameFormat: BrowserFrameFormat;
   /** Page CSS-pixel viewport the client scales its canvas to. */
   viewport: { width: number; height: number };
+  /**
+   * Wave 5 FE-026: the gateway viewer id that holds takeover (null/absent
+   * when nobody does). A client compares it with the `viewerId` on its own
+   * `browser_state` op to tell "you are controlling" from "controlled on
+   * another device". Optional so older workers stay schema-valid.
+   */
+  takeoverViewerId?: string | null;
 }
 
 /** A viewer interaction, published on the input channel in page CSS pixels. */
@@ -75,7 +82,27 @@ export type BrowserInputEvent =
 export type BrowserCtlMsg =
   | { type: "viewer_join"; viewerId: string }
   | { type: "viewer_leave"; viewerId: string }
-  | { type: "takeover"; enabled: boolean };
+  | { type: "takeover"; enabled: boolean; viewerId?: string };
+
+// -- per-user browser (Wave 5, owner rule R2) ---------------------------------
+
+/**
+ * The cloud browser is ONE per user, shared across all of that user's chat
+ * sessions. Every redis channel, pool slot and registry entry is keyed by
+ * this value (passed where the older code says `sessionId`), so a viewer
+ * opening the Browser screen from ANY chat attaches to whatever page the
+ * agent has open for that user.
+ */
+export function userBrowserKey(userId: string): string {
+  return `user-${userId}`;
+}
+
+/**
+ * `browser_attach { sessionId: USER_BROWSER_ALIAS }` attaches to the
+ * caller's own browser without naming a chat (an unsent chat has no server
+ * id yet). Any owned session id attaches to the very same browser.
+ */
+export const USER_BROWSER_ALIAS = "user";
 
 // -- channel helpers ----------------------------------------------------------
 
@@ -119,6 +146,7 @@ export const browserStateDtoSchema: z.ZodType<BrowserStateDto> = z.object({
   screencast: z.boolean(),
   frameFormat: z.enum(["jpeg", "webp"]),
   viewport: z.object({ width: viewportDim, height: viewportDim }),
+  takeoverViewerId: z.string().min(1).nullable().optional(),
 });
 
 export const browserInputEventSchema: z.ZodType<BrowserInputEvent> = z.discriminatedUnion("type", [
@@ -172,5 +200,6 @@ export const browserCtlMsgSchema: z.ZodType<BrowserCtlMsg> = z.discriminatedUnio
   z.object({
     type: z.literal("takeover"),
     enabled: z.boolean(),
+    viewerId: id.optional(),
   }),
 ]);

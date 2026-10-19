@@ -1,5 +1,6 @@
 import type { Tool } from "@ovid/agent-core";
 import type { BrowserToolDef } from "@ovid/browser";
+import { userBrowserKey } from "@ovid/shared";
 
 /**
  * Adapts the P6 browser tool suite onto the canonical `Tool` seam (ruling R2:
@@ -28,7 +29,48 @@ import type { BrowserToolDef } from "@ovid/browser";
 /** Per-action ceiling. Navigation and screenshot capture are the slow ones. */
 export const BROWSER_TOOL_TIMEOUT_MS = 60_000;
 
-export function adaptBrowserTools(defs: readonly BrowserToolDef[]): Tool[] {
+/**
+ * Wave 5 (owner rule R2): ONE cloud browser per user, shared by all of that
+ * user's sessions. A run ending must therefore not close a browser another
+ * run of the same user is still driving, nor one the user is watching live.
+ * The leases track which runs used the browser; the LAST one to end releases
+ * it (flushing storageState), unless a viewer is attached — then the pool's
+ * idle lease reaps it once they leave (the browser stays headless until).
+ */
+export interface UserBrowserLeases {
+  /** Record that `runId` drove the user's browser. */
+  note(userId: string, runId: string): void;
+  /** The run ended: release the user's browser if it was the last user of it. */
+  releaseRun(userId: string, runId: string): Promise<void>;
+}
+
+export function createUserBrowserLeases(engine: {
+  releaseSession(key: string): Promise<void>;
+  viewerCount(key: string): number;
+}): UserBrowserLeases {
+  const runsByUser = new Map<string, Set<string>>();
+  return {
+    note(userId, runId) {
+      let runs = runsByUser.get(userId);
+      if (runs === undefined) {
+        runs = new Set();
+        runsByUser.set(userId, runs);
+      }
+      runs.add(runId);
+    },
+    async releaseRun(userId, runId) {
+      const runs = runsByUser.get(userId);
+      if (runs === undefined || !runs.delete(runId)) return; // never browsed
+      if (runs.size > 0) return; // another run of this user still drives it
+      runsByUser.delete(userId);
+      const key = userBrowserKey(userId);
+      if (engine.viewerCount(key) > 0) return; // watched live: idle lease reaps later
+      await engine.releaseSession(key);
+    },
+  };
+}
+
+export function adaptBrowserTools(defs: readonly BrowserToolDef[], leases?: UserBrowserLeases): Tool[] {
   return defs.map((def) => ({
     spec: {
       name: def.name,
@@ -37,9 +79,13 @@ export function adaptBrowserTools(defs: readonly BrowserToolDef[]): Tool[] {
     },
     timeoutMs: BROWSER_TOOL_TIMEOUT_MS,
     async execute(args, ctx) {
+      leases?.note(ctx.userId, ctx.runId);
       const result = await def.execute(args, {
-        sessionId: ctx.sessionId,
+        // The browser key is the USER (R2); artifacts still land in the
+        // run's own session workspace.
+        sessionId: userBrowserKey(ctx.userId),
         userId: ctx.userId,
+        workspaceSessionId: ctx.sessionId,
       });
       return {
         content: result.content,

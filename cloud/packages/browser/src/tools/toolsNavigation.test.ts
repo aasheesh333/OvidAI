@@ -244,6 +244,21 @@ describe.skipIf(!chromiumExecutableExists())("browser tools I", () => {
     expect(bytes[1]).toBe(0xd8);
   });
 
+  it("per-user browser: artifacts land in the CHAT session's workspace (workspaceSessionId), not the browser key's", async () => {
+    const seen: Array<[string, string]> = [];
+    deps.workspaceDir = async (userId: string, sessionId: string) => {
+      seen.push([userId, sessionId]);
+      return wsRoot;
+    };
+    tools = new Map(createBrowserTools(deps).map((t) => [t.name, t]));
+    const ctx = { sessionId: "user-u1", userId: "u1", workspaceSessionId: "chat-42" };
+    await tool("browser_open").execute({ url: server.url("/click") }, ctx);
+    const result = await tool("browser_screenshot").execute({}, ctx);
+    expect(result.artifacts).toHaveLength(1);
+    expect(seen).toEqual([["u1", "chat-42"]]);
+    expect(registry.get("user-u1")).not.toBeNull();
+  });
+
   it("browser_resize clamps and applies the viewport", async () => {
     await exec("browser_open", { url: server.url("/") });
     const result = await exec("browser_resize", { width: 10_000, height: 10 });

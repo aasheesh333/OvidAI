@@ -8,6 +8,8 @@ import {
   browserInputEventSchema,
   browserStateChannel,
   browserStateDtoSchema,
+  USER_BROWSER_ALIAS,
+  userBrowserKey,
 } from "./browser.js";
 
 const validState = {
@@ -117,5 +119,34 @@ describe("BROWSER_FRAME_FORMAT", () => {
   it("pins the redis 1-byte format prefix values", () => {
     expect(BROWSER_FRAME_FORMAT.jpeg).toBe(1);
     expect(BROWSER_FRAME_FORMAT.webp).toBe(2);
+  });
+});
+
+describe("per-user browser (Wave 5 R2)", () => {
+  it("userBrowserKey keys the ONE browser of a user, never a session", () => {
+    expect(userBrowserKey("u1")).toBe("user-u1");
+    expect(browserFramesChannel(userBrowserKey("u1"))).toBe("browser:user-u1:frames");
+  });
+
+  it("the attach alias is a fixed, non-uuid literal", () => {
+    expect(USER_BROWSER_ALIAS).toBe("user");
+  });
+
+  it("state DTO accepts takeoverViewerId (string or null) and stays valid without it", () => {
+    expect(browserStateDtoSchema.parse({ ...validState, takeoverViewerId: "v1" }).takeoverViewerId).toBe("v1");
+    expect(browserStateDtoSchema.parse({ ...validState, takeoverViewerId: null }).takeoverViewerId).toBe(null);
+    expect(browserStateDtoSchema.parse(validState).takeoverViewerId).toBeUndefined();
+  });
+
+  it("takeover ctl carries the requesting viewer", () => {
+    expect(browserCtlMsgSchema.parse({ type: "takeover", enabled: true, viewerId: "v1" })).toEqual({
+      type: "takeover",
+      enabled: true,
+      viewerId: "v1",
+    });
+    expect(browserCtlMsgSchema.parse({ type: "takeover", enabled: false })).toEqual({
+      type: "takeover",
+      enabled: false,
+    });
   });
 });

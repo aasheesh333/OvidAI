@@ -46,6 +46,14 @@ export interface BrowserChannelDeps {
 /** Re-publish viewer_join while attached (the worker's sweep drops viewers silent for ~3× this). */
 export const BROWSER_VIEWER_HEARTBEAT_MS = 30_000;
 
+/**
+ * Wave 5: a live, NON-casting state means the worker has a page but has not
+ * counted this viewer (its join predates the worker's watch — the agent
+ * opened its first page after the Browser screen did). The attach then
+ * re-announces itself at most this often.
+ */
+export const BROWSER_REJOIN_MIN_INTERVAL_MS = 2_000;
+
 /** socket.bufferedAmount above this ⇒ DROP the frame (slow-client guard, Review Focus #3). */
 export const BROWSER_FRAME_HIGH_WATER = 4 * 1024 * 1024;
 
@@ -58,8 +66,14 @@ export interface BrowserAttachHandlers {
 
 /** One attached viewer; created by createBrowserAttach, owned by ws.ts. */
 export interface BrowserAttach {
+  /** The BROWSER key (Wave 5: `userBrowserKey(uid)`) — channel namespace. */
   readonly sessionId: string;
   readonly viewerId: string;
+  /**
+   * FE-026: may THIS viewer inject input? False only while the latest state
+   * names ANOTHER viewer as the takeover holder.
+   */
+  mayInput(): boolean;
   /** Fire-and-forget publish on the session's ctl channel. */
   publishCtl(msg: BrowserCtlMsg): void;
   /** Fire-and-forget publish on the session's input channel. */
@@ -99,6 +113,9 @@ export function createBrowserAttach(opts: {
   const stateChannel = browserStateChannel(sessionId);
   const framesChannel = browserFramesChannel(sessionId);
   const join = JSON.stringify({ type: "viewer_join", viewerId } satisfies BrowserCtlMsg);
+  let latestState: BrowserStateDto | null = null;
+  let lastRejoinAt = 0;
+  let subscribed = false;
 
   function publish(channel: string, payload: string): void {
     if (detached) return;
@@ -125,6 +142,16 @@ export function createBrowserAttach(opts: {
         log(`ignoring schema-invalid state payload on ${ch}`);
         return;
       }
+      latestState = check.data;
+      if (
+        subscribed &&
+        check.data.live &&
+        !check.data.screencast &&
+        Date.now() - lastRejoinAt >= BROWSER_REJOIN_MIN_INTERVAL_MS
+      ) {
+        lastRejoinAt = Date.now();
+        publish(ctlChannel, join);
+      }
       handlers.onState(check.data);
       return;
     }
@@ -149,6 +176,7 @@ export function createBrowserAttach(opts: {
 
     // Initial join AFTER the subscribe: the worker starts screencasting on
     // it, and the subscriber is already listening by then.
+    subscribed = true;
     publish(ctlChannel, join);
 
     // Heartbeat: re-publish the SAME viewerId so the worker's staleness sweep
@@ -159,6 +187,10 @@ export function createBrowserAttach(opts: {
     const attach: BrowserAttach = {
       sessionId,
       viewerId,
+      mayInput: () => {
+        const holder = latestState?.takeoverViewerId ?? null;
+        return holder === null || holder === viewerId;
+      },
       publishCtl: (msg) => publish(ctlChannel, JSON.stringify(msg)),
       publishInput: (event) => publish(browserInputChannel(sessionId), JSON.stringify(event)),
       async detach(): Promise<void> {

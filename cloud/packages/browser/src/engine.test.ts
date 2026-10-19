@@ -204,7 +204,7 @@ async function mkEngine(cfgOverrides: Partial<BrowserEngineConfig> = {}): Promis
     persistence,
     workspaceDir: async () => wsRoot,
     now: () => clock.t,
-    log: () => {},
+    log: (m: string, e?: unknown) => { if (process.env.ENGINE_DEBUG) console.log("[engine]", m, e ?? ""); },
   });
   return { engine, conns, flush, restore, persistence, clock, wsRoot };
 }
@@ -534,6 +534,102 @@ describe.skipIf(!GATED)("BrowserEngine facade (real redis + chromium, harness pl
     await expect(rig.engine.close()).resolves.toBeUndefined();
     expect(rig.flush).toHaveBeenCalledTimes(1);
   });
+
+  // -------------------------------------------------------------------------
+  // Wave 5 (R2/R3, FE-026) — the live view attaches to the agent's browser
+  // -------------------------------------------------------------------------
+
+  it("tools-only path (the worker never calls openSession): a viewer joining after browser_open gets frames", async () => {
+    // Production regression: the worker drives the engine through tools only.
+    // Before Wave 5 nothing watched the ctl channel on that path, so a
+    // viewer's join was never seen and no frame was ever cast.
+    const key = `user-${randomUUID()}`;
+    const stateTap = await openStateTap(key);
+    const frameTap = await openFrameTap(key);
+    rig = await mkEngine();
+
+    await tool(rig.engine, "browser_open").execute(
+      { url: server.url("/animated") },
+      { sessionId: key, userId: "u1" },
+    );
+    await stateTap.waitForState((s) => s.live && s.url === server.url("/animated"));
+    const engine = rig.engine;
+    await waitFor("engine watching the browser key", () => engine.isWatching(key));
+
+    await gw.publish(browserCtlChannel(key), joinMsg("v1"));
+    await stateTap.waitForState((s) => s.live && s.screencast, 10_000);
+    await frameTap.next(10_000);
+    expect(engine.viewerCount(key)).toBe(1);
+  });
+
+  it("a second viewer joining a running cast on a STATIC page gets a fresh state and a fresh frame", async () => {
+    const key = `user-${randomUUID()}`;
+    const stateTap = await openStateTap(key);
+    const frameTap = await openFrameTap(key);
+    rig = await mkEngine();
+
+    await tool(rig.engine, "browser_open").execute({ url: server.url("/") }, { sessionId: key, userId: "u1" });
+    const engine = rig.engine;
+    await waitFor("watching", () => engine.isWatching(key));
+    await gw.publish(browserCtlChannel(key), joinMsg("v1"));
+    await stateTap.waitForState((s) => s.screencast, 10_000);
+    await frameTap.next(10_000);
+    await sleep(600); // the static page has settled: no more damage frames
+    const framesBefore = frameTap.received;
+    const statesBefore = stateTap.states.length;
+
+    await gw.publish(browserCtlChannel(key), joinMsg("v2"));
+    await waitFor("a fresh frame for the new viewer", () => frameTap.received > framesBefore, 5000);
+    await waitFor("a fresh state for the new viewer", () => stateTap.states.length > statesBefore, 5000);
+  }, 30_000);
+
+  it("takeover records the controlling viewer; that viewer leaving (another stays) releases it (FE-026)", async () => {
+    const key = `user-${randomUUID()}`;
+    const tap = await openStateTap(key);
+    rig = await mkEngine();
+
+    await tool(rig.engine, "browser_open").execute({ url: server.url("/") }, { sessionId: key, userId: "u1" });
+    const engine = rig.engine;
+    await waitFor("watching", () => engine.isWatching(key));
+    await gw.publish(browserCtlChannel(key), joinMsg("v1"));
+    await gw.publish(browserCtlChannel(key), joinMsg("v2"));
+    await gw.publish(
+      browserCtlChannel(key),
+      JSON.stringify({ type: "takeover", enabled: true, viewerId: "v1" } satisfies BrowserCtlMsg),
+    );
+    const st = await tap.waitForState((s) => s.takeover === true);
+    expect(st.takeoverViewerId).toBe("v1");
+    expect(engine.registry.get(key)?.takeoverViewerId).toBe("v1");
+
+    await gw.publish(browserCtlChannel(key), leaveMsg("v1"));
+    await waitFor("takeover released with its owner", () => engine.registry.get(key)?.takeover === false);
+    await tap.waitForState((s) => s.takeover === false && (s.takeoverViewerId ?? null) === null);
+    expect(engine.viewerCount(key)).toBe(1);
+  }, 30_000);
+
+  it("a watched browser is never idle-evicted; once the last viewer leaves it is (headless until then)", async () => {
+    const key = `user-${randomUUID()}`;
+    const tap = await openStateTap(key);
+    rig = await mkEngine({ idleEvictMs: 200 });
+
+    await tool(rig.engine, "browser_open").execute({ url: server.url("/") }, { sessionId: key, userId: "u1" });
+    const engine = rig.engine;
+    await waitFor("watching", () => engine.isWatching(key));
+    await gw.publish(browserCtlChannel(key), joinMsg("v1"));
+    await waitFor("viewer counted", () => engine.viewerCount(key) === 1);
+
+    rig.clock.t += 1000;
+    expect(await engine.pool.evictIdle()).toEqual([]);
+    expect(engine.registry.get(key)).not.toBeNull();
+
+    await gw.publish(browserCtlChannel(key), leaveMsg("v1"));
+    await waitFor("cast stopped", () => engine.viewerCount(key) === 0 && engine.screencastCount() === 0);
+    expect(engine.registry.get(key)).not.toBeNull(); // headless, still alive
+
+    rig.clock.t += 1000;
+    expect(await engine.pool.evictIdle()).toEqual([key]);
+    await tap.waitForState((s) => s.live === false);
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -556,7 +652,7 @@ describe("BrowserEngine uid-drop boot contract", () => {
         },
       }),
     ).rejects.toThrow("uid drop unavailable");
-  });
+  }, 30_000);
 
   it("cleans up the prepared uid-drop runtime on close()", async () => {
     const cleanup = vi.fn(async () => {});

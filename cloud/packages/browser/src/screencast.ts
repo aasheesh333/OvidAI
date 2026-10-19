@@ -50,6 +50,13 @@ export interface ScreencastHandle {
    * `stop()` afterwards to release the CDP session.
    */
   adjust(step: LadderStep): Promise<void>;
+  /**
+   * Capture one fresh frame (CDP Page.captureScreenshot in the cast's
+   * format) and hand it to onFrame. Screencast is damage-driven: a viewer
+   * attaching to a STATIC page would otherwise wait for the next repaint and
+   * see nothing. No-op on a stopped handle; errors propagate.
+   */
+  refresh(): Promise<void>;
   /** Page.stopScreencast + detach the CDP session; idempotent. */
   stop(): Promise<void>;
 }
@@ -122,23 +129,62 @@ export async function startScreencast(
   let frames = 0;
   let stopped = false;
   let stopPromise: Promise<void> | null = null;
+  let currentStep: LadderStep = { quality: cfg.quality, everyNthFrame: cfg.everyNthFrame };
+
+  // Wave 5 R3 frame-rate cap. A frame that arrives before its slot is HELD
+  // (newest wins) and left UNACKED until the slot, so with maxFramesInFlight
+  // 1 chromium encodes at most ~maxFps frames per second. The held frame is
+  // always delivered at its slot (trailing edge): the viewer never misses the
+  // final state of a page that stopped repainting.
+  const minIntervalMs = cfg.maxFps !== undefined && cfg.maxFps > 0 ? 1000 / cfg.maxFps : 0;
+  let lastForwardAt = Number.NEGATIVE_INFINITY;
+  let held: { data: Buffer; sessionId: number } | null = null;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Never awaited: the listener must not go async, and a dead session must
+  // not produce unhandled rejects.
+  const ack = (sessionId: number): void => {
+    void cdp.send("Page.screencastFrameAck", { sessionId }).catch(() => {});
+  };
+
+  const forward = (data: Buffer, sessionId: number): void => {
+    lastForwardAt = Date.now();
+    frames++;
+    onFrame({ format, data });
+    // Ack AFTER the handoff — chromium holds the next frame (up to
+    // maxFramesInFlight) until this lands.
+    ack(sessionId);
+  };
+
+  const flushHeld = (): void => {
+    flushTimer = null;
+    if (stopped || held === null) return;
+    const next = held;
+    held = null;
+    forward(next.data, next.sessionId);
+  };
 
   const onFrameEvent = (ev: ScreencastFrameEvent): void => {
     if (stopped) return;
-    frames++;
-    onFrame({ format, data: Buffer.from(ev.data, "base64") });
-    // Ack AFTER the handoff — chromium holds the next frame (up to
-    // maxFramesInFlight) until this lands. Never awaited: the listener must
-    // not go async, and a dead session must not produce unhandled rejects.
-    void cdp.send("Page.screencastFrameAck", { sessionId: ev.sessionId }).catch(() => {});
+    const data = Buffer.from(ev.data, "base64");
+    const wait = lastForwardAt + minIntervalMs - Date.now();
+    if (wait <= 0 && held === null) {
+      forward(data, ev.sessionId);
+      return;
+    }
+    // A superseded held frame is acked so chromium's in-flight window stays
+    // open; the newer frame takes the slot.
+    if (held !== null) ack(held.sessionId);
+    held = { data, sessionId: ev.sessionId };
+    if (flushTimer === null) {
+      flushTimer = setTimeout(flushHeld, Math.max(0, wait));
+      flushTimer.unref?.();
+    }
   };
   cdp.on("Page.screencastFrame", onFrameEvent);
 
   try {
-    await cdp.send(
-      "Page.startScreencast",
-      startScreencastParams(format, { quality: cfg.quality, everyNthFrame: cfg.everyNthFrame }, cfg),
-    );
+    await cdp.send("Page.startScreencast", startScreencastParams(format, currentStep, cfg));
   } catch (err) {
     // No dangling CDP sessions on the start-reject path (Review Focus #2) —
     // probeWebpSupport's declared false-path (a start rejected outright on a
@@ -156,6 +202,9 @@ export async function startScreencast(
     if (stopPromise) return stopPromise;
     stopPromise = (async () => {
       stopped = true;
+      if (flushTimer !== null) clearTimeout(flushTimer);
+      flushTimer = null;
+      held = null;
       cdp.off("Page.screencastFrame", onFrameEvent);
       // Both steps are best-effort: the page/target may already be gone
       // (navigation crash, context close) — teardown must never throw.
@@ -173,22 +222,38 @@ export async function startScreencast(
     return stopPromise;
   }
 
+  async function refresh(): Promise<void> {
+    if (stopped) return;
+    const shot = (await cdp.send("Page.captureScreenshot", {
+      format: format as "jpeg" | "png", // see startScreencastParams: runtime accepts webp
+      quality: currentStep.quality,
+    })) as { data: string };
+    if (stopped) return;
+    lastForwardAt = Date.now();
+    frames++;
+    onFrame({ format, data: Buffer.from(shot.data, "base64") });
+  }
+
+  async function adjust(next: LadderStep): Promise<void> {
+    if (stopped) throw new Error("Cannot adjust a stopped screencast.");
+    currentStep = next;
+    await cdp.send("Page.stopScreencast");
+    try {
+      await cdp.send("Page.startScreencast", startScreencastParams(format, next, cfg));
+    } catch (err) {
+      // The old cast is already stopped and the restart failed — no frames
+      // will ever flow, so the handle must not stay live-flagged. The
+      // caller gets the error and can still stop() to release the session.
+      stopped = true;
+      throw err;
+    }
+  }
+
   return {
     format: () => format,
     framesSent: () => frames,
-    async adjust(next: LadderStep): Promise<void> {
-      if (stopped) throw new Error("Cannot adjust a stopped screencast.");
-      await cdp.send("Page.stopScreencast");
-      try {
-        await cdp.send("Page.startScreencast", startScreencastParams(format, next, cfg));
-      } catch (err) {
-        // The old cast is already stopped and the restart failed — no frames
-        // will ever flow, so the handle must not stay live-flagged. The
-        // caller gets the error and can still stop() to release the session.
-        stopped = true;
-        throw err;
-      }
-    },
+    adjust,
+    refresh,
     stop,
   };
 }

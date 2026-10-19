@@ -12,6 +12,8 @@ import {
   browserFramesChannel,
   browserInputChannel,
   browserStateChannel,
+  USER_BROWSER_ALIAS,
+  userBrowserKey,
   wsServerMsg,
   type BrowserStateDto,
   type WsServerMsg,
@@ -328,7 +330,7 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
     it("browser_attach: viewer_join on ctl; nothing until the worker publishes; invalid state dropped; state + binary frame relayed (prefix stripped)", async () => {
       const uid = testUid("ws9a");
       const sid = await createOwnedSession(uid);
-      const ctlTap = await openTap(browserCtlChannel(sid));
+      const ctlTap = await openTap(browserCtlChannel(userBrowserKey(uid)));
 
       const { wsBase } = await makeApp();
       const client = await newClient(wsBase, await tickets.mint(uid));
@@ -345,21 +347,23 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
       expect(client.binary).toEqual([]);
 
       // Schema-invalid state → logged and DROPPED; the connection survives.
-      await redis.publish(browserStateChannel(sid), JSON.stringify({ nope: true }));
+      await redis.publish(browserStateChannel(userBrowserKey(uid)), JSON.stringify({ nope: true }));
       await sleep(200);
       expect(client.messages).toEqual([]);
 
       // Valid state → forwarded verbatim as a browser_state op.
-      await redis.publish(browserStateChannel(sid), JSON.stringify(mkState(sid)));
+      await redis.publish(browserStateChannel(userBrowserKey(uid)), JSON.stringify(mkState(sid)));
       await client.waitFor(
         () => client.messages.some((m) => m.op === "browser_state"),
         "browser_state frame",
       );
-      expect(client.messages).toEqual([{ op: "browser_state", sessionId: sid, state: mkState(sid) }]);
+      expect(client.messages).toEqual([
+        { op: "browser_state", sessionId: sid, state: mkState(sid), viewerId: join.viewerId },
+      ]);
 
       // Binary frame: the redis format-prefix byte is STRIPPED; the client
       // receives the bare image bytes as a BINARY ws message.
-      await redis.publish(browserFramesChannel(sid), framePayload(JPEG));
+      await redis.publish(browserFramesChannel(userBrowserKey(uid)), framePayload(JPEG));
       await client.waitFor(() => client.binary.length === 1, "binary frame");
       expect(client.binary[0]).toEqual(JPEG);
     }, 20_000);
@@ -367,8 +371,8 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
     it("browser_input → exact event JSON on the input channel; browser_takeover → ctl takeover", async () => {
       const uid = testUid("ws9b");
       const sid = await createOwnedSession(uid);
-      const ctlTap = await openTap(browserCtlChannel(sid));
-      const inputTap = await openTap(browserInputChannel(sid));
+      const ctlTap = await openTap(browserCtlChannel(userBrowserKey(uid)));
+      const inputTap = await openTap(browserInputChannel(userBrowserKey(uid)));
 
       const { wsBase } = await makeApp();
       const client = await newClient(wsBase, await tickets.mint(uid));
@@ -381,10 +385,10 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
 
       client.send({ op: "browser_takeover", sessionId: sid, enabled: true });
       const on = parseJson((await ctlTap.next("takeover on")).message);
-      expect(on).toEqual({ type: "takeover", enabled: true });
+      expect(on).toEqual({ type: "takeover", enabled: true, viewerId: expect.any(String) });
       client.send({ op: "browser_takeover", sessionId: sid, enabled: false });
       const off = parseJson((await ctlTap.next("takeover off")).message);
-      expect(off).toEqual({ type: "takeover", enabled: false });
+      expect(off).toEqual({ type: "takeover", enabled: false, viewerId: expect.any(String) });
     }, 20_000);
 
     it("attach to another user's session → forbidden (no join published); the socket still serves a normal subscribe", async () => {
@@ -392,7 +396,7 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
       const uidOther = testUid("ws9c-other");
       const sidOwner = await createOwnedSession(uidOwner);
       const sidOwn = await createOwnedSession(uidOther);
-      const ctlTap = await openTap(browserCtlChannel(sidOwner));
+      const ctlTap = await openTap(browserCtlChannel(userBrowserKey(uidOwner)));
 
       const { wsBase } = await makeApp();
       const client = await newClient(wsBase, await tickets.mint(uidOther));
@@ -448,7 +452,7 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
       const uid = testUid("ws9e");
       const sidA = await createOwnedSession(uid);
       const sidB = await createOwnedSession(uid);
-      const ctlTapA = await openTap(browserCtlChannel(sidA));
+      const ctlTapA = await openTap(browserCtlChannel(userBrowserKey(uid)));
 
       const { wsBase } = await makeApp();
       const client = await newClient(wsBase, await tickets.mint(uid));
@@ -510,7 +514,7 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
     it("re-attach replaces: peer sees leave(v1) then join(v2); frames flow exactly once to the new viewer", async () => {
       const uid = testUid("ws9g");
       const sid = await createOwnedSession(uid);
-      const ctlTap = await openTap(browserCtlChannel(sid));
+      const ctlTap = await openTap(browserCtlChannel(userBrowserKey(uid)));
 
       const { wsBase } = await makeApp();
       const client = await newClient(wsBase, await tickets.mint(uid));
@@ -529,7 +533,7 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
 
       // The replacement viewer's subscriber is live and the old one is gone:
       // exactly ONE copy of the frame reaches the socket.
-      await redis.publish(browserFramesChannel(sid), framePayload(JPEG));
+      await redis.publish(browserFramesChannel(userBrowserKey(uid)), framePayload(JPEG));
       await client.waitFor(() => client.binary.length === 1, "frame after re-attach");
       await sleep(250); // a second copy from a leaked old subscriber would land here
       expect(client.binary).toHaveLength(1);
@@ -539,7 +543,7 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
     it("socket close → viewer_leave published, both attach connections quit, channel count back to baseline", async () => {
       const uid = testUid("ws9h");
       const sid = await createOwnedSession(uid);
-      const ctlTap = await openTap(browserCtlChannel(sid));
+      const ctlTap = await openTap(browserCtlChannel(userBrowserKey(uid)));
 
       const { wsBase, created } = await makeApp();
       const client = await newClient(wsBase, await tickets.mint(uid));
@@ -563,11 +567,11 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
         "both attach connections quit",
       );
       await waitForAsync(
-        async () => (await channelCount(browserStateChannel(sid))) === 0,
+        async () => (await channelCount(browserStateChannel(userBrowserKey(uid)))) === 0,
         "state channel back to baseline",
       );
       await waitForAsync(
-        async () => (await channelCount(browserFramesChannel(sid))) === 0,
+        async () => (await channelCount(browserFramesChannel(userBrowserKey(uid)))) === 0,
         "frames channel back to baseline",
       );
     }, 20_000);
@@ -575,7 +579,7 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
     it("browser_detach → viewer_leave + connections quit; a later socket close publishes NO second leave", async () => {
       const uid = testUid("ws9i");
       const sid = await createOwnedSession(uid);
-      const ctlTap = await openTap(browserCtlChannel(sid));
+      const ctlTap = await openTap(browserCtlChannel(userBrowserKey(uid)));
 
       const { wsBase, created } = await makeApp();
       const client = await newClient(wsBase, await tickets.mint(uid));
@@ -592,7 +596,7 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
       );
 
       // Frames published after the detach never reach the client.
-      await redis.publish(browserFramesChannel(sid), framePayload(JPEG));
+      await redis.publish(browserFramesChannel(userBrowserKey(uid)), framePayload(JPEG));
       await sleep(250);
       expect(client.binary).toEqual([]);
 
@@ -601,6 +605,115 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
       await client.close();
       await sleep(300);
       expect(ctlTap.received).toEqual([]);
+    }, 20_000);
+
+    // -----------------------------------------------------------------------
+    // Wave 5 — one browser per user (R2), live attach (R3), per-viewer
+    // takeover (FE-026)
+    // -----------------------------------------------------------------------
+
+    it("two chats of one user attach to the SAME per-user browser; the 'user' alias needs no chat at all", async () => {
+      const uid = testUid("w5a");
+      const sidA = await createOwnedSession(uid);
+      const sidB = await createOwnedSession(uid);
+      const ctlTap = await openTap(browserCtlChannel(userBrowserKey(uid)));
+
+      const { wsBase } = await makeApp();
+      const a = await newClient(wsBase, await tickets.mint(uid));
+      const b = await newClient(wsBase, await tickets.mint(uid));
+      const c = await newClient(wsBase, await tickets.mint(uid));
+      a.send({ op: "browser_attach", sessionId: sidA });
+      b.send({ op: "browser_attach", sessionId: sidB });
+      c.send({ op: "browser_attach", sessionId: USER_BROWSER_ALIAS });
+      for (const what of ["join a", "join b", "join c"]) {
+        expect(parseJson((await ctlTap.next(what)).message)).toMatchObject({ type: "viewer_join" });
+      }
+
+      // ONE state publish on the user's key reaches every viewer, each with
+      // its OWN echo id and viewer id.
+      const key = userBrowserKey(uid);
+      await redis.publish(browserStateChannel(key), JSON.stringify(mkState(key)));
+      for (const [client, echo] of [[a, sidA], [b, sidB], [c, USER_BROWSER_ALIAS]] as const) {
+        await client.waitFor(() => client.messages.some((m) => m.op === "browser_state"), `state for ${echo}`);
+        expect(client.messages[0]).toEqual({
+          op: "browser_state",
+          sessionId: echo,
+          state: mkState(key),
+          viewerId: expect.any(String),
+        });
+      }
+      await redis.publish(browserFramesChannel(key), framePayload(JPEG));
+      await a.waitFor(() => a.binary.length === 1, "frame a");
+      await c.waitFor(() => c.binary.length === 1, "frame c");
+    }, 20_000);
+
+    it("a live NON-casting state re-announces the viewer (the agent opened its page after the viewer attached), throttled", async () => {
+      const uid = testUid("w5b");
+      const key = userBrowserKey(uid);
+      const ctlTap = await openTap(browserCtlChannel(key));
+
+      const { wsBase } = await makeApp();
+      const client = await newClient(wsBase, await tickets.mint(uid));
+      client.send({ op: "browser_attach", sessionId: USER_BROWSER_ALIAS });
+      const join = parseJson((await ctlTap.next("initial join")).message);
+
+      const idle = { ...mkState(key), screencast: false };
+      await redis.publish(browserStateChannel(key), JSON.stringify(idle));
+      const rejoin = parseJson((await ctlTap.next("re-join on a live idle state")).message);
+      expect(rejoin).toEqual({ type: "viewer_join", viewerId: join.viewerId });
+
+      // A burst of idle states never floods the ctl channel.
+      for (let i = 0; i < 5; i++) await redis.publish(browserStateChannel(key), JSON.stringify(idle));
+      await sleep(300);
+      expect(ctlTap.received).toHaveLength(0);
+
+      // A dead browser (live:false) or a casting one never triggers a re-join.
+      await sleep(2_100);
+      await redis.publish(browserStateChannel(key), JSON.stringify({ ...idle, live: false }));
+      await redis.publish(browserStateChannel(key), JSON.stringify(mkState(key)));
+      await sleep(300);
+      expect(ctlTap.received).toHaveLength(0);
+    }, 20_000);
+
+    it("takeover is per viewer: the controller's id rides the ctl msg; another device's input is refused and never published", async () => {
+      const uid = testUid("w5c");
+      const key = userBrowserKey(uid);
+      const ctlTap = await openTap(browserCtlChannel(key));
+      const inputTap = await openTap(browserInputChannel(key));
+
+      const { wsBase } = await makeApp();
+      const a = await newClient(wsBase, await tickets.mint(uid));
+      const b = await newClient(wsBase, await tickets.mint(uid));
+      a.send({ op: "browser_attach", sessionId: USER_BROWSER_ALIAS });
+      const joinA = parseJson((await ctlTap.next("join a")).message);
+      b.send({ op: "browser_attach", sessionId: USER_BROWSER_ALIAS });
+      await ctlTap.next("join b");
+
+      a.send({ op: "browser_takeover", sessionId: USER_BROWSER_ALIAS, enabled: true });
+      expect(parseJson((await ctlTap.next("takeover by a")).message)).toEqual({
+        type: "takeover",
+        enabled: true,
+        viewerId: joinA.viewerId,
+      });
+      // The worker confirms: A holds takeover.
+      await redis.publish(
+        browserStateChannel(key),
+        JSON.stringify({ ...mkState(key), takeover: true, takeoverViewerId: joinA.viewerId }),
+      );
+      await b.waitFor(() => b.messages.some((m) => m.op === "browser_state"), "b sees the takeover state");
+
+      b.send({ op: "browser_input", sessionId: USER_BROWSER_ALIAS, input: { type: "tap", x: 1, y: 2 } });
+      await b.waitFor(() => b.messages.some((m) => m.op === "error"), "b refused");
+      expect(b.messages.find((m) => m.op === "error")).toMatchObject({
+        op: "error",
+        code: "not_controller",
+        sessionId: USER_BROWSER_ALIAS,
+      });
+
+      a.send({ op: "browser_input", sessionId: USER_BROWSER_ALIAS, input: { type: "tap", x: 3, y: 4 } });
+      expect(parseJson((await inputTap.next("a's input")).message)).toEqual({ type: "tap", x: 3, y: 4 });
+      await sleep(200);
+      expect(inputTap.received).toHaveLength(0); // b's tap never reached the worker
     }, 20_000);
   },
 );
@@ -743,28 +856,28 @@ describe.skipIf(!TEST_REDIS_URL)(
 
     it("slow client: a frame buffered above the high-water is DROPPED; the connection stays open and later frames flow", async () => {
       const { s, sid, send, created } = await connectStub();
-      const ctlTap = await openTap(browserCtlChannel(sid));
+      const ctlTap = await openTap(browserCtlChannel(userBrowserKey("stub-viewer")));
 
       send({ op: "browser_attach", sessionId: sid });
       await ctlTap.next("join");
 
       // Under the high-water: relayed as a binary message (prefix stripped).
       const small = Buffer.from([0x01, 0x02, 0x03, 0x04]);
-      await redis.publish(browserFramesChannel(sid), framePayload(small));
+      await redis.publish(browserFramesChannel(userBrowserKey("stub-viewer")), framePayload(small));
       await waitFor(() => s.sent.filter((f) => f.kind === "binary").length === 1, "small frame relayed");
       expect(s.sent.filter((f) => f.kind === "binary")[0]).toEqual({ kind: "binary", data: small });
 
       // Above the high-water: DROPPED — never queued behind the stuck client.
       s.state.bufferedAmount = BROWSER_FRAME_HIGH_WATER + 1;
       const big = Buffer.alloc(64 * 1024, 0xab);
-      await redis.publish(browserFramesChannel(sid), framePayload(big));
+      await redis.publish(browserFramesChannel(userBrowserKey("stub-viewer")), framePayload(big));
       await sleep(300);
       expect(s.sent.filter((f) => f.kind === "binary")).toHaveLength(1); // the big frame was dropped
       expect(s.state.readyState).toBe(1); // still OPEN
 
       // Back under the high-water: frames flow again.
       s.state.bufferedAmount = 0;
-      await redis.publish(browserFramesChannel(sid), framePayload(small));
+      await redis.publish(browserFramesChannel(userBrowserKey("stub-viewer")), framePayload(small));
       await waitFor(
         () => s.sent.filter((f) => f.kind === "binary").length === 2,
         "frames flow again after the drain",
@@ -778,7 +891,7 @@ describe.skipIf(!TEST_REDIS_URL)(
 
     it("heartbeat: re-publishes viewer_join with the SAME viewerId at the injected interval; close publishes the leave", async () => {
       const { s, sid, send } = await connectStub({ browserHeartbeatMs: 80 });
-      const ctlTap = await openTap(browserCtlChannel(sid));
+      const ctlTap = await openTap(browserCtlChannel(userBrowserKey("stub-viewer")));
 
       send({ op: "browser_attach", sessionId: sid });
       const join1 = parseJson((await ctlTap.next("initial join")).message);

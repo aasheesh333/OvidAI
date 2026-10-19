@@ -132,6 +132,106 @@ describe("screencast failure paths (unit — stubbed CDP)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Frame-rate cap (Wave 5 R3) — stubbed CDP + fake timers: chromium may emit
+// at 20+ fps on an animated page, but the viewer sees 3–5 fps and chromium is
+// held (unacked) between slots so it never encodes frames nobody will see.
+// ---------------------------------------------------------------------------
+
+describe("screencast frame-rate cap (unit — stubbed CDP)", () => {
+  const cfg: ScreencastConfig = {
+    width: 400,
+    height: 300,
+    quality: 60,
+    everyNthFrame: 2,
+    maxFramesInFlight: 1,
+    maxFps: 4,
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function frameEmitter(cdp: ReturnType<typeof stubCdpPage>["cdp"]): (id: number) => void {
+    const listener = cdp.on.mock.calls.find((c) => c[0] === "Page.screencastFrame")![1] as (ev: {
+      data: string;
+      sessionId: number;
+    }) => void;
+    return (id: number) => listener({ data: Buffer.from([0xff, 0xd8, id]).toString("base64"), sessionId: id });
+  }
+
+  function acked(cdp: ReturnType<typeof stubCdpPage>["cdp"]): number[] {
+    return cdp.send.mock.calls
+      .filter((c) => c[0] === "Page.screencastFrameAck")
+      .map((c) => (c[1] as { sessionId: number }).sessionId);
+  }
+
+  it("a 20 fps source is forwarded at <= 4 fps over 2 s, and the LAST frame always lands (trailing edge)", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const { page, cdp } = stubCdpPage();
+    const forwarded: number[] = [];
+    await startScreencast(page, cfg, (f) => forwarded.push(f.data[2]));
+    const emit = frameEmitter(cdp);
+    for (let i = 1; i <= 40; i++) {
+      emit(i);
+      await vi.advanceTimersByTimeAsync(50);
+    }
+    await vi.advanceTimersByTimeAsync(500);
+    // 2 s at 4 fps ⇒ 8 slots (+1 for the immediate first frame).
+    expect(forwarded.length).toBeGreaterThanOrEqual(6);
+    expect(forwarded.length).toBeLessThanOrEqual(10);
+    expect(forwarded[0]).toBe(1);
+    expect(forwarded[forwarded.length - 1]).toBe(40);
+  });
+
+  it("a held frame stays UNACKED until its slot — chromium is paced, not just the wire", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const { page, cdp } = stubCdpPage();
+    await startScreencast(page, cfg, () => {});
+    const emit = frameEmitter(cdp);
+    emit(1); // forwarded + acked at once
+    await vi.advanceTimersByTimeAsync(0);
+    expect(acked(cdp)).toEqual([1]);
+    emit(2); // too early: held, NOT acked
+    await vi.advanceTimersByTimeAsync(100);
+    expect(acked(cdp)).toEqual([1]);
+    await vi.advanceTimersByTimeAsync(200); // the 250 ms slot passed
+    expect(acked(cdp)).toEqual([1, 2]);
+  });
+
+  it("refresh() captures and forwards one fresh frame in the cast's format (a static page emits no damage frames)", async () => {
+    const { page, cdp } = stubCdpPage();
+    const forwarded: Buffer[] = [];
+    const handle = await startScreencast(page, cfg, (f) => forwarded.push(f.data), { format: "webp" });
+    cdp.send.mockImplementation(async (method: string) =>
+      method === "Page.captureScreenshot" ? { data: Buffer.from([0xff, 0xd8, 0x07]).toString("base64") } : {},
+    );
+    cdp.send.mockClear();
+    await handle.refresh();
+    expect(cdp.send).toHaveBeenCalledWith("Page.captureScreenshot", { format: "webp", quality: 60 });
+    expect(forwarded.map((b) => b[2])).toEqual([7]);
+    expect(handle.framesSent()).toBe(1);
+  });
+
+  it("refresh() on a stopped cast is a no-op", async () => {
+    const { page, cdp } = stubCdpPage();
+    const handle = await startScreencast(page, cfg, () => {});
+    await handle.stop();
+    cdp.send.mockClear();
+    await handle.refresh();
+    expect(cdp.send).not.toHaveBeenCalled();
+  });
+
+  it("no maxFps ⇒ every frame is forwarded (legacy behaviour)", async () => {
+    const { page, cdp } = stubCdpPage();
+    const forwarded: number[] = [];
+    await startScreencast(page, { ...cfg, maxFps: undefined }, (f) => forwarded.push(f.data[2]));
+    const emit = frameEmitter(cdp);
+    for (let i = 1; i <= 5; i++) emit(i);
+    expect(forwarded).toEqual([1, 2, 3, 4, 5]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Chromium-gated leg — real chromium against the fixture server. Screencast
 // is damage-driven, so every frame-producing test navigates to /animated
 // (the fixture that repaints every 100 ms; a static page yields 0 frames by
