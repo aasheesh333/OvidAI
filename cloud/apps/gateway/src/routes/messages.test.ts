@@ -143,6 +143,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       runId: expect.stringMatching(UUIDV7_RE),
       userMessageId: expect.stringMatching(UUIDV7_RE),
       status: "queued",
+      model: "auto",
     });
 
     // Exactly one add, exact name/data/opts.
@@ -741,6 +742,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       runId: firstBody.runId,
       userMessageId: firstBody.userMessageId,
       status: "queued",
+      model: "auto",
     });
 
     // No second message, no second run, no second enqueue.
@@ -819,6 +821,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       runId: run.id,
       userMessageId: seeded.id,
       status: "queued",
+      model: "auto",
     });
 
     // The healing path inserted and enqueued NOTHING of its own.

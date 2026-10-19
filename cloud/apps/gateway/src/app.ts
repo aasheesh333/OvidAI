@@ -30,6 +30,7 @@ import {
 } from "./routes/mcpOauth.js";
 import { registerMcpServerRoutes } from "./routes/mcpServers.js";
 import { registerMessageRoutes } from "./routes/messages.js";
+import { registerPreferenceRoutes } from "./routes/preferences.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
 import { registerReportsRoutes } from "./routes/reports.js";
 import type { ReportsConfig } from "./routes/reports.js";
@@ -166,6 +167,16 @@ export interface GatewayDeps {
    * 503 `unavailable` (bounded), never a hung request.
    */
   mintTimeoutMs?: number;
+  /**
+   * Wave 1a (CH-007): the model catalog a send's `model` is validated against
+   * (LiteLLM model-group names). Production reads the mint's published
+   * `config:model_groups` list from the mint redis. There is no per-plan
+   * model restriction: every plan may use every catalog model (allowances are
+   * price-based — ovid_plans "only price matters"). Absent, null or throwing
+   * = catalog unknown → the id is accepted (documented fail-open; the
+   * LiteLLM key's own model scope still bounds it).
+   */
+  modelCatalog?: () => Promise<readonly string[] | null>;
   /**
    * P10 Task 2 (P1 Task 8 deferral): structured warning sink for caught
    * WS/event-listener errors. Defaults to the Fastify logger when absent.
@@ -316,6 +327,7 @@ export function buildGateway(
 
       registerSessionRoutes(scope, deps);
       registerMessageRoutes(scope, deps);
+      registerPreferenceRoutes(scope, deps);
       registerEventRoutes(scope, deps);
       registerAttachmentRoutes(scope, deps);
       registerRunRoutes(scope, deps);

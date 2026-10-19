@@ -270,6 +270,35 @@ export const sessions = {
     return rows[0] ?? null;
   },
 
+  /**
+   * Wave 1a (R1 @-mentions): the caller's live sessions whose title matches
+   * one of [titles] case-insensitively (trimmed). Ownership-scoped and
+   * deleted-filtered; returns {id, title} for every match (the caller decides
+   * what an ambiguous title means). Bounded: at most 20 titles are looked up.
+   */
+  async findByTitles(
+    db: Db,
+    userId: string,
+    titles: readonly string[],
+  ): Promise<Array<{ id: string; title: string }>> {
+    const wanted = [...new Set(titles.map((t) => t.trim().toLowerCase()).filter((t) => t !== ""))].slice(0, 20);
+    if (wanted.length === 0) return [];
+    const rows = await db
+      .select({ id: sessionsTable.id, title: sessionsTable.title })
+      .from(sessionsTable)
+      .where(
+        and(
+          eq(sessionsTable.userId, userId),
+          isNull(sessionsTable.deletedAt),
+          inArray(sql`lower(btrim(${sessionsTable.title}))`, wanted),
+        ),
+      )
+      .limit(200);
+    return rows
+      .filter((r): r is { id: string; title: string } => r.title !== null)
+      .map((r) => ({ id: r.id.trim(), title: r.title }));
+  },
+
   /** Most recent activity first; keyset cursor over (updatedAt, id). Invalid cursors restart from the beginning. */
   async list(
     db: Db,
