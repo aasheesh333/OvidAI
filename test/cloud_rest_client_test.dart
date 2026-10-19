@@ -584,4 +584,37 @@ void main() {
     expect(recording.flags, [false, true],
         reason: 'the retry must force-refresh the ID token');
   });
+
+  test('a transport failure (DNS, refused, TLS) is a typed (0, unreachable)',
+      () async {
+    final rest = _client(MockClient(
+        (_) async => throw http.ClientException('Failed host lookup')));
+    await expectLater(
+      rest.getJson('/sessions'),
+      _throwsCloudApi(status: 0, code: 'unreachable'),
+    );
+    await expectLater(
+      rest.postJson('/sessions', body: const {}),
+      _throwsCloudApi(status: 0, code: 'unreachable'),
+    );
+  });
+
+  test('an App Check failure never escapes as a raw exception', () async {
+    var sent = false;
+    final rest = _client(
+      MockClient((_) async {
+        sent = true;
+        return http.Response('{}', 200);
+      }),
+      headers: CloudHeaders(
+        idToken: () async => 'tok',
+        appCheck: () async => throw Exception('play integrity missing'),
+      ),
+    );
+    await expectLater(
+      rest.getJson('/sessions'),
+      _throwsCloudApi(status: 403, code: 'app_check_unavailable'),
+    );
+    expect(sent, isFalse);
+  });
 }

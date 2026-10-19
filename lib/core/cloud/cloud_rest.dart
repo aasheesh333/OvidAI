@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import '../cloud_app_check.dart';
 import '../firebase_service.dart';
 import 'cloud_config.dart';
+import 'cloud_issues.dart';
 import 'models.dart';
 
 /// The one error type for every non-2xx gateway answer. `code` comes from the
@@ -35,16 +36,17 @@ class CloudApiException implements Exception {
   }
 }
 
-/// Binds the caller's Firebase identity to the two headers every
-/// authenticated gateway call carries: `Authorization: Bearer <idToken>` and
-/// `X-Firebase-AppCheck: <token>` (the gateway's authHook verifies both).
+/// Binds the caller's Firebase identity to the auth headers every
+/// authenticated gateway call carries: `Authorization: Bearer <idToken>`
+/// (always) and `X-Firebase-AppCheck: <token>` (only when the build opted
+/// into App Check with `OVID_APPCHECK=true`; see [kOvidAppCheck]).
 class CloudHeaders {
   /// Custom header sources. Both closures are optional; [idToken] returning
   /// null means "signed out" and [authorize] throws before any request goes
-  /// out.
+  /// out. A null [appCheck] means "no attestation": the header is omitted.
   CloudHeaders({
     Future<String?> Function()? idToken,
-    Future<String> Function()? appCheck,
+    Future<String?> Function()? appCheck,
   }) : this._(_forceAwareOrNull(idToken), appCheck);
 
   CloudHeaders._(this._idToken, this._appCheck);
@@ -61,22 +63,18 @@ class CloudHeaders {
   /// Force-refresh-capable seam: a plain no-arg closure cannot re-mint a
   /// near-expiry token, so the default singleton binds a force-aware one.
   final Future<String?> Function({bool forceRefresh})? _idToken;
-  final Future<String> Function()? _appCheck;
+  final Future<String?> Function()? _appCheck;
 
   static CloudHeaders? _instance;
 
-  /// The process-wide default: FirebaseService's ID token + CloudAppCheck.
+  /// The process-wide default: FirebaseService's ID token + the shared
+  /// CloudAppCheck provider (null unless `OVID_APPCHECK=true`).
   /// Lazy, so merely importing this file never touches Firebase.
   static CloudHeaders get I => _instance ??= CloudHeaders._(
         ({bool forceRefresh = false}) =>
             FirebaseService.I.getIdToken(forceRefresh: forceRefresh),
-        _defaultAppCheck.getToken,
+        CloudAppCheck.shared.provider,
       );
-
-  static final CloudAppCheck _defaultAppCheck = CloudAppCheck(
-    initializeFirebase: () => FirebaseService.I.initialize(),
-    activatedByFirebase: () => FirebaseService.I.accountService.enabled,
-  );
 
   @visibleForTesting
   static CloudHeaders forTest({
@@ -88,11 +86,19 @@ class CloudHeaders {
         appCheck: () async => appCheck,
       );
 
-  /// The two auth headers. [forceRefresh] re-mints the ID token first (the
-  /// 401-retry path). Throws [CloudApiException] `(401, unauthenticated)`
-  /// when signed out — no request is sent.
+  /// The auth headers. [forceRefresh] re-mints the ID token first (the
+  /// 401-retry path). Never throws anything but [CloudApiException], and in
+  /// every failure case no request is sent:
+  /// - signed out / ID token unavailable: `(401, unauthenticated)`
+  /// - App Check enabled but attestation failed:
+  ///   `(403, app_check_unavailable)`
   Future<Map<String, String>> authorize({bool forceRefresh = false}) async {
-    final token = await _idToken?.call(forceRefresh: forceRefresh);
+    String? token;
+    try {
+      token = await _idToken?.call(forceRefresh: forceRefresh);
+    } catch (_) {
+      token = null;
+    }
     if (token == null || token.trim().isEmpty) {
       throw CloudApiException(
         status: 401,
@@ -100,10 +106,24 @@ class CloudHeaders {
         message: 'Sign in to use Ovid Cloud.',
       );
     }
-    final appCheckToken = await _appCheck?.call();
+    String? appCheckToken;
+    final appCheck = _appCheck;
+    if (appCheck != null) {
+      try {
+        appCheckToken = await appCheck();
+      } catch (_) {
+        throw CloudApiException(
+          status: 403,
+          code: 'app_check_unavailable',
+          message: 'Ovid could not verify this copy of the app. '
+              'Restart the app and retry.',
+        );
+      }
+    }
     return <String, String>{
       'Authorization': 'Bearer $token',
-      'X-Firebase-AppCheck': appCheckToken ?? '',
+      if (appCheckToken != null && appCheckToken.trim().isNotEmpty)
+        'X-Firebase-AppCheck': appCheckToken,
     };
   }
 }
@@ -123,9 +143,15 @@ class CloudRestClient {
     http.Client? httpClient,
     CloudHeaders? headers,
     String? restBase,
+    CloudIssues? issues,
   })  : _httpClient = httpClient ?? http.Client(),
         _headers = headers ?? CloudHeaders.I,
+        _issues = issues ?? CloudIssues.I,
         _restBase = _stripTrailingSlash(restBase ?? CloudConfig.restBase);
+
+  /// Where account-level failures (signed out, quota, attestation,
+  /// unreachable) are published for the shell banner.
+  final CloudIssues _issues;
 
   /// The ceiling on any single JSON round-trip. 30s is far above a healthy
   /// gateway answer (sub-second) yet short enough that a jammed link frees
@@ -194,17 +220,34 @@ class CloudRestClient {
   /// retries exactly once — a stale cached token self-heals, a real
   /// unauthenticated failure still surfaces. The per-request [timeout]
   /// ceiling applies to EACH attempt, not to the pair.
+  ///
+  /// Every outcome is published to [CloudIssues]: a typed failure (auth,
+  /// attestation, transport, or a non-2xx answer) via `reportFailure`, a
+  /// 2xx via `reportSuccess`. Only [CloudApiException] ever escapes.
   Future<http.Response> _authed(
     String method,
     Uri uri,
     Object? body, {
     Duration? timeout,
   }) async {
-    final first = await _raw(method, uri, await _headers.authorize(),
-        jsonBody: body, timeout: timeout);
-    if (first.statusCode != 401) return first;
-    return _raw(method, uri, await _headers.authorize(forceRefresh: true),
-        jsonBody: body, timeout: timeout);
+    final http.Response response;
+    try {
+      final first = await _raw(method, uri, await _headers.authorize(),
+          jsonBody: body, timeout: timeout);
+      response = first.statusCode != 401
+          ? first
+          : await _raw(method, uri, await _headers.authorize(forceRefresh: true),
+              jsonBody: body, timeout: timeout);
+    } on CloudApiException catch (e) {
+      _issues.reportFailure(e);
+      rethrow;
+    }
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      _issues.reportSuccess(billable: method == 'POST');
+    } else {
+      _issues.reportFailure(_toError(response));
+    }
+    return response;
   }
 
   Future<http.Response> _raw(
@@ -241,6 +284,18 @@ class CloudRestClient {
         status: 0,
         code: 'timeout',
         message: 'Ovid Cloud did not answer within $waited.',
+      );
+    } on CloudApiException {
+      rethrow;
+    } catch (_) {
+      // DNS failure, connection refused/reset, TLS failure (ClientException,
+      // SocketException, HandshakeException...). Same `status: 0` shape as a
+      // timeout so every caller that handles CloudApiException also handles
+      // "cannot reach the server" instead of leaking an unhandled error.
+      throw CloudApiException(
+        status: 0,
+        code: 'unreachable',
+        message: 'Cannot reach Ovid Cloud. Check your connection and retry.',
       );
     }
   }
