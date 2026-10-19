@@ -200,21 +200,22 @@ jobs:
       - name: Build signed release APK + AAB
         if: env.release_signing == 'true'
         run: |
-          # The Play profile (targetSdk 36, Play manifest overlay, sandbox and
-          # Control gated) applies to production_release builds. The APK gets
-          # it too: the artifact gate below expects target 36 for both.
+          # Every build targets SDK 36. The Play profile (Play manifest
+          # overlay, Control gated) applies to production_release builds; the
+          # APK gets it too.
           play_define=""
           if [ "${{ inputs.production_release }}" = "true" ]; then play_define="--dart-define=OVID_PLAY_BUILD=true"; fi
           flutter build apk --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED" $play_define
           flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED" $play_define
 
-      # Manual production_release enforces the API 36 Play floor and the Play
-      # profile (OVID_PLAY_BUILD=true). Both profiles forbid a sandbox
-      # bootstrap payload — the on-device sandbox no longer exists.
+      # Both profiles target API 36 (the sideload target 28 existed only for
+      # the removed on-device sandbox). Manual production_release adds the
+      # Play profile (OVID_PLAY_BUILD=true) and the production signer/16 KB
+      # gates. Both profiles forbid a sandbox bootstrap payload.
       - name: Gate release artifacts
         if: env.release_signing == 'true'
         run: |
-          if [ "${{ inputs.production_release }}" = "true" ]; then mode=production; target=36; profile=play; else mode=release; target=28; profile=sideload; fi
+          if [ "${{ inputs.production_release }}" = "true" ]; then mode=production; target=36; profile=play; else mode=release; target=36; profile=sideload; fi
           status=0
           python3 tool/release_inventory.py build/app/outputs/flutter-apk/app-release.apk --mode "$mode" --expected-target "$target" --profile "$profile" --output build/release-inventory/release-apk.json || status=1
           python3 tool/release_inventory.py build/app/outputs/bundle/release/app-release.aab --mode "$mode" --expected-target "$target" --profile "$profile" --output build/release-inventory/release-aab.json || status=1
@@ -247,15 +248,33 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      # CT-021: keep release crashes symbolicatable. `--split-debug-info`
+      # writes the Dart symbols to build/symbols; R8 writes the Java/Kotlin
+      # mapping (plugins are obfuscated with -repackageclasses). Workflow
+      # artifacts are visible only to accounts with read access to this
+      # repository; if the repository ever becomes public, move these to
+      # private storage, because they undo `--obfuscate`.
+      - name: Upload Dart symbols (split-debug-info)
+        if: env.release_signing == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: Ovid-symbols-dart-${{ github.sha }}
+          path: build/symbols/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload R8 mapping
+        if: env.release_signing == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: Ovid-symbols-r8-mapping-${{ github.sha }}
+          path: build/app/outputs/mapping/release/
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Remove injected release credentials
         if: always() && (inputs.production_release == true || env.release_signing == 'true')
         run: rm -f android/keystore.properties android/release-keystore.jks android/app/google-services.json
-
-      # NOTE: `--split-debug-info=build/symbols` produces Dart deobfuscation
-      # symbols. These are intentionally NOT uploaded as a workflow artifact:
-      # publishing them would defeat the `--obfuscate` build. They exist only
-      # as ephemeral files on the runner and must be archived privately (or
-      # uploaded to Crashlytics) if symbolication is ever needed.
 
   # Static checks, workflow/tool unit tests and the JVM host tests. Native host
   # tests need only the debug Flutter assets.
@@ -431,7 +450,7 @@ jobs:
       - name: Gate debug APK inventory
         run: >-
           python3 tool/release_inventory.py build/app/outputs/flutter-apk/app-debug.apk
-          --mode debug --expected-target 28 --output build/release-inventory/debug.json
+          --mode debug --expected-target 36 --output build/release-inventory/debug.json
 
       - name: Upload debug APK
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

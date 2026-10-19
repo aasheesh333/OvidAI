@@ -117,7 +117,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("needs.detect.outputs.release_signing != 'true'", debug["if"])
         self.assertIn("inputs.production_release != true", debug["if"])
         gate = _step("debug-apk", "Gate debug APK inventory")["run"]
-        self.assertIn("--mode debug --expected-target 28", gate)
+        # The on-device sandbox is gone: every build targets API 36.
+        self.assertIn("--mode debug --expected-target 36", gate)
         _step("debug-apk", "Build debug APK")
         _step("debug-apk", "Upload debug APK")
 
@@ -173,12 +174,35 @@ class ReleaseWorkflowTest(unittest.TestCase):
         text = _step("release", "Gate release artifacts")["run"]
         self.assertIn("--mode \"$mode\" --expected-target \"$target\"", text)
         self.assertRegex(text, r"target=36")
-        self.assertRegex(text, r"target=28")
-        # Production builds with OVID_PLAY_BUILD=true, which ships no bootstrap:
-        # the gate must run in the matching profile in both directions.
+        # EM-001 / CT-017: the target-28 sideload profile existed only for the
+        # removed on-device sandbox. Both profiles now target API 36.
+        self.assertNotRegex(text, r"target=28")
         self.assertRegex(text, r"target=36; profile=play")
-        self.assertRegex(text, r"target=28; profile=sideload")
+        self.assertRegex(text, r"target=36; profile=sideload")
         self.assertEqual(WORKFLOW.read_text().count('--profile "$profile"'), 2)
+
+    def test_no_build_targets_the_legacy_sdk(self):
+        text = WORKFLOW.read_text()
+        self.assertNotIn("--expected-target 28", text)
+        self.assertNotRegex(text, r"target=28")
+
+    def test_release_uploads_dart_symbols_and_r8_mapping(self):
+        # CT-021: release crashes must be symbolicatable. Both artifacts are
+        # uploaded for every signed release build, before credential cleanup.
+        names = [step.get("name") for step in _steps("release")]
+        symbols = _step("release", "Upload Dart symbols (split-debug-info)")
+        self.assertEqual(symbols["if"], "env.release_signing == 'true'")
+        self.assertEqual(symbols["with"]["path"], "build/symbols/")
+        self.assertEqual(symbols["with"]["if-no-files-found"], "error")
+        mapping = _step("release", "Upload R8 mapping")
+        self.assertEqual(mapping["if"], "env.release_signing == 'true'")
+        self.assertIn("build/app/outputs/mapping/release/", mapping["with"]["path"])
+        self.assertEqual(mapping["with"]["if-no-files-found"], "error")
+        build = names.index("Build signed release APK + AAB")
+        for name in ("Upload Dart symbols (split-debug-info)", "Upload R8 mapping"):
+            self.assertGreater(names.index(name), build, name)
+            self.assertLess(names.index(name), names.index("Remove injected release credentials"), name)
+            self.assertRegex(_step("release", name)["uses"], r"@[0-9a-f]{40}$")
 
     def test_push_builds_signed_full_release(self):
         # Every push builds the signed full-feature (sideload) release APK + AAB when the
