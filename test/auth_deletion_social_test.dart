@@ -61,7 +61,7 @@ void main() {
       error = null;
       await submit();
       expect(submissions, 1);
-      expect(find.textContaining('2026-10-04'), findsOneWidget);
+      expect(find.textContaining('Oct 4'), findsWidgets);
     },
   );
 }

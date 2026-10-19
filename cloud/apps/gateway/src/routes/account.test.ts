@@ -184,4 +184,54 @@ describe("legacy /account routes", () => {
     const res = await app.inject({ method: "POST", url: "/account/finalize", headers });
     expect(res.statusCode).toBe(404);
   });
+
+  // SH-004: the installed app's acknowledgeLogin sends
+  // `content-type: application/json` with a null body. Fastify 5's default
+  // parser would 400 (FST_ERR_CTP_EMPTY_JSON_BODY) and strand admission.
+  it("accepts POST /account/login with a JSON content type and an empty body", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/account/login",
+      headers: { ...headers, "content-type": "application/json" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(lifecycle.state);
+    expect(lifecycle.calls.map((c) => c.op)).toEqual(["login"]);
+  });
+
+  it("treats an empty JSON body on the other POSTs as a missing body (route validation, not a parser 400)", async () => {
+    const del = await app.inject({
+      method: "POST",
+      url: "/account/deletion",
+      headers: { ...headers, "content-type": "application/json" },
+    });
+    expect(del.statusCode).toBe(422);
+    expect(del.json()).toEqual({ detail: "invalid_request" });
+    const cancel = await app.inject({
+      method: "POST",
+      url: "/account/deletion/cancel",
+      headers: { ...headers, "content-type": "application/json; charset=utf-8" },
+      payload: "",
+    });
+    expect(cancel.statusCode).toBe(400);
+    expect(cancel.json()).toEqual({ detail: "explicit_consent_required" });
+  });
+
+  it("still parses a non-empty JSON body and rejects malformed JSON with a 400", async () => {
+    const ok = await app.inject({
+      method: "POST",
+      url: "/account/deletion/cancel",
+      headers: { ...headers, "content-type": "application/json" },
+      payload: '{"consent":true}',
+    });
+    expect(ok.statusCode).toBe(200);
+    const bad = await app.inject({
+      method: "POST",
+      url: "/account/login",
+      headers: { ...headers, "content-type": "application/json" },
+      payload: "{nope",
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(lifecycle.calls.map((c) => c.op)).toEqual(["cancel"]);
+  });
 });

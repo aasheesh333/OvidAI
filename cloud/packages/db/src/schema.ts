@@ -866,3 +866,32 @@ export type ScheduleRow = typeof schedules.$inferSelect;
 export type ScheduleRunRow = typeof scheduleRuns.$inferSelect;
 export type DeviceRow = typeof devices.$inferSelect;
 export type NotificationRow = typeof notifications.$inferSelect;
+
+// Wave 3: per-model-call token ledger. The worker records one row per
+// LiteLLM call (AgentResponse.usage) best-effort; the gateway aggregates it
+// for GET /cloud/v1/usage/history. Deliberately NO foreign keys: recording
+// must never fail a run over a racing session delete, and account deletion
+// purges rows by user_id (packages/account adapters "sql" stage). `model` is
+// the model id the worker REQUESTED from LiteLLM (e.g. "auto"), not the
+// served member.
+export const runUsage = pgTable(
+  "run_usage",
+  {
+    id: char("id", { length: 36 }).primaryKey(), // UUIDv7
+    userId: text("user_id").notNull(),
+    sessionId: char("session_id", { length: 36 }).notNull(),
+    runId: char("run_id", { length: 36 }).notNull(),
+    model: text("model").notNull(),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    cacheReadTokens: integer("cache_read_tokens").notNull().default(0),
+    cacheWriteTokens: integer("cache_write_tokens").notNull().default(0),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("run_usage_user_id_created_at_idx").on(t.userId, t.createdAt),
+    index("run_usage_run_id_idx").on(t.runId),
+  ],
+);
+
+export type RunUsageRow = typeof runUsage.$inferSelect;

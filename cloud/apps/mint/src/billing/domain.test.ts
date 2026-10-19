@@ -7,7 +7,6 @@ import {
   type Entitlement,
 } from "./domain.js";
 import {
-  DEFAULT_PLAN_FEATURES,
   DEFAULT_PRODUCTS,
   TIER_RANK,
   TIERS,
@@ -101,21 +100,6 @@ describe("products (port of products.py)", () => {
     );
     expect(accountHash("u1")).toHaveLength(64);
     expect(accountHash("u1")).not.toBe(accountHash("u2"));
-  });
-
-  it("DEFAULT_PLAN_FEATURES is the verbatim Python copy", () => {
-    expect(DEFAULT_PLAN_FEATURES.free).toEqual([
-      "All Ovid Cloud chat models",
-      "About 30 messages a day",
-      "Image generation within the daily allowance",
-    ]);
-    expect(DEFAULT_PLAN_FEATURES["15x"]).toEqual([
-      "All Ovid Cloud chat models",
-      "About 15x the Free allowance, pooled over 30 days",
-      "Image generation from the same allowance",
-      "Priority during busy periods",
-    ]);
-    expect(Object.keys(DEFAULT_PLAN_FEATURES)).toEqual(["free", "3x", "7x", "15x"]);
   });
 
   it("loadProducts: default, override, and invalid JSON/mappings throw", () => {

@@ -39,23 +39,50 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.textContaining('API keys and tokens'), findsNothing);
-    await tester.tap(find.text('Delete all data'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Clear this device'));
     await tester.pumpAndSettle();
-    // The confirmation states what is and is not removed.
+    // The confirmation states truthfully what is and is not removed: this
+    // device vs cloud account data (SE-003).
     expect(find.textContaining('API keys and tokens'), findsOneWidget);
     expect(find.textContaining('Not deleted:'), findsOneWidget);
-    // Delete everything stays disabled until DELETE is typed (F-066).
+    expect(find.textContaining('everything in Ovid Cloud'), findsOneWidget);
+    expect(find.textContaining('plugins, MCP servers'), findsNothing,
+        reason: 'stores that no longer exist on the device are not listed');
+    // The confirm stays disabled until DELETE is typed (F-066).
     await tester.enterText(
       find.byKey(const ValueKey('aether-confirm-type')),
       'DELETE',
     );
     await tester.pump();
-    await tester.tap(find.text('Delete everything'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Clear this device').last);
     await tester.pumpAndSettle();
     expect(find.text('Root gate'), findsOneWidget);
     expect(find.text('Settings'), findsNothing);
     expect(find.byType(SettingsResetScreen), findsNothing);
-    expect(find.text('All data on this device was deleted.'), findsOneWidget);
+    expect(find.textContaining('This device was cleared'), findsOneWidget);
+  });
+
+  testWidgets('cloud deletion is a separate account-deletion path (SE-003)', (
+    tester,
+  ) async {
+    var opened = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsResetScreen(
+          reset: () async => const SettingsResetResult(
+            completed: ['sessions'],
+            verifiedComplete: true,
+          ),
+          onDeleteAccount: () => opened++,
+        ),
+      ),
+    );
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('reset-delete-account')),
+      200,
+    );
+    await tester.tap(find.byKey(const ValueKey('reset-delete-account')));
+    expect(opened, 1);
   });
 
   group('export chats', () {

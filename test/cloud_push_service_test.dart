@@ -49,6 +49,15 @@ class _FakeMessaging implements PushMessagingDelegate {
   @override
   Future<Map<String, dynamic>?> getInitialMessage() async => initial;
 
+  int deletedTokens = 0;
+
+  @override
+  Future<void> deleteToken() async {
+    deletedTokens++;
+    // FCM mints a fresh token for the next getToken().
+    token = 'fcm-token-after-delete-$deletedTokens';
+  }
+
   Future<void> close() async {
     await tokenRefresh.close();
     await messages.close();
@@ -80,11 +89,20 @@ class _Harness {
   Future<void> init() async {
     service.onOpenRoute = routes.add;
     await service.init();
+    await service.bindAccount('uid-a');
   }
 
   /// Token registrations in wire order: `{token, platform}`.
   List<Map<String, dynamic>> get registrations => [
-        for (final r in requests.where((r) => r.url.path.endsWith('/devices')))
+        for (final r in requests.where(
+            (r) => r.url.path.endsWith('/devices') && r.method == 'POST'))
+          Map<String, dynamic>.from(jsonDecode(r.body) as Map),
+      ];
+
+  /// Token unregistrations in wire order: `{token}`.
+  List<Map<String, dynamic>> get unregistrations => [
+        for (final r in requests.where(
+            (r) => r.url.path.endsWith('/devices') && r.method == 'DELETE'))
           Map<String, dynamic>.from(jsonDecode(r.body) as Map),
       ];
 }
@@ -108,10 +126,12 @@ void main() {
     PushService.resetForTest();
   });
 
-  test('init requests permission and registers the FCM token', () async {
+  test('binding an account registers the FCM token without prompting',
+      () async {
     await h.init();
 
-    expect(h.messaging.permissionRequests, 1);
+    // The onboarding sequence owns the permission prompt (EM-005/EM-016).
+    expect(h.messaging.permissionRequests, 0);
     expect(h.registrations, [
       {'token': 'fcm-token-1', 'platform': 'android'},
     ]);
@@ -182,7 +202,61 @@ void main() {
     h.messaging.token = null;
     await h.init();
     await h.init();
-    expect(h.messaging.permissionRequests, 1);
+    expect(h.messaging.permissionRequests, 0);
     expect(h.registrations, isEmpty);
+  });
+
+  test('requestPermission asks only when called explicitly', () async {
+    await h.init();
+    expect(await h.service.requestPermission(), isTrue);
+    expect(h.messaging.permissionRequests, 1);
+  });
+
+  test('unbind DELETEs the token, then invalidates it (SE-002)', () async {
+    await h.init();
+    await h.service.unbindAccount();
+
+    expect(h.unregistrations, [
+      {'token': 'fcm-token-1'},
+    ]);
+    expect(h.messaging.deletedTokens, 1);
+    expect(h.service.boundUid, isNull);
+  });
+
+  test('signed out: a token refresh is not registered to anyone', () async {
+    await h.init();
+    await h.service.unbindAccount();
+    h.messaging.tokenRefresh.add('fcm-token-x');
+    await Future<void>.delayed(Duration.zero);
+
+    expect(h.registrations, [
+      {'token': 'fcm-token-1', 'platform': 'android'},
+    ]);
+  });
+
+  test('account switch in one process registers account B (CT-006)',
+      () async {
+    await h.init(); // A
+    await h.service.unbindAccount();
+    await h.service.bindAccount('uid-b');
+
+    expect(h.service.boundUid, 'uid-b');
+    expect(h.registrations, [
+      {'token': 'fcm-token-1', 'platform': 'android'},
+      {'token': 'fcm-token-after-delete-1', 'platform': 'android'},
+    ]);
+  });
+
+  test('binding the same account twice registers once', () async {
+    await h.init();
+    await h.service.bindAccount('uid-a');
+    expect(h.registrations, hasLength(1));
+  });
+
+  test('unbind with nothing bound makes no request', () async {
+    await h.service.init();
+    await h.service.unbindAccount();
+    expect(h.requests, isEmpty);
+    expect(h.messaging.deletedTokens, 0);
   });
 }

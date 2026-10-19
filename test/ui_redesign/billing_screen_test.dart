@@ -64,31 +64,23 @@ void main() {
     AppState.resetTestInstance();
   });
 
-  testWidgets('renders four plan cards with multipliers and no fixed prices', (
+  testWidgets('renders the server plan table: names, multipliers, prices', (
     tester,
   ) async {
     await _pumpBilling(tester);
 
-    // Scroll the whole list so every lazily-built card is materialised.
-    for (final marker in ['Free', 'Plus', 'Pro', 'Max', '×15']) {
+    // Scroll the whole list; every server plan fact appears on the way
+    // (SH-006): names, multipliers and indicative prices.
+    for (final marker in [
+      'Free', '×1', 'Starter', '×3', 'US\$5 / month', 'Pro', '×23',
+      'US\$25 / month', 'Max', '×43', 'US\$60 / month',
+    ]) {
       await tester.scrollUntilVisible(find.text(marker).first, 140);
       await tester.pump();
+      expect(find.text(marker), findsWidgets, reason: marker);
     }
-
-    // All four plan names visible.
-    expect(find.text('Free'), findsWidgets);
-    expect(find.text('Plus'), findsOneWidget);
-    expect(find.text('Pro'), findsOneWidget);
-    expect(find.text('Max'), findsOneWidget);
-
-    // Prices come only from Google Play (localised); never hard-coded INR.
+    expect(find.text('Plus'), findsNothing);
     expect(find.textContaining('₹'), findsNothing);
-
-    // Multiplier chips.
-    expect(find.text('×1'), findsOneWidget);
-    expect(find.text('×3'), findsOneWidget);
-    expect(find.text('×7'), findsOneWidget);
-    expect(find.text('×15'), findsOneWidget);
   });
 
   testWidgets('current plan button is disabled with "Current plan" label', (
@@ -159,8 +151,9 @@ void main() {
     },
   );
 
-  testWidgets('no USD text appears anywhere on the screen', (tester) async {
-    // Try every tier so the renewal/footer/current-plan copy all render.
+  testWidgets('no usage amount in money: only plan prices per month', (
+    tester,
+  ) async {
     for (final startTier in ['free', '3x', '7x', '15x']) {
       OvidCloudService.httpClientFactoryForTest = () => MockClient(
         (_) async => http.Response(jsonEncode(_snapshot(startTier)), 200),
@@ -168,14 +161,9 @@ void main() {
       await _pumpBilling(tester);
       final blob = _allVisibleText(tester);
       expect(
-        blob.contains(r'$'),
-        isFalse,
-        reason: 'dollar sign leaked for tier=$startTier: $blob',
-      );
-      expect(
-        RegExp(r'\bUSD\b', caseSensitive: false).hasMatch(blob),
-        isFalse,
-        reason: 'USD leaked for tier=$startTier: $blob',
+        RegExp(r'\$\d').allMatches(blob).length,
+        RegExp(r'US\$\d+ / month').allMatches(blob).length,
+        reason: 'a money amount other than a plan price for tier=$startTier',
       );
     }
   });

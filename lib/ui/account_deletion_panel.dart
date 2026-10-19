@@ -1,8 +1,13 @@
+import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import '../core/account_service.dart';
+import '../core/format.dart';
 import '../core/legal_links.dart';
+import '../core/ovid_cloud_service.dart';
+import '../core/play_billing.dart';
 import '../core/theme.dart';
+import 'user_error.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/external_link.dart';
 
@@ -16,6 +21,7 @@ class AccountDeletionPanel extends StatefulWidget {
     this.restore,
     this.canReauthenticate = true,
     this.uid,
+    this.subscriptionActive,
   });
   final AccountService service;
   // Kept as an ignored source-compatibility parameter for existing consumers.
@@ -38,6 +44,11 @@ class AccountDeletionPanel extends StatefulWidget {
   /// Prefilled into the email deletion request.
   final String? uid;
 
+  /// Whether this account has a paid plan that Google Play keeps billing
+  /// after deletion (SH-012). Defaults to the Play-owned plan or a paid
+  /// server tier.
+  final bool Function()? subscriptionActive;
+
   @override
   State<AccountDeletionPanel> createState() => _AccountDeletionPanelState();
 }
@@ -53,11 +64,34 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
     (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0'),
   ).join();
 
+  /// Keeps the deletion countdown current (SH-022).
+  Timer? _clock;
+
   @override
   void initState() {
     super.initState();
     if (widget.service.enabled) _refresh();
+    _clock = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted && _status?.isPending == true) setState(() {});
+    });
   }
+
+  @override
+  void dispose() {
+    _clock?.cancel();
+    super.dispose();
+  }
+
+  bool get _hasSubscription {
+    final probe = widget.subscriptionActive;
+    if (probe != null) return probe();
+    final tier = OvidCloudService.I.confirmedTier ?? 'free';
+    return PlayBillingService.I.ownedTier != null || tier != 'free';
+  }
+
+  /// No raw exception text on screen (SH-023).
+  static String _message(Object e) =>
+      e is AccountException ? e.message : friendlyError(e);
 
   Future<void> _refresh() async {
     setState(() => _busy = true);
@@ -70,13 +104,14 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = _message(e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
   Future<void> _delete() async {
+    final subscription = _hasSubscription;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialog) => Dialog(
@@ -124,9 +159,44 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'The server will retain your request for 24 hours. Signing in does not cancel deletion; choose Restore account explicitly before the deadline. After the deadline, your Ovid identity, profile, cloud data and cloud keys will be removed.\n\nLocal workspaces and data held by third-party providers are not erased by this action.',
+                      'The server will retain your request for 24 hours. Signing in does not cancel deletion; choose Restore account explicitly before the deadline. After the deadline, your Ovid identity, profile, chats, files, schedules, shared links and saved keys in Ovid Cloud will be removed.\n\nData held by third-party providers (for example, providers of your own API keys) is not erased by this action.',
                       style: AetherType.body,
                     ),
+                    if (subscription) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        key: const ValueKey('deletion-subscription-warning'),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Aether.warn.withValues(alpha: 0.10),
+                          borderRadius: BorderRadius.circular(AetherRadius.rSm),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Your Google Play subscription is not cancelled '
+                              'automatically. Cancel it in Google Play first, '
+                              'or it keeps renewing after your account is '
+                              'deleted.',
+                              style: AetherType.body,
+                            ),
+                            const SizedBox(height: 6),
+                            TextButton.icon(
+                              key: const ValueKey('deletion-manage-play'),
+                              icon: const Icon(Icons.open_in_new, size: 16),
+                              label: const Text('Manage in Google Play'),
+                              onPressed: () => openExternalLink(
+                                dialog,
+                                playSubscriptionCenterUri(
+                                  productId: PlayBillingService.I.ownedProductId,
+                                ).toString(),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 12),
                     Text(
                       'Next, verify with a social provider or phone linked to this account.',
@@ -156,7 +226,7 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
       if (!mounted) return;
       setState(() => _status = status);
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = _message(e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -179,7 +249,7 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
           : await widget.service.cancelDeletion();
       if (mounted && status != null) setState(() => _status = status);
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = _message(e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -249,7 +319,7 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
                       ),
                     ),
                   Text(
-                    'Deletion requested. Scheduled after ${_status!.deleteAfter!.toUtc().toIso8601String()} (UTC). Restore the account explicitly before then if you want to keep it.',
+                    'Deletion requested. Scheduled after ${formatDeadline(_status!.deleteAfter!)}. Restore the account explicitly before then if you want to keep it.',
                     style: AetherType.body,
                   ),
                 ],

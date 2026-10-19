@@ -52,6 +52,16 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="https" android:host="${ovidShareHost}" android:pathPrefix="/s/" />
             </intent-filter>
+            <!-- Chat and schedule links (/c/<id>, /schedule/<id>) that AppRouter
+                 parses (SH-020). Opened only for a ready account; signed-out
+                 opens are parked until sign-in (AppRouter.open). -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="${ovidShareHost}" android:pathPrefix="/c/" />
+                <data android:scheme="https" android:host="${ovidShareHost}" android:pathPrefix="/schedule/" />
+            </intent-filter>
         </activity>
         <!-- MCP OAuth redirect (RFC 8252 private-use scheme). A trampoline
              forwards it to the running MainActivity so the Custom Tab is

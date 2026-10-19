@@ -68,7 +68,7 @@ describe.skipIf(!TEST_DATABASE_URL)("mcp/plugin repos against real postgres", ()
           ` plans, mint_settings, user_plan_overrides, mint_audit, billing_purchases, image_jobs,` +
           ` image_deleted_accounts, image_cards, image_card_history, image_probe_log, image_probe_state,` +
           ` shares, share_forks, reports, account_deletions, byok_keys,` +
-          ` mcp_oauth_tokens, mcp_oauth_flows, plugins, plugin_grants, mcp_servers CASCADE`,
+          ` mcp_oauth_tokens, mcp_oauth_flows, plugins, plugin_grants, mcp_servers, run_usage CASCADE`,
       );
     } finally {
       await admin.end({ timeout: 5 });

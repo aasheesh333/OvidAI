@@ -77,7 +77,14 @@ function subscription(
 class FakePlay implements PlayDeveloperApi {
   readonly tokens = new Map<string, unknown>();
   readonly calls: string[] = [];
+  readonly acks: Array<{ product: string; token: string }> = [];
   fail: Error | null = null;
+  ackFail: Error | null = null;
+
+  async acknowledgeSubscription(product: string, token: string): Promise<void> {
+    if (this.ackFail) throw this.ackFail;
+    this.acks.push({ product, token });
+  }
 
   async getSubscription(token: string): Promise<unknown> {
     this.calls.push(token);
@@ -226,6 +233,40 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
       { uid, tier: "3x", expiresAt: NOW + 30 * 86400 },
       { uid, tier: "3x", expiresAt: NOW + 30 * 86400 },
     ]);
+  });
+
+  // SH-002 belt and braces: the server acknowledges a verified, active,
+  // still-unacknowledged purchase itself, so a client that dies between
+  // verify and completePurchase cannot let Play refund it after 3 days.
+  it("acknowledges an active unacknowledged purchase server-side, exactly once", async () => {
+    play.tokens.set("tok-1", subscription({ uid, ack: false }));
+    const first = await verify();
+    expect(first.payload.acknowledge).toBe(true);
+    expect(play.acks).toEqual([{ product: "ovid_plus_monthly", token: "tok-1" }]);
+    // Play now reports it acknowledged: a re-verify (resume/restore) is a
+    // no-op for Google and identical for the client.
+    play.tokens.set("tok-1", subscription({ uid, ack: true }));
+    const second = await verify();
+    expect(second).toEqual(first);
+    expect(play.acks).toHaveLength(1);
+  });
+
+  it("never acknowledges pending, expired or foreign purchases", async () => {
+    play.tokens.set("tok-p", subscription({ uid, state: "SUBSCRIPTION_STATE_PENDING" }));
+    await verify("tok-p");
+    play.tokens.set("tok-e", subscription({ uid, expiry: NOW - 10 }));
+    await verify("tok-e");
+    play.tokens.set("tok-f", subscription({ uid: other }));
+    await codeOf(verify("tok-f"));
+    expect(play.acks).toEqual([]);
+  });
+
+  it("a failed server-side acknowledgement never fails verify (the client still acknowledges)", async () => {
+    play.tokens.set("tok-1", subscription({ uid, ack: false }));
+    play.ackFail = new Error("play down");
+    const { status, payload } = await verify();
+    expect(status).toBe(200);
+    expect(payload).toMatchObject({ ok: true, tier: "3x", acknowledge: true });
   });
 
   it("unverified or foreign purchases never set a paid tier", async () => {
@@ -480,17 +521,14 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
     expect(fields.plan_expires_at).toBe(iso(NOW + 30 * 86400));
     expect(fields.plan_auto_renews).toBe(true);
     expect(fields.plan_product_id).toBe("ovid_plus_monthly");
-    const plans = fields.plans as { tier: string; product_id?: string; features: string[] }[];
-    expect(plans.map((p) => p.tier)).toEqual(["free", "3x", "7x", "15x"]);
-    expect(plans[1]!.product_id).toBe("ovid_plus_monthly");
-    expect(plans[0]!.product_id).toBeUndefined();
-    expect(plans.every((p) => p.features.length > 0)).toBe(true);
+    // SH-006: plan cards come from the live plan table (usage.ts/planCards),
+    // never from the old hard-coded TIERS copy here.
+    expect(fields).not.toHaveProperty("plans");
+    expect(service.products).toEqual(PRODUCTS);
   });
 
-  it("usageFields(null) omits the plan_* fields but still lists plans", async () => {
+  it("usageFields(null) omits the plan_* fields", async () => {
     const fields = await service.usageFields(null);
-    expect(fields.billing_enabled).toBe(true);
-    expect(fields).not.toHaveProperty("plan_expires_at");
-    expect((fields.plans as unknown[]).length).toBe(4);
+    expect(fields).toEqual({ billing_enabled: true });
   });
 });

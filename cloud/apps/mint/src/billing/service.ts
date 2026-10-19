@@ -11,12 +11,7 @@ import type { MintEnv } from "../env.js";
 import { BillingError, evaluate } from "./domain.js";
 import type { PlayDeveloperApi } from "./play.js";
 import { createPlayApi } from "./play.js";
-import {
-  DEFAULT_PLAN_FEATURES,
-  TIERS,
-  accountHash,
-  loadProducts,
-} from "./products.js";
+import { accountHash, loadProducts } from "./products.js";
 import { createTierSink, type PublishTier, type TierSink } from "./tierSink.js";
 
 /**
@@ -25,7 +20,8 @@ import { createTierSink, type PublishTier, type TierSink } from "./tierSink.js";
  * `verify` is the only path that can bind a purchase token to an account;
  * `notify` is the RTDN path. Both recompute the user's best active purchase
  * from the DURABLE Postgres ledger (billing_purchases) and push the result
- * through the tier sink. Google is only ever read, never written.
+ * through the tier sink. The only Google write is the best-effort
+ * acknowledgement of a verified active purchase (SH-002).
  */
 
 const MAX_TOKEN = 4096;
@@ -70,6 +66,8 @@ export interface BillingVerifyResult {
 
 export interface BillingService {
   readonly configured: boolean;
+  /** Play product id -> tier (3x/7x/15x); planCards maps plans to products. */
+  readonly products: Record<string, string>;
   verify(uid: string, body: unknown): Promise<BillingVerifyResult>;
   notify(envelope: unknown): Promise<void>;
   usageFields(uid: string | null): Promise<Record<string, unknown>>;
@@ -207,6 +205,19 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
     const row = await store.record(token, entitlement, now, uid);
     const { tier, best } = await apply(uid);
     const active = row.status === "active";
+    if (active && !entitlement.acknowledged && api!.acknowledgeSubscription !== undefined) {
+      // SH-002: acknowledge server-side too, so a client that dies between
+      // this response and completePurchase cannot let Play auto-refund a
+      // purchase we already granted. Best effort: the tier is set, and the
+      // client acknowledges when it sees `acknowledge: true`.
+      try {
+        await api!.acknowledgeSubscription(row.productId, token);
+      } catch (err) {
+        console.log(
+          `[mint] billing: server-side acknowledge failed: ${err instanceof Error ? err.name : String(err)}`,
+        );
+      }
+    }
     const payload: Record<string, unknown> = {
       ok: active,
       status: row.status,
@@ -297,16 +308,6 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
   async function usageFields(uid: string | null): Promise<Record<string, unknown>> {
     const fields: Record<string, unknown> = {
       billing_enabled: configured,
-      plans: TIERS.map((tier) => {
-        const plan: Record<string, unknown> = {
-          tier,
-          features: DEFAULT_PLAN_FEATURES[tier] ?? [],
-        };
-        if (tier !== "free") {
-          plan.product_id = Object.entries(products).find(([, t]) => t === tier)?.[0] ?? null;
-        }
-        return plan;
-      }),
     };
     if (configured && uid !== null && uid !== "") {
       const best = await store.effective(uid, Math.trunc(clock()));
@@ -323,6 +324,7 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
     get configured() {
       return configured;
     },
+    products,
     verify,
     notify,
     usageFields,

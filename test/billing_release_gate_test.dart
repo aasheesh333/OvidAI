@@ -89,15 +89,15 @@ void main() {
     await _mount(tester, allowTestUpgrade: false);
     expect(find.byKey(const ValueKey('upgrade-header')), findsNothing);
     expect(
-      find.byKey(const ValueKey('paid-plans-coming-soon')),
+      find.byKey(const ValueKey('paid-plans-unavailable')),
       findsOneWidget,
     );
     for (final tier in ['3x', '7x', '15x']) {
       expect(find.byKey(ValueKey('upgrade-$tier')), findsNothing);
-      expect(find.byKey(ValueKey('coming-soon-$tier')), findsOneWidget);
+      expect(find.byKey(ValueKey('not-purchasable-$tier')), findsOneWidget);
     }
     expect(find.textContaining('Pay now'), findsNothing);
-    expect(find.textContaining('nothing can be purchased yet'), findsOneWidget);
+    expect(find.textContaining('cannot be bought in this version'), findsOneWidget);
     expect(requests, isNot(contains('/upgrade')));
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -111,7 +111,7 @@ void main() {
     await _mount(tester, allowTestUpgrade: false, billing: billing);
     expect(find.byKey(const ValueKey('upgrade-header')), findsOneWidget);
     expect(find.byKey(const ValueKey('upgrade-3x')), findsOneWidget);
-    expect(find.byKey(const ValueKey('paid-plans-coming-soon')), findsNothing);
+    expect(find.byKey(const ValueKey('paid-plans-unavailable')), findsNothing);
     expect(find.byKey(const ValueKey('billing-restore')), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -126,7 +126,7 @@ void main() {
     addTearDown(billing.dispose);
     await _mount(tester, allowTestUpgrade: false, billing: billing);
     expect(find.byKey(const ValueKey('upgrade-3x')), findsNothing);
-    expect(find.textContaining('need Google Play'), findsOneWidget);
+    expect(find.textContaining('not installed from the Play Store'), findsOneWidget);
     expect(requests, isNot(contains('/upgrade')));
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -152,7 +152,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('billing-sheet-close')));
     await _frames(tester);
     expect(find.byKey(const ValueKey('upgrade-3x')), findsNothing);
-    expect(find.byKey(const ValueKey('coming-soon-3x')), findsOneWidget);
+    expect(find.byKey(const ValueKey('not-purchasable-3x')), findsOneWidget);
     expect(AppState.I.ovidCloudTier, 'free');
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());

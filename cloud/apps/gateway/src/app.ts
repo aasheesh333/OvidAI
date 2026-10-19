@@ -19,6 +19,7 @@ import type { AttachmentPresigner } from "./routes/attachments.js";
 import { registerByokRoutes } from "./routes/byok.js";
 import type { ByokRouteOverrides } from "./routes/byok.js";
 import { registerDevicesRoutes } from "./routes/devices.js";
+import { registerUsageHistoryRoutes } from "./routes/usageHistory.js";
 import { registerEventRoutes } from "./routes/events.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerImportRoutes } from "./routes/import.js";
@@ -347,6 +348,9 @@ export function buildGateway(
       // P4 Task 11: schedule CRUD + runs feed + FCM device registration.
       registerScheduleRoutes(scope, deps);
       registerDevicesRoutes(scope, deps);
+
+      // Wave 3: the run_usage token ledger (caller-scoped).
+      registerUsageHistoryRoutes(scope, deps);
 
       // P9 Task 11: BYOK escrow CRUD + the SSRF-guarded provider probe.
       registerByokRoutes(scope, {

@@ -9,7 +9,9 @@ import { registerUsageRoutes } from "../usage.js";
 import { BillingError } from "./domain.js";
 import { pubsubPushVerifier } from "./pushAuth.js";
 import { registerBillingRoutes } from "./routes.js";
-import type { BillingService } from "./service.js";
+import { createBillingService, type BillingService } from "./service.js";
+import { accountHash } from "./products.js";
+import { createMintVerifier } from "../verifier.js";
 import {
   closeDb,
   closeRedis,
@@ -42,6 +44,7 @@ function stubBilling(overrides: Partial<BillingService> = {}): BillingService {
     verify: async () => ({ status: 200, payload: { ok: true, status: "active" } }),
     notify: async () => {},
     usageFields: async () => ({}),
+    products: {},
     ...overrides,
   };
 }
@@ -484,5 +487,174 @@ describe.skipIf(!RUN)("billing route + the real account-deletion fence (NEW-4)",
     });
     expect(res.statusCode).toBe(200);
     expect(verify).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CT-005 / SH-002: the INSTALLED CLIENT's exact request against the real
+// verifier + real BillingService + real ledger (only Google is faked).
+// lib/core/ovid_cloud_service.dart _verifyPlayPurchase sends:
+//   POST /billing/verify
+//   Authorization: Bearer <Firebase ID token>
+//   X-Firebase-AppCheck: <token>   (omitted when App Check yields nothing)
+//   Content-Type: application/json
+//   {"product_id", "purchase_token", "package_name"}
+// and parses: status 202 | body.status == "pending" → pending; 404 or
+// 503 {error:{code:"billing_unavailable"}} → notAvailable; >=500 → unknown;
+// other non-200 → rejected; 200 → tier, ok, acknowledge, expires_at,
+// auto_renewing.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!RUN)("/billing/verify — installed-client contract (real verifier + service)", () => {
+  let db: Db;
+  let redis: Redis;
+  const sink: Array<{ uid: string; tier: string }> = [];
+  const playTokens = new Map<string, unknown>();
+  const acks: string[] = [];
+  const now = Math.floor(Date.now() / 1000);
+
+  async function build(appcheck: "true" | "false"): Promise<FastifyInstance> {
+    const env = baseEnv({ DATABASE_URL: TEST_DATABASE_URL!, APPCHECK_ENABLED: appcheck });
+    const deps: MintDeps = {
+      db,
+      redis,
+      litellm: {} as never,
+      env,
+      alerter: async () => {},
+      verifyIdentity: createMintVerifier(env, {
+        verifyIdToken: async (token) => ({ uid: token.replace(/^id-/, "") }),
+        verifyAppCheck: async () => ({ appId: "1:android:abc" }),
+      }),
+    };
+    const billing = createBillingService({
+      db,
+      redis,
+      env,
+      projection: { publishUserTier: async () => {} },
+      setTier: async (uid, tier) => {
+        sink.push({ uid, tier });
+      },
+      api: {
+        getSubscription: async (token) => {
+          if (!playTokens.has(token)) throw new BillingError(400, "purchase_invalid");
+          return playTokens.get(token);
+        },
+        acknowledgeSubscription: async (_product, token) => {
+          acks.push(token);
+        },
+      },
+    });
+    const app = Fastify({ logger: false });
+    registerBillingRoutes(app, deps, billing);
+    await app.ready();
+    return app;
+  }
+
+  function resource(uid: string): Record<string, unknown> {
+    return {
+      subscriptionState: "SUBSCRIPTION_STATE_ACTIVE",
+      acknowledgementState: "ACKNOWLEDGEMENT_STATE_PENDING",
+      lineItems: [
+        {
+          productId: "ovid_pro_monthly",
+          expiryTime: new Date((now + 30 * 86400) * 1000).toISOString(),
+          autoRenewingPlan: { autoRenewEnabled: true },
+        },
+      ],
+      externalAccountIdentifiers: { obfuscatedExternalAccountId: accountHash(uid) },
+    };
+  }
+
+  beforeAll(async () => {
+    db = await resetTestDb();
+    redis = await openFlushedRedis();
+  }, 60_000);
+
+  afterAll(async () => {
+    await closeRedis(redis);
+    await closeDb(db);
+  });
+
+  function clientPost(app: FastifyInstance, uid: string, token: string, withAppCheck = false) {
+    return app.inject({
+      method: "POST",
+      url: "/billing/verify",
+      headers: {
+        authorization: `Bearer id-${uid}`,
+        "content-type": "application/json",
+        ...(withAppCheck ? { "x-firebase-appcheck": "ac" } : {}),
+      },
+      payload: JSON.stringify({
+        product_id: "ovid_pro_monthly",
+        purchase_token: token,
+        package_name: "com.dhanuk.ovidai",
+      }),
+    });
+  }
+
+  it("APPCHECK_ENABLED=false: no App Check header → 200 with every field the client parses; re-verify is identical", async () => {
+    const app = await build("false");
+    try {
+      const uid = testUid("client");
+      playTokens.set("tok-client", resource(uid));
+      const first = await clientPost(app, uid, "tok-client");
+      expect(first.statusCode).toBe(200);
+      expect(first.headers["cache-control"]).toBe("no-store");
+      const body = first.json() as Record<string, unknown>;
+      expect(body).toMatchObject({
+        ok: true,
+        status: "active",
+        tier: "7x",
+        product_id: "ovid_pro_monthly",
+        auto_renewing: true,
+        acknowledge: true,
+      });
+      expect(typeof body.expires_at).toBe("string");
+      expect(Number.isNaN(Date.parse(body.expires_at as string))).toBe(false);
+      expect(sink.at(-1)).toEqual({ uid, tier: "7x" });
+      expect(acks).toEqual(["tok-client"]);
+      // Resume/restore re-delivers the same token: same verdict, no error.
+      const again = await clientPost(app, uid, "tok-client");
+      expect(again.statusCode).toBe(200);
+      expect(again.json()).toEqual(body);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("another account replaying the token → 409 (client: rejected); wrong obfuscated id → 403", async () => {
+    const app = await build("false");
+    try {
+      const owner = testUid("owner");
+      const thief = testUid("thief");
+      playTokens.set("tok-owned", resource(owner));
+      expect((await clientPost(app, owner, "tok-owned")).statusCode).toBe(200);
+      const replay = await clientPost(app, thief, "tok-owned");
+      expect(replay.statusCode).toBe(409);
+      expect(replay.json()).toEqual({
+        ok: false,
+        error: { code: "purchase_owned_by_another_account" },
+      });
+      playTokens.set("tok-foreign", resource(owner));
+      const mismatch = await clientPost(app, thief, "tok-foreign");
+      expect(mismatch.statusCode).toBe(403);
+      expect(mismatch.json()).toEqual({ ok: false, error: { code: "account_mismatch" } });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("APPCHECK_ENABLED=true: a missing App Check header is 401 sign_in_required; present → 200", async () => {
+    const app = await build("true");
+    try {
+      const uid = testUid("attested");
+      playTokens.set("tok-attested", resource(uid));
+      const missing = await clientPost(app, uid, "tok-attested");
+      expect(missing.statusCode).toBe(401);
+      expect(missing.json()).toEqual({ ok: false, error: { code: "sign_in_required" } });
+      expect((await clientPost(app, uid, "tok-attested", true)).statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
   });
 });

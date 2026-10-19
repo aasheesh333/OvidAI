@@ -78,7 +78,44 @@ function sendError(reply: FastifyReply, err: unknown): FastifyReply {
   throw err;
 }
 
+/**
+ * SH-004: the installed app's `acknowledgeLogin` posts
+ * `content-type: application/json` with a null body. Fastify 5's default
+ * JSON parser rejects that with 400 FST_ERR_CTP_EMPTY_JSON_BODY, which the
+ * client maps to "account server unavailable" and admission never completes.
+ * Inside this scope an empty (or whitespace-only) JSON body parses as
+ * `undefined`, so each route's own validation decides (login ignores the
+ * body; deletion/cancel answer with their Python-parity 422/400). Malformed
+ * non-empty JSON is still a 400.
+ */
+function tolerantJsonParser(
+  _request: FastifyRequest,
+  body: Buffer,
+  done: (err: Error | null, body?: unknown) => void,
+): void {
+  const text = body.toString("utf8");
+  if (text.trim() === "") {
+    done(null, undefined);
+    return;
+  }
+  try {
+    done(null, JSON.parse(text));
+  } catch {
+    const err = new Error("Body is not valid JSON") as Error & { statusCode: number };
+    err.statusCode = 400;
+    done(err);
+  }
+}
+
 export function registerAccountRoutes(app: FastifyInstance, deps: AccountRouteDeps): void {
+  app.register(async (scope) => {
+    scope.removeContentTypeParser("application/json");
+    scope.addContentTypeParser("application/json", { parseAs: "buffer" }, tolerantJsonParser);
+    registerAccountRoutesIn(scope, deps);
+  });
+}
+
+function registerAccountRoutesIn(app: FastifyInstance, deps: AccountRouteDeps): void {
   async function run(
     request: FastifyRequest,
     action: (claims: Claims) => Promise<PublicState>,

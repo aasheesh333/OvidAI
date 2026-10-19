@@ -136,6 +136,56 @@ void main() {
     },
   );
 
+  test('signOut runs the before-sign-out hooks while still signed in '
+      '(push unregister needs the ID token — SE-002)', () async {
+    final seen = <bool>[];
+    service.addBeforeSignOut(() async => seen.add(service.isSignedIn));
+    await expectLater(service.signOut(), throwsA(anything));
+    expect(seen, [true]);
+    expect(service.isSignedIn, isFalse);
+  });
+
+  test('a hung before-sign-out hook cannot block the sign-out', () async {
+    service.addBeforeSignOut(() => Completer<void>().future);
+    await expectLater(
+      service.runBeforeSignOut(timeout: const Duration(milliseconds: 50)),
+      completes,
+    );
+  });
+
+  test('signOut during an in-flight auth op still signs out (SH-018)',
+      () async {
+    final pendingCredential = Completer<Never>();
+    final identity = AuthIdentity(
+      auth: () => auth,
+      providers: AuthProviders(),
+      googleCredential: () => pendingCredential.future,
+    );
+    final busyService = FirebaseService.forTest(
+      initializeApp: () async {},
+      configure: () async {},
+      identity: identity,
+      initialUser: user,
+    );
+    addTearDown(busyService.dispose);
+    await busyService.initialize();
+    final previous = FirebaseService.authSettleTimeout;
+    FirebaseService.authSettleTimeout = const Duration(milliseconds: 200);
+    addTearDown(() => FirebaseService.authSettleTimeout = previous);
+
+    // A native picker that never returns keeps the identity busy.
+    unawaited(busyService.authenticateSocial(
+      'google.com',
+      AuthIntent.reauthenticate,
+    ));
+    await Future<void>.delayed(Duration.zero);
+    expect(identity.busy, isTrue, reason: 'precondition: auth op in flight');
+
+    await expectLater(busyService.signOut(), throwsA(anything));
+    expect(busyService.isSignedIn, isFalse,
+        reason: 'sign-out must never silently do nothing');
+  });
+
   test('signOut still hands the AppState session back to guest', () async {
     // Outside the barrier the public sign-out keeps its existing behavior: it
     // awaits the AppState transition before touching the SDK.

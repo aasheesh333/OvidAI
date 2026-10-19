@@ -85,7 +85,14 @@ void main() {
         store.controller.add([
           purchase('ovid_plus_monthly', PurchaseStatus.purchased),
         ]);
-        expect((await result).result, failure);
+        // A paid purchase the server could not confirm is "confirming"
+        // (re-verified later, SH-002); a refusal stays "rejected".
+        expect(
+          (await result).result,
+          failure == UpgradeResult.rejected
+              ? UpgradeResult.rejected
+              : UpgradeResult.confirming,
+        );
       }
       // Verified-but-inactive (expired/replaced) also must not be acknowledged.
       verdict = (_) => const PlayVerifyOutcome(UpgradeResult.ok, tier: 'free');
@@ -275,6 +282,12 @@ void main() {
     test('rejected, pending and disabled verdicts do not set a tier', () async {
       final cases = {
         http.Response('{"ok":false,"error":{"code":"account_mismatch"}}', 403):
+            UpgradeResult.otherAccount,
+        http.Response(
+          '{"ok":false,"error":{"code":"purchase_owned_by_another_account"}}',
+          409,
+        ): UpgradeResult.otherAccount,
+        http.Response('{"ok":false,"error":{"code":"account_blocked"}}', 403):
             UpgradeResult.rejected,
         http.Response('{"ok":false,"status":"pending"}', 202):
             UpgradeResult.pending,
@@ -291,6 +304,36 @@ void main() {
         expect(outcome.acknowledge, isFalse);
         expect(AppState.I.ovidCloudTier, 'free');
       }
+    });
+
+    test('a 401 is retried once with a fresh ID token', () async {
+      var calls = 0;
+      OvidCloudService.forceRefreshIdTokenOverrideForTest = () async => 'fresh';
+      addTearDown(
+        () => OvidCloudService.forceRefreshIdTokenOverrideForTest = null,
+      );
+      final auths = <String?>[];
+      final client = MockClient((request) async {
+        if (request.url.path != '/billing/verify') {
+          return http.Response('{"data":[]}', 200);
+        }
+        calls++;
+        auths.add(request.headers['Authorization']);
+        return calls == 1
+            ? http.Response('{"ok":false,"error":{"code":"sign_in_required"}}', 401)
+            : http.Response(
+                jsonEncode({'ok': true, 'tier': '3x', 'acknowledge': true}),
+                200,
+              );
+      });
+      final outcome = await OvidCloudService.I.verifyPlayPurchase(
+        productId: 'ovid_plus_monthly',
+        purchaseToken: 'tok',
+        packageName: kOvidPlayPackage,
+        client: client,
+      );
+      expect(outcome.result, UpgradeResult.ok);
+      expect(auths, ['Bearer billing-token', 'Bearer fresh']);
     });
   });
 }

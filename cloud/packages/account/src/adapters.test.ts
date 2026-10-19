@@ -419,7 +419,7 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
           ` plans, mint_settings, user_plan_overrides, mint_audit, billing_purchases, image_jobs,` +
           ` image_deleted_accounts, image_cards, image_card_history, image_probe_log, image_probe_state,` +
           ` shares, share_forks, reports, account_deletions, byok_keys,` +
-          ` mcp_servers, mcp_oauth_tokens, mcp_oauth_flows, plugins, plugin_grants CASCADE`,
+          ` mcp_servers, mcp_oauth_tokens, mcp_oauth_flows, plugins, plugin_grants, run_usage CASCADE`,
       );
     } finally {
       await admin.end({ timeout: 5 });
@@ -453,6 +453,7 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
     await db.$client`DELETE FROM mcp_servers`;
     await db.$client`DELETE FROM byok_keys`;
     await db.$client`DELETE FROM shares`;
+    await db.$client`DELETE FROM run_usage`;
     await db.$client`DELETE FROM reports`;
     await db.$client`DELETE FROM user_plan_overrides`;
     await db.$client`DELETE FROM mint_audit`;
@@ -534,6 +535,9 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
     await db.$client`INSERT INTO notifications (id, user_id, kind, channel, title, body, route, data) VALUES
       (${"12121212-1212-7212-8212-121212121212"}, ${UID}, 'k', 'c', 't', 'b', 'r', '{}'::jsonb)`;
     await db.$client`INSERT INTO user_plan_overrides (uid) VALUES (${UID})`;
+    await db.$client`INSERT INTO run_usage (id, user_id, session_id, run_id, model, input_tokens, output_tokens) VALUES
+      (${"14141414-1414-7414-8414-141414141414"}, ${UID}, ${SESSION}, ${"15151515-1515-7515-8515-151515151515"}, 'auto', 10, 2),
+      (${"16161616-1616-7616-8616-161616161616"}, ${OTHER}, ${OTHER_SESSION}, ${"17171717-1717-7717-8717-171717171717"}, 'auto', 10, 2)`;
     await db.$client`INSERT INTO mint_audit (id, actor, action, target) VALUES
       (${"13131313-1313-7313-8313-131313131313"}, 'admin', 'ban', ${JSON.stringify({ uid: UID })}::jsonb)`;
     await db.$client`INSERT INTO shares (token, owner_uid, session_id, request_id, content, message_count, created_at, expires_at) VALUES
@@ -590,6 +594,7 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
       ["plugin_grants", "user_id"],
       ["devices", "user_id"],
       ["notifications", "user_id"],
+      ["run_usage", "user_id"],
       ["reports", "reporter_uid"],
     ] as const) {
       const [row] = await db.$client.unsafe(
@@ -617,6 +622,8 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
     // The other user's data is untouched.
     const [others] = await db.$client`SELECT count(*)::int AS n FROM sessions WHERE user_id = ${OTHER}`;
     expect(others.n).toBe(1);
+    const [otherUsage] = await db.$client`SELECT count(*)::int AS n FROM run_usage WHERE user_id = ${OTHER}`;
+    expect(otherUsage.n).toBe(1);
     const [otherShare] = await db.$client`SELECT content FROM shares WHERE token = ${OTHER_SHARE_TOKEN}`;
     expect(otherShare.content).toEqual({ messages: [] });
     // Own share content is erased (receipt row retained), images tombstoned.

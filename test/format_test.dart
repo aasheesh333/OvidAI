@@ -47,4 +47,37 @@ void main() {
           '2h 5m');
     });
   });
+
+  group('local date/time (SH-016, SH-022)', () {
+    final now = DateTime(2026, 10, 19, 8, 0);
+
+    test('formats wall-clock time without ISO noise', () {
+      expect(formatLocalDateTime(DateTime(2026, 10, 19, 13, 45), now: now),
+          'Oct 19, 1:45 PM');
+      expect(formatLocalDateTime(DateTime(2026, 10, 20, 0, 5), now: now),
+          'Oct 20, 12:05 AM');
+      expect(formatLocalDateTime(DateTime(2027, 1, 2, 9, 0), now: now),
+          'Jan 2, 2027, 9:00 AM');
+      expect(formatLocalDay(DateTime(2026, 10, 18), now: now), 'Oct 18');
+    });
+
+    test('time until is coarse and human', () {
+      expect(formatTimeUntil(now.add(const Duration(hours: 5, minutes: 12)),
+          now: now), 'in 5 h 12 m');
+      expect(formatTimeUntil(now.add(const Duration(minutes: 12)), now: now),
+          'in 12 m');
+      expect(formatTimeUntil(now.add(const Duration(seconds: 20)), now: now),
+          'in under a minute');
+      expect(formatTimeUntil(now.add(const Duration(days: 2, hours: 3)),
+          now: now), 'in 2 d 3 h');
+      expect(formatTimeUntil(now.subtract(const Duration(minutes: 1)),
+          now: now), 'now');
+    });
+
+    test('reset label and deadline combine both', () {
+      final at = DateTime(2026, 10, 19, 13, 45);
+      expect(formatResetLabel(at, now: now), 'Resets in 5 h 45 m · Oct 19, 1:45 PM');
+      expect(formatDeadline(at, now: now), 'Oct 19, 1:45 PM (in 5 h 45 m)');
+    });
+  });
 }

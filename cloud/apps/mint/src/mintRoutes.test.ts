@@ -365,7 +365,14 @@ describe.skipIf(!RUN)("public mint endpoints (mintRoutes.ts)", () => {
         price_usd: 5,
         aliases: ["3x"],
         window: "24h",
+        // SH-006: the same live cards /usage returns.
+        tier: "3x",
+        mult: 3,
+        product_id: "ovid_plus_monthly",
       });
+      expect((starter as unknown as { features: string[] }).features).toContain(
+        "About 3x the Free allowance",
+      );
     } finally {
       await storeSettings({ db, redis }, original);
     }

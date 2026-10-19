@@ -478,6 +478,35 @@ class WsMultiplexer extends ChangeNotifier {
     _userDisconnecting = false;
   }
 
+  /// Account switch / sign-out (SH-008): the socket's ticket was minted for
+  /// the previous uid and the gateway rejects that socket's subscribes for
+  /// any other account, so tear the link down AND forget every
+  /// subscription and replay cursor (they name the previous account's
+  /// sessions). The next [connectIfNeeded] mints a fresh ticket for the
+  /// current account.
+  Future<void> resetForAccountChange() async {
+    await disconnect();
+    for (final sub in _subs.values) {
+      unawaited(sub.events.close().catchError((Object _) {}));
+    }
+    _subs.clear();
+    _seededCursors.clear();
+    _rawSessionErrorWatchers.clear();
+    _outboundQueue.clear();
+    try {
+      final prefs = _prefs ??= await SharedPreferences.getInstance();
+      for (final key in prefs.getKeys().toList()) {
+        if (key.startsWith(_lastEventKey)) await prefs.remove(key);
+      }
+    } catch (err) {
+      debugPrint('cloud ws: cursor reset failed: $err');
+    }
+  }
+
+  /// Active session subscriptions (diagnostics/tests).
+  @visibleForTesting
+  int get subscriptionCountForTest => _subs.length;
+
   /// Sends an arbitrary op frame over the multiplexed socket (the Tasks
   /// 15/16 `pty_*`/`browser_*` lane), connecting first if needed. Frames
   /// sent mid-connect are buffered (≤ [_outboundQueueMax]) and flushed once

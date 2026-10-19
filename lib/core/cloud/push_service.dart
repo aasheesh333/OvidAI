@@ -22,6 +22,10 @@ abstract class PushMessagingDelegate {
   Stream<PushMessageData> get onMessage;
   Stream<PushMessageData> get onMessageOpenedApp;
   Future<PushMessageData?> getInitialMessage();
+
+  /// Invalidates the current registration token so the next account on this
+  /// device gets a fresh one (the old token can never be re-bound to it).
+  Future<void> deleteToken();
 }
 
 /// Production delegate over [FirebaseMessaging].
@@ -58,17 +62,27 @@ class FirebaseMessagingDelegate implements PushMessagingDelegate {
   @override
   Future<PushMessageData?> getInitialMessage() async =>
       (await _messaging.getInitialMessage())?.data;
+
+  @override
+  Future<void> deleteToken() => _messaging.deleteToken();
 }
 
-/// Cloud push: registers this device's FCM token and turns FCM messages into
-/// in-app notifications / routes.
+/// Cloud push: registers this device's FCM token for the signed-in account
+/// and turns FCM messages into in-app notifications / routes.
 ///
 /// This is the thin-client replacement for the deleted foreground-service
 /// keep-alive: runs execute detached on the gateway, so the device only needs
 /// to be woken to show the result. Nothing here keeps the process alive.
 ///
-/// Notification `data` routes (P4 payload):
-///   `{'route': '/c/<sessionId>'}` and `{'route': '/schedule/<scheduleId>'}`.
+/// Listening ([init]) is process-wide; registration is per account
+/// ([bindAccount] on every account that becomes ready, [unbindAccount] before
+/// every sign-out / reset), so a signed-out device or a second account never
+/// receives the previous account's notifications (SH-003, SE-002, CT-006).
+///
+/// Notification `data` routes (P4 payload, worker notify.ts):
+///   `{'route': '/c/<serverSessionId>'}` and
+///   `{'route': '/schedule/<serverSessionId>'}` — both carry the SERVER
+///   session id; the router resolves it to the local row (FE-011).
 class PushService {
   PushService({
     CloudRestClient? rest,
@@ -101,19 +115,31 @@ class PushService {
   StreamSubscription<PushMessageData>? _messageSub;
   StreamSubscription<PushMessageData>? _openedSub;
 
-  /// Requests permission, registers the current token, and starts listening.
-  /// Safe to call more than once and never throws: push is best-effort.
+  /// The account whose uid the current FCM token is registered to on the
+  /// gateway, or null when no account is bound (signed out / never bound).
+  String? _boundUid;
+  String? _boundToken;
+
+  /// Serialises bind/unbind so a fast sign-out → sign-in can never interleave
+  /// the DELETE for A with the POST for B.
+  Future<void> _chain = Future<void>.value();
+
+  /// The uid this device's token is currently registered to.
+  String? get boundUid => _boundUid;
+
+  /// Starts listening for token refreshes, foreground messages and taps.
+  /// Never requests the notification permission: the first-run onboarding
+  /// owns that prompt so prompts never stack (EM-005, EM-016). Safe to call
+  /// more than once; never throws.
   Future<void> init() async {
     if (_initialized) return;
     _initialized = true;
     try {
-      await _messaging.requestPermission();
-      final token = await _messaging.getToken();
-      if (token != null && token.isNotEmpty) {
-        await _register(token);
-      }
       _tokenSub = _messaging.onTokenRefresh.listen((token) {
         if (token.isEmpty) return;
+        // Signed out: there is nobody to register the new token for.
+        if (_boundUid == null) return;
+        _boundToken = token;
         unawaited(_register(token));
       });
       _messageSub = _messaging.onMessage.listen(_showInApp);
@@ -123,6 +149,68 @@ class PushService {
     } catch (e) {
       Diag.swallow('push.init', e);
     }
+  }
+
+  /// Asks Android for POST_NOTIFICATIONS (API 33+). Called by the first-run
+  /// onboarding step and the Settings toggle, never implicitly.
+  Future<bool> requestPermission() async {
+    try {
+      return await _messaging.requestPermission();
+    } catch (e) {
+      Diag.swallow('push.permission', e);
+      return false;
+    }
+  }
+
+  /// Registers this device's token for [uid]. Runs for every account that
+  /// becomes ready (not once per process), so account B is registered after
+  /// A signs out in the same process. Idempotent per uid.
+  Future<void> bindAccount(String uid) => _serial(() async {
+        await init();
+        if (_boundUid == uid) return;
+        _boundUid = uid;
+        try {
+          final token = await _messaging.getToken();
+          if (_boundUid != uid) return;
+          if (token != null && token.isNotEmpty) {
+            _boundToken = token;
+            await _register(token);
+          }
+        } catch (e) {
+          Diag.swallow('push.bind', e);
+        }
+      });
+
+  /// Unregisters this device from the bound account (`DELETE /devices` with
+  /// the still-valid ID token), then invalidates the FCM token so pushes for
+  /// that account can never reach this device again. Call BEFORE the
+  /// Firebase sign-out. Best-effort, bounded by [timeout], never throws.
+  Future<void> unbindAccount({
+    Duration timeout = const Duration(seconds: 6),
+  }) => _serial(() async {
+        final uid = _boundUid;
+        final token = _boundToken;
+        _boundUid = null;
+        _boundToken = null;
+        if (uid == null) return;
+        if (token != null && token.isNotEmpty) {
+          try {
+            await _rest.unregisterDevice(fcmToken: token).timeout(timeout);
+          } catch (e) {
+            Diag.swallow('push.unregister_device', e);
+          }
+        }
+        try {
+          await _messaging.deleteToken().timeout(timeout);
+        } catch (e) {
+          Diag.swallow('push.delete_token', e);
+        }
+      });
+
+  Future<void> _serial(Future<void> Function() op) {
+    final next = _chain.then((_) => op());
+    _chain = next.catchError((Object _) {});
+    return next;
   }
 
   Future<void> _register(String token) async {
@@ -139,7 +227,7 @@ class PushService {
     final route = _route(data);
     final notification = OvidNotification(
       kind: OvidNotificationKind.jobDone,
-      title: _text(data['title']) ?? 'Ovid',
+      title: _text(data['title']) ?? 'Ovid Si',
       body: _text(data['body']) ?? '',
       route: route ?? NotificationRoutes.home,
     );
@@ -185,5 +273,7 @@ class PushService {
     _messageSub = null;
     _openedSub = null;
     _initialized = false;
+    _boundUid = null;
+    _boundToken = null;
   }
 }
