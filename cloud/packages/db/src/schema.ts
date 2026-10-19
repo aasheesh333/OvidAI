@@ -184,9 +184,18 @@ export const attachments = pgTable(
     name: text("name").notNull(),
     size: integer("size").notNull(),
     r2Key: text("r2_key").notNull(),
+    // Wave 1b (CH-006): the user message this upload was sent with — set by
+    // the send route once the prompt row exists, so history pages can render
+    // the attachment chips under the right bubble. NULL = staged but never
+    // sent (or sent before the column existed). No FK: a truncated message
+    // simply leaves the link dangling, and the reader joins by id.
+    messageId: char("message_id", { length: 36 }),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
-  (t) => [index("attachments_session_id_idx").on(t.sessionId)],
+  (t) => [
+    index("attachments_session_id_idx").on(t.sessionId),
+    index("attachments_message_id_idx").on(t.messageId),
+  ],
 );
 
 export type UserRow = typeof users.$inferSelect;

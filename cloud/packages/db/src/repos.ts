@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import { uuidv7 } from "uuidv7";
 import type { MessageDto, SessionEvent, SessionEventType, UiManifest } from "@ovid/shared";
 import type { Db } from "./client.js";
@@ -524,6 +524,127 @@ export const messages = {
     const last = rows[rows.length - 1];
     return { rows, nextCursor: hasMore && last ? last.id : null };
   },
+
+  /** Wave 1b: one message of THIS session (session-scoped), or null. */
+  async getInSession(db: Db, sessionId: string, messageId: string): Promise<MessageRow | null> {
+    const rows = await db
+      .select()
+      .from(messagesTable)
+      .where(and(eq(messagesTable.sessionId, sessionId), eq(messagesTable.id, messageId)))
+      .limit(1);
+    return rows[0] ?? null;
+  },
+
+  /**
+   * Wave 1b (regenerate): the newest USER row strictly before [beforeId] in
+   * id order — the prompt an assistant answer replied to — or null.
+   */
+  async latestUserBefore(db: Db, sessionId: string, beforeId: string): Promise<MessageRow | null> {
+    const rows = await db
+      .select()
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.sessionId, sessionId),
+          eq(messagesTable.role, "user"),
+          lt(messagesTable.id, beforeId),
+        ),
+      )
+      .orderBy(desc(messagesTable.id))
+      .limit(1);
+    return rows[0] ?? null;
+  },
+
+  /**
+   * Wave 1b (CT-004 delete / edit / regenerate): removes [fromId] and every
+   * later row of the session (id order), plus the durable event-mirror rows
+   * recorded at or after the anchor's createdAt — so a rich history page can
+   * never resurrect the tool rows of a deleted turn. One transaction. A
+   * compaction checkpoint whose fold boundary sits inside the deleted span
+   * would summarize rows that no longer exist: the session's compaction
+   * state is reset in that case (the next long run re-compacts). Returns the
+   * number of message rows removed (0 when the anchor is not in the session).
+   */
+  async truncateFrom(db: Db, sessionId: string, fromId: string): Promise<number> {
+    return db.transaction(async (tx) => {
+      const anchorRows = await tx
+        .select()
+        .from(messagesTable)
+        .where(and(eq(messagesTable.sessionId, sessionId), eq(messagesTable.id, fromId)))
+        .limit(1);
+      const anchor = anchorRows[0];
+      if (anchor === undefined) return 0;
+      const deleted = await tx
+        .delete(messagesTable)
+        .where(and(eq(messagesTable.sessionId, sessionId), gte(messagesTable.id, fromId)))
+        .returning({ id: messagesTable.id });
+      await tx
+        .delete(sessionEventMirror)
+        .where(
+          and(
+            eq(sessionEventMirror.sessionId, sessionId),
+            gte(sessionEventMirror.ts, anchor.createdAt),
+          ),
+        );
+      const stateRows = await tx
+        .select()
+        .from(sessionAgentStateTable)
+        .where(eq(sessionAgentStateTable.sessionId, sessionId))
+        .limit(1);
+      const stateRow = stateRows[0];
+      if (stateRow !== undefined) {
+        const json = stateRow.state as { compaction?: { cutoffMessageId?: string | null } | null };
+        const cutoff = json.compaction?.cutoffMessageId ?? null;
+        if (json.compaction != null && (cutoff === null || cutoff >= fromId)) {
+          await tx
+            .update(sessionAgentStateTable)
+            .set({ state: { ...stateRow.state, compaction: null } })
+            .where(eq(sessionAgentStateTable.sessionId, sessionId));
+        }
+      }
+      return deleted.length;
+    });
+  },
+
+  /**
+   * Wave 1b (branch): copies [rows] (oldest-first) into [targetSessionId]
+   * with fresh time-ordered ids, keeping each row's role, content and
+   * createdAt. One statement; returns the number inserted.
+   */
+  async copyInto(
+    db: Db,
+    targetSessionId: string,
+    rows: ReadonlyArray<Pick<MessageRow, "role" | "content" | "createdAt">>,
+  ): Promise<number> {
+    if (rows.length === 0) return 0;
+    const inserted = await db
+      .insert(messagesTable)
+      .values(
+        rows.map((r) => ({
+          id: newId(),
+          sessionId: targetSessionId,
+          role: r.role,
+          content: r.content,
+          createdAt: r.createdAt,
+        })),
+      )
+      .returning({ id: messagesTable.id });
+    return inserted.length;
+  },
+
+  /**
+   * Wave 1b (branch): the session's rows up to and including [throughId],
+   * oldest-first, keeping at most the [limit] newest of them.
+   */
+  async upTo(db: Db, sessionId: string, throughId: string, limit: number): Promise<MessageRow[]> {
+    const rows = await db
+      .select()
+      .from(messagesTable)
+      .where(and(eq(messagesTable.sessionId, sessionId), lte(messagesTable.id, throughId)))
+      .orderBy(desc(messagesTable.id))
+      .limit(limit);
+    return rows.reverse();
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -877,6 +998,39 @@ export const attachments = {
       .where(where)
       .orderBy(asc(attachmentsTable.id));
   },
+
+  /** Wave 1b (CH-006): records which user message carried these uploads. */
+  async linkToMessage(
+    db: Db,
+    sessionId: string,
+    ids: readonly string[],
+    messageId: string,
+  ): Promise<void> {
+    if (ids.length === 0) return;
+    await db
+      .update(attachmentsTable)
+      .set({ messageId })
+      .where(and(eq(attachmentsTable.sessionId, sessionId), inArray(attachmentsTable.id, [...ids])));
+  },
+
+  /** Wave 1b (CH-006): the attachments sent with any of [messageIds], oldest-first. */
+  async forMessages(
+    db: Db,
+    sessionId: string,
+    messageIds: readonly string[],
+  ): Promise<AttachmentRow[]> {
+    if (messageIds.length === 0) return [];
+    return db
+      .select()
+      .from(attachmentsTable)
+      .where(
+        and(
+          eq(attachmentsTable.sessionId, sessionId),
+          inArray(attachmentsTable.messageId, [...messageIds]),
+        ),
+      )
+      .orderBy(asc(attachmentsTable.id));
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -978,7 +1132,87 @@ export const eventMirror = {
       .limit(limit);
     return rows.reverse().map(toSessionEvent);
   },
+
+  /** Wave 1b (CH-003): the session's newest mirrored seq, or null when none. */
+  async maxSeq(db: Db, sessionId: string): Promise<string | null> {
+    const rows = await db
+      .select({ seq: sessionEventMirror.seq })
+      .from(sessionEventMirror)
+      .where(eq(sessionEventMirror.sessionId, sessionId))
+      .orderBy(desc(seqMs), desc(seqSub))
+      .limit(1);
+    return rows[0]?.seq ?? null;
+  },
+
+  /**
+   * Wave 1b (CH-006 rich history): the session's events whose ts falls in
+   * [fromTs, toTs) (either bound optional) and whose seq is at most
+   * [maxSeq], in seq order, EXCLUDING streaming deltas (`message_delta` —
+   * settled text rides message_completed / message_segment). At most
+   * [limit] rows: the NEWEST ones of the window when it overflows.
+   */
+  async readWindow(
+    db: Db,
+    sessionId: string,
+    o: { fromTs: Date | null; toTs: Date | null; maxSeq: string | null; limit: number },
+  ): Promise<SessionEvent[]> {
+    const conds = [
+      eq(sessionEventMirror.sessionId, sessionId),
+      ne(sessionEventMirror.type, "message_delta"),
+    ];
+    if (o.fromTs !== null) conds.push(gte(sessionEventMirror.ts, o.fromTs));
+    if (o.toTs !== null) conds.push(lt(sessionEventMirror.ts, o.toTs));
+    const max = seqAtMost(o.maxSeq);
+    if (max !== undefined) conds.push(max);
+    const rows = await db
+      .select()
+      .from(sessionEventMirror)
+      .where(and(...conds))
+      .orderBy(desc(seqMs), desc(seqSub))
+      .limit(o.limit);
+    return rows.reverse().map(toSessionEvent);
+  },
+
+  /**
+   * Wave 1b (CH-002): the `message_delta` rows of [runId] with seq strictly
+   * after [afterSeq] (null ⇒ all) and at most [maxSeq], in seq order — the
+   * live answer's text so far, for a chat reopened mid-run.
+   */
+  async deltasForRun(
+    db: Db,
+    sessionId: string,
+    runId: string,
+    o: { afterSeq: string | null; maxSeq: string | null; limit: number },
+  ): Promise<SessionEvent[]> {
+    const conds = [
+      eq(sessionEventMirror.sessionId, sessionId),
+      eq(sessionEventMirror.type, "message_delta"),
+      sql`${sessionEventMirror.payload}->>'runId' = ${runId}`,
+    ];
+    const after = o.afterSeq === null ? null : splitSeq(o.afterSeq);
+    if (after !== null) {
+      conds.push(
+        or(sql`${seqMs} > ${after.ms}`, and(sql`${seqMs} = ${after.ms}`, sql`${seqSub} > ${after.sub}`))!,
+      );
+    }
+    const max = seqAtMost(o.maxSeq);
+    if (max !== undefined) conds.push(max);
+    const rows = await db
+      .select()
+      .from(sessionEventMirror)
+      .where(and(...conds))
+      .orderBy(asc(seqMs), asc(seqSub))
+      .limit(o.limit);
+    return rows.map(toSessionEvent);
+  },
 };
+
+/** `seq <= maxSeq` (numeric on both parts); undefined for a null/malformed bound. */
+function seqAtMost(maxSeq: string | null) {
+  const max = maxSeq === null ? null : splitSeq(maxSeq);
+  if (max === null) return undefined;
+  return or(sql`${seqMs} < ${max.ms}`, and(sql`${seqMs} = ${max.ms}`, sql`${seqSub} <= ${max.sub}`));
+}
 
 // ---------------------------------------------------------------------------
 // MCP servers, OAuth tokens/flows, plugins, grants (P5 Task 8).
