@@ -48,9 +48,9 @@ void main() {
     await tester.pump();
     expect(find.byType(AetherSectionTitle), findsWidgets);
     expect(find.byType(AetherCard), findsWidgets);
-    expect(find.text('BACKUP'), findsOneWidget);
+    expect(find.text('EXPORT & IMPORT'), findsOneWidget);
     expect(find.text('Export'), findsOneWidget);
-    expect(find.text('Import backup…'), findsOneWidget);
+    expect(find.text('Import archive…'), findsOneWidget);
     expect(find.text('Share archive'), findsOneWidget);
     expect(find.text('JSON (for other tools)'), findsOneWidget);
     // F-149: the dead "View backup files" pseudo-link is gone.

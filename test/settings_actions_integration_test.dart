@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io';
@@ -7,7 +6,6 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/studio_remote_client.dart';
 import 'package:ovid_ai/core/composer_drafts.dart';
 import 'package:ovid_ai/core/presets.dart';
@@ -26,17 +24,10 @@ import 'package:sqlite3/open.dart' show open, OperatingSystem;
 class _Preferences extends InMemorySharedPreferencesStore {
   _Preferences() : super.empty();
   Future<bool> Function(String, Object)? beforeWrite;
-  bool throwAfterImportWrite = false;
   @override
   Future<bool> setValue(String type, String key, Object value) async {
     if (beforeWrite != null && !await beforeWrite!(key, value)) return false;
-    final result = await super.setValue(type, key, value);
-    if (throwAfterImportWrite && key == 'flutter.ovid_sessions' &&
-        (value as List).length == 2) {
-      throwAfterImportWrite = false;
-      throw StateError('storage failed after accepting the candidate');
-    }
-    return result;
+    return super.setValue(type, key, value);
   }
 }
 
@@ -149,249 +140,24 @@ void main() {
     return SettingsBackupService(publisher: SettingsActions.restorePublisher);
   }
 
-  test('production owner restores inactive new IDs and durable attachments', () async {
-    final oldRows = prefs.getStringList('ovid_sessions')!;
-    await boundService().restore(await archive(attachment: true), root);
-    expect(app.sessions, hasLength(2));
-    expect(app.activeSessionId, 'existing');
-    final imported = app.sessions.singleWhere((s) => s.id != 'existing');
-    expect(imported.id, startsWith('restored-'));
-    expect(imported.sandboxId, imported.id);
-    expect(imported.messages.single.content, 'Imported transcript');
-    final path = imported.messages.single.attachments.single.path!;
-    expect(await File(path).readAsString(), 'portable');
-    expect(path, contains('workspaces'));
-    expect(path, contains('/ws_${imported.sandboxId}/'));
-    expect(root.listSync().whereType<Directory>().where(
-      (d) => d.path.split('/').last.startsWith('ovid-restore-')), isEmpty);
-    await prefs.reload();
-    expect(prefs.getStringList('ovid_sessions')!.first, oldRows.first);
-    expect(prefs.getStringList('ovid_sessions'), hasLength(2));
-    expect(prefs.getString('ovid_session_bootstrap_v1'), 'original snapshot');
-    expect(prefs.getBool('show_reasoning'), false);
-  });
-
-  test('rejected publication rolls back disk, live state and copied files', () async {
+  test('SE-009: the bound publisher never writes local restored- rows', () async {
+    // Restore now uploads archives to Ovid Cloud (CloudBackup); the state
+    // owner's local publisher refuses, so no inactive local-only chat can be
+    // created that would never sync and that the model has no history for.
     final oldRows = prefs.getStringList('ovid_sessions');
-    backend.beforeWrite = (key, value) async =>
-        !(key == 'flutter.ovid_sessions' && (value as List).length == 2);
-    await expectLater(boundService().restore(await archive(attachment: true), root),
-        throwsStateError);
+    final service = boundService();
+    await expectLater(
+      service.restore(await archive(attachment: true), root),
+      throwsUnsupportedError,
+    );
+    expect(app.sessions.map((s) => s.id), ['existing']);
+    expect(app.sessions.where((s) => s.id.startsWith('restored-')), isEmpty);
     await prefs.reload();
     expect(prefs.getStringList('ovid_sessions'), oldRows);
-    expect(app.sessions.map((s) => s.id), ['existing']);
     expect(prefs.getString('ovid_session_bootstrap_v1'), 'original snapshot');
-    expect(prefs.getBool('show_reasoning'), false);
     expect(Directory('${root.path}/workspaces').listSync()
         .map((entry) => entry.path).toSet(), originalWorkspacePaths);
     expect(existingWorkspaceFile.readAsStringSync(), 'pre-existing workspace data');
-  });
-
-  test('ID collisions are rejected under the owner barrier', () async {
-    final service = boundService();
-    final staged = await service.stage(await archive(), root);
-    try {
-      await expectLater(SettingsActions.restorePublisher!(staged,
-          {'existing': 'existing'}), throwsStateError);
-      expect(app.sessions.map((s) => s.id), ['existing']);
-    } finally {
-      await staged.dispose();
-    }
-  });
-
-  test('storage throwing after mutation restores the exact previous rows', () async {
-    final saved = prefs.getStringList('ovid_sessions');
-    backend.throwAfterImportWrite = true;
-    await expectLater(boundService().restore(await archive(), root), throwsStateError);
-    await prefs.reload();
-    expect(prefs.getStringList('ovid_sessions'), saved);
-    expect(app.sessions.map((s) => s.id), ['existing']);
-    expect(prefs.getString('ovid_session_bootstrap_v1'), 'original snapshot');
-  });
-
-  test('an existing workspace is never overwritten for a restored ID', () async {
-    final service = boundService();
-    final staged = await service.stage(await archive(attachment: true), root);
-    final id = 'restored-${'2' * 32}';
-    final workspace = await Directory('${root.path}/workspaces/ws_$id')
-        .create(recursive: true);
-    final retained = File('${workspace.path}/keep')..writeAsStringSync('original');
-    try {
-      await expectLater(SettingsActions.restorePublisher!(staged,
-          {'existing': id}), throwsStateError);
-      expect(retained.readAsStringSync(), 'original');
-      expect(workspace.listSync(), hasLength(1));
-      expect(app.sessions.map((s) => s.id), ['existing']);
-    } finally {
-      await staged.dispose();
-    }
-  });
-
-  test('missing staged attachment never publishes any transcript', () async {
-    final service = boundService();
-    final staged = await service.stage(await archive(attachment: true), root);
-    await staged.attachments.values.single.delete();
-    try {
-      await expectLater(SettingsActions.restorePublisher!(staged,
-          {'existing': 'restored-${'1' * 32}'}), throwsStateError);
-      expect(app.sessions.map((s) => s.id), ['existing']);
-      await prefs.reload();
-      expect(prefs.getStringList('ovid_sessions'), hasLength(1));
-    } finally {
-      await staged.dispose();
-    }
-  });
-
-  test('publisher captured before an account change cannot restore into B', () async {
-    final service = boundService();
-    final bytes = await archive();
-    await app.transitionSessionAccount('B');
-    await expectLater(service.restore(bytes, root), throwsStateError);
-    expect(app.sessionAccountId, 'B');
-    expect(app.sessions.any((s) => s.title == 'Imported'), false);
-    await prefs.reload();
-    expect(prefs.getStringList('ovid_sessions'), hasLength(1));
-    expect(prefs.getStringList('ovid_sessions_owner_B'), isNull);
-  });
-
-  test('restore before namespace hydration cannot replace unloaded history', () async {
-    AppState.createForTest();
-    final service = boundService();
-    await expectLater(service.restore(await archive(), root), throwsStateError);
-    await prefs.reload();
-    expect(prefs.getStringList('ovid_sessions'), hasLength(1));
-    expect(prefs.getString('ovid_session_bootstrap_v1'), 'original snapshot');
-  });
-
-  test('account transition waits for in-flight restore rollback', () async {
-    final saved = prefs.getStringList('ovid_sessions');
-    final entered = Completer<void>();
-    final release = Completer<void>();
-    backend.beforeWrite = (key, value) async {
-      if (key == 'flutter.ovid_sessions' && (value as List).length == 2) {
-        entered.complete();
-        await release.future;
-      }
-      return true;
-    };
-    final restore = boundService().restore(await archive(attachment: true), root);
-    final failed = expectLater(restore, throwsStateError);
-    await entered.future;
-    expect(app.sessionAccountReady, false);
-    var transitioned = false;
-    final transition = app.transitionSessionAccount('B').then((_) {
-      transitioned = true;
-    });
-    await Future<void>.delayed(Duration.zero);
-    expect(transitioned, false);
-    release.complete();
-    await failed;
-    await transition;
-    await prefs.reload();
-    expect(app.sessionAccountId, 'B');
-    expect(app.sessionAccountReady, true);
-    expect(prefs.getStringList('ovid_sessions'), saved);
-    expect(prefs.getStringList('ovid_sessions_owner_B'), isNull);
-    expect(Directory('${root.path}/workspaces').listSync()
-        .map((entry) => entry.path).toSet(), originalWorkspacePaths);
-    expect(existingWorkspaceFile.readAsStringSync(), 'pre-existing workspace data');
-  });
-
-  test('racing session edits abort publication without undoing the edit', () async {
-    final entered = Completer<void>();
-    final release = Completer<void>();
-    backend.beforeWrite = (key, value) async {
-      if (key == 'flutter.ovid_sessions' && (value as List).length == 2) {
-        entered.complete();
-        await release.future;
-      }
-      return true;
-    };
-    final restore = boundService().restore(await archive(), root);
-    final failed = expectLater(restore, throwsStateError);
-    await entered.future;
-    app.renameSession('existing', 'Edited while copying');
-    expect(() => app.deleteSession('existing'), throwsStateError);
-    release.complete();
-    await failed;
-    expect(app.sessions.single.title, 'Edited while copying');
-    await prefs.reload();
-    expect(prefs.getStringList('ovid_sessions'), hasLength(1));
-  });
-
-  test('restore waits for pending setting writes and fences active work', () async {
-    final service = boundService();
-    final staged = await service.stage(await archive(), root);
-    final entered = Completer<void>();
-    final release = Completer<void>();
-    final token = app.sessionAccountToken;
-    CloudAgentFacade.I.setActiveRunForTest('existing', 'active-before-reset');
-    expect(CloudAgentFacade.I.busyFor('existing'), true);
-    final write = SettingsActions.persist('pending-setting', true, () async {
-      entered.complete();
-      await release.future;
-      await prefs.setBool('pending-setting', true);
-    });
-    await entered.future;
-    var finished = false;
-    final restore = service.publisher!(staged,
-        {'existing': 'restored-${'3' * 32}'}).then((_) {
-      finished = true;
-    });
-    expect(identical(app.sessionAccountToken, token), false);
-    expect(app.sessionAccountReady, false);
-    expect(CloudAgentFacade.I.busyFor('existing'), false);
-    await Future<void>.delayed(Duration.zero);
-    expect(finished, false);
-    release.complete();
-    await write;
-    await restore;
-    await staged.dispose();
-    expect(app.sessionAccountReady, true);
-    await prefs.reload();
-    expect(prefs.getBool('pending-setting'), true);
-    expect(prefs.getStringList('ovid_sessions'), hasLength(2));
-  });
-
-  test('restore applies the allowlisted settings snapshot with the transcripts', () async {
-    await prefs.setString('ovid_theme_mode', 'light');
-    await prefs.setBool('ovid_keep_alive', false);
-    await prefs.setBool('ovid_show_reasoning', true);
-    final bytes = await SettingsBackupService(attachmentRoots: [root]).export([
-      ChatSession(
-        id: 'existing', title: 'Imported', model: 'untrusted',
-        messages: [Message(role: 'user', content: 'Imported transcript')],
-      ),
-    ], settings: {'ovid_theme_mode': 'dark', 'ovid_keep_alive': true});
-    await boundService().restore(bytes, root);
-    await prefs.reload();
-    expect(prefs.getString('ovid_theme_mode'), 'dark');
-    expect(prefs.getBool('ovid_keep_alive'), true);
-    // The snapshot is a full allowlist section: an allowlisted key absent from
-    // it is removed, while non-allowlisted app state is untouched.
-    expect(prefs.getBool('ovid_show_reasoning'), isNull);
-    expect(prefs.getString('ovid_session_bootstrap_v1'), 'original snapshot');
-    expect(app.sessions, hasLength(2));
-  });
-
-  test('failed settings apply rolls back settings and transcripts together', () async {
-    await prefs.setString('ovid_theme_mode', 'light');
-    await prefs.setBool('ovid_keep_alive', true);
-    final saved = prefs.getStringList('ovid_sessions');
-    backend.beforeWrite = (key, value) async =>
-        !(key == 'flutter.ovid_theme_mode' && value == 'dark');
-    final bytes = await SettingsBackupService(attachmentRoots: [root]).export([
-      ChatSession(
-        id: 'existing', title: 'Imported', model: 'untrusted',
-        messages: [Message(role: 'user', content: 'Imported transcript')],
-      ),
-    ], settings: {'ovid_theme_mode': 'dark'});
-    await expectLater(boundService().restore(bytes, root), throwsStateError);
-    await prefs.reload();
-    expect(prefs.getString('ovid_theme_mode'), 'light');
-    expect(prefs.getBool('ovid_keep_alive'), true);
-    expect(prefs.getStringList('ovid_sessions'), saved);
-    expect(app.sessions.map((s) => s.id), ['existing']);
   });
 
   test('wired all-store reset clears verifiable stores and reports the rest truthfully', () async {

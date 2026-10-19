@@ -3,11 +3,11 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+import '../core/cloud/cloud_backup.dart';
+import '../core/cloud/cloud_session_store.dart';
 import '../core/diag.dart';
 import '../core/native_share.dart';
-import '../core/settings_actions.dart';
 import '../core/settings_backup_service.dart';
-import '../core/state.dart';
 import '../core/theme.dart';
 import '../l10n/l10n.dart';
 import 'settings_action_widgets.dart';
@@ -15,8 +15,15 @@ import 'user_error.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/error_views.dart';
 
+/// Settings → Export & import. Both directions go through Ovid Cloud (SE-008,
+/// SE-009): export pages the account's full history from the server, import
+/// uploads an archive's chats into the account through the import route.
 class SettingsBackupScreen extends StatefulWidget {
-  const SettingsBackupScreen({super.key});
+  const SettingsBackupScreen({super.key, this.backup});
+
+  /// Test seam; production uses the signed-in account's REST client.
+  final CloudBackup? backup;
+
   @override
   State<SettingsBackupScreen> createState() => _SettingsBackupScreenState();
 }
@@ -25,12 +32,15 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
   bool _busy = false;
   String? _status;
   String? _statusDetail;
-  String _operation = 'Backup';
+  String _operation = 'Export';
   File? _exported;
 
-  /// Set once the restore publisher starts writing. Only failures before this
-  /// point can honestly say "No data was changed".
-  bool _publishStarted = false;
+  /// Live progress line and fraction (null fraction = indeterminate).
+  String? _progress;
+  double? _fraction;
+  CloudBackupCancelToken? _cancel;
+
+  CloudBackup get _backup => widget.backup ?? CloudBackup();
 
   Future<void> _run(String operation, Future<void> Function() action) async {
     if (_busy) return;
@@ -39,36 +49,92 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
       _operation = operation;
       _status = null;
       _statusDetail = null;
-      _publishStarted = false;
+      _progress = null;
+      _fraction = null;
     });
     try {
       await action();
+    } on CloudBackupCancelled {
+      if (mounted) {
+        setState(
+          () => _status = operation == 'Import'
+              ? CloudBackupCopy.importStopped
+              : CloudBackupCopy.exportStopped,
+        );
+      }
     } catch (e, st) {
       Diag.swallow('settings_backup_screen.$operation', e, st);
       if (mounted) {
         final message = _failureMessage(context.l10n, operation, e);
         setState(() {
           _status = message;
-          _statusDetail = UserError.detailOf(e);
+          _statusDetail = UserError.detailOf(
+            e is CloudRestorePartial ? e.cause : e,
+          );
         });
       }
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _cancel = null;
+          _progress = null;
+          _fraction = null;
+        });
+      }
     }
   }
 
   String _failureMessage(AppLocalizations l, String operation, Object error) {
-    if (error is RestoreRollbackError) return l.backupRestoreRollbackUnverified;
+    if (error is CloudRestorePartial) {
+      final cause = error.cause;
+      final reason = cause is CloudBackupCancelled ? '' : _reason(l, cause);
+      return CloudBackupCopy.importPartial(error.chatsUploaded, reason);
+    }
+    return l.backupFailedUnchanged(operation, _reason(l, error));
+  }
+
+  String _reason(AppLocalizations l, Object error) {
     // A named backup limit is already user-facing copy (PR-6d).
-    final reason = error is BackupLimitException
-        ? error.message
-        : error is FormatException
-        ? l.backupInvalidArchive
-        : friendlyError(error, l10n: l);
-    // The publisher contract rolls back its own writes on failure; an
-    // unverified rollback is reported above as RestoreRollbackError.
-    if (_publishStarted) return l.backupRestoreRolledBack(reason);
-    return l.backupFailedUnchanged(operation, reason);
+    if (error is BackupLimitException) return error.message;
+    if (error is FormatException) return l.backupInvalidArchive;
+    if (UserError.from(error).kind == UserErrorKind.unauthorized) {
+      return CloudBackupCopy.signInRequired;
+    }
+    return friendlyError(error, l10n: l);
+  }
+
+  void _onProgress(CloudBackupProgress p) {
+    if (!mounted) return;
+    setState(() {
+      _fraction = p.fraction;
+      _progress = switch (p.phase) {
+        CloudBackupPhase.listing => CloudBackupCopy.listing(p.done),
+        CloudBackupPhase.downloading => CloudBackupCopy.downloading(
+          p.done,
+          p.total,
+        ),
+        CloudBackupPhase.uploading => CloudBackupCopy.uploading(
+          p.done,
+          p.total,
+        ),
+      };
+    });
+  }
+
+  /// Pages the account's full history from Ovid Cloud with visible progress.
+  Future<CloudExportSnapshot> _fetchHistory() async {
+    final cancel = CloudBackupCancelToken();
+    setState(() => _cancel = cancel);
+    try {
+      return await _backup.fetchHistory(
+        onProgress: _onProgress,
+        cancel: cancel,
+      );
+    } finally {
+      // Past this point there is nothing left to stop.
+      if (mounted) setState(() => _cancel = null);
+    }
   }
 
   /// Opens the share sheet for [file] so the user picks where to save it.
@@ -83,27 +149,22 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
   }
 
   Future<void> _export() => _run('Export', () async {
-    final sessions = List.of(AppState.I.sessions);
-    final plan = SettingsBackupService.planExport(sessions);
+    final snapshot = await _fetchHistory();
+    final plan = SettingsBackupService.planExport(snapshot.sessions);
     if (!plan.isComplete) {
       final proceed = await _confirmPartial(plan);
       if (proceed != true || plan.included.isEmpty) {
         if (mounted) {
           setState(
-            () => _status =
-                'Export cancelled. Your chats exceed ${plan.limitHit}.',
+            () => _status = CloudBackupCopy.exportLimit(plan.limitHit ?? ''),
           );
         }
         return;
       }
     }
-    final support = await getApplicationSupportDirectory();
-    // Only known attachment roots; never export arbitrary app documents,
-    // secure storage, external folders, or a recursively discovered tree.
-    final service = SettingsBackupService(
-      attachmentRoots: [Directory('${support.path}/workspaces')],
-    );
-    final bytes = await service.export(plan.included);
+    // Server transcripts only: no device attachment roots are read, so the
+    // archive never claims files it could not fetch.
+    final bytes = await SettingsBackupService().export(plan.included);
     final temp = await getTemporaryDirectory();
     final dir = await temp.createTemp('ovid-backup-');
     final file = File('${dir.path}/ovid-transcripts-v1.zip');
@@ -114,19 +175,30 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
       rethrow;
     }
     if (mounted) setState(() => _exported = file);
-    final shared = await _share(file);
-    if (mounted) {
-      final scope = plan.isComplete
-          ? ''
-          : ' It holds your ${plan.included.length} most recent chat(s); '
-                '${plan.skipped.length} older chat(s) were left out because '
-                'of ${plan.limitHit}.';
-      setState(() {
-        _status = shared
-            ? 'Export complete. Choose where to save the archive in the share sheet.$scope'
-            : 'Export complete. Tap Share archive to save it.$scope';
-      });
+    final messages = plan.included.fold<int>(
+      0,
+      (sum, s) => sum + s.messages.length,
+    );
+    final summary = StringBuffer(
+      CloudBackupCopy.exported(plan.included.length, messages),
+    );
+    if (!plan.isComplete) {
+      summary.write(
+        CloudBackupCopy.exportPartial(
+          plan.included.length,
+          plan.skipped.length,
+          plan.limitHit ?? '',
+        ),
+      );
     }
+    if (snapshot.skippedMessages > 0) {
+      summary.write(CloudBackupCopy.leftOutTool(snapshot.skippedMessages));
+    }
+    final shared = await _share(file);
+    summary.write(
+      shared ? CloudBackupCopy.exportShared : CloudBackupCopy.exportNotShared,
+    );
+    if (mounted) setState(() => _status = summary.toString());
   });
 
   Future<bool?> _confirmPartial(BackupExportPlan plan) => showDialog<bool>(
@@ -134,8 +206,11 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
     builder: (context) => AlertDialog(
       title: Text(context.l10n.backupLimitReachedTitle),
       content: Text(
-        'Your chats exceed ${plan.limitHit}. '
-        '${plan.included.isEmpty ? 'No chat fits in a backup.' : 'Export your ${plan.included.length} most recent chat(s) now? ${plan.skipped.length} older chat(s) will not be included.'}',
+        CloudBackupCopy.exportPartialPrompt(
+          plan.included.length,
+          plan.skipped.length,
+          plan.limitHit ?? '',
+        ),
       ),
       actions: [
         TextButton(
@@ -152,6 +227,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
   );
 
   Future<void> _exportJson() => _run('JSON export', () async {
+    final snapshot = await _fetchHistory();
     final temp = await getTemporaryDirectory();
     // Remove plaintext left behind by an interrupted earlier export.
     await for (final entity in temp.list(followLinks: false)) {
@@ -167,7 +243,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
     final bool shared;
     try {
       final file = await SettingsBackupService.writeJsonExport(
-        List.of(AppState.I.sessions),
+        snapshot.sessions,
         dir,
       );
       // The native share path copies the file into its own short-lived share
@@ -182,19 +258,15 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
     if (mounted) {
       setState(
         () => _status = shared
-            ? 'JSON export ready. Choose where to save it in the share sheet. '
-                  'JSON files are for other tools and cannot be restored.'
-            : 'JSON export could not open the share sheet. Try again.',
+            ? CloudBackupCopy.jsonShared
+            : CloudBackupCopy.jsonNotShared,
       );
     }
   });
 
-  /// One flow: pick an archive, validate it, show what it holds, and restore
-  /// only after the user confirms.
+  /// One flow: pick an archive, validate it, show what it holds, and upload
+  /// it to the Ovid Cloud account only after the user confirms.
   Future<void> _import() => _run('Import', () async {
-    // Capture ownership before the picker and all IO: an account handoff while
-    // choosing a file must not redirect the import into the next account.
-    final owner = SettingsActions.restorePublisher;
     final picked = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['zip'],
@@ -219,50 +291,25 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
       buffer.add(chunk);
     }
     final bytes = buffer.takeBytes();
-    // Only failures before the publisher starts writing may say "No data
-    // was changed".
-    final SettingsRestorePublisher? publisher = owner == null
-        ? null
-        : (staged, ids) {
-            _publishStarted = true;
-            return owner(staged, ids);
-          };
     final temp = await getTemporaryDirectory();
     final staged = await SettingsBackupService().stage(bytes, temp);
-    final int sessions;
-    final int messages;
-    final int attachments;
+    final List<Map<String, dynamic>> sessions;
     try {
-      sessions = staged.sessions.length;
-      messages = staged.sessions.fold<int>(
-        0,
-        (sum, s) => sum + ((s['messages'] as List?)?.length ?? 0),
-      );
-      attachments = staged.attachments.length;
+      sessions = List.of(staged.sessions);
     } finally {
       await staged.dispose();
     }
-    final summary =
-        'Archive valid: $sessions transcript(s), $messages message(s), '
-        '$attachments portable attachment(s).';
-    if (publisher == null) {
-      if (mounted) {
-        setState(
-          () => _status =
-              '$summary Restore is unavailable in this build. No data restored.',
-        );
-      }
-      return;
-    }
+    final messages = sessions.fold<int>(
+      0,
+      (sum, s) => sum + ((s['messages'] as List?)?.length ?? 0),
+    );
+    final summary = CloudBackupCopy.archiveSummary(sessions.length, messages);
     if (!mounted) return;
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(context.l10n.backupRestoreTitle),
-        content: Text(
-          '$summary\n\nThey will be added as new, inactive chats in the '
-          'current account. Existing chats are not changed or merged.',
-        ),
+        content: Text('$summary\n\n${CloudBackupCopy.importConfirm}'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -276,65 +323,89 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
       ),
     );
     if (confirm != true) {
-      if (mounted) setState(() => _status = '$summary No data restored.');
+      if (mounted) {
+        setState(() => _status = '$summary${CloudBackupCopy.importDeclined}');
+      }
       return;
     }
-    await SettingsBackupService(publisher: publisher).restore(bytes, temp);
-    if (mounted) {
-      setState(
-        () => _status =
-            'Transcripts restored: $sessions new, inactive chat(s) '
-            'in the current account.',
+    final cancel = CloudBackupCancelToken();
+    if (mounted) setState(() => _cancel = cancel);
+    final CloudRestoreReport report;
+    try {
+      report = await _backup.uploadArchiveSessions(
+        sessions,
+        onProgress: _onProgress,
+        cancel: cancel,
       );
+    } finally {
+      // Bring the uploaded chats (all, or the part uploaded before a stop)
+      // into the sidebar as ordinary cloud chats.
+      try {
+        await CloudSessionStore.I.refreshSessions();
+      } catch (e, st) {
+        Diag.swallow('settings_backup_screen.refresh', e, st);
+      }
     }
+    if (mounted) setState(() => _status = CloudBackupCopy.imported(report));
   });
 
   @override
   Widget build(BuildContext context) {
-    final restoreAvailable = SettingsActions.restorePublisher != null;
     final mibLimit = SettingsBackupService.maxArchiveBytes ~/ (1024 * 1024);
-    final attLimit = SettingsBackupService.maxAttachmentBytes ~/ (1024 * 1024);
+    final idle = _exported != null
+        ? CloudBackupCopy.archiveReady
+        : CloudBackupCopy.idle;
+    final live = _busy ? (_progress ?? '$_operation in progress…') : idle;
     return Scaffold(
+      backgroundColor: Aether.bg,
       appBar: AppBar(
         toolbarHeight:
             kToolbarHeight * (MediaQuery.textScalerOf(context).scale(20) / 20),
-        title: const Text('Export data'),
+        title: const Text(CloudBackupCopy.screenTitle),
       ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
           const AetherSectionTitle(
-            eyebrow: 'Backup',
-            subtitle: 'Portable, versioned transcript archive.',
+            eyebrow: CloudBackupCopy.screenTitle,
+            subtitle: CloudBackupCopy.screenSubtitle,
           ),
           const SizedBox(height: 12),
           Semantics(
             container: true,
             liveRegion: true,
-            label:
-                'Backup status: ${_busy
-                    ? '$_operation in progress'
-                    : _exported != null
-                    ? 'Archive ready to share'
-                    : 'Ready to export'}',
-            child: ExcludeSemantics(
-              child: Text(
-                _busy
-                    ? '$_operation in progress…'
-                    : _exported != null
-                    ? 'Archive ready to share'
-                    : 'Ready to export',
-                style: AetherType.label,
-              ),
-            ),
+            label: CloudBackupCopy.statusPrefix + live,
+            child: ExcludeSemantics(child: Text(live, style: AetherType.label)),
           ),
+          if (_busy) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: LinearProgressIndicator(
+                    value: _fraction,
+                    semanticsLabel: live,
+                  ),
+                ),
+                if (_cancel != null) ...[
+                  const SizedBox(width: 8),
+                  TextButton(
+                    onPressed: _cancel!.isCancelled
+                        ? null
+                        : () => setState(() => _cancel!.cancel()),
+                    child: const Text(CloudBackupCopy.stop),
+                  ),
+                ],
+              ],
+            ),
+          ],
           const SizedBox(height: 12),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
                 child: SettingsActionButton(
-                  label: 'Export',
+                  label: CloudBackupCopy.exportButton,
                   icon: Icons.file_download_outlined,
                   primary: true,
                   onPressed: _busy ? null : _export,
@@ -352,8 +423,8 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
                           if (mounted) {
                             setState(
                               () => _status = shared
-                                  ? 'Share sheet opened. Choose a destination to save the archive.'
-                                  : 'The share sheet could not be opened.',
+                                  ? CloudBackupCopy.shareOpened
+                                  : CloudBackupCopy.shareFailed,
                             );
                           }
                         }),
@@ -362,31 +433,15 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
             ],
           ),
           const SizedBox(height: 8),
-          Text(
-            'Export opens Share / save so you choose where the archive goes.',
-            style: AetherType.caption,
-          ),
+          Text(CloudBackupCopy.exportHelp, style: AetherType.caption),
           const SizedBox(height: 16),
           SettingsActionButton(
-            label: 'Import backup…',
+            label: CloudBackupCopy.importButton,
             icon: Icons.file_upload_outlined,
             onPressed: _busy ? null : _import,
           ),
           const SizedBox(height: 8),
-          Text(
-            'Restore transcript archive as new inactive sessions: Import checks the '
-            'archive, shows what it holds, and restores only after you confirm. '
-            'Restored transcripts are published atomically for the current account '
-            'and never merge into existing chats.',
-            style: AetherType.caption,
-          ),
-          if (!restoreAvailable) ...[
-            const SizedBox(height: 8),
-            Text(
-              'Restore unavailable in this build: the state publisher is not connected. Import only validates and never changes your chats.',
-              style: AetherType.caption,
-            ),
-          ],
+          Text(CloudBackupCopy.importHelp, style: AetherType.caption),
           const SizedBox(height: 16),
           Align(
             alignment: AlignmentDirectional.centerStart,
@@ -396,10 +451,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
               label: Text(context.l10n.backupJsonExport),
             ),
           ),
-          Text(
-            'A full JSON dump for other tools. It cannot be restored.',
-            style: AetherType.caption,
-          ),
+          Text(CloudBackupCopy.jsonHelp, style: AetherType.caption),
           const SizedBox(height: 16),
           AetherCard(
             title: Text(context.l10n.backupExportReadyTitle),
@@ -407,41 +459,26 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Transcript-only export: completed text, reasoning and compacted transcript rows. '
-                  'It excludes settings, credentials, grants, schedules, tool output, generated images, '
-                  'HTML artifacts and running turns. This is not a full app backup.',
-                  style: AetherType.body,
-                ),
+                Text(CloudBackupCopy.scope, style: AetherType.body),
                 const SizedBox(height: 10),
                 Text(
-                  'File summary: regular attachments inside approved app workspace roots only; '
-                  '$attLimit MiB each, ${SettingsBackupService.maxAttachments} total. '
-                  'Missing, external or oversized files are marked unavailable. '
-                  'Archive limit: $mibLimit MiB; transcript manifest: '
-                  '${SettingsBackupService.maxManifestBytes ~/ (1024 * 1024)} MiB; '
-                  '${SettingsBackupService.maxSessions} sessions / '
-                  '${SettingsBackupService.maxMessages} messages.',
+                  CloudBackupCopy.limits(
+                    mibLimit,
+                    SettingsBackupService.maxSessions,
+                    SettingsBackupService.maxMessages,
+                  ),
                   style: AetherType.bodyMuted,
                 ),
                 const SizedBox(height: 10),
-                Text(
-                  'Chat text and attachments may contain secrets you put in them. Their contents are not redacted. '
-                  'The export is a ZIP archive with unencrypted stored entries. Modified, compressed or legacy JSON archives cannot be restored.',
-                  style: AetherType.bodyMuted,
-                ),
+                Text(CloudBackupCopy.secrets, style: AetherType.bodyMuted),
               ],
             ),
           ),
-          if (_busy) ...[
-            const SizedBox(height: 12),
-            LinearProgressIndicator(semanticsLabel: '$_operation in progress'),
-          ],
           if (_status != null) ...[
             const SizedBox(height: 16),
             Semantics(
               liveRegion: true,
-              label: 'Backup status: $_status',
+              label: CloudBackupCopy.statusPrefix + _status!,
               child: SelectableText(_status!, style: AetherType.body),
             ),
             if (_statusDetail != null) ErrorDetails(detail: _statusDetail!),
