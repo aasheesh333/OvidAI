@@ -249,6 +249,11 @@ export const NO_PARAM_OWNERSHIP_EXEMPT: Array<{
     reason: "creates a session owned by the caller; no existing-resource lookup.",
   },
   {
+    method: "PATCH",
+    path: "/cloud/v1/preferences",
+    reason: "writes the authenticated principal's own preferences row; no resource id.",
+  },
+  {
     method: "POST",
     path: "/cloud/v1/plugins/install",
     reason: "installs for the authenticated uid; tier-gated, no foreign resource id.",
@@ -317,6 +322,11 @@ interface Fixtures {
   scheduleDeleteA: ScheduleRow;
   /** Wave 5 run-now positive control: its own idle chat (sessionA is busy with runA). */
   scheduleRunNowA: ScheduleRow;
+  /** Wave 1b history edits: idle chats with a prompt + answer each (a
+   *  positive control truncates its own fixture, so they are not shared). */
+  historyDeleteA: { session: SessionRow; promptId: string; answerId: string };
+  historyRegenA: { session: SessionRow; promptId: string; answerId: string };
+  historyBranchA: { session: SessionRow; promptId: string; answerId: string };
   pluginA: PluginRow;
   /** Dedicated to the DELETE positive control. */
   pluginDeleteA: PluginRow;
@@ -340,8 +350,9 @@ interface Case {
   params: (f: Fixtures) => Record<string, string>;
   /** A valid body so only ownership (not validation) can reject. */
   body?: unknown;
-  /** Owner-side body when the cross-owner body is intentionally invalid. */
-  ownerBody?: unknown;
+  /** Owner-side body when the cross-owner body is intentionally invalid
+   *  (a function when it needs a fixture id). */
+  ownerBody?: unknown | ((f: Fixtures) => unknown);
   /** Owner-side query string (e.g. the workspace file path). */
   ownerQuery?: Record<string, string>;
 }
@@ -370,6 +381,19 @@ const OWNED_CASES: Record<string, Case> = {
     body: { content: "hello" },
   },
   "GET /cloud/v1/sessions/:id/messages": { params: (f) => ({ id: f.sessionA.id }) },
+  // Wave 1b history edits (CT-004): ownership before any read of the message.
+  "DELETE /cloud/v1/sessions/:id/messages/:messageId": {
+    params: (f) => ({ id: f.historyDeleteA.session.id, messageId: f.historyDeleteA.answerId }),
+  },
+  "POST /cloud/v1/sessions/:id/messages/:messageId/regenerate": {
+    params: (f) => ({ id: f.historyRegenA.session.id, messageId: f.historyRegenA.answerId }),
+    body: {},
+  },
+  "POST /cloud/v1/sessions/:id/branch": {
+    params: (f) => ({ id: f.historyBranchA.session.id }),
+    body: {},
+    ownerBody: (f: Fixtures) => ({ messageId: f.historyBranchA.answerId }),
+  },
   // The read-only event log the user follows a run through (the terminal was
   // removed; this route replaced it). Ownership is checked before any read.
   "GET /cloud/v1/sessions/:id/events": { params: (f) => ({ id: f.sessionA.id }) },
@@ -549,6 +573,15 @@ describe("route sweep — 404 not 403", () => {
     const sessionA = await sessions.create(db, userA, "A session");
     const sessionB = await sessions.create(db, userB, "B session");
     const sessionDeleteA = await sessions.create(db, userA, "sweep delete fixture");
+    const historyFixture = async (title: string) => {
+      const session = await sessions.create(db, userA, title);
+      const p = await messages.append(db, { sessionId: session.id, role: "user", content: "q" });
+      const a = await messages.append(db, { sessionId: session.id, role: "assistant", content: "a" });
+      return { session, promptId: p.id, answerId: a.id };
+    };
+    const historyDeleteA = await historyFixture("sweep history delete");
+    const historyRegenA = await historyFixture("sweep history regenerate");
+    const historyBranchA = await historyFixture("sweep history branch");
     // Warm manifest so the workspace positive controls take the live path
     // (worker stubs below) instead of the never-registered seams.
     await fileManifests.upsertWarm(db, {
@@ -700,6 +733,9 @@ describe("route sweep — 404 not 403", () => {
       scheduleA,
       scheduleDeleteA,
       scheduleRunNowA,
+      historyDeleteA,
+      historyRegenA,
+      historyBranchA,
       pluginA,
       pluginDeleteA,
       mcpA,
@@ -1001,6 +1037,7 @@ describe("route sweep — 404 not 403", () => {
     expect(NO_PARAM_OWNERSHIP_EXEMPT.map((entry) => `${entry.method} ${entry.path}`)).toEqual([
       "POST /cloud/v1/auth/ticket",
       "POST /cloud/v1/sessions",
+      "PATCH /cloud/v1/preferences",
       "POST /cloud/v1/plugins/install",
       "POST /cloud/v1/system/responses",
       "POST /cloud/v1/schedules",
@@ -1384,7 +1421,12 @@ describe("route sweep — 404 not 403", () => {
         method: method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
         url,
         headers: authHeaders(userA),
-        payload: bodyFor(method, ownershipCase.ownerBody ?? ownershipCase.body),
+        payload: bodyFor(
+          method,
+          (typeof ownershipCase.ownerBody === "function"
+            ? (ownershipCase.ownerBody as (f: Fixtures) => unknown)(fixtures)
+            : ownershipCase.ownerBody) ?? ownershipCase.body,
+        ),
       });
       if (res.statusCode < 200 || res.statusCode >= 300) {
         failures.push(`${key} → ${res.statusCode} (expected 2xx for the owner)`);

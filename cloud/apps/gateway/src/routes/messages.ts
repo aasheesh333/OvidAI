@@ -1,30 +1,84 @@
-import type { FastifyInstance } from "fastify";
-import { attachments, messages, runs, sessionState, sessions, users, type Db, type MessageRow } from "@ovid/db";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import {
+  attachments,
+  eventMirror,
+  messages,
+  runs,
+  sessionState,
+  sessions,
+  users,
+  type Db,
+  type MessageRow,
+  type RunRow,
+} from "@ovid/db";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import {
+  branchSessionBodySchema,
   CLOUD_PRESET_IDS,
   MAX_SESSION_REFS,
   MintInternalError,
+  regenerateBodySchema,
   sendMessageBodySchema,
   type MessageDto,
-  type Page,
+  type MessagePage,
+  type RegenerateResponse,
   type SendMessageResponse,
   type SessionDto,
+  type SessionEvent,
+  type TruncateMessagesResponse,
 } from "@ovid/shared";
+import { toSessionDto } from "./sessions.js";
 import type { GatewayDeps } from "../app.js";
 import { DEFAULT_MINT_TIMEOUT_MS, MintTimeoutError } from "../keys.js";
 import { badRequest, isUuid, notFound, parsePageLimit, queryValue, sendError, zodBadRequest } from "./http.js";
 
 // Message routes — all mounted inside the authenticated /cloud/v1 scope.
 
-export function toMessageDto(row: MessageRow): MessageDto {
+export function toMessageDto(
+  row: MessageRow,
+  files?: ReadonlyArray<{ id: string; name: string; size: number }>,
+): MessageDto {
   return {
     id: row.id,
     sessionId: row.sessionId,
     role: row.role as MessageDto["role"],
     content: row.content,
     createdAt: row.createdAt.toISOString(),
+    ...(files !== undefined && files.length > 0
+      ? { attachments: files.map((f) => ({ id: f.id, name: f.name, sizeBytes: f.size })) }
+      : {}),
   };
+}
+
+/** Wave 1b: the most events one history page carries (newest kept on overflow). */
+export const HISTORY_EVENT_LIMIT = 2000;
+/** Wave 1b: the most streamed chunks folded into a live run's text. */
+const LIVE_DELTA_LIMIT = 20_000;
+/** Wave 1b: the most rows a branch copies (the newest ones up to the message). */
+const BRANCH_MESSAGE_LIMIT = 2000;
+
+/**
+ * Events after which a live run's bubble starts fresh on the client: the
+ * in-progress text of a reopened run is only the deltas AFTER the last of
+ * these (run_started_retry carries no runId — it can only belong to the
+ * active run once that run has started).
+ */
+const BUBBLE_BOUNDARY_TYPES = new Set([
+  "run_started",
+  "message_segment",
+  "tool_started",
+  "tool_completed",
+  "run_started_retry",
+]);
+
+/** Shown when history changes are refused because a run is still going. */
+function sessionBusy(reply: FastifyReply): FastifyReply {
+  return sendError(
+    reply,
+    409,
+    "session_busy",
+    "A task is still running in this chat. Stop it before changing the history.",
+  );
 }
 
 // The send body schema lives in @ovid/shared (sendMessageBodySchema) — the
@@ -163,6 +217,128 @@ function resetsAtEpochMs(headers: Readonly<Record<string, string>>): string | nu
   if (/^\d+$/.test(raw)) return raw;
   const ms = Date.parse(raw);
   return Number.isNaN(ms) ? null : String(ms);
+}
+
+/**
+ * Key provisioning BEFORE any write (send and regenerate share it): null =
+ * the key is there, proceed; otherwise the reply already sent. A deadline
+ * breach is a retryable 503; mint 402/429 verdicts are re-enveloped for the
+ * thin client with any resets-at forwarded as x-ovid-resets-at; everything
+ * else collapses to 409 key_not_minted.
+ */
+async function provisionKey(
+  deps: GatewayDeps,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  uid: string,
+  sessionId: string,
+): Promise<FastifyReply | null> {
+  try {
+    await ensureKeyBounded(deps, uid);
+    return null;
+  } catch (err) {
+    // P10 Task 2: a deadline breach is a bounded, retryable dependency
+    // failure — NOT a "this account has no key" verdict.
+    if (
+      err instanceof MintTimeoutError ||
+      (typeof err === "object" && err !== null && (err as { name?: unknown }).name === "TimeoutError")
+    ) {
+      request.log.warn({ err, sessionId }, "key provisioning timed out; run not enqueued");
+      return sendError(reply, 503, "unavailable", "Key provisioning timed out; please retry shortly.");
+    }
+    if (err instanceof MintInternalError && (err.status === 402 || err.status === 429)) {
+      const response = reply.code(err.status);
+      const resetsAt = resetsAtEpochMs(err.headers);
+      if (resetsAt !== null) response.header("x-ovid-resets-at", resetsAt);
+      return response.send({
+        error: { code: mintRelayCode(err.status), message: mintDetail(err.body) },
+      });
+    }
+    request.log.warn({ err, sessionId }, "key provisioning failed; run not enqueued");
+    return sendError(reply, 409, "key_not_minted", "No model API key is provisioned for this account.");
+  }
+}
+
+/**
+ * Wave 1b (CH-006): this page's settled agent activity — the non-delta
+ * events whose ts falls inside the page's time window (from its oldest row
+ * when older rows exist, up to the newer page's first row), capped at the
+ * snapshot's [lastEventSeq] — plus, on the newest page, ONE coalesced
+ * `message_delta` carrying the active run's in-progress text since its last
+ * bubble boundary (a chat reopened mid-run shows the live answer, CH-002).
+ */
+async function historyEvents(
+  db: Db,
+  sessionId: string,
+  o: {
+    rows: MessageRow[];
+    nextCursor: string | null;
+    beforeId: string | null;
+    lastEventSeq: string | null;
+    active: RunRow | null;
+  },
+): Promise<SessionEvent[]> {
+  if (o.lastEventSeq === null) return [];
+  const oldest = o.rows[o.rows.length - 1];
+  const fromTs = o.nextCursor !== null && oldest !== undefined ? oldest.createdAt : null;
+  let toTs: Date | null = null;
+  if (o.beforeId !== null) {
+    const boundary = await messages.getInSession(db, sessionId, o.beforeId);
+    if (boundary === null) return [];
+    toTs = boundary.createdAt;
+  }
+  const events = await eventMirror.readWindow(db, sessionId, {
+    fromTs,
+    toTs,
+    maxSeq: o.lastEventSeq,
+    limit: HISTORY_EVENT_LIMIT,
+  });
+  const active = o.active;
+  if (o.beforeId !== null || active === null || active.status !== "running") return events;
+
+  // The active run's bubble boundary: its run_started and every later
+  // boundary event in the window.
+  let startIndex = -1;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i]!;
+    if (e.type === "run_started" && e.payload.runId === active.id) {
+      startIndex = i;
+      break;
+    }
+  }
+  if (startIndex === -1) return events;
+  let boundarySeq = events[startIndex]!.seq;
+  for (let i = startIndex + 1; i < events.length; i += 1) {
+    const e = events[i]!;
+    if (!BUBBLE_BOUNDARY_TYPES.has(e.type)) continue;
+    const runId = e.payload.runId;
+    if (runId === undefined || runId === active.id) boundarySeq = e.seq;
+  }
+  const deltas = await eventMirror.deltasForRun(db, sessionId, active.id, {
+    afterSeq: boundarySeq,
+    maxSeq: o.lastEventSeq,
+    limit: LIVE_DELTA_LIMIT,
+  });
+  const last = deltas[deltas.length - 1];
+  if (last === undefined) return events;
+  const text = deltas.map((d) => (typeof d.payload.text === "string" ? d.payload.text : "")).join("");
+  const coalesced: SessionEvent = {
+    sessionId,
+    seq: last.seq,
+    type: "message_delta",
+    payload: { runId: active.id, text },
+    ts: last.ts,
+  };
+  return [...events, coalesced].sort((a, b) => compareSeqStrings(a.seq, b.seq));
+}
+
+/** Redis stream ids "<ms>-<sub>", compared numerically on both parts. */
+function compareSeqStrings(a: string, b: string): number {
+  const [am = "0", as = "0"] = a.split("-");
+  const [bm = "0", bs = "0"] = b.split("-");
+  const dm = Number(am) - Number(bm);
+  if (dm !== 0) return dm;
+  return Number(as) - Number(bs);
 }
 
 // ---------------------------------------------------------------------------
@@ -394,39 +570,8 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     //    x-ovid-resets-at; every other failure collapses to 409 key_not_minted.
     //    P9 Task 9: mint is called with the gateway's own verified uid
     //    (signed server-to-server).
-    try {
-      await ensureKeyBounded(deps, uid);
-    } catch (err) {
-      // P10 Task 2: a deadline breach is a bounded, retryable dependency
-      // failure — NOT a "this account has no key" verdict.
-      if (
-        err instanceof MintTimeoutError ||
-        (typeof err === "object" && err !== null && (err as { name?: unknown }).name === "TimeoutError")
-      ) {
-        request.log.warn({ err, sessionId }, "key provisioning timed out; run not enqueued");
-        return sendError(
-          reply,
-          503,
-          "unavailable",
-          "Key provisioning timed out; please retry shortly.",
-        );
-      }
-      if (err instanceof MintInternalError && (err.status === 402 || err.status === 429)) {
-        const response = reply.code(err.status);
-        const resetsAt = resetsAtEpochMs(err.headers);
-        if (resetsAt !== null) response.header("x-ovid-resets-at", resetsAt);
-        return response.send({
-          error: { code: mintRelayCode(err.status), message: mintDetail(err.body) },
-        });
-      }
-      request.log.warn({ err, sessionId }, "key provisioning failed; run not enqueued");
-      return sendError(
-        reply,
-        409,
-        "key_not_minted",
-        "No model API key is provisioned for this account.",
-      );
-    }
+    const mintFailure = await provisionKey(deps, request, reply, uid, sessionId);
+    if (mintFailure !== null) return mintFailure;
 
     // 5. Persist the user message, create the run row, then enqueue. With a
     //    clientMsgId the insert is guarded by the per-session partial unique
@@ -462,6 +607,8 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
         "This clientMsgId is already used by a message that has no run.",
       );
     }
+    // Wave 1b (CH-006): the uploads ride under this prompt in history.
+    await attachments.linkToMessage(deps.db, sessionId, requestedAttachmentIds, userMessage.id);
     const run = await runs.create(deps.db, {
       sessionId,
       promptMessageId: userMessage.id,
@@ -560,11 +707,150 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     // page instead of the intended "no valid cursor → start over").
     const rawBefore = queryValue(query.before);
     const beforeId = rawBefore !== null && isUuid(rawBefore) ? rawBefore : null;
+    const rawEvents = queryValue(query.events);
+    const wantEvents = rawEvents === "1" || rawEvents === "true";
+    // Wave 1b (CH-003): the watermark is read BEFORE the page, so every
+    // event at or below it is reflected by (or older than) the snapshot; a
+    // client that subscribes from it never replays the log on top of the
+    // page, and anything committed meanwhile replays after it (the client's
+    // messageId guard keeps that exactly-once).
+    const lastEventSeq = await eventMirror.maxSeq(deps.db, sessionId);
     const { rows, nextCursor } = await messages.page(deps.db, sessionId, {
       limit,
       beforeId,
     });
-    // Newest-first keyset page (UUIDv7 id order); nextCursor is the oldest id.
-    return { items: rows.map(toMessageDto), nextCursor } satisfies Page<MessageDto>;
+    const active = await runs.activeForSession(deps.db, sessionId);
+    const files = await attachments.forMessages(
+      deps.db,
+      sessionId,
+      rows.filter((r) => r.role === "user").map((r) => r.id),
+    );
+    const filesByMessage = new Map<string, typeof files>();
+    for (const f of files) {
+      if (f.messageId === null) continue;
+      const key = f.messageId.trim();
+      filesByMessage.set(key, [...(filesByMessage.get(key) ?? []), f]);
+    }
+    const body: MessagePage = {
+      // Newest-first keyset page (UUIDv7 id order); nextCursor is the oldest id.
+      items: rows.map((r) => toMessageDto(r, filesByMessage.get(r.id.trim()))),
+      nextCursor,
+      lastEventSeq,
+      activeRun:
+        active === null
+          ? null
+          : { runId: active.id, status: active.status === "running" ? "running" : "queued" },
+    };
+    if (wantEvents) {
+      body.events = await historyEvents(deps.db, sessionId, {
+        rows,
+        nextCursor,
+        beforeId,
+        lastEventSeq,
+        active,
+      });
+    }
+    return body;
+  });
+
+  // -------------------------------------------------------------------------
+  // Wave 1b (CT-004 / CH-024): history edits. Every route is ownership-first
+  // (wrong owner and unknown ids are the same 404) and refuses while a run is
+  // queued or running — the worker reads the history the edit would change.
+  // -------------------------------------------------------------------------
+
+  /** Delete a message and everything after it (also the edit-and-resend half). */
+  app.delete("/sessions/:id/messages/:messageId", async (request, reply) => {
+    const { id: sessionId, messageId } = request.params as { id: string; messageId: string };
+    const { uid } = request.principal;
+    if (!isUuid(sessionId)) return notFound(reply);
+    const session = await sessions.get(deps.db, sessionId, uid);
+    if (session === null) return notFound(reply);
+    if (!isUuid(messageId)) return notFound(reply, "Message not found.");
+    const anchor = await messages.getInSession(deps.db, sessionId, messageId);
+    if (anchor === null) return notFound(reply, "Message not found.");
+    if ((await runs.activeForSession(deps.db, sessionId)) !== null) return sessionBusy(reply);
+    // An answer's own tool events precede its row: drop them from its
+    // prompt's time on, so history never shows a deleted turn's activity.
+    const prompt =
+      anchor.role === "assistant" ? await messages.latestUserBefore(deps.db, sessionId, anchor.id) : null;
+    const deleted = await messages.truncateFrom(deps.db, sessionId, anchor.id, {
+      ...(prompt !== null ? { eventsFrom: prompt.createdAt } : {}),
+    });
+    await sessions.touch(deps.db, sessionId);
+    return { deleted } satisfies TruncateMessagesResponse;
+  });
+
+  /** Drop an answer (and anything after it) and run its prompt again. */
+  app.post("/sessions/:id/messages/:messageId/regenerate", async (request, reply) => {
+    const { id: sessionId, messageId } = request.params as { id: string; messageId: string };
+    const { uid, email } = request.principal;
+    if (!isUuid(sessionId)) return notFound(reply);
+    const session = await sessions.get(deps.db, sessionId, uid);
+    if (session === null) return notFound(reply);
+    const parsed = regenerateBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) return zodBadRequest(reply, parsed.error);
+    if (!isUuid(messageId)) return notFound(reply, "Message not found.");
+    const answer = await messages.getInSession(deps.db, sessionId, messageId);
+    if (answer === null) return notFound(reply, "Message not found.");
+    if (answer.role !== "assistant") {
+      return badRequest(reply, "Only an assistant answer can be regenerated.");
+    }
+    const prompt = await messages.latestUserBefore(deps.db, sessionId, answer.id);
+    if (prompt === null) return badRequest(reply, "This answer has no prompt to run again.");
+    if ((await runs.activeForSession(deps.db, sessionId)) !== null) return sessionBusy(reply);
+
+    const user = await users.ensure(deps.db, uid, email);
+    const mintFailure = await provisionKey(deps, request, reply, uid, sessionId);
+    if (mintFailure !== null) return mintFailure;
+
+    await messages.truncateFrom(deps.db, sessionId, answer.id, { eventsFrom: prompt.createdAt });
+    const files = await attachments.forMessages(deps.db, sessionId, [prompt.id]);
+    const run = await runs.create(deps.db, { sessionId, promptMessageId: prompt.id });
+    try {
+      await deps.queues.agentRuns.add(
+        AGENT_RUN_JOB_NAME,
+        {
+          runId: run.id,
+          sessionId,
+          userId: uid,
+          prompt: prompt.content,
+          tier: user.tier,
+          ...(files.length > 0 ? { attachmentIds: files.map((f) => f.id) } : {}),
+          ...(parsed.data.maxOutputTokens !== undefined
+            ? { maxOutputTokens: parsed.data.maxOutputTokens }
+            : {}),
+        },
+        { jobId: run.id, priority: user.tier === "free" ? 2 : 1 },
+      );
+    } catch (err) {
+      request.log.error({ err, runId: run.id, sessionId }, "queue add failed; regenerate run left queued");
+      return sendError(reply, 503, "unavailable", "Run queue is temporarily unavailable; please retry shortly.");
+    }
+    if (deps.activity !== undefined) {
+      void deps.activity.bump(sessionId).catch(() => {});
+    }
+    await sessions.touch(deps.db, sessionId);
+    const body: RegenerateResponse = { runId: run.id, promptMessageId: prompt.id, status: "queued" };
+    return reply.code(202).send(body);
+  });
+
+  /** A new chat seeded with this chat's history up to and including a message. */
+  app.post("/sessions/:id/branch", async (request, reply) => {
+    const { id: sessionId } = request.params as { id: string };
+    const { uid, email } = request.principal;
+    if (!isUuid(sessionId)) return notFound(reply);
+    const session = await sessions.get(deps.db, sessionId, uid);
+    if (session === null) return notFound(reply);
+    const parsed = branchSessionBodySchema.safeParse(request.body ?? undefined);
+    if (!parsed.success) return zodBadRequest(reply, parsed.error);
+    const anchor = await messages.getInSession(deps.db, sessionId, parsed.data.messageId);
+    if (anchor === null) return notFound(reply, "Message not found.");
+    await users.ensure(deps.db, uid, email);
+    const rows = await messages.upTo(deps.db, sessionId, anchor.id, BRANCH_MESSAGE_LIMIT);
+    const title = parsed.data.title?.trim() || `${(session.title ?? "").trim() || "Chat"} (branch)`;
+    const created = await sessions.create(deps.db, uid, title);
+    await messages.copyInto(deps.db, created.id, rows);
+    return reply.code(201).send(toSessionDto(created));
   });
 }

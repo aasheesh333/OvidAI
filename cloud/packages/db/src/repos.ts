@@ -558,14 +558,21 @@ export const messages = {
   /**
    * Wave 1b (CT-004 delete / edit / regenerate): removes [fromId] and every
    * later row of the session (id order), plus the durable event-mirror rows
-   * recorded at or after the anchor's createdAt — so a rich history page can
+   * recorded at or after `opts.eventsFrom` (default: the anchor's createdAt;
+   * an answer's own tool events precede it, so callers removing an answer
+   * pass its prompt's createdAt) — so a rich history page can
    * never resurrect the tool rows of a deleted turn. One transaction. A
    * compaction checkpoint whose fold boundary sits inside the deleted span
    * would summarize rows that no longer exist: the session's compaction
    * state is reset in that case (the next long run re-compacts). Returns the
    * number of message rows removed (0 when the anchor is not in the session).
    */
-  async truncateFrom(db: Db, sessionId: string, fromId: string): Promise<number> {
+  async truncateFrom(
+    db: Db,
+    sessionId: string,
+    fromId: string,
+    opts: { eventsFrom?: Date } = {},
+  ): Promise<number> {
     return db.transaction(async (tx) => {
       const anchorRows = await tx
         .select()
@@ -583,7 +590,7 @@ export const messages = {
         .where(
           and(
             eq(sessionEventMirror.sessionId, sessionId),
-            gte(sessionEventMirror.ts, anchor.createdAt),
+            gte(sessionEventMirror.ts, opts.eventsFrom ?? anchor.createdAt),
           ),
         );
       const stateRows = await tx

@@ -1,0 +1,383 @@
+// Wave 1b — rich history page, truncate (delete / edit-and-resend),
+// regenerate and branch routes (CH-002, CH-003, CH-006, CT-003, CT-004,
+// CH-024). Real Postgres, stub queue/mint (the messages.test.ts harness).
+
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import type { FastifyInstance } from "fastify";
+import { attachments, eventMirror, messages, newId, runs, type Db } from "@ovid/db";
+import type { MessagePage, SessionEvent } from "@ovid/shared";
+import { buildGateway } from "../app.js";
+import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
+import {
+  authHeaders,
+  noopEvents,
+  stubKeys,
+  stubMint,
+  stubQueues,
+  stubSystemBus,
+  stubTickets,
+  stubVerifier,
+  type QueueAdd,
+} from "../test/stubs.js";
+
+interface TestApp {
+  app: FastifyInstance;
+  adds: QueueAdd[];
+}
+
+describe.skipIf(!TEST_DATABASE_URL)("Wave 1b message routes (real postgres)", () => {
+  let db: Db;
+  const built: TestApp[] = [];
+
+  beforeAll(async () => {
+    db = await openTestDb();
+  }, 60_000);
+
+  afterEach(async () => {
+    while (built.length > 0) await built.pop()!.app.close();
+  });
+
+  afterAll(async () => {
+    await closeDb(db);
+  });
+
+  function makeApp(): TestApp {
+    const { queues, adds } = stubQueues();
+    const app = buildGateway({
+      system: stubSystemBus(),
+      db,
+      queues,
+      verifier: stubVerifier(),
+      tickets: stubTickets(),
+      keys: stubKeys(),
+      mint: stubMint(),
+      events: noopEvents,
+    });
+    const handle = { app, adds };
+    built.push(handle);
+    return handle;
+  }
+
+  async function createSession(h: TestApp, uid: string): Promise<string> {
+    const res = await h.app.inject({
+      method: "POST",
+      url: "/cloud/v1/sessions",
+      headers: authHeaders(uid),
+      payload: { title: "Trip plan" },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json().id as string;
+  }
+
+  function get(h: TestApp, uid: string, url: string) {
+    return h.app.inject({ method: "GET", url, headers: authHeaders(uid) });
+  }
+
+  let seqCounter = 1_800_000_000_000;
+  async function putEvent(
+    sessionId: string,
+    type: string,
+    payload: Record<string, unknown>,
+    ts: Date,
+  ): Promise<string> {
+    seqCounter += 1;
+    const seq = `${seqCounter}-0`;
+    const e: SessionEvent = { sessionId, seq, type: type as SessionEvent["type"], payload, ts: ts.toISOString() };
+    await eventMirror.put(db, e);
+    return seq;
+  }
+
+  const later = (d: Date, ms: number) => new Date(d.getTime() + ms);
+
+  async function finishRuns(sessionId: string): Promise<void> {
+    await db.$client.unsafe(
+      "UPDATE runs SET status = 'completed' WHERE session_id = $1 AND status IN ('queued','running')",
+      [sessionId],
+    );
+  }
+
+  // ── GET rich page ──────────────────────────────────────────────────────
+
+  it("GET answers lastEventSeq + activeRun, and attachments under the user row that sent them", async () => {
+    const h = makeApp();
+    const uid = testUid("w1b-get");
+    const sid = await createSession(h, uid);
+    const attId = newId();
+    await attachments.create(db, { id: attId, sessionId: sid, userId: uid, name: "map.png", size: 1234, r2Key: "k" });
+    const send = await h.app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/messages`,
+      headers: authHeaders(uid),
+      payload: { content: "look at this", attachmentIds: [attId] },
+    });
+    expect(send.statusCode).toBe(202);
+    const { runId, userMessageId } = send.json() as { runId: string; userMessageId: string };
+
+    const empty = await get(h, uid, `/cloud/v1/sessions/${sid}/messages`);
+    const page0 = empty.json() as MessagePage;
+    expect(page0.lastEventSeq).toBeNull();
+    expect(page0.activeRun).toEqual({ runId, status: "queued" });
+    expect(page0.events).toBeUndefined();
+    expect(page0.items[0]).toMatchObject({
+      id: userMessageId,
+      attachments: [{ id: attId, name: "map.png", sizeBytes: 1234 }],
+    });
+
+    const seq = await putEvent(sid, "run_started", { runId }, new Date());
+    await finishRuns(sid);
+    const after = (await get(h, uid, `/cloud/v1/sessions/${sid}/messages`)).json() as MessagePage;
+    expect(after.lastEventSeq).toBe(seq);
+    expect(after.activeRun).toBeNull();
+  });
+
+  it("GET ?events=1 returns the page window's settled events (no deltas) and coalesces the live run's text", async () => {
+    const h = makeApp();
+    const uid = testUid("w1b-ev");
+    const sid = await createSession(h, uid);
+    const u1 = await messages.append(db, { sessionId: sid, role: "user", content: "q1" });
+    const r1 = await runs.create(db, { sessionId: sid, promptMessageId: u1.id });
+    await putEvent(sid, "run_started", { runId: r1.id }, later(u1.createdAt, 1));
+    await putEvent(sid, "message_delta", { runId: r1.id, text: "Let me" }, later(u1.createdAt, 2));
+    await putEvent(sid, "message_segment", { runId: r1.id, content: "Let me look." }, later(u1.createdAt, 3));
+    await putEvent(sid, "tool_started", { runId: r1.id, callId: "c1", name: "web_search" }, later(u1.createdAt, 4));
+    await putEvent(sid, "tool_completed", { runId: r1.id, callId: "c1", name: "web_search", content: "ok" }, later(u1.createdAt, 5));
+    const a1 = await messages.append(db, { sessionId: sid, role: "assistant", content: "Found it." });
+    await putEvent(sid, "message_completed", { messageId: a1.id, content: "Found it." }, later(a1.createdAt, 1));
+    await putEvent(sid, "run_completed", { runId: r1.id }, later(a1.createdAt, 2));
+    await runs.finish(db, r1.id, "completed");
+
+    // A second, still-running run with streamed text after a tool round.
+    const u2 = await messages.append(db, { sessionId: sid, role: "user", content: "q2" });
+    const r2 = await runs.create(db, { sessionId: sid, promptMessageId: u2.id });
+    await runs.claimNext(db, r2.id);
+    await putEvent(sid, "run_started", { runId: r2.id }, later(u2.createdAt, 1));
+    await putEvent(sid, "message_delta", { runId: r2.id, text: "old " }, later(u2.createdAt, 2));
+    await putEvent(sid, "tool_started", { runId: r2.id, callId: "c2", name: "fetch_url" }, later(u2.createdAt, 3));
+    await putEvent(sid, "tool_completed", { runId: r2.id, callId: "c2", name: "fetch_url", content: "x" }, later(u2.createdAt, 4));
+    await putEvent(sid, "message_delta", { runId: r2.id, text: "Hello " }, later(u2.createdAt, 5));
+    const lastSeq = await putEvent(sid, "message_delta", { runId: r2.id, text: "world" }, later(u2.createdAt, 6));
+
+    const res = await get(h, uid, `/cloud/v1/sessions/${sid}/messages?events=1`);
+    expect(res.statusCode).toBe(200);
+    const page = res.json() as MessagePage;
+    expect(page.lastEventSeq).toBe(lastSeq);
+    expect(page.activeRun).toEqual({ runId: r2.id, status: "running" });
+    const evs = page.events!;
+    expect(evs.map((e) => e.type)).toEqual([
+      "run_started",
+      "message_segment",
+      "tool_started",
+      "tool_completed",
+      "message_completed",
+      "run_completed",
+      "run_started",
+      "tool_started",
+      "tool_completed",
+      "message_delta",
+    ]);
+    const live = evs[evs.length - 1]!;
+    expect(live.payload).toEqual({ runId: r2.id, text: "Hello world" });
+    expect(live.seq).toBe(lastSeq);
+  });
+
+  it("GET ?events=1 on an older page scopes events to that page's time window", async () => {
+    const h = makeApp();
+    const uid = testUid("w1b-old");
+    const sid = await createSession(h, uid);
+    const u1 = await messages.append(db, { sessionId: sid, role: "user", content: "q1" });
+    await putEvent(sid, "tool_started", { callId: "old" }, later(u1.createdAt, 1));
+    await new Promise((r) => setTimeout(r, 10));
+    const u2 = await messages.append(db, { sessionId: sid, role: "user", content: "q2" });
+    await putEvent(sid, "tool_started", { callId: "new" }, later(u2.createdAt, 1));
+
+    const newest = (await get(h, uid, `/cloud/v1/sessions/${sid}/messages?events=1&limit=1`)).json() as MessagePage;
+    expect(newest.items.map((m) => m.id)).toEqual([u2.id]);
+    expect(newest.events!.map((e) => e.payload.callId)).toEqual(["new"]);
+    const older = (
+      await get(h, uid, `/cloud/v1/sessions/${sid}/messages?events=1&limit=1&before=${newest.nextCursor}`)
+    ).json() as MessagePage;
+    expect(older.items.map((m) => m.id)).toEqual([u1.id]);
+    expect(older.events!.map((e) => e.payload.callId)).toEqual(["old"]);
+  });
+
+  // ── DELETE (truncate from a message) ───────────────────────────────────
+
+  it("DELETE removes the message and everything after it; ownership-scoped; refused while a run is active", async () => {
+    const h = makeApp();
+    const uid = testUid("w1b-del");
+    const sid = await createSession(h, uid);
+    const u1 = await messages.append(db, { sessionId: sid, role: "user", content: "q1" });
+    const a1 = await messages.append(db, { sessionId: sid, role: "assistant", content: "a1" });
+    const u2 = await messages.append(db, { sessionId: sid, role: "user", content: "q2" });
+    await messages.append(db, { sessionId: sid, role: "assistant", content: "a2" });
+
+    const stranger = testUid("w1b-stranger");
+    const foreign = await h.app.inject({
+      method: "DELETE",
+      url: `/cloud/v1/sessions/${sid}/messages/${u2.id}`,
+      headers: authHeaders(stranger),
+    });
+    expect(foreign.statusCode).toBe(404);
+
+    const busyRun = await runs.create(db, { sessionId: sid, promptMessageId: u2.id });
+    const busy = await h.app.inject({
+      method: "DELETE",
+      url: `/cloud/v1/sessions/${sid}/messages/${u2.id}`,
+      headers: authHeaders(uid),
+    });
+    expect(busy.statusCode).toBe(409);
+    expect(busy.json().error.code).toBe("session_busy");
+    await runs.finish(db, busyRun.id, "completed");
+
+    const unknown = await h.app.inject({
+      method: "DELETE",
+      url: `/cloud/v1/sessions/${sid}/messages/${newId()}`,
+      headers: authHeaders(uid),
+    });
+    expect(unknown.statusCode).toBe(404);
+
+    const ok = await h.app.inject({
+      method: "DELETE",
+      url: `/cloud/v1/sessions/${sid}/messages/${u2.id}`,
+      headers: authHeaders(uid),
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toEqual({ deleted: 2 });
+    const left = await messages.page(db, sid, { limit: 10 });
+    expect(left.rows.map((r) => r.id)).toEqual([a1.id, u1.id]);
+  });
+
+  it("DELETE of an answer also drops the tool events of the run that produced it", async () => {
+    const h = makeApp();
+    const uid = testUid("w1b-del-a");
+    const sid = await createSession(h, uid);
+    const u1 = await messages.append(db, { sessionId: sid, role: "user", content: "q1" });
+    await putEvent(sid, "tool_started", { callId: "c" }, later(u1.createdAt, 1));
+    const a1 = await messages.append(db, { sessionId: sid, role: "assistant", content: "a1" });
+    const res = await h.app.inject({
+      method: "DELETE",
+      url: `/cloud/v1/sessions/${sid}/messages/${a1.id}`,
+      headers: authHeaders(uid),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(await eventMirror.readSince(db, sid, null, 10)).toEqual([]);
+    expect((await messages.page(db, sid, { limit: 10 })).rows.map((r) => r.id)).toEqual([u1.id]);
+  });
+
+  // ── regenerate ─────────────────────────────────────────────────────────
+
+  it("regenerate drops the answer and re-runs its prompt (same prompt row, its attachments), 202", async () => {
+    const h = makeApp();
+    const uid = testUid("w1b-regen");
+    const sid = await createSession(h, uid);
+    const attId = newId();
+    await attachments.create(db, { id: attId, sessionId: sid, userId: uid, name: "a.txt", size: 3, r2Key: "k" });
+    const send = await h.app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/messages`,
+      headers: authHeaders(uid),
+      payload: { content: "summarize", attachmentIds: [attId] },
+    });
+    const { userMessageId } = send.json() as { userMessageId: string };
+    await finishRuns(sid);
+    const answer = await messages.append(db, { sessionId: sid, role: "assistant", content: "old answer" });
+
+    const notAnswer = await h.app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/messages/${userMessageId}/regenerate`,
+      headers: authHeaders(uid),
+      payload: {},
+    });
+    expect(notAnswer.statusCode).toBe(400);
+
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/messages/${answer.id}/regenerate`,
+      headers: authHeaders(uid),
+      payload: { maxOutputTokens: 500 },
+    });
+    expect(res.statusCode).toBe(202);
+    const body = res.json() as { runId: string; promptMessageId: string; status: string };
+    expect(body).toMatchObject({ promptMessageId: userMessageId, status: "queued" });
+    const left = await messages.page(db, sid, { limit: 10 });
+    expect(left.rows.map((r) => r.id)).toEqual([userMessageId]);
+    const add = h.adds[h.adds.length - 1]!;
+    expect(add.data).toMatchObject({
+      runId: body.runId,
+      sessionId: sid,
+      userId: uid,
+      prompt: "summarize",
+      attachmentIds: [attId],
+      maxOutputTokens: 500,
+    });
+    expect(add.opts.jobId).toBe(body.runId);
+    expect(await runs.activeForSession(db, sid)).toMatchObject({ id: body.runId, promptMessageId: userMessageId });
+
+    // A stranger can't regenerate; a busy session refuses.
+    const stranger = await h.app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/messages/${answer.id}/regenerate`,
+      headers: authHeaders(testUid("w1b-x")),
+      payload: {},
+    });
+    expect(stranger.statusCode).toBe(404);
+  });
+
+  it("regenerate refuses while a run is active", async () => {
+    const h = makeApp();
+    const uid = testUid("w1b-regen-busy");
+    const sid = await createSession(h, uid);
+    const u1 = await messages.append(db, { sessionId: sid, role: "user", content: "q" });
+    const a1 = await messages.append(db, { sessionId: sid, role: "assistant", content: "a" });
+    await runs.create(db, { sessionId: sid, promptMessageId: u1.id });
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/messages/${a1.id}/regenerate`,
+      headers: authHeaders(uid),
+      payload: {},
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("session_busy");
+    expect((await messages.page(db, sid, { limit: 10 })).rows).toHaveLength(2);
+  });
+
+  // ── branch ─────────────────────────────────────────────────────────────
+
+  it("branch creates a new owned session holding the history up to the message", async () => {
+    const h = makeApp();
+    const uid = testUid("w1b-branch");
+    const sid = await createSession(h, uid);
+    const u1 = await messages.append(db, { sessionId: sid, role: "user", content: "q1" });
+    const a1 = await messages.append(db, { sessionId: sid, role: "assistant", content: "a1" });
+    await messages.append(db, { sessionId: sid, role: "user", content: "q2" });
+
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/branch`,
+      headers: authHeaders(uid),
+      payload: { messageId: a1.id },
+    });
+    expect(res.statusCode).toBe(201);
+    const dto = res.json() as { id: string; title: string };
+    expect(dto.id).not.toBe(sid);
+    expect(dto.title).toBe("Trip plan (branch)");
+    const copied = (await get(h, uid, `/cloud/v1/sessions/${dto.id}/messages`)).json() as MessagePage;
+    expect(copied.items.map((m) => m.content).reverse()).toEqual(["q1", "a1"]);
+    expect(copied.items[1]!.createdAt).toBe(u1.createdAt.toISOString());
+
+    const foreign = await h.app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/branch`,
+      headers: authHeaders(testUid("w1b-y")),
+      payload: { messageId: a1.id },
+    });
+    expect(foreign.statusCode).toBe(404);
+    const bad = await h.app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/branch`,
+      headers: authHeaders(uid),
+      payload: { messageId: newId() },
+    });
+    expect(bad.statusCode).toBe(404);
+  });
+});
