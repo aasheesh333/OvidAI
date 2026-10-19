@@ -3136,13 +3136,13 @@ abstract class AppLocalizations {
   /// **'Memory stays in the current chat unless you explicitly turn on sharing.'**
   String get memoryIntro;
 
-  /// No description provided for @memoryScopeChat.
+  /// Memory screen: per-chat scope explanation.
   ///
   /// In en, this message translates to:
   /// **'Current chat only. Other chats cannot use these notes unless you explicitly tag this chat or turn on memory sharing.'**
   String get memoryScopeChat;
 
-  /// No description provided for @memoryScopeShared.
+  /// Memory screen: shared-scope explanation.
   ///
   /// In en, this message translates to:
   /// **'Shared memory is on. These notes can be used by your chats. Turn off sharing in Settings to return to chat-only notes.'**
