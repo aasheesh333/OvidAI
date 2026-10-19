@@ -43,8 +43,9 @@ bool isStudioWorkspaceKey(String key) =>
 ///  - `PUT  /sessions/:id/workspace/file`
 ///    body `{path, contentUtf8, ifMatchSha256? | ifNoneMatch?:'*'}` →
 ///    `{path,sizeBytes,sha256}`; 409 `baseline_mismatch` / `already_exists`
-///    when the precondition fails (the server compares INSIDE its atomic
-///    temp+rename write, so there is no client-side TOCTOU window — ST-007)
+///    when the precondition fails. Overlapping Studio mutations are serialized
+///    within one worker process; agent/shell and other-process writes do not
+///    participate in that lock (ST-007 remains partial for those writers).
 ///  - `DELETE /sessions/:id/workspace/file?path=…[&recursive=true]`
 ///    → `{path, type}`; 409 `not_empty` for a folder without `recursive`
 ///  - `POST /sessions/:id/workspace/move {from,to}` → `{from,to}`; 409
@@ -437,10 +438,11 @@ class StudioFilesClient {
   ///
   /// [baselineHash] is the sha256 captured when the buffer was opened (or the
   /// sha256 the previous successful PUT returned). It travels as the
-  /// server-side `ifMatchSha256` precondition: the server compares it inside
-  /// its atomic write and answers 409 `baseline_mismatch` (nothing written)
-  /// when the file changed meanwhile — no client-side pre-read, no TOCTOU
-  /// window (ST-007).
+  /// server-side `ifMatchSha256` precondition: the worker compares it while
+  /// holding its process-local Studio mutation lock and answers 409
+  /// `baseline_mismatch` (nothing written) if it differs. This prevents lost
+  /// updates between participating saves, not races with raw agent/shell or
+  /// other-process writes; temp+rename is not filesystem compare-and-swap.
   ///
   /// [createOnly] (a brand-new file) sends `ifNoneMatch:'*'`: the server
   /// refuses with 409 `already_exists` instead of overwriting a file that
