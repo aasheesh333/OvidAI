@@ -26,6 +26,12 @@ export interface SendMessageResponse {
   runId: string;
   userMessageId: string;
   status: "queued";
+  /**
+   * Wave 1a (additive): the session's requested model pin after this send —
+   * the pin string, or "auto" when the server routes. Absent on a
+   * clientMsgId replay of a pre-Wave-1a send.
+   */
+  model?: string;
 }
 
 /**
@@ -144,17 +150,94 @@ export const MAX_OUTPUT_TOKENS_CAP = 8192;
  * engine request's `maxTokens` — both transports already serialize it
  * (`max_tokens`). Older servers ignore the field.
  */
+/** Session interaction mode (spec D5) — "control" was retired; never re-add it. */
+export const sessionModeSchema = z.enum(["safe", "auto", "drive", "studio"]);
+
+/**
+ * Built-in agent preset ids the cloud honors (agent-core presets.ts
+ * BUILT_IN_PRESETS — an agent-core test pins the two lists equal). Custom
+ * client presets are not a cloud concept.
+ */
+export const CLOUD_PRESET_IDS = ["standard", "minimal", "studio", "code", "plan"] as const;
+export type CloudPresetId = (typeof CLOUD_PRESET_IDS)[number];
+
+/** Max sessions one send may reference for cross-session context (R1 @-tags). */
+export const MAX_SESSION_REFS = 5;
+
+/** Model ids: printable, no control characters (the effort suffix " · high" is allowed). */
+// eslint-disable-next-line no-control-regex
+const MODEL_ID_RE = /^[^\u0000-\u001f\u007f]+$/;
+
+/**
+ * Wave 1a (CT-001 / CH-001 / CH-007 / CH-008, additive + optional) — the
+ * per-turn settings the composer sends with EVERY message. The send body is
+ * the single source of truth for the turn; the gateway persists each present
+ * field into the session's agent state so the session remembers it (server
+ * slash commands, scheduled runs, the next send without the field):
+ *
+ * - model: a catalog id (optionally with the effort suffix " · low|medium|high")
+ *   or an AUTO alias ("auto" / "ovid-cloud/auto"). The gateway validates the
+ *   base id against the model catalog (400 model_unavailable). Persisted as
+ *   session_agent_state.modelPin (null for auto).
+ * - mode: the access chip (Read-Only=safe, General=auto, Full Access=drive,
+ *   Studio=studio). Persisted on sessions.mode + agent state, and rides the
+ *   job (job wins).
+ * - planMode: the Plan chip. A change becomes state.pendingPlanMode, applied
+ *   at the run's first turn boundary.
+ * - presetId: one of CLOUD_PRESET_IDS. Persisted as state.presetId.
+ * - sessionRefs: sessions the user @-tagged (R1 — the ONLY way another
+ *   session's context reaches this run unless "Share session memory" is on).
+ *   Owner-checked; the gateway also resolves `@[Title]` tokens in content.
+ */
 export const sendMessageBodySchema = z
   .object({
     content: z.string(),
     attachmentIds: z.array(z.string().uuid()).optional(),
     clientMsgId: z.string().min(1).max(64).optional(),
     maxOutputTokens: z.number().int().min(1).max(MAX_OUTPUT_TOKENS_CAP).optional(),
+    model: z.string().min(1).max(160).regex(MODEL_ID_RE).optional(),
+    mode: sessionModeSchema.optional(),
+    planMode: z.boolean().optional(),
+    presetId: z.string().min(1).max(64).optional(),
+    sessionRefs: z.array(z.string().uuid()).max(MAX_SESSION_REFS).optional(),
   })
   .strict();
 
-/** Session interaction mode (spec D5) — "control" was retired; never re-add it. */
-export const sessionModeSchema = z.enum(["safe", "auto", "drive", "studio"]);
+// ---------------------------------------------------------------------------
+// Wave 1a (SE-005 / R1): per-user preferences the worker enforces.
+// ---------------------------------------------------------------------------
+
+/**
+ * GET/PATCH /cloud/v1/preferences. memoryEnabled=false removes the memory_*
+ * tools from every run; shareSessionMemory=false (the default) confines
+ * session_search to the current session — no other session's context reaches
+ * a run unless the user @-tags it.
+ */
+export interface UserPreferences {
+  memoryEnabled: boolean;
+  shareSessionMemory: boolean;
+}
+
+export const DEFAULT_USER_PREFERENCES: UserPreferences = Object.freeze({
+  memoryEnabled: true,
+  shareSessionMemory: false,
+}) as UserPreferences;
+
+export const userPreferencesSchema: z.ZodType<UserPreferences> = z
+  .object({ memoryEnabled: z.boolean(), shareSessionMemory: z.boolean() })
+  .strict();
+
+export const userPreferencesPatchSchema = z
+  .object({
+    memoryEnabled: z.boolean().optional(),
+    shareSessionMemory: z.boolean().optional(),
+  })
+  .strict()
+  .refine((b) => b.memoryEnabled !== undefined || b.shareSessionMemory !== undefined, {
+    message: "At least one of 'memoryEnabled' or 'shareSessionMemory' is required.",
+  });
+
+export type UserPreferencesPatch = Partial<UserPreferences>;
 
 export const sessionDtoSchema: z.ZodType<SessionDto> = z.object({
   id: z.string().min(1),
