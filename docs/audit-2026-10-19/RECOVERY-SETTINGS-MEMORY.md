@@ -1,6 +1,9 @@
 # Settings recovery status — R1 private memory (agent worktree a769e6b7)
 
-Branch: `worktree-agent-a769e6b7def3c7073`. Scope: the parent-approved
+Branch: `worktree-agent-a769e6b7def3c7073`, commits `43711af2` (private
+memory) merged with main `feat/ovid-cloud` @ `91d63a32` as `319a0d9c` (the
+0018_attachment_message chain on main is byte-identical to the copy this
+branch generated from; deployed 0017 untouched). Scope: the parent-approved
 bounded private-memory plan (migration 0019, DB repo, agent-core store port,
 hard-boundary tests) plus the Wave 4 Settings work already checkpointed in
 `1787b84d`.
@@ -71,7 +74,7 @@ owner decides a migration path. Until then:
   `/memory?sessionId=` API; its contract is unchanged (list/read/write with
   ifRevision/delete), so no client change was needed for the store swap.
 
-## Test evidence (commands and counts)
+## Test evidence (commands and counts — all re-run on the MERGED tree)
 
 - `npx vitest run src/privateMemory.test.ts` (packages/db, scratch DB
   `settings_mem_a769e6b7def3c7073` on ovid-dev-pg :5433): **5/5 passed** —
@@ -87,8 +90,22 @@ owner decides a migration path. Until then:
   scratch DB): **10/10 passed** — settings/presets unchanged; memory API
   now DB-only (list/read/edit/conflict/delete, ownership, sharing opens
   only the shared scope, no implicit chat selection).
+- `npx vitest run src/routes/messages.test.ts src/routes/messagesWave1b.test.ts
+  src/routes/messagesSettings.test.ts` (apps/gateway, same scratch DB):
+  **26 + 13 + 13 = 52/52 passed** — BYOK ordinary-send correctness intact
+  after the merge (owner-validated key selection, no Ovid billing for a
+  valid owner key; the merge resolution keeps the byokDefault snapshot
+  check ahead of main's factored `provisionKey`, called only when no BYOK
+  default is set).
+- `npx vitest run src/loop.test.ts` (packages/agent-core, same scratch DB):
+  **75/75 passed** (main's merged loop changes verified).
+- `TEST_REDIS_URL=redis://127.0.0.1:6390/14 npx vitest run
+  src/runProcessor.test.ts` (apps/worker, same scratch DB):
+  **62/62 passed** — memory tools bound to the DB adapter in the production
+  roster; Memory OFF removes the family; session_search R1 intact.
 - `pnpm --filter @ovid/shared build && pnpm --filter @ovid/db build &&
-  pnpm --filter agent-core build && pnpm --filter @ovid/worker build &&
-  pnpm --filter @ovid/gateway build`: all compile clean.
+  pnpm --filter @ovid/queue build && pnpm --filter agent-core build &&
+  pnpm --filter @ovid/worker build && pnpm --filter @ovid/gateway build`:
+  all compile clean on the merged tree.
 - `/root/flutter/bin/flutter test test/settings_memory_presets_test.dart
-  test/cloud_byok_ui_test.dart`: **17/17 passed**.
+  test/cloud_byok_ui_test.dart`: **17/17 passed** on the merged tree.
