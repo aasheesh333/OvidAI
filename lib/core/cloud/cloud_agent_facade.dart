@@ -770,19 +770,12 @@ class CloudAgentFacade extends ChangeNotifier
       stopRequested: false,
       clearRunId: true,
     );
-    final failCode = payload['code'];
-    if (type == 'run_failed' && failCode is String && failCode != 'cancelled') {
-      final message = payload['message'];
-      _recordError(serverId, failCode, message is String ? message : '');
-    } else {
-      // run_completed, run_cancelled — and the queued-cancel spelling
-      // run_failed{code:'cancelled'} (CH-020): a user-initiated stop is not
-      // a failure and never raises the red error row.
-      // run_completed and run_cancelled clear the error surface: a
-      // user-initiated cancel is not a surfaced error (the projection fold
-      // appends the 'Stopped by user.' turn tail the user sees).
-      _clearError(serverId);
-    }
+    // CH-019: a RUN-level failure has exactly one surface — the inline
+    // failure row the projection appends (plain copy, Details, Retry, Pick
+    // model). The red banner is reserved for send-level errors, so it is
+    // cleared here for every terminal, failures included. CH-020: the
+    // queued-cancel spelling run_failed{code:'cancelled'} is a user stop.
+    _clearError(serverId);
     _notify();
     // Terminal cache write (Task 9 carry, Task 10): live deltas are not
     // persisted per-delta, so THIS is what makes a cold offline start show
@@ -1448,8 +1441,7 @@ class CloudAgentFacade extends ChangeNotifier
 
   /// True when [sessionId] has a prompt Retry can re-send.
   bool canRetryLastPrompt(String sessionId) =>
-      _lastPrompts.containsKey(_serverId(sessionId) ?? sessionId) ||
-      _lastServerPrompt(sessionId) != null;
+      _lastPrompts.containsKey(_serverId(sessionId) ?? sessionId);
 
   // -------------------------------------------------------------------------
   // Wave 1b (CT-004 / CH-024): history edits — server truncate, regenerate,
@@ -1457,19 +1449,23 @@ class CloudAgentFacade extends ChangeNotifier
   // only mirrors what the server already did.
   // -------------------------------------------------------------------------
 
-  static final RegExp _serverIdShape = RegExp(
-    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
-  );
+  /// A locally minted row id (`Message`'s 24 random bytes as hex) — never a
+  /// server message id.
+  static final RegExp _localIdShape = RegExp(r'^[0-9a-f]{48}$');
 
   /// True when [m] is a row the server stores (a user prompt or a final
   /// answer, keyed by its server message id) — the only rows history edits
-  /// can address. Tool rows, segments, artifact chips and pending prompts
-  /// are not.
-  static bool isServerMessage(Message m) =>
-      _serverIdShape.hasMatch(m.privateSyncId) &&
-      (m.role == 'user' || m.role == 'assistant') &&
-      m.kind == MsgKind.text &&
-      m.toolName == null;
+  /// can address. Tool rows, segments, artifact chips (`kind:` prefixed
+  /// ids), pending prompts and locally minted rows are not.
+  static bool isServerMessage(Message m) {
+    final id = m.privateSyncId;
+    return (m.role == 'user' || m.role == 'assistant') &&
+        m.kind == MsgKind.text &&
+        m.toolName == null &&
+        id.isNotEmpty &&
+        !id.contains(':') &&
+        !_localIdShape.hasMatch(id);
+  }
 
   /// The oldest server-stored row of a loaded transcript — the `before`
   /// cursor for the next older history page (rich rows carry other ids).
@@ -1494,8 +1490,9 @@ class CloudAgentFacade extends ChangeNotifier
 
   /// True while history edits are possible for [sessionId]: nothing in
   /// flight (the server refuses edits while a run is queued or running).
-  bool canEditHistory(String sessionId) =>
-      !busyFor(sessionId) && !(_store?.offline ?? false);
+  /// (A failure — offline, refused — surfaces as an error the UI shows; the
+  /// local transcript changes only after the server confirmed.)
+  bool canEditHistory(String sessionId) => !busyFor(sessionId);
 
   void _truncateLocal(String key, String fromMessageId, {bool keep = false}) {
     final state = _sessions[key];

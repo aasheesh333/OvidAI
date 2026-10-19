@@ -32,8 +32,19 @@ void main() {
       model: 'm',
       mode: 'auto',
       messages: [
-        Message(role: 'user', kind: MsgKind.text, content: 'hi'),
-        Message(role: 'assistant', kind: MsgKind.text, content: 'hello'),
+        // Server-stored rows (UUID ids): history actions address them.
+        Message(
+          role: 'user',
+          kind: MsgKind.text,
+          content: 'hi',
+          privateSyncId: '0199aaaa-0000-7000-8000-000000000001',
+        ),
+        Message(
+          role: 'assistant',
+          kind: MsgKind.text,
+          content: 'hello',
+          privateSyncId: '0199aaaa-0000-7000-8000-000000000002',
+        ),
       ],
     );
     app.sessions.add(session);
@@ -47,7 +58,9 @@ void main() {
 
   testWidgets('message action targets are at least 48x48dp', (tester) async {
     await pump(tester);
-    for (final tip in ['Copy', 'Good answer', 'Bad answer', 'More actions']) {
+    // CH-029: no thumbs on cloud rows (no server feedback route).
+    expect(find.byTooltip('Good answer'), findsNothing);
+    for (final tip in ['Copy', 'More actions']) {
       final targets = find.byTooltip(tip);
       expect(targets, findsWidgets, reason: tip);
       for (final e in targets.evaluate()) {
@@ -57,10 +70,10 @@ void main() {
       }
     }
     // Branch moved into the overflow menu.
-    expect(find.byTooltip('Branch into a new conversation'), findsNothing);
-    await tester.tap(find.byTooltip('More actions'));
+    expect(find.byTooltip('Branch into a new chat'), findsNothing);
+    await tester.tap(find.byTooltip('More actions').last);
     await tester.pumpAndSettle();
-    expect(find.text('Branch into a new conversation'), findsOneWidget);
+    expect(find.text('Branch into a new chat'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

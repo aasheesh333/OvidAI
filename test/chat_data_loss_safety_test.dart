@@ -12,6 +12,9 @@ import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
 import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
 
+/// A server-shaped (UUID) message id — rows the server stores.
+String _id(int n) => '0199aaaa-0000-7000-8000-${n.toString().padLeft(12, '0')}';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final composer = find.byKey(const ValueKey('chat-composer'));
@@ -98,67 +101,68 @@ void main() {
     expect(draft(tester), 'A long prompt I typed carefully');
   });
 
-  testWidgets('Regenerate explains why it cannot run', (tester) async {
+  // CT-004 / CH-024: history edits are server operations on server-stored
+  // rows. A local-only row offers no Regenerate (nothing it could re-run).
+  testWidgets('Regenerate is not offered on a row the server does not store', (
+    tester,
+  ) async {
     a.messages
       ..clear()
       ..addAll([
         Message(role: 'user', content: 'Question'),
         Message(role: 'assistant', content: 'Answer'),
       ]);
-    AppState.I.providers.single.models = ['other-model'];
     await pumpChat(tester);
-    await tester.tap(find.byTooltip('Regenerate'));
-    await tester.pump();
-    expect(find.textContaining('no longer available'), findsOneWidget);
+    expect(find.byTooltip('Regenerate'), findsNothing);
     expect(a.messages, hasLength(2));
-    await expireSnackBars(tester);
   });
 
-  testWidgets('edit dialog states how many later messages it removes', (
-    tester,
-  ) async {
+  testWidgets('edit dialog states how many later messages it removes, and a '
+      'refused edit keeps the history', (tester) async {
     a.messages
       ..clear()
       ..addAll([
-        Message(role: 'user', content: 'First'),
-        Message(role: 'assistant', content: 'One'),
-        Message(role: 'user', content: 'Second'),
-        Message(role: 'assistant', content: 'Two'),
+        Message(role: 'user', content: 'First', privateSyncId: _id(1)),
+        Message(role: 'assistant', content: 'One', privateSyncId: _id(2)),
+        Message(role: 'user', content: 'Second', privateSyncId: _id(3)),
+        Message(role: 'assistant', content: 'Two', privateSyncId: _id(4)),
       ]);
     await pumpChat(tester);
     await tester.tap(find.byTooltip('Edit & resend').first);
     await tester.pumpAndSettle();
     expect(
-      find.textContaining('This removes the 3 messages after it'),
+      find.textContaining('This also removes the 3 messages after it'),
       findsOneWidget,
     );
-    await tester.tap(find.widgetWithText(TextButton, 'Edit & remove 3'));
-    await tester.pumpAndSettle();
-    expect(a.messages, isEmpty);
-    expect(draft(tester), 'First');
-
-    // Undo restores the transcript and takes the staged edit back.
-    await tester.tap(find.text('Undo'));
-    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('edit-resend-send')));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    // The test HTTP stack refuses every request: the server never truncated,
+    // so nothing local changes and the user is told.
     expect(a.messages.map((m) => m.content), ['First', 'One', 'Second', 'Two']);
-    expect(draft(tester), isEmpty);
+    expect(find.byType(SnackBar), findsOneWidget);
     await expireSnackBars(tester);
   });
 
-  testWidgets('Delete message (formerly Revert) offers Undo', (tester) async {
+  testWidgets('Delete from here asks first; a refused delete keeps the rows', (
+    tester,
+  ) async {
     a.messages
       ..clear()
       ..addAll([
-        Message(role: 'assistant', content: 'Hello'),
-        Message(role: 'user', content: 'Oops'),
+        Message(role: 'assistant', content: 'Hello', privateSyncId: _id(5)),
+        Message(role: 'user', content: 'Oops', privateSyncId: _id(6)),
       ]);
     await pumpChat(tester);
     expect(find.byTooltip('Revert'), findsNothing);
-    await tester.tap(find.byTooltip('Delete message'));
+    await tester.tap(find.byTooltip('More actions').last);
     await tester.pumpAndSettle();
-    expect(a.messages.map((m) => m.content), ['Hello']);
-    await tester.tap(find.text('Undo'));
+    await tester.tap(find.text('Delete from here'));
     await tester.pumpAndSettle();
+    expect(find.text('Delete this message?'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('confirm-delete-from')));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
     expect(a.messages.map((m) => m.content), ['Hello', 'Oops']);
     await expireSnackBars(tester);
   });

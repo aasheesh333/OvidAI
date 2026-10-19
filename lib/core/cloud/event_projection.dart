@@ -845,6 +845,9 @@ class EventTranscriptProjector {
     final message = _str(payload, 'message');
     target._setLastError(code, message);
     _terminal(toolState: code == 'cancelled' ? 'stopped' : 'error');
+    final copy = code == null || code == 'cancelled'
+        ? null
+        : cloudErrorCopy(code, message: message);
     target._appendMessage(Message(
       role: 'assistant',
       kind: MsgKind.turnTail,
@@ -853,9 +856,15 @@ class EventTranscriptProjector {
       // server's own words.
       content: code == 'cancelled'
           ? (message ?? humanText(code!))
-          : code == null
+          : copy == null
               ? (message ?? '')
-              : cloudErrorCopy(code, message: message).text,
+              : copy.text,
+      // The ONE surface of a run-level failure (CH-019): the row knows its
+      // code (Retry / Pick model) and keeps the raw text behind "Details".
+      toolName: code == 'cancelled' ? 'run_cancelled' : 'run_failed',
+      toolSummary: code,
+      toolDetail: copy?.detail,
+      toolState: code == 'cancelled' ? 'stopped' : 'error',
       time: _now(),
     ));
   }

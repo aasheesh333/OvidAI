@@ -16,6 +16,8 @@ import '../core/theme.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
 import '../core/cloud/cloud_errors.dart';
+import '../core/cloud/cloud_rest.dart' show CloudApiException;
+import '../core/cloud/event_projection.dart' show kArtifactRowTool;
 import '../core/cloud/cloud_session_store.dart';
 import '../core/cloud/models.dart';
 import '../core/model_limits.dart';
@@ -1176,7 +1178,10 @@ class _ChatScreenState extends State<ChatScreen>
     if (serverId == null) return; // local-only chat: no server history
     final loaded = CloudAgentFacade.I.transcriptFor(serverId);
     if (loaded == null || loaded.isEmpty) return;
-    final before = loaded.first.privateSyncId;
+    // Rich rows (tool cards, segments, chips) carry no server id: the
+    // cursor is the oldest SERVER message (Wave 1b).
+    final before = CloudAgentFacade.I.oldestServerMessageId(serverId);
+    if (before == null) return;
 
     _loadingEarlier = true;
     if (mounted) setState(() {}); // "Loading earlier…" affordance row
@@ -1197,7 +1202,7 @@ class _ChatScreenState extends State<ChatScreen>
     }
     final after =
         CloudAgentFacade.I.transcriptFor(serverId) ?? const <Message>[];
-    if (!failed && (after.isEmpty || after.first.privateSyncId == before)) {
+    if (!failed && (after.isEmpty || CloudAgentFacade.I.oldestServerMessageId(serverId) == before)) {
       // Nothing older came back: the server's beginning is loaded.
       _serverTranscriptComplete.add(sessionId);
     }
@@ -4040,21 +4045,30 @@ class _SubagentCardState extends State<_SubagentCard> {
     final l10n = context.l10n;
     final m = widget.m;
     final input = _input();
-    final child = m.toolSessionId == null
-        ? null
-        : AppState.I.sessionById(m.toolSessionId);
+    // Wave 1b: the child's live transcript comes from its own cloud
+    // session (the facade watches it while the subagent runs).
+    final childId = m.toolSessionId;
+    final childRows = childId == null
+        ? const <Message>[]
+        : (CloudAgentFacade.I.transcriptFor(childId) ??
+              AppState.I.sessionById(childId)?.messages ??
+              const <Message>[]);
     final running = m.toolState == 'running';
     final name =
-        _str(input, const ['subagent_type', 'agent', 'name']) ??
+        _str(input, const ['agentType', 'subagent_type', 'agent', 'name']) ??
+        (m.toolTitle?.trim().isNotEmpty == true ? m.toolTitle!.trim() : null) ??
         l10n.subagentDefaultName;
     final task =
         _str(input, const ['objective', 'prompt', 'message']) ??
         (m.toolSummary ?? '').trim();
     final tools = <Message>[
-      if (child != null)
-        for (final cm in child.messages)
-          if (cm.kind == MsgKind.tool) cm,
+      for (final cm in childRows)
+        if (cm.kind == MsgKind.tool) cm,
     ];
+    // The live activity line: "CodeSubagent: Editing lib/main.dart…".
+    final activity = running
+        ? CloudAgentFacade.I.subagentActivityLine(m)
+        : null;
     final status = switch (m.toolState) {
       'running' => l10n.subagentStatusRunning,
       'error' => l10n.subagentStatusFailed,
@@ -4063,12 +4077,13 @@ class _SubagentCardState extends State<_SubagentCard> {
     };
     final end = running
         ? DateTime.now()
-        : (child != null && child.messages.isNotEmpty
-              ? child.messages.last.time
-              : null);
+        : (childRows.isNotEmpty ? childRows.last.time : null);
     final elapsed = end?.difference(m.time);
     final meta = [
-      status,
+      if (activity != null && activity != name)
+        '${activity.substring(activity.indexOf(':') + 1).trim()}…'
+      else
+        status,
       l10n.subagentToolUses(tools.length),
       if (elapsed != null && elapsed.inSeconds > 0)
         formatCompactDuration(elapsed),
@@ -4101,7 +4116,15 @@ class _SubagentCardState extends State<_SubagentCard> {
             label: l10n.subagentCardSemantics(name, status),
             child: InkWell(
               key: const ValueKey('chat-subagent-header'),
-              onTap: () => setState(() => _override = !open),
+              onTap: () {
+                setState(() => _override = !open);
+                // A finished subagent's work loads on first expand (its
+                // child session is not watched after a reload).
+                final id = m.toolSessionId;
+                if (!open && id != null && childRows.isEmpty) {
+                  unawaited(CloudAgentFacade.I.openSubagentTranscript(id));
+                }
+              },
               child: ConstrainedBox(
                 constraints: const BoxConstraints(minHeight: 48),
                 child: Padding(
@@ -5464,6 +5487,168 @@ class _TurnTailRow extends StatelessWidget {
   }
 }
 
+/// CH-019: the ONE surface of a run-level failure — plain copy, the raw
+/// server text behind Details, and the action that helps: Retry (re-runs
+/// the prompt in place) or Pick model for provider failures.
+class _RunFailedRow extends StatefulWidget {
+  const _RunFailedRow({
+    required this.message,
+    required this.sessionId,
+    required this.latest,
+  });
+
+  final Message message;
+  final String sessionId;
+
+  /// Only the newest failure offers Retry.
+  final bool latest;
+
+  @override
+  State<_RunFailedRow> createState() => _RunFailedRowState();
+}
+
+class _RunFailedRowState extends State<_RunFailedRow> {
+  bool _details = false;
+  bool _retrying = false;
+
+  Future<void> _retry() async {
+    setState(() => _retrying = true);
+    try {
+      await CloudAgentFacade.I.retryFailedRun(widget.sessionId);
+    } catch (e) {
+      if (mounted) {
+        final text = e is CloudApiException
+            ? cloudErrorCopy(e.code, message: e.message).text
+            : 'That did not work. Check your connection and try again.';
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(text)));
+      }
+    } finally {
+      if (mounted) setState(() => _retrying = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final m = widget.message;
+    final code = m.toolSummary ?? '';
+    final detail = (m.toolDetail ?? '').trim();
+    final busy = _agent.busyFor(widget.sessionId);
+    final pickModel = code.startsWith('model_');
+    return Semantics(
+      liveRegion: true,
+      child: Container(
+        key: const ValueKey('run-failed-row'),
+        margin: const EdgeInsets.only(top: 2, bottom: 8),
+        padding: const EdgeInsets.fromLTRB(10, 8, 6, 4),
+        decoration: BoxDecoration(
+          color: Aether.danger.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Aether.danger.withValues(alpha: 0.35)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.error_outline, size: 15, color: Aether.danger),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    m.content,
+                    style: TextStyle(fontSize: 13, color: Aether.text),
+                  ),
+                ),
+              ],
+            ),
+            if (_details && detail.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(23, 4, 4, 0),
+                child: SelectableText(
+                  detail,
+                  style: TextStyle(fontSize: 12, color: Aether.textMuted),
+                ),
+              ),
+            Wrap(
+              alignment: WrapAlignment.end,
+              children: [
+                if (detail.isNotEmpty)
+                  TextButton(
+                    onPressed: () => setState(() => _details = !_details),
+                    child: Text(_details ? 'Hide details' : 'Details'),
+                  ),
+                if (pickModel && widget.latest)
+                  TextButton(
+                    onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Pick another model from the model menu at the top, '
+                          'then tap Retry.',
+                        ),
+                      ),
+                    ),
+                    child: const Text('Pick model'),
+                  ),
+                if (widget.latest)
+                  TextButton(
+                    key: const ValueKey('run-failed-retry'),
+                    onPressed: busy || _retrying ? null : () => unawaited(_retry()),
+                    child: Text(_retrying ? 'Retrying…' : 'Retry'),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// CH-004: the files the agent created in this turn, as artifact chips —
+/// tapping one opens the preview (the URL is re-minted first, so an old
+/// chat's chips still open after their presigned links expired).
+class _ArtifactChips extends StatelessWidget {
+  const _ArtifactChips({required this.message, required this.sessionId});
+
+  final Message message;
+  final String sessionId;
+
+  @override
+  Widget build(BuildContext context) {
+    final session = AppState.I.sessionById(sessionId);
+    return Padding(
+      key: const ValueKey('chat-artifact-chips'),
+      padding: const EdgeInsets.only(top: 2, bottom: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final a in message.attachments)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: ArtifactCard(
+                artifact: SessionArtifact(
+                  id: 'art:${cloudArtifactIdOf(a.url) ?? a.name}',
+                  name: a.name,
+                  sessionId: sessionId,
+                  sessionTitle: session?.title ?? '',
+                  time: message.time,
+                  origin: ArtifactOrigin.generated,
+                  kind: artifactKindFor(a.name),
+                  url: a.url,
+                  size: a.size,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _MessageView extends StatelessWidget {
   final Message m;
   final dynamic session; // ChatSession
@@ -5504,6 +5689,9 @@ class _MessageView extends StatelessWidget {
                   ? CrossAxisAlignment.end
                   : CrossAxisAlignment.start,
               children: [
+                if (m.toolName == kArtifactRowTool)
+                  _ArtifactChips(message: m, sessionId: session.id as String)
+                else
                 switch (m.kind) {
                   MsgKind.imageGen => _imageGen(context),
                   MsgKind.htmlArtifact => HtmlArtifactView(
@@ -5532,7 +5720,10 @@ class _MessageView extends StatelessWidget {
           // web-IDE message meta + action row: copy / edit / revert / time.
           // (Suppressed on compaction event rows — they are apparatus, not
           // conversation turns.)
-          if (!m.thinking && m.kind != MsgKind.compact)
+          if (!m.thinking &&
+              m.kind != MsgKind.compact &&
+              m.kind != MsgKind.turnTail &&
+              m.toolName != kArtifactRowTool)
             _actionRow(context, isUser, isLast),
         ],
       ),
@@ -5598,152 +5789,37 @@ class _MessageView extends StatelessWidget {
         unawaited(reportAiMessage(context, m, model: session.model));
       });
     }
+    // CT-004 / CH-024: history edits are real server operations, offered
+    // only on rows the server stores and only while nothing runs.
+    final serverRow = CloudAgentFacade.isServerMessage(m);
     final canEdit =
         input != null &&
         !session.isSubagent &&
-        !_agent.busyFor(session.id);
-    if (canEdit && isUser && isLast) {
-      add(Icons.edit_outlined, 'Edit & resend', () async {
-        await _editAndTruncate(context, m.content);
-      });
-      // Deletes this message only (it is the last row). It does not revert
-      // any file changes, so it is not called "Revert"; Undo restores it.
-      add(Icons.delete_outline, 'Delete message', () async {
-        if (!_canChangeHistory) return;
-        final undo = _undoSnapshot(msgIndex);
-        final removed = await _deleteHistoryFrom(context, msgIndex);
-        if (removed == null) return;
-        onAction();
-        if (context.mounted) {
-          _offerUndo(context, undo, removed, message: 'Message deleted');
-        }
-      });
-    }
-    // Earlier user messages: edit & resend (truncates conversation).
-    if (canEdit && isUser && !isLast) {
+        serverRow &&
+        CloudAgentFacade.I.canEditHistory(session.id as String);
+    if (canEdit && isUser) {
       add(Icons.edit_outlined, 'Edit & resend', () {
         _showEditResendDialog(context);
       });
+      overflow.add((
+        Icons.delete_outline,
+        'Delete from here',
+        () => unawaited(_confirmDeleteFrom(context)),
+      ));
     }
-    // message feedback: like/dislike + note on final assistant rows.
-    // Re-clicking the same value retracts. A down-vote offers a note.
-    if (!isUser && m.kind == MsgKind.text && !m.thinking) {
-      items.add(
-        target(
-          m.feedback == 'up' ? 'Retract like' : 'Good answer',
-          () {
-            m.feedback = m.feedback == 'up' ? null : 'up';
-            m.feedbackNote = null;
-            AppState.I.persistSessions();
-            onAction();
-          },
-          Icon(
-            m.feedback == 'up'
-                ? Icons.thumb_up_alt
-                : Icons.thumb_up_alt_outlined,
-            size: 16,
-            color: m.feedback == 'up' ? Aether.accent : Aether.textFaint,
-          ),
-        ),
-      );
-      items.add(
-        target(
-          m.feedback == 'down' ? 'Retract dislike' : 'Bad answer',
-          () {
-            if (m.feedback == 'down') {
-              m.feedback = null;
-              m.feedbackNote = null;
-              AppState.I.persistSessions();
-              onAction();
-              return;
-            }
-            m.feedback = 'down';
-            _askFeedbackNote(context);
-          },
-          Icon(
-            m.feedback == 'down'
-                ? Icons.thumb_down_alt
-                : Icons.thumb_down_alt_outlined,
-            size: 16,
-            color: m.feedback == 'down' ? Aether.danger : Aether.textFaint,
-          ),
-        ),
-      );
+    // CH-029: thumbs feedback is not offered — there is no server feedback
+    // route yet, and a like that is never sent or kept would be a lie.
+    // Branch into a new chat from this answer (server-side copy).
+    if (!isUser && serverRow && !m.thinking && !session.isSubagent) {
+      overflow.add((
+        Icons.call_split,
+        'Branch into a new chat',
+        () => unawaited(_branch(context)),
+      ));
     }
-    // Branch into a new conversation from this assistant message.
-    if (!isUser && m.kind == MsgKind.text && !m.thinking) {
-      overflow.add((Icons.call_split, 'Branch into a new conversation', () {
-        final branch = AppState.I.branchSessionFrom(session.id, msgIndex);
-        if (branch != null && context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Branched into a new chat'),
-              duration: Duration(milliseconds: 900),
-            ),
-          );
-        }
-      }));
-    }
-    // Regenerate: re-send the last user message to get a new response.
-    if (canEdit && !isUser && isLast && m.kind == MsgKind.text && !m.thinking) {
-      add(Icons.refresh, 'Regenerate', () async {
-        if (!_canChangeHistory) return;
-        void explain(String text) {
-          if (!context.mounted) return;
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(text)));
-        }
-
-        // Find the last user message content.
-        final msgs = session.messages as List<Message>;
-        var lastUserIdx = -1;
-        for (var i = msgs.length - 1; i >= 0; i--) {
-          if (msgs[i].role == 'user') {
-            lastUserIdx = i;
-            break;
-          }
-        }
-        final lastUser = lastUserIdx < 0 ? null : msgs[lastUserIdx];
-        if (lastUser == null || lastUser.content.isEmpty) {
-          explain('There is no message to regenerate a reply for.');
-          return;
-        }
-        final provider = AppState.I.providerForSession(session);
-        if (provider == null || !provider.isConfigured) {
-          explain('Set up a provider for this chat before regenerating.');
-          return;
-        }
-        if (!provider.models.contains(session.model.split('·').first.trim())) {
-          explain(
-            'The selected model is no longer available. Pick another model to regenerate.',
-          );
-          return;
-        }
-        if (lastUser.attachments.any(
-          (a) => a.path == null || a.path!.isEmpty,
-        )) {
-          explain(
-            'An attachment of the original message is no longer available, so the reply cannot be regenerated.',
-          );
-          return;
-        }
-        // Delete EVERY row after the last user message (tool calls, reasoning
-        // and the answer) so the first attempt is never re-sent to the model.
-        if (await _deleteHistoryFrom(context, lastUserIdx + 1) == null) {
-          return;
-        }
-        onAction();
-        _agent.runTask(
-          lastUser.content,
-          sessionId: session.id,
-          expandRefsFor: session,
-          attachments: [
-            for (final a in lastUser.attachments)
-              (name: a.name, path: a.path!, size: a.size),
-          ],
-        );
-      });
+    // Regenerate the newest answer (server re-run of its prompt).
+    if (canEdit && !isUser && _isLatestAnswer()) {
+      add(Icons.refresh, 'Regenerate', () => unawaited(_regenerate(context)));
     }
     if (overflow.isNotEmpty) {
       items.add(
@@ -5802,239 +5878,22 @@ class _MessageView extends StatelessWidget {
   String _formatTime(DateTime t) =>
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
-  bool get _canChangeHistory =>
-      input != null &&
-      !session.isSubagent &&
-      AppState.I.activeSessionId == session.id &&
-      identical(AppState.I.sessionById(session.id), session) &&
-      !_agent.busyFor(session.id) &&
-      msgIndex < session.messages.length &&
-      identical(session.messages[msgIndex], m);
-
-  /// Truncates the conversation from [index] (inclusive). Returns the removed
-  /// rows, or null when the deletion failed or the conversation changed
-  /// while it was written (no continuation may run then).
-  Future<List<Message>?> _deleteHistoryFrom(
-    BuildContext context,
-    int index,
-  ) async {
-    final app = AppState.I;
-    if (index < 0 || index > session.messages.length) return null;
-    final List<Message> removed;
-    try {
-      removed = await app.deleteMessagesFrom(session.id, index);
-    } catch (_) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'History could not be deleted. Your draft and messages have been kept; retry the deletion.',
-            ),
-          ),
-        );
-      }
-      return null;
-    }
-    // A session switch or a newly started run during the disk write must not
-    // launch a continuation against another owner or a stale conversation.
-    final current =
-        context.mounted &&
-        identical(AppState.I, app) &&
-        app.activeSessionId == session.id &&
-        identical(app.sessionById(session.id), session) &&
-        !_agent.busyFor(session.id);
-    return current ? removed : null;
-  }
-
-  ({int index}) _undoSnapshot(int index) => (index: index);
-
-  /// "[message] · Undo" for ~8 s after a history truncation. Undo restores
-  /// the removed rows only while nothing was added after the cut; it also
-  /// takes back an edit staged in the composer by [stagedText].
-  void _offerUndo(
-    BuildContext context,
-    ({int index}) snapshot,
-    List<Message> removed, {
-    required String message,
-    String? stagedText,
-    List<({String name, String path, int size})> stagedFiles = const [],
-  }) {
-    final messenger = ScaffoldMessenger.of(context);
-    final composer = input;
-    final sessionId = session.id;
-    showUndoSnackBar(
-      messenger,
-      message: message,
-      duration: const Duration(seconds: 8),
-      onUndo: () {
-        final restored =
-            !_agent.busyFor(sessionId) &&
-            AppState.I.restoreMessagesAt(
-              sessionId,
-              snapshot.index,
-              removed,
-            );
-        if (!restored) {
-          if (messenger.mounted) {
-            messenger.showSnackBar(
-              const SnackBar(
-                content: Text(
-                  'The conversation changed, so the deleted messages could not be restored.',
-                ),
-              ),
-            );
-          }
-          return;
-        }
-        if (stagedText != null &&
-            composer != null &&
-            AppState.I.activeSessionId == sessionId &&
-            composer.text == stagedText) {
-          composer.clear();
-          final pending = _agent.pendingAttachments;
-          for (final file in stagedFiles) {
-            pending.remove(file);
-          }
-        }
-      },
-    );
-  }
-
-  /// Stages [text] (and this message's files) in the composer, truncates the
-  /// conversation from this message and offers Undo.
-  Future<void> _editAndTruncate(BuildContext context, String text) async {
-    final staged = [
-      for (final a in m.attachments)
-        if (a.path != null && a.path!.isNotEmpty)
-          (name: a.name, path: a.path!, size: a.size),
-    ];
-    if (!_stageEdit(context, text)) return;
-    final undo = _undoSnapshot(msgIndex);
-    final removed = await _deleteHistoryFrom(context, msgIndex);
-    if (removed == null) return;
-    onAction();
-    if (!context.mounted) return;
-    final later = removed.length - 1;
-    _offerUndo(
-      context,
-      undo,
-      removed,
-      message: later > 0
-          ? 'Moved to composer · $later later message${later == 1 ? '' : 's'} removed'
-          : 'Moved to composer',
-      stagedText: text,
-      stagedFiles: staged,
-    );
-  }
-
-  bool _stageEdit(BuildContext context, String text) {
-    if (!_canChangeHistory) return false;
-    final pending = _agent.pendingAttachments;
-    String? error;
-    if (input!.text.isNotEmpty || pending.isNotEmpty) {
-      error = 'Finish the current draft before editing a message.';
-    } else if (m.attachments.length > _maxChatAttachments ||
-        m.attachments.any((a) => a.path == null || a.path!.isEmpty)) {
-      error =
-          'The original attachments cannot be restored. The message has been kept.';
-    }
-    if (error != null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(error)));
-      return false;
-    }
-    // Stage the draft before the durable deletion. A failed write keeps both
-    // the original transcript and this editable draft, including attachments.
-    pending.addAll([
-      for (final a in m.attachments)
-        (name: a.name, path: a.path!, size: a.size),
-    ]);
-    input!.value = TextEditingValue(
-      text: text,
-      selection: TextSelection.collapsed(offset: text.length),
-    );
-    return true;
-  }
-
-  /// Optional note attached to a down-vote (the feedback collector feedback note popover).
-  void _askFeedbackNote(BuildContext context) {
-    final c = TextEditingController();
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Aether.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) => Padding(
-        padding: EdgeInsets.fromLTRB(
-          16,
-          16,
-          16,
-          MediaQuery.of(ctx).viewInsets.bottom + 16,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'What was wrong with this answer?',
-              style: const TextStyle(
-                fontSize: 14.5,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'Optional — the note stays on this device.',
-              style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: c,
-              autofocus: true,
-              maxLines: 3,
-              style: const TextStyle(fontSize: 13),
-              decoration: const InputDecoration(
-                hintText: 'e.g. wrong API, hallucinated paths…',
-              ),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                style: FilledButton.styleFrom(
-                  backgroundColor: Aether.accent,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                ),
-                onPressed: () {
-                  m.feedbackNote = c.text.trim();
-                  AppState.I.persistSessions();
-                  Navigator.pop(ctx);
-                  onAction();
-                },
-                child: const Text('Save', style: TextStyle(fontSize: 13.5)),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// Earlier-message edits transfer to the composer before truncating history.
+  /// Edit & resend: the edited prompt replaces this one; everything after
+  /// it is removed on the server first (CT-004).
   void _showEditResendDialog(BuildContext context) {
     final c = TextEditingController(text: m.content);
     final navigator = Navigator.of(context, rootNavigator: true);
-    final later = session.messages.length - msgIndex - 1;
+    final later = _laterServerRows();
     Future<void> send(String value) async {
       final text = value.trim();
-      if (text.isEmpty) {
-        navigator.pop();
-        return;
-      }
       navigator.pop();
-      await _editAndTruncate(context, text);
+      if (text.isEmpty) return;
+      try {
+        await CloudAgentFacade.I.editAndResend(session.id as String, m, text);
+        onAction();
+      } catch (e) {
+        if (context.mounted) _historyError(context, e);
+      }
     }
 
     final route = DialogRoute<void>(
@@ -6060,8 +5919,8 @@ class _MessageView extends StatelessWidget {
             if (later > 0) ...[
               const SizedBox(height: 12),
               Text(
-                'This removes the $later message${later == 1 ? '' : 's'} '
-                'after it. You can undo for a few seconds.',
+                'This also removes the $later message${later == 1 ? '' : 's'} '
+                'after it. This cannot be undone.',
                 key: const ValueKey('edit-resend-removal-count'),
                 style: TextStyle(fontSize: 12.5, color: Aether.danger),
               ),
@@ -6071,9 +5930,10 @@ class _MessageView extends StatelessWidget {
         actions: [
           TextButton(onPressed: navigator.pop, child: const Text('Cancel')),
           TextButton(
+            key: const ValueKey('edit-resend-send'),
             onPressed: () => send(c.text),
             child: Text(
-              later > 0 ? 'Edit & remove $later' : 'Edit in composer',
+              later > 0 ? 'Send & remove $later' : 'Send',
               style: TextStyle(
                 color: later > 0 ? Aether.danger : Aether.accent,
               ),
@@ -6183,7 +6043,127 @@ class _MessageView extends StatelessWidget {
   Widget _toolCard() => _ToolCard(m);
 
   /// turn-tail parity — faint footer row (elapsed · stats).
-  Widget _turnTail() => _TurnTailRow(m);
+  Widget _turnTail() => m.toolName == 'run_failed'
+      ? _RunFailedRow(
+          message: m,
+          sessionId: session.id as String,
+          latest: _isLatestRow(),
+        )
+      : _TurnTailRow(m);
+
+  /// The projection rows this view indexes into (cloud sessions keep
+  /// `ChatSession.messages` empty).
+  List<Message> _rows() =>
+      CloudAgentFacade.I.transcriptFor(session.id as String) ??
+      (session.messages as List<Message>);
+
+  /// True when nothing but turn tails follows this row.
+  bool _isLatestRow() {
+    final rows = _rows();
+    final i = rows.indexOf(m);
+    if (i < 0) return false;
+    for (var j = i + 1; j < rows.length; j++) {
+      if (rows[j].kind != MsgKind.turnTail) return false;
+    }
+    return true;
+  }
+
+  /// True when [m] is the newest server-stored answer (Regenerate).
+  bool _isLatestAnswer() {
+    final rows = _rows();
+    final i = rows.indexOf(m);
+    if (i < 0) return false;
+    for (var j = i + 1; j < rows.length; j++) {
+      final r = rows[j];
+      if (CloudAgentFacade.isServerMessage(r) ||
+          CloudAgentFacade.pendingClientMsgIdOf(r) != null) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// Server-stored rows after [m] — what a history edit from here removes.
+  int _laterServerRows() {
+    final rows = _rows();
+    final i = rows.indexOf(m);
+    if (i < 0) return 0;
+    var n = 0;
+    for (var j = i + 1; j < rows.length; j++) {
+      if (CloudAgentFacade.isServerMessage(rows[j])) n++;
+    }
+    return n;
+  }
+
+  void _historyError(BuildContext context, Object e) {
+    if (!context.mounted) return;
+    final text = e is CloudApiException
+        ? (e.code == 'session_busy'
+              ? 'A task is still running in this chat. Stop it first.'
+              : cloudErrorCopy(e.code, message: e.message).text)
+        : 'That did not work. Check your connection and try again.';
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  Future<void> _confirmDeleteFrom(BuildContext context) async {
+    final later = _laterServerRows();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete this message?'),
+        content: Text(
+          later > 0
+              ? 'This deletes it and the $later message${later == 1 ? '' : 's'} '
+                    'after it, on every device. This cannot be undone.'
+              : 'This deletes it on every device. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            key: const ValueKey('confirm-delete-from'),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text('Delete', style: TextStyle(color: Aether.danger)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await CloudAgentFacade.I.deleteFrom(session.id as String, m);
+      onAction();
+    } catch (e) {
+      if (context.mounted) _historyError(context, e);
+    }
+  }
+
+  Future<void> _regenerate(BuildContext context) async {
+    try {
+      await CloudAgentFacade.I.regenerate(session.id as String, m);
+      onAction();
+    } catch (e) {
+      if (context.mounted) _historyError(context, e);
+    }
+  }
+
+  Future<void> _branch(BuildContext context) async {
+    try {
+      final id = await CloudAgentFacade.I.branchFrom(session.id as String, m);
+      AppState.I.selectSession(id);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Branched into a new chat'),
+            duration: Duration(milliseconds: 1200),
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) _historyError(context, e);
+    }
+  }
 
   Widget _imageGen(BuildContext context) {
     final path = m.imagePath;
@@ -8925,11 +8905,21 @@ class _ApprovalDockState extends State<_ApprovalDock> {
     // Title says WHICH tool is asking; the monospace box below shows exactly
     // what will run. When there is no separate detail, the summary itself is
     // the thing being approved, so it goes in the (never clamped) box.
+    // CH-017: a plan prompt is a plan review, not a generic tool ask.
+    final isPlan = req.kind == 'plan';
     final hasDetail = req.detail.isNotEmpty && req.detail != req.summary;
-    final title = hasDetail && req.summary.trim().isNotEmpty
+    final title = isPlan
+        ? 'Review the plan'
+        : hasDetail && req.summary.trim().isNotEmpty
         ? req.summary.trim()
         : _toolLabel(req.tool);
-    final body = hasDetail ? req.detail : req.summary;
+    final body = isPlan
+        ? (req.planBody ?? req.detail)
+        : hasDetail
+        ? req.detail
+        : req.summary;
+    // While the answer travels to the server the card stays, disabled.
+    final sending = req.sending;
     final lines = body.split('\n');
     final long = lines.length > _detailPreviewLines;
     final isCommit = req.tool == 'commit';
@@ -8951,8 +8941,8 @@ class _ApprovalDockState extends State<_ApprovalDock> {
         minimumSize: const Size(64, 48),
         padding: const EdgeInsets.symmetric(horizontal: 12),
       ),
-      onPressed: () => _decide(req, ok: false),
-      child: Text('Deny', style: buttonText),
+      onPressed: sending ? null : () => _decide(req, ok: false),
+      child: Text(isPlan ? 'Keep planning' : 'Deny', style: buttonText),
     );
     final allow = FilledButton(
       key: const ValueKey('approval-allow'),
@@ -8962,13 +8952,13 @@ class _ApprovalDockState extends State<_ApprovalDock> {
         minimumSize: const Size(64, 48),
         padding: const EdgeInsets.symmetric(horizontal: 12),
       ),
-      onPressed: () => _decide(req, ok: true),
-      child: Text('Allow', style: buttonText),
+      onPressed: sending ? null : () => _decide(req, ok: true),
+      child: Text(isPlan ? 'Approve plan' : 'Allow', style: buttonText),
     );
     // No scope choice: an Always Allow is recorded for THIS mode and THIS
     // session, persists across restarts, and is purged when the session is
     // deleted.
-    final always = req.allowAlways
+    final always = req.allowAlways && !isPlan
         ? TextButton(
             key: const ValueKey('approval-always'),
             style: TextButton.styleFrom(
@@ -8976,7 +8966,9 @@ class _ApprovalDockState extends State<_ApprovalDock> {
               minimumSize: const Size(64, 48),
               padding: const EdgeInsets.symmetric(horizontal: 12),
             ),
-            onPressed: () => _decide(req, ok: true, always: true),
+            onPressed: sending
+                ? null
+                : () => _decide(req, ok: true, always: true),
             child: Text(
               'Always Allow',
               textAlign: TextAlign.center,
@@ -9007,7 +8999,9 @@ class _ApprovalDockState extends State<_ApprovalDock> {
                 Padding(
                   padding: const EdgeInsets.only(top: 1),
                   child: Icon(
-                    Icons.warning_amber_rounded,
+                    isPlan
+                        ? Icons.map_outlined
+                        : Icons.warning_amber_rounded,
                     size: 16,
                     color: Aether.warnLight,
                   ),
@@ -9071,6 +9065,30 @@ class _ApprovalDockState extends State<_ApprovalDock> {
                   ),
                 ),
             ],
+            if (req.expiresAt != null && !sending)
+              _ApprovalCountdown(expiresAt: req.expiresAt!),
+            if (sending)
+              Padding(
+                key: const ValueKey('approval-sending'),
+                padding: const EdgeInsets.only(top: 6),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.5,
+                        color: Aether.textMuted,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Sending your answer…',
+                      style: TextStyle(fontSize: 12, color: Aether.textMuted),
+                    ),
+                  ],
+                ),
+              ),
             const SizedBox(height: 8),
             // Full-width action row. Narrow widths (or large text) move
             // Always Allow onto its own row so Deny / Allow keep a wide,
@@ -9111,6 +9129,58 @@ class _ApprovalDockState extends State<_ApprovalDock> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// CH-017: the server auto-denies an unanswered prompt at `expiresAt`; the
+/// card says how long is left (ticking) instead of failing silently.
+class _ApprovalCountdown extends StatefulWidget {
+  const _ApprovalCountdown({required this.expiresAt});
+
+  final DateTime expiresAt;
+
+  @override
+  State<_ApprovalCountdown> createState() => _ApprovalCountdownState();
+}
+
+class _ApprovalCountdownState extends State<_ApprovalCountdown> {
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {});
+      if (!widget.expiresAt.isAfter(DateTime.now())) _tick?.cancel();
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final left = widget.expiresAt.difference(DateTime.now());
+    final String text;
+    if (left.isNegative || left == Duration.zero) {
+      text = 'Timed out: the request was denied.';
+    } else {
+      final m = left.inMinutes;
+      final sec = (left.inSeconds % 60).toString().padLeft(2, '0');
+      text = 'Denied automatically in $m:$sec if you do not answer.';
+    }
+    return Padding(
+      key: const ValueKey('approval-countdown'),
+      padding: const EdgeInsets.only(top: 6),
+      child: Text(
+        text,
+        style: TextStyle(fontSize: 12, color: Aether.textMuted),
       ),
     );
   }

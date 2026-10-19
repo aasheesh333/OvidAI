@@ -724,7 +724,8 @@ void main() {
       h.facade.dispose();
     });
 
-    test('a later run_started clears the previous run error', () async {
+    test('CH-019: a run failure has ONE surface — the inline failure row, '
+        'never the banner too', () async {
       final h = await _build();
       await h.facade.runTask('first', sessionId: 's1');
       final socket = await h.socket();
@@ -735,7 +736,12 @@ void main() {
         'message': 'boom',
       }));
       await pumpEventQueue();
-      expect(h.facade.runStateFor('s1').lastErrorCode, 'provider_error');
+      expect(h.facade.runStateFor('s1').lastErrorCode, isNull,
+          reason: 'no banner for a run-level failure');
+      final tail = h.facade.transcriptFor('s1')!.last;
+      expect(tail.kind, MsgKind.turnTail);
+      expect(tail.toolName, 'run_failed');
+      expect(tail.toolSummary, 'provider_error');
 
       await h.facade.runTask('second', sessionId: 's1');
       socket.server(_eventFrame('s1', '3-0', 'run_started', {'runId': 'run-2'}));

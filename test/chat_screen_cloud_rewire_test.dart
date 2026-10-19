@@ -770,7 +770,16 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
 
-      // The card dismissed optimistically…
+      // CH-017: the card stays up in its "Sending…" state until the server
+      // confirms the decision…
+      expect(find.byKey(const ValueKey('approval-sending')), findsOneWidget);
+      socket.server(<String, dynamic>{
+        'op': 'approval_ack',
+        'approvalId': 'ap-1',
+        'decision': 'allow',
+      });
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       expect(find.byKey(const ValueKey('approval-allow')), findsNothing);
       expect(find.byKey(const ValueKey('approval-deny')), findsNothing);
       // …and the answer went out on the multiplexed wire.
