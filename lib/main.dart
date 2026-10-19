@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import 'core/cert_pinning.dart';
+import 'core/cloud/cloud_account_binding.dart';
 import 'core/cloud/cloud_agent_facade.dart';
 import 'core/cloud/cloud_session_store.dart';
 import 'core/cloud/cloud_ws.dart';
@@ -15,6 +16,8 @@ import 'core/studio_drafts.dart';
 import 'core/background_notifications.dart';
 import 'core/composer_drafts.dart';
 import 'core/firebase_service.dart';
+import 'core/native_routes.dart';
+import 'core/play_billing.dart';
 import 'core/session_history_store.dart';
 import 'core/theme.dart';
 import 'ui/app_router.dart';
@@ -187,37 +190,44 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     // Rebuild the whole app when the user toggles the theme in Settings.
     AppState.I.addListener(_onThemeChanged);
     // Notification taps route through the app router (07 §1): back to the
-    // chat root, validated id, then select. FCM is the delivery path now.
+    // chat root, validated id, then select. FCM is the delivery path now;
+    // local notifications reach Dart through the `ovid/native` channel
+    // (CT-009), whose cold-start route Dart pulls once the engine is up.
     PushService.I.onOpenRoute = _openRouteFromNotification;
+    NativeRouteChannel.install(_openRouteFromNotification);
+    unawaited(_openPendingNativeRoute());
+    unawaited(PushService.I.init());
     BackgroundNotifier.I.inAppPresenter = _showInAppNotification;
-    // Firebase must be up before a token can be requested; LoginGate owns
-    // initialization, so start push and warm the cloud link/store as soon as
-    // readiness flips. P8 Task 20 boot is exactly: Firebase + PushService +
-    // WsMultiplexer + CloudSessionStore warm-up.
-    FirebaseService.I.addListener(_maybeStartCloud);
-    _maybeStartCloud();
+    // The outgoing account's push token is unregistered while its ID token
+    // still works, before every sign-out and reset (SE-002).
+    FirebaseService.I.addBeforeSignOut(PushService.I.unbindAccount);
+    // Push registration, the WS link, session sync and billing state follow
+    // EVERY account that becomes ready — not just the first one in this
+    // process (SH-003, SH-008, SH-013, CT-006).
+    _accountBinding.start();
     _restoreAndListenForLinks();
   }
 
-  /// One-shot cold-boot warm-up once Firebase reports an account.
-  ///
-  /// Push registration, the WS link and the session store all need the
-  /// signed-in identity; warming before that would mint an unauthenticated
-  /// ticket. A later sign-in is covered by the shell's resume path.
-  void _maybeStartCloud() {
-    final firebase = FirebaseService.I;
-    if (!firebase.isAvailable) return;
-    if (!firebase.isSignedIn || !firebase.accountReady) return;
-    firebase.removeListener(_maybeStartCloud);
+  late final _accountBinding = CloudAccountBinding(
+    auth: FirebaseService.I,
+    readyUid: () {
+      final firebase = FirebaseService.I;
+      return firebase.isAvailable && firebase.accountReady
+          ? firebase.uid
+          : null;
+    },
+    signedIn: () => FirebaseService.I.isSignedIn,
+    onBind: _bindCloudAccount,
+    onUnbind: _unbindCloudAccount,
+  );
+
+  Future<void> _bindCloudAccount(String uid) async {
     // Session-delete teardown hook: deleting a chat drops its WS
     // subscription, projection and every other facade surface
     // (state.deleteSession also fires the server-side DELETE).
     AppState.I.onSessionDeleted = CloudAgentFacade.I.dropSession;
-    unawaited(PushService.I.init());
-    unawaited(_warmCloud());
-  }
-
-  Future<void> _warmCloud() async {
+    unawaited(PushService.I.bindAccount(uid));
+    unawaited(PlayBillingService.I.ensureLoaded());
     await CloudSessionStore.I.ready;
     try {
       await WsMultiplexer.I.connectIfNeeded();
@@ -225,29 +235,44 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     } catch (e) {
       Diag.swallow('main.warmCloud', e);
     }
+    // A link or notification tap that arrived before the account was ready
+    // opens now, against reconciled sessions (SH-019).
+    if (mounted) _drainPendingRoute();
   }
 
-  bool _openChatFromNotification(String sessionId, [int attempt = 0]) {
-    if (AppRouter.openChat(sessionId)) return true;
-    // Cold start: the navigator may not be attached for a few frames.
-    if (appNavigatorKey.currentState == null && attempt < 10 && mounted) {
+  Future<void> _unbindCloudAccount(String previousUid) async {
+    AppRouter.clearPending();
+    await PushService.I.unbindAccount();
+    await WsMultiplexer.I.resetForAccountChange();
+    CloudSessionStore.I.resetSyncState();
+    PlayBillingService.I.resetForAccount();
+  }
+
+  void _drainPendingRoute([int attempt = 0]) {
+    if (AppRouter.drainPending()) return;
+    if (AppRouter.pendingRoute != null &&
+        appNavigatorKey.currentState == null &&
+        attempt < 10 &&
+        mounted) {
       WidgetsBinding.instance.addPostFrameCallback(
-        (_) => _openChatFromNotification(sessionId, attempt + 1),
+        (_) => _drainPendingRoute(attempt + 1),
       );
       WidgetsBinding.instance.scheduleFrame();
     }
-    return false;
+  }
+
+  Future<void> _openPendingNativeRoute() async {
+    final route = await NativeRouteChannel.takePendingRoute();
+    if (route != null && mounted) _openRouteFromNotification(route);
   }
 
   /// Notification tap → `/c/<id>`, `/schedule/<id>`, `/settings` or `/`.
+  /// Opened through [AppRouter.open]: parked until the account is ready
+  /// (never above the login screen, never before hydration).
   void _openRouteFromNotification(String path, [int attempt = 0]) {
     final route = AppRouter.parse(Uri.parse(path));
     if (route == null) return;
-    // Chat taps keep the session-validation path (and its cold-start retry).
-    if (route is ChatRoute && _openChatFromNotification(route.sessionId, attempt)) {
-      return;
-    }
-    if (AppRouter.go(route)) return;
+    if (AppRouter.open(route)) return;
     // Cold start: the navigator may not be attached for a few frames.
     if (appNavigatorKey.currentState == null && attempt < 10 && mounted) {
       WidgetsBinding.instance.addPostFrameCallback(
@@ -281,7 +306,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     final route = AppRouter.parse(uri);
     if (route is ChatRoute || route is ScheduleRoute) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) AppRouter.go(route!);
+        if (mounted) AppRouter.open(route!);
       });
       WidgetsBinding.instance.scheduleFrame();
       return;
@@ -368,7 +393,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     AppState.I.setAccountFeaturesForeground(false);
     WidgetsBinding.instance.removeObserver(this);
     AppState.I.removeListener(_onThemeChanged);
-    FirebaseService.I.removeListener(_maybeStartCloud);
+    _accountBinding.stop();
     if (PushService.I.onOpenRoute == _openRouteFromNotification) {
       PushService.I.onOpenRoute = null;
     }
