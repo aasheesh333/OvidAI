@@ -61,6 +61,28 @@ owner decides a migration path. Until then:
   store and scrubs the workspace copies, or a FS-tool deny-rule on
   `.ovid/**` in the sandbox adapter.
 
+**Decision-ready inventory (added):** `cloud/scripts/migrate/legacyMemoryInventory.ts`
+is the owner-run, strictly READ-ONLY half of that follow-up. It walks
+`{OVID_WORKSPACES_ROOT}/{uid}/workspace/.ovid` (readdir/lstat metadata only
+— contents are never opened, symlinks never followed) and emits a manifest
+that maps every legacy file to its private_memory_files target scope and
+applies every store guard (canonical name, ≤80 chars, ≤32 KiB, ≤32 files
+counting the virtual MEMORY.md, case-conflicts, unexpected layouts) plus
+optional session liveness/ownership verdicts from `--db-url`:
+
+    node cloud/scripts/migrate/legacyMemoryInventory.ts \
+      --root <OVID_WORKSPACES_ROOT> [--db-url postgres://…] \
+      [--out manifest.json] [--quiet]
+
+Exit 0 with the manifest (issues are data, not errors); no import, no
+delete, no move, no content reads — the owner's eventual decision becomes
+one command over this manifest. Tests:
+`cloud/scripts/migrate/legacyMemoryInventory.test.ts` 9/9 (store guards,
+case-conflict/cap pressure, session verdicts, and a walker suite that
+plants poison contents and asserts they never leave the walker); the CLI
+was smoke-run end-to-end (no DB, unreachable DB, and a seeded scratch DB:
+live → importable, soft-deleted/foreign/unknown → flagged).
+
 ## Honest gaps
 
 - `memoryDirectoryFor`/`MEMORY_DIR` in `@ovid/shared` are now dead exports
