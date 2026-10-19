@@ -1621,13 +1621,13 @@ abstract class AppLocalizations {
   /// Delete-chat confirmation body when nothing else is affected.
   ///
   /// In en, this message translates to:
-  /// **'You can undo for a few seconds; after that this chat cannot be recovered.'**
+  /// **'This deletes the chat and its history on all your devices. Files in your Studio workspace are kept. You can undo for a few seconds.'**
   String get sessionDeleteImpactUndo;
 
   /// Delete-chat confirmation body listing what else is deleted or stopped.
   ///
   /// In en, this message translates to:
-  /// **'This will permanently delete {details}. You can undo for a few seconds; after that this chat cannot be recovered.'**
+  /// **'This deletes the chat and its history on all your devices, and {details}. Files in your Studio workspace are kept. You can undo for a few seconds.'**
   String sessionDeleteImpactDetails(String details);
 
   /// Delete-chat impact item.

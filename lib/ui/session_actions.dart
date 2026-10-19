@@ -98,19 +98,15 @@ Future<bool> askDeleteSessionConfirmed(
   final l10n = context.l10n;
   final app = AppState.I;
   final descendants = app.descendantsOf(session.id);
-  final doomed = [session, ...descendants];
   final runningDescendantCount = descendants
       .where((candidate) => _agent.busyFor(candidate.id))
       .length;
   final runningRoot = _agent.busyFor(session.id);
-  final sandboxCount = doomed
-      .map((candidate) => candidate.sandboxId ?? candidate.id)
-      .toSet()
-      .length;
+  // CH-030: a cloud chat delete removes the chat and its history; the
+  // Studio workspace is shared per user and is never deleted with a chat.
   final details = <String>[
     if (descendants.isNotEmpty)
       l10n.sessionDeleteChildSessions(descendants.length),
-    if (sandboxCount > 0) l10n.sessionDeleteSandboxes(sandboxCount),
     if (runningRoot) l10n.sessionDeleteStopsRunning,
     if (runningDescendantCount > 0)
       l10n.sessionDeleteStopsDescendants(runningDescendantCount),

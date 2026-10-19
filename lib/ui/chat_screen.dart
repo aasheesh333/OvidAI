@@ -6982,7 +6982,7 @@ class _InputBarState extends State<_InputBar> {
               sheetCtx,
               Icons.photo_library_outlined,
               'Photos & videos',
-              'Up to 20 files per message, max 20 MB each',
+              'Up to 20 files per message, max 25 MB each',
               () => _pickMedia(sheetCtx),
             ),
             _attachOption(

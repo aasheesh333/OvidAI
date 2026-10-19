@@ -279,6 +279,10 @@ class CloudAgentFacade extends ChangeNotifier
   /// cannot stage past it.
   static const int _maxAttachments = 20;
 
+  /// The gateway's per-file cap (`ATTACHMENT_MAX_BYTES`,
+  /// cloud/apps/gateway/src/routes/attachments.ts) — 25,000,000 bytes.
+  static const int maxAttachmentBytes = 25000000;
+
   /// In-flight `attachFile` calls per session. The count check and the
   /// reservation happen before the first await, so concurrent picks cannot
   /// all pass the limit together (the retired service's
@@ -2086,7 +2090,12 @@ class CloudAgentFacade extends ChangeNotifier
       } catch (_) {
         return 'file not found: $fileName';
       }
-      if (size > 25 * 1024 * 1024) {
+      // CH-022: the gateway's exact limit (25,000,000 bytes, `size > 0`),
+      // checked HERE so a file that cannot be sent never stages.
+      if (size <= 0) {
+        return '$fileName is empty, so there is nothing to send.';
+      }
+      if (size > maxAttachmentBytes) {
         return 'File is larger than the 25 MB cloud attachment limit.';
       }
       // Re-read the map after the await: a send that settled during the

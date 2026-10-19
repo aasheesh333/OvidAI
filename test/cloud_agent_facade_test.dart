@@ -1074,7 +1074,8 @@ void main() {
       addTearDown(() => dir.delete(recursive: true));
       final big = File('${dir.path}/big.bin');
       final raf = await big.open(mode: FileMode.write);
-      await raf.truncate(25 * 1024 * 1024 + 1);
+      // CH-022: the SERVER's limit is 25,000,000 bytes (not 25 MiB).
+      await raf.truncate(CloudAgentFacade.maxAttachmentBytes + 1);
       await raf.close();
 
       final error =
@@ -1092,7 +1093,7 @@ void main() {
       addTearDown(() => dir.delete(recursive: true));
       final atLimit = File('${dir.path}/limit.bin');
       final raf = await atLimit.open(mode: FileMode.write);
-      await raf.truncate(25 * 1024 * 1024);
+      await raf.truncate(CloudAgentFacade.maxAttachmentBytes);
       await raf.close();
 
       final error =
@@ -1101,6 +1102,20 @@ void main() {
       expect(error, isNull);
       expect(h.facade.pendingAttachmentsForTest('s1'), hasLength(1));
 
+      h.facade.dispose();
+    });
+
+    test('CH-022: the limit is the server\'s 25,000,000 bytes and an empty '
+        'file is refused at staging time', () async {
+      expect(CloudAgentFacade.maxAttachmentBytes, 25000000);
+      final h = await _build();
+      final dir = await Directory.systemTemp.createTemp('facade-empty');
+      addTearDown(() => dir.delete(recursive: true));
+      final empty = File('${dir.path}/empty.txt')..writeAsBytesSync(const []);
+      final error =
+          await h.facade.attachFile(empty.path, 'empty.txt', sessionId: 's1');
+      expect(error, 'empty.txt is empty, so there is nothing to send.');
+      expect(h.facade.pendingAttachmentsForTest('s1'), isEmpty);
       h.facade.dispose();
     });
   });
