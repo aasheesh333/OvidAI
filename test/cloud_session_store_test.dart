@@ -45,6 +45,9 @@ class FakeStoreRest extends CloudRestClient {
       : super(headers: CloudHeaders.forTest(), restBase: 'http://test');
 
   int createCalls = 0;
+
+  /// Thrown by the next createSession (CH-012: non-CloudApiException).
+  Object? createError;
   final List<
       ({
         String sessionId,
@@ -99,6 +102,8 @@ class FakeStoreRest extends CloudRestClient {
   @override
   Future<SessionDto> createSession({String? title}) async {
     createCalls++;
+    final error = createError;
+    if (error != null) throw error;
     final id = 'srv-created-$createCalls';
     return SessionDto(
       id: id,
@@ -1074,6 +1079,27 @@ void main() {
       expect(h.rest.sent, isEmpty);
       expect(h.store.outboxFor('srv-1'), hasLength(1));
       expect(h.store.outboxFor('srv-1').single.content, 'offline prompt');
+    });
+  });
+
+  group('create-on-first-send failures (CH-012)', () {
+    test('a non-CloudApiException from create is recorded, not unhandled',
+        () async {
+      final rest = FakeStoreRest()..createError = StateError('socket closed');
+      final h = await _buildStore(rest: rest);
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+      final facade =
+          CloudAgentFacade(rest: h.rest, ws: h.ws, store: h.store);
+      addTearDown(facade.dispose);
+
+      // Completes normally: no error escapes the fire-and-forget send.
+      await facade.runTask('first prompt', sessionId: 'local-new');
+
+      expect(h.rest.sent, isEmpty);
+      expect(facade.runStateFor('local-new').lastErrorCode, 'internal');
+      expect(facade.runStateFor('local-new').lastErrorMessage,
+          contains('socket closed'));
     });
   });
 }

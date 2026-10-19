@@ -135,8 +135,9 @@ class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
     if (!fb.accountReady) _bindStarted = false;
     if (fb.isAvailable && fb.accountReady && !_bindStarted) {
       _bindStarted = true;
-      // Bind the Ovid Cloud key in the background; a failure leaves the app
-      // usable with the user's own custom providers.
+      // Bind the Ovid Cloud key in the background. A failure (quota, expired
+      // session, unreachable) is published on OvidCloudService's connection
+      // state and shown by the shell's CloudIssueBanner with an action.
       unawaited(
         widget.bindCloud?.call() ?? OvidCloudService.I.ensureConnected(),
       );

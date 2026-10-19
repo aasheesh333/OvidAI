@@ -10,6 +10,7 @@ import '../core/firebase_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'chat_screen.dart';
+import 'cloud_issue_banner.dart';
 import 'sidebar.dart';
 
 /// Shown when the debounced session write has failed, i.e. chat history is
@@ -318,6 +319,8 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
       body: Column(
         children: [
           const OfflineBanner(),
+          // Signed out / quota / unreachable / attestation (SH-009, EM-011).
+          const CloudIssueBanner(),
           if (_persistWarned)
             SafeArea(
               bottom: false,

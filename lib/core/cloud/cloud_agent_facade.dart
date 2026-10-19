@@ -944,6 +944,12 @@ class CloudAgentFacade extends ChangeNotifier
           _recordError(sessionId, e.code, e.message, resetsAt: e.resetsAt);
           _notify();
           return;
+        } catch (e) {
+          // CH-012: never let a non-CloudApiException escape the
+          // fire-and-forget send; record it so the chat row can show it.
+          _recordError(sessionId, 'internal', '$e');
+          _notify();
+          return;
         }
       }
       if (store?.offline ?? false) {
@@ -976,6 +982,11 @@ class CloudAgentFacade extends ChangeNotifier
           id = resolved;
         } on CloudApiException catch (e) {
           _recordError(sessionId, e.code, e.message, resetsAt: e.resetsAt);
+          _notify();
+          return;
+        } catch (e) {
+          // CH-012: see above; no unhandled error from create-on-first-send.
+          _recordError(sessionId, 'internal', '$e');
           _notify();
           return;
         }
