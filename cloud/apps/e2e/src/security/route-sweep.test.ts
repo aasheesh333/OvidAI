@@ -271,6 +271,13 @@ export const NO_PARAM_OWNERSHIP_EXEMPT: Array<{
     reason: "creates a schedule owned by the caller; no existing-resource lookup.",
   },
   {
+    method: "PATCH",
+    path: "/cloud/v1/preferences",
+    reason:
+      "writes users.preferences for request.principal.uid only; the body carries " +
+      "no resource id (Wave 1a SE-005).",
+  },
+  {
     method: "POST",
     path: "/cloud/v1/devices",
     reason: "registers an FCM token for the authenticated uid.",
@@ -1041,6 +1048,7 @@ describe("route sweep — 404 not 403", () => {
       "POST /cloud/v1/plugins/install",
       "POST /cloud/v1/system/responses",
       "POST /cloud/v1/schedules",
+      "PATCH /cloud/v1/preferences",
       "POST /cloud/v1/devices",
       "DELETE /cloud/v1/devices",
       "POST /cloud/v1/byok",

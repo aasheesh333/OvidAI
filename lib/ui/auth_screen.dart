@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../core/account_service.dart';
 import '../core/firebase_service.dart';
+import '../core/ovid_cloud_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'profile_avatar.dart';
 import 'account_deletion_panel.dart';
+import 'user_error.dart';
 import '../core/auth_identity.dart';
 import '../core/auth_providers.dart';
 import 'auth_methods.dart';
@@ -125,7 +127,7 @@ class _AuthScreenState extends State<AuthScreen> {
       await fb.signOut();
     } catch (error) {
       if (!mounted) return;
-      setState(() => _signOutError = 'Could not sign out: $error');
+      setState(() => _signOutError = 'Could not sign out. ${friendlyError(error)}');
     } finally {
       if (mounted) setState(() => _signingOut = false);
     }
@@ -368,12 +370,8 @@ class _AuthScreenState extends State<AuthScreen> {
 
   String _planPill(String tier, bool isPaid) {
     if (!isPaid) return 'FREE';
-    return switch (tier) {
-      '3x' => 'PLUS',
-      '7x' => 'PRO',
-      '15x' => 'MAX',
-      _ => tier.toUpperCase(),
-    };
+    // The server plan table's name (SH-006).
+    return ovidPlanName(tier).toUpperCase();
   }
 
   IconData _providerIcon(String id) {

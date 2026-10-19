@@ -213,6 +213,54 @@ void main() {
     expect(fake.calls, isEmpty, reason: 'plan is read-only');
   });
 
+  test('plan skips cloud chats, already-synced chats and empty chats '
+      '(SE-015: no duplicates, no "0 chats")', () async {
+    final prefs = await prefsWith(const <String, Object>{});
+    final repo = sqliteRepo();
+    await repo.writeRows(prefs, 'ovid_sessions', <String>[
+      // A cloud chat reconciled into the local namespace (server UUID).
+      _sessionJson('0192f1d2-7c3a-7b44-9a1e-0123456789ab', <Map<String, dynamic>>[
+        _message('user', 'from cloud', 0),
+      ]),
+      // A local chat already mapped to a server session.
+      _sessionJson('1700000000000001', <Map<String, dynamic>>[
+        _message('user', 'synced', 0),
+      ]),
+      // The auto-created empty chat.
+      _sessionJson('1700000000000002', const <Map<String, dynamic>>[]),
+      // The only device-only chat.
+      _sessionJson('1700000000000003', <Map<String, dynamic>>[
+        _message('user', 'local', 0),
+        _message('assistant', 'reply', 1),
+      ]),
+    ]);
+
+    final fake = _FakeRest();
+    final plan = await HistoryImportService(
+      rest: fake,
+      history: repo,
+      prefs: prefs,
+      account: 'guest',
+      memoryRoot: memoryDir,
+      isCloudSession: (id) => id == '1700000000000001',
+    ).plan();
+
+    expect(plan.sessions, 1);
+    expect(plan.messages, 2);
+  });
+
+  test('a store with only an empty chat plans nothing to import', () async {
+    final prefs = await prefsWith(const <String, Object>{});
+    final repo = sqliteRepo();
+    await repo.writeRows(prefs, 'ovid_sessions', <String>[
+      _sessionJson('1700000000000002', const <Map<String, dynamic>>[]),
+    ]);
+    final plan =
+        await service(rest: _FakeRest(), history: repo, prefs: prefs).plan();
+    expect(plan.sessions, 0);
+    expect(plan.messages, 0);
+  });
+
   test('plan falls back to legacy prefs rows, including the bare-uid namespace',
       () async {
     final prefs = await prefsWith(<String, Object>{

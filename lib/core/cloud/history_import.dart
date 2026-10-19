@@ -86,13 +86,19 @@ class HistoryImportService {
     required SharedPreferences prefs,
     String? account,
     Directory? memoryRoot,
+    bool Function(String localSessionId)? isCloudSession,
   }) {
     _rest = rest;
     _history = history;
     _prefs = prefs;
     _account = account ?? _detectAccount(prefs);
     _memoryRoot = memoryRoot;
+    _isCloudSession = isCloudSession;
   }
+
+  /// True for a local row that already has a server copy (excluded from the
+  /// scan so the import never duplicates it).
+  late final bool Function(String localSessionId)? _isCloudSession;
 
   /// `POST /import/sessions` rejects a batch larger than this (Task 4's
   /// `import_too_large`). Keep the client at the same boundary.
@@ -321,15 +327,32 @@ class HistoryImportService {
     return const <String>[];
   }
 
+  /// Only chats that exist on THIS device alone are importable (SE-015):
+  ///   * rows keyed by a server UUID are cloud chats the session store
+  ///     reconciled into the same namespace — uploading them again would
+  ///     duplicate every cloud chat;
+  ///   * rows the caller knows are already on the server ([_isCloudSession],
+  ///     e.g. a local chat mapped to a server session after its first send);
+  ///   * rows with no importable message (the auto-created empty chat).
   Future<List<_LocalSession>> _scanSessions() async {
     final rows = await _readTranscriptRows();
     final sessions = <_LocalSession>[];
     for (final row in rows) {
       final session = _parseSession(row);
-      if (session != null) sessions.add(session);
+      if (session == null) continue;
+      if (_serverUuid.hasMatch(session.key)) continue;
+      if (_isCloudSession?.call(session.key) ?? false) continue;
+      if (!session.messages.any((m) => m.importable)) continue;
+      sessions.add(session);
     }
     return sessions;
   }
+
+  /// Server session ids are UUIDs (v7); local ids are microsecond stamps.
+  static final RegExp _serverUuid = RegExp(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
+    r'[0-9a-fA-F]{12}$',
+  );
 
   /// Parse the persisted `ChatSession.toJson` shape. Raw JSON is used rather
   /// than `ChatSession.fromJson` so a row without `time` gets a deterministic

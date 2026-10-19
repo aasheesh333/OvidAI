@@ -27,7 +27,7 @@ import {
   userFreeDaily,
 } from "./settings.js";
 import { sweepSlowMode } from "./slowMode.js";
-import { computeUsage, unitCost } from "./usage.js";
+import { computeUsage, unitCost, withAppPlanFields } from "./usage.js";
 import {
   dropUsageCache,
   isoUtc,
@@ -950,7 +950,7 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
     if (uid === null) {
       throw new HttpContractError(404, "user not found");
     }
-    const { body, detail } = await computeUsage(deps, uid);
+    const { body, detail, settings: usageSettings } = await computeUsage(deps, uid);
     const settings = await getSettings({ db: deps.db });
     const plan = await planFor(deps, uid, settings);
     const [row, override, banned] = await Promise.all([
@@ -982,7 +982,7 @@ export function registerAdminRoutes(adminApp: FastifyInstance, deps: MintDeps): 
       remaining_usd: detail.remaining_usd,
       remaining_fraction: body.remaining_fraction,
       keys: detail.keys,
-      app_view: body,
+      app_view: await withAppPlanFields(deps, uid, body, usageSettings, deps.billing),
     };
   });
 

@@ -81,6 +81,14 @@ void main() {
     expect(dart, contains('onOpenRoute'));
     expect(File('lib/main.dart').readAsStringSync(),
         contains('PushService.I.onOpenRoute = _openRouteFromNotification'));
+    // CT-009: Kotlin's onOpenRoute/onSelectSession have a Dart handler, and a
+    // cold start parks the route for Dart to pull.
+    expect(activity, contains('"takePendingRoute"'));
+    expect(File('lib/main.dart').readAsStringSync(),
+        contains('NativeRouteChannel.install(_openRouteFromNotification)'));
+    final native = File('lib/core/native_routes.dart').readAsStringSync();
+    expect(native, contains("'onOpenRoute'"));
+    expect(native, contains("'onSelectSession'"));
   });
 
   test('the IANA zone channel backs server daily/cron triggers', () {

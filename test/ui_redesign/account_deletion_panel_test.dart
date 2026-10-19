@@ -16,6 +16,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:ovid_ai/core/format.dart';
 import 'package:ovid_ai/core/account_service.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/account_deletion_panel.dart';
@@ -180,7 +181,7 @@ void main() {
       // The returned pending status is rendered immediately: rule + countdown.
       expect(warnRule(), findsOneWidget);
       expect(find.text('Deletion requested'), findsOneWidget);
-      expect(find.textContaining(deadline.toIso8601String()), findsOneWidget);
+      expect(find.textContaining(formatDeadline(deadline)), findsOneWidget);
       expect(find.textContaining('remaining'), findsOneWidget);
       expect(
         find.widgetWithText(AetherGhostButton, 'Restore account'),

@@ -128,6 +128,20 @@ void main() {
     expect((await service.acknowledgeLogin()).state, 'pending');
   });
 
+  test('login sends a JSON body, never an empty one under application/json '
+      '(SH-004)', () async {
+    final service = AccountService(
+      enabled: true,
+      idToken: (_) async => 'id',
+      client: MockClient((request) async {
+        expect(request.headers['content-type'], startsWith('application/json'));
+        expect(request.body, '{}');
+        return http.Response('{"state":"active"}', 200);
+      }),
+    );
+    await service.acknowledgeLogin();
+  });
+
   test(
     'explicit cancellation requires consent and confirms cancelled state',
     () async {

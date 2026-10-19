@@ -193,12 +193,12 @@ void main() {
     },
   );
 
-  testWidgets('plan pill reflects paid tier (3x → PLUS)', (tester) async {
+  testWidgets('plan pill reflects paid tier (3x → STARTER, the server plan name)', (tester) async {
     AppState.I.ovidCloudTier = '3x';
     final service = _signedInFake();
 
     await _pumpAuth(tester, service);
-    expect(find.text('PLUS'), findsOneWidget);
+    expect(find.text('STARTER'), findsOneWidget);
     expect(find.text('FREE'), findsNothing);
     expect(
       find.textContaining('Paid plan active'),

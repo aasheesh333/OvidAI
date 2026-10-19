@@ -5,7 +5,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../core/distribution.dart';
+import '../core/notification_permission.dart';
 import '../core/cloud/byok_client.dart';
+
+export '../core/notification_permission.dart' show NotificationPermissionAccess;
 import '../core/app_info.dart';
 import '../core/native_share.dart';
 import '../core/firebase_service.dart';
@@ -22,6 +25,7 @@ import 'auth_screen.dart';
 import 'profile_avatar.dart';
 import 'share_actions.dart';
 import 'billing_screen.dart';
+import 'history_import_sheet.dart' show ImportLocalChatsTile;
 import 'memory_screen.dart';
 import 'permissions_screen.dart';
 import 'providers_screen.dart';
@@ -77,7 +81,7 @@ class SettingsScreen extends StatelessWidget {
                   context,
                   Icons.bar_chart_rounded,
                   'Usage',
-                  'Per-client spend · OvidAI, OpenCode, [CC], Z Code',
+                  'Allowance left, resets, and usage by day, model and chat',
                   const UsageScreen(),
                 ),
               ],
@@ -171,19 +175,29 @@ class SettingsScreen extends StatelessWidget {
                 _TelemetryTile(),
                 _hairline(),
                 const _StorageTile(),
+                // Reopen the history import after "Not now" (SE-015); only
+                // shown while device-only chats exist.
+                const ImportLocalChatsTile(),
                 _hairline(),
                 _navTile(
                   context,
-                  Icons.delete_outline,
-                  'Delete all data',
+                  Icons.phonelink_erase_outlined,
+                  'Clear this device',
                   SettingsActions.resetAll == null
-                      ? 'Unavailable · verified full reset is not connected'
-                      : 'Chats, keys and settings · irreversible',
+                      ? 'Unavailable in this build'
+                      : 'Signs out and removes local cache. Your cloud chats '
+                            'are kept.',
                   SettingsResetScreen(
                     // "Export my chats first" (PR-3b) opens Export data.
                     onExport: () => Navigator.of(context).push(
                       MaterialPageRoute<void>(
                         builder: (_) => const SettingsBackupScreen(),
+                      ),
+                    ),
+                    // Cloud data is deleted only by deleting the account.
+                    onDeleteAccount: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const AuthScreen(),
                       ),
                     ),
                   ),
@@ -308,7 +322,7 @@ class SettingsScreen extends StatelessWidget {
                   context,
                   Icons.info_outline,
                   'About',
-                  'Ovid AI $kAppVersion',
+                  'Ovid Si $kAppVersion',
                   const _AboutScreen(),
                 ),
               ],
@@ -346,9 +360,7 @@ class SettingsScreen extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        signedIn
-                            ? (fb.displayName ?? fb.email ?? 'You')
-                            : 'You',
+                        signedIn ? fb.accountLabel : 'You',
                         style: const TextStyle(
                           fontSize: 15.5,
                           fontWeight: FontWeight.w700,
@@ -357,7 +369,7 @@ class SettingsScreen extends StatelessWidget {
                       const SizedBox(height: 2),
                       Text(
                         signedIn
-                            ? (fb.email ?? 'Signed in')
+                            ? fb.accountDetail
                             : 'Sign in to your account',
                         style: TextStyle(fontSize: 12, color: Aether.textFaint),
                       ),
@@ -1005,24 +1017,6 @@ class _ShareMemoryTile extends StatelessWidget {
   }
 }
 
-/// Seam over the OS notification permission so the Settings row can be
-/// exercised in tests without the platform channel.
-class NotificationPermissionAccess {
-  NotificationPermissionAccess._();
-
-  static Future<PermissionStatus> Function() status = () =>
-      Permission.notification.status;
-  static Future<PermissionStatus> Function() request = () =>
-      Permission.notification.request();
-  static Future<bool> Function() openSettings = openAppSettings;
-
-  @visibleForTesting
-  static void reset() {
-    status = () => Permission.notification.status;
-    request = () => Permission.notification.request();
-    openSettings = openAppSettings;
-  }
-}
 
 /// Notifications switch that reflects the OS permission, not just the
 /// preference: turning it ON asks Android for POST_NOTIFICATIONS, and a
@@ -1636,7 +1630,7 @@ class _AboutScreen extends StatelessWidget {
               style: TextStyle(fontSize: 14),
             ),
             subtitle: Text(
-              'Third-party software used by Ovid AI',
+              'Third-party software used by Ovid Si',
               style: TextStyle(fontSize: 12, color: Aether.textFaint),
             ),
             trailing: Icon(
@@ -1646,7 +1640,7 @@ class _AboutScreen extends StatelessWidget {
             ),
             onTap: () => showLicensePage(
               context: context,
-              applicationName: 'Ovid AI',
+              applicationName: 'Ovid Si',
               applicationVersion: kAppVersion,
               applicationLegalese: '© ${DateTime.now().year} Dhanuk Softwares',
             ),

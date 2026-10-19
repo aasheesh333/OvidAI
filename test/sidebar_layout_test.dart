@@ -221,8 +221,11 @@ void main() {
     await tester.enterText(find.byType(TextField), 'empty');
     await tester.pump();
     await tester.enterText(find.byType(TextField), '');
-    await tester.pumpAndSettle();
-    expect(find.text('No sessions yet').hitTestable(), findsOneWidget);
+    // The empty state may show a loading spinner (SH-017): bounded pumps.
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    expect(find.byType(SidebarEmptyState).hitTestable(), findsOneWidget);
     expect(tester.getRect(settings), footerRect);
     expect(tester.takeException(), isNull);
   });

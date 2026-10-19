@@ -105,6 +105,27 @@ class FirebaseService extends ChangeNotifier {
   String? get uid => _user?.uid;
   bool get emailVerified => _user?.emailVerified ?? false;
   String? get phoneNumber => _user?.phoneNumber;
+
+  /// What to call the signed-in user (SH-024): display name, then email,
+  /// then phone number, then "Ovid user" — never "Signed in / Signed in".
+  String get accountLabel {
+    for (final v in [displayName, email, phoneNumber]) {
+      final t = v?.trim();
+      if (t != null && t.isNotEmpty) return t;
+    }
+    return 'Ovid user';
+  }
+
+  /// The second line under [accountLabel]: the first identifier not already
+  /// used as the label, else the sign-in method.
+  String get accountDetail {
+    final label = accountLabel;
+    for (final v in [email, phoneNumber]) {
+      final t = v?.trim();
+      if (t != null && t.isNotEmpty && t != label) return t;
+    }
+    return phoneNumber != null ? 'Signed in with phone' : 'Signed in';
+  }
   final authProviders = AuthProviders();
   AuthIdentity? _authIdentity;
   AuthIdentity get _identity => _authIdentity ??= AuthIdentity(
@@ -577,7 +598,7 @@ class FirebaseService extends ChangeNotifier {
       notifyListeners();
       return null;
     } catch (e) {
-      return 'Could not update name: $e';
+      return 'Could not update your name. Check your connection and try again.';
     }
   }
 
@@ -588,9 +609,48 @@ class FirebaseService extends ChangeNotifier {
     return authenticateSocial('google.com', AuthIntent.signIn);
   }
 
+  /// Work that must run while the outgoing account's ID token is still valid
+  /// (DELETE /devices for its FCM token). Registered once by main.dart.
+  final List<Future<void> Function()> _beforeSignOut = [];
+
+  /// Registers [hook] to run before every sign-out / reset sign-out.
+  void addBeforeSignOut(Future<void> Function() hook) {
+    if (!_beforeSignOut.contains(hook)) _beforeSignOut.add(hook);
+  }
+
+  /// Runs the before-sign-out hooks, bounded so a hung network never blocks
+  /// the sign-out itself. Never throws.
+  Future<void> runBeforeSignOut({
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    for (final hook in List.of(_beforeSignOut)) {
+      try {
+        await hook().timeout(timeout);
+      } catch (e) {
+        Diag.swallow('firebase.before_signout', e);
+      }
+    }
+  }
+
+  /// How long [signOut] waits for an in-flight credential submission to
+  /// settle before signing out anyway (SH-018).
+  @visibleForTesting
+  static Duration authSettleTimeout = const Duration(seconds: 10);
+
+  /// Signs out of Firebase and Google. Never silently does nothing: an auth
+  /// operation in flight is cancelled and given [authSettleTimeout] to
+  /// settle, then the sign-out proceeds (SH-018).
   Future<void> signOut() async {
-    // SDK credential submission cannot be aborted. Do not race it with signout.
-    if (_identity.busy) return;
+    _identity.cancelPending();
+    if (_identity.busy) {
+      final deadline = DateTime.now().add(authSettleTimeout);
+      while (_identity.busy && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    }
+    // Unregister this device's push token for the outgoing account while
+    // its ID token still works (SE-002 / SH-003).
+    await runBeforeSignOut();
     _identity.cancelPending();
     _authRevision++;
     _accountAdmission = null;
@@ -633,6 +693,38 @@ class FirebaseService extends ChangeNotifier {
     _accountSession.clear();
     _user = null;
     notifyListeners();
+  }
+
+  /// Signs the Firebase and Google SDKs out after a reset (SE-001).
+  ///
+  /// [signOutLocal] only clears in-memory state; without this the SDK keeps
+  /// its persisted credential and the next launch is signed in again with
+  /// every cloud chat back. Safe inside the reset barrier: the SDK's
+  /// `userChanges` listener runs `_onUser` unawaited, so its guest
+  /// transition queues behind the barrier instead of deadlocking it.
+  Future<void> signOutSdk() async {
+    if (!_available) return;
+    try {
+      await FirebaseAuth.instance.signOut();
+    } catch (e) {
+      Diag.swallow('firebase.sdk_signout', e);
+    }
+    try {
+      await GoogleSignIn().signOut();
+    } catch (e) {
+      Diag.swallow('firebase.google_signout', e);
+    }
+  }
+
+  /// True when the Firebase SDK holds no persisted user (readback for the
+  /// reset's account store). Trivially true when Firebase is unavailable.
+  bool get sdkSignedOut {
+    if (!_available) return true;
+    try {
+      return FirebaseAuth.instance.currentUser == null;
+    } catch (_) {
+      return true;
+    }
   }
 
   /// Lightweight analytics event — only fires when consent is given.

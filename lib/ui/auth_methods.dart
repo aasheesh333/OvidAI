@@ -155,8 +155,8 @@ class _AuthMethodsState extends State<AuthMethods> {
     if (widget.intent == AuthIntent.signIn) {
       children.add(
         Text(
-          'Sign in with a configured social provider or phone. '
-          'A new account is created automatically on first sign-in.',
+          'Continue with one of the options below. New to Ovid Si? Your '
+          'account is created the first time you sign in.',
           style: AetherType.body,
         ),
       );

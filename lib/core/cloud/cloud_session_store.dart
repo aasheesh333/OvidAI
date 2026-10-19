@@ -310,6 +310,20 @@ class CloudSessionStore extends ChangeNotifier {
   /// The server session id for a local id (null when unmapped).
   String? serverIdFor(String localSessionId) => _idMap[localSessionId];
 
+  /// The LOCAL row id for a server id (FE-011): a chat created on this device
+  /// keeps its local id after the first send, so a push / link carrying the
+  /// server UUID must be mapped back. Null when [serverId] is not mapped
+  /// (server-native rows are keyed by their server id already).
+  String? localIdFor(String serverId) {
+    for (final entry in _idMap.entries) {
+      if (entry.value == serverId) return entry.key;
+    }
+    return null;
+  }
+
+  /// The AppState row id for a session id that may be local or server.
+  String resolveLocalSessionId(String id) => localIdFor(id) ?? id;
+
   /// The id to put on the wire for [id]: the mapped server UUID when one
   /// exists, otherwise [id] unchanged.
   ///
@@ -461,7 +475,55 @@ class CloudSessionStore extends ChangeNotifier {
   /// A server session already mapped from a local id updates THAT local row
   /// (the map is preserved; no duplicate appears). Local sessions without a
   /// server id stay untouched until their first send.
-  Future<void> refreshSessions() async {
+  ///
+  /// Concurrent callers share one walk. [syncing], [hasSynced] and
+  /// [lastSyncError] describe it for the sidebar (SH-017): loading vs empty
+  /// vs failed are different states, not one "No sessions yet".
+  Future<void> refreshSessions() {
+    final inFlight = _refreshing;
+    if (inFlight != null) return inFlight;
+    _syncing = true;
+    notifyListeners();
+    late final Future<void> walk;
+    walk = _refreshSessions().then(
+      (_) {
+        _hasSynced = true;
+        _lastSyncError = null;
+      },
+      onError: (Object e, StackTrace st) {
+        _lastSyncError = e;
+        Error.throwWithStackTrace(e, st);
+      },
+    ).whenComplete(() {
+      if (identical(_refreshing, walk)) _refreshing = null;
+      _syncing = false;
+      notifyListeners();
+    });
+    return _refreshing = walk;
+  }
+
+  Future<void>? _refreshing;
+  bool _syncing = false;
+  bool _hasSynced = false;
+  Object? _lastSyncError;
+
+  /// A session-list walk is in flight.
+  bool get syncing => _syncing;
+
+  /// At least one walk completed in this process (for this account).
+  bool get hasSynced => _hasSynced;
+
+  /// The last walk's failure, cleared by the next success.
+  Object? get lastSyncError => _lastSyncError;
+
+  /// Account change: the next account has not synced yet.
+  void resetSyncState() {
+    _hasSynced = false;
+    _lastSyncError = null;
+    notifyListeners();
+  }
+
+  Future<void> _refreshSessions() async {
     if (!_loaded) await _ready;
     // Tombstone retry: deletes that never reached the server (an offline
     // delete, a failed DELETE) are re-fired here; the tombstone clears only

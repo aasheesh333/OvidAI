@@ -5,18 +5,18 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/account_service.dart';
-import '../core/cloud/cloud_rest.dart';
 import '../core/cloud/history_import.dart';
 import '../core/diag.dart';
 import '../core/firebase_service.dart';
+import '../core/format.dart';
 import '../core/ovid_cloud_service.dart';
 import '../core/play_billing.dart';
-import '../core/session_history_store.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import '../core/auth_identity.dart';
 import '../core/legal_links.dart';
 import 'auth_methods.dart';
+import 'first_run_steps.dart';
 import 'history_import_sheet.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/external_link.dart';
@@ -75,6 +75,7 @@ class LoginGate extends StatefulWidget {
 class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
   late final _firebase = widget.service ?? FirebaseService.I;
   bool _bindStarted = false;
+  bool _wasInApp = false;
   Object? _bindOwner;
 
   /// True while Firebase.initializeApp is in flight. The splash screen is
@@ -133,6 +134,19 @@ class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
       _bindStarted = false;
     }
     if (!fb.accountReady) _bindStarted = false;
+    // Leaving the app (sign-out, deletion, admission lost): the gate only
+    // swaps the HOME route, so Settings / Account / Billing pushed above it
+    // would stay on screen for a signed-out user. Drop them so the login
+    // (or account-not-ready) screen is what the user sees, and back exits
+    // (SH-007).
+    final inApp = fb.isAvailable && fb.isSignedIn && fb.accountReady;
+    if (_wasInApp && !inApp) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        Navigator.maybeOf(context)?.popUntil((route) => route.isFirst);
+      });
+    }
+    _wasInApp = inApp;
     if (fb.isAvailable && fb.accountReady && !_bindStarted) {
       _bindStarted = true;
       // Bind the Ovid Cloud key in the background. A failure (quota, expired
@@ -379,19 +393,29 @@ class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
 
   bool _restoreBusy = false;
   bool _retryBusy = false;
+  bool _signOutBusy = false;
   bool _stuck = false;
   String? _actionError;
   Timer? _stuckTimer;
+
+  /// Keeps the deletion countdown ("in 23 h") current (SH-022).
+  Timer? _clock;
 
   @override
   void initState() {
     super.initState();
     _armStuckTimer();
+    _clock = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted && widget.service.lastDeletionReceipt != null) {
+        setState(() {});
+      }
+    });
   }
 
   @override
   void dispose() {
     _stuckTimer?.cancel();
+    _clock?.cancel();
     super.dispose();
   }
 
@@ -442,17 +466,22 @@ class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
     'Could not restore your account. Check your connection and retry.',
   );
 
+  /// Sign-out always gives visible feedback, even while a sign-in is still
+  /// finishing (SH-018).
+  void _signOut() => _run(
+    widget.service.signOut,
+    (busy) => _signOutBusy = busy,
+    'Could not sign out. Check your connection and retry.',
+  );
+
   @override
   Widget build(BuildContext context) {
     final service = widget.service;
     final error = service.accountError;
     final transitionFailed = service.accountTransitionFailed;
     final receipt = service.lastDeletionReceipt;
-    final deadline = receipt?.deleteAfter
-        ?.toUtc()
-        .toIso8601String()
-        .replaceFirst('T', '\n')
-        .replaceFirst('Z', ' UTC');
+    final deleteAfter = receipt?.deleteAfter;
+    final deadline = deleteAfter == null ? null : formatDeadline(deleteAfter);
     final pending = receipt?.isPending == true;
     final showActions = error != null || transitionFailed || _stuck;
     final message = pending
@@ -492,7 +521,7 @@ class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
                     if (deadline != null) ...[
                       const SizedBox(height: AetherSpacing.space3),
                       Text(
-                        'Scheduled after\n$deadline',
+                        'Scheduled after $deadline',
                         style: AetherType.body,
                       ),
                     ],
@@ -527,21 +556,33 @@ class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
                       ),
                       const SizedBox(height: AetherSpacing.space2),
                       AetherGhostButton(
-                        label: 'Sign out',
-                        onPressed: service.signOut,
+                        label: _signOutBusy ? 'Signing out…' : 'Sign out',
+                        onPressed: _signOutBusy ? null : _signOut,
                       ),
-                      if (_actionError != null) ...[
-                        const SizedBox(height: AetherSpacing.space3),
-                        Semantics(
-                          liveRegion: true,
-                          child: Text(
-                            _actionError!,
-                            style: AetherType.body.copyWith(
-                              color: Aether.dangerC,
-                            ),
+                    ],
+                    // Switching accounts must never wait for the 15 s stuck
+                    // timer (SH-033).
+                    if (!showActions) ...[
+                      const SizedBox(height: AetherSpacing.space4),
+                      AetherGhostButton(
+                        key: const ValueKey('use-different-account'),
+                        label: _signOutBusy
+                            ? 'Signing out…'
+                            : 'Use a different account',
+                        onPressed: _signOutBusy ? null : _signOut,
+                      ),
+                    ],
+                    if (_actionError != null) ...[
+                      const SizedBox(height: AetherSpacing.space3),
+                      Semantics(
+                        liveRegion: true,
+                        child: Text(
+                          _actionError!,
+                          style: AetherType.body.copyWith(
+                            color: Aether.dangerC,
                           ),
                         ),
-                      ],
+                      ),
                     ],
                   ],
                 ),
@@ -606,11 +647,16 @@ class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
     _startPostLogin();
   }
 
-  /// The welcome banner and the import sheet both live at the bottom of the
-  /// screen. Run them in order: the import question waits until the welcome
-  /// is gone (auto-dismissed or acknowledged).
+  /// The first-run sequence, ONE prompt at a time (EM-005, SH-031): the
+  /// welcome, then the notification permission (EM-016), then telemetry
+  /// consent, then — only with device-only chats — the history import. Each
+  /// step completes before the next starts, so dialogs never stack.
   Future<void> _startPostLogin() async {
     await _maybeShowWelcome();
+    if (!mounted) return;
+    await FirstRunSteps.notifications(context);
+    if (!mounted) return;
+    await FirstRunSteps.telemetry(context);
     if (!mounted) return;
     await _maybeShowHistoryImport();
   }
@@ -657,12 +703,7 @@ class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
     }
 
     final service = widget.historyImportService ??
-        HistoryImportService(
-          rest: CloudRestClient.I,
-          history: SessionHistoryRepository.I,
-          prefs: prefs,
-          account: account,
-        );
+        productionHistoryImportService(prefs: prefs, account: account);
     final HistoryImportPlan plan;
     try {
       plan = await service.plan();
@@ -671,7 +712,12 @@ class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
       return;
     }
     if (!mounted) return;
-    if (plan.alreadyImported) return;
+    // Nothing device-only to import (fresh install, or every local chat is
+    // already in the cloud): never show "0 chats · 0 messages" (SH-010,
+    // EM-003). Settings offers the import whenever local chats appear.
+    if (plan.alreadyImported || plan.sessions == 0 || plan.messages == 0) {
+      return;
+    }
 
     await showHistoryImportSheet(
       context,
@@ -811,7 +857,8 @@ class _WelcomeContent extends StatelessWidget {
               ),
               const SizedBox(height: AetherSpacing.space2),
               Text(
-                'Explore your available models, create agents, and browse the web.',
+                'Ask anything. Ovid Si works in the cloud, so long tasks keep '
+                'running even after you close the app.',
                 style: AetherType.bodyMuted,
               ),
               const SizedBox(height: AetherSpacing.space4),
@@ -855,11 +902,8 @@ class _LoginScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final deletion = service.lastDeletionReceipt;
     final pending = deletion?.isPending == true;
-    final deadline = deletion?.deleteAfter
-        ?.toUtc()
-        .toIso8601String()
-        .replaceFirst('T', '\n')
-        .replaceFirst('Z', ' UTC');
+    final deleteAfter = deletion?.deleteAfter;
+    final deadline = deleteAfter == null ? null : formatDeadline(deleteAfter);
     return Scaffold(
       backgroundColor: Aether.bg,
       body: SafeArea(
@@ -910,7 +954,7 @@ class _LoginScreen extends StatelessWidget {
                         if (deadline != null) ...[
                           const SizedBox(height: AetherSpacing.space2),
                           Text(
-                            'Scheduled after\n$deadline',
+                            'Scheduled after $deadline',
                             style: AetherType.body,
                           ),
                           const SizedBox(height: AetherSpacing.space2),

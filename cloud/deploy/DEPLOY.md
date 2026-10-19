@@ -299,6 +299,17 @@ ovid_cloud) — 14-day local retention, optional R2 offsite.
 
 ## 10. Redeploys + decommission
 
+- **Host firewall: gateway → worker file service.** The gateway container
+  reaches the host-run worker's internal file service at
+  `host.docker.internal:8093` (Studio tree/file/save routes). UFW's default
+  `deny (incoming)` drops that traffic, so Studio answers 503 after a 10 s
+  timeout. Allow only the `ovid-cloud` compose network (the service also
+  requires its internal token):
+  `ufw allow from $(docker network inspect ovid-cloud -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}') to any port 8093 proto tcp comment 'ovid-cloud gateway -> host worker file service'`
+  (applied 2026-10-19 for 172.19.0.0/16). Check:
+  `docker exec ovid-cloud-gateway-1 wget -q -T 4 -O- http://host.docker.internal:8093/`
+  must answer HTTP 401, not time out.
+
 - **Gateway / redis-q / proxies (compose services)**: `cd
   /opt/ovid-cloud/repo && git pull`, then `cd cloud && pnpm install
   --frozen-lockfile && pnpm -r build` (host build for migrate-cli), `cd

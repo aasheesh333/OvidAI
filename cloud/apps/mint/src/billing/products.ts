@@ -20,34 +20,11 @@ export const DEFAULT_PRODUCTS: Record<string, string> = {
   ovid_max_monthly: "15x",
 };
 
-/**
- * Shown on the Plans screen (F-200). Approximate, server-owned copy so client
- * copy never drifts from limits — verbatim from products.py.
+/*
+ * Plan feature copy used to live here (DEFAULT_PLAN_FEATURES, "About 7x the
+ * Free allowance"...) and contradicted the real plan table. Plan cards are
+ * now generated from the live plans in ../planCards.ts (SH-006).
  */
-export const DEFAULT_PLAN_FEATURES: Record<string, string[]> = {
-  free: [
-    "All Ovid Cloud chat models",
-    "About 30 messages a day",
-    "Image generation within the daily allowance",
-  ],
-  "3x": [
-    "All Ovid Cloud chat models",
-    "About 3x the Free allowance, pooled over 30 days",
-    "Image generation from the same allowance",
-  ],
-  "7x": [
-    "All Ovid Cloud chat models",
-    "About 7x the Free allowance, pooled over 30 days",
-    "Image generation from the same allowance",
-    "Priority during busy periods",
-  ],
-  "15x": [
-    "All Ovid Cloud chat models",
-    "About 15x the Free allowance, pooled over 30 days",
-    "Image generation from the same allowance",
-    "Priority during busy periods",
-  ],
-};
 
 /**
  * `OVID_PLAY_PRODUCTS` is a non-empty JSON object of product id → tier. A

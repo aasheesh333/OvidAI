@@ -73,6 +73,16 @@ enum UpgradeResult {
   /// Restore found no active subscription for this Google account.
   nothingToRestore,
 
+  /// Google Play took the payment but Ovid could not confirm it yet (verify
+  /// unreachable / 404 / 5xx). The purchase stays unacknowledged, Play
+  /// re-delivers it and it is re-verified on the next launch/resume (SH-002).
+  /// Never "Nothing was charged".
+  confirming,
+
+  /// The Play purchase belongs to a different Ovid account (409 /
+  /// account_mismatch): sign in with that account to use it.
+  otherAccount,
+
   /// Anything else.
   unknown,
 }
@@ -954,12 +964,21 @@ class OvidCloudService extends ChangeNotifier {
           .timeout(const Duration(seconds: 15));
       scope.check();
       if (res.statusCode != 200) {
-        throw CloudUsageException(
-          'Cloud allowance unavailable (${res.statusCode}). Retry to refresh.',
-        );
+        // No raw status codes on screen (EM-015). 401/403 here is the server
+        // refusing this build or session, not a typo the user can fix.
+        throw CloudUsageException(switch (res.statusCode) {
+          401 || 403 =>
+            "Ovid couldn't load your plan for this session. Retry, or sign "
+                'out and back in.',
+          429 => 'Too many requests. Wait a moment, then retry.',
+          _ => 'Your plan and usage are unavailable right now. Retry in a '
+              'moment.',
+        });
       }
       final j = jsonDecode(res.body) as Map<String, dynamic>;
-      return OvidUsage.fromJson(j);
+      final usage = OvidUsage.fromJson(j);
+      OvidPlanCatalog.update(usage.plans);
+      return usage;
     } catch (e) {
       Diag.swallow('ovid_cloud.usage', e);
       if (throwOnError) {
@@ -1043,7 +1062,7 @@ class OvidCloudService extends ChangeNotifier {
       if (j['ok'] != true ||
           newTier is! String ||
           newTier != tier ||
-          !ovidPlanMultipliers.containsKey(newTier)) {
+          !isKnownOvidTier(newTier)) {
         return const UpgradeOutcome(UpgradeResult.rejected);
       }
       await _applyConfirmedTier(newTier, scope, c);
@@ -1093,19 +1112,29 @@ class OvidCloudService extends ChangeNotifier {
     );
     final c = client ?? _newClient();
     try {
-      final headers = await _headers(scope);
-      final res = await c
-          .post(
-            Uri.parse(billingVerifyUrl),
-            headers: {...headers, 'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'product_id': productId,
-              'purchase_token': purchaseToken,
-              'package_name': packageName,
-            }),
-          )
-          .timeout(const Duration(seconds: 30));
+      Future<http.Response> send({bool forceRefresh = false}) async {
+        final headers = await _headers(scope, forceRefresh: forceRefresh);
+        return c
+            .post(
+              Uri.parse(billingVerifyUrl),
+              headers: {...headers, 'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'product_id': productId,
+                'purchase_token': purchaseToken,
+                'package_name': packageName,
+              }),
+            )
+            .timeout(const Duration(seconds: 30));
+      }
+
+      var res = await send();
       scope.check();
+      // A stale cached ID token must not turn a paid purchase into
+      // "rejected": retry once with a fresh one.
+      if (res.statusCode == 401) {
+        res = await send(forceRefresh: true);
+        scope.check();
+      }
       Map<String, dynamic> body;
       try {
         body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -1124,6 +1153,14 @@ class OvidCloudService extends ChangeNotifier {
       if (res.statusCode >= 500) {
         return const PlayVerifyOutcome(UpgradeResult.unknown);
       }
+      final errorCode = body['error'] is Map
+          ? (body['error'] as Map)['code']
+          : null;
+      if (res.statusCode == 409 ||
+          errorCode == 'account_mismatch' ||
+          errorCode == 'purchase_owned_by_another_account') {
+        return const PlayVerifyOutcome(UpgradeResult.otherAccount);
+      }
       if (res.statusCode != 200) {
         return const PlayVerifyOutcome(UpgradeResult.rejected);
       }
@@ -1132,7 +1169,7 @@ class OvidCloudService extends ChangeNotifier {
       final autoRenewing = body['auto_renewing'] is bool
           ? body['auto_renewing'] as bool
           : null;
-      if (tier is String && ovidPlanMultipliers.containsKey(tier)) {
+      if (tier is String && isKnownOvidTier(tier)) {
         // Active or not, the server's tier is authoritative for this account.
         await _applyConfirmedTier(tier, scope, c);
       }
@@ -1230,17 +1267,155 @@ class _CloudRequestScope {
 
 /// Plan multipliers over the Free base limit: paid limit = Free × multiplier.
 ///
-/// The server applies this to its own (internal) base amount. The client only
-/// ever shows the multiplier and a remaining fraction — never a dollar value.
+/// OFFLINE FALLBACK ONLY, keyed by the stored tier the server reports in
+/// `/usage.tier` (the plan's first alias). It mirrors the server's seed plan
+/// table (cloud/apps/mint/src/planMath.ts `seedPlans`: Starter ×3, Pro ×23,
+/// Max ×43); the live table — owner-editable in /admin — always wins via
+/// [OvidPlanCatalog] (SH-006). The client never shows a dollar value of
+/// usage, only plan prices (subscription metadata) and remaining fractions.
 const Map<String, int> ovidPlanMultipliers = {
   'free': 1,
   '3x': 3,
-  '7x': 7,
-  '15x': 15,
+  '7x': 23,
+  '15x': 43,
 };
 
-/// Multiplier for [tier] over the Free base limit (unknown tiers → 1).
-int ovidPlanMultiplier(String tier) => ovidPlanMultipliers[tier] ?? 1;
+/// Multiplier for [tier] over the Free base limit: the live server table
+/// first, then the fallback (unknown tiers → 1).
+num ovidPlanMultiplier(String tier) =>
+    OvidPlanCatalog.byTier(tier)?.mult ?? ovidPlanMultipliers[tier] ?? 1;
+
+/// A tier the server table (or the fallback) knows.
+bool isKnownOvidTier(String tier) =>
+    OvidPlanCatalog.byTier(tier) != null ||
+    ovidPlanMultipliers.containsKey(tier);
+
+/// Display name for [tier]: the live server table first, then the fallback.
+String ovidPlanName(String tier) =>
+    OvidPlanCatalog.byTier(tier)?.name ??
+    OvidPlanCatalog.fallback
+        .where((p) => p.tier == tier || p.id == tier)
+        .firstOrNull
+        ?.name ??
+    'Free';
+
+/// `×23` — integer multipliers without decimals.
+String ovidMultiplierLabel(num mult) =>
+    '×${mult == mult.roundToDouble() ? mult.toInt() : mult}';
+
+/// One sellable plan as the server describes it (`/usage.plans[]`, built
+/// from the live plan table by the mint's planCards.ts).
+class OvidPlan {
+  const OvidPlan({
+    required this.tier,
+    required this.id,
+    required this.name,
+    required this.priceUsd,
+    required this.mult,
+    this.window,
+    this.features = const [],
+    this.productId,
+  });
+
+  /// The stored tier `/usage.tier` reports for this plan (first alias or id).
+  final String tier;
+  final String id;
+  final String name;
+
+  /// Subscription price in USD (plan metadata, shown as an indicative price
+  /// until Google Play's localised price is loaded).
+  final num priceUsd;
+
+  /// Allowance multiplier over Free.
+  final num mult;
+  final String? window;
+  final List<String> features;
+
+  /// The Google Play subscription product mapped to this plan.
+  final String? productId;
+
+  bool get isFree => id == 'free' || priceUsd == 0;
+
+  /// `$5 / month` style indicative price; null for Free.
+  String? get indicativePrice {
+    if (isFree) return null;
+    final p = priceUsd == priceUsd.roundToDouble()
+        ? priceUsd.toInt().toString()
+        : priceUsd.toStringAsFixed(2);
+    return 'US\$$p / month';
+  }
+
+  static OvidPlan? tryParse(Object? raw) {
+    if (raw is! Map) return null;
+    final tier = raw['tier'];
+    if (tier is! String || tier.isEmpty) return null;
+    // Older servers send only {tier, features, product_id}: fill the rest
+    // from the seed table, never "free" by accident.
+    final seed = OvidPlanCatalog.fallback
+        .where((p) => p.tier == tier)
+        .firstOrNull;
+    final id = raw['id'] is String ? raw['id'] as String : (seed?.id ?? tier);
+    final name = raw['name'] is String && (raw['name'] as String).isNotEmpty
+        ? raw['name'] as String
+        : (seed?.name ?? ovidPlanName(tier));
+    num number(String key, num fallback) {
+      final v = raw[key];
+      if (v is num && v.isFinite && v >= 0) return v;
+      if (v is String) return num.tryParse(v) ?? fallback;
+      return fallback;
+    }
+
+    return OvidPlan(
+      tier: tier,
+      id: id,
+      name: name,
+      priceUsd: number('price_usd', seed?.priceUsd ?? 0),
+      mult: number('mult', seed?.mult ?? ovidPlanMultipliers[tier] ?? 1),
+      window: raw['window'] is String ? raw['window'] as String : null,
+      features: [
+        for (final f in (raw['features'] is List ? raw['features'] as List : const []))
+          if (f is String && f.trim().isNotEmpty && f.length <= 120) f,
+      ].take(6).toList(),
+      productId: raw['product_id'] is String ? raw['product_id'] as String : null,
+    );
+  }
+}
+
+/// The plan table last reported by the server, shared by Billing, Usage,
+/// the sidebar and Account so they all say the same names and multipliers
+/// (SH-006). Until the server answers, [fallback] mirrors the seed table.
+class OvidPlanCatalog {
+  OvidPlanCatalog._();
+
+  static const fallback = <OvidPlan>[
+    OvidPlan(tier: 'free', id: 'free', name: 'Free', priceUsd: 0, mult: 1),
+    OvidPlan(tier: '3x', id: 'starter', name: 'Starter', priceUsd: 5, mult: 3),
+    OvidPlan(tier: '7x', id: 'pro', name: 'Pro', priceUsd: 25, mult: 23),
+    OvidPlan(tier: '15x', id: 'max', name: 'Max', priceUsd: 60, mult: 43),
+  ];
+
+  static List<OvidPlan>? _server;
+
+  /// True once a server table has been seen in this process.
+  static bool get fromServer => _server != null;
+
+  /// The live table, else the fallback.
+  static List<OvidPlan> get plans => _server ?? fallback;
+
+  static void update(List<OvidPlan> plans) {
+    if (plans.isNotEmpty) _server = List.unmodifiable(plans);
+  }
+
+  static OvidPlan? byTier(String tier) {
+    for (final p in plans) {
+      if (p.tier == tier || p.id == tier) return p;
+    }
+    return null;
+  }
+
+  @visibleForTesting
+  static void resetForTest() => _server = null;
+}
 
 /// Server-authoritative usage snapshot for the Ovid Cloud plan.
 ///
@@ -1269,9 +1444,37 @@ class OvidUsage {
     this.window,
     this.today,
     this.hasRemainingFraction = false,
+    this.plans = const [],
+    this.planId,
+    this.planName,
   });
 
   final String tier;
+
+  /// Server field `plans`: the live plan table (names, prices, multipliers,
+  /// features, Play products). Empty on servers that predate it.
+  final List<OvidPlan> plans;
+
+  /// Server field `plan`: the plan id (`starter`, `pro`, …).
+  final String? planId;
+
+  /// Server field `plan_name`: the display name of the current plan.
+  final String? planName;
+
+  /// The current plan from the server table (falls back to the catalog).
+  OvidPlan? get currentPlan {
+    for (final p in plans.isNotEmpty ? plans : OvidPlanCatalog.plans) {
+      if (p.tier == tier || (planId != null && p.id == planId)) return p;
+    }
+    return null;
+  }
+
+  /// The name to show for the current plan: `plan_name`, else the table's.
+  String get displayPlanName {
+    final n = planName?.trim();
+    if (n != null && n.isNotEmpty) return n;
+    return currentPlan?.name ?? ovidPlanName(tier);
+  }
 
   /// Server field `window` (`24h` | `30d`): the allowance window. Parsed only;
   /// the client never derives a reset time from it ([resetsAt] is shown).
@@ -1362,7 +1565,7 @@ class OvidUsage {
       hasRemainingPct ? _validRemainingFraction(remainingPct) : null;
 
   /// This plan's multiplier over the Free base limit.
-  int get multiplier => ovidPlanMultiplier(tier);
+  num get multiplier => currentPlan?.mult ?? ovidPlanMultiplier(tier);
 
   factory OvidUsage.fromJson(Map<String, dynamic> j) => OvidUsage(
     tier: (j['tier'] as String?) ?? 'free',
@@ -1395,13 +1598,19 @@ class OvidUsage {
       for (final p in (j['plans'] is List ? j['plans'] as List : const []))
         if (p is Map &&
             p['tier'] is String &&
-            ovidPlanMultipliers.containsKey(p['tier']) &&
+            (p['tier'] as String).isNotEmpty &&
             p['features'] is List)
           p['tier'] as String: [
             for (final f in p['features'] as List)
               if (f is String && f.trim().isNotEmpty && f.length <= 120) f,
           ].take(6).toList(),
     },
+    plans: [
+      for (final p in (j['plans'] is List ? j['plans'] as List : const []))
+        ?OvidPlan.tryParse(p),
+    ],
+    planId: j['plan'] is String ? j['plan'] as String : null,
+    planName: j['plan_name'] is String ? j['plan_name'] as String : null,
     models: [
       for (final m in (j['models'] as List? ?? const []))
         if (m is Map<String, dynamic>) OvidModelUsage.fromJson(m),
@@ -1416,12 +1625,17 @@ class OvidUsageToday {
     required this.inputTokens,
     required this.outputTokens,
     required this.images,
+    this.byModel = const {},
   });
 
   final int requests;
   final int inputTokens;
   final int outputTokens;
   final int images;
+
+  /// Server field `today.by_model`: the same counters per public model id
+  /// for the current allowance window (every device on the account).
+  final Map<String, OvidUsageToday> byModel;
 
   /// Null unless [value] is an object; missing/invalid counters read as 0.
   static OvidUsageToday? tryParse(Object? value) {
@@ -1431,11 +1645,18 @@ class OvidUsageToday {
       return v is num && v.isFinite && v >= 0 ? v.toInt() : 0;
     }
 
+    final raw = value['by_model'];
     return OvidUsageToday(
       requests: count('requests'),
       inputTokens: count('input_tokens'),
       outputTokens: count('output_tokens'),
       images: count('images'),
+      byModel: {
+        if (raw is Map)
+          for (final e in raw.entries)
+            if (e.key is String && e.value is Map)
+              e.key as String: OvidUsageToday.tryParse(e.value)!,
+      },
     );
   }
 }

@@ -77,11 +77,16 @@ Future<void> _reveal(WidgetTester tester, Finder finder,
 void _honestCopy(WidgetTester tester) {
   final copy = tester.widgetList<Text>(find.byType(Text))
       .map((text) => text.data ?? '').join(' ');
+  // Plan prices are subscription metadata from the server and are shown
+  // (SH-021); invented perks and renewal claims are not.
   expect(copy, isNot(matches(RegExp(
-    r'USD|\$|Renews on|auto-renew|GST|Google Play|/ month|'
+    r'Renews on|auto-renew|GST|'
     r'Priority routing|faster response|models unlocked|Pro-tier|Max-tier',
     caseSensitive: false,
   ))));
+  // Never a usage amount in money: only plan prices per month.
+  expect(RegExp(r'\$\d').allMatches(copy).length,
+      RegExp(r'US\$\d+ / month').allMatches(copy).length);
 }
 
 void main() {
@@ -117,10 +122,11 @@ void main() {
         expect(find.text('37% remaining'), findsOneWidget);
         expect(tester.takeException(), isNull);
         for (final entry in [
+          // The server seed table (SH-006): Starter ×3, Pro ×23, Max ×43.
           ('free', 'Free', '×1'),
-          ('3x', 'Plus', '×3'),
-          ('7x', 'Pro', '×7'),
-          ('15x', 'Max', '×15'),
+          ('3x', 'Starter', '×3'),
+          ('7x', 'Pro', '×23'),
+          ('15x', 'Max', '×43'),
         ]) {
           final card = find.byKey(ValueKey('plan-${entry.$1}'));
           await _reveal(tester, card);
@@ -163,9 +169,11 @@ void main() {
     OvidCloudService.httpClientFactoryForTest = () => MockClient((_) async =>
         http.Response(jsonEncode(_usage('future-tier', remaining: null)), 200));
     await _mount(tester);
-    expect(find.text('Plan unavailable'), findsOneWidget);
-    expect(find.text('UNKNOWN'), findsOneWidget);
-    expect(find.text('Usage unavailable'), findsOneWidget);
+    // An admin-created tier the app does not know shows its server name
+    // (plan_name absent here → the generic label), never "UNKNOWN" (EM-015).
+    expect(find.text('UNKNOWN'), findsNothing);
+    expect(find.text('Plan unavailable'), findsNothing);
+    expect(find.byKey(const ValueKey('billing-plan-name')), findsOneWidget);
     expect(find.textContaining('% remaining'), findsNothing);
     expect(find.byKey(const ValueKey('upgrade-header')), findsNothing);
     _honestCopy(tester);
@@ -212,7 +220,7 @@ void main() {
       expect(AppState.I.ovidCloudTier, tier);
       if (success) {
         expect(find.byKey(const ValueKey('billing-pay-now')), findsNothing);
-        expect(find.text('You are now on the Plus plan.'), findsOneWidget);
+        expect(find.text('You are now on the Starter plan.'), findsOneWidget);
       } else {
         // A rejection keeps the sheet open with specific copy and Retry.
         expect(find.byKey(const ValueKey('billing-sheet-error')), findsOneWidget);
@@ -231,6 +239,7 @@ void main() {
         http.Response(jsonEncode(_usage('7x')), 200));
     await _mount(tester);
     expect(find.text('PRO'), findsOneWidget);
+    expect(find.text('Pro'), findsWidgets);
     _honestCopy(tester);
     await _reveal(tester, find.byKey(const ValueKey('plan-free')));
     expect(find.byKey(const ValueKey('upgrade-free')), findsNothing);
@@ -239,7 +248,7 @@ void main() {
     expect(find.descendant(of: change, matching: find.text('Change plan')), findsOneWidget);
     await tester.tap(change);
     await _frames(tester);
-    expect(find.text('Change to Plus'), findsOneWidget);
+    expect(find.text('Change to Starter'), findsOneWidget);
     await _reveal(tester, find.text('Cancel'));
     await tester.tap(find.text('Cancel'));
     await _frames(tester);
@@ -264,7 +273,8 @@ void main() {
     expect(tester.takeException(), isNull);
     response.complete(http.Response('{}', 503));
     await _frames(tester);
-    expect(find.textContaining('(503)'), findsOneWidget);
+    expect(find.textContaining('unavailable right now'), findsOneWidget);
+    expect(find.textContaining('(503)'), findsNothing);
     expect(find.textContaining('% remaining'), findsNothing);
     await _reveal(tester, find.text('Retry'));
     await tester.tap(find.text('Retry'));

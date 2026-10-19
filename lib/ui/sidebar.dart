@@ -7,6 +7,7 @@ import '../core/connection_service.dart';
 import '../core/firebase_service.dart';
 import '../core/session_history_store.dart';
 import '../core/theme.dart';
+import '../core/ovid_cloud_service.dart';
 import '../core/state.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
@@ -170,12 +171,24 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
   /// into AppState; the notifier the rows already listen to re-renders.
   Future<void> _refreshCloudSessions() async {
     final store = CloudSessionStore.I;
+    final messenger = ScaffoldMessenger.maybeOf(context);
     await store.ready;
-    if (store.offline) return; // read-only cache while offline (spec §12)
+    if (store.offline) {
+      // Read-only cache while offline (spec §12) — say so (SH-017).
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text("You're offline — showing chats saved on this device."),
+        ),
+      );
+      return;
+    }
     try {
       await store.refreshSessions();
     } catch (_) {
-      // A failed refresh keeps the last reconciled list.
+      // The last reconciled list stays; the failure is no longer silent.
+      messenger?.showSnackBar(
+        const SnackBar(content: Text("Couldn't refresh your chats. Try again.")),
+      );
     }
   }
 
@@ -381,16 +394,26 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                               (s, hit),
                       ];
                       if (visible.isEmpty && contentRows.isEmpty) {
-                        return Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: Text(
-                            q.isEmpty
-                                ? 'No sessions yet'
-                                : 'No sessions match "$_query"',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Aether.textFaint,
+                        if (q.isNotEmpty) {
+                          return Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Text(
+                              'No sessions match "$_query"',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Aether.textFaint,
+                              ),
                             ),
+                          );
+                        }
+                        // Loading vs offline vs failed vs truly empty are
+                        // different states, and the empty state is pullable
+                        // too (SH-017).
+                        return RefreshIndicator(
+                          onRefresh: _refreshCloudSessions,
+                          child: SidebarEmptyState(
+                            store: CloudSessionStore.I,
+                            onRetry: _refreshCloudSessions,
                           ),
                         );
                       }
@@ -523,15 +546,15 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                             compact: compact,
                             icon: Icons.schedule_outlined,
                             label: 'Schedule',
-                            enabled: hasSession,
-                            onTap: hasSession
-                                ? () => _navigateFromSidebar(
-                                    context,
-                                    (_) => ScheduleScreen(
-                                      sessionId: app.activeSessionId!,
-                                    ),
-                                  )
-                                : null,
+                            // Always available: with no chat open it lists
+                            // every schedule (Wave 5).
+                            enabled: true,
+                            onTap: () => _navigateFromSidebar(
+                              context,
+                              (_) => ScheduleScreen(
+                                sessionId: app.activeSessionId,
+                              ),
+                            ),
                           ),
                           // PR27/B2: trajectory moved here from the chat header
                           // (the header keeps only jobs + studio + browser).
@@ -819,13 +842,9 @@ class _SidebarHeader extends StatelessWidget {
                   builder: (_, _) {
                     final fb = FirebaseService.I;
                     final signedIn = fb.isSignedIn;
-                    final name = signedIn
-                        ? (fb.displayName?.trim().isNotEmpty == true
-                              ? fb.displayName!.trim()
-                              : (fb.email ?? 'Signed in'))
-                        : 'You';
+                    final name = signedIn ? fb.accountLabel : 'You';
                     final sub = signedIn
-                        ? (fb.email ?? 'Signed in')
+                        ? fb.accountDetail
                         : 'Sign in to your account';
                     return Row(
                       crossAxisAlignment: CrossAxisAlignment.center,
@@ -892,12 +911,10 @@ class _PlanPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final paid = tier != 'free';
-    final label = switch (tier) {
-      '3x' => 'Plus · 3×',
-      '7x' => 'Pro · 7×',
-      '15x' => 'Max · 15×',
-      _ => 'Free plan',
-    };
+    // Names and multipliers from the server plan table (SH-006).
+    final label = paid
+        ? '${ovidPlanName(tier)} · ${ovidMultiplierLabel(ovidPlanMultiplier(tier))}'
+        : 'Free plan';
     return AetherPill(
       label: label,
       color: paid ? Aether.accent : Aether.textMuted,
@@ -1090,7 +1107,7 @@ class _SessionTileState extends State<_SessionTile> {
                                 children: [
                                   Expanded(
                                     child: Text(
-                                      summary.model,
+                                      ovidModelLabel(summary.model),
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
@@ -1319,6 +1336,75 @@ class _ConnectionChip extends StatelessWidget {
               ),
             ),
           ),
+        );
+      },
+    );
+  }
+}
+
+/// The session list's empty area (SH-017): a first sync in flight shows a
+/// loading row, offline says the list is the device cache, a failed sync
+/// offers Retry, and only a completed sync with no chats says "No chats yet".
+/// Always scrollable so pull-to-refresh works on an empty list.
+class SidebarEmptyState extends StatelessWidget {
+  const SidebarEmptyState({
+    super.key,
+    required this.store,
+    required this.onRetry,
+  });
+
+  final CloudSessionStore store;
+  final Future<void> Function() onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([store, store.connection]),
+      builder: (context, _) {
+        final style = TextStyle(fontSize: 12, color: Aether.textFaint);
+        final Widget body;
+        // The connectivity probe, not the WS link: the socket is still
+        // connecting during the very first sync.
+        if (store.connection.offline) {
+          body = Text(
+            "You're offline. Chats saved on this device appear here; "
+            'pull down to retry when you are back online.',
+            key: const ValueKey('sidebar-empty-offline'),
+            style: style,
+          );
+        } else if (store.lastSyncError != null && !store.syncing) {
+          body = Column(
+            key: const ValueKey('sidebar-empty-error'),
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text("Couldn't load your chats.", style: style),
+              TextButton(onPressed: onRetry, child: const Text('Retry')),
+            ],
+          );
+        } else if (store.syncing || !store.hasSynced) {
+          body = Row(
+            key: const ValueKey('sidebar-empty-loading'),
+            children: [
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 10),
+              Text('Loading your chats…', style: style),
+            ],
+          );
+        } else {
+          body = Text(
+            'No chats yet. Start one with New chat.',
+            key: const ValueKey('sidebar-empty-none'),
+            style: style,
+          );
+        }
+        return ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(16),
+          children: [body],
         );
       },
     );

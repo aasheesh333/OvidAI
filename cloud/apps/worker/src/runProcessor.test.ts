@@ -2002,6 +2002,56 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(await readMirror(seeded.sessionId)).toEqual(evts);
     });
 
+    it("full processor: every model call's usage lands in run_usage (Wave 3 ledger)", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort({ exitCode: 0, stdout: "hi\n", stderr: "" });
+      const usage = (prompt: number, completion: number, cached: number) => ({
+        choices: [],
+        usage: {
+          prompt_tokens: prompt,
+          completion_tokens: completion,
+          total_tokens: prompt + completion,
+          prompt_tokens_details: { cached_tokens: cached },
+        },
+      });
+      const sse = await startTurnSse([
+        [...toolCallTurn("call_1", "run_shell", { command: "echo hi" }), usage(1200, 40, 1000)],
+        [...textTurn("done"), usage(1300, 5, 1200)],
+      ]);
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+      const rows = (await db.$client`
+        SELECT user_id, session_id, run_id, model, input_tokens, output_tokens, cache_read_tokens
+          FROM run_usage WHERE run_id = ${seeded.runId} ORDER BY created_at, id
+      `) as Array<Record<string, unknown>>;
+      expect(rows).toEqual([
+        {
+          user_id: seeded.uid,
+          session_id: seeded.sessionId,
+          run_id: seeded.runId,
+          model: "full-default-model",
+          input_tokens: 1200,
+          output_tokens: 40,
+          cache_read_tokens: 1000,
+        },
+        {
+          user_id: seeded.uid,
+          session_id: seeded.sessionId,
+          run_id: seeded.runId,
+          model: "full-default-model",
+          input_tokens: 1300,
+          output_tokens: 5,
+          cache_read_tokens: 1200,
+        },
+      ]);
+    });
+
     it("full processor: the five subagent tools are registered (fix I-1)", async () => {
       const seeded = await seedRun();
       const sbx = makeFakePort();

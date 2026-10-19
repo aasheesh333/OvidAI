@@ -53,6 +53,12 @@ class MainActivity : FlutterActivity() {
     private val channelName = "ovid/native"
     private val safExportRequestCode = 7407
 
+    // Cold start (CT-009): onCreate runs before Dart has registered its
+    // `ovid/native` handler, so a pushed onOpenRoute would be lost. The
+    // launch route is parked here and Dart pulls it with takePendingRoute.
+    private var pendingRoute: String? = null
+    private var pendingSessionId: String? = null
+
     private val safExportCoordinator = SafExportCoordinator<ParcelFileDescriptor, Uri> { source, destination ->
         val output = contentResolver.openOutputStream(destination, "w")
             ?: throw IllegalStateException("Destination could not be opened")
@@ -98,6 +104,13 @@ class MainActivity : FlutterActivity() {
                     return@setMethodCallHandler
                 }
                 when (call.method) {
+                    "takePendingRoute" -> {
+                        val route = pendingRoute
+                            ?: pendingSessionId?.let { "/c/$it" }
+                        pendingRoute = null
+                        pendingSessionId = null
+                        result.success(route)
+                    }
                     "getInstallReferrer" -> {
                         val referrer = InstallReferrerClient.newBuilder(this).build()
                         var completed = false
@@ -449,7 +462,9 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        routeSessionSelection(intent)
+        // Dart is not listening yet: park the launch route for takePendingRoute.
+        routeSessionIntent(intent) { sid -> pendingSessionId = sid }
+        routeNotificationIntent(intent) { route -> pendingRoute = route }
     }
 
     override fun onNewIntent(intent: Intent) {

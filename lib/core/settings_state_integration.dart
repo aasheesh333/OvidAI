@@ -117,11 +117,21 @@ extension _SettingsStateIntegration on AppState {
           // AppState.transitionSessionAccount (which awaits this barrier's
           // `_settingsOperation` and would deadlock). Server-side deletion is a
           // separate, explicitly-requested flow.
-          onDelete: () => FirebaseService.I.signOutLocal(),
+          // Before the local sign-out: unregister this device's FCM token
+          // while the ID token still works (SE-002). After it: sign the
+          // Firebase/Google SDKs out too, or the persisted credential signs
+          // the user back in on the next launch (SE-001).
+          onDelete: () async {
+            final firebase = FirebaseService.I;
+            await firebase.runBeforeSignOut();
+            await firebase.signOutLocal();
+            await firebase.signOutSdk();
+          },
           // `isSignedIn` is read back directly because `accountReady` also folds
           // in the barrier's own session-account fence and would otherwise
-          // verify as empty.
-          onVerifyDeleted: () async => !FirebaseService.I.isSignedIn,
+          // verify as empty. The SDK's persisted user is read back as well.
+          onVerifyDeleted: () async =>
+              !FirebaseService.I.isSignedIn && FirebaseService.I.sdkSignedOut,
         ),
         ResetStoreKind.imageReceipts: FunctionalResetStore(
           name: ResetStoreKind.imageReceipts.id,

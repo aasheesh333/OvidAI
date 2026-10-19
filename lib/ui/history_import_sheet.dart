@@ -25,6 +25,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/cloud/cloud_rest.dart';
+import '../core/cloud/cloud_session_store.dart';
 import '../core/cloud/history_import.dart';
 import '../core/diag.dart';
 import '../core/session_history_store.dart';
@@ -47,6 +48,46 @@ String historyImportDoneMarkerKey(String account) =>
 /// chooses "Skip for now".
 String historyImportSkippedMarkerKey(String account) =>
     'ovid_cloud_import_skipped_${historyImportMarkerAccount(account)}';
+
+/// User copy for a [HistoryImportService.run] stage. The service's stage
+/// strings are internal (`session <key> chunk 2/3`, `skipped (server
+/// endpoint not live)`); they never reach the screen verbatim (EM-004).
+String historyImportStageLabel(String stage) {
+  if (stage == HistoryImportService.stageTranscripts) return 'Reading your chats…';
+  if (stage == HistoryImportService.stageLedger ||
+      stage == HistoryImportService.stageMemory ||
+      stage == HistoryImportService.skippedEndpointNotLive) {
+    return 'Finishing up…';
+  }
+  if (stage == HistoryImportService.stageDone) return 'Done';
+  if (stage.startsWith('session ')) {
+    if (stage.endsWith(' failed')) return 'One chat could not be uploaded…';
+    final chunk = RegExp(r'chunk (\d+)/(\d+)$').firstMatch(stage);
+    return chunk == null
+        ? 'Uploading your chats…'
+        : 'Uploading your chats (part ${chunk[1]} of ${chunk[2]})…';
+  }
+  return stage;
+}
+
+/// The production import service for [account], which never re-uploads a
+/// chat that already has a server copy (SE-015).
+HistoryImportService productionHistoryImportService({
+  required SharedPreferences prefs,
+  required String account,
+}) => HistoryImportService(
+  rest: CloudRestClient.I,
+  history: SessionHistoryRepository.I,
+  prefs: prefs,
+  account: account,
+  isCloudSession: (id) {
+    try {
+      return CloudSessionStore.I.knownServerIdFor(id) != null;
+    } catch (_) {
+      return false;
+    }
+  },
+);
 
 /// Shows the consent/progress sheet as a non-dismissible modal bottom sheet.
 ///
@@ -122,12 +163,7 @@ class _HistoryImportSheetState extends State<HistoryImportSheet> {
       final prefs = widget.prefs ?? await SharedPreferences.getInstance();
       final account = widget.account ?? AppState.I.sessionAccountId;
       final service = widget.service ??
-          HistoryImportService(
-            rest: CloudRestClient.I,
-            history: SessionHistoryRepository.I,
-            prefs: prefs,
-            account: account,
-          );
+          productionHistoryImportService(prefs: prefs, account: account);
       // `plan()` is read-only: it reads local rows and the completion marker
       // and never opens a connection.
       final plan = await service.plan();
@@ -233,7 +269,7 @@ class _HistoryImportSheetState extends State<HistoryImportSheet> {
   List<Widget> _actions() => switch (_phase) {
     _Phase.consent => [
       AetherSecondaryButton(
-        label: 'Skip for now',
+        label: 'Not now',
         onPressed: _skip,
       ),
       AetherPrimaryButton(
@@ -255,7 +291,7 @@ class _HistoryImportSheetState extends State<HistoryImportSheet> {
       ],
     ],
     _Phase.error => [
-      AetherSecondaryButton(label: 'Skip for now', onPressed: _skip),
+      AetherSecondaryButton(label: 'Not now', onPressed: _skip),
       AetherPrimaryButton(label: 'Try again', onPressed: _retryPlan),
     ],
     _ => const <Widget>[],
@@ -323,8 +359,15 @@ class _HistoryImportSheetState extends State<HistoryImportSheet> {
         const SizedBox(height: AetherSpacing.space3),
         const _ImportFact(
           label: 'Not uploaded',
-          value: 'Session event ledgers and memory files — there is no server '
-              'endpoint for them yet.',
+          value: 'Older on-device activity logs and memory notes. They stay on '
+              'this device. Chats already in Ovid Cloud are never copied '
+              'again.',
+        ),
+        const SizedBox(height: AetherSpacing.space3),
+        const _ImportFact(
+          label: 'Later',
+          value: 'Choose Not now to decide later from Settings → Data '
+              'controls → Import chats from this device.',
         ),
         const SizedBox(height: AetherSpacing.space4),
         Container(
@@ -358,7 +401,7 @@ class _HistoryImportSheetState extends State<HistoryImportSheet> {
         Semantics(
           liveRegion: true,
           child: Text(
-            _stage,
+            historyImportStageLabel(_stage),
             key: const ValueKey('history-import-stage'),
             style: AetherType.bodyMuted,
           ),
@@ -397,8 +440,9 @@ class _HistoryImportSheetState extends State<HistoryImportSheet> {
         if (result.skipped > 0) ...[
           const SizedBox(height: AetherSpacing.space3),
           Text(
-            'Skipped items include messages the server already had, and stores '
-            'with no server endpoint (session event ledgers and memory files).',
+            'Skipped items include messages Ovid Cloud already had, and older '
+            'on-device activity logs and memory notes, which stay on this '
+            'device.',
             style: AetherType.bodyMuted,
           ),
         ],
@@ -434,6 +478,92 @@ class _HistoryImportSheetState extends State<HistoryImportSheet> {
 
   static String _plural(int count, String one, String many) =>
       '$count ${count == 1 ? one : many}';
+}
+
+/// Settings → Data controls → "Import chats from this device" (SE-015).
+///
+/// Reopens the import after "Not now". Rendered only while device-only chats
+/// exist (the same read-only plan the first-run step uses), so it is never a
+/// dead row. [service] / [account] are test seams.
+class ImportLocalChatsTile extends StatefulWidget {
+  const ImportLocalChatsTile({super.key, this.service, this.account});
+
+  final HistoryImportService? service;
+  final String? account;
+
+  @override
+  State<ImportLocalChatsTile> createState() => _ImportLocalChatsTileState();
+}
+
+class _ImportLocalChatsTileState extends State<ImportLocalChatsTile> {
+  HistoryImportPlan? _plan;
+  HistoryImportService? _service;
+  String? _account;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final account = widget.account ?? AppState.I.sessionAccountId;
+      if (account.isEmpty || account == 'guest') return;
+      final prefs = await SharedPreferences.getInstance();
+      final service = widget.service ??
+          productionHistoryImportService(prefs: prefs, account: account);
+      final plan = await service.plan();
+      if (!mounted) return;
+      setState(() {
+        _plan = plan;
+        _service = service;
+        _account = account;
+      });
+    } catch (e, st) {
+      Diag.swallow('settings.import_tile', e, st);
+    }
+  }
+
+  Future<void> _open() async {
+    await showHistoryImportSheet(
+      context,
+      service: _service,
+      account: _account,
+    );
+    if (mounted) await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final plan = _plan;
+    if (plan == null ||
+        plan.alreadyImported ||
+        plan.sessions == 0 ||
+        plan.messages == 0) {
+      return const SizedBox.shrink();
+    }
+    final chats = plan.sessions == 1 ? '1 chat' : '${plan.sessions} chats';
+    return ListTile(
+      key: const ValueKey('settings-import-local-chats'),
+      dense: true,
+      leading: Icon(
+        Icons.cloud_upload_outlined,
+        size: 19,
+        color: Aether.textMuted,
+      ),
+      title: const Text(
+        'Import chats from this device',
+        style: TextStyle(fontSize: 14),
+      ),
+      subtitle: Text(
+        '$chats saved only on this device · copy them to Ovid Cloud',
+        style: TextStyle(fontSize: 12, color: Aether.textFaint),
+      ),
+      trailing: const Icon(Icons.chevron_right, size: 18),
+      onTap: _open,
+    );
+  }
 }
 
 class _ImportFact extends StatelessWidget {
