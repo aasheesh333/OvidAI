@@ -40,6 +40,7 @@ class _Rest extends CloudRestClient {
     String sessionId, {
     int limit = 50,
     String? before,
+    bool withEvents = false,
   }) async => CloudPage(
     items: [
       for (var i = 0; i < 3; i++)

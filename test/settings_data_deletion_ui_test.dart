@@ -40,6 +40,7 @@ class _ExportRest extends CloudRestClient {
     String sessionId, {
     int limit = 50,
     String? before,
+    bool withEvents = false,
   }) async => CloudPage(
     items: [
       MessageDto(

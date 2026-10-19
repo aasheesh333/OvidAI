@@ -57,6 +57,7 @@ class _FakeRest extends CloudRestClient {
     String sessionId, {
     int limit = 50,
     String? before,
+    bool withEvents = false,
   }) async {
     if (failWith != null) throw failWith!;
     messageCursors.putIfAbsent(sessionId, () => []).add(before);
