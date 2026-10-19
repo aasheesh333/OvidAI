@@ -54,6 +54,47 @@ void main() {
     expect(jsonEncode(snapshot.toJson()), isNot(contains('Private title')));
   });
 
+  test('snapshot reads the cloud projection when it is passed in', () {
+    // A cloud session's rows stay empty; the facade's live projection is
+    // the transcript the entry points hand over.
+    final session = ChatSession(id: 'cloud-1', title: 'Cloud chat', model: 'm');
+    final projection = [
+      Message(role: 'user', content: 'Hello cloud'),
+      // The live streaming bubble: thinking + unfinished — excluded.
+      Message(
+        role: 'assistant',
+        kind: MsgKind.streaming,
+        thinking: true,
+        content: 'partial',
+      ),
+      Message(role: 'assistant', kind: MsgKind.text, content: 'Cloud answer'),
+      // Terminal tails and tool rows never carry shareable text.
+      Message(role: 'assistant', kind: MsgKind.turnTail, content: 'Run failed'),
+      Message(
+        role: 'assistant',
+        kind: MsgKind.tool,
+        toolName: 'run_shell',
+        content: 'rm -rf /',
+      ),
+      Message(role: 'user', content: 'Authorization: Bearer secret'),
+    ];
+    final snapshot = ConversationSnapshot.fromSession(
+      session,
+      messages: projection,
+    );
+    expect(snapshot.messages, hasLength(2));
+    expect(snapshot.messages.map((m) => m.role), ['user', 'assistant']);
+    expect(snapshot.messages.map((m) => m.content), [
+      'Hello cloud',
+      'Cloud answer',
+    ]);
+    expect(snapshot.sessionId, 'cloud-1');
+    // The private-text allowlist still filters projection rows.
+    expect(jsonEncode(snapshot.toJson()), isNot(contains('secret')));
+    // Without the override the same session snapshots to nothing.
+    expect(ConversationSnapshot.fromSession(session).messages, isEmpty);
+  });
+
   test('authenticated create/list/revoke use configured endpoints', () async {
     final methods = <String>[];
     final service = ConversationShareService(

@@ -11,9 +11,11 @@
 //     gate asks once per account instead of on every launch. The service owns
 //     the `done` marker and only writes it after a run with no failed
 //     sessions; this sheet never writes that marker itself.
-//   * While a run is in flight the sheet cannot be dismissed (no drag, no
-//     barrier tap, no system back). A cancelled/interrupted run stays
-//     resumable because the service persists per-chunk progress.
+//   * While a run is in flight the sheet cannot be dismissed casually (no
+//     drag, no barrier tap, no system back) — but a deliberate Cancel is
+//     always offered. Dismissal is safe because the service persists
+//     per-chunk progress after every acknowledged chunk; a cancelled or
+//     interrupted run stays resumable.
 //   * A partial result keeps the sheet open with a plain-language line and a
 //     "Try again" action. Re-running is safe: the service resumes at the last
 //     acknowledged chunk and its deterministic `clientMsgId`s make duplicate
@@ -105,6 +107,7 @@ class _HistoryImportSheetState extends State<HistoryImportSheet> {
   String _stage = 'Preparing…';
   double _progress = 0;
   String? _error;
+  bool _cancelled = false;
 
   bool get _running => _phase == _Phase.running;
 
@@ -205,9 +208,11 @@ class _HistoryImportSheetState extends State<HistoryImportSheet> {
   @override
   Widget build(BuildContext context) {
     return PopScope(
-      // A running import must not be dismissed: it is resumable, but leaving
-      // mid-flight without a deliberate choice would hide its state.
-      canPop: !_running,
+      // A running import must not be dismissed casually: it is resumable, but
+      // leaving mid-flight without a deliberate choice would hide its state.
+      // After a Cancel tap the sheet has made that deliberate choice, so the
+      // system back is allowed again (the button pops directly).
+      canPop: !_running || _cancelled,
       child: AetherSheet(
         title: 'Import your chats',
         pinActions: true,
@@ -236,6 +241,11 @@ class _HistoryImportSheetState extends State<HistoryImportSheet> {
         onPressed: _import,
       ),
     ],
+    _Phase.running => [
+      // Escape hatch: without it a hung upload would trap the user in the
+      // sheet forever (isDismissible:false, drag off, no other button).
+      AetherSecondaryButton(label: 'Cancel', onPressed: _cancel),
+    ],
     _Phase.result => [
       if ((_result?.failedSessionKeys ?? const <String>[]).isEmpty)
         AetherPrimaryButton(label: 'Done', onPressed: _close)
@@ -252,6 +262,18 @@ class _HistoryImportSheetState extends State<HistoryImportSheet> {
   };
 
   void _close() => Navigator.of(context).pop();
+
+  /// Deliberate exit from a running import. Safe by contract: the service
+  /// persists per-chunk progress (`ovid_cloud_import_progress_<uid>`) after
+  /// every acknowledged chunk and its `clientMsgId`s are deterministic, so a
+  /// later run resumes at the last acknowledged chunk and can never
+  /// duplicate a message. The in-flight run is allowed to finish in the
+  /// background — its progress callbacks are mounted-guarded — so whatever
+  /// still lands is durable too.
+  void _cancel() {
+    setState(() => _cancelled = true);
+    Navigator.of(context).pop();
+  }
 
   Future<void> _retryPlan() async {
     setState(() {

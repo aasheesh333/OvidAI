@@ -160,6 +160,23 @@ class AttachmentUpload {
   final DateTime expiresAt;
 }
 
+/// `ArtifactUrlResponse` (workspace.ts) — the 200 answer of GET
+/// /sessions/:id/artifacts/:artifactId/url. [url] is a presigned download
+/// URL: a bearer capability valid until [expiresAt] (default TTL 1h), never
+/// to be logged or persisted as if permanent.
+class MintedArtifactUrl {
+  const MintedArtifactUrl({required this.url, required this.expiresAt});
+
+  factory MintedArtifactUrl.fromJson(Map<String, dynamic> j) =>
+      MintedArtifactUrl(
+        url: j['url'] as String,
+        expiresAt: DateTime.parse(j['expiresAt'] as String),
+      );
+
+  final String url;
+  final DateTime expiresAt;
+}
+
 /// One row of the bulk-history import batch (P8 Task 4). [clientMsgId] is the
 /// idempotency key: a (session, clientMsgId) that already exists is skipped,
 /// never duplicated. Wire form: strict camelCase, `createdAt` as ISO UTC.
@@ -248,6 +265,11 @@ class CloudHealth {
 /// (P8 Task 9, spec §12). [clientMsgId] is the Task 4 idempotency key: a
 /// replayed flush returns the ORIGINAL run/user message, so the entry is
 /// removed without creating a second run or optimistic row.
+///
+/// [account] is the `AppState.sessionAccountId` that composed the prompt
+/// (P0 privacy): the queue is only ever delivered to, or surfaced by, its
+/// owner. Null exists ONLY for rows persisted before the stamp — the store's
+/// legacy migration attributes them to the current account at load.
 class OutboxEntry {
   const OutboxEntry({
     required this.clientMsgId,
@@ -255,6 +277,8 @@ class OutboxEntry {
     required this.content,
     this.attachmentIds = const <String>[],
     required this.createdAt,
+    this.maxOutputTokens,
+    this.account,
   });
 
   factory OutboxEntry.fromJson(Map<String, dynamic> j) => OutboxEntry(
@@ -267,6 +291,8 @@ class OutboxEntry {
         ],
         createdAt:
             DateTime.tryParse(j['createdAt'] as String? ?? '') ?? DateTime.now(),
+        maxOutputTokens: j['maxOutputTokens'] as int?,
+        account: j['account'] as String?,
       );
 
   final String clientMsgId;
@@ -282,9 +308,21 @@ class OutboxEntry {
   final List<String> attachmentIds;
   final DateTime createdAt;
 
+  /// The Settings "Max output tokens" pick captured at enqueue time, or
+  /// null (auto). Rides the flush's sendMessage exactly like
+  /// [CloudAgentFacade] passes it on the online path, so an offline send
+  /// honors the same cap a direct one does.
+  final int? maxOutputTokens;
+
+  /// The owning `AppState.sessionAccountId` (see the class comment). Null
+  /// only on pre-stamp rows, before the legacy migration runs.
+  final String? account;
+
   OutboxEntry copyWith({
     String? sessionId,
     List<String>? attachmentIds,
+    int? maxOutputTokens,
+    String? account,
   }) =>
       OutboxEntry(
         clientMsgId: clientMsgId,
@@ -292,6 +330,8 @@ class OutboxEntry {
         content: content,
         attachmentIds: attachmentIds ?? this.attachmentIds,
         createdAt: createdAt,
+        maxOutputTokens: maxOutputTokens ?? this.maxOutputTokens,
+        account: account ?? this.account,
       );
 
   Map<String, dynamic> toJson() => <String, dynamic>{
@@ -301,6 +341,8 @@ class OutboxEntry {
         if (attachmentIds.isNotEmpty) 'attachmentIds': attachmentIds,
         // The server's zod `.datetime()` wants a Z-terminated stamp.
         'createdAt': createdAt.toUtc().toIso8601String(),
+        if (maxOutputTokens != null) 'maxOutputTokens': maxOutputTokens,
+        if (account != null) 'account': account,
       };
 }
 
@@ -441,6 +483,13 @@ class ApprovalRequest {
   /// request is what makes per-mode grants correct with parallel sessions.
   final String modeName;
 
+  /// The cloud approval gate's answer key (the `approval_requested` payload's
+  /// `approvalId`): what the `approval_resolved` fold clears by and what the
+  /// facade's `approval_response` op echoes back to the worker's bridge.
+  /// Null on prompts the test seams construct — those never reach the wire,
+  /// and [CloudAgentFacade.approveRequest] answers them with false.
+  final String? approvalId;
+
   ApprovalRequest({
     required this.tool,
     required this.summary,
@@ -449,6 +498,7 @@ class ApprovalRequest {
     this.planBody,
     this.allowAlways = false,
     this.modeName = '',
+    this.approvalId,
   });
 }
 

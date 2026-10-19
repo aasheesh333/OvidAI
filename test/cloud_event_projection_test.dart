@@ -9,9 +9,12 @@
 //       run_failed {code, message?} · system_note {code, message, command}
 //   - the full type union — cloud/packages/shared/src/events.ts: members
 //     LANDED but absent from the Task 7 fold table (tool_started,
-//     tool_completed, approval_requested, run_cancelled, …) must pass
+//     tool_completed, approval_requested, subagent_started, …) must pass
 //     through as NO-OPs (forward compatibility); a type outside the union
-//     entirely ('job_started') must too.
+//     entirely ('job_started') must too. run_cancelled LEFT that list: the
+//     full processor emits it as its own terminal (agent-core loop.ts
+//     `cancelled()`), so it folds like run_failed — see the fold-table
+//     tests below.
 //   - Message/MsgKind — lib/core/state.dart (the KEPT model, unmodified).
 
 import 'package:flutter_test/flutter_test.dart';
@@ -98,6 +101,74 @@ void main() {
 
       expect(p.messages.single.content, 'Hello!');
       expect(p.liveBubbleTicks.value, 2);
+    });
+
+    test(
+        'the FIRST message_delta flips the bubble out of thinking — the '
+        'answer renders via the answer path, not inside the Thinking… card',
+        () {
+      final p = TranscriptProjection();
+      final proj = EventTranscriptProjector(p);
+      proj.apply(
+          _ev('run_started', <String, dynamic>{'runId': 'run-9'}, seq: '1-1'));
+      expect(p.messages.single.thinking, isTrue); // armed by run_started
+
+      proj.apply(_ev('message_delta',
+          <String, dynamic>{'runId': 'run-9', 'text': 'Hel'}, seq: '1-2'));
+      expect(p.messages.single.thinking, isFalse);
+      expect(p.messages.single.content, 'Hel');
+
+      // Idempotent: later deltas never re-flip.
+      proj.apply(_ev('message_delta',
+          <String, dynamic>{'runId': 'run-9', 'text': 'lo!'}, seq: '1-3'));
+      expect(p.messages.single.thinking, isFalse);
+      expect(p.messages.single.content, 'Hello!');
+      expect(p.messages, hasLength(1)); // an empty pre-delta bubble adds no row
+    });
+
+    test(
+        'pre-delta bubble content is kept as a reasoning row above the '
+        'answer, never prefixed to the answer body', () {
+      final p = TranscriptProjection();
+      var now = _at(0);
+      final proj = EventTranscriptProjector(p, clock: () => now);
+      proj.apply(
+          _ev('run_started', <String, dynamic>{'runId': 'run-9'}, seq: '1-1'));
+      // No built emitter puts content in the bubble before the first answer
+      // delta (the worker streams answer text only); write pre-answer noise
+      // straight into the armed bubble to pin the fold for a future
+      // reasoning-phase emitter.
+      p.messages.single.content = 'let me think…';
+      now = _at(1500);
+
+      proj.apply(_ev('message_delta',
+          <String, dynamic>{'runId': 'run-9', 'text': 'Hel'}, seq: '1-2'));
+
+      // The noise became a settled reasoning row (the transcript model's
+      // reasoning carrier — `_ReasoningCard` renders its content as the
+      // collapsed "Thought for Ns" block) DIRECTLY above the bubble.
+      expect(p.messages, hasLength(2));
+      final thought = p.messages[0];
+      expect(thought.kind, MsgKind.reasoning);
+      expect(thought.content, 'let me think…');
+      expect(thought.thinking, isFalse);
+      expect(thought.elapsedMs, 1500); // pre-answer phase length → the label
+      final live = p.messages[1];
+      expect(live.kind, MsgKind.streaming);
+      expect(live.thinking, isFalse);
+      expect(live.content, 'Hel'); // the noise never leaks into the answer
+
+      now = _at(4000);
+      proj.apply(
+          _ev('message_completed',
+              <String, dynamic>{'messageId': 'msg-7', 'content': 'Hello!'},
+              seq: '1-3'));
+      // The reasoning row SURVIVES the server-authoritative replace — the
+      // Thought-for block stays above the finalized answer.
+      expect(p.messages, hasLength(2));
+      expect(p.messages[0].kind, MsgKind.reasoning);
+      expect(p.messages[1].kind, MsgKind.text);
+      expect(p.messages[1].content, 'Hello!');
     });
 
     test(
@@ -326,6 +397,63 @@ void main() {
       expect(p.messages.last.content, 'model_transient_exhausted');
     });
 
+    test(
+        'run_cancelled: terminal settle — busy false, activeRunId cleared, '
+        'retry line down, cancelled turn tail (compat run_failed{cancelled} '
+        'parity)', () {
+      final p = TranscriptProjection();
+      final proj = EventTranscriptProjector(p);
+      proj.apply(
+          _ev('run_started', <String, dynamic>{'runId': 'run-9'}, seq: '1-1'));
+      proj.apply(_ev('run_started_retry',
+          <String, dynamic>{'attempt': 2, 'nextBackoffMs': 3000},
+          seq: '1-2'));
+      proj.apply(_ev('message_delta',
+          <String, dynamic>{'runId': 'run-9', 'text': 'partial'}, seq: '1-3'));
+
+      // Full-processor shape (loop.ts cancelled()): {runId, reason?} — no
+      // code/message.
+      proj.apply(_ev('run_cancelled',
+          <String, dynamic>{'runId': 'run-9'}, seq: '1-4'));
+
+      expect(p.busy, isFalse);
+      expect(p.activeRunId, isNull); // a late delta has nowhere to land
+      expect(p.statusLine, isNull); // never a retry line for a dead run
+      // Same error fields the compat spelling (run_failed{code:'cancelled',
+      // message:'Stopped by user.'}) always produced.
+      expect(p.lastErrorCode, 'cancelled');
+      expect(p.lastErrorMessage, 'Stopped by user.');
+      expect(p.messages, hasLength(2)); // settled partial + turn tail
+      expect(p.messages[0].kind, MsgKind.text);
+      expect(p.messages[0].thinking, isFalse);
+      expect(p.messages[0].content, 'partial'); // the partial stays visible
+      final tail = p.messages[1];
+      expect(tail.role, 'assistant');
+      expect(tail.kind, MsgKind.turnTail);
+      expect(tail.content, 'Stopped by user.');
+
+      // No live bubble remains: a late delta must never land.
+      proj.apply(_ev('message_delta',
+          <String, dynamic>{'runId': 'run-9', 'text': 'late'}, seq: '1-5'));
+      expect(p.messages[0].content, 'partial');
+    });
+
+    test('run_cancelled renders the server reason verbatim', () {
+      final p = TranscriptProjection();
+      final proj = EventTranscriptProjector(p);
+      proj.apply(
+          _ev('run_started', <String, dynamic>{'runId': 'run-9'}, seq: '1-1'));
+
+      proj.apply(_ev('run_cancelled',
+          <String, dynamic>{'runId': 'run-9', 'reason': 'parent run cancelled'},
+          seq: '1-2'));
+
+      expect(p.busy, isFalse);
+      expect(p.messages.single.kind, MsgKind.turnTail);
+      expect(p.messages.single.content, 'parent run cancelled');
+      expect(p.lastErrorMessage, 'parent run cancelled');
+    });
+
     test('run_completed: busy false, statusLine cleared', () {
       final p = TranscriptProjection();
       final proj = EventTranscriptProjector(p);
@@ -526,8 +654,12 @@ void main() {
       proj.apply(_ev('approval_requested',
           <String, dynamic>{'runId': 'run-9', 'callId': 'c1', 'name': 'fs_edit'},
           seq: '1-4'));
-      proj.apply(_ev('run_cancelled',
-          <String, dynamic>{'runId': 'run-9'}, seq: '1-5'));
+      // run_cancelled used to sit here as a union-only no-op; the full
+      // processor now emits it as its own terminal, so it folds (see the
+      // fold-table tests). subagent_started keeps the no-op coverage.
+      proj.apply(_ev('subagent_started',
+          <String, dynamic>{'runId': 'run-9', 'subagentId': 'sa-1'},
+          seq: '1-5'));
       proj.apply(_ev('compaction_completed',
           <String, dynamic>{'kept': 10}, seq: '1-6'));
 
@@ -596,8 +728,9 @@ void main() {
   });
 
   group('publication discipline', () {
-    test('message_delta publishes via liveBubbleTicks, not notifyListeners',
-        () {
+    test(
+        'message_delta publishes per token via liveBubbleTicks; the FIRST '
+        "delta's thinking flip is the one structural notify", () {
       final p = TranscriptProjection();
       final proj = EventTranscriptProjector(p);
       var notified = 0;
@@ -606,11 +739,19 @@ void main() {
           _ev('run_started', <String, dynamic>{'runId': 'run-9'}, seq: '1-1'));
       final afterStart = notified;
 
+      // First delta: flips the bubble out of thinking — a structural change
+      // (the render gate switches to the answer path), republished once
+      // through the apply-level flush like message_completed's replace.
       proj.apply(_ev('message_delta',
-          <String, dynamic>{'runId': 'run-9', 'text': 'token'}, seq: '1-2'));
-
+          <String, dynamic>{'runId': 'run-9', 'text': 'First'}, seq: '1-2'));
       expect(p.liveBubbleTicks.value, 1);
-      expect(notified, afterStart); // the tick IS the publication
+      expect(notified, afterStart + 1);
+
+      // Every later delta: the tick IS the publication.
+      proj.apply(_ev('message_delta',
+          <String, dynamic>{'runId': 'run-9', 'text': ' token'}, seq: '1-3'));
+      expect(p.liveBubbleTicks.value, 2);
+      expect(notified, afterStart + 1);
     });
 
     test('liveBubbleTicks exposes its own listenable value', () {
@@ -627,6 +768,202 @@ void main() {
           <String, dynamic>{'runId': 'run-9', 'text': 'b'}, seq: '1-3'));
 
       expect(ticks, 2);
+    });
+  });
+
+  group('approval affordance (P3 Task 12 fold)', () {
+    test('approval_requested sets pendingApproval from the payload, adds no '
+        'transcript row', () {
+      final p = TranscriptProjection();
+      final proj = EventTranscriptProjector(p);
+      var notified = 0;
+      p.addListener(() => notified++);
+
+      proj.apply(_ev('approval_requested', <String, dynamic>{
+        'approvalId': 'ap-1',
+        'tool': 'bash',
+        'kind': 'tool',
+        'summary': 'Run rm -rf /tmp/build',
+        'detail': 'rm -rf /tmp/build',
+        'allowAlways': true,
+        'expiresAt': '2026-10-16T10:02:00.000Z',
+      }));
+
+      final prompt = p.pendingApproval;
+      expect(prompt, isNotNull);
+      expect(prompt!.approvalId, 'ap-1');
+      expect(prompt.tool, 'bash');
+      expect(prompt.kind, 'tool');
+      expect(prompt.summary, 'Run rm -rf /tmp/build');
+      expect(prompt.detail, 'rm -rf /tmp/build');
+      expect(prompt.allowAlways, isTrue);
+      expect(prompt.expiresAt,
+          DateTime.parse('2026-10-16T10:02:00.000Z'));
+      // The affordance is the dock's, not a transcript row.
+      expect(p.messages, isEmpty);
+      expect(notified, 1);
+    });
+
+    test('approval_resolved clears the matching prompt; a mismatched id keeps '
+        'it; nothing pending is a no-op', () {
+      final p = TranscriptProjection();
+      final proj = EventTranscriptProjector(p);
+      var notified = 0;
+      p.addListener(() => notified++);
+      proj.apply(_ev('approval_requested', <String, dynamic>{
+        'approvalId': 'ap-1',
+        'tool': 'bash',
+        'kind': 'tool',
+        'summary': 's',
+        'detail': 'd',
+        'allowAlways': false,
+      }, seq: '1-1'));
+
+      // A resolved for a different (superseded) approval never clears the
+      // live prompt.
+      proj.apply(_ev('approval_resolved',
+          <String, dynamic>{'approvalId': 'ap-0', 'decision': 'deny'},
+          seq: '1-2'));
+      expect(p.pendingApproval?.approvalId, 'ap-1');
+
+      proj.apply(_ev('approval_resolved',
+          <String, dynamic>{'approvalId': 'ap-1', 'decision': 'deny'},
+          seq: '1-3'));
+      expect(p.pendingApproval, isNull);
+      expect(notified, 2);
+
+      // Duplicate/late resolved with nothing pending: no throw, no notify.
+      proj.apply(_ev('approval_resolved',
+          <String, dynamic>{'approvalId': 'ap-1', 'decision': 'deny'},
+          seq: '1-4'));
+      expect(notified, 2);
+    });
+
+    test('the timeout-deny spelling (reason) clears like any resolved', () {
+      final p = TranscriptProjection();
+      final proj = EventTranscriptProjector(p);
+      proj.apply(_ev('approval_requested', <String, dynamic>{
+        'approvalId': 'ap-9',
+        'tool': 'bash',
+        'kind': 'tool',
+        'summary': 's',
+        'detail': 'd',
+        'allowAlways': false,
+      }, seq: '1-1'));
+      proj.apply(_ev('approval_resolved', <String, dynamic>{
+        'approvalId': 'ap-9',
+        'decision': 'deny',
+        'reason': 'timeout',
+      }, seq: '1-2'));
+      expect(p.pendingApproval, isNull);
+    });
+
+    test('terminal events clear a standing prompt (run_failed, '
+        'run_cancelled, run_completed)', () {
+      // run_failed / run_cancelled.
+      for (final terminal in const ['run_failed', 'run_cancelled']) {
+        final p = TranscriptProjection();
+        final proj = EventTranscriptProjector(p);
+        proj.apply(_ev('run_started',
+            <String, dynamic>{'runId': 'run-1'}, seq: '1-1'));
+        proj.apply(_ev('approval_requested', <String, dynamic>{
+          'approvalId': 'ap-1',
+          'tool': 'bash',
+          'kind': 'tool',
+          'summary': 's',
+          'detail': 'd',
+          'allowAlways': false,
+        }, seq: '1-2'));
+        expect(p.pendingApproval, isNotNull);
+        proj.apply(_ev(terminal,
+            terminal == 'run_failed'
+                ? <String, dynamic>{'code': 'internal', 'message': 'boom'}
+                : <String, dynamic>{'runId': 'run-1', 'reason': 'Stopped.'},
+            seq: '1-3'));
+        expect(p.pendingApproval, isNull, reason: terminal);
+      }
+      // run_completed.
+      final p = TranscriptProjection();
+      final proj = EventTranscriptProjector(p);
+      proj.apply(
+          _ev('run_started', <String, dynamic>{'runId': 'run-1'}, seq: '1-1'));
+      proj.apply(_ev('approval_requested', <String, dynamic>{
+        'approvalId': 'ap-1',
+        'tool': 'exit_plan_mode',
+        'kind': 'plan',
+        'summary': 'Plan complete?',
+        'detail': 'the recap',
+        'allowAlways': false,
+      }, seq: '1-2'));
+      proj.apply(_ev('run_completed', <String, dynamic>{'runId': 'run-1'},
+          seq: '1-3'));
+      expect(p.pendingApproval, isNull);
+    });
+
+    test('an off-contract payload (no approvalId) is a defensive no-op', () {
+      final p = TranscriptProjection();
+      final proj = EventTranscriptProjector(p);
+      proj.apply(_ev('approval_requested', <String, dynamic>{
+        'tool': 'bash',
+        'kind': 'tool',
+        'summary': 's',
+        'detail': 'd',
+        'allowAlways': false,
+      }));
+      expect(p.pendingApproval, isNull);
+      expect(p.messages, isEmpty);
+    });
+
+    test('re-folding the SAME approvalId keeps the standing prompt (no churn '
+        'through the dock arm guard)', () {
+      final p = TranscriptProjection();
+      final proj = EventTranscriptProjector(p);
+      var notified = 0;
+      p.addListener(() => notified++);
+      proj.apply(_ev('approval_requested', <String, dynamic>{
+        'approvalId': 'ap-1',
+        'tool': 'bash',
+        'kind': 'tool',
+        'summary': 's',
+        'detail': 'd',
+        'allowAlways': false,
+      }, seq: '1-1'));
+      final first = p.pendingApproval;
+      proj.apply(_ev('approval_requested', <String, dynamic>{
+        'approvalId': 'ap-1',
+        'tool': 'bash',
+        'kind': 'tool',
+        'summary': 's',
+        'detail': 'd',
+        'allowAlways': false,
+      }, seq: '1-2'));
+      expect(identical(p.pendingApproval, first), isTrue);
+      expect(notified, 1);
+    });
+
+    test('clearPendingApproval clears + notifies on the live id, ignores a '
+        'stale one (the facade optimistic dismiss)', () {
+      final p = TranscriptProjection();
+      final proj = EventTranscriptProjector(p);
+      var notified = 0;
+      p.addListener(() => notified++);
+      proj.apply(_ev('approval_requested', <String, dynamic>{
+        'approvalId': 'ap-1',
+        'tool': 'bash',
+        'kind': 'tool',
+        'summary': 's',
+        'detail': 'd',
+        'allowAlways': false,
+      }));
+      final afterFold = notified;
+
+      p.clearPendingApproval('ap-other');
+      expect(p.pendingApproval?.approvalId, 'ap-1');
+      expect(notified, afterFold);
+
+      p.clearPendingApproval('ap-1');
+      expect(p.pendingApproval, isNull);
+      expect(notified, afterFold + 1);
     });
   });
 

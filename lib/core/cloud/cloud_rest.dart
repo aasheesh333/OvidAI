@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -111,6 +112,12 @@ class CloudHeaders {
 /// `models.dart`; all non-2xx answers surface as [CloudApiException]. A 401
 /// from the server is retried exactly ONCE with a force-refreshed ID token
 /// before the exception is thrown.
+///
+/// Every request carries a hard [defaultTimeout] ceiling (overridable
+/// per call): one hung gateway answer must never jam the link, sends, the
+/// import sheet or the health screen forever. A cut-off request surfaces as
+/// `CloudApiException(0, 'timeout')` — `status: 0` because no HTTP answer
+/// ever arrived, `code: 'timeout'` because no server envelope exists.
 class CloudRestClient {
   CloudRestClient({
     http.Client? httpClient,
@@ -119,6 +126,15 @@ class CloudRestClient {
   })  : _httpClient = httpClient ?? http.Client(),
         _headers = headers ?? CloudHeaders.I,
         _restBase = _stripTrailingSlash(restBase ?? CloudConfig.restBase);
+
+  /// The ceiling on any single JSON round-trip. 30s is far above a healthy
+  /// gateway answer (sub-second) yet short enough that a jammed link frees
+  /// the UI instead of trapping it.
+  static const Duration defaultTimeout = Duration(seconds: 30);
+
+  /// The presigned R2 PUT ([uploadAttachmentBytes]) can legitimately carry
+  /// megabytes over a slow uplink, so it gets its own, longer ceiling.
+  static const Duration uploadTimeout = Duration(seconds: 120);
 
   final http.Client _httpClient;
   final CloudHeaders _headers;
@@ -138,23 +154,29 @@ class CloudRestClient {
   // -------------------------------------------------------------------------
 
   Future<Map<String, dynamic>> getJson(String path,
-      {Map<String, String>? query}) async {
-    return _decode(await _authed('GET', _uri(path, query), null));
+      {Map<String, String>? query, Duration? timeout}) async {
+    return _decode(
+        await _authed('GET', _uri(path, query), null, timeout: timeout));
   }
 
-  Future<Map<String, dynamic>> postJson(String path, {Object? body}) async {
-    return _decode(await _authed('POST', _uri(path), body));
+  Future<Map<String, dynamic>> postJson(String path,
+      {Object? body, Duration? timeout}) async {
+    return _decode(
+        await _authed('POST', _uri(path), body, timeout: timeout));
   }
 
-  Future<Map<String, dynamic>> patchJson(String path, {Object? body}) async {
-    return _decode(await _authed('PATCH', _uri(path), body));
+  Future<Map<String, dynamic>> patchJson(String path,
+      {Object? body, Duration? timeout}) async {
+    return _decode(
+        await _authed('PATCH', _uri(path), body, timeout: timeout));
   }
 
   /// DELETE for endpoints that answer 204 with an empty body (P4
   /// `DELETE /schedules/:id`). A non-2xx answer still maps to
   /// [CloudApiException]; there is no response body to decode on success.
-  Future<void> delete(String path) async {
-    final response = await _authed('DELETE', _uri(path), null);
+  Future<void> delete(String path, {Duration? timeout}) async {
+    final response =
+        await _authed('DELETE', _uri(path), null, timeout: timeout);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw _toError(response);
     }
@@ -163,20 +185,26 @@ class CloudRestClient {
   /// PUT with a JSON body. Added for the Studio workspace file write
   /// (`PUT /sessions/:id/workspace/file`); every non-2xx answer maps to
   /// [CloudApiException] exactly like the other verbs.
-  Future<Map<String, dynamic>> putJson(String path, {Object? body}) async {
-    return _decode(await _authed('PUT', _uri(path), body));
+  Future<Map<String, dynamic>> putJson(String path,
+      {Object? body, Duration? timeout}) async {
+    return _decode(await _authed('PUT', _uri(path), body, timeout: timeout));
   }
 
   /// Sends with auth headers; on a 401, refreshes the ID token (force) and
   /// retries exactly once — a stale cached token self-heals, a real
-  /// unauthenticated failure still surfaces.
+  /// unauthenticated failure still surfaces. The per-request [timeout]
+  /// ceiling applies to EACH attempt, not to the pair.
   Future<http.Response> _authed(
-      String method, Uri uri, Object? body) async {
-    final first =
-        await _raw(method, uri, await _headers.authorize(), jsonBody: body);
+    String method,
+    Uri uri,
+    Object? body, {
+    Duration? timeout,
+  }) async {
+    final first = await _raw(method, uri, await _headers.authorize(),
+        jsonBody: body, timeout: timeout);
     if (first.statusCode != 401) return first;
     return _raw(method, uri, await _headers.authorize(forceRefresh: true),
-        jsonBody: body);
+        jsonBody: body, timeout: timeout);
   }
 
   Future<http.Response> _raw(
@@ -185,6 +213,7 @@ class CloudRestClient {
     Map<String, String> headers, {
     Object? jsonBody,
     List<int>? byteBody,
+    Duration? timeout,
   }) async {
     final request = http.Request(method, uri);
     request.headers.addAll(headers);
@@ -194,7 +223,26 @@ class CloudRestClient {
     } else if (byteBody != null) {
       request.bodyBytes = byteBody;
     }
-    return http.Response.fromStream(await _httpClient.send(request));
+    final ceiling = timeout ?? defaultTimeout;
+    try {
+      // The ceiling covers BOTH halves of the round-trip: a socket that
+      // never accepts the request (send hangs) and one that accepts it but
+      // never answers (the streamed response hangs).
+      final streamed = await _httpClient.send(request).timeout(ceiling);
+      return await http.Response.fromStream(streamed).timeout(ceiling);
+    } on TimeoutException {
+      // The socket may still be draining; the CALLER is already free. Status 0
+      // marks "no HTTP answer at all" (the health screen's generic catch maps
+      // unreachable the same way); no caller switches on it as an HTTP status.
+      final waited = ceiling.inSeconds > 0
+          ? '${ceiling.inSeconds}s'
+          : '${ceiling.inMilliseconds}ms';
+      throw CloudApiException(
+        status: 0,
+        code: 'timeout',
+        message: 'Ovid Cloud did not answer within $waited.',
+      );
+    }
   }
 
   Map<String, dynamic> _decode(http.Response response) {
@@ -326,6 +374,12 @@ class CloudRestClient {
   Future<SessionDto> getSession(String id) async =>
       SessionDto.fromJson(await getJson('/sessions/$id'));
 
+  /// DELETE /sessions/:id → 204 with an empty body. The server cancels any
+  /// active run and soft-deletes the row; every later read of the id 404s.
+  Future<void> deleteSession(String id) async {
+    await delete('/sessions/$id');
+  }
+
   /// PATCH /sessions/:id — only the fields provided are sent (the server
   /// requires at least one and rejects unknown keys).
   Future<SessionDto> patchSession(String id, {String? title, String? mode}) async {
@@ -335,11 +389,23 @@ class CloudRestClient {
     }));
   }
 
+  /// The wire's max-output cap, mirroring @ovid/shared's
+  /// `MAX_OUTPUT_TOKENS_CAP` (cloud/packages/shared/src/rest.ts). The
+  /// Settings presets above it (16K/32K) degrade to it before sending —
+  /// the alternative would be a 400 on every send, the exact "saved but
+  /// wired to nothing" failure class this setting's wiring fixes.
+  static const int maxOutputTokensWireCap = 8192;
+
+  /// POST /sessions/:id/messages. [maxOutputTokens] is the Settings "Max
+  /// output tokens" pick — null (auto/0) never sends the key, so the
+  /// provider's own default applies; callers pass an already-clamped value
+  /// (see [maxOutputTokensWireCap]).
   Future<SendMessageResponse> sendMessage(
     String sessionId,
     String content, {
     List<String> attachmentIds = const [],
     String? clientMsgId,
+    int? maxOutputTokens,
   }) async {
     return SendMessageResponse.fromJson(await postJson(
       '/sessions/$sessionId/messages',
@@ -348,6 +414,8 @@ class CloudRestClient {
         if (attachmentIds.isNotEmpty) 'attachmentIds': attachmentIds,
         if (clientMsgId != null && clientMsgId.isNotEmpty)
           'clientMsgId': clientMsgId,
+        // Null-aware marker: the key is omitted entirely when unset (auto).
+        'maxOutputTokens': ?maxOutputTokens,
       },
     ));
   }
@@ -373,14 +441,34 @@ class CloudRestClient {
     ));
   }
 
+  /// GET /sessions/:id/artifacts/:artifactId/url — re-mints a presigned
+  /// download URL for a cloud artifact. Transcript-persisted URLs die with
+  /// their ~1h TTL; this is the refresh path before rendering or sharing a
+  /// remote artifact. The answer's [MintedArtifactUrl.url] is a bearer
+  /// capability until [MintedArtifactUrl.expiresAt].
+  Future<MintedArtifactUrl> mintArtifactUrl(
+    String sessionId,
+    String artifactId,
+  ) async {
+    return MintedArtifactUrl.fromJson(
+      await getJson('/sessions/$sessionId/artifacts/$artifactId/url'),
+    );
+  }
+
   /// Raw PUT of the attachment bytes to the presigned R2 URL — NO
   /// Authorization / App Check headers (they would corrupt the signature;
-  /// the URL itself is the credential).
+  /// the URL itself is the credential). The ceiling is [uploadTimeout], not
+  /// [defaultTimeout]: a multi-megabyte upload over a slow uplink is a
+  /// legitimate long request, not a hung one.
   Future<void> uploadAttachmentBytes(
-      AttachmentUpload upload, List<int> bytes) async {
+    AttachmentUpload upload,
+    List<int> bytes, {
+    Duration? timeout,
+  }) async {
     final response = await _raw('PUT', Uri.parse(upload.uploadUrl),
         const <String, String>{},
-        byteBody: bytes);
+        byteBody: bytes,
+        timeout: timeout ?? uploadTimeout);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       // R2 answers XML, not the gateway's JSON envelope → 'internal'.
       throw _toError(response);

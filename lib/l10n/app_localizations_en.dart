@@ -48,6 +48,10 @@ class AppLocalizationsEn extends AppLocalizations {
       'Too many requests right now. Wait a moment and try again.';
 
   @override
+  String get errorQuotaExceeded =>
+      'You\'ve reached your plan limit. It resets automatically.';
+
+  @override
   String get errorServer =>
       'The service is having trouble right now. Please try again later.';
 

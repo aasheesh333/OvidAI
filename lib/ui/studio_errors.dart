@@ -92,6 +92,8 @@ class StudioFailure {
       case 'unavailable':
       case 'file_service_not_configured':
         return 'The cloud workspace is temporarily unavailable. Try again.';
+      case 'timeout':
+        return 'That took too long. Check your connection and try again.';
       case 'unauthenticated':
         return 'Sign in to use Ovid Cloud.';
     }

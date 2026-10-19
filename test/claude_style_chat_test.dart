@@ -222,6 +222,38 @@ void main() {
       ]);
     });
 
+    test('menu items: a cloud session gates on the projection transcript', () {
+      // Cloud sessions keep ChatSession.messages empty — the facade's live
+      // projection is the transcript (chat_screen's `_messagesOf` parity).
+      final cloud = ChatSession(id: 'd', title: 't', model: 'm');
+      expect(
+        chatMenuActionsFor(cloud, 0),
+        isNot(
+          anyOf(
+            contains(ChatMenuAction.share),
+            contains(ChatMenuAction.newChat),
+          ),
+        ),
+        reason: 'no projection and empty rows: nothing to share',
+      );
+      final projected = chatMenuActionsFor(cloud, 0, transcript: [
+        Message(role: 'user', content: 'hello cloud'),
+      ]);
+      expect(projected, contains(ChatMenuAction.share));
+      expect(projected, contains(ChatMenuAction.newChat));
+      // A present-but-empty projection wins over stale local rows.
+      final stale = ChatSession(
+        id: 'e',
+        title: 't',
+        model: 'm',
+        messages: [Message(role: 'user', content: 'x')],
+      );
+      expect(
+        chatMenuActionsFor(stale, 0, transcript: const <Message>[]),
+        isNot(contains(ChatMenuAction.share)),
+      );
+    });
+
     testWidgets('rename from the ⋮ menu renames the chat', (tester) async {
       addSession('h4', [Message(role: 'user', content: 'hello')]);
       await pumpChat(tester);

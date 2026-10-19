@@ -83,11 +83,11 @@ void main() {
         ),
       ]);
     await pumpChat(tester);
-    // Nothing is known synchronously: no size, no "missing" verdict yet.
-    expect(find.text('4 KB'), findsNothing);
-    expect(find.text('image file not in workspace'), findsNothing);
-
-    await settleIo(tester);
+    // The stat is synchronous in the row's lifecycle entry points (never
+    // inside build — see _ImageFileInfoState): the size and the missing
+    // verdict are known on the FIRST frame, with no real I/O settlement
+    // needed. The old async stat never completed under the test binding,
+    // which this suite's earlier shape pinned as "nothing known yet".
     expect(find.text('4 KB'), findsOneWidget);
     expect(find.text('image file not in workspace'), findsOneWidget);
   });

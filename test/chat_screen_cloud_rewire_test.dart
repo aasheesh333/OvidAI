@@ -5,6 +5,9 @@
 //   * typing + Send reaches the FACADE's REST client (never a local run);
 //   * a run_started / message_delta / message_completed sequence through the
 //     fake socket renders a live bubble and then the finalized row;
+//   * the FIRST message_delta flips that bubble out of the "Thinking…" card
+//     so the answer streams through the answer path (pre-delta content, if
+//     any, is kept as the "Thought for" block above the answer);
 //   * queued outbox entries render the composer queue chip;
 //   * Review Focus #4 — a 402 `daily_limit_reached` with `x-ovid-resets-at`
 //     shows the server message VERBATIM plus a resets countdown, and the
@@ -24,6 +27,7 @@ import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
 import 'package:ovid_ai/core/cloud/cloud_ws.dart';
 import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/connection_service.dart';
+import 'package:ovid_ai/core/diag.dart';
 import 'package:ovid_ai/core/session_history_store.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -48,7 +52,44 @@ class FakeChatRest extends CloudRestClient {
   /// 402/409/503 answers keyed by the prompt content being sent.
   final Map<String, CloudApiException> sendErrors = <String, CloudApiException>{};
 
+  /// Holds every sendMessage RESPONSE until completed: the POST is recorded
+  /// (it left the device) but the facade stays inside the POST's in-flight
+  /// window — the double-tap window under test.
+  Completer<void>? sendGate;
+
+  /// Title PATCHes (the rename sync), in call order.
+  final List<({String sessionId, String? title, String? mode})> patched = [];
+  CloudApiException? patchError;
+
+  /// Server-side message history keyed by session id, OLDEST-first (the
+  /// model's order); the wire answers newest-first, so page slices come
+  /// back reversed — mirroring `GET /sessions/:id/messages`.
+  final Map<String, List<MessageDto>> historyBySession =
+      <String, List<MessageDto>>{};
+
+  /// Every pageMessages call, in order — the pager tests read the `before`
+  /// cursors out of these.
+  final List<({String sessionId, String? before, int limit})> paged = [];
+
+  /// Thrown only for older-page fetches (`before != null`): the boot's
+  /// newest-page load stays clean, so a failure lands in the pager alone.
+  CloudApiException? olderPageError;
+
   int _seq = 0;
+
+  @override
+  Future<SessionDto> patchSession(String id,
+      {String? title, String? mode}) async {
+    patched.add((sessionId: id, title: title, mode: mode));
+    if (patchError != null) throw patchError!;
+    return SessionDto(
+      id: id,
+      title: title,
+      mode: mode ?? 'auto',
+      createdAt: DateTime.utc(2026, 10, 17),
+      updatedAt: DateTime.utc(2026, 10, 17),
+    );
+  }
 
   @override
   Future<SessionDto> createSession({String? title}) async => SessionDto(
@@ -71,7 +112,25 @@ class FakeChatRest extends CloudRestClient {
     int limit = 50,
     String? before,
   }) async {
-    return const CloudPage<MessageDto>(items: [], nextCursor: null);
+    paged.add((sessionId: sessionId, before: before, limit: limit));
+    if (before != null && olderPageError != null) throw olderPageError!;
+    final history = historyBySession[sessionId] ?? const <MessageDto>[];
+    // Server semantics: the page before `before` holds the `limit` rows
+    // strictly OLDER than that message, newest first. `before` = the
+    // oldest message (or an unknown id) is the empty final page.
+    var end = history.length;
+    if (before != null) {
+      final i = history.indexWhere((m) => m.id == before);
+      if (i <= 0) {
+        return const CloudPage<MessageDto>(items: [], nextCursor: null);
+      }
+      end = i;
+    }
+    final start = end - limit < 0 ? 0 : end - limit;
+    return CloudPage<MessageDto>(
+      items: history.sublist(start, end).reversed.toList(),
+      nextCursor: null,
+    );
   }
 
   @override
@@ -80,6 +139,7 @@ class FakeChatRest extends CloudRestClient {
     String content, {
     List<String> attachmentIds = const [],
     String? clientMsgId,
+    int? maxOutputTokens,
   }) async {
     final error = sendErrors[content];
     if (error != null) throw error;
@@ -89,6 +149,7 @@ class FakeChatRest extends CloudRestClient {
       attachmentIds: attachmentIds,
       clientMsgId: clientMsgId,
     ));
+    if (sendGate != null) await sendGate!.future;
     final n = ++_seq;
     return SendMessageResponse(
       runId: 'run-$n',
@@ -102,6 +163,10 @@ class FakeChatSocket implements CloudSocket {
   final StreamController<Object> _frames = StreamController<Object>.broadcast();
   final StreamController<void> _closed = StreamController<void>.broadcast();
 
+  /// Every client frame that reached the wire, decoded, in order — the
+  /// subscribe frames, pings, and the approval ops alike.
+  final List<Map<String, dynamic>> sent = <Map<String, dynamic>>[];
+
   @override
   Stream<Object> get frames => _frames.stream;
 
@@ -112,7 +177,14 @@ class FakeChatSocket implements CloudSocket {
   int? get closeCode => null;
 
   @override
-  void sendText(String frame) {}
+  void sendText(String frame) {
+    try {
+      final decoded = jsonDecode(frame);
+      if (decoded is Map<String, dynamic>) sent.add(decoded);
+    } catch (_) {
+      // Not a JSON object frame — nothing the harness needs to assert on.
+    }
+  }
 
   @override
   Future<void> close([int? code, String? reason]) async {
@@ -214,6 +286,20 @@ ChatSession _addSession(String id) {
   return session;
 }
 
+/// Seeds [rest] with [count] single-row messages (`msg-0` oldest).
+void _seedHistory(FakeChatRest rest, String sessionId, int count) {
+  rest.historyBySession[sessionId] = <MessageDto>[
+    for (var i = 0; i < count; i++)
+      MessageDto(
+        id: 'msg-$i',
+        sessionId: sessionId,
+        role: 'user',
+        content: 'm$i',
+        createdAt: DateTime.utc(2026, 10, 17),
+      ),
+  ];
+}
+
 Future<void> _pumpChat(WidgetTester tester) async {
   await tester.pumpWidget(
     MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
@@ -237,6 +323,7 @@ void main() {
     SharedPreferences.setMockInitialValues(const <String, Object>{});
     AppState.resetTestInstance();
     AppState.createForTest();
+    Diag.resetForTest();
     // The local engine must never be consulted; pausing its timer keeps the
     // assertion below safe to make without pending-timer noise.
   });
@@ -267,6 +354,48 @@ void main() {
     expect(CloudAgentFacade.I.busyFor('srv-1'), isFalse);
     // The optimistic user row renders from the facade projection.
     expect(find.textContaining('hello cloud'), findsWidgets);
+    await h.close();
+  });
+
+  testWidgets(
+      'a double-tap Send while the POST is in flight queues the second '
+      'message — ONE server POST (chat P1)',
+      timeout: const Timeout(Duration(seconds: 60)), (tester) async {
+    final h = await _bind();
+    addTearDown(() async {
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+    _addSession('srv-1');
+    await _pumpChat(tester);
+
+    final gate = Completer<void>();
+    h.rest.sendGate = gate;
+
+    await tester.enterText(
+        find.byKey(const ValueKey('chat-composer')), 'hello cloud');
+    await tester.pump();
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pump();
+    // busyFor covers the POST's in-flight window: the composer already
+    // offers Queue, and busyFor is the composer's queue-or-send decision.
+    expect(h.facade.busyFor('srv-1'), isTrue);
+
+    // The second tap arrives before the first POST lands.
+    await tester.tap(find.byTooltip('Add to queue'));
+    await tester.pump();
+
+    expect(h.rest.sent, hasLength(1), reason: 'one POST, one run');
+    expect(h.rest.sent.single.content, 'hello cloud');
+    expect(h.facade.queuedMessagesFor('srv-1'), ['hello cloud']);
+
+    gate.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    // The queued row did not dispatch a second run behind the first; it
+    // waits for the first run's terminal.
+    expect(h.rest.sent, hasLength(1));
+    expect(h.facade.queuedMessagesFor('srv-1'), ['hello cloud']);
     await h.close();
   });
 
@@ -314,6 +443,117 @@ void main() {
     expect(find.textContaining('Final answer.'), findsWidgets);
     await h.close();
   });
+
+  testWidgets(
+    'the FIRST message_delta flips the live bubble out of the Thinking… '
+    'card — the answer streams through the answer path',
+    timeout: const Timeout(Duration(seconds: 60)), (tester) async {
+      final h = await _bind();
+      addTearDown(() async {
+        await h.ws.disconnect();
+        h.facade.dispose();
+      });
+      _addSession('srv-1');
+      await _pumpChat(tester);
+
+      await _send(tester, 'hello cloud');
+      final socket = h.socket();
+
+      socket.server(_eventFrame('srv-1', '1-0', 'run_started', {'runId': 'run-1'}));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      // No delta yet: the tail is the live "Thinking…" card.
+      expect(find.textContaining('Thinking'), findsOneWidget);
+
+      socket.server(_eventFrame('srv-1', '2-0', 'message_delta',
+          {'runId': 'run-1', 'text': 'Cloud '}));
+      socket.server(_eventFrame('srv-1', '3-0', 'message_delta',
+          {'runId': 'run-1', 'text': 'says hi'}));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      // Flipped on the first delta: the shimmer label is gone and the
+      // streamed text renders as the answer body with the caret at its
+      // growing edge — never buried inside the expanded reasoning card
+      // until the run finishes.
+      expect(find.textContaining('Cloud says hi'), findsWidgets);
+      expect(find.textContaining('Thinking'), findsNothing);
+      expect(
+          find.byKey(const ValueKey('chat-streaming-caret')), findsOneWidget);
+
+      // Settle the run so no live animation outlives the test body.
+      socket.server(_eventFrame('srv-1', '4-0', 'message_completed', {
+        'messageId': 'msg-assistant-1',
+        'content': 'Cloud says hi. Final answer.',
+      }));
+      socket.server(
+          _eventFrame('srv-1', '5-0', 'run_completed', {'runId': 'run-1'}));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byKey(const ValueKey('chat-streaming-caret')), findsNothing);
+      await h.close();
+    });
+
+  testWidgets(
+    'pre-delta bubble content is kept as the "Thought for" block above the '
+    'answer, never prefixed to the answer body',
+    timeout: const Timeout(Duration(seconds: 60)), (tester) async {
+      final h = await _bind();
+      addTearDown(() async {
+        await h.ws.disconnect();
+        h.facade.dispose();
+      });
+      _addSession('srv-1');
+      await _pumpChat(tester);
+
+      await _send(tester, 'hello cloud');
+      final socket = h.socket();
+
+      socket.server(_eventFrame('srv-1', '1-0', 'run_started', {'runId': 'run-1'}));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      // No built emitter puts content in the bubble before the first answer
+      // delta (the worker streams answer text only); write pre-answer noise
+      // straight into the armed bubble to pin the fold for a future
+      // reasoning-phase emitter. No frame is pumped while the noise sits on
+      // the thinking bubble on purpose: the projector owns the thinking →
+      // answer transition, and the fold's reasoning row — not the UI-side
+      // think-clock snapshot — is the durable carrier of the thought text.
+      (CloudAgentFacade.I.transcriptFor('srv-1')!).last.content =
+          'PRE_ANSWER_NOISE';
+
+      socket.server(_eventFrame('srv-1', '2-0', 'message_delta',
+          {'runId': 'run-1', 'text': 'Cloud says hi'}));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      // The answer body starts with the delta text — the noise never leaks
+      // in — and the snapshot survives as the collapsed "Thought for" block
+      // above it (collapsed by default: the body is not rendered yet).
+      expect(find.textContaining('Cloud says hi'), findsWidgets);
+      expect(find.textContaining('Thought for'), findsOneWidget);
+      expect(find.textContaining('PRE_ANSWER_NOISE'), findsNothing);
+
+      // Expanding the block shows the recorded snapshot.
+      await tester.tap(find.byKey(const ValueKey('chat-reasoning-summary')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.textContaining('PRE_ANSWER_NOISE'), findsWidgets);
+
+      // The block survives the server-authoritative finalize.
+      socket.server(_eventFrame('srv-1', '3-0', 'message_completed', {
+        'messageId': 'msg-assistant-1',
+        'content': 'Cloud says hi. Final answer.',
+      }));
+      socket.server(
+          _eventFrame('srv-1', '4-0', 'run_completed', {'runId': 'run-1'}));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.textContaining('Thought for'), findsOneWidget);
+      expect(find.textContaining('PRE_ANSWER_NOISE'), findsWidgets);
+      expect(find.textContaining('Final answer.'), findsWidgets);
+      await h.close();
+    });
 
   testWidgets('queued outbox entries render the composer queue chip',
       (tester) async {
@@ -396,4 +636,368 @@ void main() {
     expect(editable.controller.text, 'limit me');
     await h.close();
   });
+
+  testWidgets(
+    'a rename PATCHes the server title for a cloud session, never for a '
+    'purely local one',
+    timeout: const Timeout(Duration(seconds: 60)),
+    (tester) async {
+      final h = await _bind();
+      addTearDown(() async {
+        await h.ws.disconnect();
+        h.facade.dispose();
+      });
+      final s = _addSession('srv-1'); // 'srv-1' is a known server id
+      AppState.I.sessions
+          .add(ChatSession(id: 'local-9', title: 'Local', model: 'm'));
+
+      AppState.I.renameSession('srv-1', 'Renamed cloud chat');
+      await h.facade.titlePatchSettledForTest('srv-1');
+      expect(h.rest.patched.single,
+          (sessionId: 'srv-1', title: 'Renamed cloud chat', mode: null));
+      // The optimistic local title stands either way.
+      expect(s.title, 'Renamed cloud chat');
+
+      // No server id yet: the rename stays local until the first send.
+      AppState.I.renameSession('local-9', 'Renamed local chat');
+      await h.facade.titlePatchSettledForTest('local-9');
+      expect(h.rest.patched, hasLength(1),
+          reason: 'a purely local chat has nothing to sync');
+      expect(AppState.I.sessionById('local-9')!.title, 'Renamed local chat');
+
+      // A failed PATCH keeps the local rename and only lands in Diag.
+      h.rest.patchError = CloudApiException(
+        status: 503,
+        code: 'unavailable',
+        message: 'Gateway is restarting.',
+      );
+      AppState.I.renameSession('srv-1', 'Offline rename');
+      await h.facade.titlePatchSettledForTest('srv-1');
+      expect(s.title, 'Offline rename',
+          reason: 'the optimistic title must survive a failed sync');
+      expect(
+        Diag.recent().any((e) => e.context == 'cloud.renameSession'),
+        isTrue,
+      );
+      await h.close();
+    },
+  );
+
+  testWidgets(
+    'a rename of a local id mapped to a server id PATCHes under the server id',
+    timeout: const Timeout(Duration(seconds: 60)),
+    (tester) async {
+      // Seed the map BEFORE _bind so the store loads it with the outbox.
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(CloudSessionStore.idMapKey,
+          jsonEncode(<String, String>{'local-mapped': 'srv-2'}));
+      final h = await _bind();
+      addTearDown(() async {
+        await h.ws.disconnect();
+        h.facade.dispose();
+      });
+      AppState.I.sessions
+          .add(ChatSession(id: 'local-mapped', title: 'Mapped', model: 'm'));
+
+      AppState.I.renameSession('local-mapped', 'Mapped rename');
+      await h.facade.titlePatchSettledForTest('local-mapped');
+      expect(h.rest.patched.single,
+          (sessionId: 'srv-2', title: 'Mapped rename', mode: null));
+      expect(
+          AppState.I.sessionById('local-mapped')!.title, 'Mapped rename');
+      await h.close();
+    },
+  );
+
+  testWidgets(
+    'a server approval_requested renders the approval card; Allow answers the '
+    'bridge with the approval_response op and dismisses the card',
+    timeout: const Timeout(Duration(seconds: 60)),
+    (tester) async {
+      final h = await _bind();
+      addTearDown(() async {
+        await h.ws.disconnect();
+        h.facade.dispose();
+      });
+      _addSession('srv-1');
+      await _pumpChat(tester);
+
+      await _send(tester, 'hello cloud');
+      final socket = h.socket();
+
+      socket.server(
+          _eventFrame('srv-1', '1-0', 'run_started', {'runId': 'run-1'}));
+      socket.server(_eventFrame('srv-1', '2-0', 'approval_requested',
+          <String, dynamic>{
+        'approvalId': 'ap-1',
+        'tool': 'bash',
+        'kind': 'tool',
+        'summary': 'Run rm -rf /tmp/build',
+        'detail': 'rm -rf /tmp/build',
+        'allowAlways': true,
+      }));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      // The card shows the tool's ask and the exact preview, and the
+      // composer is locked while it stands (approval takeover parity).
+      expect(find.byKey(const ValueKey('approval-allow')), findsOneWidget);
+      expect(find.byKey(const ValueKey('approval-deny')), findsOneWidget);
+      expect(find.byKey(const ValueKey('approval-always')), findsOneWidget);
+      expect(find.text('Run rm -rf /tmp/build'), findsOneWidget);
+      expect(find.text('rm -rf /tmp/build'), findsOneWidget);
+
+      // The dock's arm delay (300 ms) has elapsed; the tap is delivered.
+      await tester.tap(find.byKey(const ValueKey('approval-allow')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      // The card dismissed optimistically…
+      expect(find.byKey(const ValueKey('approval-allow')), findsNothing);
+      expect(find.byKey(const ValueKey('approval-deny')), findsNothing);
+      // …and the answer went out on the multiplexed wire.
+      final frames = <Map<String, dynamic>>[
+        for (final frame in socket.sent)
+          if (frame['op'] == 'approval_response') frame,
+      ];
+      expect(frames, hasLength(1));
+      expect(frames.single, <String, dynamic>{
+        'op': 'approval_response',
+        'sessionId': 'srv-1',
+        'approvalId': 'ap-1',
+        'decision': 'allow',
+      });
+      await h.close();
+    },
+  );
+
+  testWidgets(
+    'approval_resolved (the timeout-deny spelling) dismisses the card with '
+    'nothing sent from the client',
+    timeout: const Timeout(Duration(seconds: 60)),
+    (tester) async {
+      final h = await _bind();
+      addTearDown(() async {
+        await h.ws.disconnect();
+        h.facade.dispose();
+      });
+      _addSession('srv-1');
+      await _pumpChat(tester);
+
+      await _send(tester, 'hello cloud');
+      final socket = h.socket();
+
+      socket.server(
+          _eventFrame('srv-1', '1-0', 'run_started', {'runId': 'run-1'}));
+      socket.server(_eventFrame('srv-1', '2-0', 'approval_requested',
+          <String, dynamic>{
+        'approvalId': 'ap-1',
+        'tool': 'bash',
+        'kind': 'tool',
+        'summary': 'Run rm -rf /tmp/build',
+        'detail': 'rm -rf /tmp/build',
+        'allowAlways': false,
+      }));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byKey(const ValueKey('approval-allow')), findsOneWidget);
+
+      socket.server(_eventFrame('srv-1', '3-0', 'approval_resolved',
+          <String, dynamic>{
+        'approvalId': 'ap-1',
+        'decision': 'deny',
+        'reason': 'timeout',
+      }));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.byKey(const ValueKey('approval-allow')), findsNothing);
+      expect(
+        socket.sent.where((f) => f['op'] == 'approval_response'),
+        isEmpty,
+        reason: 'the bridge settled by timeout — the client never answered',
+      );
+      await h.close();
+    },
+  );
+
+  testWidgets(
+    '⋮ menu offers Share and New chat once the projection has content',
+    timeout: const Timeout(Duration(seconds: 60)),
+    (tester) async {
+      final h = await _bind();
+      addTearDown(() async {
+        await h.ws.disconnect();
+        h.facade.dispose();
+      });
+      _addSession('srv-1'); // a cloud chat: the local rows stay empty
+      await _pumpChat(tester);
+
+      // No projection yet: transcriptFor is null and the empty rows hide
+      // Share / New chat (the pre-fix behaviour for EVERY cloud chat).
+      await tester.tap(find.byKey(const ValueKey('chat-header-more')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('chat-menu-share')), findsNothing);
+      expect(find.byKey(const ValueKey('chat-menu-newChat')), findsNothing);
+      // Dismiss the menu before the second open.
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+
+      // The live projection is the transcript — the gate must see it.
+      h.facade.seedTranscript('srv-1', [
+        Message(role: 'user', content: 'hello cloud'),
+        Message(role: 'assistant', kind: MsgKind.text, content: 'Cloud says hi'),
+      ], null);
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('chat-header-more')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('chat-menu-share')), findsOneWidget);
+      expect(find.byKey(const ValueKey('chat-menu-newChat')), findsOneWidget);
+      await h.close();
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  // Older-server-page paging (chat P1: history past the first page)
+  // -------------------------------------------------------------------------
+
+  testWidgets(
+    'scrolling to the top pages OLDER server pages through `before` — '
+    'history past the first 50 is reachable',
+    timeout: const Timeout(Duration(seconds: 60)),
+    (tester) async {
+      final h = await _bind();
+      addTearDown(() async {
+        await h.ws.disconnect();
+        h.facade.dispose();
+      });
+      _addSession('srv-1');
+      _seedHistory(h.rest, 'srv-1', 120);
+      await _pumpChat(tester);
+
+      // Boot loaded the newest 50 (msg-70..msg-119); the tail renders.
+      expect(h.rest.paged, hasLength(1));
+      expect(h.rest.paged.single.before, isNull);
+      // The projection holds the full boot page; the viewport sits at the
+      // bottom (the follow-tip jump), so newest rows are built. The exact
+      // LAST row can sit a few pixels below the lazy builder's fold (the
+      // 24px at-bottom dead zone), so assert on the projection plus a row
+      // that is guaranteed built.
+      final seeded = CloudAgentFacade.I.transcriptFor('srv-1')!;
+      expect(seeded.length, 50);
+      expect(seeded.first.content, 'm70');
+      expect(seeded.last.content, 'm119');
+      expect(find.textContaining('m11'), findsWidgets);
+
+      final list = find.byKey(const ValueKey('chat-transcript-list'));
+      // Drag to the top: the pager widens the in-memory window, and — one
+      // widen from exhausting it — fetches the next server page from the
+      // oldest loaded row. Single-flight keeps the scroll-event burst to
+      // ONE older-page call.
+      await tester.drag(list, const Offset(0, 5000));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(h.rest.paged.where((c) => c.before != null), hasLength(1));
+      expect(h.rest.paged.last.before, 'msg-70');
+      // The 50 older rows were prepended into the projection.
+      expect(CloudAgentFacade.I.transcriptFor('srv-1'), hasLength(100));
+      expect(
+        CloudAgentFacade.I.transcriptFor('srv-1')!.first.privateSyncId,
+        'msg-20',
+      );
+
+      // The prepend pushed the anchored view back down. A real user drags
+      // back to the top; in the harness, gesture physics clamp at the
+      // extent unpredictably after the anchor restore, so drive the scroll
+      // position directly to the top edge (the production trigger is
+      // `pixels < 120`) — deterministic for the second page fetch.
+      final scrollState =
+          tester.state<ScrollableState>(find.byType(Scrollable).first);
+      scrollState.position.jumpTo(0);
+      scrollState.position.notifyListeners();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(h.rest.paged.last.before, 'msg-20');
+      expect(CloudAgentFacade.I.transcriptFor('srv-1'), hasLength(120));
+      expect(
+        CloudAgentFacade.I.transcriptFor('srv-1')!.first.privateSyncId,
+        'msg-0',
+      );
+
+      // The in-memory window is now exhausted (hidden == 0): the pager's
+      // server branch fires, and the empty page completes the transcript.
+      scrollState.position.jumpTo(0);
+      scrollState.position.notifyListeners();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(h.rest.paged.last.before, 'msg-0');
+      expect(CloudAgentFacade.I.transcriptFor('srv-1'), hasLength(120));
+
+      // A completed transcript never hits the wire again: leave the top
+      // edge so the next approach produces scroll events.
+      scrollState.position.jumpTo(400);
+      scrollState.position.notifyListeners();
+      await tester.pump();
+      scrollState.position.jumpTo(0);
+      scrollState.position.notifyListeners();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(h.rest.paged, hasLength(4));
+      await h.close();
+    },
+  );
+
+  testWidgets(
+    'a failed older-page fetch is swallowed and the chat stays usable',
+    timeout: const Timeout(Duration(seconds: 60)),
+    (tester) async {
+      final h = await _bind();
+      addTearDown(() async {
+        await h.ws.disconnect();
+        h.facade.dispose();
+      });
+      _addSession('srv-1');
+      _seedHistory(h.rest, 'srv-1', 120);
+      // Only the older-page fetch fails; the boot's newest page loads clean.
+      h.rest.olderPageError = CloudApiException(
+        status: 503,
+        code: 'unavailable',
+        message: 'Gateway is restarting.',
+      );
+      await _pumpChat(tester);
+      final seeded2 = CloudAgentFacade.I.transcriptFor('srv-1')!;
+      expect(seeded2.length, 50);
+      expect(find.textContaining('m11'), findsWidgets);
+
+      final list = find.byKey(const ValueKey('chat-transcript-list'));
+      await tester.drag(list, const Offset(0, 5000));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(milliseconds: 400));
+
+      // The fetch fired, failed, and was swallowed into Diag — one call
+      // per top-approach, no retry storm.
+      expect(h.rest.paged, hasLength(2));
+      expect(h.rest.paged.last.before, 'msg-70');
+      expect(
+        Diag.recent()
+            .any((e) => e.context == 'chat_screen.loadEarlierServerPage'),
+        isTrue,
+      );
+      // The loaded window is untouched and fully readable from the top.
+      // (Row visibility depends on the lazy builder's viewport fold; the
+      // projection length is the data-level guarantee.)
+      expect(CloudAgentFacade.I.transcriptFor('srv-1'), hasLength(50));
+      // The "Loading earlier…" affordance did not stick at the top.
+      expect(find.textContaining('Loading earlier'), findsNothing);
+
+      // The chat keeps working: a send still reaches the facade's REST.
+      await _send(tester, 'still works');
+      expect(h.rest.sent.single.content, 'still works');
+      expect(find.textContaining('still works'), findsWidgets);
+      expect(h.rest.paged, hasLength(2));
+      await h.close();
+    },
+  );
 }

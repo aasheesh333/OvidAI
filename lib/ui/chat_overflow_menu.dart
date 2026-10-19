@@ -31,8 +31,17 @@ enum ChatMenuAction {
 /// Share and New chat only make sense once the chat has content, so an empty
 /// chat hides them; everything else stays reachable. Subagent sessions are
 /// owned by their parent, so share/rename/delete are not offered there.
-List<ChatMenuAction> chatMenuActionsFor(ChatSession? session, int jobCount) {
-  final hasChat = session != null && session.messages.isNotEmpty;
+///
+/// A cloud session keeps `ChatSession.messages` empty — its transcript is the
+/// facade's live projection — so callers pass that as [transcript] (the chat
+/// screen's `_messagesOf` parity); it wins over the session's own rows.
+List<ChatMenuAction> chatMenuActionsFor(
+  ChatSession? session,
+  int jobCount, {
+  List<Message>? transcript,
+}) {
+  final messages = transcript ?? session?.messages;
+  final hasChat = messages != null && messages.isNotEmpty;
   final own = session != null && !session.isSubagent;
   return [
     if (hasChat && own) ChatMenuAction.share,
@@ -69,7 +78,13 @@ class ChatOverflowMenu extends StatelessWidget {
         final jobs = s == null ? const [] : _agent.jobsFor(s.id);
         final running = jobs.where((j) => j.state == 'running').length;
         final l10n = context.l10n;
-        final actions = chatMenuActionsFor(s, jobs.length);
+        // Cloud rows keep session.messages empty — the live projection is
+        // the transcript the gating reads.
+        final actions = chatMenuActionsFor(
+          s,
+          jobs.length,
+          transcript: s == null ? null : CloudAgentFacade.I.transcriptFor(s.id),
+        );
         return PopupMenuButton<ChatMenuAction>(
           tooltip: jobs.isEmpty
               ? l10n.chatMenuMore
@@ -173,7 +188,14 @@ class ChatOverflowMenu extends StatelessWidget {
     final nav = Navigator.of(context);
     switch (a) {
       case ChatMenuAction.share:
-        if (s != null) showConversationShareSheet(context, s);
+        if (s != null) {
+          showConversationShareSheet(
+            context,
+            s,
+            // Cloud rows keep session.messages empty — share the projection.
+            messages: CloudAgentFacade.I.transcriptFor(s.id),
+          );
+        }
       case ChatMenuAction.newChat:
         AppState.I.newSession();
       case ChatMenuAction.jobs:

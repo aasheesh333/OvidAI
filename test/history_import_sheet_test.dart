@@ -277,6 +277,43 @@ void main() {
     expect(find.text('Try again'), findsOneWidget);
   });
 
+  testWidgets('a running import offers Cancel and escapes a hung run', (
+    tester,
+  ) async {
+    final prefs = await _prefs();
+    // The gate NEVER completes in this test: the run hangs forever, exactly
+    // like an import behind a jammed gateway link.
+    final gate = Completer<void>();
+    final service = _FakeHistoryImportService(
+      prefs: prefs,
+      planResult: const HistoryImportPlan(
+        sessions: 2,
+        messages: 4,
+        alreadyImported: false,
+      ),
+      firstRunGate: gate,
+    );
+
+    await _openSheet(tester, service: service, prefs: prefs);
+    await tester.tap(find.text('Import my chats'));
+    await tester.pump();
+
+    // Running: casual dismissal is still blocked by design…
+    expect(find.text('Importing your chats…'), findsOneWidget);
+    expect(tester.widget<PopScope>(find.byType(PopScope)).canPop, isFalse);
+    // …but the deliberate escape is right there, so the sheet is no trap.
+    expect(find.text('Cancel'), findsOneWidget);
+
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Import your chats'), findsNothing,
+        reason: 'Cancel must free the user without waiting for the run');
+    expect(service.runCalls, 1,
+        reason: 'cancel hides the sheet; the durable progress marker is the '
+            "service's resume contract, not a UI abort");
+  });
+
   testWidgets('Try again resumes and a clean run reports completion', (
     tester,
   ) async {

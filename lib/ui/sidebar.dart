@@ -1168,7 +1168,13 @@ class _SessionTileState extends State<_SessionTile> {
               ),
               onTap: () {
                 Navigator.pop(sheetCtx);
-                showConversationShareSheet(context, session);
+                // Cloud rows keep session.messages empty — share the
+                // facade's live projection (the overflow-menu parity).
+                showConversationShareSheet(
+                  context,
+                  session,
+                  messages: CloudAgentFacade.I.transcriptFor(session.id),
+                );
               },
             ),
             ListTile(

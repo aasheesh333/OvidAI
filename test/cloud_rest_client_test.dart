@@ -10,6 +10,7 @@
 //     landed in the parallel wave; deviceRegisterRequestSchema is the pinned
 //     contract there — reconcile when P4 lands).
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -321,6 +322,43 @@ void main() {
     expect(upload.expiresAt, DateTime.utc(2026, 10, 17, 11));
   });
 
+  test('mintArtifactUrl GETs the re-mint route and parses {url, expiresAt}',
+      () async {
+    late http.Request captured;
+    final artifactId = '01234567-89ab-7cde-8f01-23456789abcd';
+    final mock = MockClient((request) async {
+      captured = request;
+      return http.Response(
+        jsonEncode({
+          'url': 'https://r2.test/users/u1/artifacts/s1/$artifactId-shot.png?sig=2',
+          'expiresAt': '2026-10-18T11:00:00.000Z',
+        }),
+        200,
+      );
+    });
+    final rest = _client(mock);
+    final res = await rest.mintArtifactUrl('s1', artifactId);
+    expect(captured.method, 'GET');
+    expect(captured.url.toString(),
+        '$_restBase/sessions/s1/artifacts/$artifactId/url');
+    expect(res.url,
+        'https://r2.test/users/u1/artifacts/s1/$artifactId-shot.png?sig=2');
+    expect(res.expiresAt, DateTime.utc(2026, 10, 18, 11));
+  });
+
+  test('mintArtifactUrl surfaces the gateway error envelope unminted', () async {
+    final mock = MockClient((request) async => http.Response(
+          _errorBody('storage_not_configured',
+              'Artifact downloads are not configured on this deployment.'),
+          503,
+        ));
+    final rest = _client(mock);
+    await expectLater(
+      rest.mintArtifactUrl('s1', '01234567-89ab-7cde-8f01-23456789abcd'),
+      _throwsCloudApi(status: 503, code: 'storage_not_configured'),
+    );
+  });
+
   test('uploadAttachmentBytes PUTs the raw bytes with NO auth headers',
       () async {
     late http.Request captured;
@@ -480,6 +518,68 @@ void main() {
     final rest = _client(mock, headers: recording);
     final session = await rest.getSession('s1');
     expect(session.id, 's1');
+    expect(calls, 2, reason: 'exactly one retry, never more');
+    expect(recording.flags, [false, true],
+        reason: 'the retry must force-refresh the ID token');
+  });
+
+  test('the timeout ceiling pins 30s for JSON and 120s for the R2 upload',
+      () {
+    expect(CloudRestClient.defaultTimeout, const Duration(seconds: 30));
+    expect(CloudRestClient.uploadTimeout, const Duration(seconds: 120));
+  });
+
+  test('a never-answering gateway is cut off as (0, timeout)', () async {
+    // The handler's future NEVER completes — the request hangs at the socket
+    // level, exactly like a jammed gateway. A 10ms ceiling must free the
+    // caller instead of parking it forever.
+    final mock = MockClient(
+        (request) => Completer<http.Response>().future);
+    final rest = _client(mock);
+    await expectLater(
+      rest.getJson('/sessions', timeout: const Duration(milliseconds: 10)),
+      _throwsCloudApi(status: 0, code: 'timeout'),
+    );
+  });
+
+  test('a hung presigned upload is cut off as (0, timeout) too', () async {
+    final mock = MockClient(
+        (request) => Completer<http.Response>().future);
+    final rest = _client(mock);
+    final upload = AttachmentUpload(
+      attachmentId: 'a1',
+      uploadUrl: 'https://r2.test/users/u1/sessions/s1/uploads/a1?sig=x',
+      path: 'uploads/f.png',
+      expiresAt: DateTime.utc(2026, 10, 17, 11),
+    );
+    await expectLater(
+      rest.uploadAttachmentBytes(upload, [1, 2, 3],
+          timeout: const Duration(milliseconds: 10)),
+      _throwsCloudApi(status: 0, code: 'timeout'),
+    );
+  });
+
+  test('a 401 under a custom timeout still gets exactly one force-refreshed '
+      'retry', () async {
+    // The per-request ceiling must apply to EACH attempt, not swallow the
+    // retry: attempt one answers 401 immediately, the retried attempt must
+    // still go out under the same wrapper and succeed.
+    final recording = _RecordingHeaders();
+    var calls = 0;
+    final mock = MockClient((request) async {
+      calls++;
+      if (calls == 1) {
+        return http.Response(
+          _errorBody('unauthenticated', 'Missing or invalid credentials.'),
+          401,
+        );
+      }
+      return http.Response(jsonEncode(_sessionJson('s1')), 200);
+    });
+    final rest = _client(mock, headers: recording);
+    final json = await rest.getJson('/sessions/s1',
+        timeout: const Duration(seconds: 5));
+    expect(json['id'], 's1');
     expect(calls, 2, reason: 'exactly one retry, never more');
     expect(recording.flags, [false, true],
         reason: 'the retry must force-refresh the ID token');

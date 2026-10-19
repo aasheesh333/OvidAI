@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../core/cloud/cloud_rest.dart';
 import '../core/diag.dart';
 import '../core/native_share.dart';
 import '../core/session_artifacts.dart';
@@ -83,12 +85,45 @@ Future<void> openArtifactPreview(
   ),
 );
 
+/// A URL [a] can actually be loaded from: a freshly minted presign when the
+/// persisted one can be re-minted, else the persisted one as-is.
+///
+/// Presigned artifact URLs expire (~1h TTL) and transcripts persist them
+/// verbatim, so a stale `a.url` is the rule, not the exception, once the
+/// message is older than the TTL. Minting needs the gateway workspace-object
+/// id, which [cloudArtifactIdOf] recovers from the URL itself; URLs without
+/// that layout (local/legacy) are returned untouched. On mint failure the
+/// stale URL wins — a maybe-working old URL beats nothing.
+Future<String?> freshArtifactUrl(SessionArtifact a) async {
+  final stale = a.url;
+  if (stale == null || stale.isEmpty) return stale;
+  final artifactId = cloudArtifactIdOf(stale);
+  if (artifactId == null) return stale;
+  try {
+    final minted = await CloudRestClient.I.mintArtifactUrl(
+      a.sessionId,
+      artifactId,
+    );
+    return minted.url;
+  } catch (e) {
+    Diag.swallow('artifact.mintUrl', e);
+    return stale;
+  }
+}
+
 /// Shares the artifact file through the system sheet (FileProvider), or
 /// explains why it cannot.
 Future<void> shareArtifact(BuildContext context, SessionArtifact a) async {
   final url = a.url;
   if (url != null && url.isNotEmpty) {
-    await showNativeShare(context, () => NativeShare.link(url));
+    // Mint-if-needed: the recipient gets file access for the URL's remaining
+    // TTL either way, so hand them a fresh capability rather than a presign
+    // that is likely already dead.
+    // TODO(l10n): note the link's ~1h TTL in the share text once the sheet
+    // copy is localized (NativeShare.link only carries the raw URL today).
+    final fresh = await freshArtifactUrl(a);
+    if (!context.mounted) return;
+    await showNativeShare(context, () => NativeShare.link(fresh ?? url));
     return;
   }
   final host = resolveArtifactHostPath(a);
@@ -106,8 +141,9 @@ Future<void> _openWith(BuildContext context, SessionArtifact a) async {
   final l10n = context.l10n;
   final url = a.url;
   if (url != null && url.isNotEmpty) {
+    final fresh = await freshArtifactUrl(a);
     final opened = await launchUrl(
-      Uri.parse(url),
+      Uri.parse(fresh ?? url),
       mode: LaunchMode.externalApplication,
     );
     if (!opened) {
@@ -134,14 +170,50 @@ Future<void> _openWith(BuildContext context, SessionArtifact a) async {
 
 /// Square thumbnail: the image itself for local images, else a tinted
 /// type glyph.
-class ArtifactThumb extends StatelessWidget {
+///
+/// Stateful for the cloud case: a persisted presigned URL is rendered
+/// immediately (Flutter's image cache may still honor it) while a fresh one
+/// is minted in the background; the swap repaints when it lands.
+class ArtifactThumb extends StatefulWidget {
   const ArtifactThumb({super.key, required this.artifact, this.size = 40});
 
   final SessionArtifact artifact;
   final double size;
 
   @override
+  State<ArtifactThumb> createState() => _ArtifactThumbState();
+}
+
+class _ArtifactThumbState extends State<ArtifactThumb> {
+  String? _freshUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    if ((widget.artifact.url ?? '').isNotEmpty) {
+      unawaited(_mint());
+    }
+  }
+
+  @override
+  void didUpdateWidget(ArtifactThumb oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.artifact.url != widget.artifact.url) {
+      _freshUrl = null;
+      if ((widget.artifact.url ?? '').isNotEmpty) unawaited(_mint());
+    }
+  }
+
+  Future<void> _mint() async {
+    final fresh = await freshArtifactUrl(widget.artifact);
+    if (!mounted || fresh == null || fresh == widget.artifact.url) return;
+    setState(() => _freshUrl = fresh);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final artifact = widget.artifact;
+    final size = widget.size;
     final radius = BorderRadius.circular(AetherRadius.rSm);
     final glyph = Container(
       width: size,
@@ -155,7 +227,7 @@ class ArtifactThumb extends StatelessWidget {
     );
     if (artifact.kind != ArtifactKind.image) return glyph;
     final dpr = MediaQuery.devicePixelRatioOf(context);
-    final url = artifact.url;
+    final url = _freshUrl ?? artifact.url;
     if (url != null && url.isNotEmpty) {
       return ClipRRect(
         borderRadius: radius,
@@ -289,10 +361,25 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
   String _text = '';
   int? _size;
 
+  /// Freshly minted replacement for [SessionArtifact.url] (remote artifacts
+  /// only): the persisted presign is likely past its ~1h TTL by the time the
+  /// preview opens.
+  String? _freshUrl;
+
   @override
   void initState() {
     super.initState();
     _state = _classify();
+    if (_state == _PreviewState.remote &&
+        widget.artifact.kind == ArtifactKind.image) {
+      unawaited(_mintRemoteUrl());
+    }
+  }
+
+  Future<void> _mintRemoteUrl() async {
+    final fresh = await freshArtifactUrl(widget.artifact);
+    if (!mounted || fresh == null || fresh == widget.artifact.url) return;
+    setState(() => _freshUrl = fresh);
   }
 
   _PreviewState _classify() {
@@ -462,7 +549,7 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
               minScale: 0.5,
               maxScale: 5,
               child: Image.network(
-                a.url!,
+                _freshUrl ?? a.url!,
                 cacheWidth: Aether.imageCacheWidth(context),
                 errorBuilder: (_, _, _) => Icon(
                   Icons.broken_image_outlined,

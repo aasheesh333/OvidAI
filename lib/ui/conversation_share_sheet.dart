@@ -22,6 +22,7 @@ Future<void> showConversationShareSheet(
   BuildContext context,
   ChatSession session, {
   ShareMode? initialMode,
+  List<Message>? messages,
 }) {
   return showAetherSheet<void>(
     context: context,
@@ -32,6 +33,7 @@ Future<void> showConversationShareSheet(
         service: ConversationShareService.production(),
         serviceFactory: ConversationShareService.production,
         initialMode: initialMode,
+        messages: messages,
       ),
     ),
   );
@@ -46,6 +48,7 @@ class ConversationShareSheet extends StatefulWidget {
     this.serviceFactory,
     this.collaboration,
     this.initialMode,
+    this.messages,
   });
   final ChatSession session;
   final ConversationShareService service;
@@ -56,6 +59,11 @@ class ConversationShareSheet extends StatefulWidget {
   /// Live-session owner; production uses [AppState.collaboration].
   final CollaborationProduction? collaboration;
   final ShareMode? initialMode;
+
+  /// The transcript to snapshot — the facade's live projection for a cloud
+  /// session (its `ChatSession.messages` stays empty). Null keeps the
+  /// session's own rows.
+  final List<Message>? messages;
 
   @override
   State<ConversationShareSheet> createState() => _ConversationShareSheetState();
@@ -108,11 +116,13 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
           key: ValueKey(_serviceGeneration),
           session: widget.session,
           service: _service,
+          messages: widget.messages,
           onSignIn: _signIn,
         ),
         ShareMode.collab => _CollabPanel(
           session: widget.session,
           controller: _collaboration,
+          messages: widget.messages,
           onSignIn: _signIn,
         ),
       },
@@ -206,10 +216,14 @@ class _CollabPanel extends StatefulWidget {
     required this.session,
     required this.controller,
     required this.onSignIn,
+    this.messages,
   });
   final ChatSession session;
   final CollaborationProduction? controller;
   final VoidCallback onSignIn;
+
+  /// The facade's live projection for a cloud session (null = own rows).
+  final List<Message>? messages;
 
   @override
   State<_CollabPanel> createState() => _CollabPanelState();
@@ -235,7 +249,10 @@ class _CollabPanelState extends State<_CollabPanel> {
   }
 
   Future<void> _start(CollaborationProduction controller) => _run(() async {
-    final snapshot = ConversationSnapshot.fromSession(widget.session);
+    final snapshot = ConversationSnapshot.fromSession(
+      widget.session,
+      messages: widget.messages,
+    );
     await controller.startFromConversation(
       sourceSessionId: widget.session.id,
       seed: [
@@ -473,10 +490,14 @@ class _ReadOnlyPanel extends StatefulWidget {
     required this.session,
     required this.service,
     required this.onSignIn,
+    this.messages,
   });
   final ChatSession session;
   final ConversationShareService service;
   final VoidCallback onSignIn;
+
+  /// The facade's live projection for a cloud session (null = own rows).
+  final List<Message>? messages;
 
   @override
   State<_ReadOnlyPanel> createState() => _ReadOnlyPanelState();
@@ -485,7 +506,10 @@ class _ReadOnlyPanel extends StatefulWidget {
 class _ReadOnlyPanelState extends State<_ReadOnlyPanel> {
   // The identity binding and frozen preview share the same lifetime.
   late final _service = widget.service;
-  late final _snapshot = ConversationSnapshot.fromSession(widget.session);
+  late final _snapshot = ConversationSnapshot.fromSession(
+    widget.session,
+    messages: widget.messages,
+  );
   String _requestId = ConversationShareService.newRequestId();
   List<ConversationShare> _shares = [];
   bool _busy = false;

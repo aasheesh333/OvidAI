@@ -44,6 +44,7 @@ class _QueueRest extends CloudRestClient {
     String content, {
     List<String> attachmentIds = const [],
     String? clientMsgId,
+    int? maxOutputTokens,
   }) async {
     final entered = sendEntered.remove(content);
     if (entered != null && !entered.isCompleted) entered.complete();

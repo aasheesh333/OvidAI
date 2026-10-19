@@ -946,6 +946,22 @@ class _ChatScreenState extends State<ChatScreen>
   int _visibleCount = _pageSize;
   bool _paging = false; // blocks re-entrant top-of-list pagination
   bool _hasEarlier = false; // older messages exist above the visible window
+  int _hiddenMessages = 0; // raw messages folded above the visible window
+
+  // ── Older server pages (chat P1: history past the first page) ──
+  // The pager above widens ONLY the in-memory window; once the newest
+  // server page is fully revealed, `_hasEarlier` goes false even though the
+  // server holds older pages — a 500-message chat was unreachable past the
+  // first 50. When the in-memory reserve is about to exhaust (or already
+  // has), the next server page is fetched ONE page at a time through the
+  // store's `before:` path (prepend + offline cache write); the projection
+  // grows above the visible window and the keyed anchor absorbs the shift.
+  bool _loadingEarlier = false; // single-flight: one server page in flight
+  bool _canPageServer = false; // active chat may hold an older server page
+
+  /// Session ids whose older-page fetch came back empty: the server's
+  /// beginning is loaded, so the pager stops hitting the wire.
+  final Set<String> _serverTranscriptComplete = <String>{};
 
   // ── Keyed scroll anchoring (Task 7) ──
   // Paging older history records the top visible item's key + offset before
@@ -1082,6 +1098,82 @@ class _ChatScreenState extends State<ChatScreen>
     }
   }
 
+  /// Fetches the next OLDER server page for the active session's transcript
+  /// (chat P1: history past the first server page was unreachable — the
+  /// pager only widened the in-memory window). One page per call,
+  /// single-flight via [_loadingEarlier]; the store's `before:` path
+  /// prepends into the projection and the offline cache, and the window
+  /// cache re-folds over the grown list so the pager keeps widening.
+  ///
+  /// The `before` cursor is the oldest loaded server row's id (the wire
+  /// takes a message UUID). Local-only chats, offline, and transcripts
+  /// already paged to the server's beginning decline without a request.
+  Future<void> _loadEarlierServerPage() async {
+    if (_loadingEarlier) return;
+    final sessionId = AppState.I.activeSessionId;
+    if (sessionId == null) return;
+    if (!_cloudTranscriptsLoaded.contains(sessionId)) return;
+    if (_serverTranscriptComplete.contains(sessionId)) return;
+    final store = CloudSessionStore.I;
+    await store.ready;
+    // Re-check after the await: the user may have switched sessions, and a
+    // scroll-event burst may have raced a second call past the entry guard
+    // while this one was suspended (both then set the flag below).
+    if (_loadingEarlier) return;
+    if (AppState.I.activeSessionId != sessionId) return;
+    // Offline: paging needs the REST link — skip silently (nothing to show
+    // rather than an error); the next top-of-list approach retries.
+    if (store.offline) return;
+    final serverId = store.knownServerIdFor(sessionId);
+    if (serverId == null) return; // local-only chat: no server history
+    final loaded = CloudAgentFacade.I.transcriptFor(serverId);
+    if (loaded == null || loaded.isEmpty) return;
+    final before = loaded.first.privateSyncId;
+
+    _loadingEarlier = true;
+    if (mounted) setState(() {}); // "Loading earlier…" affordance row
+    // Keyed anchor across the async prepend: capture the top visible row
+    // now, restore it after the page lands (Task 7 machinery, plus the
+    // index shift a prepend causes — see [_restoreAnchor]).
+    final anchor = _captureTopAnchor();
+    final head = loaded.first; // identity marker: measures the prepend
+    var failed = false;
+    try {
+      await store.loadTranscript(serverId, before: before);
+    } catch (e) {
+      // The loaded window is untouched (the store prepends only on
+      // success): the chat stays usable and a later top-of-list approach
+      // retries.
+      failed = true;
+      Diag.swallow('chat_screen.loadEarlierServerPage', e);
+    }
+    final after =
+        CloudAgentFacade.I.transcriptFor(serverId) ?? const <Message>[];
+    if (!failed && (after.isEmpty || after.first.privateSyncId == before)) {
+      // Nothing older came back: the server's beginning is loaded.
+      _serverTranscriptComplete.add(sessionId);
+    }
+    // A prepend shifts every loaded row's absolute index — and with it the
+    // anchor key — by exactly the number of prepended messages.
+    var keyShift = 0;
+    for (var i = 0; i < after.length; i++) {
+      if (identical(after[i], head)) {
+        keyShift = i;
+        break;
+      }
+    }
+    if (mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        // Never fight a session switch: the rows on screen belong to
+        // whatever chat is active now.
+        if (!mounted || AppState.I.activeSessionId != sessionId) return;
+        _restoreAnchor(anchor, keyShift: keyShift);
+      });
+    }
+    _loadingEarlier = false;
+    if (mounted) setState(() {}); // drop the affordance / spinner
+  }
+
   ValueNotifier<String?>? _fallbackNotice;
 
   /// One-time "`model` is no longer available — switched to Auto".
@@ -1134,7 +1226,14 @@ class _ChatScreenState extends State<ChatScreen>
     }
     // ChatGPT/Gemini-style lazy paging: scroll to the top and more history
     // slides in automatically — no "Show earlier" tapping.
-    if (!_paging && pos.pixels < 120 && _hasEarlier) {
+    if (!_paging && pos.pixels < 120 && (_hasEarlier || _canPageServer)) {
+      if (!_hasEarlier) {
+        // The in-memory window is exhausted; the server may still hold
+        // older pages (the guard chain inside declines local-only chats,
+        // offline, and completed transcripts without touching the wire).
+        unawaited(_loadEarlierServerPage());
+        return;
+      }
       _paging = true;
       // Keyed anchor (Task 7): capture the top visible message AFTER the new
       // scroll offset has laid out (this listener runs before that layout),
@@ -1148,6 +1247,12 @@ class _ChatScreenState extends State<ChatScreen>
         }
         final anchor = _captureTopAnchor();
         setState(() => _visibleCount += _pageSize);
+        // This widen consumes the last of the in-memory reserve — start the
+        // next server page NOW so the prepend lands before the user hits
+        // the dead end (single-flight inside; no prefetch storm).
+        if (_hiddenMessages <= _pageSize) {
+          unawaited(_loadEarlierServerPage());
+        }
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) _restoreAnchor(anchor);
           _paging = false;
@@ -1204,21 +1309,70 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   /// Stable key for a folded transcript item: the absolute message index of
-  /// its first message. Prepending older history does not change it, so the
-  /// same key identifies the same row before and after a page loads.
+  /// its first message. A server-page prepend shifts every loaded row's
+  /// index by the number of prepended messages, so a key captured before a
+  /// prepend must be restored at `key + shift` — see [_restoreAnchor].
   Object _itemKey(ChatItem item) =>
       item is SingleItem ? item.index : (item as FoldedGroup).indices.first;
 
+  /// The top-of-list paging affordance: "N earlier messages · scroll up"
+  /// while folded rows sit above the window, spinner + "Loading earlier…"
+  /// while the in-memory widen or an older server page is loading — the
+  /// spinner shows only while a page is actually loading (it used to spin
+  /// forever in any long thread). An exhausted in-memory window renders the
+  /// row only while its older server page is in flight, never as a dead end.
+  Widget _pagingAffordanceRow(int hiddenMessages) {
+    final loadingEarlier = _paging || _loadingEarlier;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (loadingEarlier) ...[
+              SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.5,
+                  color: Aether.textFaint,
+                ),
+              ),
+              const SizedBox(width: 6),
+            ] else ...[
+              Icon(
+                Icons.keyboard_arrow_up_rounded,
+                size: 14,
+                color: Aether.textFaint,
+              ),
+              const SizedBox(width: 4),
+            ],
+            Text(
+              loadingEarlier
+                  ? 'Loading earlier…'
+                  : '$hiddenMessages earlier '
+                        'message${hiddenMessages == 1 ? '' : 's'} '
+                        '· scroll up',
+              style: TextStyle(fontSize: 11, color: Aether.textFaint),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// Row keys for the window currently rendered. Row 0 is the paging
-  /// affordance when history is hidden; the tail row is the typing/produced
-  /// card. Message rows carry their [_itemKey].
+  /// affordance when it is shown (folded history or an older server page in
+  /// flight); the tail row is the typing/produced card. Message rows carry
+  /// their [_itemKey].
   List<Object> _computeRowKeys(
     TranscriptWindow window,
     bool typing,
-    bool showProduced,
-  ) {
+    bool showProduced, {
+    bool showAffordance = false,
+  }) {
     final keys = <Object>[];
-    if (window.hiddenMessages > 0) keys.add(_affordanceRowKey);
+    if (showAffordance) keys.add(_affordanceRowKey);
     for (final item in window.visible) {
       keys.add(_itemKey(item));
     }
@@ -1309,9 +1463,15 @@ class _ChatScreenState extends State<ChatScreen>
   /// prepend. If a very large prepend pushed it beyond the built cache, make
   /// a coarse extent-delta jump to bring it back into range and re-locate the
   /// keyed row on the next frame for the exact restore.
-  void _restoreAnchor(_ScrollAnchor? anchor) {
+  ///
+  /// [keyShift] is the number of messages a server-page prepend inserted
+  /// above the window: keys are absolute message indices, so the anchor
+  /// row's key moved by exactly that many (the widen path passes 0 —
+  /// growing [_visibleCount] never changes indices).
+  void _restoreAnchor(_ScrollAnchor? anchor, {int keyShift = 0}) {
     if (anchor == null || !mounted || !_scroll.hasClients) return;
-    final offset = _anchorLayoutOffset(anchor.key);
+    final key = _shiftedAnchorKey(anchor.key, keyShift);
+    final offset = _anchorLayoutOffset(key);
     if (offset != null) {
       _jumpToOffset(offset - anchor.viewportOffset);
       return;
@@ -1321,10 +1481,15 @@ class _ChatScreenState extends State<ChatScreen>
     _jumpToOffset(anchor.pixels + delta);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients) return;
-      final retry = _anchorLayoutOffset(anchor.key);
+      final retry = _anchorLayoutOffset(key);
       if (retry != null) _jumpToOffset(retry - anchor.viewportOffset);
     });
   }
+
+  /// The anchor key rebased onto the shifted indices a prepend produced.
+  /// Non-message keys (affordance / tail sentinels) never shift.
+  Object _shiftedAnchorKey(Object key, int keyShift) =>
+      keyShift > 0 && key is int ? key + keyShift : key;
 
   /// Called from the message-list builder on every rebuild — keeps the stream
   /// pinned to the bottom while the user is at the bottom.
@@ -1399,8 +1564,12 @@ class _ChatScreenState extends State<ChatScreen>
                 children: [
                   Flexible(
                     child: Text(
-                      s?.model == null || s!.model.trim().isEmpty
-                          ? 'Select model'
+                      // Never "Select model" (owner directive 2026-10-18):
+                      // an empty/sentinel model means Auto is in effect.
+                      s?.model == null ||
+                              s!.model.trim().isEmpty ||
+                              s.model == 'Select a provider'
+                          ? 'Auto'
                           : ovidModelLabel(s.model),
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 14),
@@ -1563,6 +1732,18 @@ class _ChatScreenState extends State<ChatScreen>
                                                 final window =
                                                     _transcriptWindow(s);
                                                 _hasEarlier = window.hasEarlier;
+                                                _hiddenMessages =
+                                                    window.hiddenMessages;
+                                                // Older server pages exist as
+                                                // soon as the in-memory window
+                                                // runs dry — the fetch itself
+                                                // re-checks offline / cursor /
+                                                // completeness.
+                                                _canPageServer =
+                                                    _cloudTranscriptsLoaded
+                                                        .contains(s.id) &&
+                                                    !_serverTranscriptComplete
+                                                        .contains(s.id);
                                                 final hiddenMessages =
                                                     window.hiddenMessages;
                                                 final items = window.visible;
@@ -1593,8 +1774,18 @@ class _ChatScreenState extends State<ChatScreen>
                                                 // SECURITY: the system prompt snapshot
                                                 // contains internal agent instructions
                                                 // and must never be shown to the user.
+                                                // The paging affordance also
+                                                // renders while an older
+                                                // server page is in flight, so
+                                                // an exhausted in-memory
+                                                // window shows "Loading
+                                                // earlier…" instead of a dead
+                                                // end at the top of the list.
+                                                final showAffordance =
+                                                    hiddenMessages > 0 ||
+                                                    _loadingEarlier;
                                                 final count =
-                                                    (hiddenMessages > 0
+                                                    (showAffordance
                                                         ? 1
                                                         : 0) +
                                                     items.length +
@@ -1607,6 +1798,7 @@ class _ChatScreenState extends State<ChatScreen>
                                                   window,
                                                   typing,
                                                   showProduced,
+                                                  showAffordance: showAffordance,
                                                 );
                                                 _maybeFollowTip();
                                                 final list = ListView.builder(
@@ -1630,72 +1822,21 @@ class _ChatScreenState extends State<ChatScreen>
                                                     // System prompt row removed —
                                                     // internal instructions are hidden.
 
-                                                    // Next row: paging affordance. The
-                                                    // spinner shows only while a page is
-                                                    // actually loading — it used to spin
-                                                    // forever in any long thread.
-                                                    if (hiddenMessages > 0 &&
+                                                    // Next row: paging affordance
+                                                    // (see
+                                                    // [_pagingAffordanceRow]).
+                                                    if (showAffordance &&
                                                         idx == 0) {
                                                       return KeyedSubtree(
                                                         key: rowKey,
-                                                        child: Center(
-                                                          child: Padding(
-                                                            padding:
-                                                                const EdgeInsets.all(
-                                                                  8,
-                                                                ),
-                                                            child: Row(
-                                                              mainAxisSize:
-                                                                  MainAxisSize
-                                                                      .min,
-                                                              children: [
-                                                                if (_paging) ...[
-                                                                  SizedBox(
-                                                                    width: 12,
-                                                                    height: 12,
-                                                                    child: CircularProgressIndicator(
-                                                                      strokeWidth:
-                                                                          1.5,
-                                                                      color: Aether
-                                                                          .textFaint,
-                                                                    ),
-                                                                  ),
-                                                                  const SizedBox(
-                                                                    width: 6,
-                                                                  ),
-                                                                ] else ...[
-                                                                  Icon(
-                                                                    Icons
-                                                                        .keyboard_arrow_up_rounded,
-                                                                    size: 14,
-                                                                    color: Aether
-                                                                        .textFaint,
-                                                                  ),
-                                                                  const SizedBox(
-                                                                    width: 4,
-                                                                  ),
-                                                                ],
-                                                                Text(
-                                                                  _paging
-                                                                      ? 'Loading earlier…'
-                                                                      : '$hiddenMessages earlier '
-                                                                            'message${hiddenMessages == 1 ? '' : 's'} '
-                                                                            '· scroll up',
-                                                                  style: TextStyle(
-                                                                    fontSize:
-                                                                        11,
-                                                                    color: Aether
-                                                                        .textFaint,
-                                                                  ),
-                                                                ),
-                                                              ],
-                                                            ),
-                                                          ),
+                                                        child:
+                                                            _pagingAffordanceRow(
+                                                          hiddenMessages,
                                                         ),
                                                       );
                                                     }
                                                     final li =
-                                                        hiddenMessages > 0
+                                                        showAffordance
                                                         ? idx - 1
                                                         : idx;
                                                     if (li == items.length) {
@@ -1844,8 +1985,15 @@ class _ChatScreenState extends State<ChatScreen>
                                     ),
                                     // Blocking decisions take priority over passive
                                     // status and queued work in this bounded area.
+                                    // The dock renders for the foreground
+                                    // session's own prompt OR a background
+                                    // session's (its elsewhere row switches to
+                                    // that chat, where the card renders).
                                     child:
-                                        _agent.pendingApproval != null
+                                        (_agent.pendingApproval != null ||
+                                                _agent
+                                                    .pendingApprovalsElsewhere
+                                                    .isNotEmpty)
                                         ? const _ApprovalDock()
                                         : dockColumn,
                                   ),
@@ -1990,7 +2138,10 @@ class _ChatScreenState extends State<ChatScreen>
 
                                 // ── web-IDE busy behavior: typing while running either
                                 // queues the message (default) or interrupts the current
-                                // run and sends immediately, per the user's setting. ──
+                                // run and sends immediately, per the user's setting.
+                                // `busyFor` also covers a send whose POST has not
+                                // landed yet, so a double-tap queues instead of
+                                // dispatching a second run (double spend). ──
                                 if (_agent.busyFor(s.id)) {
                                   if (AppState.I.sendWhileBusyInterrupt) {
                                     _agent.stopRequested(
@@ -2135,7 +2286,7 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   /// Queue ownership transfers synchronously, but enqueue notifies listeners.
-  /// Capture the originating list and paths before that notification: a picker
+  /// Capture the originating session before that notification: a picker
   /// completion or session switch must not change what this send consumes.
   bool _enqueuePrompt(ChatSession session, String text) {
     final app = AppState.I;
@@ -2145,7 +2296,6 @@ class _ChatScreenState extends State<ChatScreen>
       return false;
     }
     final agent = _agent;
-    final paths = agent.pendingAttachments.map((a) => a.path).toSet();
     final previousIds = agent.queuedMessageIdsFor(session.id).toSet();
     agent.enqueueMessage(text, sessionId: session.id);
     // enqueue can reject admission. Never clear a rejected draft.
@@ -2154,12 +2304,10 @@ class _ChatScreenState extends State<ChatScreen>
         .any((id) => !previousIds.contains(id))) {
       return false;
     }
-    // Ownership transfer of staged files. The facade serves an unmodifiable
-    // view, so hand the paths to the surface's removeAttachment (the send is
-    // always for the active session).
-    for (final path in paths) {
-      agent.removeAttachment(path);
-    }
+    // The facade owns the staged-file transfer: enqueue snapshots the
+    // composer's files onto the queued row ("the queued message keeps its
+    // original attachments") and clears its staging list, so anything
+    // staged afterwards belongs to the next message.
     app.refresh();
     return true;
   }
@@ -5904,8 +6052,10 @@ class _MessageView extends StatelessWidget {
   Widget _imageGen(BuildContext context) {
     final path = m.imagePath;
     if (path == null) return _imageGenCard(context, null, false, null);
-    // The file is stat'ed once, asynchronously, and cached — never with
-    // existsSync/lengthSync inside build on every rebuild.
+    // The file is stat'ed asynchronously and POSITIVE results are cached —
+    // never existsSync/lengthSync inside build on every rebuild. A notFound
+    // stat is never cached (a generated image can land in the workspace
+    // after the row first renders); see _ImageFileInfoState.
     return _ImageFileInfo(
       path: path,
       builder: (context, exists, size) =>
@@ -7382,10 +7532,19 @@ class _TypingBubble extends StatelessWidget {
       animation: _agent,
       builder: (_, _) {
         final sid = AppState.I.activeSessionId;
+        // Response-timeout watchdog (facade.stalledFor): swap the generic
+        // label for the explicit "Still working…" once the run has been
+        // silent for the whole response-wait window. Chosen as the least
+        // invasive surfacing — the typing bubble already re-renders on
+        // every facade notify, so the stalled state rides the same rebuild
+        // with no new widget, timer or screen the composer has to own.
+        final stalled = sid != null && _agent.stalledFor(sid);
         final status = sid == null ? null : _agent.statusFor(sid);
-        final label = (status == null || status.trim().isEmpty)
-            ? 'Working…'
-            : status.trim();
+        final label = stalled
+            ? 'Still working…'
+            : (status == null || status.trim().isEmpty)
+                ? 'Working…'
+                : status.trim();
         return Padding(
           padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 10),
           child: Row(
@@ -8407,14 +8566,15 @@ class _ApprovalDockState extends State<_ApprovalDock> {
         if (req.questions != null && req.questions!.isNotEmpty) {
           return _QuestionsCard(req, key: ObjectKey(req));
         }
-        // ── Plan exit (exit_plan_mode) — opencode-style switch prompt ──
-        // The plan itself lives in the model's message; this asks the single
-        // yes/no "switch to the build agent?" question, exactly like
-        // opencode's plan_exit tool. There is no plan-review card.
-        if (req.tool == 'exit_plan_mode') {
-          return _QuestionsCard(req, key: ObjectKey(req));
-        }
-        // ── Standard approve/deny card: exactly three actions ──
+        // ── Plan exit (exit_plan_mode) and every other cloud prompt — the
+        // standard card ──
+        // The cloud gate's `approval_requested` payload carries no structured
+        // questions (only summary/detail/allowAlways), so the plan-exit
+        // prompt renders as the standard Allow/Deny card: the summary asks
+        // "switch to the build agent?", the detail carries the plan recap,
+        // and the decision vocabulary is the wire's allow/deny/always. The
+        // Q&A card above stays reserved for a prompt that actually ships a
+        // question set.
         _track(req);
         return _standardCard(context, req);
       },
@@ -9870,6 +10030,10 @@ class _ImageFileInfo extends StatefulWidget {
 class _ImageFileInfoState extends State<_ImageFileInfo> {
   ({bool exists, int size})? _info;
 
+  /// Pending delayed re-stat while the row is mounted and the file has not
+  /// arrived yet (see [_stat]) — cancelled on dispose or a path change.
+  Timer? _recheck;
+
   @override
   void initState() {
     super.initState();
@@ -9882,28 +10046,63 @@ class _ImageFileInfoState extends State<_ImageFileInfo> {
     if (oldWidget.path != widget.path) _resolve();
   }
 
+  @override
+  void dispose() {
+    _recheck?.cancel();
+    super.dispose();
+  }
+
   void _resolve() {
     final path = widget.path;
-    _info = _imageFileInfoCache[path];
-    if (_info != null) return;
-    unawaited(() async {
-      ({bool exists, int size}) info;
-      try {
-        final stat = await File(path).stat();
-        info = (
-          exists: stat.type != FileSystemEntityType.notFound,
-          size: stat.size,
-        );
-      } catch (_) {
-        info = (exists: false, size: 0);
-      }
+    _recheck?.cancel();
+    _recheck = null;
+    final cached = _imageFileInfoCache[path];
+    if (cached != null) {
+      // Only POSITIVE results are cached (see the write below), so a cache
+      // hit is always trusted.
+      _info = cached;
+      return;
+    }
+    _stat(path);
+  }
+
+  void _stat(String path) {
+    // Synchronous stat: [build] must stay pure (the constraint the header
+    // comment pins), but the lifecycle entry points may stat directly —
+    // statSync is metadata-only (microseconds) and runs in initState,
+    // didUpdateWidget and the 5s re-arm below, never per rebuild. The old
+    // async stat never completed under the widget-test binding's fake-async
+    // zone, leaving every row stuck on the optimistic `exists ?? true`
+    // default — the tests only ever asserted the PENDING state.
+    ({bool exists, int size}) info;
+    try {
+      final stat = File(path).statSync();
+      info = (
+        exists: stat.type != FileSystemEntityType.notFound,
+        size: stat.size,
+      );
+    } catch (_) {
+      info = (exists: false, size: 0);
+    }
+    if (info.exists) {
       if (_imageFileInfoCache.length >= _imageFileInfoCacheCap) {
         _imageFileInfoCache.remove(_imageFileInfoCache.keys.first);
       }
       _imageFileInfoCache[path] = info;
-      if (mounted && widget.path == path) setState(() => _info = info);
-    }());
-  }
+    } else if (mounted && widget.path == path) {
+      // A notFound stat is a POINT IN TIME, never a verdict: generated
+      // images land in the workspace after the row first renders, so a
+      // negative result is never cached. While the row stays mounted the
+      // stat repeats every 5s (bounded: only built rows poll, and dispose
+      // cancels); once the file lands, the positive result is cached and the
+      // polling stops for good.
+      _recheck = Timer(const Duration(seconds: 5), () {
+        _recheck = null;
+        if (mounted && widget.path == path) _stat(path);
+      });
+    }
+    if (mounted && widget.path == path) setState(() => _info = info);
+  } // ignore: unnecessary_setstate_in_tests
 
   @override
   Widget build(BuildContext context) {

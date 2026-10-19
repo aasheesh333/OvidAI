@@ -166,6 +166,12 @@ abstract class AppLocalizations {
   /// **'Too many requests right now. Wait a moment and try again.'**
   String get errorRateLimited;
 
+  /// HTTP 402 — the plan allowance is used up.
+  ///
+  /// In en, this message translates to:
+  /// **'You\'ve reached your plan limit. It resets automatically.'**
+  String get errorQuotaExceeded;
+
   /// HTTP 5xx.
   ///
   /// In en, this message translates to:

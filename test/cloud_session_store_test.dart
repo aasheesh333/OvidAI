@@ -3,13 +3,17 @@
 // Contract anchors:
 //   - POST /sessions                 → SessionDto (create-on-first-send)
 //   - GET  /sessions?limit&cursor    → keyset page of SessionDto
+//   - DELETE /sessions/:id           → 204 (soft delete; a tombstone hides
+//     the row locally until the server confirms it is gone)
 //   - GET  /sessions/:id/messages    → NEWEST-FIRST page of MessageDto
 //   - POST /sessions/:id/messages    → 202 {runId,userMessageId,status}
 //     (clientMsgId is the Task 4 idempotency key: a replay returns the
 //      ORIGINAL runId/userMessageId and never creates a second run)
 //   - ConnectionService.status / WsMultiplexer.linkState → offline
 //   - SharedPreferences `ovid_cloud_session_ids` (local→server map) and
-//     `ovid_cloud_outbox` (FIFO JSON list) survive process death.
+//     `ovid_cloud_outbox` (FIFO JSON list) survive process death. The outbox
+//     key is ACCOUNT-SCOPED (P0 privacy): each account owns its queue; the
+//     plain key is the guest queue and the legacy pre-scoping form.
 //   - SessionHistoryRepository is the offline READ CACHE (spec §12).
 //
 // Review Focus #3 (plan): an offline prompt composed before process death
@@ -47,6 +51,7 @@ class FakeStoreRest extends CloudRestClient {
         String content,
         List<String> attachmentIds,
         String? clientMsgId,
+        int? maxOutputTokens,
       })> sent = [];
   final Map<String, SendMessageResponse> responsesByClientMsgId =
       <String, SendMessageResponse>{};
@@ -59,6 +64,37 @@ class FakeStoreRest extends CloudRestClient {
   List<CloudPage<SessionDto>> sessionPages = const [];
   Map<String, List<MessageDto>> messagesBySession =
       const <String, List<MessageDto>>{};
+
+  /// DELETE /sessions/:id wire log.
+  final List<String> deleteCalls = <String>[];
+
+  /// id → error thrown on the NEXT deleteSession. Cleared when thrown, so a
+  /// retry succeeds — unless [stickyDeleteErrors] (a persistently failing
+  /// delete). Models a transient 5xx / offline failure.
+  final Map<String, CloudApiException> deleteErrors =
+      <String, CloudApiException>{};
+  bool stickyDeleteErrors = false;
+
+  @override
+  Future<void> deleteSession(String id) async {
+    deleteCalls.add(id);
+    final error = deleteErrors[id];
+    if (error != null) {
+      if (!stickyDeleteErrors) deleteErrors.remove(id);
+      throw error;
+    }
+    // Server realism: a deleted session disappears from later list pages.
+    sessionPages = <CloudPage<SessionDto>>[
+      for (final page in sessionPages)
+        CloudPage<SessionDto>(
+          items: <SessionDto>[
+            for (final dto in page.items)
+              if (dto.id != id) dto,
+          ],
+          nextCursor: page.nextCursor,
+        ),
+    ];
+  }
 
   @override
   Future<SessionDto> createSession({String? title}) async {
@@ -103,6 +139,7 @@ class FakeStoreRest extends CloudRestClient {
     String content, {
     List<String> attachmentIds = const [],
     String? clientMsgId,
+    int? maxOutputTokens,
   }) async {
     final error = sendErrors[content];
     if (error != null) throw error;
@@ -124,6 +161,7 @@ class FakeStoreRest extends CloudRestClient {
       content: content,
       attachmentIds: attachmentIds,
       clientMsgId: clientMsgId,
+      maxOutputTokens: maxOutputTokens,
     ));
     return response;
   }
@@ -364,6 +402,171 @@ void main() {
     });
   });
 
+  group('deleteServerSession (tombstones)', () {
+    test('a mapped chat: DELETEs the server id, clears the map, no tombstone',
+        () async {
+      final h = await _buildStore(
+        idMap: <String, String>{'local-1': 'srv-9'},
+        knownServerIds: const <String>['srv-native'],
+      );
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      await h.store.deleteServerSession('local-1');
+      // A server-native row (ChatSession.id IS the server id) resolves
+      // through the known-server set the same way.
+      await h.store.deleteServerSession('srv-native');
+
+      expect(h.rest.deleteCalls, <String>['srv-9', 'srv-native']);
+      expect(h.store.serverIdFor('local-1'), isNull,
+          reason: 'the id map entry must not outlive the chat');
+      expect(h.store.isTombstoned('srv-9'), isFalse,
+          reason: 'a confirmed delete clears the tombstone');
+      expect(h.store.isTombstoned('srv-native'), isFalse);
+    });
+
+    test('a never-synced local chat: no DELETE, nothing tombstoned',
+        () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      await h.store.deleteServerSession('local-only');
+
+      expect(h.rest.deleteCalls, isEmpty,
+          reason: 'a chat that never sent has no server copy');
+      expect(h.store.isTombstoned('local-only'), isFalse);
+    });
+
+    test('an offline delete keeps the tombstone; refreshSessions hides the '
+        'row and retries the DELETE', () async {
+      final h = await _buildStore(
+        idMap: <String, String>{'local-1': 'srv-9'},
+      );
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      // The DELETE never reaches the server (transient 5xx).
+      h.rest.deleteErrors['srv-9'] = CloudApiException(
+        status: 503,
+        code: 'unavailable',
+        message: 'Cloud is briefly unavailable.',
+      );
+      await h.store.deleteServerSession('local-1');
+      expect(h.rest.deleteCalls, <String>['srv-9']);
+      expect(h.store.isTombstoned('srv-9'), isTrue);
+      expect(h.store.serverIdFor('local-1'), isNull);
+
+      // The server still lists the row — the refresh must hide it (the
+      // offline-delete contract) and re-fire the DELETE, which now lands.
+      h.rest.sessionPages = <CloudPage<SessionDto>>[
+        CloudPage<SessionDto>(
+          items: <SessionDto>[_dto('srv-9', 'Back'), _dto('srv-8', 'Alive')],
+          nextCursor: null,
+        ),
+      ];
+      await h.store.refreshSessions();
+
+      expect(AppState.I.sessionById('srv-9'), isNull,
+          reason: 'a tombstoned row must not resurrect locally');
+      expect(AppState.I.sessionById('srv-8')?.title, 'Alive');
+      expect(h.rest.deleteCalls, <String>['srv-9', 'srv-9'],
+          reason: 'the refresh retries the pending delete');
+      expect(h.store.isTombstoned('srv-9'), isFalse,
+          reason: 'the confirmed delete clears the tombstone');
+    });
+
+    test('a retry that fails again keeps the tombstone and keeps hiding the row',
+        () async {
+      final h = await _buildStore(
+        idMap: <String, String>{'local-1': 'srv-9'},
+      );
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      h.rest.stickyDeleteErrors = true;
+      h.rest.deleteErrors['srv-9'] = CloudApiException(
+        status: 503,
+        code: 'unavailable',
+        message: 'Cloud is briefly unavailable.',
+      );
+      await h.store.deleteServerSession('local-1');
+
+      h.rest.sessionPages = <CloudPage<SessionDto>>[
+        CloudPage<SessionDto>(
+          items: <SessionDto>[_dto('srv-9', 'Still there')],
+          nextCursor: null,
+        ),
+      ];
+      await h.store.refreshSessions();
+
+      expect(AppState.I.sessionById('srv-9'), isNull);
+      expect(h.rest.deleteCalls, <String>['srv-9', 'srv-9']);
+      expect(h.store.isTombstoned('srv-9'), isTrue,
+          reason: 'an unconfirmed delete keeps the tombstone for the next '
+              'refresh');
+
+      // Tombstones persist across process death: a NEW store over the same
+      // prefs keeps hiding the row.
+      final reloaded = CloudSessionStore(
+        rest: h.rest,
+        cache: SessionHistoryRepository.I,
+        prefs: h.prefs,
+        connection: h.connection,
+        ws: h.ws,
+      );
+      await reloaded.ready;
+      expect(reloaded.isTombstoned('srv-9'), isTrue);
+      reloaded.dispose();
+    });
+
+    test('a 404 answers the tombstone (already gone server-side)', () async {
+      final h = await _buildStore(
+        idMap: <String, String>{'local-1': 'srv-9'},
+      );
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      h.rest.stickyDeleteErrors = true;
+      h.rest.deleteErrors['srv-9'] = CloudApiException(
+        status: 404,
+        code: 'not_found',
+        message: 'Session not found.',
+      );
+      await h.store.deleteServerSession('local-1');
+
+      expect(h.store.isTombstoned('srv-9'), isFalse,
+          reason: 'the server confirmed the row is gone — no more hiding');
+    });
+
+    test('AppState.deleteSession fires the server DELETE for a mapped chat',
+        () async {
+      final rest = FakeStoreRest();
+      final store = CloudSessionStore.forTest(
+        idMap: <String, String>{'local-1': 'srv-9'},
+        rest: rest,
+      );
+      CloudSessionStore.installForTest(store);
+      addTearDown(CloudSessionStore.resetForTest);
+      addTearDown(store.dispose);
+
+      AppState.I.sessions.add(
+        ChatSession(id: 'local-1', title: 'Doomed', model: 'm'),
+      );
+      AppState.I.activeSessionId = 'local-1';
+
+      await AppState.I.deleteSession('local-1');
+      await pumpEventQueue();
+
+      expect(AppState.I.sessionById('local-1'), isNull,
+          reason: 'the local delete is unconditional');
+      expect(rest.deleteCalls, <String>['srv-9'],
+          reason: 'the server copy is deleted through the store');
+      expect(store.serverIdFor('local-1'), isNull,
+          reason: 'the id map entry dies with the chat');
+    });
+  });
+
   group('loadTranscript', () {
     test('reverses the newest-first page and writes the offline cache',
         () async {
@@ -458,6 +661,35 @@ void main() {
       expect(h.store.outboxFor('srv-1'), isEmpty);
     });
 
+    test('enqueue carries maxOutputTokens through the flush (and survives a '
+        'reload — offline sends honor the Settings cap)', () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      await h.store.enqueue('srv-1', 'capped', maxOutputTokens: 4096);
+      await h.store.enqueue('srv-1', 'auto');
+
+      // Reload the queue from prefs: the cap is durable state, not a
+      // call-site memory.
+      final reloaded = CloudSessionStore(
+        rest: h.rest,
+        cache: SessionHistoryRepository.I,
+        prefs: h.prefs,
+        connection: h.connection,
+        ws: h.ws,
+      );
+      await reloaded.ready;
+      reloaded.dispose();
+
+      await h.store.flushOutbox();
+
+      expect([for (final call in h.rest.sent) call.content],
+          <String>['capped', 'auto']);
+      expect(h.rest.sent.first.maxOutputTokens, 4096);
+      expect(h.rest.sent.last.maxOutputTokens, isNull);
+    });
+
     test('a 503 stops the flush and keeps the remainder', () async {
       final h = await _buildStore();
       addTearDown(h.ws.dispose);
@@ -509,6 +741,191 @@ void main() {
       );
       await h.store.flushOutbox();
       expect(h.store.outboxFor('srv-1'), isEmpty);
+    });
+  });
+
+  group('account-scoped outbox (P0 privacy)', () {
+    // The store stamps and filters by `AppState.I.sessionAccountId`, so a
+    // mid-test account switch is just a fresh AppState test instance.
+    void signInAs(String account) {
+      AppState.resetTestInstance();
+      AppState.createForTest(sessionAccountIdForTest: account);
+    }
+
+    test("A's queued prompt is never delivered to B and B never sees it",
+        () async {
+      signInAs('a');
+      final h = await _buildStore(knownServerIds: const <String>['srv-1']);
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      await h.store.enqueue('srv-1', 'a-secret');
+      final aKey = AppState.I.accountScopedPrefKey(
+        CloudSessionStore.outboxKey,
+        'a',
+      );
+
+      // Sign out / in as B on the same device, same process.
+      signInAs('b');
+
+      await h.store.flushOutbox();
+      expect(h.rest.sent, isEmpty,
+          reason: "B's flush must not deliver A's prompt");
+      expect(h.store.outboxFor('srv-1'), isEmpty,
+          reason: "B's queue chip must not surface A's prompt text");
+      expect(h.store.outboxEntries, isEmpty,
+          reason: 'the reconnect upload path must skip foreign entries');
+
+      // Skip-and-RETAIN, never drop: the entry is still on disk under A's
+      // key, and B's key never carried it.
+      expect(h.prefs.getString(aKey), isNotNull);
+      expect(
+        h.prefs.getString(
+          AppState.I.accountScopedPrefKey(CloudSessionStore.outboxKey, 'b'),
+        ),
+        isNull,
+      );
+
+      // Sign back in as A: the retained entry finally flushes.
+      signInAs('a');
+      await h.store.flushOutbox();
+      expect(
+        [for (final call in h.rest.sent) call.content],
+        <String>['a-secret'],
+      );
+      expect(h.store.outboxFor('srv-1'), isEmpty);
+    });
+
+    test("a restarted process as B loads none of A's queue; as A it flushes",
+        () async {
+      signInAs('a');
+      final h = await _buildStore(knownServerIds: const <String>['srv-1']);
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      await h.store.enqueue('srv-1', 'a-secret');
+
+      // Process death, restart while B is signed in.
+      signInAs('b');
+      final asB = CloudSessionStore(
+        rest: h.rest,
+        cache: SessionHistoryRepository.I,
+        prefs: h.prefs,
+        connection: h.connection,
+        ws: h.ws,
+      );
+      await asB.ready;
+      addTearDown(asB.dispose);
+      expect(asB.outboxFor('srv-1'), isEmpty,
+          reason: "A's scoped key must not even load for B");
+      await asB.flushOutbox();
+      expect(h.rest.sent, isEmpty);
+
+      // Restart again as A: the scoped key still holds the prompt.
+      signInAs('a');
+      final asA = CloudSessionStore(
+        rest: h.rest,
+        cache: SessionHistoryRepository.I,
+        prefs: h.prefs,
+        connection: h.connection,
+        ws: h.ws,
+      );
+      await asA.ready;
+      addTearDown(asA.dispose);
+      expect(asA.outboxFor('srv-1'), hasLength(1));
+      await asA.flushOutbox();
+      expect(
+        [for (final call in h.rest.sent) call.content],
+        <String>['a-secret'],
+      );
+    });
+
+    test('legacy unstamped rows are adopted by the current account and the '
+        'plain key is retired', () async {
+      signInAs('a');
+      // A pre-scoping build wrote this row under the plain key with no
+      // account stamp.
+      final h = await _buildStore(
+        knownServerIds: const <String>['srv-1'],
+        outbox: <OutboxEntry>[
+          OutboxEntry(
+            clientMsgId: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            sessionId: 'srv-1',
+            content: 'legacy queued prompt',
+            createdAt: DateTime.utc(2026, 10, 17),
+          ),
+        ],
+      );
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      // The migration adopted the row for A: visible to A, stamped under
+      // A's scoped key, plain key gone.
+      expect(h.store.outboxFor('srv-1'), hasLength(1));
+      expect(h.prefs.getString(CloudSessionStore.outboxKey), isNull);
+      final scoped = h.prefs.getString(
+        AppState.I.accountScopedPrefKey(CloudSessionStore.outboxKey),
+      );
+      expect(scoped, isNotNull);
+      expect(
+        (jsonDecode(scoped!) as List).single['account'],
+        'a',
+        reason: 'the adopted row must carry the owning account stamp',
+      );
+
+      // A later process as B still cannot see or deliver it.
+      signInAs('b');
+      final asB = CloudSessionStore(
+        rest: h.rest,
+        cache: SessionHistoryRepository.I,
+        prefs: h.prefs,
+        connection: h.connection,
+        ws: h.ws,
+      );
+      await asB.ready;
+      addTearDown(asB.dispose);
+      expect(asB.outboxFor('srv-1'), isEmpty);
+      await asB.flushOutbox();
+      expect(h.rest.sent, isEmpty);
+
+      // Back as A it flushes (the stamp, not the loader, owns the row).
+      signInAs('a');
+      await h.store.flushOutbox();
+      expect(
+        [for (final call in h.rest.sent) call.content],
+        <String>['legacy queued prompt'],
+      );
+    });
+
+    test('guest keeps the plain key; a drained queue removes its key',
+        () async {
+      final h = await _buildStore(
+        knownServerIds: const <String>['srv-1'],
+        outbox: <OutboxEntry>[
+          OutboxEntry(
+            clientMsgId: 'cccccccccccccccccccccccccccccccc',
+            sessionId: 'srv-1',
+            content: 'guest prompt',
+            createdAt: DateTime.utc(2026, 10, 17),
+          ),
+        ],
+      );
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+
+      // Guest's scoped key IS the plain key — the row stays put, stamped.
+      expect(h.store.outboxFor('srv-1'), hasLength(1));
+      final raw = h.prefs.getString(CloudSessionStore.outboxKey);
+      expect(raw, isNotNull);
+      expect((jsonDecode(raw!) as List).single['account'], 'guest');
+
+      await h.store.flushOutbox();
+      expect(
+        [for (final call in h.rest.sent) call.content],
+        <String>['guest prompt'],
+      );
+      // A drained owner's key is removed, not left to resurrect stale rows.
+      expect(h.prefs.getString(CloudSessionStore.outboxKey), isNull);
     });
   });
 

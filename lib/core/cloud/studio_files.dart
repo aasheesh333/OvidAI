@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
@@ -287,7 +288,23 @@ class StudioFilesClient {
           redirectUrl: downloadUrl,
         );
       }
-      final response = await _http.get(Uri.parse(downloadUrl));
+      // Presigned object-storage GET: same hung-socket risk as the gateway
+      // calls, so it gets the same ceiling. The body is bounded by
+      // kStudioEditHardCap (larger files never reach this branch), so the
+      // default 30s is generous. A cut-off download surfaces as the client's
+      // standard (0, 'timeout') shape.
+      final http.Response response;
+      try {
+        response = await _http
+            .get(Uri.parse(downloadUrl))
+            .timeout(CloudRestClient.defaultTimeout);
+      } on TimeoutException {
+        throw CloudApiException(
+          status: 0,
+          code: 'timeout',
+          message: 'The file download from object storage timed out.',
+        );
+      }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw CloudApiException(
           status: response.statusCode,

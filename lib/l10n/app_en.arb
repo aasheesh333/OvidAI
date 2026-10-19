@@ -27,6 +27,8 @@
   "@errorNotFound": {"description": "HTTP 404 or a missing resource."},
   "errorRateLimited": "Too many requests right now. Wait a moment and try again.",
   "@errorRateLimited": {"description": "HTTP 429."},
+  "errorQuotaExceeded": "You've reached your plan limit. It resets automatically.",
+  "@errorQuotaExceeded": {"description": "HTTP 402 — the plan allowance is used up."},
   "errorServer": "The service is having trouble right now. Please try again later.",
   "@errorServer": {"description": "HTTP 5xx."},
   "errorBadResponse": "Ovid received an unexpected response. Please try again.",

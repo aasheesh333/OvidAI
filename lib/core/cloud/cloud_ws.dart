@@ -9,8 +9,11 @@
 ///   `{"op":"unsubscribe","sessionId":…}`, `{"op":"ping"}` (the `pty_*` and
 ///   `browser_*` ops of Tasks 15/16 are additive discriminants — they go
 ///   through [WsMultiplexer.sendRaw] / [WsMultiplexer.rawServerFrames]);
-/// - server → client: `subscribed` / `event{event:SessionEvent}` / `pong` /
-///   `error{code,message,sessionId?,ptyId?}`;
+/// - server → client: `subscribed` (additively `{trimmed:true}` when the
+///   replay hit the server's REPLAY_LIMIT — the backlog may extend past it,
+///   the durable gap signal that triggers the DB-mirror fallback) /
+///   `event{event:SessionEvent}` / `pong` / `error{code,message,sessionId?,
+///   ptyId?}`;
 /// - close code 4401 (`WS_CLOSE_UNAUTHENTICATED`) = the single-use ticket
 ///   was missing/invalid/reused → re-mint + reconnect, silently.
 ///
@@ -809,6 +812,27 @@ class WsMultiplexer extends ChangeNotifier {
       case 'subscribed':
         // Any subscribed ack proves the link is healthy end to end.
         _attempt = 1;
+        // The additive `trimmed` flag (@ovid/shared — the DURABLE
+        // replay-degradation signal, landed in the built ws.ts): the ack
+        // says "exactly REPLAY_LIMIT events were replayed — the backlog
+        // may extend past the cap", so the wire replay may be short of the
+        // mirror's tail. Heal it through the SAME mirror catch-up the
+        // legacy internal error frames trigger. The subscription stays
+        // live server-side here — the catch-up's trailing re-subscribe
+        // simply replaces it in place (ws.ts re-subscribe semantics), with
+        // the re-seeded cursor.
+        if (msg['trimmed'] == true) {
+          final sessionId = msg['sessionId'];
+          final sub = sessionId is String ? _subs[sessionId] : null;
+          if (sub != null) {
+            unawaited(
+                _mirrorCatchUp(sub, 'subscribed{trimmed}: replay hit the '
+                    'server cap'));
+          } else {
+            debugPrint('cloud ws: trimmed ack for unknown session '
+                '($sessionId)');
+          }
+        }
         return;
       case 'pong':
         _attempt = 1; // attempt counter resets after a pong/subscribed
@@ -834,15 +858,15 @@ class WsMultiplexer extends ChangeNotifier {
     sub.events.add(event);
   }
 
-  /// The built server's ONLY replay-degradation signals (ws.ts): internal
+  /// The built server's LEGACY replay-degradation signals (ws.ts): internal
   /// error frames carrying these EXACT messages, each sent after the
   /// server-side subscription was deleted ("Replay failed." — the
   /// `readSince` catch; "Live subscription failed." — the `subscribe`
   /// catch). Matched literally: other internal frames with a sessionId
   /// (the browser-attach / approval-publish failure shapes the built ws.ts
-  /// also sends) are session errors, NOT replay degradation. Durable
-  /// long-term fix (ledgered carry): the additive `subscribed{trimmed}`
-  /// flag in @ovid/shared, consumed at `case 'subscribed'`.
+  /// also sends) are session errors, NOT replay degradation. Kept as the
+  /// degraded-path detector for older servers; the DURABLE path is the
+  /// additive `subscribed{trimmed}` flag consumed at `case 'subscribed'`.
   static const Set<String> _replayDegradedMessages = <String>{
     'Replay failed.',
     'Live subscription failed.',
@@ -871,7 +895,7 @@ class WsMultiplexer extends ChangeNotifier {
       }
       if (codeText == 'internal' &&
           _replayDegradedMessages.contains(messageText)) {
-        // The built server's ONLY replay-degradation signal (ws.ts sends
+        // The LEGACY degraded-path detector (older servers: ws.ts sends
         // "Replay failed." / "Live subscription failed." as internal error
         // frames and DELETES the server-side subscription). Fall back to the
         // DB event mirror for catch-up, then continue live.
@@ -899,13 +923,15 @@ class WsMultiplexer extends ChangeNotifier {
   // Replay fallback — the DB event mirror (P1-review deferral, owned here)
   // -------------------------------------------------------------------------
 
-  /// The Redis stream replay is unavailable or degraded (the built server's
-  /// signal: an internal error frame naming the session — the stream has
-  /// trimmed past `lastEventId` (24 h/50 MB retention, spec §6.2) or the
-  /// replay read failed). Catch up from the durable `session_event_mirror`
-  /// via [CloudMirrorReader], applying events through the SAME seq-dedupe,
-  /// then re-subscribe live; the cursor re-seeds from the mirror's last
-  /// event.
+  /// The Redis stream replay is unavailable or degraded — signalled EITHER
+  /// durably by the additive `subscribed{trimmed}` flag (the ack for a
+  /// subscribe that replayed exactly REPLAY_LIMIT events — the backlog may
+  /// extend past the server's replay cap) OR, on older servers, by an
+  /// internal error frame naming the session (the replay read failed; the
+  /// server DELETED the server-side subscription). Catch up from the durable
+  /// `session_event_mirror` via [CloudMirrorReader], applying events
+  /// through the SAME seq-dedupe, then re-subscribe live; the cursor
+  /// re-seeds from the mirror's last event.
   Future<void> _mirrorCatchUp(_SessionSub sub, String why) async {
     if (sub.mirrorInFlight) return; // a catch-up is already running
     sub.mirrorInFlight = true;
@@ -929,10 +955,12 @@ class WsMultiplexer extends ChangeNotifier {
       sub.mirrorInFlight = false;
     }
 
-    // Continue live: the built server deleted the subscription when the
-    // replay failed, so a fresh subscribe re-establishes it. Overlap with
-    // anything already delivered is dropped by the same seq-dedupe in
-    // [_accept].
+    // Continue live: on the legacy error-frame path the server DELETED the
+    // subscription when the replay failed, so a fresh subscribe re-establishes
+    // it; on the trimmed-ack path the sub is still live and the re-subscribe
+    // simply replaces it in place (ws.ts re-subscribe semantics). Either way,
+    // overlap with anything already delivered is dropped by the same
+    // seq-dedupe in [_accept].
     if (_subs[sub.sessionId] == sub &&
         _linkState == WsLinkState.online &&
         _socket != null) {
@@ -940,27 +968,69 @@ class WsMultiplexer extends ChangeNotifier {
     }
   }
 
+  /// The REST catch-up route's default page size (`DEFAULT_EVENT_LIMIT` in
+  /// cloud/apps/gateway/src/routes/events.ts): a SHORT page (fewer events
+  /// than this) means the mirror is exhausted — the paging loop's stop
+  /// signal, exactly like a cursor-less feed.
+  static const int _mirrorPageSize = 200;
+
+  /// Bound on the mirror paging loop: 25 pages × 200 events = 5000 events —
+  /// enough to heal any realistic trim gap while staying bounded. At the
+  /// cap the loop gives up GRACEFULLY: accepted events stay, the cursor
+  /// holds, and the next degradation signal re-triggers the fallback.
+  static const int _mirrorMaxPages = 25;
+
   /// Default mirror reader: the gateway REST catch-up route
   /// `GET /sessions/:id/events?after=<seq>` over [CloudRestClient.I],
   /// returning `{events:[SessionEvent…]}` (the shared SessionEvent wire
-  /// shape). NOTE: the route is not landed in the gateway at the time of
-  /// writing (the @ovid/db `eventMirror.readSince` seam it fronts IS built)
-  /// — reconciled per the [MAP] protocol like Task 5's registerDevice.
+  /// shape) — one 200-event page per call, so the reader pages via
+  /// [readMirrorPages] rather than trusting a single page to hold the whole
+  /// gap.
   static Future<List<CloudSessionEvent>> _restMirrorReader(
     String sessionId,
     String? lastSeq,
-  ) async {
-    final json = await CloudRestClient.I.getJson(
-      '/sessions/$sessionId/events',
-      query: <String, String>{'after': lastSeq ?? ''},
+  ) {
+    return readMirrorPages(
+      (after) => CloudRestClient.I.getJson(
+        '/sessions/$sessionId/events',
+        query: <String, String>{'after': after ?? ''},
+      ),
+      lastSeq,
     );
-    final rawEvents = json['events'];
-    if (rawEvents is! List) return const <CloudSessionEvent>[];
-    return [
-      for (final raw in rawEvents)
-        if (raw is Map)
-          CloudSessionEvent.fromJson(Map<String, dynamic>.from(raw)),
-    ];
+  }
+
+  /// Pages a mirror catch-up until the mirror is exhausted: each fetch asks
+  /// for events strictly AFTER the last seq of the previous page (the route's
+  /// `after` is the exclusive resume cursor); a SHORT page — fewer than
+  /// [_mirrorPageSize] events, the route's default limit — or an empty one
+  /// means done. An off-contract response (no `events` list) ends the loop
+  /// leniently, like the route's own clamp-or-ignore rule: pages already
+  /// fetched are kept, never thrown away. Capped at [_mirrorMaxPages]
+  /// fetches so a pathological mirror can never spin.
+  @visibleForTesting
+  static Future<List<CloudSessionEvent>> readMirrorPages(
+    Future<Map<String, dynamic>> Function(String? after) fetchPage,
+    String? lastSeq,
+  ) async {
+    final events = <CloudSessionEvent>[];
+    var after = lastSeq;
+    for (var page = 1; page <= _mirrorMaxPages; page++) {
+      final json = await fetchPage(after);
+      final rawEvents = json['events'];
+      if (rawEvents is! List) return events; // off-contract: stop, keep pages
+      final pageEvents = [
+        for (final raw in rawEvents)
+          if (raw is Map)
+            CloudSessionEvent.fromJson(Map<String, dynamic>.from(raw)),
+      ];
+      events.addAll(pageEvents);
+      if (pageEvents.length < _mirrorPageSize) return events;
+      after = pageEvents.last.seq; // resume strictly after this page
+    }
+    debugPrint('cloud ws: mirror catch-up hit the $_mirrorMaxPages-page cap '
+        '— giving up gracefully (the cursor holds; the next degradation '
+        'signal re-triggers the fallback)');
+    return events;
   }
 
   // -------------------------------------------------------------------------

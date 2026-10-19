@@ -86,17 +86,16 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
         const SizedBox(height: AetherSpacing.space4),
         AetherCard(
           title: const Text('Cloud status'),
-          trailing: _loading
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : IconButton(
-                  tooltip: 'Refresh',
-                  icon: const Icon(Icons.refresh, size: 20),
-                  onPressed: _check,
-                ),
+          // The refresh control NEVER disappears behind a spinner: a hung
+          // check used to replace the only retry affordance with an endless
+          // loader. The button stays enabled while busy (a re-tap just
+          // restarts _check); the busy indicator lives in the body status
+          // line below.
+          trailing: IconButton(
+            tooltip: 'Refresh',
+            icon: const Icon(Icons.refresh, size: 20),
+            onPressed: _check,
+          ),
           child: _body(),
         ),
         const SizedBox(height: AetherSpacing.space4),
@@ -107,12 +106,18 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
 
   Widget _body() {
     if (_loading && _health == null) {
-      return Text('Checking Ovid Cloud…', style: AetherType.bodyMuted);
+      return _busyLine('Checking Ovid Cloud…');
     }
     if (_error != null) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // A refresh over stale data keeps the last answer on screen with
+          // the busy line above it.
+          if (_loading) ...[
+            _busyLine('Checking Ovid Cloud…'),
+            const SizedBox(height: AetherSpacing.space4),
+          ],
           Row(
             children: [
               AetherStatusDot(color: Aether.danger),
@@ -135,6 +140,12 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // A refresh over a healthy answer also keeps the stale body visible
+        // under the busy line.
+        if (_loading) ...[
+          _busyLine('Checking Ovid Cloud…'),
+          const SizedBox(height: AetherSpacing.space4),
+        ],
         Row(
           children: [
             AetherStatusDot(
@@ -169,6 +180,20 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
       ],
     );
   }
+
+  /// The trailing status line that owns the busy spinner (the card header's
+  /// refresh button never yields its spot to it).
+  Widget _busyLine(String label) => Row(
+    children: [
+      const SizedBox(
+        width: 16,
+        height: 16,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      ),
+      const SizedBox(width: AetherSpacing.space2),
+      Expanded(child: Text(label, style: AetherType.bodyMuted)),
+    ],
+  );
 }
 
 class _CheckRow extends StatelessWidget {

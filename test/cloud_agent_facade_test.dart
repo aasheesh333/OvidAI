@@ -18,6 +18,13 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+// fake_async comes transitively through flutter_test; promoting it to a
+// direct dev_dependency needs a pubspec edit that is outside this task's
+// pathspec lane (parallel-wave disjointness) — flagged in the task report
+// for the next lockfile-allowed wave. Same waiver as
+// cloud_ws_multiplexer_test.dart.
+// ignore: depend_on_referenced_packages
+import 'package:fake_async/fake_async.dart' show fakeAsync, FakeAsync;
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/cloud_ws.dart';
@@ -34,7 +41,7 @@ class FakeCloudRest extends CloudRestClient {
       : super(headers: CloudHeaders.forTest(), restBase: 'http://test');
 
   final List<({String sessionId, String content, List<String> attachmentIds,
-      String? clientMsgId})> sent = [];
+      String? clientMsgId, int? maxOutputTokens})> sent = [];
   final List<String> cancelled = [];
   final List<({String sessionId, String? mode})> patches = [];
   final List<({String sessionId, String name, int size})> created = [];
@@ -44,6 +51,11 @@ class FakeCloudRest extends CloudRestClient {
   CloudApiException? cancelError;
   CloudApiException? patchError;
 
+  /// Holds every sendMessage RESPONSE until completed: the call is recorded
+  /// (the POST left the device) but the facade stays inside the POST's
+  /// in-flight window — the double-tap window under test.
+  Completer<void>? sendGate;
+
   int _seq = 0;
 
   @override
@@ -52,6 +64,7 @@ class FakeCloudRest extends CloudRestClient {
     String content, {
     List<String> attachmentIds = const [],
     String? clientMsgId,
+    int? maxOutputTokens,
   }) async {
     if (sendError != null) throw sendError!;
     sent.add((
@@ -59,7 +72,9 @@ class FakeCloudRest extends CloudRestClient {
       content: content,
       attachmentIds: attachmentIds,
       clientMsgId: clientMsgId,
+      maxOutputTokens: maxOutputTokens,
     ));
+    if (sendGate != null) await sendGate!.future;
     final n = ++_seq;
     return SendMessageResponse(
       runId: 'run-$n',
@@ -106,7 +121,8 @@ class FakeCloudRest extends CloudRestClient {
 
   @override
   Future<void> uploadAttachmentBytes(
-      AttachmentUpload upload, List<int> bytes) async {
+      AttachmentUpload upload, List<int> bytes,
+      {Duration? timeout}) async {
     uploaded.add(bytes);
   }
 }
@@ -163,6 +179,26 @@ Map<String, dynamic> _eventFrame(
       },
     };
 
+/// The socket's `approval_response` frames, decoded, in wire order.
+List<Map<String, dynamic>> _approvalFrames(FakeCloudSocket socket) => [
+      for (final raw in socket.sent)
+        if ((jsonDecode(raw) as Map<String, dynamic>)['op'] ==
+            'approval_response')
+          jsonDecode(raw) as Map<String, dynamic>,
+    ];
+
+/// One gate-shaped `approval_requested` payload (agent-core approvals.ts:
+/// no runId on the wire — the prompt belongs to the session's active run).
+Map<String, dynamic> _approvalPayload(String approvalId, {String tool = 'bash'}) =>
+    <String, dynamic>{
+      'approvalId': approvalId,
+      'tool': tool,
+      'kind': 'tool',
+      'summary': 'Run rm -rf /tmp/build',
+      'detail': 'rm -rf /tmp/build',
+      'allowAlways': true,
+    };
+
 class _Harness {
   _Harness(this.rest, this.ws, this.sockets, this.facade);
 
@@ -178,7 +214,10 @@ class _Harness {
   }
 }
 
-Future<_Harness> _build({FakeCloudRest? rest}) async {
+Future<_Harness> _build({
+  FakeCloudRest? rest,
+  Duration Function()? stallWindowFor,
+}) async {
   final fakeRest = rest ?? FakeCloudRest();
   final sockets = <FakeCloudSocket>[];
   final ws = WsMultiplexer(
@@ -193,7 +232,12 @@ Future<_Harness> _build({FakeCloudRest? rest}) async {
     pongTimeout: const Duration(hours: 1),
     jitterMs: () => 0,
   );
-  final facade = CloudAgentFacade(rest: fakeRest, ws: ws, store: null);
+  final facade = CloudAgentFacade(
+    rest: fakeRest,
+    ws: ws,
+    store: null,
+    stallWindowFor: stallWindowFor,
+  );
   return _Harness(fakeRest, ws, sockets, facade);
 }
 
@@ -282,6 +326,182 @@ void main() {
       await h.ws.disconnect();
       h.facade.dispose();
     });
+
+    test('the Settings max output cap rides the send (0/auto sends no key; '
+        'values above the wire cap degrade to it)', () async {
+      final h = await _build();
+      addTearDown(() => AppState.I.setMaxOutputTokens(0));
+
+      // Auto: no key on the wire.
+      await h.facade.runTask('auto pick', sessionId: 's1');
+      expect(h.rest.sent.single.maxOutputTokens, isNull);
+
+      // A cap within the wire limit passes through verbatim.
+      await AppState.I.setMaxOutputTokens(4096);
+      await h.facade.runTask('four oh nine six', sessionId: 's1');
+      expect(h.rest.sent.last.maxOutputTokens, 4096);
+
+      // The 16K/32K Settings presets exceed the shared wire cap: the facade
+      // degrades them instead of letting every send 400.
+      await AppState.I.setMaxOutputTokens(16384);
+      await h.facade.runTask('sixteen k', sessionId: 's1');
+      expect(h.rest.sent.last.maxOutputTokens, 8192);
+      expect(h.rest.sent.last.content, 'sixteen k');
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('a second send while the first POST is in flight queues instead of '
+        'double-spending (chat P1)', () async {
+      final h = await _build();
+      final gate = Completer<void>();
+      h.rest.sendGate = gate;
+
+      final first = h.facade.runTask('one', sessionId: 's1');
+      // busyFor already reads busy: the guard is claimed before runTask's
+      // first await, not when the POST response lands.
+      expect(h.facade.busyFor('s1'), isTrue);
+
+      final second = h.facade.runTask('two', sessionId: 's1');
+      await pumpEventQueue();
+
+      // ONE POST. The second call's row waits in the queue.
+      expect(h.rest.sent, hasLength(1));
+      expect(h.rest.sent.single.content, 'one');
+      expect(h.facade.queuedMessagesFor('s1'), ['two']);
+
+      gate.complete();
+      await Future.wait([first, second]);
+      // The POST landed: busy falls back to run tracking (no run_started
+      // yet — 'queued is not running' is unchanged).
+      expect(h.facade.busyFor('s1'), isFalse);
+      expect(h.rest.sent, hasLength(1));
+
+      // The re-entrant row leaves in order when the first run terminalizes.
+      final socket = await h.socket();
+      socket.server(
+          _eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+      await pumpEventQueue();
+      socket.server(
+          _eventFrame('s1', '2-0', 'run_completed', {'runId': 'run-1'}));
+      await pumpEventQueue();
+      expect(h.rest.sent, hasLength(2));
+      expect(h.rest.sent.last.content, 'two');
+      expect(h.facade.queuedMessagesFor('s1'), isEmpty);
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Response-timeout watchdog (the Settings "Response wait limit"): a
+  // user-visible surface only — long silent stretches are legitimate, so
+  // nothing is cancelled. The window is injected (5s) so fake time can cross
+  // it; production clamps the user's responseTimeoutSec to [30s, 600s].
+  // -------------------------------------------------------------------------
+
+  group('response-timeout watchdog', () {
+    // Built INSIDE fakeAsync (unlike _build, which pre-connects): the
+    // watchdog's periodic timer must be created in the fake zone, and it is
+    // created by the run_started listener — which runs in the socket's
+    // zone, which is the multiplexer's, which must therefore be fake too.
+    _Harness buildInZone(FakeAsync async, SharedPreferences prefs) {
+      final fakeRest = FakeCloudRest();
+      final zoneSockets = <FakeCloudSocket>[];
+      final ws = WsMultiplexer(
+        mintTicket: () async => 'ticket',
+        socketFactory: (Uri url) async {
+          final socket = FakeCloudSocket();
+          zoneSockets.add(socket);
+          return socket;
+        },
+        prefs: prefs,
+        heartbeatInterval: const Duration(hours: 1),
+        pongTimeout: const Duration(hours: 1),
+        jitterMs: () => 0,
+      );
+      final facade = CloudAgentFacade(
+        rest: fakeRest,
+        ws: ws,
+        store: null,
+        stallWindowFor: () => const Duration(seconds: 5),
+      );
+      facade.subscribeForTest('s1');
+      async.elapse(const Duration(milliseconds: 50));
+      return _Harness(fakeRest, ws, zoneSockets, facade);
+    }
+
+    test('silence past the window surfaces stalledFor; a delta re-arms '
+        'against a longer silence; run_completed clears it (fake async)',
+        () async {
+      final prefs = await SharedPreferences.getInstance();
+      fakeAsync((async) {
+        final h = buildInZone(async, prefs);
+        final socket = h.sockets.last;
+
+        socket.server(
+            _eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+        async.elapse(const Duration(milliseconds: 50));
+        expect(h.facade.busyFor('s1'), isTrue);
+        expect(h.facade.stalledFor('s1'), isFalse);
+
+        // Just under the window: still a normal live run.
+        async.elapse(const Duration(seconds: 4, milliseconds: 900));
+        expect(h.facade.stalledFor('s1'), isFalse);
+
+        // One tick past the window with NO event of any kind: stalled.
+        async.elapse(const Duration(milliseconds: 200));
+        expect(h.facade.stalledFor('s1'), isTrue);
+
+        // A delta re-arms: the flag clears the moment traffic resumes…
+        socket.server(_eventFrame('s1', '2-0', 'message_delta',
+            {'runId': 'run-1', 'text': 'chunk'}));
+        async.elapse(const Duration(milliseconds: 50));
+        expect(h.facade.stalledFor('s1'), isFalse);
+
+        // …and a LONGER silence than the first window trips it again.
+        async.elapse(const Duration(seconds: 5, milliseconds: 200));
+        expect(h.facade.stalledFor('s1'), isTrue);
+
+        // The terminal clears it synchronously and stands the watchdog down.
+        socket.server(
+            _eventFrame('s1', '3-0', 'run_completed', {'runId': 'run-1'}));
+        async.elapse(const Duration(milliseconds: 50));
+        expect(h.facade.busyFor('s1'), isFalse);
+        expect(h.facade.stalledFor('s1'), isFalse);
+
+        // No zombie timer: quiet time after the terminal never re-stalls.
+        async.elapse(const Duration(seconds: 30));
+        expect(h.facade.stalledFor('s1'), isFalse);
+
+        h.facade.dispose();
+        h.ws.disconnect();
+      });
+    });
+
+    test('run_failed clears the stalled state too', () async {
+      final prefs = await SharedPreferences.getInstance();
+      fakeAsync((async) {
+        final h = buildInZone(async, prefs);
+        final socket = h.sockets.last;
+
+        socket.server(
+            _eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+        async.elapse(const Duration(seconds: 5, milliseconds: 100));
+        expect(h.facade.stalledFor('s1'), isTrue);
+
+        socket.server(_eventFrame('s1', '2-0', 'run_failed',
+            {'runId': 'run-1', 'code': 'model_error'}));
+        async.elapse(const Duration(milliseconds: 50));
+        expect(h.facade.busyFor('s1'), isFalse);
+        expect(h.facade.stalledFor('s1'), isFalse);
+
+        h.facade.dispose();
+        h.ws.disconnect();
+      });
+    });
   });
 
   group('projection', () {
@@ -351,6 +571,105 @@ void main() {
           reason: 'a terminal event settles the stop request');
       expect(run.lastErrorCode, 'cancelled');
       expect(run.lastErrorMessage, 'Stopped by user.');
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('run_cancelled settles busy, clears stopRequested, records no error',
+        () async {
+      final h = await _build();
+      await h.facade.runTask('hello', sessionId: 's1');
+      final socket = await h.socket();
+      socket.server(_eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+      await pumpEventQueue();
+      expect(h.facade.busyFor('s1'), isTrue);
+
+      expect(h.facade.stopRequested(sessionId: 's1'), isTrue);
+      await h.facade.hardStopSettledForTest;
+      expect(h.facade.runStateFor('s1').stopRequested, isTrue);
+
+      // The full processor's cancel terminal (loop.ts cancelled()):
+      // {runId, reason?} — no code/message.
+      socket.server(_eventFrame('s1', '2-0', 'run_cancelled', {'runId': 'run-1'}));
+      await pumpEventQueue();
+
+      expect(h.facade.busyFor('s1'), isFalse);
+      final run = h.facade.runStateFor('s1');
+      expect(run.runId, isNull);
+      expect(run.stopRequested, isFalse,
+          reason: 'a terminal event settles the stop request');
+      expect(run.lastErrorCode, isNull,
+          reason: 'a user-initiated cancel is not a surfaced error');
+
+      // The projection fold owns the row the user sees.
+      final projection = h.facade.projectionForTest('s1')!;
+      expect(projection.busy, isFalse);
+      expect(projection.activeRunId, isNull);
+      expect(projection.messages.last.kind, MsgKind.turnTail);
+      expect(projection.messages.last.content, 'Stopped by user.');
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('a queued row dispatches on run_cancelled (terminal queue drain)',
+        () async {
+      final h = await _build();
+      await h.facade.runTask('first', sessionId: 's1');
+      final socket = await h.socket();
+      socket.server(_eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+      await pumpEventQueue();
+
+      h.facade.enqueueMessage('queued while busy', sessionId: 's1');
+      expect(h.rest.sent, hasLength(1), reason: 'not sent while busy');
+
+      socket.server(_eventFrame('s1', '2-0', 'run_cancelled', {'runId': 'run-1'}));
+      await pumpEventQueue();
+
+      expect(h.rest.sent, hasLength(2));
+      expect(h.rest.sent.last.content, 'queued while busy');
+      expect(h.facade.queuedMessagesFor('s1'), isEmpty);
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('run_cancelled followed by the compat run_failed{cancelled} '
+        'spelling is a full no-op (no duplicate)', () async {
+      final h = await _build();
+      await h.facade.runTask('hello', sessionId: 's1');
+      final socket = await h.socket();
+      socket.server(_eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+      await pumpEventQueue();
+      expect(h.facade.busyFor('s1'), isTrue);
+
+      socket.server(_eventFrame('s1', '2-0', 'run_cancelled', {'runId': 'run-1'}));
+      await pumpEventQueue();
+      expect(h.facade.busyFor('s1'), isFalse);
+
+      // The server may emit BOTH spellings of one cancel; the compat
+      // run_failed{cancelled} (no runId) arriving after run_cancelled must
+      // be dropped wholesale: no second settle, no recorded error, no
+      // second turn-tail row, no queue re-drain.
+      socket.server(_eventFrame('s1', '3-0', 'run_failed', {
+        'code': 'cancelled',
+        'message': 'Stopped by user.',
+      }));
+      await pumpEventQueue();
+
+      expect(h.facade.busyFor('s1'), isFalse);
+      final run = h.facade.runStateFor('s1');
+      expect(run.runId, isNull);
+      expect(run.lastErrorCode, isNull,
+          reason: 'the duplicate compat spelling must not surface an error');
+      expect(h.rest.sent, hasLength(1), reason: 'no second drain');
+      expect(h.rest.cancelled, isEmpty);
+      final projection = h.facade.projectionForTest('s1')!;
+      final tails =
+          projection.messages.where((m) => m.kind == MsgKind.turnTail).toList();
+      expect(tails, hasLength(1), reason: 'the duplicate appended no row');
+      expect(tails.single.content, 'Stopped by user.');
 
       await h.ws.disconnect();
       h.facade.dispose();
@@ -602,6 +921,53 @@ void main() {
       h.facade.dispose();
     });
 
+    test('a queued row keeps its staged files; a file staged later does not '
+        'ride with it (chat P1)', () async {
+      final h = await _build();
+      final dir = await Directory.systemTemp.createTemp('facade-queue-att');
+      addTearDown(() => dir.delete(recursive: true));
+      final first = File('${dir.path}/first.txt');
+      await first.writeAsString('first file bytes');
+      final later = File('${dir.path}/later.txt');
+      await later.writeAsString('later file bytes');
+
+      await h.facade.runTask('start', sessionId: 's1');
+      final socket = await h.socket();
+      socket.server(
+          _eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+      await pumpEventQueue();
+      expect(h.facade.busyFor('s1'), isTrue);
+
+      // Stage a file, then queue a row: ownership moves onto the row.
+      expect(
+          await h.facade.attachFile(first.path, 'first.txt', sessionId: 's1'),
+          isNull);
+      h.facade.enqueueMessage('queued', sessionId: 's1');
+      expect(h.facade.pendingAttachmentsForTest('s1'), isEmpty,
+          reason: 'the staged file left the composer with the row');
+      expect(h.facade.queuedMessagesFor('s1'), ['queued']);
+
+      // A file staged AFTER queueing belongs to the next message.
+      expect(
+          await h.facade.attachFile(later.path, 'later.txt', sessionId: 's1'),
+          isNull);
+
+      socket.server(
+          _eventFrame('s1', '2-0', 'run_completed', {'runId': 'run-1'}));
+      await pumpEventQueue();
+
+      // The row dispatched with ITS file — and only its file.
+      expect(h.rest.created, hasLength(1));
+      expect(h.rest.created.single.name, 'first.txt');
+      expect(h.rest.sent.last.content, 'queued');
+      expect(h.rest.sent.last.attachmentIds, ['att-1']);
+      // The later-staged file survives for the NEXT message.
+      expect(h.facade.pendingAttachmentsForTest('s1').single.name, 'later.txt');
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
     test('edit / remove / steer / take / restore operate on stable ids',
         () async {
       final h = await _build();
@@ -678,6 +1044,192 @@ void main() {
       expect(error, isNull);
       expect(h.facade.pendingAttachmentsForTest('s1'), hasLength(1));
 
+      h.facade.dispose();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Approvals (P3 Task 12): the gate emits approval_requested/approval_resolved
+  // as session events; the facade surfaces the prompt behind
+  // AgentSurface.pendingApproval and answers the worker's bridge with the
+  // approval_response WS op (shared ws.ts WsClientMsg — the gateway validates
+  // ownership + the decision enum and acks with approval_ack).
+  // -------------------------------------------------------------------------
+
+  group('approvals', () {
+    setUp(() {
+      // pendingApproval/pendingApprovalsElsewhere resolve through the
+      // ACTIVE session — the same wiring chat_screen reads.
+      AppState.resetTestInstance();
+      final app = AppState.createForTest();
+      app.sessions
+        ..clear()
+        ..add(ChatSession(id: 's1', title: 'Active', model: 'm'))
+        ..add(ChatSession(id: 's2', title: 'Background', model: 'm'));
+      app.activeSessionId = 's1';
+    });
+
+    tearDown(() {
+      AppState.resetTestInstance();
+    });
+
+    test('approval_requested surfaces pendingApproval; approveRequest answers '
+        'the bridge with the approval_response op', () async {
+      final h = await _build();
+      h.facade.subscribeForTest('s1');
+      final socket = await h.socket();
+
+      socket.server(_eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+      socket.server(_eventFrame(
+          's1', '2-0', 'approval_requested', _approvalPayload('ap-1')));
+      await pumpEventQueue();
+
+      final req = h.facade.pendingApproval;
+      expect(req, isNotNull);
+      expect(req!.tool, 'bash');
+      expect(req.summary, 'Run rm -rf /tmp/build');
+      expect(req.detail, 'rm -rf /tmp/build');
+      expect(req.allowAlways, isTrue);
+      expect(req.approvalId, 'ap-1');
+      // The foreground session's own prompt is not "elsewhere".
+      expect(h.facade.pendingApprovalsElsewhere, isEmpty);
+
+      expect(h.facade.approveRequest(req, true), isTrue);
+      expect(_approvalFrames(socket), <Map<String, dynamic>>[
+        <String, dynamic>{
+          'op': 'approval_response',
+          'sessionId': 's1',
+          'approvalId': 'ap-1',
+          'decision': 'allow',
+        },
+      ]);
+      // Optimistic dismiss: the card is gone without waiting for the
+      // server's approval_resolved echo.
+      expect(h.facade.pendingApproval, isNull);
+
+      // A stale second tap answers nothing (the bridge is
+      // first-resolution-wins server-side; the facade never re-sends).
+      expect(h.facade.approveRequest(req, true), isFalse);
+      expect(_approvalFrames(socket), hasLength(1));
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('deny and always spellings of the decision enum', () async {
+      final h = await _build();
+      h.facade.subscribeForTest('s1');
+      final socket = await h.socket();
+
+      socket.server(_eventFrame(
+          's1', '1-0', 'approval_requested', _approvalPayload('ap-1')));
+      await pumpEventQueue();
+      expect(h.facade.approveRequest(h.facade.pendingApproval!, false),
+          isTrue);
+      expect(_approvalFrames(socket).single['decision'], 'deny');
+
+      socket.server(_eventFrame(
+          's1', '2-0', 'approval_requested', _approvalPayload('ap-2')));
+      await pumpEventQueue();
+      expect(h.facade.approveAlwaysRequest(h.facade.pendingApproval!), isTrue);
+      expect(_approvalFrames(socket).last['decision'], 'always');
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('approval_resolved clears the prompt; a late tap answers nothing '
+        '(the timeout-deny spelling included)', () async {
+      final h = await _build();
+      h.facade.subscribeForTest('s1');
+      final socket = await h.socket();
+
+      socket.server(_eventFrame(
+          's1', '1-0', 'approval_requested', _approvalPayload('ap-1')));
+      await pumpEventQueue();
+      final req = h.facade.pendingApproval!;
+      expect(req, isNotNull);
+
+      socket.server(_eventFrame('s1', '2-0', 'approval_resolved',
+          {'approvalId': 'ap-1', 'decision': 'deny', 'reason': 'timeout'}));
+      await pumpEventQueue();
+      expect(h.facade.pendingApproval, isNull);
+
+      expect(h.facade.approveRequest(req, true), isFalse);
+      expect(_approvalFrames(socket), isEmpty);
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('a terminal event auto-dismisses a standing prompt', () async {
+      final h = await _build();
+      h.facade.subscribeForTest('s1');
+      final socket = await h.socket();
+
+      socket.server(_eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+      socket.server(_eventFrame(
+          's1', '2-0', 'approval_requested', _approvalPayload('ap-1')));
+      await pumpEventQueue();
+      expect(h.facade.pendingApproval, isNotNull);
+
+      socket.server(_eventFrame('s1', '3-0', 'run_failed',
+          {'code': 'internal', 'message': 'boom'}));
+      await pumpEventQueue();
+      expect(h.facade.pendingApproval, isNull);
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('a background session prompt surfaces through '
+        'pendingApprovalsElsewhere and answers under ITS session id', () async {
+      final h = await _build();
+      h.facade.subscribeForTest('s1');
+      h.facade.subscribeForTest('s2');
+      final socket = await h.socket();
+
+      socket.server(_eventFrame(
+          's2', '1-0', 'approval_requested', _approvalPayload('ap-bg')));
+      await pumpEventQueue();
+
+      // The foreground session (s1) has no prompt of its own.
+      expect(h.facade.pendingApproval, isNull);
+      final elsewhere = h.facade.pendingApprovalsElsewhere;
+      expect(elsewhere, hasLength(1));
+      expect(elsewhere.single.sessionId, 's2');
+      expect(elsewhere.single.title, 'Background');
+      expect(elsewhere.single.request.approvalId, 'ap-bg');
+
+      expect(h.facade.approveRequest(elsewhere.single.request, true), isTrue);
+      expect(_approvalFrames(socket).single, <String, dynamic>{
+        'op': 'approval_response',
+        'sessionId': 's2',
+        'approvalId': 'ap-bg',
+        'decision': 'allow',
+      });
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('the test seam still shadows the live prompt', () async {
+      final h = await _build();
+      h.facade.subscribeForTest('s1');
+      final socket = await h.socket();
+      socket.server(_eventFrame(
+          's1', '1-0', 'approval_requested', _approvalPayload('ap-1')));
+      await pumpEventQueue();
+
+      final seeded = ApprovalRequest(
+          tool: 'shell', summary: 's', detail: 'd');
+      h.facade.pendingApprovalForTest = seeded;
+      expect(identical(h.facade.pendingApproval, seeded), isTrue);
+
+      h.facade.pendingApprovalForTest = null;
+      expect(h.facade.pendingApproval?.approvalId, 'ap-1');
+
+      await h.ws.disconnect();
       h.facade.dispose();
     });
   });

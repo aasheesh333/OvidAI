@@ -13,22 +13,30 @@
 /// | Event | Projection |
 /// |---|---|
 /// | `run_started{runId}` | busy=true, activeRunId, live `streaming` bubble, statusLine cleared |
-/// | `message_delta{runId,text}` | epoch-gated append into the bubble's content + [TranscriptProjection.liveBubbleTicks] tick |
+/// | `message_delta{runId,text}` | epoch-gated append into the bubble's content + [TranscriptProjection.liveBubbleTicks] tick; the run's FIRST delta also ends the bubble's thinking phase — pre-delta content is kept as a settled reasoning row above the fresh answer body (`_beginLiveAnswer`), never as the answer's first characters |
 /// | `message_completed{messageId,content}` | bubble REPLACED by the server-authoritative text Message; activeRunId cleared (the double-apply guard) |
 /// | `run_started_retry{attempt,nextBackoffMs}` | the composer status line; stays busy; the failed attempt's partial is DISCARDED and a fresh empty bubble re-armed (ruling 1 — parity with the retired local service's `_discardLiveAttempt`) |
 /// | `run_failed{code,message?}` | busy=false, error fields, turn-tail row |
+/// | `run_cancelled{runId,reason?}` | busy=false, error fields, turn-tail row (the cancelled copy) |
 /// | `run_completed{runId}` | busy=false, statusLine cleared |
 /// | `system_note` | turn-tail row |
+/// | `approval_requested{approvalId,tool,kind,summary,detail,allowAlways,expiresAt?}` | [TranscriptProjection.pendingApproval] — the approval affordance. ONE prompt can be pending at a time: the run sits blocked in the worker's approval bridge until the user answers or the bridge timeout-denies |
+/// | `approval_resolved{approvalId,decision,reason?}` | pendingApproval cleared when the ids match (the timeout-deny spelling included) |
+///
+/// The terminal rows also clear a pending approval: a prompt can never
+/// outlive its run (the resolved event always precedes the terminal, so this
+/// is the defensive belt for a wire that skips it).
 ///
 /// Every OTHER event type is a NO-OP (forward compatibility): the LANDED
 /// @ovid/shared union members the table does not cover yet (tool_started,
 /// tool_completed, artifact_created, workspace_hibernated, workspace_hydrated,
-/// approval_requested, approval_resolved, todo_updated, goal_updated,
-/// plan_mode_changed, run_cancelled, subagent_started, subagent_completed,
-/// compaction_completed) and any future type — later P8+ tasks fold them.
-/// `run_cancelled` is union-only today (no emitter; cancels arrive as
-/// `run_failed{code:'cancelled'}`); see the HAZARD comment at the projector's
-/// default branch before ever emitting it as its own terminal.
+/// todo_updated, goal_updated, plan_mode_changed, subagent_started,
+/// subagent_completed, compaction_completed) and any future type — later P8+
+/// tasks fold them.
+/// `run_cancelled` is the full processor's terminal for a user-initiated
+/// cancel (agent-core loop.ts `cancelled()`); the P2 compat sink still
+/// renders the same cancel as `run_failed{code:'cancelled'}` — both
+/// spellings fold to the same turn tail (see [_onRunCancelled]).
 ///
 /// Payload field names mirror the BUILT emitters exactly (camelCase):
 /// cloud/apps/worker/src/runProcessor.ts (event-contract block). The server
@@ -39,6 +47,43 @@ import 'package:flutter/foundation.dart';
 
 import '../state.dart';
 import 'cloud_ws.dart';
+
+/// The live approval prompt folded from `approval_requested` (the P3 Task 12
+/// gate, agent-core approvals.ts). Field names mirror the emitter exactly;
+/// the payload carries NO runId — the prompt belongs to whichever run the
+/// session had active, and the gate prompts one request at a time.
+@immutable
+class CloudApprovalPrompt {
+  const CloudApprovalPrompt({
+    required this.approvalId,
+    required this.tool,
+    required this.kind,
+    required this.summary,
+    required this.detail,
+    required this.allowAlways,
+    this.expiresAt,
+  });
+
+  /// The bridge's answer key — what `approval_resolved` clears by and the
+  /// client's `approval_response` op echoes.
+  final String approvalId;
+
+  /// The tool asking ("bash", "exit_plan_mode", …).
+  final String tool;
+
+  /// 'tool' | 'question' | 'plan' (agent-core ports.ts ApprovalRequest).
+  final String kind;
+
+  final String summary;
+  final String detail;
+
+  /// Whether the card may offer "Always Allow" (plain tool approvals only).
+  final bool allowAlways;
+
+  /// When the bridge timeout-denies (ISO-8601), or null for an attended
+  /// question/plan — those wait for the answer, there is no clock.
+  final DateTime? expiresAt;
+}
 
 /// The transcript + run-status state for ONE cloud session, folded from
 /// session events. Structural transcript changes (append / replace / settle /
@@ -66,6 +111,29 @@ class TranscriptProjection extends ChangeNotifier {
 
   /// Wall clock of the active run's `run_started` — the `elapsedMs` source.
   DateTime? _runStartedAt;
+
+  /// The session's live approval prompt, or null when nothing is waiting on
+  /// the user. Set by the `approval_requested` fold, cleared by
+  /// `approval_resolved`, the terminal folds, and [clearPendingApproval].
+  CloudApprovalPrompt? _pendingApproval;
+
+  /// The live approval affordance (see [_pendingApproval]). The UI-facing
+  /// [Message] transcript is untouched by approvals — the chat renders the
+  /// prompt as the approval dock above the composer, not as a transcript row.
+  CloudApprovalPrompt? get pendingApproval => _pendingApproval;
+
+  /// Clears the prompt when [approvalId] is the live one — the facade's
+  /// optimistic dismiss once it has dispatched the user's
+  /// `approval_response`. Unlike the projector's folds this notifies
+  /// directly: it runs OUTSIDE an `apply`, so there is no apply-level
+  /// [_flushNotify] to piggyback on. A stale id (already superseded or
+  /// cleared) is a no-op.
+  void clearPendingApproval(String approvalId) {
+    final live = _pendingApproval;
+    if (live == null || live.approvalId != approvalId) return;
+    _pendingApproval = null;
+    notifyListeners();
+  }
 
   /// Set by the mutators below; consumed by [_flushNotify] at the end of one
   /// `apply` so a no-op fold notifies nothing.
@@ -132,6 +200,15 @@ class TranscriptProjection extends ChangeNotifier {
     if (_lastErrorCode == code && _lastErrorMessage == message) return;
     _lastErrorCode = code;
     _lastErrorMessage = message;
+    _changed = true;
+  }
+
+  /// approvalId-keyed (not identity): re-folding the SAME prompt — a
+  /// defensively re-emitted request — keeps the one already shown instead of
+  /// churning a fresh object through the dock's arm guard.
+  void _setPendingApproval(CloudApprovalPrompt? v) {
+    if (_pendingApproval?.approvalId == v?.approvalId) return;
+    _pendingApproval = v;
     _changed = true;
   }
 
@@ -218,6 +295,66 @@ class TranscriptProjection extends ChangeNotifier {
     _changed = true;
   }
 
+  /// The run's FIRST `message_delta` lands: the live bubble stops thinking
+  /// and the answer body begins. The cloud event stream has no separate
+  /// reasoning phase (the worker emits answer deltas only), so any content
+  /// the bubble already held is pre-answer noise, never the answer's first
+  /// characters: it is kept as a settled `reasoning` row inserted ABOVE the
+  /// bubble — the transcript model's reasoning carrier (`_ReasoningCard`
+  /// renders a reasoning row's content as the collapsed "Thought for Ns"
+  /// block; persisted rows carry their reasoning the same way) — and the
+  /// answer streams into a fresh body. The built wire always arms the bubble
+  /// EMPTY, so today the snapshot is a no-op; the fold stays correct for a
+  /// future emitter that streams a reasoning phase into the same bubble.
+  ///
+  /// The thinking flip is a STRUCTURAL change — the render gate switches from
+  /// the reasoning card to the answer path — so it records `_changed` and
+  /// the apply-level [_flushNotify] republishes the transcript once, exactly
+  /// like `message_completed`'s replace. The per-token tick alone repaints
+  /// only the tail row and would leave window caches keyed on `thinking`
+  /// stale. No-op once the bubble is already answering (idempotent on the
+  /// second-and-later deltas).
+  ///
+  /// HAZARD for a future reasoning-phase emitter: the UI's think-clock
+  /// (`_ThinkClock`, chat_screen.dart) snapshots whatever a frame showed on
+  /// the thinking bubble, so a bubble that streamed reasoning into `content`
+  /// across frames would render its snapshot BESIDE this row while live
+  /// (the clock dies with the bubble at `message_completed`; the reasoning
+  /// row is the durable carrier). Such an emitter should fold reasoning as
+  /// its own rows instead of into the live bubble's content.
+  void _beginLiveAnswer(Message live, DateTime now) {
+    if (!live.thinking) return;
+    final noise = live.content;
+    if (noise.isNotEmpty) {
+      final startedAt = _runStartedAt;
+      int? elapsedMs =
+          startedAt == null ? null : now.difference(startedAt).inMilliseconds;
+      if (elapsedMs != null && elapsedMs < 0) elapsedMs = 0;
+      final thought = Message(
+        role: 'assistant',
+        kind: MsgKind.reasoning,
+        content: noise,
+        // The pre-answer phase's length: drives the row's "Thought for Ns"
+        // label (`_ReasoningCard._doneDuration`).
+        elapsedMs: elapsedMs,
+        time: now,
+      );
+      // Directly above the bubble so the thought block precedes the answer
+      // it produced; appended defensively when the bubble is not tracked in
+      // `messages` yet (the wire always pairs them — `_replaceLiveBubble`
+      // parity).
+      final idx = messages.indexOf(live);
+      if (idx >= 0) {
+        messages.insert(idx, thought);
+      } else {
+        messages.add(thought);
+      }
+      live.content = '';
+    }
+    live.thinking = false;
+    _changed = true;
+  }
+
   /// One notification per mutating `apply` (the projector calls this at the
   /// end of every fold; no-op folds notify nothing).
   void _flushNotify() {
@@ -283,27 +420,33 @@ class EventTranscriptProjector {
       case 'run_failed':
         _onRunFailed(event.payload);
         break;
+      case 'run_cancelled':
+        _onRunCancelled(event.payload);
+        break;
       case 'run_completed':
         _onRunCompleted();
         break;
       case 'system_note':
         _onSystemNote(event.payload);
         break;
+      case 'approval_requested':
+        _onApprovalRequested(event.payload);
+        break;
+      case 'approval_resolved':
+        _onApprovalResolved(event.payload);
+        break;
       default:
         // Fold-table-absent type: no-op. Covers the LANDED @ovid/shared
         // union members listed in the library doc and any future type.
         //
-        // HAZARD for future emitters (P3 carry, review ruling 2):
-        // run_cancelled is currently union-only — NO emitter exists in the
-        // built cloud (user cancels arrive as run_failed{code:'cancelled'}
-        // from both the gateway queued-cancel and the worker mid-stream
-        // abort, which this projector folds correctly). If a future server
-        // path starts emitting run_cancelled as its OWN terminal event, this
-        // no-op would leave the projection stuck busy=true with a
-        // shimmering live bubble (no terminal fold, nothing settles it
-        // until the NEXT run_started). That emitter must update this switch
-        // in the same change — fold it like run_failed (terminal-settle +
-        // busy=false) — or land its own client folding task.
+        // HAZARD for future emitters (P3 carry, review ruling 2): before
+        // the full processor landed, run_cancelled was union-only — no
+        // emitter — and sat in this branch, which left the projection stuck
+        // busy=true with a shimmering live bubble (the reason this switch
+        // now folds it like run_failed). Any future terminal-ish event type
+        // must update this switch in the same change as its emitter — fold
+        // it like run_failed (terminal-settle + busy=false) — or land its
+        // own client folding task.
         return;
     }
     target._flushNotify();
@@ -341,9 +484,14 @@ class EventTranscriptProjector {
     if (runId == null || runId != target._activeRunId) return;
     final live = target._liveBubble;
     if (live == null) return; // no bubble (missed run_started): nowhere to fold
+    // First delta of the run: end the thinking phase so the streamed text
+    // renders through the answer path, not inside the "Thinking…" card
+    // (the flip also snapshots any pre-delta content — `_beginLiveAnswer`).
+    target._beginLiveAnswer(live, _clock());
     live.content = live.content + text;
     // Per-token publication: the tick repaints ONLY the live tail row
-    // (live-bubble-tick parity) — no notifyListeners here.
+    // (live-bubble-tick parity) — the one-time thinking flip above is the
+    // structural exception, republished through the apply-level flush.
     target.liveBubbleTicks.value++;
   }
 
@@ -411,6 +559,10 @@ class EventTranscriptProjector {
     // and the run is no longer active (a late delta has nowhere to land).
     target._setStatusLine(null);
     target._setActiveRunId(null);
+    // A prompt cannot outlive its run — the bridge settles before any
+    // terminal, so this only fires on a wire that skipped the resolved
+    // event (the defensive belt; run_cancelled shares it through here).
+    target._setPendingApproval(null);
     target._settleLiveBubble();
     target._appendMessage(Message(
       role: 'assistant',
@@ -421,12 +573,31 @@ class EventTranscriptProjector {
     ));
   }
 
+  /// The full processor's terminal for a user-initiated cancel (loop.ts
+  /// `cancelled()`): payload `{runId, reason?}` — no code/message. Folds as
+  /// the compat spelling the P2 sink renders for the same cancel,
+  /// `run_failed{code:'cancelled', message:CANCELLED_MESSAGE}`: the server's
+  /// `reason` verbatim when present, else the pinned copy (the server's
+  /// CANCELLED_MESSAGE and [humanText]'s 'cancelled' text are the same
+  /// string, 'Stopped by user.'). Delegates to [_onRunFailed] so the two
+  /// terminals can never drift apart.
+  void _onRunCancelled(Map<String, dynamic> payload) {
+    final reason = _str(payload, 'reason');
+    _onRunFailed(<String, dynamic>{
+      'code': 'cancelled',
+      'message': reason ?? humanText('cancelled'),
+    });
+  }
+
   void _onRunCompleted() {
     target._setBusy(false);
     target._setStatusLine(null);
     // Terminal (same reasoning as run_failed). Normally a no-op pair: the
     // wire always lands message_completed before run_completed.
     target._setActiveRunId(null);
+    // Same prompt-outlives-run belt as _onRunFailed (a resolved question
+    // precedes run_completed on the built wire).
+    target._setPendingApproval(null);
     target._settleLiveBubble();
   }
 
@@ -437,6 +608,40 @@ class EventTranscriptProjector {
       content: _str(payload, 'text') ?? _str(payload, 'message') ?? '',
       time: _clock(),
     ));
+  }
+
+  /// `approval_requested{approvalId,tool,kind,summary,detail,allowAlways,
+  /// expiresAt?}` (agent-core approvals.ts — the sink emits BEFORE the bridge
+  /// starts its timeout clock, so the card always beats the auto-deny).
+  /// Replaces any standing prompt: the gate answers one request at a time,
+  /// so a second requested event means the first was settled off-wire (a
+  /// replay gap) and the live one is the truth.
+  void _onApprovalRequested(Map<String, dynamic> payload) {
+    final approvalId = _str(payload, 'approvalId');
+    final tool = _str(payload, 'tool');
+    // Defensive: a prompt with no answer key could never be cleared.
+    if (approvalId == null || approvalId.isEmpty || tool == null) return;
+    final rawExpiresAt = payload['expiresAt'];
+    target._setPendingApproval(CloudApprovalPrompt(
+      approvalId: approvalId,
+      tool: tool,
+      kind: _str(payload, 'kind') ?? 'tool',
+      summary: _str(payload, 'summary') ?? '',
+      detail: _str(payload, 'detail') ?? '',
+      allowAlways: payload['allowAlways'] == true,
+      expiresAt: rawExpiresAt is String ? DateTime.tryParse(rawExpiresAt) : null,
+    ));
+  }
+
+  /// `approval_resolved{approvalId,decision,reason?}` — exactly one per
+  /// prompt (the bridge settles once, first answer wins). Id-matched only:
+  /// a resolved for a superseded prompt never clears the live one.
+  void _onApprovalResolved(Map<String, dynamic> payload) {
+    final live = target._pendingApproval;
+    if (live == null) return; // nothing pending (a late/duplicate resolved)
+    final approvalId = _str(payload, 'approvalId');
+    if (approvalId == null || approvalId != live.approvalId) return;
+    target._setPendingApproval(null);
   }
 
   /// Human text for the run_failed codes whose server payloads carry no

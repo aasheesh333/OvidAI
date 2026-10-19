@@ -565,6 +565,40 @@ void main() {
     expect(find.byType(ChatShareButton), findsNothing);
   });
 
+  testWidgets('a late-arriving generated image renders without a rebuild', (
+    tester,
+  ) async {
+    // The image lands in the workspace AFTER the row first renders — a
+    // notFound stat must never be cached as a verdict (audit P2 B).
+    final dir = Directory.systemTemp.createTempSync('chat-image-late-');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final late = File('${dir.path}/late.png');
+    a.messages
+      ..clear()
+      ..add(
+        Message(
+          role: 'assistant',
+          kind: MsgKind.imageGen,
+          content: 'Generated image',
+          imagePath: late.path,
+        ),
+      );
+    await pumpChat(tester);
+    expect(find.text('image file not in workspace'), findsOneWidget);
+    expect(find.text('Fullscreen'), findsNothing);
+
+    late.writeAsBytesSync([0]);
+    // The negative result is not cached: the row's delayed re-stat (5s while
+    // the row is mounted) picks the file up with no rebuild to help it.
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('image file not in workspace'), findsNothing);
+    expect(find.text('Fullscreen'), findsOneWidget);
+    expect(find.text('Open'), findsOneWidget);
+  });
+
   for (final appAvailable in [true, false]) {
     testWidgets(
       'generated image Open uses the FileProvider channel '

@@ -71,21 +71,29 @@ class ConversationSnapshot {
 
   List<SharedMessage> get importableMessages => messages;
 
-  factory ConversationSnapshot.fromSession(ChatSession session) {
-    final messages = <SharedMessage>[];
+  /// [messages] overrides the session's own rows: the share entry points
+  /// pass the facade's live projection for a cloud session (its
+  /// `ChatSession.messages` stays empty). It is the same [Message] shape,
+  /// so the allowlist filter below applies unchanged.
+  factory ConversationSnapshot.fromSession(
+    ChatSession session, {
+    List<Message>? messages,
+  }) {
+    final source = messages ?? session.messages;
+    final shared = <SharedMessage>[];
     if (!session.isSubagent) {
-      for (final message in session.messages) {
+      for (final message in source) {
         if ((message.role == 'user' || message.role == 'assistant') &&
             message.kind == MsgKind.text &&
             !message.thinking &&
             message.toolName == null &&
             message.content.trim().isNotEmpty &&
             !_privateText.hasMatch(message.content)) {
-          messages.add(SharedMessage(message.role, message.content));
+          shared.add(SharedMessage(message.role, message.content));
         }
       }
     }
-    return ConversationSnapshot._(session.id, messages);
+    return ConversationSnapshot._(session.id, shared);
   }
 
   bool get withinLimits =>

@@ -51,8 +51,9 @@ class _AttachRest extends CloudRestClient {
   @override
   Future<void> uploadAttachmentBytes(
     AttachmentUpload upload,
-    List<int> bytes,
-  ) async {
+    List<int> bytes, {
+    Duration? timeout,
+  }) async {
     uploadedBytes.add(bytes.length);
   }
 
@@ -62,6 +63,7 @@ class _AttachRest extends CloudRestClient {
     String content, {
     List<String> attachmentIds = const [],
     String? clientMsgId,
+    int? maxOutputTokens,
   }) async {
     final gate = entered;
     if (gate != null && !gate.isCompleted) gate.complete();

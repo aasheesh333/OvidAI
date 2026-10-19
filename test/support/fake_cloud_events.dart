@@ -36,6 +36,7 @@ class FakeCloudEventsRest extends CloudRestClient {
   Future<Map<String, dynamic>> getJson(
     String path, {
     Map<String, String>? query,
+    Duration? timeout,
   }) async {
     requests.add(<String, String>{'path': path, ...?query});
     final waiting = hold;

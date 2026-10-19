@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
+import '../core/cloud/cloud_rest.dart';
 import '../core/diag.dart';
 import '../l10n/l10n.dart';
 
@@ -17,6 +18,7 @@ enum UserErrorKind {
   forbidden,
   notFound,
   rateLimited,
+  quotaExceeded,
   server,
   badResponse,
   device,
@@ -79,15 +81,21 @@ class UserError {
     );
   }
 
-  /// HTTP status carried by [error], typed or embedded as `HTTP nnn`.
+  /// HTTP status carried by [error] — typed ([HttpStatusException],
+  /// [CloudApiException]) or embedded as `HTTP nnn`.
   static int? statusOf(Object error) {
+    if (error is CloudApiException) return error.status;
     if (error is HttpStatusException) return error.statusCode;
     final match = RegExp(r'\bHTTP (\d{3})\b').firstMatch('$error');
     return match == null ? null : int.parse(match.group(1)!);
   }
 
   static UserErrorKind kindForStatus(int status) {
+    // 0 is not an HTTP status: CloudRestClient uses it for a request that
+    // timed out before any answer arrived (`CloudApiException(0, 'timeout')`).
+    if (status == 0) return UserErrorKind.timeout;
     if (status == 401) return UserErrorKind.unauthorized;
+    if (status == 402) return UserErrorKind.quotaExceeded;
     if (status == 403) return UserErrorKind.forbidden;
     if (status == 404 || status == 410) return UserErrorKind.notFound;
     if (status == 408) return UserErrorKind.timeout;
@@ -136,6 +144,7 @@ class UserError {
         UserErrorKind.forbidden => l.errorForbidden,
         UserErrorKind.notFound => l.errorNotFound,
         UserErrorKind.rateLimited => l.errorRateLimited,
+        UserErrorKind.quotaExceeded => l.errorQuotaExceeded,
         UserErrorKind.server => l.errorServer,
         UserErrorKind.badResponse => l.errorBadResponse,
         UserErrorKind.device => l.errorDevice,
@@ -152,7 +161,11 @@ class UserError {
   );
 
   /// First line of [error] without Dart type prefixes, capped for display.
+  /// A [CloudApiException] contributes its server-written message — the
+  /// error envelope's human sentence — not the `CloudApiException: 402 …`
+  /// toString form.
   static String detailOf(Object error) {
+    if (error is CloudApiException) return _capDetail(error.message);
     var line = '$error'
         .split('\n')
         .map((s) => s.trim())
@@ -162,8 +175,11 @@ class UserError {
       if (stripped == line) break;
       line = stripped;
     }
-    return line.length > 300 ? '${line.substring(0, 300)}…' : line;
+    return _capDetail(line);
   }
+
+  static String _capDetail(String line) =>
+      line.length > 300 ? '${line.substring(0, 300)}…' : line;
 }
 
 /// Shorthand for the common snackbar case: the friendly sentence only.

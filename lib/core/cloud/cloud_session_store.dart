@@ -16,11 +16,13 @@
 ///    cache row also records the replay cursor (the multiplexer's last
 ///    accepted seq) so a resumed client can seed the projector and subscribe
 ///    from the cache high-water mark (the T7 review carry).
-///  * **Outbox** — [enqueue] persists prompts to `ovid_cloud_outbox` (FIFO,
-///    JSON) so process death cannot lose a composed prompt; [flushOutbox]
-///    sends them in order with their stored `clientMsgId` (Task 4
-///    idempotency: a replay returns the ORIGINAL run and is removed without
-///    a second optimistic row).
+///  * **Outbox** — [enqueue] persists prompts to the account-scoped
+///    `ovid_cloud_outbox` key (FIFO, JSON) so process death cannot lose a
+///    composed prompt; [flushOutbox] sends them in order with their stored
+///    `clientMsgId` (Task 4 idempotency: a replay returns the ORIGINAL run
+///    and is removed without a second optimistic row). Entries are stamped
+///    with the enqueuing account and only ever delivered to it (P0 privacy:
+///    account A's prompts never reach account B, even on a shared device).
 ///
 /// [CloudTranscriptSink] is the seam back into `CloudAgentFacade`: the store
 /// never imports the facade (which imports this file), so the facade attaches
@@ -97,7 +99,10 @@ class CloudSessionStore extends ChangeNotifier {
   /// Local session id → server UUIDv7 id (JSON object), per the plan.
   static const String idMapKey = 'ovid_cloud_session_ids';
 
-  /// FIFO prompt queue (JSON list of [OutboxEntry]), per the plan.
+  /// FIFO prompt queue (JSON list of [OutboxEntry]), per the plan. New
+  /// writes go through `AppState.accountScopedPrefKey` so each account owns
+  /// its queue on disk; this plain form is the GUEST key and the legacy
+  /// pre-scoping key, read once for migration at [_load].
   static const String outboxKey = 'ovid_cloud_outbox';
 
   /// `SessionHistoryRepository` namespace holding the offline transcript
@@ -109,6 +114,12 @@ class CloudSessionStore extends ChangeNotifier {
   /// so an outbox entry that already names a SERVER id is never mistaken for
   /// a local id and re-created as a duplicate session on flush.
   static const String knownServerIdsKey = 'ovid_cloud_server_ids';
+
+  /// Server ids deleted locally whose DELETE has not been confirmed by the
+  /// server yet (2xx or 404). [refreshSessions] hides these rows — an
+  /// offline delete must not resurrect on the next refresh — and retries
+  /// their DELETE; a confirmed delete clears the tombstone.
+  static const String tombstonesKey = 'ovid_cloud_deleted_server_ids';
 
   final CloudRestClient _rest;
   final SessionHistoryRepository _cache;
@@ -125,7 +136,13 @@ class CloudSessionStore extends ChangeNotifier {
 
   final Map<String, String> _idMap = <String, String>{};
   final Set<String> _knownServerIds = <String>{};
+  final Set<String> _deletedServerIds = <String>{};
   final List<OutboxEntry> _outbox = <OutboxEntry>[];
+
+  /// Every outbox prefs key this process has read or written (scoped and
+  /// legacy forms), so a drained owner's key can be removed instead of
+  /// resurrecting stale rows on the next load.
+  final Set<String> _outboxKeys = <String>{};
 
   /// In-memory view of the cache, populated by [loadTranscript] / reads.
   /// Sync getters ([cachedTranscriptFor], [cachedCursorFor]) serve the
@@ -193,8 +210,43 @@ class CloudSessionStore extends ChangeNotifier {
     // outbox flush from re-creating one after a restart).
     _knownServerIds.addAll(_idMap.values);
     _decodeKnownServerIds(prefs.getString(knownServerIdsKey));
-    _decodeOutbox(prefs.getString(outboxKey));
+    _decodeTombstones(prefs.getString(tombstonesKey));
+    await _loadOutbox(prefs);
     _loaded = true;
+  }
+
+  /// Loads this account's queue, then migrates any pre-scoping rows off the
+  /// legacy plain key (P0 privacy).
+  ///
+  /// The store is only constructed once Firebase reports the signed-in
+  /// account (main.dart's `_warmCloud`), so the account-scoped read below
+  /// happens with the real owner already current. Rows the old build wrote
+  /// under the plain key carry no `account` stamp — single-device reality:
+  /// they were enqueued by whoever was signed in — so the CURRENT account
+  /// adopts them and the legacy key is retired in the same pass.
+  Future<void> _loadOutbox(SharedPreferences prefs) async {
+    final account = AppState.I.sessionAccountId;
+    final scopedKey = AppState.I.accountScopedPrefKey(outboxKey);
+    // Guest's scoped key IS the plain key; reading both would duplicate rows.
+    final legacyRaw =
+        scopedKey == outboxKey ? null : prefs.getString(outboxKey);
+    final hasLegacy = legacyRaw != null && legacyRaw.isNotEmpty;
+
+    _outboxKeys.add(scopedKey);
+    _decodeOutbox(prefs.getString(scopedKey));
+    if (hasLegacy) _decodeOutbox(legacyRaw);
+
+    var unstamped = false;
+    for (var i = 0; i < _outbox.length; i++) {
+      if (_outbox[i].account == null) {
+        _outbox[i] = _outbox[i].copyWith(account: account);
+        unstamped = true;
+      }
+    }
+    if (unstamped || hasLegacy) {
+      await _persistOutbox();
+      if (hasLegacy) await prefs.remove(outboxKey);
+    }
   }
 
   /// Completes once the persisted map/outbox are in memory. Every async API
@@ -244,6 +296,19 @@ class CloudSessionStore extends ChangeNotifier {
     return resolveServerSessionId(id);
   }
 
+  /// The server id to address [id] on the wire when the server OWNS the
+  /// session: the mapped server UUID for a local id, or [id] itself when it
+  /// is a server-native row this process has seen. Null for a purely local
+  /// id (never sent, never synced) — unlike [resolveServerSessionId] an
+  /// unknown id is never passed through, so a caller can skip the request.
+  ///
+  /// This is the synchronous form: it sees whatever [ready] has loaded so far.
+  String? knownServerIdFor(String id) {
+    final mapped = _idMap[id];
+    if (mapped != null) return mapped;
+    return _knownServerIds.contains(id) ? id : null;
+  }
+
   /// Creates the server session on first send; idempotent across calls,
   /// concurrent callers and process restarts (the map is persisted).
   Future<String> ensureServerSession(
@@ -283,6 +348,60 @@ class CloudSessionStore extends ChangeNotifier {
     return dto.id;
   }
 
+  // -------------------------------------------------------------------------
+  // Session delete (tombstones)
+  // -------------------------------------------------------------------------
+
+  /// True when [serverId] was deleted locally and the server has not
+  /// confirmed the delete yet — [refreshSessions] hides such rows.
+  bool isTombstoned(String serverId) => _deletedServerIds.contains(serverId);
+
+  /// Server half of a chat delete ([AppState.deleteSession]): DELETEs the
+  /// mapped server session and keeps a local TOMBSTONE so an offline delete
+  /// cannot be resurrected by the next [refreshSessions].
+  ///
+  /// * [localOrServerId] resolves via [knownServerIdFor] — a mapped local id
+  ///   OR a server-native row. A purely local chat (never sent, never
+  ///   synced) has no server copy: the call is a no-op.
+  /// * The tombstone is written BEFORE the DELETE fires and cleared ONLY
+  ///   when the server confirms the row is gone (2xx, or 404 = already
+  ///   deleted). Any other failure keeps it; [refreshSessions] retries the
+  ///   DELETE until it confirms.
+  /// * The id map entry is dropped either way, so a locally re-created chat
+  ///   with the same id gets a fresh server session on its next send.
+  Future<void> deleteServerSession(String localOrServerId) async {
+    await _ready;
+    final serverId = knownServerIdFor(localOrServerId);
+    if (serverId == null) return; // never synced: nothing lives on the server
+    _deletedServerIds.add(serverId);
+    _idMap.removeWhere((_, server) => server == serverId);
+    _knownServerIds.remove(serverId);
+    await _persistIds();
+    await _deleteOnServer(serverId);
+    await _persistIds();
+    notifyListeners();
+  }
+
+  /// Fires the DELETE for [serverId] and clears the tombstone when the
+  /// server confirms the row is gone (2xx, or 404). Any other failure keeps
+  /// it — the next [refreshSessions] retries. Never throws: a delete that
+  /// cannot reach the server is exactly the offline case the tombstone
+  /// exists for.
+  Future<void> _deleteOnServer(String serverId) async {
+    try {
+      await _rest.deleteSession(serverId);
+      _deletedServerIds.remove(serverId);
+    } on CloudApiException catch (e) {
+      if (e.status == 404) {
+        // Already gone server-side: the tombstone's work is done.
+        _deletedServerIds.remove(serverId);
+      }
+      // Any other 4xx/5xx keeps the tombstone for the next refresh retry.
+    } catch (_) {
+      // Network failure: keep the tombstone; refreshSessions retries.
+    }
+  }
+
   /// Walks `GET /sessions` keyset pages and reconciles [AppState.sessions].
   ///
   /// Server sessions become `ChatSession` rows keyed by their server id.
@@ -291,6 +410,13 @@ class CloudSessionStore extends ChangeNotifier {
   /// server id stay untouched until their first send.
   Future<void> refreshSessions() async {
     await _ready;
+    // Tombstone retry: deletes that never reached the server (an offline
+    // delete, a failed DELETE) are re-fired here; the tombstone clears only
+    // when the server confirms the row is gone. Runs before the page walk so
+    // a just-confirmed delete cannot re-add the row below.
+    for (final serverId in List<String>.of(_deletedServerIds)) {
+      await _deleteOnServer(serverId);
+    }
     final localByServer = <String, String>{
       for (final entry in _idMap.entries) entry.value: entry.key,
     };
@@ -301,6 +427,9 @@ class CloudSessionStore extends ChangeNotifier {
       final page = await _rest.listSessions(limit: 50, cursor: cursor);
       for (final dto in page.items) {
         if (!seen.add(dto.id)) continue;
+        // A tombstoned row the DELETE has not killed yet must not
+        // resurrect locally (the offline-delete contract).
+        if (_deletedServerIds.contains(dto.id)) continue;
         _knownServerIds.add(dto.id);
         final localId = localByServer[dto.id];
         if (localId != null) {
@@ -576,20 +705,36 @@ class CloudSessionStore extends ChangeNotifier {
   // -------------------------------------------------------------------------
 
   /// Queued prompts for [sessionId] in FIFO order (the composer queue chip).
-  /// Accepts a local id or its mapped server id.
+  /// Accepts a local id or its mapped server id. Only the CURRENT account's
+  /// entries are visible (P0 privacy: another account's queued prompt text
+  /// is never surfaced, even on a shared device).
   List<OutboxEntry> outboxFor(String sessionId) {
     final target = serverIdFor(sessionId) ?? sessionId;
     return List<OutboxEntry>.unmodifiable(
       _outbox.where(
         (entry) =>
-            entry.sessionId == target || entry.sessionId == sessionId,
+            _ownedByCurrentAccount(entry) &&
+            (entry.sessionId == target || entry.sessionId == sessionId),
       ),
     );
   }
 
-  /// Every queued prompt, FIFO. The facade uses this to upload staged files
-  /// before the reconnect flush.
-  List<OutboxEntry> get outboxEntries => List<OutboxEntry>.unmodifiable(_outbox);
+  /// Every queued prompt owned by the current account, FIFO. The facade uses
+  /// this to upload staged files before the reconnect flush; a foreign
+  /// account's retained entries must not trigger session creates or uploads
+  /// under the wrong credentials.
+  List<OutboxEntry> get outboxEntries =>
+      List<OutboxEntry>.unmodifiable(_ownedOutboxView);
+
+  /// True only when [entry] was enqueued by the account that is signed in
+  /// NOW. Null never owns (fail-closed): post-migration every in-memory
+  /// entry is stamped, so an unstamped row means the migration did not run.
+  bool _ownedByCurrentAccount(OutboxEntry entry) =>
+      entry.account != null &&
+      entry.account == AppState.I.sessionAccountId;
+
+  Iterable<OutboxEntry> get _ownedOutboxView =>
+      _outbox.where(_ownedByCurrentAccount);
 
   /// The last flush failure (surfaced by Task 10), or null.
   ({String code, String message})? get outboxError => _outboxError;
@@ -603,12 +748,16 @@ class CloudSessionStore extends ChangeNotifier {
   }
 
   /// Queues [content] durably. The entry gets a fresh 32-hex `clientMsgId`
-  /// (Task 4 idempotency) and is persisted before this future completes, so
-  /// a process kill cannot lose it.
+  /// (Task 4 idempotency), is stamped with the account signed in NOW (P0
+  /// privacy: only that account can ever deliver or see it) and is persisted
+  /// before this future completes, so a process kill cannot lose it.
+  /// [maxOutputTokens] is the Settings output cap captured at enqueue time
+  /// (null = auto) and rides the flush's sendMessage.
   Future<void> enqueue(
     String sessionId,
     String content, {
     List<String> attachmentIds = const <String>[],
+    int? maxOutputTokens,
   }) async {
     await _ready;
     final target = serverIdFor(sessionId) ?? sessionId;
@@ -618,6 +767,8 @@ class CloudSessionStore extends ChangeNotifier {
       content: content,
       attachmentIds: attachmentIds,
       createdAt: DateTime.now(),
+      maxOutputTokens: maxOutputTokens,
+      account: AppState.I.sessionAccountId,
     ));
     await _persistOutbox();
     notifyListeners();
@@ -646,6 +797,10 @@ class CloudSessionStore extends ChangeNotifier {
   /// * 409 `run_conflict` → the prompt was already accepted → remove;
   /// * any other 4xx → remove + surface (the entry can never succeed);
   /// * 5xx / network → stop, keep the remainder, retry on the next flip.
+  ///
+  /// A RETAINED foreign entry (another account's prompt left in the queue by
+  /// an account switch) is skipped, never sent and never dropped — it stays
+  /// under its owner's key until that account signs in again.
   Future<void> flushOutbox() async {
     await _ready;
     final pending = _flushFuture;
@@ -663,6 +818,10 @@ class CloudSessionStore extends ChangeNotifier {
     if (offline) return;
     for (final entry in List<OutboxEntry>.of(_outbox)) {
       if (!_outbox.contains(entry)) continue;
+      // P0 privacy: skip-and-RETAIN another account's prompt. Delivering it
+      // here would send account A's text under B's credentials; dropping it
+      // would lose A's composed prompt. It flushes when its owner returns.
+      if (!_ownedByCurrentAccount(entry)) continue;
       String serverId;
       try {
         serverId = await ensureServerSession(entry.sessionId);
@@ -680,6 +839,7 @@ class CloudSessionStore extends ChangeNotifier {
           entry.content,
           attachmentIds: entry.attachmentIds,
           clientMsgId: entry.clientMsgId,
+          maxOutputTokens: entry.maxOutputTokens,
         );
         _transcriptSink?.appendSentUserMessage(
           serverId,
@@ -714,8 +874,9 @@ class CloudSessionStore extends ChangeNotifier {
         return; // keep the remainder
       }
     }
-    // A fully-drained queue clears the stale error (Task 10's chip).
-    if (_outbox.isEmpty && _outboxError != null) {
+    // A fully-drained queue clears the stale error (Task 10's chip). Foreign
+    // retained entries do not hold the chip: they are not this account's.
+    if (_ownedOutboxView.isEmpty && _outboxError != null) {
       _outboxError = null;
       notifyListeners();
     }
@@ -763,6 +924,18 @@ class CloudSessionStore extends ChangeNotifier {
     }
   }
 
+  void _decodeTombstones(String? raw) {
+    if (raw == null || raw.isEmpty) return;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        _deletedServerIds.addAll(decoded.whereType<String>());
+      }
+    } catch (_) {
+      // Corrupt list: harmless — the server list would just re-appear.
+    }
+  }
+
   void _decodeOutbox(String? raw) {
     if (raw == null || raw.isEmpty) return;
     try {
@@ -794,16 +967,36 @@ class CloudSessionStore extends ChangeNotifier {
     await prefs.setString(idMapKey, jsonEncode(_idMap));
     await prefs.setString(
         knownServerIdsKey, jsonEncode(_knownServerIds.toList()));
+    await prefs.setString(
+        tombstonesKey, jsonEncode(_deletedServerIds.toList()));
   }
 
+  /// Writes the queue partitioned by owner: each account's entries go under
+  /// THAT account's scoped key (P0 privacy), so one account's writes never
+  /// clobber or carry another's prompts. A retained foreign entry survives a
+  /// flush/persist by the current account intact, under its owner's key.
   Future<void> _persistOutbox() async {
     final prefs = _prefs;
     if (prefs == null) return;
-    await prefs.setString(
-      outboxKey,
-      jsonEncode(<Map<String, dynamic>>[
-        for (final entry in _outbox) entry.toJson(),
-      ]),
-    );
+    final byAccount = <String, List<Map<String, dynamic>>>{};
+    for (final entry in _outbox) {
+      final owner = entry.account ?? AppState.I.sessionAccountId;
+      byAccount.putIfAbsent(owner, () => <Map<String, dynamic>>[]).add(
+        entry.toJson(),
+      );
+    }
+    final written = <String>{};
+    for (final owner in byAccount.keys) {
+      final key = AppState.I.accountScopedPrefKey(outboxKey, owner);
+      written.add(key);
+      await prefs.setString(key, jsonEncode(byAccount[owner]));
+    }
+    // A drained owner's key must not resurrect stale rows on the next load.
+    for (final key in _outboxKeys.difference(written)) {
+      await prefs.remove(key);
+    }
+    _outboxKeys
+      ..clear()
+      ..addAll(written);
   }
 }

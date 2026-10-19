@@ -6,6 +6,8 @@
 // Both the 200-ok and 503-degraded variants carry the same body; the client
 // parses them identically and the SCREEN owns the degraded presentation.
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
@@ -99,4 +101,39 @@ void main() {
     expect(find.text('Retry'), findsNothing);
     expect(find.text('Operational'), findsNWidgets(2));
   });
+
+  testWidgets('the refresh button stays visible and enabled while a check '
+      'hangs', (tester) async {
+    // The probe NEVER completes in this test — the hung-gateway case. The
+    // refresh control must not vanish behind a spinner (that turned the card
+    // into a dead end); the busy state lives in the body status line.
+    final rest = _GatedHealthRest();
+    await tester.pumpWidget(_host(SettingsHealthScreen(rest: rest)));
+    await tester.pump();
+
+    expect(find.byType(CircularProgressIndicator), findsOneWidget,
+        reason: 'the busy line owns the spinner');
+    final button = tester.widget<IconButton>(find.byType(IconButton));
+    expect(button.onPressed, isNotNull,
+        reason: 'refresh stays enabled while busy');
+    expect(rest.calls, 1);
+
+    // A re-tap while busy just restarts the probe — it is not blocked.
+    await tester.tap(find.byType(IconButton));
+    await tester.pump();
+    expect(rest.calls, 2);
+  });
+}
+
+/// A [CloudRestClient] whose `health()` hangs until released.
+class _GatedHealthRest extends CloudRestClient {
+  _GatedHealthRest() : super(headers: CloudHeaders.forTest(), restBase: 'http://test');
+
+  int calls = 0;
+
+  @override
+  Future<CloudHealth> health() {
+    calls++;
+    return Completer<CloudHealth>().future;
+  }
 }

@@ -141,9 +141,10 @@ void main() {
       const CloudConnectionState(CloudConnectionStatus.idle),
     );
 
-    // With an empty session model there is no "Auto" opener; the compact
-    // picker affordance is labelled Select model.
-    await openPicker(tester, openerText: 'Select model');
+    // Owner directive 2026-10-18: Auto is ALWAYS pre-selected — an empty
+    // or sentinel session model renders as Auto in the header, never
+    // "Select model". The picker opens from the Auto-labelled affordance.
+    await openPicker(tester, openerText: 'Auto');
 
     expect(find.text('Ovid Cloud'), findsOneWidget);
     // The server-side `auto` alias stays selectable while idle, next to the

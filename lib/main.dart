@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import 'core/cert_pinning.dart';
+import 'core/cloud/cloud_agent_facade.dart';
 import 'core/cloud/cloud_session_store.dart';
 import 'core/cloud/cloud_ws.dart';
 import 'core/cloud/push_service.dart';
@@ -208,6 +209,10 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     if (!firebase.isAvailable) return;
     if (!firebase.isSignedIn || !firebase.accountReady) return;
     firebase.removeListener(_maybeStartCloud);
+    // Session-delete teardown hook: deleting a chat drops its WS
+    // subscription, projection and every other facade surface
+    // (state.deleteSession also fires the server-side DELETE).
+    AppState.I.onSessionDeleted = CloudAgentFacade.I.dropSession;
     unawaited(PushService.I.init());
     unawaited(_warmCloud());
   }

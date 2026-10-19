@@ -63,6 +63,12 @@ abstract class AgentSurface extends ChangeNotifier {
   /// Live status line for [sessionId] ("retrying in 9s…"), or null.
   String? statusFor(String sessionId);
 
+  /// True when [sessionId]'s live run has produced no event of any kind for
+  /// the response-timeout window — the facade's client-side watchdog, a
+  /// user-visible "still waiting" surface (never a cancel). Concrete so
+  /// implementations without a watchdog keep the old behavior.
+  bool stalledFor(String sessionId) => false;
+
   /// Ticks once per live-bubble stream publication for [sessionId].
   ValueListenable<int> liveBubbleTicksFor(String sessionId);
 

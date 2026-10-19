@@ -4,10 +4,11 @@
 //   - server ops subscribed/event/pong/error    — cloud/packages/shared/src/ws.ts
 //   - SessionEvent {sessionId, seq, type, payload, ts} — shared/src/events.ts
 //   - close 4401 = WS_CLOSE_UNAUTHENTICATED     — cloud/apps/gateway/src/ws.ts
-//   - replay-degradation signal = {"op":"error","code":"internal",
-//     "message":"Replay failed.","sessionId":…} (the built server has NO
-//     dedicated trimmed-frame op; the internal error family is the only
-//     signal, and the server deletes the subscription on it).
+//   - replay-degradation signals = the additive {"op":"subscribed",
+//     "sessionId":…,"trimmed":true} flag (the DURABLE gap signal — the
+//     server-side sub stays live) AND the legacy {"op":"error","code":
+//     "internal","message":"Replay failed.","sessionId":…} family (older
+//     servers; the server deletes the subscription on it).
 //   - compareSeq numeric-on-both-parts semantics — gateway ws.ts compareSeq.
 
 import 'dart:async';
@@ -571,6 +572,151 @@ void main() {
     expect(errors.single,
         isA<CloudWsError>().having((e) => e.code, 'code', 'internal'));
     await ws.disconnect();
+  });
+
+  test('(j3) subscribed{trimmed:true} — the durable gap signal — triggers '
+      'the SAME mirror catch-up, then live continues (trimmed-ack heal)',
+      () async {
+    final store = await SharedPreferences.getInstance();
+    await store.setString('$_lastEventKey' 's1', '5-0');
+    final mirrorCalls = <(String, String?)>[];
+    final spy = SocketFactorySpy();
+    final ws = await _build(
+      spy,
+      prefs: store,
+      mirror: (sessionId, lastSeq) async {
+        mirrorCalls.add((sessionId, lastSeq));
+        return [_event('s1', '6-0'), _event('s1', '7-0')];
+      },
+    );
+    final (events, errors) = await _subscribeAndListen(ws, 's1');
+    final socket = spy.sockets.single;
+    expect(socket.sentJson().single['lastEventId'], '5-0');
+
+    // The durable signal (@ovid/shared): the ack itself carries the trimmed
+    // flag — unlike the error-frame path, the server-side sub stays live.
+    socket.server(const {
+      'op': 'subscribed',
+      'sessionId': 's1',
+      'trimmed': true,
+    });
+    await pumpEventQueue();
+
+    expect(mirrorCalls, [('s1', '5-0')],
+        reason: 'the mirror reads strictly after the sub cursor');
+    expect(events.map((e) => e.seq), ['6-0', '7-0'],
+        reason: 'mirror events flow through the session stream once');
+    expect(errors, isEmpty, reason: 'the trimmed gap heals, no stream error');
+    expect(store.getString('$_lastEventKey' 's1'), '7-0',
+        reason: 'the cursor re-seeds from the mirror last event');
+
+    // Live continues: the catch-up's re-subscribe goes out with the
+    // re-seeded cursor (ws.ts re-subscribe replaces the still-live sub in
+    // place), and overlap with the mirror range dedupes.
+    expect(
+      socket.sentJson().last,
+      {'op': 'subscribe', 'sessionId': 's1', 'lastEventId': '7-0'},
+    );
+    socket.server(_eventFrame('s1', '6-0'));
+    socket.server(_eventFrame('s1', '8-0'));
+    await pumpEventQueue();
+    expect(events.map((e) => e.seq), ['6-0', '7-0', '8-0']);
+    await ws.disconnect();
+  });
+
+  test('(j4) a plain subscribed ack never touches the mirror; a trimmed ack '
+      'for a session we no longer hold is ignored', () async {
+    final mirrorCalls = <(String, String?)>[];
+    final spy = SocketFactorySpy();
+    final ws = await _build(
+      spy,
+      mirror: (sessionId, lastSeq) async {
+        mirrorCalls.add((sessionId, lastSeq));
+        return const <CloudSessionEvent>[];
+      },
+    );
+    final (events, errors) = await _subscribeAndListen(ws, 's1');
+    final socket = spy.sockets.single;
+
+    // The normal ack (no flag)…
+    socket.server(const {'op': 'subscribed', 'sessionId': 's1'});
+    // …an explicit false…
+    socket.server(const {
+      'op': 'subscribed',
+      'sessionId': 's1',
+      'trimmed': false,
+    });
+    // …and a trimmed ack for an unknown session: none of these heal, none
+    // may fire the fallback.
+    socket.server(const {
+      'op': 'subscribed',
+      'sessionId': 'sX',
+      'trimmed': true,
+    });
+    await pumpEventQueue();
+
+    expect(mirrorCalls, isEmpty,
+        reason: 'only trimmed:true for a held session sub triggers the '
+            'catch-up');
+    expect(events, isEmpty);
+    expect(errors, isEmpty);
+    await ws.disconnect();
+  });
+
+  test('(j5) readMirrorPages pages with after=<last seq of the previous '
+      'page> until a SHORT page, then stops; off-contract responses end '
+      'leniently', () async {
+    final afters = <String?>[];
+    final events = await WsMultiplexer.readMirrorPages((after) async {
+      afters.add(after);
+      if (after == '5-0') {
+        // Page 1: a FULL 200-event page (the route's DEFAULT_EVENT_LIMIT),
+        // resumed strictly after the seeded cursor.
+        return <String, dynamic>{
+          'events': [
+            for (var i = 0; i < 200; i++)
+              _sessionEventJson('s1', '${1000 + i}-0'),
+          ],
+        };
+      }
+      // Page 2: a short page → the mirror is exhausted.
+      return <String, dynamic>{
+        'events': [
+          _sessionEventJson('s1', '1200-0'),
+          _sessionEventJson('s1', '1200-1'),
+        ],
+      };
+    }, '5-0');
+    expect(afters, ['5-0', '1199-0'],
+        reason: 'resume after the cursor, then after the page-1 last seq');
+    expect(events, hasLength(202));
+    expect(events.first.seq, '1000-0');
+    expect(events.last.seq, '1200-1');
+
+    // Off-contract response (no `events` list): stop, keep what was read.
+    final offContract = await WsMultiplexer.readMirrorPages((after) async {
+      return <String, dynamic>{'unexpected': true};
+    }, null);
+    expect(offContract, isEmpty);
+  });
+
+  test('(j6) readMirrorPages stops at the 25-page cap (5000 events) and '
+      'gives up gracefully', () async {
+    var calls = 0;
+    final events = await WsMultiplexer.readMirrorPages((after) async {
+      calls++;
+      // Every page FULL and advancing — only the cap can stop the loop.
+      return <String, dynamic>{
+        'events': [
+          for (var i = 0; i < 200; i++)
+            _sessionEventJson('s1', '${calls * 200 + i}-0'),
+        ],
+      };
+    }, null);
+    expect(calls, 25, reason: 'the loop is bounded, never spins');
+    expect(events, hasLength(5000));
+    expect(events.first.seq, '200-0');
+    expect(events.last.seq, '5199-0');
   });
 
   test('(k) non-recoverable error frames forward on the session stream; '

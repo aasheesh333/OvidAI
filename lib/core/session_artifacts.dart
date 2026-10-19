@@ -71,6 +71,38 @@ class SessionArtifact {
   int get hashCode => Object.hash(id, time, size);
 }
 
+final RegExp _uuidShape = RegExp(
+  r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+);
+
+/// The gateway artifact id embedded in a presigned artifact URL, or null.
+///
+/// Artifact R2 keys are `users/{uid}/artifacts/{sessionId}/{artifactId}-{name}`
+/// (cloud/packages/storage/src/keys.ts), so the workspace-object id rides in
+/// the URL path right after the session id — exactly the id the re-mint route
+/// (`GET /sessions/:id/artifacts/:artifactId/url`) needs. Returns null for
+/// anything without that layout (local paths, legacy URLs): those callers
+/// keep using the URL they have.
+String? cloudArtifactIdOf(String? url) {
+  if (url == null || url.isEmpty) return null;
+  final Uri parsed;
+  try {
+    parsed = Uri.parse(url);
+  } catch (_) {
+    return null;
+  }
+  final segments = parsed.pathSegments;
+  for (var i = 0; i + 2 < segments.length; i++) {
+    if (segments[i] != 'artifacts') continue;
+    // `…/artifacts/{sessionId}/{artifactId}-{name}` — the id is the fixed
+    // 36-char UUID prefix of the last segment.
+    final piece = segments[i + 2];
+    final id = piece.length >= 36 ? piece.substring(0, 36) : '';
+    if (_uuidShape.hasMatch(id)) return id;
+  }
+  return null;
+}
+
 const _imageExt = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic', 'svg'};
 const _htmlExt = {'html', 'htm'};
 const _codeExt = {

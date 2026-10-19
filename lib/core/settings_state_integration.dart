@@ -567,7 +567,7 @@ extension _SettingsStateIntegration on AppState {
           ChatSession(
             id: id,
             title: row['title'] as String,
-            model: 'Select a provider',
+            model: 'auto',
             mode: 'safe',
             createdAt: DateTime.parse(row['createdAt'] as String),
             messages: messages,

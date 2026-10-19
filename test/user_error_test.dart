@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/diag.dart';
 import 'package:ovid_ai/l10n/l10n.dart';
 import 'package:ovid_ai/ui/user_error.dart';
@@ -128,10 +129,118 @@ void main() {
       },
     );
 
-    test('status helper covers the 5xx range only', () {
+    test('status helper maps the 5xx range, 402 and leaves 418 unknown', () {
       expect(UserError.fromHttpStatus(502).kind, UserErrorKind.server);
       expect(UserError.fromHttpStatus(418).kind, UserErrorKind.unknown);
       expect(UserError.fromHttpStatus(401).message, l.errorUnauthorized);
+      expect(UserError.fromHttpStatus(402).kind, UserErrorKind.quotaExceeded);
+      expect(UserError.fromHttpStatus(402).message, l.errorQuotaExceeded);
+    });
+  });
+
+  // The shapes CloudRestClient actually throws: every non-2xx gateway answer
+  // arrives as a CloudApiException whose toString carries no `HTTP nnn`, so
+  // these only classify through the typed status.
+  group('CloudApiException (the gateway error shape)', () {
+    final cases = <(String, CloudApiException, UserErrorKind, String)>[
+      (
+        '401 unauthenticated',
+        CloudApiException(
+          status: 401,
+          code: 'unauthenticated',
+          message: 'Sign in to use Ovid Cloud.',
+        ),
+        UserErrorKind.unauthorized,
+        l.errorUnauthorized,
+      ),
+      (
+        '402 daily_limit_reached',
+        CloudApiException(
+          status: 402,
+          code: 'daily_limit_reached',
+          message: 'Daily limit reached. Your allowance resets automatically.',
+        ),
+        UserErrorKind.quotaExceeded,
+        l.errorQuotaExceeded,
+      ),
+      (
+        '403 forbidden',
+        CloudApiException(
+          status: 403,
+          code: 'forbidden',
+          message: 'This account cannot use that feature.',
+        ),
+        UserErrorKind.forbidden,
+        l.errorForbidden,
+      ),
+      (
+        '404 not_found',
+        CloudApiException(
+          status: 404,
+          code: 'not_found',
+          message: 'Session not found.',
+        ),
+        UserErrorKind.notFound,
+        l.errorNotFound,
+      ),
+      (
+        '429 rate_limited',
+        CloudApiException(
+          status: 429,
+          code: 'rate_limited',
+          message: 'Too many requests. Slow down.',
+        ),
+        UserErrorKind.rateLimited,
+        l.errorRateLimited,
+      ),
+      (
+        '0 timeout (request cut off before any answer)',
+        CloudApiException(
+          status: 0,
+          code: 'timeout',
+          message: 'Ovid Cloud did not answer in time.',
+        ),
+        UserErrorKind.timeout,
+        l.errorTimeout,
+      ),
+      (
+        '500 internal',
+        CloudApiException(
+          status: 500,
+          code: 'internal',
+          message: 'Ovid Cloud request failed (HTTP 500).',
+        ),
+        UserErrorKind.server,
+        l.errorServer,
+      ),
+    ];
+    for (final (name, error, kind, message) in cases) {
+      test(name, () {
+        final mapped = UserError.from(error);
+        expect(mapped.kind, kind);
+        expect(mapped.statusCode, error.status);
+        expect(mapped.message, message);
+        expect(friendlyError(error), message);
+        expect(mapped.message, isNot(matches(_rawLeak)));
+      });
+    }
+
+    test('the server envelope message becomes the detail line', () {
+      expect(
+        UserError.from(
+          CloudApiException(
+            status: 402,
+            code: 'daily_limit_reached',
+            message: 'Daily limit reached.',
+            resetsAt: DateTime.utc(2026, 10, 19),
+          ),
+        ).detail,
+        'Daily limit reached.',
+      );
+      expect(
+        UserError.from(const HttpStatusException(402)).detail,
+        'HTTP 402',
+      );
     });
   });
 

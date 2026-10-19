@@ -12,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'cloud/cloud_agent_facade.dart';
+import 'cloud/cloud_session_store.dart';
 import 'cloud/studio_remote_client.dart';
 import 'firebase_service.dart';
 import 'cloud_app_check.dart';
@@ -1503,7 +1504,13 @@ class AppState extends ChangeNotifier {
         : '${key}_owner_${Uri.encodeComponent(owner)}';
   }
 
-  String accountScopedPrefKey(String key) => _accountKey(key);
+  /// The prefs key for [key] under [account] (the current account when
+  /// omitted). Guest keeps the plain key, matching every `_accountKey` use
+  /// above. Stores that persist per-account rows off the session namespace
+  /// (e.g. the cloud prompt outbox) derive their keys through this so the
+  /// `_owner_` spelling stays single-sourced.
+  String accountScopedPrefKey(String key, [String? account]) =>
+      _accountKey(key, account);
 
   /// Revoke old ownership synchronously, then restore only the explicitly
   /// named local namespace. Legacy rows have no UID provenance and stay guest.
@@ -1999,6 +2006,23 @@ class AppState extends ChangeNotifier {
         if (s != null && s.model != 'Select a provider') {
           lastSelectedModel = s.model;
           lastSelectedProviderId = s.providerId;
+        }
+      }
+      // Owner directive 2026-10-18: Auto is ALWAYS pre-selected — a cloud-only
+      // app has no "unconfigured" state. An empty backfill (fresh install)
+      // and the legacy 'Select a provider' sentinel both resolve to Ovid
+      // Cloud's `auto` alias so the header can never read "Select model".
+      if (lastSelectedModel.isEmpty || lastSelectedModel == 'Select a provider') {
+        lastSelectedModel = 'auto';
+        lastSelectedProviderId = ovidCloudProviderId;
+      }
+      // Sessions still carrying the sentinel (created before the directive)
+      // migrate on this same bootstrap.
+      for (final session in sessions) {
+        if (session.model == 'Select a provider' || session.model.trim().isEmpty) {
+          session.model = 'auto';
+          session.providerId ??= ovidCloudProviderId;
+          _markSessionDirty(session.id);
         }
       }
       if (lastSelectedModel.isNotEmpty &&
@@ -2571,6 +2595,23 @@ class AppState extends ChangeNotifier {
       );
     }
     onSessionDeleted?.call(id);
+    // Server half of the delete: if the chat has a cloud counterpart,
+    // DELETE it there too (fire-and-forget — an offline delete stays local
+    // and CloudSessionStore's tombstone keeps the next refresh from
+    // resurrecting the row).
+    _deleteServerSession(id);
+  }
+
+  /// DELETEs [localOrServerId]'s cloud copy when one exists. Errors never
+  /// surface: a delete must not fail because the server is unreachable.
+  void _deleteServerSession(String localOrServerId) {
+    unawaited(() async {
+      try {
+        await CloudSessionStore.I.deleteServerSession(localOrServerId);
+      } catch (e) {
+        Diag.swallow('state.deleteServerSession', e);
+      }
+    }());
   }
 
   Future<void> _awaitWorkspaceDeletions() async {
@@ -4127,16 +4168,21 @@ class AppState extends ChangeNotifier {
   }
 
   void newSession() {
+    // Auto is the floor (owner directive 2026-10-18): a new chat NEVER
+    // carries a "Select a provider" sentinel — the last selection or Auto.
+    final newModel = lastSelectedModel.isEmpty || lastSelectedModel == 'Select a provider'
+        ? 'auto'
+        : lastSelectedModel;
     final s = ChatSession(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       title: 'New chat',
-      model: lastSelectedModel.isEmpty
-          ? 'Select a provider'
-          : lastSelectedModel,
+      model: newModel,
     );
-    if (lastSelectedModel.isNotEmpty) {
-      s.providerId =
-          lastSelectedProviderId ?? _inferProviderId(lastSelectedModel);
+    s.providerId = lastSelectedModel == newModel && lastSelectedModel.isNotEmpty
+        ? (lastSelectedProviderId ?? _inferProviderId(lastSelectedModel))
+        : ovidCloudProviderId;
+    if (s.providerId == null || s.providerId!.isEmpty) {
+      s.providerId = ovidCloudProviderId;
     }
     // New session starts with the last Studio repo/folder so a restart never
     // forces fresh selection. A vanished folder falls back to the sandbox.
@@ -4421,6 +4467,11 @@ class AppState extends ChangeNotifier {
     if (s == null) return;
     s.title = title;
     _markSessionDirty(id);
+    // A cloud session's title is server-authoritative: without this PATCH
+    // the next refresh overwrites the rename with the stale server title
+    // (CloudSessionStore._applyDto). Fire-and-forget — the optimistic local
+    // title above stands when the PATCH fails.
+    CloudAgentFacade.renameSessionIfInstalled(id, title);
     notifyListeners();
     persistSessions();
   }
