@@ -22,6 +22,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
@@ -45,9 +46,6 @@ class FakeStoreRest extends CloudRestClient {
       : super(headers: CloudHeaders.forTest(), restBase: 'http://test');
 
   int createCalls = 0;
-
-  /// Thrown by the next createSession (CH-012: non-CloudApiException).
-  Object? createError;
   final List<
       ({
         String sessionId,
@@ -99,11 +97,61 @@ class FakeStoreRest extends CloudRestClient {
     ];
   }
 
+  /// Titles every createSession carried (CH-013).
+  final List<String?> createdTitles = <String?>[];
+
+  /// Title PATCHes (the CH-013 heal), in order.
+  final List<({String id, String? title})> titlePatches =
+      <({String id, String? title})>[];
+
+  @override
+  Future<SessionDto> patchSession(String id, {String? title, String? mode}) async {
+    titlePatches.add((id: id, title: title));
+    return _dtoFor(id, title);
+  }
+
+  static SessionDto _dtoFor(String id, String? title) => SessionDto(
+        id: id,
+        title: title,
+        mode: 'auto',
+        createdAt: DateTime.utc(2026, 10, 17),
+        updatedAt: DateTime.utc(2026, 10, 17),
+      );
+
+  /// Attachment wire log: (session, name) per create, bytes per upload.
+  final List<({String sessionId, String name})> attachmentCreates =
+      <({String sessionId, String name})>[];
+  final List<List<int>> uploads = <List<int>>[];
+
+  @override
+  Future<AttachmentUpload> createAttachment(String sessionId,
+      {required String name, required int size}) async {
+    attachmentCreates.add((sessionId: sessionId, name: name));
+    return AttachmentUpload(
+      attachmentId: '00000000-0000-4000-8000-00000000000${attachmentCreates.length}',
+      uploadUrl: 'https://upload.test/${attachmentCreates.length}',
+      path: 'uploads/$name',
+      expiresAt: DateTime.utc(2026, 10, 17, 1),
+    );
+  }
+
+  @override
+  Future<void> uploadAttachmentBytes(AttachmentUpload upload, List<int> bytes,
+      {Duration? timeout}) async {
+    uploads.add(bytes);
+  }
+
+  /// One-shot non-HTTP failure for the NEXT send (a DNS failure, a socket
+  /// reset — CH-012).
+  Object? nextSendThrow;
+
+  /// Every turn-options payload that reached the wire, in order.
+  final List<CloudTurnOptions> turns = <CloudTurnOptions>[];
+
   @override
   Future<SessionDto> createSession({String? title}) async {
+    createdTitles.add(title);
     createCalls++;
-    final error = createError;
-    if (error != null) throw error;
     final id = 'srv-created-$createCalls';
     return SessionDto(
       id: id,
@@ -138,6 +186,8 @@ class FakeStoreRest extends CloudRestClient {
     );
   }
 
+  CloudTurnOptions lastTurn = CloudTurnOptions.none;
+
   @override
   Future<SendMessageResponse> sendMessage(
     String sessionId,
@@ -145,9 +195,17 @@ class FakeStoreRest extends CloudRestClient {
     List<String> attachmentIds = const [],
     String? clientMsgId,
     int? maxOutputTokens,
+    CloudTurnOptions turn = CloudTurnOptions.none,
   }) async {
+    lastTurn = turn;
+    final thrown = nextSendThrow;
+    if (thrown != null) {
+      nextSendThrow = null;
+      throw thrown;
+    }
     final error = sendErrors[content];
     if (error != null) throw error;
+    turns.add(turn);
     final key = clientMsgId ?? '';
     final prior = responsesByClientMsgId[key];
     if (prior != null) {
@@ -219,14 +277,22 @@ class _RecordingSink implements CloudTranscriptSink {
     prepended.add(messages);
   }
 
+  final List<({String local, String server})> mapped =
+      <({String local, String server})>[];
+
   @override
-  void appendSentUserMessage(
-      String serverSessionId, String userMessageId, String content) {
+  void outboxDelivered(String serverSessionId, OutboxEntry entry,
+      SendMessageResponse response) {
     sentUser.add((
       sessionId: serverSessionId,
-      userMessageId: userMessageId,
-      content: content,
+      userMessageId: response.userMessageId,
+      content: entry.content,
     ));
+  }
+
+  @override
+  void sessionMapped(String localSessionId, String serverSessionId) {
+    mapped.add((local: localSessionId, server: serverSessionId));
   }
 }
 
@@ -298,6 +364,8 @@ Future<_Harness> _buildStore({
     prefs: prefs,
     connection: connection,
     ws: ws,
+    // Tests drive the flush by hand; no real backoff timers.
+    autoRetry: false,
   );
   await store.ready;
   return _Harness(fakeRest, prefs, connection, ws, store, sockets);
@@ -1082,24 +1150,223 @@ void main() {
     });
   });
 
-  group('create-on-first-send failures (CH-012)', () {
-    test('a non-CloudApiException from create is recorded, not unhandled',
-        () async {
-      final rest = FakeStoreRest()..createError = StateError('socket closed');
-      final h = await _buildStore(rest: rest);
+  // -------------------------------------------------------------------------
+  // Wave 1a — send contract and data safety
+  // -------------------------------------------------------------------------
+  group('Wave 1a outbox data safety (CH-009 / CH-010 / CH-012)', () {
+    for (final failure in <(String, Object)>[
+      (
+        'a 30 s timeout (status 0)',
+        CloudApiException(status: 0, code: 'timeout', message: 'slow'),
+      ),
+      (
+        'a 429',
+        CloudApiException(status: 429, code: 'rate_limited', message: 'busy'),
+      ),
+      (
+        'a 503',
+        CloudApiException(status: 503, code: 'unavailable', message: 'down'),
+      ),
+      ('a socket failure', const SocketException('Failed host lookup')),
+    ]) {
+      test('${failure.$1} keeps the prompt for an automatic retry', () async {
+        final h = await _buildStore(knownServerIds: const ['srv-1']);
+        addTearDown(h.ws.dispose);
+        addTearDown(h.store.dispose);
+        h.rest.nextSendThrow = failure.$2;
+
+        await h.store.enqueue('srv-1', 'keep me');
+        await h.store.flushOutbox();
+
+        final kept = h.store.outboxFor('srv-1');
+        expect(kept, hasLength(1), reason: 'a transient failure never drops');
+        expect(kept.single.failed, isFalse, reason: 'it retries by itself');
+        expect(kept.single.attempts, 1);
+
+        // The retry re-sends with the SAME idempotency key (CH-010).
+        final key = kept.single.clientMsgId;
+        await h.store.flushOutbox();
+        expect(h.rest.sent.single.clientMsgId, key);
+        expect(h.store.outboxFor('srv-1'), isEmpty);
+      });
+    }
+
+    test('a 401 is KEPT as "Not sent" (never dropped) until retried', () async {
+      final h = await _buildStore(knownServerIds: const ['srv-1']);
       addTearDown(h.ws.dispose);
       addTearDown(h.store.dispose);
-      final facade =
-          CloudAgentFacade(rest: h.rest, ws: h.ws, store: h.store);
-      addTearDown(facade.dispose);
+      h.rest.sendErrors['who am i'] = CloudApiException(
+          status: 401, code: 'unauthenticated', message: 'expired');
 
-      // Completes normally: no error escapes the fire-and-forget send.
-      await facade.runTask('first prompt', sessionId: 'local-new');
+      await h.store.enqueue('srv-1', 'who am i');
+      await h.store.flushOutbox();
+      final entry = h.store.outboxFor('srv-1').single;
+      expect(entry.failed, isTrue);
+      expect(entry.failedCode, 'unauthenticated');
 
+      // Survives process death.
+      final reloaded = CloudSessionStore(
+        rest: h.rest,
+        cache: SessionHistoryRepository.I,
+        prefs: h.prefs,
+        connection: h.connection,
+        ws: h.ws,
+        autoRetry: false,
+      );
+      await reloaded.ready;
+      expect(reloaded.outboxFor('srv-1').single.failedCode, 'unauthenticated');
+      reloaded.dispose();
+
+      // A plain flush does not resend a refused prompt; Retry does, with the
+      // same key.
+      h.rest.sendErrors.remove('who am i');
+      await h.store.flushOutbox();
       expect(h.rest.sent, isEmpty);
-      expect(facade.runStateFor('local-new').lastErrorCode, 'internal');
-      expect(facade.runStateFor('local-new').lastErrorMessage,
-          contains('socket closed'));
+      await h.store.retryOutboxEntry(entry.clientMsgId);
+      expect(h.rest.sent.single.clientMsgId, entry.clientMsgId);
+      expect(h.store.outboxFor('srv-1'), isEmpty);
+    });
+
+    test('a refused prompt holds the later prompts of ITS chat (order) but '
+        'not other chats; Discard is the only drop', () async {
+      final h = await _buildStore(knownServerIds: const ['srv-1', 'srv-2']);
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+      h.rest.sendErrors['bad'] = CloudApiException(
+          status: 400, code: 'bad_request', message: 'nope');
+
+      await h.store.enqueue('srv-1', 'bad');
+      await h.store.enqueue('srv-1', 'after bad');
+      await h.store.enqueue('srv-2', 'other chat');
+      await h.store.flushOutbox();
+
+      expect([for (final c in h.rest.sent) c.content], ['other chat']);
+      expect([for (final e in h.store.outboxFor('srv-1')) e.content],
+          ['bad', 'after bad']);
+
+      final bad = h.store.outboxFor('srv-1').first;
+      await h.store.discardOutboxEntry(bad.clientMsgId);
+      await h.store.flushOutbox();
+      expect([for (final c in h.rest.sent) c.content],
+          ['other chat', 'after bad']);
+      expect(h.store.outboxFor('srv-1'), isEmpty);
+    });
+
+    test('retry backoff grows 2 s → 60 s and honours a 429 reset instant', () {
+      expect(CloudSessionStore.retryDelay(1), const Duration(seconds: 2));
+      expect(CloudSessionStore.retryDelay(2), const Duration(seconds: 4));
+      expect(CloudSessionStore.retryDelay(3), const Duration(seconds: 8));
+      expect(CloudSessionStore.retryDelay(9), const Duration(seconds: 60));
+      final now = DateTime.utc(2026, 10, 19, 12);
+      expect(
+        CloudSessionStore.retryDelay(1,
+            resetsAt: now.add(const Duration(seconds: 90)), now: now),
+        const Duration(seconds: 90),
+      );
+    });
+
+    test('the per-turn settings ride the flush and survive a reload '
+        '(CT-001)', () async {
+      final h = await _buildStore(knownServerIds: const ['srv-1']);
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+      await h.store.enqueue(
+        'srv-1',
+        'plan it',
+        turn: const CloudTurnOptions(
+          model: 'glm-5.3 · high',
+          mode: 'safe',
+          planMode: true,
+          presetId: 'code',
+          sessionRefs: ['srv-9'],
+        ),
+      );
+      final reloaded = CloudSessionStore(
+        rest: h.rest,
+        cache: SessionHistoryRepository.I,
+        prefs: h.prefs,
+        connection: h.connection,
+        ws: h.ws,
+        autoRetry: false,
+      );
+      await reloaded.ready;
+      await reloaded.flushOutbox();
+      final turn = h.rest.turns.single;
+      expect(turn.model, 'glm-5.3 · high');
+      expect(turn.mode, 'safe');
+      expect(turn.planMode, isTrue);
+      expect(turn.presetId, 'code');
+      expect(turn.sessionRefs, ['srv-9']);
+      reloaded.dispose();
+    });
+  });
+
+  group('Wave 1a brand-new chat (CH-033 / CH-013)', () {
+    test('a file staged in an unmapped chat uploads to the NEW server id and '
+        'rides the first send', () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+      final sink = _RecordingSink();
+      h.store.transcriptSink = sink;
+      final dir = await Directory.systemTemp.createTemp('outbox-file');
+      addTearDown(() => dir.delete(recursive: true));
+      final file = File('${dir.path}/photo.png')..writeAsBytesSync([1, 2, 3]);
+
+      await h.store.enqueue('local-new', 'describe this image',
+          attachmentFiles: [
+            OutboxFile(name: 'photo.png', path: file.path, size: 3),
+          ]);
+      await h.store.flushOutbox();
+
+      expect(h.rest.createCalls, 1);
+      expect(sink.mapped.single.local, 'local-new');
+      expect(sink.mapped.single.server, 'srv-created-1');
+      expect(h.rest.attachmentCreates.single.sessionId, 'srv-created-1');
+      expect(h.rest.uploads.single, [1, 2, 3]);
+      expect(h.rest.sent.single.sessionId, 'srv-created-1');
+      expect(h.rest.sent.single.attachmentIds, hasLength(1));
+      expect(sink.sentUser.single.content, 'describe this image');
+    });
+
+    test('a missing staged file is refused and kept, not silently sent '
+        'without it', () async {
+      final h = await _buildStore(knownServerIds: const ['srv-1']);
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+      await h.store.enqueue('srv-1', 'needs the file', attachmentFiles: const [
+        OutboxFile(name: 'gone.txt', path: '/nonexistent/gone.txt', size: 4),
+      ]);
+      await h.store.flushOutbox();
+      expect(h.rest.sent, isEmpty);
+      expect(h.store.outboxFor('srv-1').single.failedCode, 'attachment_missing');
+    });
+
+    test('the "New chat" placeholder is never sent as a title', () async {
+      final h = await _buildStore();
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+      AppState.I.sessions.add(ChatSession(id: 'l1', title: 'New chat', model: 'm'));
+      AppState.I.sessions.add(ChatSession(id: 'l2', title: 'Trip plan', model: 'm'));
+      await h.store.ensureServerSession('l1');
+      await h.store.ensureServerSession('l2');
+      expect(h.rest.createdTitles, [null, 'Trip plan']);
+    });
+
+    test("the server's placeholder title never overwrites a real local "
+        'title; the server copy is healed', () async {
+      final h = await _buildStore(idMap: const {'l1': 'srv-1'});
+      addTearDown(h.ws.dispose);
+      addTearDown(h.store.dispose);
+      AppState.I.sessions
+          .add(ChatSession(id: 'l1', title: 'Budget review', model: 'm'));
+      h.rest.sessionPages = [
+        CloudPage<SessionDto>(items: [_dto('srv-1', 'New chat')], nextCursor: null),
+      ];
+      await h.store.refreshSessions();
+      await pumpEventQueue();
+      expect(AppState.I.sessionById('l1')!.title, 'Budget review');
+      expect(h.rest.titlePatches.single, (id: 'srv-1', title: 'Budget review'));
     });
   });
 }

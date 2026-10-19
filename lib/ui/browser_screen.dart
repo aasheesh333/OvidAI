@@ -3,54 +3,58 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/cloud/browser_stream.dart';
 import '../core/cloud/cloud_session_store.dart';
+import '../core/cloud/cloud_ws.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'widgets/aether_primitives.dart';
 
-/// Cloud browser — the P6 screencast (P8 Task 16).
+/// Cloud browser — a live VIEWER over the user's ONE server-side Chromium.
 ///
-/// The on-device WebView browser was removed with the thin-client migration;
-/// this screen is a VIEWER over the server's live Chromium:
+/// Wave 5 (owner rules R2/R3):
 ///
-///  * binary WebP/JPEG frames render on the canvas ([BrowserStreamClient]);
-///  * the tab chrome shows the server's active page (`browser_state`
-///    url/title — the built P6 surface exposes no tab-list route);
-///  * taps/scrolls are forwarded as `browser_input` ONLY while the user holds
-///    server-acknowledged takeover (spec G6). While the agent drives, the
-///    canvas ignores gestures and an "Agent is driving — Take over" button
-///    requests control; the button's effect appears only when the server's
-///    next `browser_state` says `takeover: true`.
+///  * The cloud browser is one per user, shared by every chat. Opening this
+///    screen attaches to whatever page the agent has open in ANY of the
+///    user's chats: the mapped server id when the chat has one, otherwise
+///    [BrowserStreamClient.userAlias] (an unsent chat still sees the browser).
+///  * The worker streams 3–5 fps only while someone watches. Closing the
+///    screen, or backgrounding the app, sends `browser_detach`: the screencast
+///    stops and the browser idles headless. Coming back re-attaches.
+///  * Take control / Resume agent is server-acknowledged with a pending state
+///    and a timeout, offered only while a live page exists (EM-019), and
+///    scoped to this viewer: another device's control is shown read-only
+///    (FE-026).
+///  * While in control the user can tap, double-tap, long-press, scroll
+///    (natural direction, streamed while the finger moves — FE-009) and type
+///    through the soft keyboard incl. Enter/Tab/Backspace (FE-008).
 ///
-/// There is deliberately no omnibar navigation here: the wire contract has no
-/// navigation input event (navigation is the agent's `browser_navigate` tool,
-/// server-side). The address row is a read-only, spoof-resistant display; a
-/// link tapped in the transcript opens the SYSTEM browser instead of this
-/// read-only viewer.
-///
-/// The `sessionId` callers pass is the local chat id; [_BrowserScreenState]
-/// resolves it through `CloudSessionStore.serverIdFor` before attaching (the
-/// gateway accepts only the owned server UUID).
+/// There is deliberately no omnibar navigation: navigation is the agent's
+/// `browser_navigate` tool. The address row is a read-only display; "Open in
+/// browser" hands the URL to the system browser.
 class BrowserScreen extends StatefulWidget {
-  /// Session id to attach to. This is the LOCAL `ChatSession.id` (or a server
-  /// id when the caller already has one); the screen resolves it to the
-  /// mapped server UUID before it sends `browser_attach`, because the
-  /// gateway requires a UUID it owns.
+  /// The chat the screen was opened from (LOCAL id or server id). Only used
+  /// to pick the attach id; every chat shows the same per-user browser.
   final String? sessionId;
 
   /// Test seam: inject a configured client instead of the process singleton.
   final BrowserStreamClient? client;
 
+  /// How long the viewer shows "Connecting…" before it says the agent is not
+  /// using the browser (the worker sends nothing while no browser is live).
+  final Duration firstStateTimeout;
+
   const BrowserScreen({
     super.key,
     this.sessionId,
     this.client,
+    this.firstStateTimeout = const Duration(seconds: 5),
   });
 
-  /// Push the browser for [sessionId] (defaults to the active chat).
+  /// Push the browser (defaults to the active chat).
   static Future<void> open(
     BuildContext context, {
     String? sessionId,
@@ -62,83 +66,137 @@ class BrowserScreen extends StatefulWidget {
     );
   }
 
+  /// Friendly copy for a browser-channel error code (FE-020: never a raw
+  /// code on screen).
+  static String errorCopy(BrowserStreamError error) {
+    switch (error.code) {
+      case 'forbidden':
+        return "This chat isn't on your account, so its browser can't be shown.";
+      case 'unavailable':
+        return 'The cloud browser is not available right now.';
+      case 'unauthenticated':
+        return 'Your sign-in expired. Sign in again to view the browser.';
+      default:
+        return "Couldn't connect to the cloud browser.";
+    }
+  }
+
   @override
   State<BrowserScreen> createState() => _BrowserScreenState();
 }
 
-class _BrowserScreenState extends State<BrowserScreen> {
-  /// How long "attached, but the server has not sent a state/frame yet" may
-  /// look like normal startup before the viewer says the agent has not opened
-  /// a page. The worker sends NOTHING for a chat with no live browser
-  /// (`bridge.ts` ignores viewer_join), so an unbounded spinner is a lie.
-  static const Duration _firstFrameTimeout = Duration(seconds: 8);
+class _BrowserScreenState extends State<BrowserScreen>
+    with WidgetsBindingObserver {
+  /// Live scroll cadence: wheel deltas are coalesced and sent this often
+  /// while the finger moves (FE-009), never only on finger-up.
+  static const Duration _scrollFlushInterval = Duration(milliseconds: 50);
+
+  /// The hidden keyboard field always holds this sentinel; anything typed
+  /// after it is inserted, anything deleted from it is a Backspace.
+  static const String _kSentinel = '​​';
 
   late final BrowserStreamClient _client;
-
-  /// The id the caller gave us (local chat id or already a server id).
   late final String _localSessionId;
 
-  /// The resolved server UUID used for `browser_attach`.
-  String? _serverSessionId;
+  /// The id `browser_attach` was sent with (server chat id or user alias).
+  String? _attachId;
 
   StreamSubscription<BrowserFrame>? _framesSub;
   BrowserFrame? _frame;
-  Offset _drag = Offset.zero;
 
   Timer? _waitTimer;
   bool _waitExpired = false;
 
-  /// The attach generation [frame] was received under. A reconnect (or a
-  /// detach/re-attach) bumps the client's generation and invalidates it.
+  /// True while the app is backgrounded: the attach is dropped so the worker
+  /// stops encoding frames nobody can see.
+  bool _backgrounded = false;
+
+  /// The attach generation [frame] was received under.
   int _frameGeneration = -1;
 
   /// Decoded images released after the frame that replaced them has painted.
   final Set<ui.Image> _pendingRelease = <ui.Image>{};
 
+  // Scroll coalescing (canvas-local logical pixels).
+  Offset _pendingScroll = Offset.zero;
+  Offset _scrollAnchor = Offset.zero;
+  Size _scrollBox = Size.zero;
+  Timer? _scrollTimer;
+
+  // Soft keyboard bridge (FE-008).
+  final TextEditingController _keyboard =
+      TextEditingController(text: _kSentinel);
+  final FocusNode _keyboardFocus = FocusNode(debugLabel: 'browser-keyboard');
+  bool _keyboardOpen = false;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _client = widget.client ?? BrowserStreamClient.I;
     _localSessionId = widget.sessionId ?? AppState.I.activeSession?.id ?? '';
     _client.addListener(_onClientChanged);
     _framesSub = _client.frames.listen(_onFrame);
-    if (_localSessionId.isNotEmpty) {
-      // Start the bounded wait immediately: resolving the id is fast, and
-      // the timeout is about the server sending no state/frame at all.
-      _startWaitTimer();
-      unawaited(_attachResolved());
-    }
+    _keyboardFocus.addListener(_onKeyboardFocusChanged);
+    unawaited(_attach());
   }
 
-  /// Resolves the local chat id to the server UUID at the boundary (the
-  /// gateway rejects a non-UUID id with `forbidden`). The mapping is loaded
-  /// asynchronously, so wait for the store before reading it.
-  Future<void> _attachResolved() async {
-    var serverId = _localSessionId;
+  /// The attach id: the chat's server id when it has one, else the user
+  /// alias. Both reach the same per-user browser; an unsent chat never puts
+  /// a local id on the wire (FE-020).
+  Future<String> _resolveAttachId() async {
+    if (_localSessionId.isEmpty) return BrowserStreamClient.userAlias;
     try {
       final store = CloudSessionStore.I;
       await store.ready;
-      serverId = store.serverIdFor(_localSessionId) ?? _localSessionId;
+      return store.knownServerIdFor(_localSessionId) ??
+          BrowserStreamClient.userAlias;
     } catch (_) {
-      // No cloud store available (isolated widget test): fall back to the id
-      // we were given. Production always has the store.
+      // No cloud store (isolated widget test): the alias still works.
+      return BrowserStreamClient.userAlias;
     }
-    if (!mounted) return;
-    _serverSessionId = serverId;
-    await _client.attach(serverId);
+  }
+
+  Future<void> _attach() async {
+    _startWaitTimer();
+    final id = _attachId ?? await _resolveAttachId();
+    if (!mounted || _backgrounded) return;
+    _attachId = id;
+    await _client.attach(id);
   }
 
   void _startWaitTimer() {
     _waitTimer?.cancel();
     _waitExpired = false;
-    _waitTimer = Timer(_firstFrameTimeout, () {
+    _waitTimer = Timer(widget.firstStateTimeout, () {
       if (!mounted) return;
-      if (_frame == null &&
-          _client.state == null &&
-          _client.error == null) {
+      if (_frame == null && _client.state == null && _client.error == null) {
         setState(() => _waitExpired = true);
       }
     });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        if (_backgrounded) return;
+        _backgrounded = true;
+        _waitTimer?.cancel();
+        _flushScroll();
+        // R3: nobody can see the canvas — stop the screencast server-side.
+        _client.detach();
+      case AppLifecycleState.resumed:
+        if (!_backgrounded) return;
+        _backgrounded = false;
+        _clearFrame();
+        unawaited(_attach());
+      case AppLifecycleState.inactive:
+        // Transient (notification shade, app switcher): keep streaming.
+        break;
+    }
   }
 
   void _onClientChanged() {
@@ -149,6 +207,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (_client.state != null || _client.error != null) {
       _waitTimer?.cancel();
     }
+    if (!_client.takeoverActive && _keyboardOpen) _closeKeyboard();
     setState(() {
       if (stale) _frame = null;
       if (_client.state != null || _client.error != null) {
@@ -156,6 +215,18 @@ class _BrowserScreenState extends State<BrowserScreen> {
       }
     });
     _releaseFrame(old);
+    final notice = _client.notice;
+    if (notice != null) {
+      _client.clearNotice();
+      final text = notice.code == 'not_controller'
+          ? 'The browser is being controlled on another device.'
+          : 'Reconnecting to the browser…';
+      ScaffoldMessenger.maybeOf(context)
+          ?.showSnackBar(SnackBar(content: Text(text)));
+      if (notice.code == 'not_attached' && _attachId != null) {
+        unawaited(_client.attach(_attachId!));
+      }
+    }
   }
 
   void _onFrame(BrowserFrame frame) {
@@ -181,11 +252,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     });
   }
 
-  /// Retry an errored/timed-out attach: tear the old one down and attach
-  /// again. The generation bump also clears the stale canvas.
-  void _retry() {
-    final id = _serverSessionId;
-    if (id == null) return;
+  void _clearFrame() {
     final old = _frame;
     setState(() {
       _frame = null;
@@ -193,21 +260,32 @@ class _BrowserScreenState extends State<BrowserScreen> {
       _waitExpired = false;
     });
     _releaseFrame(old);
+  }
+
+  /// Retry an errored/idle attach: tear the old one down and attach again.
+  void _retry() {
+    _clearFrame();
     _client.detach();
-    _startWaitTimer();
-    unawaited(_client.attach(id));
+    unawaited(_attach());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _waitTimer?.cancel();
     _waitTimer = null;
+    _scrollTimer?.cancel();
     _client.removeListener(_onClientChanged);
     unawaited(_framesSub?.cancel());
     final image = _frame?.image;
     _frame = null;
     if (image != null && _pendingRelease.remove(image)) image.dispose();
+    // R3: closing the viewer stops the screencast; the browser stays
+    // headless (and the server releases a takeover this viewer held).
     _client.detach();
+    _keyboardFocus.removeListener(_onKeyboardFocusChanged);
+    _keyboardFocus.dispose();
+    _keyboard.dispose();
     super.dispose();
   }
 
@@ -217,17 +295,23 @@ class _BrowserScreenState extends State<BrowserScreen> {
     return host.isEmpty ? (url ?? '') : host;
   }
 
+  String _path(String? url) {
+    final parsed = Uri.tryParse(url ?? '');
+    if (parsed == null || parsed.host.isEmpty) return '';
+    final path = parsed.path == '/' ? '' : parsed.path;
+    final query = parsed.hasQuery ? '?${parsed.query}' : '';
+    return '$path$query';
+  }
+
   Future<void> _openExternal(String url) async {
     try {
       await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
     } catch (_) {
-      // Nothing handles it — the address stays visible and copyable.
+      // Nothing handles it — the address stays visible.
     }
   }
 
-  /// Page CSS pixels for a canvas-local point. The image is painted with
-  /// `BoxFit.contain`, so the same letterboxed rect is the coordinate space.
-  ({double x, double y})? _toPage(Offset local, Size box) {
+  double? _scaleFor(Size box) {
     final s = _client.state;
     if (s == null) return null;
     final scale = math.min(
@@ -235,6 +319,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
       box.height / math.max(s.viewportHeight, 1),
     );
     if (scale <= 0 || !scale.isFinite) return null;
+    return scale;
+  }
+
+  /// Page CSS pixels for a canvas-local point. The image is painted with
+  /// `BoxFit.contain`, so the same letterboxed rect is the coordinate space.
+  ({double x, double y})? _toPage(Offset local, Size box) {
+    final s = _client.state;
+    final scale = _scaleFor(box);
+    if (s == null || scale == null) return null;
     final offsetX = (box.width - s.viewportWidth * scale) / 2;
     final offsetY = (box.height - s.viewportHeight * scale) / 2;
     final x = ((local.dx - offsetX) / scale)
@@ -246,10 +339,153 @@ class _BrowserScreenState extends State<BrowserScreen> {
     return (x: x, y: y);
   }
 
+  // ---- Scroll (FE-009) -----------------------------------------------------
+
+  void _onPanStart(Offset local, Size box) {
+    _pendingScroll = Offset.zero;
+    _scrollAnchor = local;
+    _scrollBox = box;
+  }
+
+  void _onPanUpdate(Offset local, Offset delta, Size box) {
+    _pendingScroll += delta;
+    _scrollAnchor = local;
+    _scrollBox = box;
+    _scrollTimer ??= Timer(_scrollFlushInterval, _flushScroll);
+  }
+
+  void _onPanEnd() => _flushScroll();
+
+  /// Sends the coalesced drag as ONE wheel event. Touch convention: the page
+  /// follows the finger, so a finger moving UP (negative dy) scrolls the page
+  /// DOWN (positive wheel dy) — the wheel delta is the negated drag.
+  void _flushScroll() {
+    _scrollTimer?.cancel();
+    _scrollTimer = null;
+    final drag = _pendingScroll;
+    _pendingScroll = Offset.zero;
+    if (drag == Offset.zero) return;
+    final scale = _scaleFor(_scrollBox);
+    if (scale == null) return;
+    final point = _toPage(_scrollAnchor, _scrollBox);
+    _client.sendScroll(
+      -drag.dx / scale,
+      -drag.dy / scale,
+      x: point?.x,
+      y: point?.y,
+    );
+  }
+
+  // ---- Keyboard (FE-008) ---------------------------------------------------
+
+  void _onKeyboardFocusChanged() {
+    if (!mounted) return;
+    setState(() => _keyboardOpen = _keyboardFocus.hasFocus);
+  }
+
+  void _openKeyboard() {
+    _resetKeyboardField();
+    _keyboardFocus.requestFocus();
+    unawaited(SystemChannels.textInput
+        .invokeMethod<void>('TextInput.show')
+        .catchError((Object _) {}));
+  }
+
+  void _closeKeyboard() {
+    _keyboardFocus.unfocus();
+  }
+
+  void _resetKeyboardField() {
+    _keyboard.value = const TextEditingValue(
+      text: _kSentinel,
+      selection: TextSelection.collapsed(offset: _kSentinel.length),
+    );
+  }
+
+  /// Diff against the sentinel: appended text is inserted (newlines press
+  /// Enter), characters deleted from the sentinel are Backspaces.
+  void _onKeyboardChanged(String value) {
+    if (value == _kSentinel) return;
+    if (value.startsWith(_kSentinel)) {
+      final typed = value.substring(_kSentinel.length);
+      final parts = typed.split('\n');
+      for (var i = 0; i < parts.length; i++) {
+        if (i > 0) _client.sendKey('Enter');
+        _client.sendText(parts[i]);
+      }
+    } else {
+      final removed = math.max(1, _kSentinel.length - value.length);
+      for (var i = 0; i < removed; i++) {
+        _client.sendKey('Backspace');
+      }
+    }
+    _resetKeyboardField();
+  }
+
+  void _pressKey(String key) => _client.sendKey(key);
+
+  Widget? _controlChip() {
+    final state = _client.state;
+    // EM-019: nothing to control without a live page — no chip at all.
+    if (state == null || !state.live || _client.error != null) return null;
+    if (_client.reconnecting) return null;
+    if (_client.controlledElsewhere) {
+      return _ControlChip(
+        key: const ValueKey('browser-elsewhere'),
+        label: 'Controlled on another device',
+        action: 'Take over here',
+        onPressed: () => unawaited(_client.requestTakeover()),
+      );
+    }
+    if (_client.takeoverActive) {
+      return _ControlChip(
+        key: const ValueKey('browser-release'),
+        label: _client.takeoverPending
+            ? 'Handing control back…'
+            : "You're in control",
+        leading: IconButton(
+          key: const ValueKey('browser-keyboard'),
+          tooltip: _keyboardOpen ? 'Hide keyboard' : 'Keyboard',
+          icon: Icon(
+            _keyboardOpen ? Icons.keyboard_hide : Icons.keyboard,
+            size: 19,
+          ),
+          onPressed: _keyboardOpen ? _closeKeyboard : _openKeyboard,
+        ),
+        action: 'Resume agent',
+        onPressed: _client.takeoverPending
+            ? null
+            : () => unawaited(_client.releaseTakeover()),
+      );
+    }
+    if (_client.takeoverPending) {
+      return const _ControlChip(
+        key: ValueKey('browser-takeover-pending'),
+        label: 'Taking control…',
+        busy: true,
+      );
+    }
+    if (_client.takeoverFailed) {
+      return _ControlChip(
+        key: const ValueKey('browser-takeover-failed'),
+        label: "Couldn't take control",
+        action: 'Try again',
+        onPressed: () => unawaited(_client.requestTakeover()),
+      );
+    }
+    return _ControlChip(
+      key: const ValueKey('browser-takeover'),
+      label: 'Agent is driving',
+      action: 'Take control',
+      onPressed: () => unawaited(_client.requestTakeover()),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = _client.state;
     final takeover = _client.takeoverActive;
+    final online = !_client.reconnecting;
     final textScaler = MediaQuery.textScalerOf(context);
     final actions = <Widget>[
       if (state?.url != null && state!.url!.isNotEmpty)
@@ -261,6 +497,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     ];
     final stackedActions =
         MediaQuery.sizeOf(context).width < textScaler.scale(300);
+    final chip = _controlChip();
 
     return Scaffold(
       backgroundColor: Aether.bg,
@@ -297,6 +534,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
             ),
             _AddressRow(
               host: _host(state?.url),
+              path: _path(state?.url),
               secure: (state?.url ?? '').startsWith('https:'),
               live: state?.live ?? false,
             ),
@@ -307,8 +545,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     child: _FrameCanvas(
                       key: const ValueKey('browser-canvas'),
                       frame: _frame,
-                      live: state?.live ?? false,
-                      attached: _localSessionId.isNotEmpty,
+                      state: state,
+                      online: online,
+                      connected: _client.linkState == WsLinkState.online,
                       takeover: takeover,
                       error: _client.error,
                       waitExpired: _waitExpired,
@@ -317,55 +556,71 @@ class _BrowserScreenState extends State<BrowserScreen> {
                         final point = _toPage(local, box);
                         if (point != null) _client.sendTap(point.x, point.y);
                       },
-                      onDragStart: () => _drag = Offset.zero,
-                      onDragUpdate: (delta) => _drag += delta,
-                      onDragEnd: (box) {
-                        final s = _client.state;
-                        if (s == null || _drag.distance < 4) return;
-                        final scale = math.min(
-                          box.width / math.max(s.viewportWidth, 1),
-                          box.height / math.max(s.viewportHeight, 1),
-                        );
-                        if (scale <= 0 || !scale.isFinite) return;
-                        _client.sendScroll(_drag.dx / scale, _drag.dy / scale);
+                      onDoubleTap: (local, box) {
+                        final point = _toPage(local, box);
+                        if (point != null) {
+                          _client.sendDoubleTap(point.x, point.y);
+                        }
                       },
+                      onLongPress: (local, box) {
+                        final point = _toPage(local, box);
+                        if (point != null) {
+                          _client.sendLongPress(point.x, point.y);
+                        }
+                      },
+                      onPanStart: _onPanStart,
+                      onPanUpdate: _onPanUpdate,
+                      onPanEnd: _onPanEnd,
                     ),
                   ),
-                  if (takeover)
+                  if (!online && _frame != null)
+                    const Positioned(
+                      left: 0,
+                      right: 0,
+                      top: 8,
+                      child: Center(child: _ReconnectBanner()),
+                    ),
+                  // The hidden field that carries the soft keyboard.
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    width: 1,
+                    height: 1,
+                    child: Opacity(
+                      opacity: 0,
+                      child: TextField(
+                        key: const ValueKey('browser-keyboard-field'),
+                        controller: _keyboard,
+                        focusNode: _keyboardFocus,
+                        enabled: takeover,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        keyboardType: TextInputType.visiblePassword,
+                        textInputAction: TextInputAction.go,
+                        onChanged: _onKeyboardChanged,
+                        onSubmitted: (_) {
+                          _client.sendKey('Enter');
+                          _resetKeyboardField();
+                          _keyboardFocus.requestFocus();
+                        },
+                      ),
+                    ),
+                  ),
+                  if (chip != null)
                     Positioned(
                       left: 0,
                       right: 0,
                       bottom: 12,
-                      child: Center(
-                        child: _ControlChip(
-                          key: const ValueKey('browser-release'),
-                          label: 'You are controlling the browser',
-                          action: 'Release control',
-                          onPressed: () => unawaited(
-                            _client.releaseTakeover(),
-                          ),
-                        ),
-                      ),
-                    )
-                  else
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 12,
-                      child: Center(
-                        child: _ControlChip(
-                          key: const ValueKey('browser-takeover'),
-                          label: 'Agent is driving — Take over',
-                          action: 'Take over',
-                          onPressed: () => unawaited(
-                            _client.requestTakeover(),
-                          ),
-                        ),
-                      ),
+                      child: Center(child: chip),
                     ),
                 ],
               ),
             ),
+            if (takeover && _keyboardOpen)
+              _KeyBar(
+                onKey: _pressKey,
+                onHide: _closeKeyboard,
+              ),
           ],
         ),
       ),
@@ -373,7 +628,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 }
 
-/// The server's active page as a single tab chip (P6 has no tab-list route).
+/// The server's active page as a single tab chip.
 class _TabStrip extends StatelessWidget {
   const _TabStrip({required this.title, required this.url, required this.live});
 
@@ -430,15 +685,18 @@ class _TabStrip extends StatelessWidget {
   }
 }
 
-/// Read-only address display: the host only (a page title can spoof a site).
+/// Read-only address display: the host stands out (a page title can spoof a
+/// site); the path follows in a quieter tone.
 class _AddressRow extends StatelessWidget {
   const _AddressRow({
     required this.host,
+    required this.path,
     required this.secure,
     required this.live,
   });
 
   final String host;
+  final String path;
   final bool secure;
   final bool live;
 
@@ -466,16 +724,26 @@ class _AddressRow extends StatelessWidget {
                 color: Aether.textMuted,
               ),
               const SizedBox(width: 6),
-              Expanded(
+              Flexible(
                 child: Text(
-                  host.isEmpty
-                      ? (live ? 'Waiting for the page…' : 'No page loaded')
-                      : host,
+                  host.isEmpty ? (live ? 'Loading…' : 'No page open') : host,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 13),
                 ),
               ),
+              if (path.isNotEmpty)
+                Expanded(
+                  child: Text(
+                    path,
+                    key: const ValueKey('browser-url-path'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 13, color: Aether.textFaint),
+                  ),
+                )
+              else
+                const Spacer(),
               if (!secure && host.isNotEmpty)
                 Text(
                   'Not secure',
@@ -499,62 +767,73 @@ class _FrameCanvas extends StatelessWidget {
   const _FrameCanvas({
     super.key,
     required this.frame,
-    required this.live,
-    required this.attached,
+    required this.state,
+    required this.online,
+    required this.connected,
     required this.takeover,
     required this.error,
     required this.waitExpired,
     required this.onRetry,
     required this.onTap,
-    required this.onDragStart,
-    required this.onDragUpdate,
-    required this.onDragEnd,
+    required this.onDoubleTap,
+    required this.onLongPress,
+    required this.onPanStart,
+    required this.onPanUpdate,
+    required this.onPanEnd,
   });
 
   final BrowserFrame? frame;
-  final bool live;
-  final bool attached;
+  final BrowserState? state;
+  final bool online;
+
+  /// The shared socket is up (false during the first connect or when the
+  /// device is offline from the start).
+  final bool connected;
   final bool takeover;
   final BrowserStreamError? error;
   final bool waitExpired;
   final VoidCallback onRetry;
   final void Function(Offset local, Size box) onTap;
-  final VoidCallback onDragStart;
-  final void Function(Offset delta) onDragUpdate;
-  final void Function(Size box) onDragEnd;
+  final void Function(Offset local, Size box) onDoubleTap;
+  final void Function(Offset local, Size box) onLongPress;
+  final void Function(Offset local, Size box) onPanStart;
+  final void Function(Offset local, Offset delta, Size box) onPanUpdate;
+  final VoidCallback onPanEnd;
 
   @override
   Widget build(BuildContext context) {
-    if (!attached) {
-      return const Center(
-        child: Text('Open a chat to use the cloud browser.'),
-      );
-    }
     return LayoutBuilder(
       builder: (context, constraints) {
         final box = Size(constraints.maxWidth, constraints.maxHeight);
         final image = frame;
-        if (image == null) {
-          // No page yet: the placeholder (error / retry / timeout) must stay
-          // tappable even while the agent holds control.
+        if (image == null || error != null) {
           return Container(
             color: Aether.bg,
             alignment: Alignment.center,
             child: _placeholder(),
           );
         }
+        var doubleTapAt = Offset.zero;
         return IgnorePointer(
           ignoring: !takeover,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTapUp: (details) => onTap(details.localPosition, box),
-            onPanStart: (_) => onDragStart(),
-            onPanUpdate: (details) => onDragUpdate(details.delta),
-            onPanEnd: (_) => onDragEnd(box),
+            onDoubleTapDown: (details) => doubleTapAt = details.localPosition,
+            onDoubleTap: () => onDoubleTap(doubleTapAt, box),
+            onLongPressStart: (details) =>
+                onLongPress(details.localPosition, box),
+            onPanStart: (details) => onPanStart(details.localPosition, box),
+            onPanUpdate: (details) =>
+                onPanUpdate(details.localPosition, details.delta, box),
+            onPanEnd: (_) => onPanEnd(),
             child: Container(
               color: Aether.bg,
               alignment: Alignment.center,
-              child: _FrameImage(frame: image),
+              child: Opacity(
+                opacity: online ? 1 : 0.55,
+                child: _FrameImage(frame: image),
+              ),
             ),
           ),
         );
@@ -562,71 +841,105 @@ class _FrameCanvas extends StatelessWidget {
     );
   }
 
-  Widget _placeholder() {
-    final failure = error;
-    if (failure != null) {
-      return Padding(
-        key: const ValueKey('browser-error'),
-        padding: const EdgeInsets.symmetric(horizontal: 28),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.cloud_off, size: 28, color: Aether.textMuted),
-            const SizedBox(height: 10),
-            const Text(
-              'Browser unavailable',
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-            ),
+  Widget _status({
+    required String key,
+    required String title,
+    String? detail,
+    bool busy = false,
+    IconData? icon,
+    String? action,
+  }) {
+    return Padding(
+      key: ValueKey(key),
+      padding: const EdgeInsets.symmetric(horizontal: 28),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (busy)
+            const SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else if (icon != null)
+            Icon(icon, size: 28, color: Aether.textMuted),
+          const SizedBox(height: 12),
+          Text(
+            title,
+            key: const ValueKey('browser-status'),
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+          ),
+          if (detail != null) ...[
             const SizedBox(height: 6),
             Text(
-              failure.message,
+              detail,
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 12, color: Aether.textMuted),
             ),
-            const SizedBox(height: 2),
-            Text(
-              failure.code,
-              style: TextStyle(fontSize: 11, color: Aether.textFaint),
-            ),
+          ],
+          if (action != null) ...[
             const SizedBox(height: 10),
             TextButton(
               key: const ValueKey('browser-retry'),
               onPressed: onRetry,
-              child: const Text('Retry'),
+              child: Text(action),
             ),
           ],
-        ),
+        ],
+      ),
+    );
+  }
+
+  Widget _placeholder() {
+    final failure = error;
+    if (failure != null) {
+      return _status(
+        key: 'browser-error',
+        title: 'Browser unavailable',
+        detail: BrowserScreen.errorCopy(failure),
+        icon: Icons.cloud_off,
+        action: 'Retry',
       );
     }
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const SizedBox(
-          width: 22,
-          height: 22,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
-        const SizedBox(height: 12),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 28),
-          child: Text(
-            waitExpired
-                ? "The agent hasn't opened a page in this chat yet."
-                : live
-                    ? 'Waiting for the live browser…'
-                    : 'The cloud browser is starting…',
-            key: const ValueKey('browser-status'),
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 12, color: Aether.textMuted),
-          ),
-        ),
-        if (waitExpired)
-          TextButton(
-            key: const ValueKey('browser-retry'),
-            onPressed: onRetry,
-            child: const Text('Check again'),
-          ),
-      ],
+    if (!online) {
+      return _status(
+        key: 'browser-offline',
+        title: 'Reconnecting…',
+        detail: "You're offline. The live view resumes when the connection is back.",
+        busy: true,
+      );
+    }
+    final s = state;
+    if (s == null && waitExpired && !connected) {
+      return _status(
+        key: 'browser-offline',
+        title: "You're offline",
+        detail: 'The live view connects when the connection is back.',
+        icon: Icons.cloud_off,
+        action: 'Try again',
+      );
+    }
+    if (s == null && !waitExpired) {
+      return _status(
+        key: 'browser-loading',
+        title: 'Connecting to the cloud browser…',
+        busy: true,
+      );
+    }
+    if (s == null || !s.live) {
+      return _status(
+        key: 'browser-idle',
+        title: "The agent isn't using the browser right now",
+        detail: 'This view shows its page as soon as the agent opens one.',
+        icon: Icons.public_off,
+        action: 'Check again',
+      );
+    }
+    return _status(
+      key: 'browser-loading',
+      title: 'Loading the page…',
+      busy: true,
     );
   }
 }
@@ -659,17 +972,89 @@ class _FrameImage extends StatelessWidget {
   }
 }
 
+class _ReconnectBanner extends StatelessWidget {
+  const _ReconnectBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      key: const ValueKey('browser-reconnecting'),
+      color: Aether.surface,
+      elevation: 2,
+      borderRadius: BorderRadius.circular(18),
+      child: const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 8),
+            Text('Reconnecting…', style: TextStyle(fontSize: 12)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Keys the soft keyboard lacks, shown while typing into the page.
+class _KeyBar extends StatelessWidget {
+  const _KeyBar({required this.onKey, required this.onHide});
+
+  final void Function(String key) onKey;
+  final VoidCallback onHide;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget key(String id, String label, String keyName) => TextButton(
+          key: ValueKey('browser-key-$id'),
+          onPressed: () => onKey(keyName),
+          child: Text(label),
+        );
+    return Container(
+      color: Aether.surfaceAlt,
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            key('tab', 'Tab', 'Tab'),
+            key('enter', 'Enter', 'Enter'),
+            key('backspace', 'Delete', 'Backspace'),
+            key('escape', 'Esc', 'Escape'),
+            key('up', '↑', 'ArrowUp'),
+            key('down', '↓', 'ArrowDown'),
+            IconButton(
+              tooltip: 'Hide keyboard',
+              icon: const Icon(Icons.keyboard_hide, size: 19),
+              onPressed: onHide,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _ControlChip extends StatelessWidget {
   const _ControlChip({
     super.key,
     required this.label,
-    required this.action,
-    required this.onPressed,
+    this.action,
+    this.onPressed,
+    this.leading,
+    this.busy = false,
   });
 
   final String label;
-  final String action;
-  final VoidCallback onPressed;
+  final String? action;
+  final VoidCallback? onPressed;
+  final Widget? leading;
+  final bool busy;
 
   @override
   Widget build(BuildContext context) {
@@ -678,23 +1063,38 @@ class _ControlChip extends StatelessWidget {
       elevation: 2,
       borderRadius: BorderRadius.circular(22),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 4, 4, 4),
+        padding: EdgeInsets.fromLTRB(leading == null ? 14 : 4, 4, 4, 4),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            ?leading,
+            if (busy) ...[
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 8),
+            ],
             Flexible(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12),
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: action == null ? 10 : 0),
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12),
+                ),
               ),
             ),
-            const SizedBox(width: 8),
-            TextButton(
-              onPressed: onPressed,
-              child: Text(action),
-            ),
+            if (action != null) ...[
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: onPressed,
+                child: Text(action!),
+              ),
+            ] else
+              const SizedBox(width: 10),
           ],
         ),
       ),

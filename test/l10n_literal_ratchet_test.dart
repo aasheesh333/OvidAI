@@ -19,7 +19,7 @@ const _baseline = <String, int>{
   'lib/ui/user_error.dart': 0,
   'lib/ui/widgets/error_views.dart': 0,
   'lib/ui/widgets/attachment_tiles.dart': 0,
-  'lib/ui/schedule_screen.dart': 24,
+  'lib/ui/schedule_screen.dart': 22,
   'lib/ui/providers_screen.dart': 53,
   'lib/ui/settings_screen.dart': 114,
   'lib/ui/settings_backup_screen.dart': 20,

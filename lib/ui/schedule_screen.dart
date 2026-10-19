@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/cloud/cloud_rest.dart';
@@ -27,49 +29,157 @@ String scheduleFailure(
   return friendlyError(error, l10n: l);
 }
 
-/// Schedule screen — server-backed (P4 REST).
+/// User-facing label for a server schedule status (FE-018: never the raw
+/// enum on screen).
+String scheduleStatusLabel(String status) => switch (status) {
+      'pending' => 'Active',
+      'paused' => 'Paused',
+      'failed' => 'Failed',
+      'completed' => 'Completed',
+      'cancelled' => 'Cancelled',
+      'running' => 'Running',
+      _ => status,
+    };
+
+/// User-facing label for one occurrence's status in the run history.
+String scheduleRunStatusLabel(String status) => switch (status) {
+      'running' => 'Running',
+      'retry_scheduled' => 'Retry scheduled',
+      'succeeded' => 'Succeeded',
+      'failed' => 'Failed',
+      'skipped' => 'Skipped (missed)',
+      _ => status,
+    };
+
+/// Which schedules the screen lists.
+enum ScheduleScope { all, chat }
+
+/// Schedules — every scheduled task on the account, server-backed (P4 REST).
 ///
-/// The widget tree is the Aether redesign; the data bindings come from
-/// [ScheduleClient] (`GET/PATCH/DELETE /schedules`, `GET /schedules/:id/runs`).
-/// Rows are filtered to [sessionId] because the server list is account-wide.
-///
-/// There is no local runtime to fall back to (P8 Task 20 deleted it and
-/// collapsed the distribution flags), so the screen has exactly one path:
-/// the server.
+/// Wave 5 (spec: create, pause, edit, inspect, execution history, next-run
+/// countdown):
+///  * Lists ALL of the user's schedules (FE-012), grouped by chat; when the
+///    screen was opened from a chat a "This chat" filter is offered.
+///  * "New schedule" creates one without the agent: presets (every hour,
+///    daily) or a custom cron, a time zone, the task prompt, and the target
+///    chat (this chat or a new dedicated one).
+///  * Each task can run now, and its run history (GET /schedules/:id/runs)
+///    links back to the chat that holds the output.
+///  * A failed task has a real recovery path: edit it, then resume it or run
+///    it once (FE-013). Editing sends only what changed (FE-017).
+///  * The status strip tells the truth (FE-018/EM-020): checking, unable to
+///    load, or active — never a green "active" above a load error.
+///  * Live: the WS system channel (`subscribe_system`) refreshes the list
+///    when a run starts or finishes (CT-014), and countdowns tick.
 class ScheduleScreen extends StatefulWidget {
-  final String sessionId;
-  const ScheduleScreen({super.key, required this.sessionId});
+  /// The chat the screen was opened from (LOCAL id or server id), or null
+  /// from places with no chat. Only drives the "This chat" filter and the
+  /// default target of a new schedule.
+  final String? sessionId;
+
+  /// Test seam: the live-update feed (defaults to [ScheduleLiveFeed.I]).
+  final ScheduleLiveFeed? liveFeed;
+
+  const ScheduleScreen({super.key, this.sessionId, this.liveFeed});
 
   @override
   State<ScheduleScreen> createState() => _ScheduleScreenState();
 }
 
 class _ScheduleScreenState extends State<ScheduleScreen> {
+  /// Countdown refresh cadence ("Next in 4m").
+  static const Duration _tick = Duration(seconds: 30);
+
+  /// Live events arrive in bursts (started → succeeded, several schedules at
+  /// once): coalesce them into one reload.
+  static const Duration _liveDebounce = Duration(milliseconds: 400);
+
   List<ScheduleDto> _schedules = const <ScheduleDto>[];
   bool _loading = true;
+  bool _loadedOnce = false;
   String? _error;
+
+  /// The server id of the chat the screen was opened from (null without one,
+  /// or for a chat that was never sent).
+  String? _chatServerId;
+  bool _chatResolved = false;
+  ScheduleScope _scope = ScheduleScope.all;
+
+  /// Schedules with a run in flight (from live `schedule_run_started` until
+  /// the matching succeeded/failed event or the next reload).
+  final Set<String> _running = <String>{};
+
+  /// Bumped on every reload so expanded cards refresh their run history.
+  int _revision = 0;
+
+  late final ScheduleLiveFeed _feed;
+  StreamSubscription<ScheduleSystemEvent>? _liveSub;
+  Timer? _liveTimer;
+  Timer? _ticker;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _feed = widget.liveFeed ?? ScheduleLiveFeed.I;
+    _liveSub = _feed.events.listen(_onLiveEvent);
+    _feed.start();
+    _ticker = Timer.periodic(_tick, (_) {
+      if (mounted) setState(() {});
+    });
+    unawaited(_load());
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    _liveTimer?.cancel();
+    unawaited(_liveSub?.cancel());
+    _feed.stop();
+    super.dispose();
+  }
+
+  Future<String?> _resolveChat() async {
+    final id = widget.sessionId;
+    if (id == null || id.isEmpty) return null;
+    try {
+      final store = CloudSessionStore.I;
+      // Waits for the id map only while it is still loading.
+      await store.resolveServerSessionIdAsync(id);
+      // Only a REAL server id: an unsent chat has none, and a local id must
+      // never reach the wire as a schedule's target.
+      return store.knownServerIdFor(id);
+    } catch (e, st) {
+      Diag.swallow('schedule_screen.resolve', e, st);
+      return null;
+    }
   }
 
   Future<void> _load() async {
     if (mounted) setState(() => _error = null);
     try {
-      // `ScheduleDto.sessionId` is the SERVER UUID; the screen is opened with
-      // a local `ChatSession.id`. Resolve once here and compare on the server
-      // id (an unmapped or already-server id passes through unchanged).
-      final serverSessionId = await CloudSessionStore.I
-          .resolveServerSessionIdAsync(widget.sessionId);
+      if (!_chatResolved) {
+        _chatServerId = await _resolveChat();
+        _chatResolved = true;
+      }
       final all = await ScheduleClient.I.list(includeCancelled: true);
       if (!mounted) return;
+      final opened = widget.sessionId;
+      if (_chatServerId == null &&
+          opened != null &&
+          all.any((s) => s.sessionId == opened)) {
+        // Opened with a server-native id (e.g. a schedule notification).
+        _chatServerId = opened;
+      }
       setState(() {
-        _schedules = all
-            .where((s) => s.sessionId == serverSessionId)
-            .toList(growable: false);
+        _schedules = all;
         _loading = false;
+        _loadedOnce = true;
+        _revision++;
+        // A reload is authoritative: a run that already finished is no
+        // longer "running" (its lastResult says how it went).
+        _running.removeWhere(
+          (id) => !all.any((s) => s.id == id && s.status == 'pending'),
+        );
       });
     } catch (e, st) {
       Diag.swallow('schedule_screen.load', e, st);
@@ -81,21 +191,85 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     }
   }
 
-  Future<void> _edit(BuildContext context, ScheduleDto schedule) async {
-    await showAetherSheet<void>(
+  void _onLiveEvent(ScheduleSystemEvent event) {
+    if (!mounted) return;
+    switch (event.type) {
+      case 'schedule_run_started':
+        setState(() => _running.add(event.scheduleId));
+      case 'schedule_run_succeeded':
+      case 'schedule_run_failed':
+      case 'schedule_run_paused':
+      case 'schedule_deleted':
+        setState(() => _running.remove(event.scheduleId));
+    }
+    _liveTimer?.cancel();
+    _liveTimer = Timer(_liveDebounce, () => unawaited(_load()));
+  }
+
+  /// Local chat title for a server session id, when that chat is on this
+  /// device.
+  String? _chatTitleFor(String serverId) {
+    final local = scheduleLocalSessionId(serverId);
+    if (local == null) return null;
+    final title = AppState.I.sessionById(local)?.title.trim() ?? '';
+    return title.isEmpty ? null : title;
+  }
+
+  Future<void> _openEditor(
+    BuildContext context, {
+    ScheduleDto? schedule,
+    ScheduleDto? template,
+  }) async {
+    final saved = await showAetherSheet<bool>(
       context: context,
-      builder: (sheetContext) => _EditScheduleSheet(schedule: schedule),
+      builder: (sheetContext) => _EditScheduleSheet(
+        schedule: schedule,
+        template: template,
+        chatServerId: _chatServerId,
+        chatTitle: _chatServerId == null ? null : _chatTitleFor(_chatServerId!),
+      ),
     );
-    if (mounted) await _load();
+    if (!mounted) return;
+    if (saved == true || schedule != null) await _load();
+  }
+
+  List<ScheduleDto> get _visible {
+    if (_scope == ScheduleScope.chat && _chatServerId != null) {
+      return _schedules
+          .where((s) => s.sessionId == _chatServerId)
+          .toList(growable: false);
+    }
+    return _schedules;
   }
 
   @override
   Widget build(BuildContext context) {
-    final session = AppState.I.sessionById(widget.sessionId);
+    final visible = _visible;
+    // Group by chat (the current chat first), headers only when it helps.
+    final groups = <String, List<ScheduleDto>>{};
+    for (final s in visible) {
+      (groups[s.sessionId] ??= <ScheduleDto>[]).add(s);
+    }
+    final order = groups.keys.toList()
+      ..sort((a, b) {
+        if (a == _chatServerId) return -1;
+        if (b == _chatServerId) return 1;
+        return 0;
+      });
+    final showHeaders = order.length > 1;
+
     return Scaffold(
       backgroundColor: Aether.bg,
       appBar: AppBar(
-        title: Text('Schedule · ${session?.title ?? 'session'}'),
+        title: Text(context.l10n.schedulesTitle),
+        actions: [
+          IconButton(
+            key: const ValueKey('schedule-new'),
+            tooltip: context.l10n.scheduleNew,
+            icon: const Icon(Icons.add),
+            onPressed: () => _openEditor(context),
+          ),
+        ],
       ),
       body: RefreshIndicator(
         onRefresh: _load,
@@ -104,39 +278,96 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
           children: [
             _statusStrip(context),
-            const SizedBox(height: 20),
+            const SizedBox(height: 16),
+            if (_chatServerId != null) ...[
+              _scopeChips(),
+              const SizedBox(height: 12),
+            ],
             const AetherSectionTitle(eyebrow: 'Scheduled tasks'),
             const SizedBox(height: 12),
-            if (_loading)
+            if (_loading && !_loadedOnce)
               const Padding(
                 padding: EdgeInsets.only(top: 32),
                 child: Center(child: CircularProgressIndicator()),
               )
             else if (_error != null)
               _errorState(context)
-            else if (_schedules.isEmpty)
-              const Padding(
-                padding: EdgeInsets.only(top: 32),
-                child: AetherEmptyState(
-                  icon: Icons.schedule,
-                  title: 'No scheduled tasks',
-                  message:
-                      'Ask the agent to schedule a daily, recurring, or one-off task.',
+            else if (visible.isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 32),
+                child: Column(
+                  children: [
+                    AetherEmptyState(
+                      icon: Icons.schedule,
+                      title: 'No scheduled tasks',
+                      message: _scope == ScheduleScope.chat
+                          ? 'Nothing is scheduled in this chat. Ask the agent to schedule a task, or create one here.'
+                          : 'Ask the agent to schedule a daily, recurring, or one-off task, or create one here.',
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton.icon(
+                      key: const ValueKey('schedule-new-empty'),
+                      onPressed: () => _openEditor(context),
+                      icon: const Icon(Icons.add_alarm),
+                      label: Text(context.l10n.scheduleNew),
+                    ),
+                  ],
                 ),
               )
             else
-              for (final schedule in _schedules) ...[
-                _TaskCard(
-                  key: ValueKey(schedule.id),
-                  schedule: schedule,
-                  onChanged: _load,
-                  onEdit: () => _edit(context, schedule),
-                ),
-                const SizedBox(height: 12),
+              for (final sessionId in order) ...[
+                if (showHeaders)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8, top: 4),
+                    child: Text(
+                      sessionId == _chatServerId
+                          ? 'This chat'
+                          : (_chatTitleFor(sessionId) ?? 'Scheduled chat'),
+                      key: ValueKey('schedule-group-$sessionId'),
+                      style: AetherType.label,
+                    ),
+                  ),
+                for (final schedule in groups[sessionId]!) ...[
+                  _TaskCard(
+                    key: ValueKey(schedule.id),
+                    schedule: schedule,
+                    running: _running.contains(schedule.id),
+                    revision: _revision,
+                    onChanged: _load,
+                    onEdit: () => _openEditor(context, schedule: schedule),
+                    onDuplicate: () =>
+                        _openEditor(context, template: schedule),
+                    onRunStarted: () =>
+                        setState(() => _running.add(schedule.id)),
+                  ),
+                  const SizedBox(height: 12),
+                ],
               ],
           ],
         ),
       ),
+    );
+  }
+
+  Widget _scopeChips() {
+    final title = _chatTitleFor(_chatServerId!);
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        ChoiceChip(
+          key: const ValueKey('schedule-scope-all'),
+          label: Text(context.l10n.scheduleScopeAll),
+          selected: _scope == ScheduleScope.all,
+          onSelected: (_) => setState(() => _scope = ScheduleScope.all),
+        ),
+        ChoiceChip(
+          key: const ValueKey('schedule-scope-chat'),
+          label: Text(title == null ? 'This chat' : 'This chat · $title'),
+          selected: _scope == ScheduleScope.chat,
+          onSelected: (_) => setState(() => _scope = ScheduleScope.chat),
+        ),
+      ],
     );
   }
 
@@ -163,40 +394,120 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     );
   }
 
+  /// FE-018 / EM-020: the strip reflects what the screen actually knows.
   Widget _statusStrip(BuildContext context) {
+    final Color color;
+    final bool pulsing;
+    final String title;
+    final String message;
+    if (_error != null) {
+      color = Aether.danger;
+      pulsing = false;
+      title = context.l10n.scheduleStripError;
+      message = _loadedOnce
+          ? 'Showing the last loaded schedules. Pull to refresh.'
+          : 'Your schedules could not be loaded. Check the connection and retry.';
+    } else if (!_loadedOnce) {
+      color = Aether.textFaint;
+      pulsing = false;
+      title = context.l10n.scheduleStripChecking;
+      message = 'Loading your scheduled tasks.';
+    } else {
+      final active = _schedules.where((s) => s.status == 'pending').length;
+      final paused = _schedules.where((s) => s.status == 'paused').length;
+      final failed = _schedules.where((s) => s.status == 'failed').length;
+      color = failed > 0 ? Aether.warn : Aether.success;
+      pulsing = active > 0;
+      title = context.l10n.scheduleCloudActive;
+      final parts = <String>[
+        '$active active',
+        if (paused > 0) '$paused paused',
+        if (failed > 0) '$failed need review',
+      ];
+      message = '${parts.join(' · ')}. ${context.l10n.scheduleCloudActiveMessage}';
+    }
     return AetherCard(
+      key: const ValueKey('schedule-status-strip'),
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              AetherStatusDot(color: Aether.success, pulsing: true),
+              AetherStatusDot(color: color, pulsing: pulsing),
               const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  context.l10n.scheduleCloudActive,
-                  style: AetherType.title,
-                ),
-              ),
+              Expanded(child: Text(title, style: AetherType.title)),
             ],
           ),
           const SizedBox(height: 10),
-          Text(
-            context.l10n.scheduleCloudActiveMessage,
-            style: AetherType.caption,
-          ),
+          Text(message, style: AetherType.caption),
         ],
       ),
     );
   }
 }
 
-/// Owns its own TextEditingController lifecycle so controllers aren't disposed
-/// while the modal route is still animating out.
+/// The LOCAL chat id for a server session id, when that chat exists on this
+/// device (a mapped local chat, or a server-native row kept under its own
+/// id). Null when the chat has not synced here yet.
+String? scheduleLocalSessionId(String serverId) {
+  final app = AppState.I;
+  if (app.sessionById(serverId) != null) return serverId;
+  CloudSessionStore? store;
+  try {
+    store = CloudSessionStore.I;
+  } catch (_) {
+    store = null;
+  }
+  if (store == null) return null;
+  for (final session in app.sessions) {
+    if (store.knownServerIdFor(session.id) == serverId) return session.id;
+  }
+  return null;
+}
+
+/// Opens the chat holding a schedule's output: selects the local chat and
+/// returns to the app shell. False when the chat is not on this device yet.
+bool openScheduleChat(BuildContext context, String serverSessionId) {
+  final local = scheduleLocalSessionId(serverSessionId);
+  if (local == null) {
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      const SnackBar(
+        content: Text(
+          "This chat hasn't synced to this device yet. Pull to refresh your chats, then try again.",
+        ),
+      ),
+    );
+    return false;
+  }
+  AppState.I.selectSession(local);
+  Navigator.of(context).popUntil((route) => route.isFirst);
+  return true;
+}
+
+/// Create / edit / duplicate sheet. Owns its own TextEditingController
+/// lifecycle so controllers aren't disposed while the modal route is still
+/// animating out.
+///
+///  * [schedule] set ⇒ edit: only the fields that changed are PATCHed
+///    (FE-017 — a rename never reschedules).
+///  * [schedule] null ⇒ create (FE-012), pre-filled from [template] when
+///    duplicating; the target is [chatServerId] ("This chat") or a new
+///    dedicated chat.
+/// Pops `true` after a successful save.
 class _EditScheduleSheet extends StatefulWidget {
-  final ScheduleDto schedule;
-  const _EditScheduleSheet({required this.schedule});
+  final ScheduleDto? schedule;
+  final ScheduleDto? template;
+  final String? chatServerId;
+  final String? chatTitle;
+  const _EditScheduleSheet({
+    this.schedule,
+    this.template,
+    this.chatServerId,
+    this.chatTitle,
+  });
+
+  bool get creating => schedule == null;
 
   @override
   State<_EditScheduleSheet> createState() => _EditScheduleSheetState();
@@ -228,20 +539,33 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
   /// Raw-text editing ("Advanced") is collapsed by default.
   bool _advanced = false;
 
+  /// The device's IANA zone (FE-019), resolved asynchronously.
+  String? _deviceTz;
+
+  /// Create only: run in the chat the screen was opened from, or a new one.
+  late bool _targetChat;
+
   @override
   void initState() {
     super.initState();
-    final s = widget.schedule;
-    final trigger = s.trigger;
+    final source = widget.schedule ?? widget.template;
+    // A new schedule starts as "every day at 09:00" in the device zone.
+    final trigger = source?.trigger ?? ScheduleTrigger.dailyAt('09:00', tz: '');
     _kind = switch (trigger.kind) {
       'daily_at' => 'daily_at',
       'every' => 'every_seconds',
       'cron' => 'cron',
       _ => 'at',
     };
-    _tz = trigger.tz;
-    _title = TextEditingController(text: s.title);
-    _description = TextEditingController(text: s.description);
+    _tz = (trigger.tz?.isEmpty ?? true) ? null : trigger.tz;
+    _targetChat = widget.chatServerId != null &&
+        (widget.template == null ||
+            widget.template!.sessionId == widget.chatServerId);
+    unawaited(ScheduleClient.deviceTimeZone().then((zone) {
+      if (mounted) setState(() => _deviceTz = zone);
+    }));
+    _title = TextEditingController(text: source?.title ?? '');
+    _description = TextEditingController(text: source?.description ?? '');
     _draftTimes = {
       'daily_at': trigger.kind == 'daily_at' ? (trigger.time ?? '') : '',
       'every_seconds':
@@ -255,7 +579,30 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
     _time = TextEditingController(text: _draftTimes[_kind]);
     _intervalValue = TextEditingController();
     _syncIntervalFromRaw();
-    _retries = s.maxRetries.clamp(0, 3);
+    _retries = (source?.maxRetries ?? 0).clamp(0, 3);
+  }
+
+  /// Quick presets for a new schedule (FE-012).
+  void _applyPreset(String preset) {
+    setState(() {
+      _draftTimes[_kind] = _time.text;
+      switch (preset) {
+        case 'hourly':
+          _kind = 'every_seconds';
+          _time.text = '3600';
+          _syncIntervalFromRaw();
+        case 'daily':
+          _kind = 'daily_at';
+          _time.text = '09:00';
+        case 'custom':
+          _kind = 'cron';
+          _time.text = _draftTimes['cron']?.isNotEmpty == true
+              ? _draftTimes['cron']!
+              : '0 9 * * 1-5';
+      }
+      _timeError = null;
+      _error = null;
+    });
   }
 
   @override
@@ -417,14 +764,37 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
             ScheduleClient.parseDate(time).toUtc(),
           );
       }
-      await ScheduleClient.I.update(
-        widget.schedule.id,
-        title: title,
-        description: description,
-        trigger: trigger,
-        maxRetries: _retries,
-      );
-      if (mounted) Navigator.pop(context);
+      final existing = widget.schedule;
+      if (existing == null) {
+        await ScheduleClient.I.create(
+          title: title,
+          description: description,
+          trigger: trigger,
+          maxRetries: _retries,
+          autonomy: widget.template?.autonomy ?? 'safe',
+          sessionId: _targetChat ? widget.chatServerId : null,
+        );
+      } else {
+        // FE-017: send only what changed — a repeated trigger would make the
+        // server recompute the next run from now.
+        final changedTitle = title != existing.title;
+        final changedDescription = description != existing.description;
+        final changedTrigger = trigger != existing.trigger;
+        final changedRetries = _retries != existing.maxRetries;
+        if (changedTitle ||
+            changedDescription ||
+            changedTrigger ||
+            changedRetries) {
+          await ScheduleClient.I.update(
+            existing.id,
+            title: changedTitle ? title : null,
+            description: changedDescription ? description : null,
+            trigger: changedTrigger ? trigger : null,
+            maxRetries: changedRetries ? _retries : null,
+          );
+        }
+      }
+      if (mounted) Navigator.pop(context, true);
     } catch (e, st) {
       if (mounted) {
         setState(
@@ -488,6 +858,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
               'Repeats every day in ${_tz ?? 'the device time zone'}.',
               style: AetherType.caption,
             ),
+            _timeZoneRow(),
             ?errorText,
           ],
         );
@@ -549,6 +920,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
               onChanged: (_) => setState(() => _timeError = null),
               helper: context.l10n.scheduleCronHelper,
             ),
+            _timeZoneRow(),
             ?errorText,
           ],
         );
@@ -590,14 +962,93 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
     }
   }
 
+  /// FE-019: the stored zone, and a one-tap switch to the device zone when
+  /// they differ (after travel a daily task can follow the user).
+  Widget _timeZoneRow() {
+    final device = _deviceTz;
+    final stored = _tz;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 8,
+        children: [
+          Text(
+            'Time zone: ${stored ?? device ?? 'device time zone'}',
+            key: const ValueKey('schedule-tz'),
+            style: AetherType.caption,
+          ),
+          if (device != null && stored != null && stored != device)
+            TextButton(
+              key: const ValueKey('schedule-use-device-zone'),
+              onPressed: _saving ? null : () => setState(() => _tz = device),
+              child: Text(context.l10n.scheduleUseDeviceZone(device)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _presets() {
+    Widget chip(String key, String label, String preset) => ActionChip(
+          key: ValueKey('schedule-preset-$key'),
+          label: Text(label),
+          onPressed: _saving ? null : () => _applyPreset(preset),
+        );
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        chip('hourly', 'Every hour', 'hourly'),
+        chip('daily', 'Every day at 9:00', 'daily'),
+        chip('custom', 'Custom (cron)', 'custom'),
+      ],
+    );
+  }
+
+  Widget _target() {
+    final chatLabel = widget.chatTitle == null
+        ? 'This chat'
+        : 'This chat · ${widget.chatTitle}';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(context.l10n.scheduleResultsGoTo, style: AetherType.label),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            if (widget.chatServerId != null)
+              ChoiceChip(
+                key: const ValueKey('schedule-target-chat'),
+                label: Text(chatLabel),
+                selected: _targetChat,
+                onSelected:
+                    _saving ? null : (_) => setState(() => _targetChat = true),
+              ),
+            ChoiceChip(
+              key: const ValueKey('schedule-target-new'),
+              label: Text(context.l10n.scheduleTargetNewChat),
+              selected: !_targetChat,
+              onSelected:
+                  _saving ? null : (_) => setState(() => _targetChat = false),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final creating = widget.creating;
     return Padding(
       padding: EdgeInsets.only(
         bottom: MediaQuery.of(context).viewInsets.bottom,
       ),
       child: AetherSheet(
-        title: 'Edit schedule',
+        title: creating ? 'New schedule' : 'Edit schedule',
         child: SingleChildScrollView(
           keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           child: Column(
@@ -623,6 +1074,14 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                 maxLines: 2,
               ),
               const SizedBox(height: 16),
+              if (creating) ...[
+                _target(),
+                const SizedBox(height: 16),
+                Text(context.l10n.scheduleQuickStart, style: AetherType.label),
+                const SizedBox(height: 6),
+                _presets(),
+                const SizedBox(height: 16),
+              ],
               Text(context.l10n.scheduleRecurrence, style: AetherType.label),
               const SizedBox(height: 6),
               Wrap(
@@ -633,7 +1092,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                     (value: 'at', label: 'One-off'),
                     (value: 'daily_at', label: 'Daily'),
                     (value: 'every_seconds', label: 'Interval'),
-                    if (widget.schedule.trigger.kind == 'cron')
+                    if (creating || widget.schedule!.trigger.kind == 'cron')
                       (value: 'cron', label: context.l10n.scheduleCron),
                   ])
                     ChoiceChip(
@@ -745,8 +1204,13 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                     child: const Text('Close'),
                   ),
                   FilledButton(
+                    key: const ValueKey('schedule-save'),
                     onPressed: _saving ? null : _save,
-                    child: Text(_saving ? 'Saving…' : 'Save'),
+                    child: Text(
+                      _saving
+                          ? 'Saving…'
+                          : (creating ? 'Create schedule' : 'Save'),
+                    ),
                   ),
                 ],
               ),
@@ -859,14 +1323,26 @@ String scheduleLocalText(String stored) {
 /// A card representing a single server-backed scheduled task.
 class _TaskCard extends StatefulWidget {
   final ScheduleDto schedule;
+
+  /// A run of this schedule is in flight (live system event / run now).
+  final bool running;
+
+  /// Bumped by every list reload: an open run history refreshes with it.
+  final int revision;
   final Future<void> Function() onChanged;
   final VoidCallback onEdit;
+  final VoidCallback onDuplicate;
+  final VoidCallback onRunStarted;
 
   const _TaskCard({
     super.key,
     required this.schedule,
     required this.onChanged,
     required this.onEdit,
+    required this.onDuplicate,
+    required this.onRunStarted,
+    this.running = false,
+    this.revision = 0,
   });
 
   @override
@@ -878,10 +1354,47 @@ class _TaskCardState extends State<_TaskCard> {
   bool _busy = false;
   String? _feedback;
 
+  /// The run history (FE-012), loaded when the details open.
+  List<ScheduleRunDto>? _runs;
+  bool _runsLoading = false;
+  String? _runsError;
+
+  @override
+  void didUpdateWidget(covariant _TaskCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_expanded && oldWidget.revision != widget.revision) {
+      unawaited(_loadRuns());
+    }
+  }
+
+  Future<void> _loadRuns() async {
+    setState(() {
+      _runsLoading = true;
+      _runsError = null;
+    });
+    try {
+      final runs = await ScheduleClient.I.runs(widget.schedule.id, pageSize: 20);
+      if (!mounted) return;
+      setState(() {
+        _runs = runs;
+        _runsLoading = false;
+      });
+    } catch (e, st) {
+      if (!mounted) return;
+      setState(() {
+        _runsError = scheduleFailure(context.l10n, e, st, 'schedule_screen.runs');
+        _runsLoading = false;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final l = MaterialLocalizations.of(context);
     final s = widget.schedule;
     final status = s.status;
+    final shownStatus =
+        widget.running && status == 'pending' ? 'running' : status;
     final next = s.nextRunAt?.toLocal();
     final title = s.title.trim().isEmpty ? s.description : s.title;
     final last = s.lastResult;
@@ -901,8 +1414,9 @@ class _TaskCardState extends State<_TaskCard> {
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     AetherPill(
-                      label: status,
-                      color: _statusColor(status),
+                      key: const ValueKey('schedule-status-pill'),
+                      label: scheduleStatusLabel(shownStatus),
+                      color: _statusColor(shownStatus),
                       filled: status != 'completed' && status != 'cancelled',
                     ),
                     if (last?.ranLate == true)
@@ -931,11 +1445,11 @@ class _TaskCardState extends State<_TaskCard> {
             overflow: TextOverflow.ellipsis,
           ),
           const SizedBox(height: 10),
-          Text(_prettyRecurrence(s.trigger), style: AetherType.bodyMuted),
+          Text(_prettyRecurrence(l, s.trigger), style: AetherType.bodyMuted),
           if (last != null) ...[
             const SizedBox(height: 6),
             Text(
-              _lastResultLine(last),
+              _lastResultLine(l, last),
               style: AetherType.caption,
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
@@ -953,8 +1467,13 @@ class _TaskCardState extends State<_TaskCard> {
             if (last?.message != null && last!.message!.isNotEmpty)
               Text(last.message!, style: AetherType.caption),
           ],
+          if (status == 'failed') _recovery(s),
           const SizedBox(height: 4),
-          Text(_secondary(status, next, last), style: AetherType.bodyMuted),
+          Text(
+            _secondary(l, shownStatus, next, last),
+            key: const ValueKey('schedule-next'),
+            style: AetherType.bodyMuted,
+          ),
           if (_busy) ...[
             const SizedBox(height: 8),
             const LinearProgressIndicator(minHeight: 2),
@@ -974,13 +1493,61 @@ class _TaskCardState extends State<_TaskCard> {
             child: TextButton.icon(
               icon: Icon(_expanded ? Icons.expand_less : Icons.expand_more),
               label: Text(_expanded ? 'Hide details' : 'Show details'),
-              onPressed: () => setState(() => _expanded = !_expanded),
+              onPressed: () {
+                setState(() => _expanded = !_expanded);
+                if (_expanded) unawaited(_loadRuns());
+              },
             ),
           ),
           if (_expanded) ...[
             const SizedBox(height: 4),
-            _details(s),
+            _details(l, s),
+            const SizedBox(height: 12),
+            _history(l, s),
           ],
+        ],
+      ),
+    );
+  }
+
+  /// FE-013: a failed task is reviewed, then resumed or run once — the
+  /// server accepts both after review.
+  Widget _recovery(ScheduleDto s) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Review the task, fix what failed, then resume the schedule or run it once now.',
+            style: AetherType.caption,
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              OutlinedButton(
+                key: const ValueKey('schedule-recover-edit'),
+                onPressed: _busy ? null : widget.onEdit,
+                child: Text(context.l10n.scheduleRecoverEdit),
+              ),
+              FilledButton(
+                key: const ValueKey('schedule-recover-resume'),
+                onPressed: _busy
+                    ? null
+                    : () => _runAction(
+                          () => ScheduleClient.I.update(s.id, status: 'pending'),
+                        ),
+                child: Text(context.l10n.scheduleRecoverResume),
+              ),
+              TextButton(
+                key: const ValueKey('schedule-recover-run'),
+                onPressed: _busy ? null : () => _runNow(s),
+                child: Text(context.l10n.scheduleRecoverRunOnce),
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -991,19 +1558,32 @@ class _TaskCardState extends State<_TaskCard> {
     final items = <PopupMenuEntry<String>>[
       PopupMenuItem<String>(
         value: 'edit',
-        enabled: !s.isTerminal,
+        enabled: s.isEditable,
         child: Text('Edit', style: AetherType.body),
       ),
+      if (s.canRunNow)
+        PopupMenuItem<String>(
+          value: 'run',
+          child: Text(context.l10n.scheduleRunNow, style: AetherType.body),
+        ),
       if (status == 'pending')
         PopupMenuItem<String>(
           value: 'pause',
           child: Text('Pause', style: AetherType.body),
         ),
-      if (status == 'paused')
+      if (s.canResume)
         PopupMenuItem<String>(
           value: 'resume',
           child: Text('Resume', style: AetherType.body),
         ),
+      PopupMenuItem<String>(
+        value: 'duplicate',
+        child: Text(context.l10n.scheduleDuplicate, style: AetherType.body),
+      ),
+      PopupMenuItem<String>(
+        value: 'open',
+        child: Text(context.l10n.scheduleOpenChat, style: AetherType.body),
+      ),
       if (status != 'cancelled')
         PopupMenuItem<String>(
           value: 'cancel',
@@ -1021,6 +1601,8 @@ class _TaskCardState extends State<_TaskCard> {
         switch (choice) {
           case 'edit':
             widget.onEdit();
+          case 'run':
+            _runNow(s);
           case 'pause':
             _runAction(() async {
               await ScheduleClient.I.update(s.id, status: 'paused');
@@ -1029,11 +1611,27 @@ class _TaskCardState extends State<_TaskCard> {
             _runAction(() async {
               await ScheduleClient.I.update(s.id, status: 'pending');
             });
+          case 'duplicate':
+            widget.onDuplicate();
+          case 'open':
+            openScheduleChat(context, s.sessionId);
           case 'cancel':
             _confirmCancel(context, s);
         }
       },
     );
+  }
+
+  /// FE-012: run one occurrence now (the schedule itself is unchanged).
+  Future<void> _runNow(ScheduleDto s) async {
+    await _runAction(
+      () async {
+        await ScheduleClient.I.runNow(s.id);
+        widget.onRunStarted();
+      },
+      success: 'Started. The result appears in the chat and in Run history.',
+    );
+    if (mounted && _expanded) unawaited(_loadRuns());
   }
 
   /// Cancelling is irreversible (and stops future runs), so it confirms.
@@ -1052,7 +1650,10 @@ class _TaskCardState extends State<_TaskCard> {
     await _runAction(() => ScheduleClient.I.delete(s.id));
   }
 
-  Future<void> _runAction(Future<void> Function() action) async {
+  Future<void> _runAction(
+    Future<void> Function() action, {
+    String? success,
+  }) async {
     if (_busy) return;
     setState(() {
       _busy = true;
@@ -1061,7 +1662,9 @@ class _TaskCardState extends State<_TaskCard> {
     try {
       await action();
       await widget.onChanged();
-      if (mounted) setState(() => _feedback = context.l10n.scheduleUpdated);
+      if (mounted) {
+        setState(() => _feedback = success ?? context.l10n.scheduleUpdated);
+      }
     } catch (e, st) {
       if (mounted) {
         final l = context.l10n;
@@ -1073,13 +1676,14 @@ class _TaskCardState extends State<_TaskCard> {
     }
   }
 
-  Widget _details(ScheduleDto s) {
+  Widget _details(MaterialLocalizations l, ScheduleDto s) {
     final next = s.nextRunAt?.toLocal();
     final last = s.lastResult;
     final finished = last?.finishedAt?.toLocal();
-    final scheduledLabel = next != null ? _fmtInstant(next) : 'Not scheduled';
+    final scheduledLabel =
+        next != null ? _fmtInstant(l, next) : 'Not scheduled';
     final nextRunLabel = s.status == 'pending' && next != null
-        ? _nextRunLabel(next)
+        ? _nextRunLabel(l, next)
         : _executionLabel(s.status);
     final tz = s.trigger.tz;
     final zoneLabel = tz != null
@@ -1100,19 +1704,25 @@ class _TaskCardState extends State<_TaskCard> {
         const SizedBox(height: 10),
         _detailRow('Scheduled', scheduledLabel),
         _detailRow('Time zone', zoneLabel),
-        _detailRow('Recurrence', _prettyRecurrence(s.trigger)),
+        _detailRow('Recurrence', _prettyRecurrence(l, s.trigger)),
         _detailRow('Next run', nextRunLabel),
         _detailRow(
           'Last run',
           last == null
               ? 'Never run'
               : '${last.status}'
-                  '${finished == null ? '' : ' · ${_fmtInstant(finished)}'}'
+                  '${finished == null ? '' : ' · ${_fmtInstant(l, finished)}'}'
                   '${last.ranLate ? ' · ran late' : ''}',
         ),
         _detailRow(
           'Retries',
           'Up to ${s.maxRetries} · pre-execution failures only',
+        ),
+        _detailRow(
+          'Permissions',
+          s.autonomy == 'auto'
+              ? 'May make changes (auto)'
+              : 'Read-only (safe)',
         ),
         if (last?.message != null && last!.message!.isNotEmpty)
           _detailRow(
@@ -1133,6 +1743,91 @@ class _TaskCardState extends State<_TaskCard> {
           child: Text(_rawSpec(s.trigger), style: AetherType.mono),
         ),
       ],
+    );
+  }
+
+  /// FE-012: execution history from `GET /schedules/:id/runs`.
+  Widget _history(MaterialLocalizations l, ScheduleDto s) {
+    final runs = _runs;
+    return Column(
+      key: const ValueKey('schedule-history'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(child: Text(context.l10n.scheduleRunHistory, style: AetherType.label)),
+            TextButton(
+              key: const ValueKey('schedule-open-chat'),
+              onPressed: () => openScheduleChat(context, s.sessionId),
+              child: Text(context.l10n.scheduleOpenChat),
+            ),
+          ],
+        ),
+        if (_runsLoading && runs == null)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: LinearProgressIndicator(minHeight: 2),
+          )
+        else if (_runsError != null)
+          Row(
+            children: [
+              Expanded(child: Text(_runsError!, style: AetherType.caption)),
+              TextButton(
+                onPressed: () => unawaited(_loadRuns()),
+                child: Text(context.l10n.actionRetry),
+              ),
+            ],
+          )
+        else if (runs == null || runs.isEmpty)
+          Text(context.l10n.scheduleNoRuns, style: AetherType.caption)
+        else
+          for (final run in runs) _runRow(l, run),
+      ],
+    );
+  }
+
+  Widget _runRow(MaterialLocalizations l, ScheduleRunDto run) {
+    final when = (run.startedAt ?? run.scheduledFor)?.toLocal();
+    final finished = run.finishedAt?.toLocal();
+    final duration = when != null && finished != null
+        ? ' · took ${_fmtDuration(finished.difference(when))}'
+        : '';
+    final details = <String>[
+      if (when != null) _fmtInstant(l, when),
+      if (run.attempt > 1) 'attempt ${run.attempt}',
+      if (run.ranLate) 'ran late',
+    ].join(' · ');
+    return Padding(
+      key: ValueKey('schedule-run-${run.id}'),
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: AetherStatusDot(
+              color: _runColor(run.status),
+              pulsing: run.status == 'running',
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${scheduleRunStatusLabel(run.status)}$duration',
+                  style: AetherType.body,
+                ),
+                if (details.isNotEmpty)
+                  Text(details, style: AetherType.caption),
+                if (run.error != null && run.error!.isNotEmpty)
+                  Text(run.error!, style: AetherType.caption),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1165,24 +1860,28 @@ class _TaskCardState extends State<_TaskCard> {
     );
   }
 
-  String _nextRunLabel(DateTime next) {
-    final now = DateTime.now();
-    final diff = next.difference(now);
+  String _nextRunLabel(MaterialLocalizations l, DateTime next) {
+    final diff = next.difference(DateTime.now());
     if (diff.isNegative) {
       return 'Overdue by ${_fmtDuration(diff.abs())} '
-          '· ${_fmtInstant(next)}';
+          '· ${_fmtInstant(l, next)}';
     }
-    return 'In ${_fmtDuration(diff)} · ${_fmtInstant(next)}';
+    return 'In ${_fmtDuration(diff)} · ${_fmtInstant(l, next)}';
   }
 
-  String _secondary(String status, DateTime? next, ScheduleLastResult? last) {
+  String _secondary(
+    MaterialLocalizations l,
+    String status,
+    DateTime? next,
+    ScheduleLastResult? last,
+  ) {
+    if (status == 'running') return 'Running now · the result appears in the chat';
     if (status == 'pending' && next != null) {
-      final now = DateTime.now();
-      final diff = next.difference(now);
+      final diff = next.difference(DateTime.now());
       if (diff.isNegative) {
-        return 'Overdue by ${_fmtDuration(diff.abs())} · ${_fmtInstant(next)}';
+        return 'Overdue by ${_fmtDuration(diff.abs())} · ${_fmtInstant(l, next)}';
       }
-      return 'Next in ${_fmtDuration(diff)} · ${_fmtInstant(next)}';
+      return 'Next in ${_fmtDuration(diff)} · ${_fmtInstant(l, next)}';
     }
     return '${_executionLabel(status)}'
         '${last != null ? ' · Last run: ${last.status}' : ''}';
@@ -1210,13 +1909,21 @@ class _TaskCardState extends State<_TaskCard> {
         return Aether.accent;
     }
   }
+
+  Color _runColor(String status) => switch (status) {
+        'succeeded' => Aether.success,
+        'failed' => Aether.danger,
+        'running' => Aether.accent,
+        'retry_scheduled' => Aether.warn,
+        _ => Aether.textFaint,
+      };
 }
 
-String _lastResultLine(ScheduleLastResult last) {
+String _lastResultLine(MaterialLocalizations l, ScheduleLastResult last) {
   final message = (last.message ?? '').trim();
   final when = last.finishedAt == null
       ? ''
-      : ' · ${_fmtInstant(last.finishedAt!.toLocal())}';
+      : ' · ${_fmtInstant(l, last.finishedAt!.toLocal())}';
   final late = last.ranLate ? ' · ran late' : '';
   return message.isEmpty
       ? 'Last run: ${last.status}$late$when'
@@ -1226,7 +1933,7 @@ String _lastResultLine(ScheduleLastResult last) {
 String _executionLabel(String status) => switch (status) {
   'paused' => 'Paused · resume to run',
   'running' => 'Execution in progress',
-  'failed' => 'Failed · review before resuming',
+  'failed' => 'Failed · edit, then resume or run once',
   'completed' => 'Completed · no next run',
   'cancelled' => 'Cancelled · no next run',
   _ => 'Not scheduled',
@@ -1249,16 +1956,18 @@ String _rawSpec(ScheduleTrigger trigger) => switch (trigger.kind) {
   _ => 'spec=unknown',
 };
 
-String _prettyRecurrence(ScheduleTrigger trigger) => switch (trigger.kind) {
-  'at' => trigger.at == null
-      ? 'One-off · unknown'
-      : 'One-off · ${_fmtInstant(trigger.at!.toLocal())}',
-  'every' => 'Every ${_fmtInterval(trigger.seconds ?? 0)} · fixed interval',
-  'daily_at' =>
-    'Daily · ${trigger.time ?? '—'} · ${trigger.tz ?? 'unknown zone'}',
-  'cron' => "Cron · '${trigger.expr ?? '—'}' · ${trigger.tz ?? 'unknown zone'}",
-  _ => 'Unknown trigger',
-};
+String _prettyRecurrence(MaterialLocalizations l, ScheduleTrigger trigger) =>
+    switch (trigger.kind) {
+      'at' => trigger.at == null
+          ? 'One-off · unknown'
+          : 'One-off · ${_fmtInstant(l, trigger.at!.toLocal())}',
+      'every' => 'Every ${_fmtInterval(trigger.seconds ?? 0)} · fixed interval',
+      'daily_at' =>
+        'Daily · ${trigger.time ?? '—'} · ${trigger.tz ?? 'unknown zone'}',
+      'cron' =>
+        "Cron · '${trigger.expr ?? '—'}' · ${trigger.tz ?? 'unknown zone'}",
+      _ => 'Unknown trigger',
+    };
 
 String _fmtInterval(int seconds) {
   if (seconds <= 0) return '0s';
@@ -1283,17 +1992,8 @@ String _fmtDuration(Duration d) {
   return '${d.inSeconds}s';
 }
 
-String _fmtInstant(DateTime dt) {
-  const months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-  ];
-  final hour12 = dt.hour == 0
-      ? 12
-      : (dt.hour > 12 ? dt.hour - 12 : dt.hour);
-  final suffix = dt.hour >= 12 ? 'PM' : 'AM';
-  final minute = dt.minute.toString().padLeft(2, '0');
-  final seconds = dt.second == 0 ? '' : ':${dt.second.toString().padLeft(2, '0')}';
-  return '${months[dt.month - 1]} ${dt.day}, ${dt.year} at '
-      '$hour12:$minute$seconds $suffix ${_zoneLabel(dt)}';
-}
+/// Localised date + time (FE-018), with the zone so the reader knows which
+/// clock it is.
+String _fmtInstant(MaterialLocalizations l, DateTime dt) =>
+    '${l.formatShortDate(dt)}, '
+    '${l.formatTimeOfDay(TimeOfDay.fromDateTime(dt))} ${_zoneLabel(dt)}';

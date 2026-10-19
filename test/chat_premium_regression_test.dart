@@ -67,12 +67,17 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('a draft without an active session cannot submit', (tester) async {
+  testWidgets(
+      'EM-010: with no active chat the screen opens one, so a draft can send',
+      (tester) async {
     app.activeSessionId = null;
     await mount(tester);
-    await tester.enterText(composer, 'Select a session first');
     await tester.pump();
-    expect(primary(tester).onPressed, isNull);
+    expect(app.activeSessionId, isNotNull,
+        reason: 'a signed-in user always has a chat to type into');
+    await tester.enterText(composer, 'First message on a fresh account');
+    await tester.pump();
+    expect(primary(tester).onPressed, isNotNull);
     await tester.pumpWidget(const SizedBox());
   });
 
@@ -89,7 +94,7 @@ void main() {
     app.sendWhileBusy = 'interrupt';
     app.refresh();
     await tester.pump();
-    expect(find.bySemanticsLabel('Interrupt and send'), findsOneWidget);
+    expect(find.bySemanticsLabel('Stop and send'), findsOneWidget);
     expect(find.byTooltip('Stop session').hitTestable(), findsOneWidget);
     await tester.tap(find.byTooltip('Stop session'));
     await tester.pump();

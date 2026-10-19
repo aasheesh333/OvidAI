@@ -459,12 +459,19 @@ class CloudRestClient {
   /// output tokens" pick — null (auto/0) never sends the key, so the
   /// provider's own default applies; callers pass an already-clamped value
   /// (see [maxOutputTokensWireCap]).
+  ///
+  /// [turn] carries the per-turn settings (Wave 1a): the selected model (a
+  /// catalog id or "auto"), the access mode, plan mode, the preset and any
+  /// @-tagged session ids. The gateway validates and persists them before
+  /// the run is queued — 400 `model_unavailable` for a model outside the
+  /// allowed catalog.
   Future<SendMessageResponse> sendMessage(
     String sessionId,
     String content, {
     List<String> attachmentIds = const [],
     String? clientMsgId,
     int? maxOutputTokens,
+    CloudTurnOptions turn = CloudTurnOptions.none,
   }) async {
     return SendMessageResponse.fromJson(await postJson(
       '/sessions/$sessionId/messages',
@@ -475,9 +482,27 @@ class CloudRestClient {
           'clientMsgId': clientMsgId,
         // Null-aware marker: the key is omitted entirely when unset (auto).
         'maxOutputTokens': ?maxOutputTokens,
+        ...turn.toJson(),
       },
     ));
   }
+
+  /// GET /preferences — the per-user memory switches the worker enforces
+  /// (Wave 1a, SE-005 / owner rule R1).
+  Future<CloudUserPreferences> getPreferences() async =>
+      CloudUserPreferences.fromJson(await getJson('/preferences'));
+
+  /// PATCH /preferences — only the provided switches are sent (the server
+  /// requires at least one and rejects unknown keys).
+  Future<CloudUserPreferences> patchPreferences({
+    bool? memoryEnabled,
+    bool? shareSessionMemory,
+  }) async =>
+      CloudUserPreferences.fromJson(await patchJson('/preferences',
+          body: <String, Object>{
+            'memoryEnabled': ?memoryEnabled,
+            'shareSessionMemory': ?shareSessionMemory,
+          }));
 
   Future<CloudPage<MessageDto>> pageMessages(String sessionId,
       {int limit = 50, String? before}) async {

@@ -11,6 +11,7 @@ import { createDb, migrate, sessions, users, type Db } from "@ovid/db";
 import { createRedisEventLog, createRedisSystemBus, type EventLog } from "@ovid/events";
 import type { QueueServices } from "@ovid/queue";
 import {
+  userBrowserKey,
   wsServerMsg,
   type KeyProvider,
   type KeyResolver,
@@ -500,8 +501,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
         sidViewer = await newSession(uidA);
         // The "run" is underway: the agent's tab is live on the animated
         // fixture (damage every 100 ms — a static page emits zero frames).
-        await engine.openSession(sidViewer, uidA);
-        await tool("browser_open").execute({ url: server.url("/animated") }, ctx(sidViewer));
+        await engine.openSession(userBrowserKey(uidA), uidA);
+        await tool("browser_open").execute({ url: server.url("/animated") }, ctx(userBrowserKey(uidA)));
 
         // Owner viewer: ticket → subscribe (sanity) → browser_attach.
         viewer = await connectWs(uidA);
@@ -533,7 +534,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
         );
 
         const state = browserStates(viewer).find((s) => s.live && s.screencast)!;
-        expect(state.sessionId).toBe(sidViewer);
+        expect(state.sessionId).toBe(userBrowserKey(uidA)); // Wave 5 R2: the browser key is the USER
         expect(state.takeover).toBe(false);
         // Every binary frame's magic bytes must match the published format.
         for (const frame of viewer.binary) {
@@ -549,7 +550,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
       "leg c — input injection: client JSON → gateway → redis → worker → Playwright → DOM; the harness (playing the gateway CLIENT) queues input until browser_state{screencast:true} and toggles takeover on first — the engine drops viewer input without the flag (I2 binding: the ENGINE does not gate input on the ~3 s webp probe — input sent early lands on the probe's data: fixture and is lost)",
       async () => {
         // Leg b's session: viewer attached, cast live.
-        await tool("browser_open").execute({ url: server.url("/click") }, ctx(sidViewer));
+        await tool("browser_open").execute({ url: server.url("/click") }, ctx(userBrowserKey(uidA)));
 
         // I2 CLIENT CONTRACT: no input before a browser_state with
         // screencast:true for the page we are about to tap. The probe already
@@ -599,7 +600,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
 
         // The DOM proof, through the agent's own tool on the same page.
         await waitForAsync(
-          async () => (await findCount("CLICKED", sidViewer)) >= 1,
+          async () => (await findCount("CLICKED", userBrowserKey(uidA))) >= 1,
           "#out flips to CLICKED",
           15_000,
         );
@@ -621,9 +622,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
         // set it to CLICKED; a fresh click must be distinguishable).
         await tool("browser_evaluate").execute(
           { expression: "document.getElementById('out').textContent = 'PRE-TAKEOVER'" },
-          ctx(sidViewer),
+          ctx(userBrowserKey(uidA)),
         );
-        expect(await findCount("CLICKED", sidViewer)).toBe(0);
+        expect(await findCount("CLICKED", userBrowserKey(uidA))).toBe(0);
 
         viewer!.send({ op: "browser_takeover", sessionId: sidViewer, enabled: true });
         await viewer!.waitFor(
@@ -632,7 +633,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
         );
 
         // Exactly the pinned refusal copy — before any browser work.
-        const refused = await tool("browser_click").execute({ selector: "#btn" }, ctx(sidViewer));
+        const refused = await tool("browser_click").execute({ selector: "#btn" }, ctx(userBrowserKey(uidA)));
         expect(refused.content).toBe(TAKEOVER_REFUSAL);
 
         viewer!.send({ op: "browser_takeover", sessionId: sidViewer, enabled: false });
@@ -647,10 +648,10 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
           "state frame with takeover:false after the takeover:true one",
         );
 
-        const clicked = await tool("browser_click").execute({ selector: "#btn" }, ctx(sidViewer));
+        const clicked = await tool("browser_click").execute({ selector: "#btn" }, ctx(userBrowserKey(uidA)));
         expect(clicked.content).toBe("clicked #btn");
         await waitForAsync(
-          async () => (await findCount("CLICKED", sidViewer)) >= 1,
+          async () => (await findCount("CLICKED", userBrowserKey(uidA))) >= 1,
           "#out flips back to CLICKED",
           15_000,
         );

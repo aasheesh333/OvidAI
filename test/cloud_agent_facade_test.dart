@@ -58,6 +58,8 @@ class FakeCloudRest extends CloudRestClient {
 
   int _seq = 0;
 
+  CloudTurnOptions lastTurn = CloudTurnOptions.none;
+
   @override
   Future<SendMessageResponse> sendMessage(
     String sessionId,
@@ -65,7 +67,9 @@ class FakeCloudRest extends CloudRestClient {
     List<String> attachmentIds = const [],
     String? clientMsgId,
     int? maxOutputTokens,
+    CloudTurnOptions turn = CloudTurnOptions.none,
   }) async {
+    lastTurn = turn;
     if (sendError != null) throw sendError!;
     sent.add((
       sessionId: sessionId,
@@ -569,8 +573,9 @@ void main() {
       final run = h.facade.runStateFor('s1');
       expect(run.stopRequested, isFalse,
           reason: 'a terminal event settles the stop request');
-      expect(run.lastErrorCode, 'cancelled');
-      expect(run.lastErrorMessage, 'Stopped by user.');
+      // CH-020: the queued-cancel spelling run_failed{cancelled} is a
+      // user-initiated stop, never a red error row.
+      expect(run.lastErrorCode, isNull);
 
       await h.ws.disconnect();
       h.facade.dispose();
@@ -956,6 +961,8 @@ void main() {
           _eventFrame('s1', '2-0', 'run_completed', {'runId': 'run-1'}));
       await pumpEventQueue();
 
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await pumpEventQueue();
       // The row dispatched with ITS file — and only its file.
       expect(h.rest.created, hasLength(1));
       expect(h.rest.created.single.name, 'first.txt');

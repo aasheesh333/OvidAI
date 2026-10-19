@@ -10,6 +10,12 @@ export interface ScreencastConfig {
   quality: number;
   everyNthFrame: number;
   maxFramesInFlight: number;
+  /**
+   * Wave 5 R3: the live view's frame-rate cap (OVID_SCREENCAST_MAX_FPS,
+   * default 4 ⇒ 3–5 fps effective). Frames arriving early are held UNACKED
+   * until their slot, so chromium itself is paced. Absent ⇒ uncapped.
+   */
+  maxFps?: number;
 }
 
 export interface BrowserEngineConfig {
@@ -230,7 +236,8 @@ export function loadBrowserEngineConfig(raw: NodeJS.ProcessEnv): BrowserEngineCo
       height: positiveInt(raw, "OVID_SCREENCAST_HEIGHT") ?? 800,
       quality: positiveInt(raw, "OVID_SCREENCAST_QUALITY") ?? 60,
       everyNthFrame: positiveInt(raw, "OVID_SCREENCAST_EVERY_NTH_FRAME") ?? 2,
-      maxFramesInFlight: positiveInt(raw, "OVID_SCREENCAST_MAX_FRAMES_IN_FLIGHT") ?? 2,
+      maxFramesInFlight: positiveInt(raw, "OVID_SCREENCAST_MAX_FRAMES_IN_FLIGHT") ?? 1,
+      maxFps: positiveNumber(raw, "OVID_SCREENCAST_MAX_FPS") ?? 4,
     },
     stateDir: optionalString(raw, "OVID_BROWSER_STATE_DIR"),
     lightpandaBin: optionalString(raw, "OVID_LIGHTPANDA_BIN"),

@@ -1,14 +1,15 @@
 import {
   ONE_OFF_GRACE_MS,
   nextFireAfter,
+  schedulePrompt,
   type ScheduleAutonomy,
   type ScheduleTrigger,
   type ScheduleUpdate,
 } from "@ovid/shared";
 import type { Db } from "./client.js";
-import { sessions, users } from "./repos.js";
-import { schedules } from "./scheduleRepos.js";
-import type { ScheduleRow } from "./schema.js";
+import { messages, runs, sessions, users } from "./repos.js";
+import { scheduleRuns, schedules } from "./scheduleRepos.js";
+import type { ScheduleRow, ScheduleRunRow } from "./schema.js";
 
 /**
  * P4 Task 5: schedule domain service — the single choke point both the REST
@@ -26,7 +27,8 @@ import type { ScheduleRow } from "./schema.js";
  */
 
 export class ScheduleError extends Error {
-  readonly code: "not_found" | "tier_required" | "invalid_trigger" | "bad_request";
+  /** `busy` (Wave 5 run-now): the schedule's chat already has an active run. */
+  readonly code: "not_found" | "tier_required" | "invalid_trigger" | "bad_request" | "busy";
 
   constructor(code: ScheduleError["code"], message: string) {
     super(message);
@@ -152,6 +154,24 @@ export async function createSchedule(db: Db, args: CreateScheduleArgs): Promise<
   });
 }
 
+/** Key-order-insensitive structural equality for trigger JSON. */
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      const v = (value as Record<string, unknown>)[key];
+      if (v !== undefined) out[key] = canonical(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+export function sameTrigger(a: ScheduleTrigger, b: ScheduleTrigger): boolean {
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+}
+
 export interface UpdateScheduleArgs {
   userId: string;
   scheduleId: string;
@@ -162,37 +182,44 @@ export interface UpdateScheduleArgs {
 type ScheduleUpdateFields = Parameters<typeof schedules.update>[2];
 
 /**
- * Patch a schedule. Terminal rows (cancelled/completed/failed) are not
- * editable. Pausing keeps `nextRunAt` (informational — `claimDue` filters on
- * `status='pending'`); resuming recomputes it. A trigger change on a pending
- * schedule recomputes the next fire from now; a change to cron re-checks tier.
+ * Patch a schedule. Cancelled and completed rows are not editable; a FAILED
+ * row is (Wave 5 FE-013: the user reviews, edits, then resumes it). Pausing
+ * keeps `nextRunAt` (informational — `claimDue` filters on
+ * `status='pending'`); resuming (from paused OR failed) recomputes it. A
+ * trigger CHANGE on a pending schedule recomputes the next fire from now; a
+ * patch that repeats the stored trigger is not a change (FE-017: renaming an
+ * hourly task must not push its next run out). A change to cron re-checks
+ * tier.
  */
 export async function updateSchedule(db: Db, args: UpdateScheduleArgs): Promise<ScheduleRow> {
   const { userId, scheduleId, patch } = args;
 
   const existing = await schedules.get(db, scheduleId, userId);
   if (!existing) throw new ScheduleError("not_found", "Schedule not found.");
-  if (
-    existing.status === "cancelled" ||
-    existing.status === "completed" ||
-    existing.status === "failed"
-  ) {
+  if (existing.status === "cancelled" || existing.status === "completed") {
     throw new ScheduleError("bad_request", "Schedule is not editable.");
   }
   if (Object.keys(patch).length === 0) {
     throw new ScheduleError("bad_request", "At least one field must be provided.");
   }
   validateMaxRetries(patch.maxRetries);
-  if (patch.trigger !== undefined) {
-    await assertCronTier(db, userId, patch.trigger);
+  // FE-017: an unchanged trigger is not a trigger change.
+  const triggerChanged =
+    patch.trigger !== undefined && !sameTrigger(patch.trigger, existing.trigger);
+  if (triggerChanged) {
+    await assertCronTier(db, userId, patch.trigger!);
   }
   if (patch.sessionId !== undefined) {
     const session = await sessions.get(db, patch.sessionId, userId);
     if (!session) throw new ScheduleError("not_found", "Session not found.");
   }
-  // Resume is only meaningful from paused (Dart resumeStopped).
-  if (patch.status === "pending" && existing.status !== "paused") {
-    throw new ScheduleError("bad_request", "Only a paused schedule can be resumed.");
+  // Resume is meaningful from paused (Dart resumeStopped) and, after
+  // review, from failed (FE-013).
+  if (patch.status === "pending" && existing.status !== "paused" && existing.status !== "failed") {
+    throw new ScheduleError("bad_request", "Only a paused or failed schedule can be resumed.");
+  }
+  if (patch.status === "paused" && existing.status !== "pending" && existing.status !== "paused") {
+    throw new ScheduleError("bad_request", "Only an active schedule can be paused.");
   }
 
   const at = now(args.clock);
@@ -201,7 +228,7 @@ export async function updateSchedule(db: Db, args: UpdateScheduleArgs): Promise<
 
   if (patch.title !== undefined) set.title = patch.title;
   if (patch.description !== undefined) set.description = patch.description;
-  if (patch.trigger !== undefined) set.trigger = patch.trigger;
+  if (triggerChanged) set.trigger = patch.trigger;
   if (patch.autonomy !== undefined) set.autonomy = patch.autonomy;
   if (patch.maxRetries !== undefined) set.maxRetries = patch.maxRetries;
   if (patch.sessionId !== undefined) set.sessionId = patch.sessionId;
@@ -214,9 +241,11 @@ export async function updateSchedule(db: Db, args: UpdateScheduleArgs): Promise<
     set.status = "pending";
     set.pausedReason = null;
     set.nextRunAt = resumeNextRunAt(trigger, at);
-  } else if (patch.trigger !== undefined && existing.status === "pending") {
+  } else if (triggerChanged && existing.status === "pending") {
     set.nextRunAt = initialNextRunAt(trigger, at);
   }
+
+  if (Object.keys(set).length === 0) return existing; // a no-op patch
 
   const updated = await schedules.update(db, scheduleId, set);
   if (!updated) throw new ScheduleError("not_found", "Schedule not found.");
@@ -240,4 +269,64 @@ export async function cancelSchedule(
     pausedReason: null,
   });
   if (!updated) throw new ScheduleError("not_found", "Schedule not found.");
+}
+
+export interface RunScheduleNowResult {
+  schedule: ScheduleRow;
+  runId: string;
+  scheduleRun: ScheduleRunRow;
+  /** The transcript prompt the run executes (the caller enqueues it). */
+  prompt: string;
+}
+
+/**
+ * Wave 5 FE-012 "Run now": claim ONE immediate occurrence of a schedule —
+ * the same message + run + ledger rows the scheduler tick writes for a due
+ * occurrence (scheduledFor = now, never late) — WITHOUT touching the
+ * schedule's own `nextRunAt` or status. The caller enqueues the run after
+ * this commits (and publishes `schedule_run_started`); the settle reconciler
+ * then closes the occurrence like any other (an unenqueued run is recovered
+ * by its stale arm).
+ *
+ * Runnable: pending, paused and failed (a test run during review).
+ * Cancelled/completed → bad_request; another active run in the chat → busy;
+ * wrong owner or unknown id → not_found.
+ */
+export async function runScheduleNow(
+  db: Db,
+  args: { userId: string; scheduleId: string; clock?: () => Date },
+): Promise<RunScheduleNowResult> {
+  const at = now(args.clock);
+  return db.transaction(async (tx) => {
+    const tdb = tx as unknown as Db;
+    const row = await schedules.get(tdb, args.scheduleId, args.userId);
+    if (!row) throw new ScheduleError("not_found", "Schedule not found.");
+    if (row.status === "cancelled" || row.status === "completed") {
+      throw new ScheduleError("bad_request", "This schedule can no longer run.");
+    }
+    if ((await runs.activeForSession(tdb, row.sessionId)) !== null) {
+      throw new ScheduleError("busy", "This schedule's chat is already running a task.");
+    }
+    const prompt = schedulePrompt(row.title, row.description);
+    const message = await messages.append(tdb, {
+      sessionId: row.sessionId,
+      role: "user",
+      content: prompt,
+    });
+    const run = await runs.create(tdb, { sessionId: row.sessionId, promptMessageId: message.id });
+    const scheduleRun = await scheduleRuns.claim(tdb, {
+      scheduleId: row.id,
+      scheduledFor: at,
+      runId: run.id,
+      ranLate: false,
+      sessionId: row.sessionId,
+      triggerKind: row.trigger.kind,
+    });
+    if (scheduleRun === null) {
+      // The tick ledgered this exact instant a moment ago: the run it fired
+      // is the "run now" the user asked for.
+      throw new ScheduleError("busy", "This schedule is starting a run right now.");
+    }
+    return { schedule: row, runId: run.id, scheduleRun, prompt };
+  });
 }

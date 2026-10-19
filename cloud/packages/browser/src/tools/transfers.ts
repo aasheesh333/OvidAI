@@ -26,6 +26,7 @@ import { guardUrl, withSession } from "../sessionOps.js";
 import { DOWNLOAD_MAX_BYTES, sanitizeFilename } from "./downloadWiring.js";
 import {
   TOOL_ERROR_PREFIX,
+  artifactSessionId,
   defineBrowserTool,
   messageOf,
   type BrowserToolDef,
@@ -161,7 +162,7 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
             : (defaultFilename(url) ?? `download-${deps.now?.() ?? Date.now()}`);
         if (name === null) return { content: "Download refused: invalid filename." };
 
-        const root = await deps.workspaceDir(ctx.userId, ctx.sessionId);
+        const root = await deps.workspaceDir(ctx.userId, artifactSessionId(ctx));
         const relDir = "browser/downloads";
         const dir = join(root, relDir);
         await mkdir(dir, { recursive: true });
@@ -196,7 +197,7 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
     },
     inputSchema: z.object({ selector: z.string().min(1), path: z.string().min(1) }),
     async execute(input, ctx) {
-      const root = await deps.workspaceDir(ctx.userId, ctx.sessionId);
+      const root = await deps.workspaceDir(ctx.userId, artifactSessionId(ctx));
       const abs = resolve(root, input.path);
       const rel = relative(root, abs);
       // Review Focus #4: the jail check is path-level, before any file work.

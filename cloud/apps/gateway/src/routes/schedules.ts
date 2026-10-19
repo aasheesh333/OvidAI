@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   cancelSchedule,
   createSchedule,
+  runScheduleNow,
   scheduleRuns,
   schedules,
   ScheduleError,
@@ -16,8 +17,10 @@ import {
   type Page,
   type ScheduleDto,
   type ScheduleRunDto,
+  type ScheduleRunNowResponse,
   type SystemEvent,
 } from "@ovid/shared";
+import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import type { GatewayDeps } from "../app.js";
 import {
   badRequest,
@@ -79,6 +82,8 @@ function scheduleErrorReply(reply: FastifyReply, err: ScheduleError): FastifyRep
     case "invalid_trigger":
     case "bad_request":
       return badRequest(reply, err.message);
+    case "busy":
+      return sendError(reply, 409, "session_busy", err.message);
   }
 }
 
@@ -158,6 +163,71 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: GatewayDeps):
       beforeId,
     });
     return { items: rows.map(toScheduleRunDto), nextCursor };
+  });
+
+  // Wave 5 FE-012: run one occurrence NOW. The occurrence is claimed exactly
+  // like a due tick (message + run + ledger, scheduledFor = now) without
+  // moving the schedule's own nextRunAt/status; the run is enqueued with the
+  // schedule's autonomy projected onto the run mode (the tick's H1 rule) and
+  // settles like any other occurrence.
+  app.post("/schedules/:id/run", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!isUuid(id)) return notFound(reply, SCHEDULE_NOT_FOUND);
+    const { uid } = request.principal;
+
+    let fired: Awaited<ReturnType<typeof runScheduleNow>>;
+    try {
+      fired = await runScheduleNow(deps.db, { userId: uid, scheduleId: id });
+    } catch (err) {
+      if (isScheduleError(err)) return scheduleErrorReply(reply, err);
+      throw err;
+    }
+
+    const { schedule, runId, scheduleRun, prompt } = fired;
+    const autonomy = schedule.autonomy as "safe" | "auto";
+    const tier = (await users.ensure(deps.db, uid, null)).tier;
+    try {
+      await deps.queues.agentRuns.add(
+        AGENT_RUN_JOB_NAME,
+        {
+          runId,
+          sessionId: schedule.sessionId,
+          userId: uid,
+          prompt,
+          tier,
+          autonomy,
+          mode: autonomy === "safe" ? "safe" : "auto",
+          schedule: { scheduleId: schedule.id, scheduleRunId: scheduleRun.id, autonomy },
+        },
+        { jobId: runId, priority: tier === "free" ? 2 : 1 },
+      );
+    } catch (err) {
+      // The occurrence is committed; settle's stale arm recovers a lost
+      // enqueue (run_lost → retry ladder). The client may simply refresh.
+      request.log.error({ err, runId, scheduleId: id }, "run-now enqueue failed; settle will recover");
+      return sendError(
+        reply,
+        503,
+        "unavailable",
+        "Run queue is temporarily unavailable; the run will be retried.",
+      );
+    }
+
+    await publish(deps, uid, {
+      type: "schedule_run_started",
+      scheduleId: schedule.id,
+      ts: new Date().toISOString(),
+      payload: {
+        scheduleRunId: scheduleRun.id,
+        runId,
+        scheduledFor: scheduleRun.scheduledFor.toISOString(),
+        ranLate: false,
+        attempt: scheduleRun.attempt,
+        manual: true,
+      },
+    });
+    const body: ScheduleRunNowResponse = { runId, scheduleRun: toScheduleRunDto(scheduleRun) };
+    return reply.code(202).send(body);
   });
 
   app.patch("/schedules/:id", async (request, reply) => {

@@ -38,6 +38,8 @@ class _QueueRest extends CloudRestClient {
   final Map<String, Completer<void>> sendEntered =
       <String, Completer<void>>{};
 
+  CloudTurnOptions lastTurn = CloudTurnOptions.none;
+
   @override
   Future<SendMessageResponse> sendMessage(
     String sessionId,
@@ -45,7 +47,9 @@ class _QueueRest extends CloudRestClient {
     List<String> attachmentIds = const [],
     String? clientMsgId,
     int? maxOutputTokens,
+    CloudTurnOptions turn = CloudTurnOptions.none,
   }) async {
+    lastTurn = turn;
     final entered = sendEntered.remove(content);
     if (entered != null && !entered.isCompleted) entered.complete();
     final gate = sendGates.remove(content);

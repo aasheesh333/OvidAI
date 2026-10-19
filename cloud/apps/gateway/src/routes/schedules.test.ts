@@ -5,6 +5,7 @@ import {
   pageSchema,
   scheduleDtoSchema,
   scheduleRunDtoSchema,
+  scheduleRunNowResponseSchema,
   type Page,
   type ScheduleDto,
   type ScheduleRunDto,
@@ -34,11 +35,13 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway schedule routes (real postgres)", (
   let db: Db;
   let app: FastifyInstance;
   let bus: SystemBusStub;
+  let queueAdds: ReturnType<typeof stubQueues>["adds"];
 
   beforeAll(async () => {
     db = await openTestDb();
     bus = stubSystemBus();
-    const { queues } = stubQueues();
+    const { queues, adds } = stubQueues();
+    queueAdds = adds;
     app = buildGateway({
       db,
       queues,
@@ -511,6 +514,121 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway schedule routes (real postgres)", (
     expect(deletedEvent!.event.payload).toMatchObject({ scheduleId: created.id });
   });
 
+  // ---- Wave 5: run now, failed-schedule recovery, title-only edits ---------
+
+  it("POST /:id/run → 202 {runId, scheduleRun}; the run is enqueued with the schedule's autonomy; schedule_run_started published; nextRunAt untouched", async () => {
+    const uid = testUid("sched-runnow");
+    const created = await createSchedule(uid);
+    const res = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/schedules/${created.id}/run`,
+      headers: authHeaders(uid),
+    });
+    expect(res.statusCode, res.body).toBe(202);
+    const body = scheduleRunNowResponseSchema.parse(res.json());
+    expect(body.scheduleRun.scheduleId).toBe(created.id);
+    expect(body.scheduleRun.runId).toBe(body.runId);
+    expect(body.scheduleRun.status).toBe("running");
+
+    const job = queueAdds.find((a) => a.data.runId === body.runId);
+    expect(job).toBeDefined();
+    expect(job!.data).toMatchObject({
+      sessionId: created.sessionId,
+      userId: uid,
+      prompt: "[schedule: Morning report] check things",
+      autonomy: "safe",
+      mode: "safe",
+      schedule: { scheduleId: created.id, scheduleRunId: body.scheduleRun.id, autonomy: "safe" },
+    });
+    expect(job!.opts).toMatchObject({ jobId: body.runId });
+
+    const started = bus.published.find(
+      (p) => p.event.type === "schedule_run_started" && p.event.scheduleId === created.id,
+    );
+    expect(started?.uid).toBe(uid);
+
+    const after = await app.inject({
+      method: "GET",
+      url: `/cloud/v1/schedules/${created.id}`,
+      headers: authHeaders(uid),
+    });
+    expect(scheduleDtoSchema.parse(after.json()).nextRunAt).toBe(created.nextRunAt);
+
+    // The chat is busy now: a second press answers 409, never a double run.
+    const again = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/schedules/${created.id}/run`,
+      headers: authHeaders(uid),
+    });
+    expect(again.statusCode).toBe(409);
+    expect(again.json()).toMatchObject({ error: { code: "session_busy" } });
+  });
+
+  it("POST /:id/run as a stranger or with a malformed id → 404; on a cancelled schedule → 400", async () => {
+    const uid = testUid("sched-runnow-guard");
+    const created = await createSchedule(uid);
+    const stranger = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/schedules/${created.id}/run`,
+      headers: authHeaders(testUid("sched-runnow-other")),
+    });
+    expect(stranger.statusCode).toBe(404);
+    const garbage = await app.inject({
+      method: "POST",
+      url: "/cloud/v1/schedules/not-a-uuid/run",
+      headers: authHeaders(uid),
+    });
+    expect(garbage.statusCode).toBe(404);
+
+    await app.inject({ method: "DELETE", url: `/cloud/v1/schedules/${created.id}`, headers: authHeaders(uid) });
+    const cancelled = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/schedules/${created.id}/run`,
+      headers: authHeaders(uid),
+    });
+    expect(cancelled.statusCode).toBe(400);
+  });
+
+  it("a FAILED schedule can be edited and resumed (FE-013); the resume publishes reason 'resumed'", async () => {
+    const uid = testUid("sched-failed");
+    const created = await createSchedule(uid);
+    await db.$client.unsafe("UPDATE schedules SET status = 'failed' WHERE id = $1", [created.id]);
+
+    const edited = await app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/schedules/${created.id}`,
+      headers: authHeaders(uid),
+      payload: { description: "check fewer things" },
+    });
+    expect(edited.statusCode, edited.body).toBe(200);
+    const resumed = await app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/schedules/${created.id}`,
+      headers: authHeaders(uid),
+      payload: { status: "pending" },
+    });
+    expect(resumed.statusCode, resumed.body).toBe(200);
+    expect(scheduleDtoSchema.parse(resumed.json()).status).toBe("pending");
+    const event = bus.published.filter((p) => p.event.scheduleId === created.id).pop();
+    expect(event?.event.payload).toMatchObject({ reason: "resumed" });
+  });
+
+  it("a title-only PATCH that repeats the trigger keeps nextRunAt (FE-017)", async () => {
+    const uid = testUid("sched-title");
+    const created = await createSchedule(uid);
+    await sleep(20);
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/schedules/${created.id}`,
+      headers: authHeaders(uid),
+      payload: { title: "Renamed", trigger: EVERY_300 },
+    });
+    expect(res.statusCode).toBe(200);
+    const dto = scheduleDtoSchema.parse(res.json());
+    expect(dto.title).toBe("Renamed");
+    expect(dto.nextRunAt).toBe(created.nextRunAt);
+  });
+
   it("all schedule routes answer 401 unauthenticated", async () => {
     const created = await createSchedule(testUid("sched-401"));
     const requests = [
@@ -520,6 +638,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway schedule routes (real postgres)", (
       { method: "GET" as const, url: `/cloud/v1/schedules/${created.id}/runs` },
       { method: "PATCH" as const, url: `/cloud/v1/schedules/${created.id}`, payload: { title: "x" } },
       { method: "DELETE" as const, url: `/cloud/v1/schedules/${created.id}` },
+      { method: "POST" as const, url: `/cloud/v1/schedules/${created.id}/run` },
     ];
     for (const req of requests) {
       const res = await app.inject({ ...req, headers: {} });

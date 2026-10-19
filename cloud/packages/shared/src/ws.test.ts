@@ -125,6 +125,11 @@ describe("wsServerMsg browser ops (P6)", () => {
     expect(wsServerMsg(input)).toEqual(input);
   });
 
+  it("parses browser_state carrying this socket's viewerId (FE-026)", () => {
+    const input = { op: "browser_state", sessionId: "s1", state: browserState, viewerId: "v1" };
+    expect(wsServerMsg(input)).toEqual(input);
+  });
+
   it("rejects browser_state with a malformed state", () => {
     expect(() =>
       wsServerMsg({

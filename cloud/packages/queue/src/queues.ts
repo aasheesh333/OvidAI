@@ -92,6 +92,12 @@ export interface AgentRunJob {
    * the schedule's own autonomy, not the sender's.
    */
   schedule?: ScheduleRunRef;
+  /**
+   * Wave 1a (R1, additive, optional): sessions the user explicitly @-tagged
+   * in this message (gateway owner-checked). The worker includes their recent
+   * context for THIS run only; absent = no other session's context.
+   */
+  sessionRefs?: string[];
 }
 
 // Wire-format ids are plain nonempty strings (same convention as
@@ -115,6 +121,7 @@ export const agentRunJobSchema: z.ZodType<AgentRunJob> = z.object({
   autonomy: z.enum(["safe", "auto"]).optional(),
   mode: z.enum(["safe", "auto", "drive", "studio"]).optional(),
   schedule: scheduleRunRefSchema.optional(),
+  sessionRefs: z.array(z.string().min(1)).optional(),
 });
 
 /** Why a workspace is being hibernated (warm → cold). */

@@ -60,6 +60,9 @@ export const users = pgTable("users", {
   // ovid:uids) are iterated by reapply-all/reset-all/export/resync. Chat-only
   // rows stay false.
   mintProvisioned: boolean("mint_provisioned").notNull().default(false),
+  // Wave 1a (SE-005 / R1): per-user preferences the worker enforces
+  // ({memoryEnabled?, shareSessionMemory?}; absent keys = shared defaults).
+  preferences: jsonb("preferences").$type<Record<string, unknown>>().notNull().default({}),
   createdAt: timestamptz("created_at").notNull().defaultNow(),
 });
 

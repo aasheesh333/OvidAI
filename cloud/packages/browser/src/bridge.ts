@@ -57,7 +57,8 @@ export interface BridgeHandlers {
   onViewersChange(sessionId: string, viewers: number): void;
   /** Only zod-valid events, in redis arrival order. */
   onInput(sessionId: string, event: BrowserInputEvent): void;
-  onTakeover(sessionId: string, enabled: boolean): void;
+  /** `viewerId` is the requesting gateway viewer (Wave 5 FE-026; absent from older gateways). */
+  onTakeover(sessionId: string, enabled: boolean, viewerId?: string): void;
 }
 
 export interface BrowserBridge {
@@ -70,6 +71,10 @@ export interface BrowserBridge {
   /** PUBLISH JSON — fire-and-forget, errors logged not thrown. */
   publishState(sessionId: string, state: BrowserStateDto): void;
   viewerCount(sessionId: string): number;
+  /** True while `viewerId` is a live (joined, not swept) viewer of the session. */
+  hasViewer(sessionId: string, viewerId: string): boolean;
+  /** True once `watch(sessionId)` has SUBSCRIBED (and not unwatched). */
+  isWatching(sessionId: string): boolean;
   /** Unwatch all + quit the shared publisher connection. Idempotent. */
   close(): Promise<void>;
 }
@@ -79,6 +84,8 @@ interface WatchedSession {
   sub: Redis;
   /** viewerId -> last-seen epoch ms (from `now`). */
   viewers: Map<string, number>;
+  /** True once the SUBSCRIBE resolved — only then can a viewer_join be seen. */
+  subscribed: boolean;
 }
 
 export function createRedisBrowserBridge(opts: {
@@ -158,7 +165,7 @@ export function createRedisBrowserBridge(opts: {
       const after = session.viewers.size;
       if (after !== before) handlers.onViewersChange(sessionId, after);
     } else {
-      handlers.onTakeover(sessionId, msg.enabled);
+      handlers.onTakeover(sessionId, msg.enabled, msg.viewerId);
     }
   }
 
@@ -193,13 +200,14 @@ export function createRedisBrowserBridge(opts: {
         if (ch === browserCtlChannel(sessionId)) onCtlMessage(sessionId, ch, message);
         else if (ch === browserInputChannel(sessionId)) onInputMessage(sessionId, ch, message);
       });
-      const watched: WatchedSession = { sub, viewers: new Map() };
+      const watched: WatchedSession = { sub, viewers: new Map(), subscribed: false };
       // Register BEFORE subscribing so an immediately-following publish
       // (e.g. the gateway's viewer_join before this watch resolved) is not
       // dropped by the `sessions.get` guards above.
       sessions.set(sessionId, watched);
       try {
         await sub.subscribe(browserCtlChannel(sessionId), browserInputChannel(sessionId));
+        watched.subscribed = true;
       } catch (err) {
         // Never leave a half-watched session registered.
         if (sessions.get(sessionId) === watched) sessions.delete(sessionId);
@@ -245,6 +253,14 @@ export function createRedisBrowserBridge(opts: {
 
     viewerCount(sessionId: string): number {
       return sessions.get(sessionId)?.viewers.size ?? 0;
+    },
+
+    hasViewer(sessionId: string, viewerId: string): boolean {
+      return sessions.get(sessionId)?.viewers.has(viewerId) ?? false;
+    },
+
+    isWatching(sessionId: string): boolean {
+      return sessions.get(sessionId)?.subscribed === true;
     },
 
     async close(): Promise<void> {

@@ -5,7 +5,14 @@ import { createDb, migrate, type Db } from "./client.js";
 import { newId, sessions, users as usersRepo } from "./repos.js";
 import { schedules as schedulesTable, sessions as sessionsTable, users as usersTable } from "./schema.js";
 import type { ScheduleRow } from "./schema.js";
-import { cancelSchedule, createSchedule, ScheduleError, updateSchedule } from "./scheduleService.js";
+import { schedules } from "./scheduleRepos.js";
+import {
+  cancelSchedule,
+  createSchedule,
+  runScheduleNow,
+  ScheduleError,
+  updateSchedule,
+} from "./scheduleService.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
@@ -380,6 +387,125 @@ describe.skipIf(!TEST_DATABASE_URL)("scheduleService against real postgres", () 
       .where(eq(schedulesTable.id, created.id));
     expect(stored!.status).toBe("cancelled");
     expect(stored!.pausedReason).toBeNull();
+  });
+
+  // ---- Wave 5: FE-013 / FE-017 / run now -----------------------------------
+
+  async function markFailed(id: string): Promise<void> {
+    await db.update(schedulesTable).set({ status: "failed" }).where(eq(schedulesTable.id, id));
+  }
+
+  it("FE-017: a patch that carries the UNCHANGED trigger never reschedules", async () => {
+    const uid = await seedUser();
+    const created = await createSchedule(db, baseCreate(uid));
+    const later = clockAt("2026-10-17T12:04:00.000Z");
+
+    const renamed = await updateSchedule(db, {
+      userId: uid,
+      scheduleId: created.id,
+      // Same trigger, keys in another order — still the same trigger.
+      patch: { title: "Renamed", trigger: { seconds: 300, kind: "every" } as never },
+      clock: later,
+    });
+    expect(renamed.title).toBe("Renamed");
+    expect(renamed.nextRunAt).toEqual(created.nextRunAt);
+  });
+
+  it("FE-013: a failed schedule can be edited after review and resumed", async () => {
+    const uid = await seedUser();
+    const created = await createSchedule(db, baseCreate(uid));
+    await markFailed(created.id);
+
+    const edited = await updateSchedule(db, {
+      userId: uid,
+      scheduleId: created.id,
+      patch: { description: "Summarize the day, but shorter" },
+      clock,
+    });
+    expect(edited.status).toBe("failed");
+    expect(edited.description).toBe("Summarize the day, but shorter");
+
+    const resumed = await updateSchedule(db, {
+      userId: uid,
+      scheduleId: created.id,
+      patch: { status: "pending" },
+      clock,
+    });
+    expect(resumed.status).toBe("pending");
+    expect(resumed.pausedReason).toBeNull();
+    expect(resumed.nextRunAt).toEqual(new Date(NOW.getTime() + 300_000));
+  });
+
+  it("FE-013: a failed one-off resumed with a new time keeps that time", async () => {
+    const uid = await seedUser();
+    const created = await createSchedule(
+      db,
+      baseCreate(uid, { trigger: { kind: "at", at: "2026-10-17T13:00:00.000Z" } }),
+    );
+    await markFailed(created.id);
+    const resumed = await updateSchedule(db, {
+      userId: uid,
+      scheduleId: created.id,
+      patch: { status: "pending", trigger: { kind: "at", at: "2026-10-18T08:00:00.000Z" } },
+      clock,
+    });
+    expect(resumed.status).toBe("pending");
+    expect(resumed.nextRunAt).toEqual(new Date("2026-10-18T08:00:00.000Z"));
+  });
+
+  it("completed and cancelled schedules stay read-only", async () => {
+    const uid = await seedUser();
+    const created = await createSchedule(db, baseCreate(uid));
+    await db.update(schedulesTable).set({ status: "completed" }).where(eq(schedulesTable.id, created.id));
+    await expectScheduleError(
+      updateSchedule(db, { userId: uid, scheduleId: created.id, patch: { status: "pending" }, clock }),
+      "bad_request",
+    );
+  });
+
+  it("run now: claims an immediate occurrence (message + run + ledger) without touching nextRunAt", async () => {
+    const uid = await seedUser();
+    const created = await createSchedule(db, baseCreate(uid));
+
+    const fired = await runScheduleNow(db, { userId: uid, scheduleId: created.id, clock });
+    expect(fired.schedule.id).toBe(created.id);
+    expect(fired.scheduleRun.scheduleId).toBe(created.id);
+    expect(fired.scheduleRun.status).toBe("running");
+    expect(fired.scheduleRun.runId).toBe(fired.runId);
+    expect(fired.scheduleRun.scheduledFor).toEqual(NOW);
+    expect(fired.prompt).toBe("[schedule: Daily digest] Summarize the day");
+
+    const after = await schedules.get(db, created.id, uid);
+    expect(after!.nextRunAt).toEqual(created.nextRunAt);
+    expect(after!.status).toBe("pending");
+  });
+
+  it("run now refuses a busy chat, a cancelled schedule, and a stranger", async () => {
+    const uid = await seedUser();
+    const created = await createSchedule(db, baseCreate(uid));
+    await runScheduleNow(db, { userId: uid, scheduleId: created.id, clock });
+    // The first run is still queued: the chat is busy.
+    await expectScheduleError(
+      runScheduleNow(db, { userId: uid, scheduleId: created.id, clock: clockAt("2026-10-17T12:00:01.000Z") }),
+      "busy",
+    );
+
+    const other = await seedUser();
+    await expectScheduleError(runScheduleNow(db, { userId: other, scheduleId: created.id, clock }), "not_found");
+
+    const second = await createSchedule(db, baseCreate(uid));
+    await cancelSchedule(db, { userId: uid, scheduleId: second.id });
+    await expectScheduleError(runScheduleNow(db, { userId: uid, scheduleId: second.id, clock }), "bad_request");
+  });
+
+  it("run now works on a paused or failed schedule (a test run during review)", async () => {
+    const uid = await seedUser();
+    const created = await createSchedule(db, baseCreate(uid));
+    await markFailed(created.id);
+    const fired = await runScheduleNow(db, { userId: uid, scheduleId: created.id, clock });
+    expect(fired.scheduleRun.status).toBe("running");
+    const after = await schedules.get(db, created.id, uid);
+    expect(after!.status).toBe("failed");
   });
 
   it("throws not_found for an unknown schedule id", async () => {

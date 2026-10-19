@@ -70,7 +70,7 @@ void main() {
       ),
     ]);
 
-    expect(find.text('pending'), findsOneWidget);
+    expect(find.text('Active'), findsOneWidget);
     expect(find.text('Review PR queue'), findsOneWidget);
     expect(find.textContaining('Daily'), findsOneWidget);
     expect(find.textContaining('09:30'), findsOneWidget);
@@ -171,7 +171,7 @@ void main() {
     await _settle(tester);
     expect(fake.lastPatchBody, {'status': 'paused'});
     expect(fake.byId('sc1')!['status'], 'paused');
-    expect(find.text('paused'), findsOneWidget);
+    expect(find.text('Paused'), findsOneWidget);
 
     await tester.tap(find.byIcon(Icons.more_horiz));
     await _settle(tester);
@@ -197,7 +197,7 @@ void main() {
 
     expect(fake.deleteCalls, 1);
     expect(fake.byId('sc1')!['status'], 'cancelled');
-    expect(find.text('cancelled'), findsOneWidget);
+    expect(find.text('Cancelled'), findsOneWidget);
     expect(find.text('A task'), findsOneWidget);
   });
 

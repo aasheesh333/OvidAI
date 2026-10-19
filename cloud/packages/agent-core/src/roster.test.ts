@@ -353,11 +353,12 @@ describe("computeToolRoster — canonical ordering", () => {
 // ── modePolicy ──────────────────────────────────────────────────────────────
 
 describe("modePolicy", () => {
-  it("safe: no mutation, confined, outside needs approval", () => {
+  it("safe: asks before every action, confined, never mutates unattended", () => {
     expect(modePolicy("safe", false)).toEqual({
       canMutate: false,
       confineToWorkspace: true,
       approvalForOutside: true,
+      askBeforeActions: true,
     });
   });
 
@@ -367,6 +368,7 @@ describe("modePolicy", () => {
         canMutate: true,
         confineToWorkspace: true,
         approvalForOutside: true,
+        askBeforeActions: false,
       });
     }
   });
@@ -376,6 +378,7 @@ describe("modePolicy", () => {
       canMutate: true,
       confineToWorkspace: false,
       approvalForOutside: false,
+      askBeforeActions: false,
     });
   });
 
@@ -388,6 +391,7 @@ describe("modePolicy", () => {
       canMutate: false,
       confineToWorkspace: true,
       approvalForOutside: true,
+      askBeforeActions: false,
     });
   });
 });

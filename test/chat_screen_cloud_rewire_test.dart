@@ -75,6 +75,10 @@ class FakeChatRest extends CloudRestClient {
   /// newest-page load stays clean, so a failure lands in the pager alone.
   CloudApiException? olderPageError;
 
+  /// Thrown for every newest-page fetch while set (CH-035: a failed first
+  /// history load).
+  CloudApiException? newestPageError;
+
   int _seq = 0;
 
   @override
@@ -114,6 +118,8 @@ class FakeChatRest extends CloudRestClient {
   }) async {
     paged.add((sessionId: sessionId, before: before, limit: limit));
     if (before != null && olderPageError != null) throw olderPageError!;
+    final newestError = newestPageError;
+    if (before == null && newestError != null) throw newestError;
     final history = historyBySession[sessionId] ?? const <MessageDto>[];
     // Server semantics: the page before `before` holds the `limit` rows
     // strictly OLDER than that message, newest first. `before` = the
@@ -133,6 +139,8 @@ class FakeChatRest extends CloudRestClient {
     );
   }
 
+  CloudTurnOptions lastTurn = CloudTurnOptions.none;
+
   @override
   Future<SendMessageResponse> sendMessage(
     String sessionId,
@@ -140,7 +148,9 @@ class FakeChatRest extends CloudRestClient {
     List<String> attachmentIds = const [],
     String? clientMsgId,
     int? maxOutputTokens,
+    CloudTurnOptions turn = CloudTurnOptions.none,
   }) async {
+    lastTurn = turn;
     final error = sendErrors[content];
     if (error != null) throw error;
     sent.add((
@@ -271,6 +281,7 @@ Future<_Harness> _bind() async {
     prefs: prefs,
     connection: ConnectionService.forTest(),
     ws: ws,
+    autoRetry: false,
   );
   final facade = CloudAgentFacade(rest: rest, ws: ws, store: store);
   CloudSessionStore.installForTest(store);
@@ -377,25 +388,30 @@ void main() {
     await tester.pump();
     await tester.tap(find.byTooltip('Send'));
     await tester.pump();
-    // busyFor covers the POST's in-flight window: the composer already
-    // offers Queue, and busyFor is the composer's queue-or-send decision.
+    // busyFor covers the POST's in-flight window: a second send would queue.
     expect(h.facade.busyFor('srv-1'), isTrue);
 
-    // The second tap arrives before the first POST lands.
-    await tester.tap(find.byTooltip('Add to queue'));
-    await tester.pump();
-
+    // CH-011: the prompt left the composer the moment it was safe in the
+    // outbox and shows as a pending row — there is nothing left for a second
+    // tap to send, so a double tap can never double-run.
+    final editable = tester.widget<EditableText>(
+      find.descendant(
+        of: find.byKey(const ValueKey('chat-composer')),
+        matching: find.byType(EditableText),
+      ),
+    );
+    expect(editable.controller.text, isEmpty);
+    expect(find.text('Sending…'), findsOneWidget);
     expect(h.rest.sent, hasLength(1), reason: 'one POST, one run');
     expect(h.rest.sent.single.content, 'hello cloud');
-    expect(h.facade.queuedMessagesFor('srv-1'), ['hello cloud']);
 
     gate.complete();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    // The queued row did not dispatch a second run behind the first; it
-    // waits for the first run's terminal.
     expect(h.rest.sent, hasLength(1));
-    expect(h.facade.queuedMessagesFor('srv-1'), ['hello cloud']);
+    // Confirmed: the pending status is gone, the row stays.
+    expect(find.text('Sending…'), findsNothing);
+    expect(find.textContaining('hello cloud'), findsWidgets);
     await h.close();
   });
 
@@ -573,7 +589,7 @@ void main() {
     final chip = find.byKey(const ValueKey('cloud-outbox-chip'));
     expect(chip, findsOneWidget);
     expect(
-      find.descendant(of: chip, matching: find.textContaining('1 queued')),
+      find.descendant(of: chip, matching: find.textContaining('1 message')),
       findsOneWidget,
     );
     await h.close();
@@ -602,38 +618,39 @@ void main() {
 
     final row = find.byKey(const ValueKey('cloud-error-row'));
     expect(row, findsOneWidget);
-    // The server message is shown VERBATIM.
+    // CH-031: plain language with the reset time and an Upgrade path —
+    // never a raw code or "Resets in 842 min".
     expect(
       find.descendant(
         of: row,
-        matching: find.text('Daily limit reached. Your allowance resets soon.'),
+        matching: find.textContaining(
+            RegExp(r'plan allowance\. It resets at \d\d:\d\d \(in \d+ min\)')),
       ),
       findsOneWidget,
     );
-    // A countdown derived from resetsAt.
-    expect(
-      find.descendant(
-        of: row,
-        matching: find.textContaining(RegExp(r'Resets in \d+ min')),
-      ),
-      findsOneWidget,
-    );
-    // Nothing was sent and the local engine never ran.
+    expect(find.byKey(const ValueKey('cloud-error-plans')), findsOneWidget);
+    // Nothing was accepted and the local engine never ran.
     expect(h.rest.sent, isEmpty);
     expect(CloudAgentFacade.I.busyFor('srv-1'), isFalse);
 
-    // The composed draft is still present after the error row is dismissed.
-    await tester.tap(find.byKey(const ValueKey('cloud-error-dismiss')));
+    // CH-009: the prompt is KEPT — a "Not sent" row with Retry / Discard,
+    // durable in the outbox (it survives process death).
+    expect(find.text('Not sent'), findsOneWidget);
+    expect(h.store.outboxFor('srv-1').single.content, 'limit me');
+    expect(h.store.outboxFor('srv-1').single.failedCode, 'daily_limit_reached');
+
+    // Retry re-delivers with the SAME clientMsgId (CH-010).
+    final key = h.store.outboxFor('srv-1').single.clientMsgId;
+    h.rest.sendErrors.remove('limit me');
+    await tester.tap(find.byKey(const ValueKey('cloud-error-retry')).hitTestable().evaluate().isEmpty
+        ? find.byKey(ValueKey('pending-retry-$key'))
+        : find.byKey(const ValueKey('cloud-error-retry')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
+    expect(h.rest.sent.single.clientMsgId, key);
+    expect(h.store.outboxFor('srv-1'), isEmpty);
     expect(find.byKey(const ValueKey('cloud-error-row')), findsNothing);
-    final editable = tester.widget<EditableText>(
-      find.descendant(
-        of: find.byKey(const ValueKey('chat-composer')),
-        matching: find.byType(EditableText),
-      ),
-    );
-    expect(editable.controller.text, 'limit me');
+    expect(find.text('Not sent'), findsNothing);
     await h.close();
   });
 
@@ -997,6 +1014,59 @@ void main() {
       expect(h.rest.sent.single.content, 'still works');
       expect(find.textContaining('still works'), findsWidgets);
       expect(h.rest.paged, hasLength(2));
+      await h.close();
+    },
+  );
+
+  testWidgets(
+    'CH-035: a failed first history load shows Retry, never an empty chat',
+    timeout: const Timeout(Duration(seconds: 60)),
+    (tester) async {
+      final h = await _bind();
+      addTearDown(h.close);
+      _seedHistory(h.rest, 'srv-1', 3);
+      h.rest.newestPageError = CloudApiException(
+        status: 503,
+        code: 'unavailable',
+        message: 'Gateway is restarting.',
+      );
+      _addSession('srv-1');
+      await _pumpChat(tester);
+
+      expect(find.byKey(const ValueKey('chat-history-load-failed')),
+          findsOneWidget);
+      expect(find.text('How can I help?'), findsNothing);
+
+      h.rest.newestPageError = null;
+      await tester.tap(find.byKey(const ValueKey('chat-history-retry')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byKey(const ValueKey('chat-history-load-failed')),
+          findsNothing);
+      expect(CloudAgentFacade.I.transcriptFor('srv-1'), hasLength(3));
+      await h.close();
+    },
+  );
+
+  testWidgets(
+    'R1: an @[chat] tag sends that chat\'s server id with this message only',
+    timeout: const Timeout(Duration(seconds: 60)),
+    (tester) async {
+      final h = await _bind();
+      addTearDown(h.close);
+      final other =
+          ChatSession(id: 'trip-local', title: 'Trip plan', model: 'm');
+      AppState.I.sessions.add(other);
+      // The tagged chat is synced: it has a server id.
+      await h.store.ensureServerSession('trip-local');
+      _addSession('srv-1');
+      await _pumpChat(tester);
+
+      await _send(tester, 'compare with @[Trip plan] please');
+      expect(h.rest.lastTurn.sessionRefs, ['srv-created']);
+
+      await _send(tester, 'and now without a tag');
+      expect(h.rest.lastTurn.sessionRefs, isEmpty);
       await h.close();
     },
   );

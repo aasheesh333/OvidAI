@@ -86,6 +86,15 @@ describe("agentRunJobSchema", () => {
     expect(agentRunJobSchema.safeParse(null).success).toBe(false);
   });
 
+  it("accepts an optional sessionRefs list (Wave 1a R1) and rejects malformed ones", () => {
+    expect(agentRunJobSchema.safeParse({ ...valid, sessionRefs: ["s2"] })).toEqual({
+      success: true,
+      data: { ...valid, sessionRefs: ["s2"] },
+    });
+    expect(agentRunJobSchema.safeParse({ ...valid, sessionRefs: [""] }).success).toBe(false);
+    expect(agentRunJobSchema.safeParse({ ...valid, sessionRefs: "s2" }).success).toBe(false);
+  });
+
   it("accepts an optional attachmentIds list (P8 Task 3) and rejects malformed ones", () => {
     expect(
       agentRunJobSchema.safeParse({ ...valid, attachmentIds: ["a1", "a2"] }),

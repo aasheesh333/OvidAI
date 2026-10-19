@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { runs, sessions, users, type SessionRow } from "@ovid/db";
+import { runs, sessionState, sessions, users, type SessionRow } from "@ovid/db";
 import { sessionPatchSchema, type Page, type SessionDto } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { isUuid, notFound, parsePageLimit, queryValue, zodBadRequest } from "./http.js";
@@ -75,6 +75,12 @@ export function registerSessionRoutes(app: FastifyInstance, deps: GatewayDeps): 
     // come back null → 404 (never 403 — no existence leaks).
     const row = await sessions.update(deps.db, id, request.principal.uid, parsed.data);
     if (row === null) return notFound(reply);
+    // CH-001: the worker reads the mode from session_agent_state, not the
+    // sessions column — keep the two in step so a chip change is honored by
+    // the next run (and by server slash commands / schedules).
+    if (parsed.data.mode !== undefined) {
+      await sessionState.patch(deps.db, id, { mode: parsed.data.mode });
+    }
     return toSessionDto(row);
   });
 

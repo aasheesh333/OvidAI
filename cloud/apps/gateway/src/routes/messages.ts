@@ -1,7 +1,16 @@
 import type { FastifyInstance } from "fastify";
-import { attachments, messages, runs, sessions, users, type Db, type MessageRow } from "@ovid/db";
+import { attachments, messages, runs, sessionState, sessions, users, type Db, type MessageRow } from "@ovid/db";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
-import { MintInternalError, sendMessageBodySchema, type MessageDto, type Page, type SendMessageResponse } from "@ovid/shared";
+import {
+  CLOUD_PRESET_IDS,
+  MAX_SESSION_REFS,
+  MintInternalError,
+  sendMessageBodySchema,
+  type MessageDto,
+  type Page,
+  type SendMessageResponse,
+  type SessionDto,
+} from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { DEFAULT_MINT_TIMEOUT_MS, MintTimeoutError } from "../keys.js";
 import { badRequest, isUuid, notFound, parsePageLimit, queryValue, sendError, zodBadRequest } from "./http.js";
@@ -156,6 +165,122 @@ function resetsAtEpochMs(headers: Readonly<Record<string, string>>): string | nu
   return Number.isNaN(ms) ? null : String(ms);
 }
 
+// ---------------------------------------------------------------------------
+// Wave 1a — per-turn settings helpers
+// ---------------------------------------------------------------------------
+
+/** agent-core routing.ts AUTO_ALIASES (the gateway does not depend on agent-core). */
+const AUTO_MODEL_ALIASES: readonly string[] = ["auto", "ovid-cloud/auto"];
+/** agent-core routing.ts EFFORT_SUFFIX — Dart `·\s*(low|medium|high)$`. */
+const EFFORT_SUFFIX = /·\s*(low|medium|high)$/i;
+
+/** The catalog id under an optional " · low|medium|high" effort suffix. */
+function baseModelId(raw: string): string {
+  const m = EFFORT_SUFFIX.exec(raw);
+  return (m === null ? raw : raw.slice(0, m.index)).trim();
+}
+
+function isAutoModel(base: string): boolean {
+  return base === "" || AUTO_MODEL_ALIASES.includes(base.toLowerCase());
+}
+
+/**
+ * The allowed model ids (lowercased) or null when the catalog is unknown —
+ * the documented fail-open (absent seam, null answer, empty list or a thrown
+ * read all mean "cannot judge"; LiteLLM's key scope still bounds the run).
+ */
+async function readModelCatalog(
+  deps: GatewayDeps,
+  log: { warn(obj: unknown, msg?: string): void },
+): Promise<Set<string> | null> {
+  if (deps.modelCatalog === undefined) return null;
+  try {
+    const list = await deps.modelCatalog();
+    if (list === null || list.length === 0) return null;
+    return new Set(list.map((m) => m.trim().toLowerCase()));
+  } catch (err) {
+    log.warn({ err }, "model catalog unavailable; accepting the requested model");
+    return null;
+  }
+}
+
+/** `@[Title]` tokens (R1 explicit session tags). */
+const TITLE_MENTION_RE = /@\[([^\]\n]{1,200})\]/g;
+
+/**
+ * Resolves `@[Title]` mentions to the caller's session ids: case-insensitive
+ * exact title match among live sessions, excluding the current one. An
+ * ambiguous title (two sessions share it) or an unknown one is ignored —
+ * never guessed.
+ */
+async function resolveTitleMentions(
+  deps: GatewayDeps,
+  uid: string,
+  currentSessionId: string,
+  content: string,
+): Promise<string[]> {
+  const titles: string[] = [];
+  for (const m of content.matchAll(TITLE_MENTION_RE)) {
+    const t = m[1]!.trim();
+    if (t !== "") titles.push(t);
+  }
+  if (titles.length === 0) return [];
+  const rows = await sessions.findByTitles(deps.db, uid, titles);
+  const byTitle = new Map<string, string[]>();
+  for (const row of rows) {
+    if (row.id === currentSessionId) continue;
+    const key = row.title.trim().toLowerCase();
+    byTitle.set(key, [...(byTitle.get(key) ?? []), row.id]);
+  }
+  const out: string[] = [];
+  for (const t of titles) {
+    const ids = byTitle.get(t.toLowerCase());
+    if (ids !== undefined && ids.length === 1 && !out.includes(ids[0]!)) out.push(ids[0]!);
+  }
+  return out;
+}
+
+/**
+ * Writes the present settings into the session's agent state (and the mode
+ * onto the sessions row so the DTO agrees). Returns the effective model the
+ * session will request ("auto" when unpinned).
+ */
+async function persistTurnSettings(
+  deps: GatewayDeps,
+  sessionId: string,
+  uid: string,
+  s: {
+    modelPin: string | null | undefined;
+    mode: SessionDto["mode"] | undefined;
+    planMode: boolean | undefined;
+    presetId: string | undefined;
+  },
+): Promise<string> {
+  const current = await sessionState.get(deps.db, sessionId);
+  const patch: Parameters<typeof sessionState.patch>[2] = {};
+  if (s.modelPin !== undefined) patch.modelPin = s.modelPin;
+  if (s.mode !== undefined) patch.mode = s.mode;
+  if (s.presetId !== undefined) patch.presetId = s.presetId;
+  if (s.planMode !== undefined) {
+    // A change becomes a pending transition the loop applies at the run's
+    // first turn boundary (entering/leaving plan mode correctly records and
+    // restores the pre-plan mode there). Unchanged = no transition; a stale
+    // pending opposite transition is cancelled.
+    if (s.planMode !== current.planMode) patch.pendingPlanMode = s.planMode;
+    else if (current.pendingPlanMode !== null) patch.pendingPlanMode = null;
+  }
+  if (Object.keys(patch).length > 0) await sessionState.patch(deps.db, sessionId, patch);
+  if (s.mode !== undefined) await sessions.update(deps.db, sessionId, uid, { mode: s.mode });
+  const pin = s.modelPin !== undefined ? s.modelPin : current.modelPin;
+  return pin === null || pin.trim() === "" ? "auto" : pin;
+}
+
+/** The session's requested model right now ("auto" when unpinned) — replay answers. */
+async function currentModel(deps: GatewayDeps, sessionId: string): Promise<string> {
+  const pin = (await sessionState.get(deps.db, sessionId)).modelPin;
+  return pin === null || pin.trim() === "" ? "auto" : pin;
+}
+
 export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): void {
   app.post("/sessions/:id/messages", async (request, reply) => {
     const { id: sessionId } = request.params as { id: string };
@@ -192,6 +317,7 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
           runId: resolved.runId,
           userMessageId: resolved.userMessageId,
           status: "queued",
+          model: await currentModel(deps, sessionId),
         };
         return reply.code(202).send(body);
       }
@@ -220,6 +346,41 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
         return badRequest(reply, "attachmentIds contains an unknown attachment id.");
       }
     }
+
+    // 2d. Wave 1a per-turn settings — validated BEFORE mint and any write
+    //     (and after the replay check: a retry of an accepted send replays
+    //     the original answer whatever its settings say now).
+    const settings = parsed.data;
+    if (settings.presetId !== undefined && !(CLOUD_PRESET_IDS as readonly string[]).includes(settings.presetId)) {
+      return badRequest(reply, `presetId must be one of: ${CLOUD_PRESET_IDS.join(", ")}.`);
+    }
+    let modelPin: string | null | undefined;
+    if (settings.model !== undefined) {
+      const raw = settings.model.trim();
+      const base = baseModelId(raw);
+      if (raw === "" || isAutoModel(base)) {
+        modelPin = null;
+      } else {
+        const known = await readModelCatalog(deps, request.log);
+        if (known !== null && !known.has(base.toLowerCase())) {
+          return sendError(
+            reply,
+            400,
+            "model_unavailable",
+            "That model is not available on Ovid Cloud. Pick another model.",
+          );
+        }
+        modelPin = raw;
+      }
+    }
+    // R1: the explicit @-tags — sessionRefs ids plus `@[Title]` tokens.
+    const explicitRefs = [...new Set(settings.sessionRefs ?? [])];
+    for (const ref of explicitRefs) {
+      const owned = ref !== sessionId && isUuid(ref) ? await sessions.get(deps.db, ref, uid) : null;
+      if (owned === null) return badRequest(reply, "sessionRefs contains an unknown session.");
+    }
+    const mentioned = await resolveTitleMentions(deps, uid, sessionId, content);
+    const sessionRefs = [...new Set([...explicitRefs, ...mentioned])].slice(0, MAX_SESSION_REFS);
 
     // 3. Provision the users row (FK target for everything below); its tier
     //    sets the queue priority (free → 2, anything else → 1).
@@ -290,6 +451,7 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
           runId: resolved.runId,
           userMessageId: resolved.userMessageId,
           status: "queued",
+          model: await currentModel(deps, sessionId),
         };
         return reply.code(202).send(body);
       }
@@ -305,6 +467,16 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
       promptMessageId: userMessage.id,
     });
     const priority = user.tier === "free" ? 2 : 1;
+
+    // 5b. Wave 1a: persist the turn's settings into the session's agent state
+    //     (what the worker's loop reads: modelPin, mode, presetId, pending
+    //     plan transition) — only for a NEW accepted send, never a replay.
+    const effectiveModel = await persistTurnSettings(deps, sessionId, uid, {
+      modelPin,
+      mode: settings.mode,
+      planMode: settings.planMode,
+      presetId: settings.presetId,
+    });
     try {
       await deps.queues.agentRuns.add(
         AGENT_RUN_JOB_NAME,
@@ -328,6 +500,11 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
           ...(parsed.data.maxOutputTokens !== undefined
             ? { maxOutputTokens: parsed.data.maxOutputTokens }
             : {}),
+          // Wave 1a: the access chip rides the job (job wins in the loop),
+          // and the explicit @-tags are the ONLY other sessions this run may
+          // see (R1).
+          ...(settings.mode !== undefined ? { mode: settings.mode } : {}),
+          ...(sessionRefs.length > 0 ? { sessionRefs } : {}),
         },
         { jobId: run.id, priority },
       );
@@ -359,6 +536,7 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
       runId: run.id,
       userMessageId: userMessage.id,
       status: "queued",
+      model: effectiveModel,
     };
     return reply.code(202).send(body);
   });
