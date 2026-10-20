@@ -13,6 +13,8 @@ import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/chat_integration_ports.dart';
+import '../core/chat_pins.dart';
+import '../core/projects_port_adapter.dart';
 import '../core/theme.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
@@ -1134,6 +1136,9 @@ class _ChatScreenState extends State<ChatScreen>
     );
     ConnectionService.I.addListener(_onConnectivityForHistory);
     _agent.addListener(_onAgentVoiceTick);
+    unawaited(ChatPinsStore.I.bindCurrentAccount());
+    // W1's project list backs the ⋮ "Add to Project" item and the @ menu.
+    ProjectsControllerPort.ensureInstalled();
     unawaited(_bootCloud());
   }
 
@@ -1722,7 +1727,7 @@ class _ChatScreenState extends State<ChatScreen>
   Widget build(BuildContext context) {
     final app = AppState.I;
     return AnimatedBuilder(
-      animation: Listenable.merge([app, _agent]),
+      animation: Listenable.merge([app, _agent, ChatPinsStore.I]),
       builder: (_, _) {
         final s = app.activeSession;
         // EM-010: a signed-in user always has a chat to type into. A fresh
@@ -1812,6 +1817,22 @@ class _ChatScreenState extends State<ChatScreen>
                         ),
                       ),
                       const SizedBox(width: 4),
+                      if (s != null &&
+                          (ProjectsPort.instance?.supportsPin == true
+                              ? ProjectsPort.instance!.isPinned(s.id)
+                              : ChatPinsStore.I.isPinned(s.id)))
+                        Padding(
+                          padding: const EdgeInsets.only(right: 2),
+                          child: Tooltip(
+                            message: 'Pinned session',
+                            child: Icon(
+                              Icons.push_pin,
+                              key: const ValueKey('chat-header-pinned'),
+                              size: 14,
+                              color: Aether.accent,
+                            ),
+                          ),
+                        ),
                       Icon(
                         modelLocked ? Icons.lock_outline : Icons.unfold_more,
                         size: 16,
@@ -2350,7 +2371,12 @@ class _ChatScreenState extends State<ChatScreen>
                                     );
                                     return;
                                   }
-                                  agent.editQueuedMessageById(edit.id, t);
+                                  agent.editQueuedMessageById(
+                                    edit.id,
+                                    t,
+                                    sessionRefs: sessionRefsIn(t, s.id),
+                                    projectRefs: projectRefsIn(t),
+                                  );
                                   setState(() => _queueEdits.remove(s.id));
                                   clearSubmitted();
                                   return;

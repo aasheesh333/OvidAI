@@ -158,7 +158,15 @@ abstract class AgentSurface extends ChangeNotifier {
   });
 
   /// Edits the queued message with stable [id].
-  void editQueuedMessageById(int id, String newText);
+  ///
+  /// [sessionRefs]/[projectRefs] replace the row's refs so an edited @-tag
+  /// is honoured when the row is dispatched (the row's attachments stay).
+  void editQueuedMessageById(
+    int id,
+    String newText, {
+    List<String> sessionRefs = const <String>[],
+    List<String> projectRefs = const <String>[],
+  });
 
   /// Removes the queued message at [index] in the foreground queue.
   void removeQueuedMessage(int index);

@@ -1,0 +1,86 @@
+import 'dart:async';
+
+import 'chat_integration_ports.dart';
+import 'chat_pins.dart';
+import 'cloud/projects.dart';
+import 'diag.dart';
+
+/// W1 adapter for the chat surface's [ProjectsPort].
+///
+/// W1 landed `ProjectsController` + `showAddToProjectSheet`; the chat composer
+/// only needs a read-only project list plus move/pin calls. This adapter keeps
+/// the chat surface on the narrow port while W1 owns the server state.
+///
+/// * `supportsTurnProjectRefs` stays **false**: the gateway's
+///   `sendMessageBodySchema` is strict and has no `projectRefs`, so the `@`
+///   menu never inserts a project token that would 400 the send.
+/// * Pinning is still W9-local ([ChatPinsStore]) because W1 does not own a
+///   pin flag; `supportsPin` therefore stays false and the overflow menu
+///   writes the local store.
+class ProjectsControllerPort extends ProjectsPort {
+  ProjectsControllerPort({ProjectsController? controller})
+      : _controller = controller ?? ProjectsController.I;
+
+  final ProjectsController _controller;
+
+  @override
+  bool get ready => _controller.loadedOnce;
+
+  /// Server capability switch (W1b owns `projectRefs` in
+  /// `sendMessageBodySchema` + ownership resolution).
+  ///
+  /// Flip to `true` only once that contract is DEPLOYED: while false the `@`
+  /// menu hides project rows and no send carries the field, so an older
+  /// strict gateway cannot 400 a chat send.
+  static bool serverSupportsTurnProjectRefs = false;
+
+  @override
+  bool get supportsTurnProjectRefs => serverSupportsTurnProjectRefs;
+
+  @override
+  List<ProjectOption> get projects => [
+    for (final p in _controller.projects)
+      ProjectOption(
+        id: p.id,
+        name: p.name,
+        sessionCount: p.sessionCount,
+        fileCount: p.fileCount,
+        fileCap: p.fileCap,
+      ),
+  ];
+
+  @override
+  bool isPinned(String sessionId) => ChatPinsStore.I.isPinned(sessionId);
+
+  @override
+  Future<void> addSessionToProject(String sessionId, String? projectId) async {
+    final ok = await _controller.moveSession(sessionId, projectId);
+    if (!ok) {
+      throw StateError(
+        _controller.error ?? 'The chat could not be moved to that project.',
+      );
+    }
+  }
+
+  @override
+  Future<void> setPinned(String sessionId, bool pinned) =>
+      ChatPinsStore.I.setPinned(sessionId, pinned);
+
+  /// Installs the adapter once and starts the project list loading.
+  ///
+  /// Safe to call from any screen mount: an explicitly installed port (a
+  /// test fake) is never replaced, and the controller's own `refresh` is
+  /// idempotent while a load is in flight.
+  static ProjectsPort ensureInstalled() {
+    final existing = ProjectsPort.instance;
+    if (existing != null) return existing;
+    final port = ProjectsControllerPort();
+    ProjectsPort.instance = port;
+    if (!ProjectsController.I.loadedOnce) {
+      unawaited(ProjectsController.I.refresh().catchError((Object e) {
+        Diag.swallow('chat.projectsBoot', e);
+      }));
+    }
+    return port;
+  }
+}

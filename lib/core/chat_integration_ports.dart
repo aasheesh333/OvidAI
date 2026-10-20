@@ -33,11 +33,17 @@ class ProjectOption {
     required this.id,
     required this.name,
     this.sessionCount,
+    this.fileCount,
+    this.fileCap,
   });
 
   final String id;
   final String name;
   final int? sessionCount;
+
+  /// Project-memory file usage (W1's per-plan cap), when the server reports it.
+  final int? fileCount;
+  final int? fileCap;
 }
 
 /// Port implemented by W1 (Projects).
@@ -57,10 +63,15 @@ abstract class ProjectsPort extends ChangeNotifier {
 
   /// True when the gateway accepts `projectRefs` on `POST /sessions/:id/messages`.
   ///
-  /// W1 should return true only after the server-side route validates the
-  /// field; until then W9 never inserts `@project:` tokens or sends
-  /// `projectRefs`, so a strict gateway cannot 400 a chat send.
+  /// W1's adapter returns **false** until the strict server send schema grows
+  /// the optional field (and ownership resolution). While false W9 never
+  /// inserts `@project:` tokens or sends `projectRefs`, so a strict gateway
+  /// cannot 400 a chat send.
   bool get supportsTurnProjectRefs;
+
+  /// True when [setPinned]/[isPinned] persist. When false the chat surface
+  /// falls back to its local [ChatPinsStore] so the menu item still works.
+  bool get supportsPin => false;
 
   /// Projects owned by the signed-in user, in display order.
   List<ProjectOption> get projects;
@@ -79,10 +90,41 @@ abstract class ProjectsPort extends ChangeNotifier {
 
   /// Project ids explicitly tagged in [text] for THIS turn only (R1).
   ///
-  /// W1 resolves the tokens its own `mentionToken` wrote and returns the ids
-  /// that should ride `CloudTurnOptions.projectRefs`. Returning an empty list
-  /// means "no explicit project context".
-  List<String> projectRefsIn(String text) => const <String>[];
+  /// Fail-safe parsing for the strict server contract (W1b):
+  /// * only `@project:<uuid>` tokens are considered (malformed tokens are
+  ///   dropped, never forwarded);
+  /// * duplicates are collapsed (the server rejects duplicates with a 400);
+  /// * the list is capped at [maxTurnProjectRefs] (the server's max);
+  /// * ids not in the loaded [projects] list are dropped, so a stale or
+  ///   foreign token cannot produce a 400 that would refuse the whole send.
+  ///
+  /// When [supportsTurnProjectRefs] is false the result is always empty, so
+  /// an older gateway never receives the field.
+  List<String> projectRefsIn(String text) {
+    if (!supportsTurnProjectRefs) return const <String>[];
+    final known = {for (final p in projects) p.id};
+    if (known.isEmpty) return const <String>[];
+    final refs = <String>[];
+    for (final match in turnProjectToken.allMatches(text)) {
+      final id = match.group(1)!;
+      if (!uuidPattern.hasMatch(id)) continue;
+      if (!known.contains(id)) continue;
+      if (refs.contains(id)) continue;
+      refs.add(id);
+      if (refs.length >= maxTurnProjectRefs) break;
+    }
+    return refs;
+  }
+
+  /// The server's per-turn project-ref cap (shared/src/rest.ts).
+  static const int maxTurnProjectRefs = 5;
+
+  /// `@project:<id>` tokens; the id is validated separately.
+  static final RegExp turnProjectToken = RegExp(r'@project:([^\s\[\]()]+)');
+
+  static final RegExp uuidPattern = RegExp(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+  );
 }
 
 /// A resolved repo/branch binding for one chat.
