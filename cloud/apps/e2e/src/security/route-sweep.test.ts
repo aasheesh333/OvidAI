@@ -51,30 +51,39 @@
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  attachments,
+  browserCredentialsRepo,
   byokKeysRepo,
   createDb,
+  createPrivateMemoryStore,
+  customPresets,
   fileManifests,
   mcpServers,
   messages,
   migrate,
   newId,
   plugins,
+  projectsRepo,
   runs,
   schedules,
   sessions,
   sharesRepo,
   users,
   workspaceObjects,
+  type AttachmentRow,
+  type BrowserCredentialRow,
   type ByokKeyRow,
   type Db,
   type McpServerRow,
   type PluginRow,
+  type ProjectRow,
   type RunRow,
   type ScheduleRow,
   type SessionRow,
   type ShareReceiptRow,
   type WorkspaceObjectRow,
 } from "@ovid/db";
+import { browserCredentialRecordId } from "@ovid/shared";
 import { byokRecordId } from "@ovid/escrow";
 import type { EventLog, SystemBus } from "@ovid/events";
 import type { OAuthFlow } from "@ovid/mcp";
@@ -155,6 +164,10 @@ export const TIER_GATE_ALLOWLIST: Array<{
  * entry (route removed/renamed) also fails the suite. */
 const PUBLIC_ROUTES = new Set([
   "GET /cloud/v1/health",
+  // Wave 4 (SE-014) Service status screen: registered in the public scope and
+  // deliberately unauthenticated (coarse capability states only, no counts or
+  // hostnames). The app renders it before sign-in.
+  "GET /cloud/v1/health/status",
   "GET /cloud/v1/mcp/oauth/callback",
   "GET /oauth/callback",
   "GET /cloud/ws",
@@ -176,6 +189,15 @@ const EXEMPT_PARAM_ROUTES: Record<string, string> = {
   "GET /s/:token": "public read-only viewer (no auth by design).",
   "GET /s/:token.json": "public JSON snapshot (no auth by design).",
   "GET /s/:token/:invite": "public invite landing (no auth by design).",
+  // NOT public, but caller-scoped rather than resource-scoped: the id is a
+  // client-chosen slug and the write is an UPSERT under the caller's uid.
+  // A foreign slug therefore creates/updates the CALLER's own preset (2xx);
+  // there is no owner lookup that could answer 404. The same id on DELETE
+  // IS owner-scoped and is covered in OWNED_CASES.
+  "PUT /cloud/v1/presets/:id":
+    "caller-scoped upsert: the row is written under the caller's uid, so a " +
+    "foreign slug creates the caller's own preset instead of reading A's; " +
+    "DELETE on the same slug is owner-scoped and covered in OWNED_CASES.",
 };
 
 // ---------------------------------------------------------------------------
@@ -223,6 +245,15 @@ export const NO_PARAM_OWNERSHIP_CASES: Record<string, NoParamOwnershipCase> = {
           },
         ],
       },
+    }),
+  },
+  // Settings are caller-scoped by default, but a `byokDefault.keyId` names an
+  // EXISTING escrowed key. A foreign key id must answer the same 404 as every
+  // other owned-resource read (the caller's own settings are unaffected).
+  "PATCH /cloud/v1/settings": {
+    request: (f) => ({
+      url: "/cloud/v1/settings",
+      body: { byokDefault: { keyId: f.byokA.id, model: "openai/gpt-4o" } },
     }),
   },
 };
@@ -299,6 +330,22 @@ export const NO_PARAM_OWNERSHIP_EXEMPT: Array<{
     path: "/cloud/v1/mcp/servers",
     reason: "creates an MCP server owned by the caller; no existing-resource lookup.",
   },
+  {
+    method: "POST",
+    path: "/cloud/v1/projects",
+    reason:
+      "creates a project owned by the caller (UNIQUE per user); the body has " +
+      "only a name, so there is no foreign resource id to scope — a " +
+      "cross-owner request mints the CALLER's project, never reads A's.",
+  },
+  {
+    method: "POST",
+    path: "/cloud/v1/credentials",
+    reason:
+      "creates a sealed credential owned by the caller (UNIQUE label per " +
+      "user); the body carries no id, so there is no foreign resource to " +
+      "look up — a cross-owner request mints the CALLER's own row.",
+  },
 ];
 
 /**
@@ -347,6 +394,15 @@ interface Fixtures {
   artifactA: WorkspaceObjectRow;
   /** A's artifact under B's session — exercises artifact-level ownership. */
   foreignArtifact: WorkspaceObjectRow;
+  /** A's attachment, sized to the storage stub's HEAD (5 bytes). */
+  attachmentA: AttachmentRow;
+  /** A's project (memory + detail + move target). */
+  projectA: ProjectRow;
+  /** Dedicated to the DELETE positive control. */
+  projectDeleteA: ProjectRow;
+  /** A's credential; DELETE has its own so the positive control is independent. */
+  credentialA: BrowserCredentialRow;
+  credentialDeleteA: BrowserCredentialRow;
   shareA: ShareReceiptRow;
   /** Dedicated to the DELETE positive control. */
   shareDeleteA: ShareReceiptRow;
@@ -355,13 +411,31 @@ interface Fixtures {
 interface Case {
   /** Path params materializing user A's resource. */
   params: (f: Fixtures) => Record<string, string>;
-  /** A valid body so only ownership (not validation) can reject. */
-  body?: unknown;
+  /** Query string for the CROSS-OWNER request (e.g. memory's sessionId, the
+   *  artifact vault's required ?source=). */
+  query?: (f: Fixtures) => Record<string, string>;
+  /** A valid body so only ownership (not validation) can reject. A function
+   *  when it needs a fixture id (resolved per probe). */
+  body?: unknown | ((f: Fixtures) => unknown);
   /** Owner-side body when the cross-owner body is intentionally invalid
    *  (a function when it needs a fixture id). */
   ownerBody?: unknown | ((f: Fixtures) => unknown);
-  /** Owner-side query string (e.g. the workspace file path). */
-  ownerQuery?: Record<string, string>;
+  /** Owner-side query string (e.g. the workspace file path); a function when
+   *  it needs a fixture id. */
+  ownerQuery?: Record<string, string> | ((f: Fixtures) => Record<string, string>);
+  /** Overrides for the unknown-id probe when a path param is NOT a uuid
+   *  (memory file names, preset slugs) or when the ownership id rides the
+   *  query string. Merged over the default random UUIDs. */
+  unknownParams?: (f: Fixtures) => Record<string, string>;
+  unknownQuery?: (f: Fixtures) => Record<string, string>;
+  /** Overrides for the malformed-id probe. Used when the route validates the
+   *  name/slug before the ownership id, so only the id itself is malformed. */
+  malformedParams?: (f: Fixtures) => Record<string, string>;
+  malformedQuery?: (f: Fixtures) => Record<string, string>;
+  /** Owner positive-control expectation when the route is a documented,
+   *  release-gated refusal rather than a 2xx (history mutations). */
+  ownerStatus?: number;
+  ownerCode?: string;
 }
 
 const shareBody = {
@@ -391,15 +465,23 @@ const OWNED_CASES: Record<string, Case> = {
   // Wave 1b history edits (CT-004): ownership before any read of the message.
   "DELETE /cloud/v1/sessions/:id/messages/:messageId": {
     params: (f) => ({ id: f.historyDeleteA.session.id, messageId: f.historyDeleteA.answerId }),
+    // Release-gated (CH-024/CT-004): the OWNER gets a documented 409 refusal,
+    // never a silent no-op. Ownership still precedes it (foreign → 404).
+    ownerStatus: 409,
+    ownerCode: "history_actions_unavailable",
   },
   "POST /cloud/v1/sessions/:id/messages/:messageId/regenerate": {
     params: (f) => ({ id: f.historyRegenA.session.id, messageId: f.historyRegenA.answerId }),
     body: {},
+    ownerStatus: 409,
+    ownerCode: "history_actions_unavailable",
   },
   "POST /cloud/v1/sessions/:id/branch": {
     params: (f) => ({ id: f.historyBranchA.session.id }),
     body: {},
     ownerBody: (f: Fixtures) => ({ messageId: f.historyBranchA.answerId }),
+    ownerStatus: 409,
+    ownerCode: "history_actions_unavailable",
   },
   // The read-only event log the user follows a run through (the terminal was
   // removed; this route replaced it). Ownership is checked before any read.
@@ -472,6 +554,98 @@ const OWNED_CASES: Record<string, Case> = {
   },
   "DELETE /cloud/v1/byok/:id": { params: (f) => ({ id: f.byokDeleteA.id }) },
   "POST /cloud/v1/byok/:id/test": { params: (f) => ({ id: f.byokA.id }) },
+  // Wave 4 settings/presets/memory + W1 projects + W6 credentials + W12 CDN.
+  "GET /cloud/v1/memory/:name": {
+    params: () => ({ name: "notes.md" }),
+    query: (f) => ({ sessionId: f.sessionA.id }),
+    ownerQuery: (f) => ({ sessionId: f.sessionA.id }),
+    unknownParams: () => ({ name: "missing.md" }),
+    unknownQuery: (f) => ({ sessionId: f.sessionA.id }),
+    malformedParams: () => ({ name: "notes.md" }),
+    malformedQuery: () => ({ sessionId: "not-a-uuid" }),
+  },
+  "PUT /cloud/v1/memory/:name": {
+    params: () => ({ name: "put.md" }),
+    query: (f) => ({ sessionId: f.sessionA.id }),
+    body: { content: "foreign write" },
+    ownerBody: { content: "owner write" },
+    ownerQuery: (f) => ({ sessionId: f.sessionA.id }),
+    // A new name is an upsert for the owner, so "unknown" means an unknown
+    // OWNERSHIP id: the sessionId in the query string.
+    unknownParams: () => ({ name: "missing.md" }),
+    unknownQuery: () => ({ sessionId: newId() }),
+    malformedParams: () => ({ name: "put.md" }),
+    malformedQuery: () => ({ sessionId: "not-a-uuid" }),
+  },
+  "DELETE /cloud/v1/memory/:name": {
+    params: () => ({ name: "delete.md" }),
+    query: (f) => ({ sessionId: f.sessionA.id }),
+    ownerQuery: (f) => ({ sessionId: f.sessionA.id }),
+    unknownParams: () => ({ name: "missing.md" }),
+    unknownQuery: (f) => ({ sessionId: f.sessionA.id }),
+    malformedParams: () => ({ name: "delete.md" }),
+    malformedQuery: () => ({ sessionId: "not-a-uuid" }),
+  },
+  "GET /cloud/v1/artifacts/:id/url": {
+    params: (f) => ({ id: f.artifactA.id }),
+    query: () => ({ source: "generated" }),
+    ownerQuery: { source: "generated" },
+    unknownQuery: () => ({ source: "generated" }),
+  },
+  "GET /cloud/v1/artifacts/:id/cdn-url": {
+    params: (f) => ({ id: f.artifactA.id }),
+    query: () => ({ source: "generated" }),
+    ownerQuery: { source: "generated" },
+    unknownQuery: () => ({ source: "generated" }),
+  },
+  "POST /cloud/v1/sessions/:id/project": {
+    params: (f) => ({ id: f.sessionA.id }),
+    body: (f: Fixtures) => ({ projectId: f.projectA.id }),
+    ownerBody: (f: Fixtures) => ({ projectId: f.projectA.id }),
+  },
+  "PUT /cloud/v1/sessions/:id/preset": {
+    params: (f) => ({ id: f.sessionA.id }),
+    body: { presetId: "standard" },
+  },
+  "GET /cloud/v1/sessions/:id/attachments/:attachmentId/cdn-url": {
+    params: (f) => ({ id: f.sessionA.id, attachmentId: f.attachmentA.id }),
+  },
+  "GET /cloud/v1/projects/:id": { params: (f) => ({ id: f.projectA.id }) },
+  "PATCH /cloud/v1/projects/:id": {
+    params: (f) => ({ id: f.projectA.id }),
+    body: { name: "foreign rename" },
+    ownerBody: { name: "sweep project renamed" },
+  },
+  "DELETE /cloud/v1/projects/:id": { params: (f) => ({ id: f.projectDeleteA.id }) },
+  "GET /cloud/v1/projects/:id/memory": { params: (f) => ({ id: f.projectA.id }) },
+  "GET /cloud/v1/projects/:id/memory/:name": {
+    params: (f) => ({ id: f.projectA.id, name: "notes.md" }),
+    unknownParams: (f) => ({ id: newId(), name: "missing.md" }),
+    malformedParams: () => ({ id: "not-a-uuid", name: "notes.md" }),
+  },
+  "PUT /cloud/v1/projects/:id/memory/:name": {
+    params: (f) => ({ id: f.projectA.id, name: "put.md" }),
+    body: { content: "foreign write" },
+    ownerBody: { content: "owner write" },
+    unknownParams: (f) => ({ id: newId(), name: "missing.md" }),
+    malformedParams: () => ({ id: "not-a-uuid", name: "notes.md" }),
+  },
+  "DELETE /cloud/v1/projects/:id/memory/:name": {
+    params: (f) => ({ id: f.projectA.id, name: "delete.md" }),
+    unknownParams: (f) => ({ id: newId(), name: "missing.md" }),
+    malformedParams: () => ({ id: "not-a-uuid", name: "notes.md" }),
+  },
+  "DELETE /cloud/v1/presets/:id": {
+    params: () => ({ id: "custom-sweep-delete" }),
+  },
+  "PATCH /cloud/v1/credentials/:id": {
+    params: (f) => ({ id: f.credentialA.id }),
+    body: { label: "foreign rename" },
+    ownerBody: { label: "sweep credential renamed" },
+  },
+  "DELETE /cloud/v1/credentials/:id": {
+    params: (f) => ({ id: f.credentialDeleteA.id }),
+  },
   // Legacy root routes (Python envelope): owner-scoped update/revoke.
   "PUT /shares/:token": {
     params: (f) => ({ token: f.shareA.token }),
@@ -530,6 +704,30 @@ function bodyFor(
   if (explicit !== undefined) return explicit as Record<string, unknown>;
   if (method === "POST" || method === "PUT" || method === "PATCH") return {};
   return undefined;
+}
+
+/** Resolve a fixture-dependent case body (see `Case.body`). */
+function resolveBody(
+  body: unknown | ((f: Fixtures) => unknown) | undefined,
+  f: Fixtures,
+): unknown {
+  return typeof body === "function" ? (body as (f: Fixtures) => unknown)(f) : body;
+}
+
+/** Resolve a fixture-dependent query map (see `Case.ownerQuery`). */
+function resolveQuery(
+  query: Record<string, string> | ((f: Fixtures) => Record<string, string>) | undefined,
+  f: Fixtures,
+): Record<string, string> | undefined {
+  return typeof query === "function"
+    ? (query as (f: Fixtures) => Record<string, string>)(f)
+    : query;
+}
+
+/** Append a query map to a URL (no-op when undefined). */
+function withQuery(url: string, query: Record<string, string> | undefined): string {
+  if (query === undefined) return url;
+  return `${url}?${new URLSearchParams(query).toString()}`;
 }
 
 function isCloudPath(path: string): boolean {
@@ -709,6 +907,85 @@ describe("route sweep — 404 not 403", () => {
       contentType: "text/plain",
       meta: { name: "foreign.txt" },
     });
+    // W12 CDN positive control: the storage stub's HEAD reports exactly 5
+    // bytes, so this attachment (and artifactA) pass the availability proof.
+    const attachmentA = await attachments.create(db, {
+      id: newId(),
+      sessionId: sessionA.id,
+      userId: userA,
+      name: "sweep.txt",
+      size: 5,
+      r2Key: `users/${userA}/sessions/${sessionA.id}/uploads/${newId()}`,
+    });
+    // W1 projects: one live project (detail/memory/move) and one dedicated to
+    // the DELETE positive control (a delete detaches chats and drops memory).
+    const projectA = await projectsRepo.create(db, userA, "sweep project");
+    if (projectA === null) throw new Error("sweep fixture: projectA was not created");
+    const projectDeleteA = await projectsRepo.create(db, userA, "sweep delete project");
+    if (projectDeleteA === null) {
+      throw new Error("sweep fixture: projectDeleteA was not created");
+    }
+    // Memory fixtures: the store re-checks session/project ownership inside
+    // its transaction, which is exactly what the sweep exercises.
+    const memoryStore = createPrivateMemoryStore(db);
+    await memoryStore.save(
+      userA,
+      { sessionId: sessionA.id, shared: false },
+      "notes.md",
+      "session notes",
+    );
+    await memoryStore.save(
+      userA,
+      { sessionId: sessionA.id, shared: false },
+      "delete.md",
+      "session delete fixture",
+    );
+    await memoryStore.save(
+      userA,
+      { projectId: projectA.id, maxFiles: 80 },
+      "notes.md",
+      "project notes",
+    );
+    await memoryStore.save(
+      userA,
+      { projectId: projectA.id, maxFiles: 80 },
+      "delete.md",
+      "project delete fixture",
+    );
+    // Wave 4 custom preset dedicated to the DELETE positive control.
+    await customPresets.upsert(db, userA, {
+      id: "custom-sweep-delete",
+      label: "Sweep delete",
+      description: "sweep fixture",
+      deniedTools: [],
+      model: null,
+      temperature: null,
+    });
+    // Wave 6 credentials: sealed envelopes with the suite's master key. The
+    // routes never decrypt for metadata, but the AAD stays realistic.
+    const credentialAId = newId();
+    const credentialA = await browserCredentialsRepo.create(db, {
+      id: credentialAId,
+      userId: userA,
+      label: "sweep credential",
+      site: "https://example.test",
+      username: "sweep",
+      secretKind: "password",
+      secretSealed: crypto.encrypt("sweep-secret", browserCredentialRecordId(credentialAId)),
+    });
+    const credentialDeleteAId = newId();
+    const credentialDeleteA = await browserCredentialsRepo.create(db, {
+      id: credentialDeleteAId,
+      userId: userA,
+      label: "sweep delete credential",
+      site: "https://example.test",
+      username: "sweep",
+      secretKind: "password",
+      secretSealed: crypto.encrypt(
+        "sweep-secret",
+        browserCredentialRecordId(credentialDeleteAId),
+      ),
+    });
     const shareA = await sharesRepo.create(
       db,
       userA,
@@ -751,6 +1028,11 @@ describe("route sweep — 404 not 403", () => {
       byokDeleteA,
       artifactA,
       foreignArtifact,
+      attachmentA,
+      projectA,
+      projectDeleteA,
+      credentialA,
+      credentialDeleteA,
       shareA,
       shareDeleteA,
     };
@@ -824,7 +1106,10 @@ describe("route sweep — 404 not 403", () => {
         return null;
       },
       async head() {
-        return null;
+        // Both fixtures (artifactA and attachmentA) are registered as 5 bytes:
+        // the mint routes' single HEAD availability proof must pass for the
+        // owner's positive control.
+        return { bytes: 5, sha256Hex: null, etag: null, metadata: {} };
       },
       async delete() {},
       async presignGet() {
@@ -934,6 +1219,14 @@ describe("route sweep — 404 not 403", () => {
       // Behavior-gating deps the owner-side positive controls exercise.
       presigner,
       storage,
+      // W12: a wired CDN config so the signed-URL mints take their live path
+      // (an unconfigured deployment answers a typed 503, which is not an
+      // ownership answer and cannot prove the positive control).
+      cdn: {
+        baseUrl: "https://cdn.example.test",
+        secret: "s".repeat(32),
+        ttlSeconds: 900,
+      },
       worker,
       byok: {
         fetchImpl: async () => new Response(null, { status: 200 }),
@@ -1053,6 +1346,8 @@ describe("route sweep — 404 not 403", () => {
       "DELETE /cloud/v1/devices",
       "POST /cloud/v1/byok",
       "POST /cloud/v1/mcp/servers",
+      "POST /cloud/v1/projects",
+      "POST /cloud/v1/credentials",
     ]);
     for (const entry of NO_PARAM_OWNERSHIP_EXEMPT) {
       expect(entry.reason.length, `${entry.method} ${entry.path} needs a reason`).toBeGreaterThan(
@@ -1106,12 +1401,15 @@ describe("route sweep — 404 not 403", () => {
       const key = routeKey(route);
       const ownershipCase = OWNED_CASES[key];
       if (ownershipCase === undefined) continue;
-      const url = fillParams(route.path, ownershipCase.params(fixtures));
+      const url = withQuery(
+        fillParams(route.path, ownershipCase.params(fixtures)),
+        resolveQuery(ownershipCase.query, fixtures),
+      );
       const res = await app.inject({
         method: route.method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
         url,
         headers: authHeaders(userB),
-        payload: bodyFor(route.method, ownershipCase.body),
+        payload: bodyFor(route.method, resolveBody(ownershipCase.body, fixtures)),
       });
       const isAllowed403 = TIER_GATE_ALLOWLIST.some(
         (entry) => entry.method === route.method && entry.path === route.path,
@@ -1143,12 +1441,19 @@ describe("route sweep — 404 not 403", () => {
       const key = routeKey(route);
       if (!(key in OWNED_CASES)) continue;
       const ownershipCase = OWNED_CASES[key]!;
-      const url = fillParams(route.path, unknownValues(route.path));
+      const params = {
+        ...unknownValues(route.path),
+        ...(ownershipCase.unknownParams?.(fixtures) ?? {}),
+      };
+      const url = withQuery(
+        fillParams(route.path, params),
+        ownershipCase.unknownQuery?.(fixtures),
+      );
       const res = await app.inject({
         method: route.method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
         url,
         headers: authHeaders(userA),
-        payload: bodyFor(route.method, ownershipCase.body),
+        payload: bodyFor(route.method, resolveBody(ownershipCase.body, fixtures)),
       });
       if (res.statusCode !== 404) {
         failures.push(`${key} → ${res.statusCode} (expected 404 for unknown id)`);
@@ -1170,12 +1475,19 @@ describe("route sweep — 404 not 403", () => {
       const key = routeKey(route);
       if (!(key in OWNED_CASES)) continue;
       const ownershipCase = OWNED_CASES[key]!;
-      const url = fillParams(route.path, malformedValues(route.path));
+      const params = {
+        ...malformedValues(route.path),
+        ...(ownershipCase.malformedParams?.(fixtures) ?? {}),
+      };
+      const url = withQuery(
+        fillParams(route.path, params),
+        ownershipCase.malformedQuery?.(fixtures),
+      );
       const res = await app.inject({
         method: route.method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
         url,
         headers: authHeaders(userA),
-        payload: bodyFor(route.method, ownershipCase.body),
+        payload: bodyFor(route.method, resolveBody(ownershipCase.body, fixtures)),
       });
       if (res.statusCode === 500 || res.statusCode === 403) {
         failures.push(`${key} → ${res.statusCode} (malformed id must be 404)`);
@@ -1421,9 +1733,9 @@ describe("route sweep — 404 not 403", () => {
     for (const [key, ownershipCase] of Object.entries(OWNED_CASES)) {
       const { method, path } = splitRouteKey(key);
       let url = fillParams(path, ownershipCase.params(fixtures));
-      if (ownershipCase.ownerQuery !== undefined) {
-        const query = new URLSearchParams(ownershipCase.ownerQuery).toString();
-        url = `${url}?${query}`;
+      const ownerQuery = resolveQuery(ownershipCase.ownerQuery, fixtures);
+      if (ownerQuery !== undefined) {
+        url = withQuery(url, ownerQuery);
       }
       const res = await app.inject({
         method: method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
@@ -1431,11 +1743,31 @@ describe("route sweep — 404 not 403", () => {
         headers: authHeaders(userA),
         payload: bodyFor(
           method,
-          (typeof ownershipCase.ownerBody === "function"
-            ? (ownershipCase.ownerBody as (f: Fixtures) => unknown)(fixtures)
-            : ownershipCase.ownerBody) ?? ownershipCase.body,
+          resolveBody(
+            (typeof ownershipCase.ownerBody === "function"
+              ? (ownershipCase.ownerBody as (f: Fixtures) => unknown)(fixtures)
+              : ownershipCase.ownerBody) ?? ownershipCase.body,
+            fixtures,
+          ),
         ),
       });
+      if (ownershipCase.ownerStatus !== undefined) {
+        // Documented release-gated refusal (history mutations): assert the
+        // exact status AND code, so a 409 cannot mask an ownership failure.
+        if (res.statusCode !== ownershipCase.ownerStatus) {
+          failures.push(
+            `${key} → ${res.statusCode} (expected ${ownershipCase.ownerStatus} for the owner)`,
+          );
+          continue;
+        }
+        if (ownershipCase.ownerCode !== undefined) {
+          const code = (res.json() as { error?: { code?: string } }).error?.code;
+          if (code !== ownershipCase.ownerCode) {
+            failures.push(`${key} → ${res.statusCode} but code=${String(code)}`);
+          }
+        }
+        continue;
+      }
       if (res.statusCode < 200 || res.statusCode >= 300) {
         failures.push(`${key} → ${res.statusCode} (expected 2xx for the owner)`);
       }
