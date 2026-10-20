@@ -125,7 +125,7 @@ const tapConns: Redis[] = [];describe.skipIf(!TEST_REDIS_URL)("createRedisBrowse
   it("join/leave transitions fire onViewersChange on every size change", async () => {
     const sid = randomUUID();
     const events: Array<[string, number]> = [];
-    const { bridge } = mkBridge({ onViewersChange: (s, v) => events.push([s, v]), onInput: noop, onTakeover: noop });
+    const { bridge } = mkBridge({ onViewersChange: (s, v) => events.push([s, v]), onInput: noop, onTakeover: noop, onSwitchTab: noop });
     await bridge.watch(sid);
 
     await gw.publish(browserCtlChannel(sid), join("v1"));
@@ -153,7 +153,7 @@ const tapConns: Redis[] = [];describe.skipIf(!TEST_REDIS_URL)("createRedisBrowse
     const events: Array<[string, number]> = [];
     let t = 10_000; // injected clock
     const { bridge } = mkBridge(
-      { onViewersChange: (s, v) => events.push([s, v]), onInput: noop, onTakeover: noop },
+      { onViewersChange: (s, v) => events.push([s, v]), onInput: noop, onTakeover: noop, onSwitchTab: noop },
       { viewerStaleMs: 1000, sweepIntervalMs: 50, now: () => t },
     );
     await bridge.watch(sid);
@@ -172,7 +172,7 @@ const tapConns: Redis[] = [];describe.skipIf(!TEST_REDIS_URL)("createRedisBrowse
   it("delivers only schema-valid input events, in arrival order, surviving bad payloads", async () => {
     const sid = randomUUID();
     const got: BrowserInputEvent[] = [];
-    const { bridge } = mkBridge({ onViewersChange: noop, onInput: (_s, e) => got.push(e), onTakeover: noop });
+    const { bridge } = mkBridge({ onViewersChange: noop, onInput: (_s, e) => got.push(e), onTakeover: noop, onSwitchTab: noop });
     await bridge.watch(sid);
 
     const tap: BrowserInputEvent = { type: "tap", x: 10, y: 20 };
@@ -196,7 +196,7 @@ const tapConns: Redis[] = [];describe.skipIf(!TEST_REDIS_URL)("createRedisBrowse
   it("surfaces the takeover toggle", async () => {
     const sid = randomUUID();
     const events: Array<[string, boolean]> = [];
-    const { bridge } = mkBridge({ onViewersChange: noop, onInput: noop, onTakeover: (s, b) => events.push([s, b]) });
+    const { bridge } = mkBridge({ onViewersChange: noop, onInput: noop, onTakeover: (s, b) => events.push([s, b]), onSwitchTab: noop });
     await bridge.watch(sid);
 
     await gw.publish(browserCtlChannel(sid), takeover(true));
@@ -209,7 +209,7 @@ const tapConns: Redis[] = [];describe.skipIf(!TEST_REDIS_URL)("createRedisBrowse
   it("publishFrame sends [format byte, image bytes] on the frames channel", async () => {
     const sid = randomUUID();
     const tap = await openTap(browserFramesChannel(sid), true);
-    const { bridge } = mkBridge({ onViewersChange: noop, onInput: noop, onTakeover: noop });
+    const { bridge } = mkBridge({ onViewersChange: noop, onInput: noop, onTakeover: noop, onSwitchTab: noop });
 
     bridge.publishFrame(sid, { format: "webp", data: Buffer.from("RIFFxxxxWEBP") });
     const got = await tap.next();
@@ -232,7 +232,7 @@ const tapConns: Redis[] = [];describe.skipIf(!TEST_REDIS_URL)("createRedisBrowse
       viewport: { width: 1280, height: 720 },
     };
     const tap = await openTap(browserStateChannel(sid), false);
-    const { bridge } = mkBridge({ onViewersChange: noop, onInput: noop, onTakeover: noop });
+    const { bridge } = mkBridge({ onViewersChange: noop, onInput: noop, onTakeover: noop, onSwitchTab: noop });
 
     bridge.publishState(sid, state);
     const got = await tap.next();
@@ -244,7 +244,7 @@ const tapConns: Redis[] = [];describe.skipIf(!TEST_REDIS_URL)("createRedisBrowse
   it("unwatch unsubscribes + quits the session connection; late ctl is ignored; close() quits every connection", async () => {
     const sid = randomUUID();
     const events: Array<[string, number]> = [];
-    const { bridge, created } = mkBridge({ onViewersChange: (s, v) => events.push([s, v]), onInput: noop, onTakeover: noop });
+    const { bridge, created } = mkBridge({ onViewersChange: (s, v) => events.push([s, v]), onInput: noop, onTakeover: noop, onSwitchTab: noop });
     await bridge.watch(sid);
     expect(created.length).toBe(1); // exactly one connection so far: the subscriber
     const sub = created[0];
@@ -265,7 +265,7 @@ const tapConns: Redis[] = [];describe.skipIf(!TEST_REDIS_URL)("createRedisBrowse
 
   it("watch twice for one session is idempotent (single connection)", async () => {
     const sid = randomUUID();
-    const { bridge, created } = mkBridge({ onViewersChange: noop, onInput: noop, onTakeover: noop });
+    const { bridge, created } = mkBridge({ onViewersChange: noop, onInput: noop, onTakeover: noop, onSwitchTab: noop });
     await bridge.watch(sid);
     await bridge.watch(sid);
     expect(created.filter((r) => r.status !== "end").length).toBe(1);
@@ -273,7 +273,7 @@ const tapConns: Redis[] = [];describe.skipIf(!TEST_REDIS_URL)("createRedisBrowse
   });
 
   it("the sweep interval is unref'd and cleared on close (never keeps the process alive)", async () => {
-    const { bridge } = mkBridge({ onViewersChange: noop, onInput: noop, onTakeover: noop }, { sweepIntervalMs: 1000 });
+    const { bridge } = mkBridge({ onViewersChange: noop, onInput: noop, onTakeover: noop, onSwitchTab: noop }, { sweepIntervalMs: 1000 });
     // `_sweepTimer` is a test seam (documented in bridge.ts): the raw Node
     // Timeout handle, exposed so the unref can be asserted without timing a
     // whole process exit.
@@ -298,7 +298,7 @@ const tapConns: Redis[] = [];describe.skipIf(!TEST_REDIS_URL)("createRedisBrowse
     const bad = { publish: () => Promise.reject(new Error("redis down")) } as unknown as IORedis;
     const bridge = createRedisBrowserBridge({
       redisFactory: () => bad,
-      handlers: { onViewersChange: noop, onInput: noop, onTakeover: noop },
+      handlers: { onViewersChange: noop, onInput: noop, onTakeover: noop, onSwitchTab: noop },
       log,
     });
     expect(() => bridge.publishFrame("s", { format: "jpeg", data: Buffer.from("x") })).not.toThrow();

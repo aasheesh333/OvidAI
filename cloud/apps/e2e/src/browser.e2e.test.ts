@@ -346,6 +346,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
       wsRoot = await mkdtemp(join(tmpdir(), "ovid-browser-e2e-ws-"));
 
       const cfg: BrowserEngineConfig = {
+        // W4 detach grace: 0 keeps this suite on the pre-W4 immediate
+        // conversion so the release/reopen leg is deterministic.
+        screencastDetachGraceMs: 0,
         maxLiveBrowsers: 4,
         tier1FallbackContexts: 2,
         // Real clock, comfortably above the suite duration: no idle eviction

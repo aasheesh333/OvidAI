@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { PrivateMemoryStore } from "@ovid/shared";
+import type { PrivateMemoryNamespace, PrivateMemoryStore } from "@ovid/shared";
 import type { SandboxPort } from "../ports.js";
 import type { ToolContext } from "../types.js";
 import {
@@ -57,7 +57,10 @@ function fakeSandbox() {
     jobKill: async () => {},
   };
   const privateDocs = new Map<string, string>();
-  const key = (uid: string, ns: { sessionId: string; shared: boolean }, name: string) => `${uid}:${ns.shared ? 'shared' : ns.sessionId}:${name}`;
+  // W1 added project-scoped memory, so the fake store keys by the full
+  // namespace (project scope, shared scope, or session scope).
+  const key = (uid: string, ns: PrivateMemoryNamespace, name: string) =>
+    `${uid}:${ns.projectId !== undefined ? `project:${ns.projectId}` : ns.shared ? 'shared' : ns.sessionId}:${name}`;
   const store: PrivateMemoryStore = {
     async list(uid, ns) {
       const prefix = key(uid, ns, '');

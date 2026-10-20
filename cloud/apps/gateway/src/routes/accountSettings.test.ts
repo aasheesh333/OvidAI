@@ -58,12 +58,11 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgr
       providerId: "openai",
       endpoint: "https://api.openai.com/v1",
       label: null,
-      wrappedDek: Buffer.from("d"),
-      iv: Buffer.from("i"),
-      ciphertext: Buffer.from("c"),
-      tag: Buffer.from("t"),
-      status: "untested",
-    } as Parameters<typeof byokKeysRepo.create>[1]);
+      wrappedDek: Buffer.from("d").toString("base64"),
+      iv: Buffer.from("i").toString("base64"),
+      ciphertext: Buffer.from("c").toString("base64"),
+      tag: Buffer.from("t").toString("base64"),
+    });
     return row.id;
   }
 

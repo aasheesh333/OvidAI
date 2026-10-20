@@ -141,7 +141,8 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     const sid = await createSession(handle, uid);
     const key = await byokKeysRepo.create(db, {
       userId: uid, providerId: "openai", endpoint: "https://api.openai.com/v1", label: null,
-      wrappedDek: Buffer.from("d"), iv: Buffer.from("i"), ciphertext: Buffer.from("c"), tag: Buffer.from("t"), status: "untested",
+      wrappedDek: Buffer.from("d").toString("base64"), iv: Buffer.from("i").toString("base64"),
+      ciphertext: Buffer.from("c").toString("base64"), tag: Buffer.from("t").toString("base64"),
     });
     await accountSettings.patch(db, uid, { byokDefault: { keyId: key.id, model: "gpt-4.1-mini" } });
 
