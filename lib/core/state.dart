@@ -733,6 +733,10 @@ class ChatSession {
   /// Persisted with the session.
   String mode;
 
+  /// W1: the project this chat belongs to, or null for an ungrouped chat.
+  /// Mirrors the server's sessions.project_id; the sidebar groups by it.
+  String? projectId;
+
   /// Agent preset — a named composition of a tool roster + a persona
   /// preamble (the preset coordinator agent-presets parity: standard / minimal / studio /
   /// code). Sessions join a preset; a child inherits its parent's.
@@ -909,6 +913,7 @@ class ChatSession {
     this.repo,
     this.branch,
     this.mode = 'auto',
+    this.projectId,
     this.presetId = 'standard',
     this.customPresetId,
     this.workspaceFolder,
@@ -951,6 +956,7 @@ class ChatSession {
     repo: j['repo'] as String?,
     branch: j['branch'] as String?,
     mode: AppState.sanitizeColdStartMode(j['mode'] as String? ?? 'auto'),
+    projectId: j['projectId'] as String?,
     presetId: j['presetId'] as String? ?? 'standard',
     customPresetId: j['customPresetId'] as String?,
     workspaceFolder: j['workspaceFolder'] as String?,
@@ -1010,6 +1016,7 @@ class ChatSession {
     if (repo != null) 'repo': repo,
     if (branch != null) 'branch': branch,
     'mode': mode,
+    if (projectId != null) 'projectId': projectId,
     if (presetId != 'standard') 'presetId': presetId,
     if (customPresetId != null) 'customPresetId': customPresetId,
     if (workspaceFolder != null && workspaceFolder!.isNotEmpty)

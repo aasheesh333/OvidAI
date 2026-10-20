@@ -122,6 +122,9 @@ export function createAgentEngine(deps: AgentEngineDeps): AgentEngine {
             ...(job.turnContext !== undefined && job.turnContext !== ""
               ? { turnContext: job.turnContext }
               : {}),
+            ...(job.memoryContext !== undefined && job.memoryContext !== ""
+              ? { memoryContext: job.memoryContext }
+              : {}),
             unattended: job.unattended ?? false,
             ...(job.autonomy !== undefined ? { autonomy: job.autonomy } : {}),
             ...(job.mode !== undefined ? { mode: job.mode } : {}),

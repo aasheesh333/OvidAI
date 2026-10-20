@@ -471,6 +471,52 @@ class CloudRestClient {
     }));
   }
 
+  // ── W1 Projects ──────────────────────────────────────────────────────────
+
+  /// GET /projects → every project the caller owns, with live counts.
+  Future<List<ProjectDto>> listProjects() async {
+    final json = await getJson('/projects');
+    return <ProjectDto>[
+      for (final item in (json['items'] as List? ?? const <dynamic>[]))
+        if (item is Map<String, dynamic>) ProjectDto.fromJson(item),
+    ];
+  }
+
+  Future<ProjectDto> createProject(String name) async {
+    return ProjectDto.fromJson(
+      await postJson('/projects', body: <String, Object>{'name': name}),
+    );
+  }
+
+  Future<ProjectDto> renameProject(String id, String name) async {
+    return ProjectDto.fromJson(
+      await patchJson(
+        '/projects/${Uri.encodeComponent(id)}',
+        body: <String, Object>{'name': name},
+      ),
+    );
+  }
+
+  /// DELETE /projects/:id → 204. Chats are detached (never deleted) and the
+  /// project's memory rows cascade server-side.
+  Future<void> deleteProject(String id) async {
+    await delete('/projects/${Uri.encodeComponent(id)}');
+  }
+
+  /// POST /sessions/:id/project — move a chat into a project, or out of every
+  /// project with a null [projectId]. Returns the updated session row.
+  Future<SessionDto> moveSessionToProject(
+    String sessionId,
+    String? projectId,
+  ) async {
+    return SessionDto.fromJson(
+      await postJson(
+        '/sessions/${Uri.encodeComponent(sessionId)}/project',
+        body: <String, Object?>{'projectId': projectId},
+      ),
+    );
+  }
+
   /// The wire's max-output cap, mirroring @ovid/shared's
   /// `MAX_OUTPUT_TOKENS_CAP` (cloud/packages/shared/src/rest.ts). The
   /// Settings presets above it (16K/32K) degrade to it before sending —

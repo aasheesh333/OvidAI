@@ -12,7 +12,10 @@ import '../core/state.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
 import '../core/cloud/cloud_session_store.dart';
+import '../core/cloud/models.dart';
+import '../core/cloud/projects.dart';
 import 'profile_avatar.dart';
+import 'projects_section.dart';
 import 'settings_screen.dart';
 import 'trajectory_screen.dart';
 import 'artifacts_screen.dart';
@@ -34,6 +37,7 @@ class SessionSummary {
     required this.model,
     required this.hasImage,
     required this.lastActivityAt,
+    required this.projectId,
   });
 
   factory SessionSummary.of(ChatSession session) => SessionSummary(
@@ -43,6 +47,7 @@ class SessionSummary {
     model: session.model,
     hasImage: session.hasImage,
     lastActivityAt: session.lastActivityAt,
+    projectId: session.projectId,
   );
 
   /// The live session, for row actions (delete, share, rename).
@@ -51,6 +56,10 @@ class SessionSummary {
   final String title;
   final String model;
   final bool hasImage;
+
+  /// W1: project membership (null = ungrouped). Included in equality so a
+  /// move regroups the row on the next rebuild.
+  final String? projectId;
 
   /// Drives recency order and the date headers (F-046).
   final DateTime lastActivityAt;
@@ -63,10 +72,11 @@ class SessionSummary {
       other.title == title &&
       other.model == model &&
       other.hasImage == hasImage &&
+      other.projectId == projectId &&
       other.lastActivityAt == lastActivityAt;
 
   @override
-  int get hashCode => Object.hash(id, title, model, hasImage, lastActivityAt);
+  int get hashCode => Object.hash(id, title, model, hasImage, projectId, lastActivityAt);
 }
 
 /// List-slot key for a session row. Its own type, so it never collides with
@@ -153,6 +163,9 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
   final TextEditingController _searchController = TextEditingController();
   final SidebarSessionsNotifier _sessions = SidebarSessionsNotifier();
 
+  /// W1: projects the user has expanded (session rows render nested).
+  final Set<String> _expandedProjects = <String>{};
+
   /// P8 Task 10: the session list is the store's reconciliation output —
   /// refresh it once at mount (offline: the list renders from the local cache
   /// read-only, spec §12).
@@ -163,6 +176,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
       CloudSessionStore.I.ready.then((_) async {
         if (CloudSessionStore.I.offline) return;
         await CloudSessionStore.I.refreshSessions();
+        await ProjectsController.I.refresh();
       }).catchError((Object _) {}),
     );
   }
@@ -184,6 +198,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
     }
     try {
       await store.refreshSessions();
+      await ProjectsController.I.refresh();
     } catch (_) {
       // The last reconciled list stays; the failure is no longer silent.
       messenger?.showSnackBar(
@@ -239,6 +254,78 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
     await Navigator.of(context).push(MaterialPageRoute(builder: builder));
   }
 
+  // ── W1 project actions ──────────────────────────────────────────────────
+
+  Future<void> _createProject(BuildContext context) async {
+    final name = await showProjectNameDialog(
+      context,
+      title: 'New project',
+      confirmLabel: 'Create',
+    );
+    if (name == null || !context.mounted) return;
+    final created = await ProjectsController.I.create(name);
+    if (!context.mounted) return;
+    if (created == null) {
+      _showProjectError(context);
+    } else {
+      setState(() => _expandedProjects.add(created.id));
+    }
+  }
+
+  Future<void> _renameProject(BuildContext context, ProjectDto project) async {
+    final name = await showProjectNameDialog(
+      context,
+      title: 'Rename project',
+      initial: project.name,
+    );
+    if (name == null || !context.mounted) return;
+    final ok = await ProjectsController.I.rename(project.id, name);
+    if (!context.mounted || ok) return;
+    _showProjectError(context);
+  }
+
+  Future<void> _deleteProject(BuildContext context, ProjectDto project) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(
+          'Delete "${project.name}"?',
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+        ),
+        content: const Text(
+          'Chats in this project stay in your sidebar. Its project memory '
+          'and file counts are removed.',
+          style: TextStyle(fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: Text('Delete', style: TextStyle(color: Aether.danger)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    final ok = await ProjectsController.I.delete(project.id);
+    if (!context.mounted) return;
+    if (ok) {
+      setState(() => _expandedProjects.remove(project.id));
+    } else {
+      _showProjectError(context);
+    }
+  }
+
+  void _showProjectError(BuildContext context) {
+    final message = ProjectsController.I.error ?? 'Could not update projects.';
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
   @override
   void dispose() {
     _contentDebounce?.cancel();
@@ -280,18 +367,52 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                     // working (sidebar_no_repo_labels_test).
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: SizedBox(
-                        width: double.infinity,
-                        child: AetherPrimaryButton(
-                          label: 'New session',
-                          icon: Icons.add,
-                          onPressed: () {
-                            app.newSession();
-                            // Only the drawer is a route; in wide mode maybePop
-                            // would pop the app itself.
-                            if (widget.isDrawer) Navigator.maybePop(context);
-                          },
-                        ),
+                      child: Stack(
+                        children: [
+                          SizedBox(
+                            width: double.infinity,
+                            child: AetherPrimaryButton(
+                              label: 'New session',
+                              icon: Icons.add,
+                              onPressed: () {
+                                app.newSession();
+                                // Only the drawer is a route; in wide mode
+                                // maybePop would pop the app itself.
+                                if (widget.isDrawer) Navigator.maybePop(context);
+                              },
+                            ),
+                          ),
+                          // W1: the always-available way to start a project,
+                          // even before the first one exists (the Projects
+                          // section below appears once there is one). An
+                          // overlay, not a Row sibling: narrowing the CTA
+                          // wraps its label in the very-short layouts and
+                          // steals the session viewport.
+                          Positioned(
+                            right: 4,
+                            top: 0,
+                            bottom: 0,
+                            child: Center(
+                              child: Tooltip(
+                                message: 'New project',
+                                child: InkWell(
+                                  key: const ValueKey('sidebar-new-project'),
+                                  borderRadius: BorderRadius.circular(8),
+                                  onTap: () => _createProject(context),
+                                  child: SizedBox(
+                                    width: 30,
+                                    height: 30,
+                                    child: Icon(
+                                      Icons.create_new_folder_outlined,
+                                      size: 18,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                     SizedBox(height: compact ? 4 : 14),
@@ -377,10 +498,17 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                       // Titles match instantly; message bodies follow from
                       // the debounced content search. Model names are not
                       // matched (searching "gpt" listed every chat).
+                      // W1: when browsing (no search), project chats render
+                      // nested under their project; the main list keeps only
+                      // ungrouped chats. Searching looks across everything.
                       final visible = q.isEmpty
                           ? data.items
+                                .where((s) => s.projectId == null)
+                                .toList()
                           : data.items
-                                .where((s) => s.title.toLowerCase().contains(q))
+                                .where(
+                                  (s) => s.title.toLowerCase().contains(q),
+                                )
                                 .toList();
                       final byId = <String, SessionSummary>{
                         for (final s in data.items) s.id: s,
@@ -393,7 +521,10 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                                 when shown.add(s.id))
                               (s, hit),
                       ];
-                      if (visible.isEmpty && contentRows.isEmpty) {
+                      if (visible.isEmpty &&
+                          contentRows.isEmpty &&
+                          !(q.isEmpty &&
+                              ProjectsController.I.projects.isNotEmpty)) {
                         if (q.isNotEmpty) {
                           return Padding(
                             padding: const EdgeInsets.all(16),
@@ -514,6 +645,63 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                         keyboardDismissBehavior:
                             ScrollViewKeyboardDismissBehavior.onDrag,
                         slivers: [
+                          // W1 Projects section above the sessions (owner
+                          // spec §3 Screen 4). Hidden while searching so
+                          // every matching chat is reachable.
+                          if (q.isEmpty)
+                            SliverToBoxAdapter(
+                              child: AnimatedBuilder(
+                                animation: ProjectsController.I,
+                                builder: (_, _) {
+                                  final projects =
+                                      ProjectsController.I.projects;
+                                  // No projects → no section at all: the
+                                  // constrained/short layouts keep their
+                                  // whole viewport for sessions, and the CTA
+                                  // row above already offers "New project".
+                                  if (projects.isEmpty) {
+                                    return const SizedBox.shrink();
+                                  }
+                                  final tiles = <String, List<Widget>>{};
+                                  for (final project in projects) {
+                                    final projectSessions = data.items
+                                        .where((s) => s.projectId == project.id)
+                                        .toList();
+                                    tiles[project.id] = [
+                                      for (final summary in projectSessions)
+                                        Padding(
+                                          key: _SessionRowKey(summary.id),
+                                          padding: const EdgeInsets.only(
+                                            left: 20,
+                                          ),
+                                          child: _SessionTile(
+                                            summary: summary,
+                                            active:
+                                                summary.id == data.activeId,
+                                            isDrawer: widget.isDrawer,
+                                          ),
+                                        ),
+                                    ];
+                                  }
+                                  return ProjectsSection(
+                                    projects: projects,
+                                    expanded: _expandedProjects,
+                                    sessionTiles: tiles,
+                                    onToggle: (id) => setState(() {
+                                      if (!_expandedProjects.remove(id)) {
+                                        _expandedProjects.add(id);
+                                      }
+                                    }),
+                                    onCreate: () => _createProject(context),
+                                    onRename: (project) =>
+                                        _renameProject(context, project),
+                                    onDelete: (project) =>
+                                        _deleteProject(context, project),
+                                    compact: compact,
+                                  );
+                                },
+                              ),
+                            ),
                           for (final section in sections)
                             sectionSliver(section),
                         ],
@@ -1207,6 +1395,22 @@ class _SessionTileState extends State<_SessionTile> {
                 _rename(context);
               },
             ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.create_new_folder_outlined,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              title: const Text(
+                'Add to Project',
+                style: TextStyle(fontSize: 13.5),
+              ),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                _addToProject(context);
+              },
+            ),
             // P8 Task 20: title generation is a server concern and the facade
             // member is inert until the owning server task wires it, so the
             // action is not offered.
@@ -1218,6 +1422,35 @@ class _SessionTileState extends State<_SessionTile> {
 
   void _rename(BuildContext context) =>
       showRenameSessionDialog(context, widget.session);
+
+  /// W1 "Add to Project": pick a project (or "No project") and move the chat.
+  Future<void> _addToProject(BuildContext context) async {
+    final controller = ProjectsController.I;
+    if (!controller.loadedOnce && !controller.loading) {
+      await controller.refresh();
+    }
+    if (!context.mounted) return;
+    final selection = await showAddToProjectSheet(
+      context,
+      sessionTitle: widget.session.title,
+      projects: controller.projects,
+      currentProjectId: widget.session.projectId,
+    );
+    if (selection == null || !context.mounted) return;
+    if (selection.projectId == widget.session.projectId) return;
+    final ok = await controller.moveSession(
+      widget.session.id,
+      selection.projectId,
+    );
+    if (!context.mounted || ok) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(
+        content: Text(
+          controller.error ?? 'Could not move this chat to that project.',
+        ),
+      ),
+    );
+  }
 }
 
 /// "● running" suffix on a session row. Listens to that session's busy flag
