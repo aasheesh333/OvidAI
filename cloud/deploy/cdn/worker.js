@@ -515,7 +515,14 @@ export async function handleRequest(request, env, opts = {}) {
   }
 
   if (useCache && cache !== undefined) {
+    // R2 bodies are single-consumer streams. Tee BEFORE building the cached
+    // response, and remember the client half: if the cache write fails after
+    // the tee, the original body is already locked, so only this half can be
+    // served.
+    let toClient;
     try {
+      const [toCache, clientHalf] = object.body.tee();
+      toClient = clientHalf;
       // Cache the object representation only; per-request headers
       // (Content-Disposition/CORS) are rebuilt on every hit above.
       const cacheHeaders = new Headers();
@@ -523,17 +530,15 @@ export async function handleRequest(request, env, opts = {}) {
       if (etag !== undefined) cacheHeaders.set("etag", etag);
       if (object.size !== undefined) cacheHeaders.set("content-length", String(object.size));
       cacheHeaders.set("cache-control", cacheControlFor(parsed.cacheClass));
-      // R2 bodies are single-consumer streams: tee so the cache and the
-      // client each get a readable half.
-      const [toCache, toClient] = object.body.tee();
       const cacheable = new Response(toCache, { status: 200, headers: cacheHeaders });
       const put = cache.put(cacheKeyFor(parsed), cacheable);
       if (typeof opts.waitUntil === "function") opts.waitUntil(put);
       else await put;
-      return new Response(toClient, { status: 200, headers });
     } catch {
-      // ignore cache write failures and stream the original body
+      // A cache write failure is never a request failure: serve the client
+      // half when the tee succeeded, otherwise the untouched original body.
     }
+    if (toClient !== undefined) return new Response(toClient, { status: 200, headers });
   }
 
   return new Response(object.body, { status: 200, headers });

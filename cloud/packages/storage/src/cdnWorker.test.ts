@@ -94,6 +94,13 @@ class FakeCache implements CdnCache {
   }
 }
 
+class ThrowingCache extends FakeCache {
+  override async put(): Promise<void> {
+    this.puts += 1;
+    throw new Error("cache write failed");
+  }
+}
+
 function mint(overrides: Partial<Parameters<typeof mintCdnUrl>[1]> = {}): string {
   return mintCdnUrl(CONFIG, {
     key: ARTIFACT_KEY,
@@ -275,6 +282,16 @@ describe("CDN Worker handler", () => {
     const tampered = mint().replace(/t=[^&]+/, "t=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
     expect((await run(tampered, bucket, { cache })).status).toBe(403);
     expect(cache.matches).toBe(before);
+  });
+
+  it("still serves the object when the cache write fails", async () => {
+    const bucket = new FakeBucket();
+    bucket.seed(ARTIFACT_KEY, "survives-cache-failure", "image/png");
+    const cache = new ThrowingCache();
+    const res = await run(mint(), bucket, { cache });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("survives-cache-failure");
+    expect(cache.puts).toBe(1);
   });
 
   it("echoes an allowed Origin and sets Vary; ignores a foreign Origin", async () => {
