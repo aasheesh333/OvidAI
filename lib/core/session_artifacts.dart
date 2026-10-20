@@ -97,6 +97,11 @@ final RegExp _uuidShape = RegExp(
 /// (`GET /sessions/:id/artifacts/:artifactId/url`) needs. Returns null for
 /// anything without that layout (local paths, legacy URLs): those callers
 /// keep using the URL they have.
+///
+/// W12: signed CDN URLs hide the key behind an opaque base64url path segment
+/// (`https://cdn.ovidsi.com/o/<base64url(key)>?...`). The same id is recovered
+/// by decoding that segment, so artifact chips minted from `artifact_created`
+/// events still re-mint correctly when the CDN is enabled.
 String? cloudArtifactIdOf(String? url) {
   if (url == null || url.isEmpty) return null;
   final Uri parsed;
@@ -106,6 +111,18 @@ String? cloudArtifactIdOf(String? url) {
     return null;
   }
   final segments = parsed.pathSegments;
+  // Signed CDN shape: /o/<base64url(r2 key)>.
+  if (segments.length == 2 && segments[0] == 'o') {
+    final decoded = _decodeCdnOpaqueKey(segments[1]);
+    if (decoded != null) {
+      final id = _artifactIdFromKeySegments(decoded.split('/'));
+      if (id != null) return id;
+    }
+  }
+  return _artifactIdFromKeySegments(segments);
+}
+
+String? _artifactIdFromKeySegments(List<String> segments) {
   for (var i = 0; i + 2 < segments.length; i++) {
     if (segments[i] != 'artifacts') continue;
     // `…/artifacts/{sessionId}/{artifactId}-{name}` — the id is the fixed
@@ -115,6 +132,23 @@ String? cloudArtifactIdOf(String? url) {
     if (_uuidShape.hasMatch(id)) return id;
   }
   return null;
+}
+
+/// Strict base64url decode of the CDN's opaque key; null on anything that is
+/// not valid UTF-8 or not canonical base64url.
+String? _decodeCdnOpaqueKey(String opaque) {
+  if (opaque.isEmpty || !RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(opaque)) {
+    return null;
+  }
+  try {
+    var b64 = opaque.replaceAll('-', '+').replaceAll('_', '/');
+    while (b64.length % 4 != 0) {
+      b64 += '=';
+    }
+    return utf8.decode(base64.decode(b64));
+  } catch (_) {
+    return null;
+  }
 }
 
 const _imageExt = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic', 'svg'};

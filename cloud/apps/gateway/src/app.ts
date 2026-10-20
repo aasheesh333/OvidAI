@@ -10,13 +10,15 @@ import type { EnvelopeCrypto, OAuthFlow } from "@ovid/mcp";
 import type { QueueServices } from "@ovid/queue";
 import type { InternalMintProvisioner, KeyProvider } from "@ovid/shared";
 import type { ApiError } from "@ovid/shared";
-import type { ActivityTracker, StorageAdapter } from "@ovid/storage";
+import type { ActivityTracker, CdnConfig, StorageAdapter } from "@ovid/storage";
 import { authHook, type Verifier } from "./auth.js";
 import { registerAccountRoutes, type AccountRouteDeps } from "./routes/account.js";
+import { registerArtifactCdnRoutes } from "./routes/artifactCdn.js";
 import { registerArtifactRoutes } from "./routes/artifacts.js";
 import { registerArtifactVaultRoutes } from "./routes/artifactVault.js";
 import { registerAttachmentRoutes } from "./routes/attachments.js";
-import { registerCredentialRoutes } from "./routes/credentials.js";import type { AttachmentPresigner } from "./routes/attachments.js";
+import { registerCredentialRoutes } from "./routes/credentials.js";
+import type { AttachmentPresigner } from "./routes/attachments.js";
 import { registerByokRoutes } from "./routes/byok.js";
 import type { ByokRouteOverrides } from "./routes/byok.js";
 import { registerDevicesRoutes } from "./routes/devices.js";
@@ -132,6 +134,13 @@ export interface GatewayDeps {
    * createStorage(loadStorageEnv(env)).
    */
   storage?: StorageAdapter;
+  /**
+   * W12: signed-token CDN acceleration (OVID_CDN_BASE_URL +
+   * OVID_CDN_SIGNING_SECRET). OPTIONAL: absent means the CDN routes answer a
+   * typed 503 cdn_not_configured and clients fall back to `storage.presignGet`
+   * — enabling or disabling the CDN never breaks artifact access.
+   */
+  cdn?: CdnConfig;
   /**
    * P7 Task 12: session activity tracker — the Studio-interaction signal the
    * hibernator consults. OPTIONAL for the same composition-compat reason;
@@ -344,6 +353,9 @@ export function buildGateway(
       registerWorkspaceRoutes(scope, deps);
       registerArtifactRoutes(scope, deps);
       registerArtifactVaultRoutes(scope, deps);
+      // W12: signed CDN URL mints (additive; 503 cdn_not_configured without
+      // OVID_CDN_* so the client falls back to the canonical presign).
+      registerArtifactCdnRoutes(scope, deps);
       // Wave 6 W4: browser Credentials Vault (metadata + sealed secrets).
       registerCredentialRoutes(scope, deps);
 

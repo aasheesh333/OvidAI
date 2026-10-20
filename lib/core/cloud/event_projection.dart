@@ -987,8 +987,9 @@ class EventTranscriptProjector {
   void _onArtifactCreated(Map<String, dynamic> payload, String seq) {
     final name = _str(payload, 'name');
     if (name == null) return;
-    // The presigned URL carries the artifact id (the re-mint key); the chip
-    // re-mints before opening, so an expired URL in history still works.
+    // The URL carries the artifact id (presigned R2 key path, or the opaque
+    // key of a W12 signed CDN URL); the chip re-mints before opening, so an
+    // expired URL in history still works.
     final attachment = MessageAttachment(
       name: name,
       size: _int(payload, 'sizeBytes') ?? 0,

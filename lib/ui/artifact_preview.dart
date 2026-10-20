@@ -442,7 +442,7 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
     final vault = widget.vaultClient;
     if (vault == null) return;
     try {
-      final minted = await vault.mintUrl(widget.artifact);
+      final minted = await vault.mintPreferredUrl(widget.artifact);
       if (!mounted || _accountLost) return;
       setState(() {
         _freshUrl = minted.url;
@@ -505,7 +505,7 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
     final vault = widget.vaultClient;
     if (vault == null) return;
     await showNativeShare(context, () async {
-      final fresh = await vault.mintUrl(widget.artifact);
+      final fresh = await vault.mintPreferredUrl(widget.artifact, download: true);
       await NativeShare.link(fresh.url);
     });
   }
@@ -517,7 +517,7 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
     final l10n = context.l10n;
     final messenger = ScaffoldMessenger.of(context);
     try {
-      final fresh = await vault.mintUrl(widget.artifact);
+      final fresh = await vault.mintPreferredUrl(widget.artifact, download: true);
       final opened = await launchUrl(
         Uri.parse(fresh.url),
         mode: LaunchMode.externalApplication,

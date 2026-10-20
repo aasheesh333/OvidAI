@@ -56,6 +56,7 @@ import {
   type HydrateRunsRepo,
   type SandboxUidResolver,
   type StorageAdapter,
+  type CdnConfig,
 } from "@ovid/storage";
 
 /** Cold-file redirect ceiling: extractFile buffers whole members (worker mem_limit 2 g). */
@@ -89,6 +90,12 @@ export interface FileServiceDeps {
   workspaceObjects: ArtifactWorkspaceObjectsRepo;
   /** Default DEFAULT_PRESIGN_TTL_SECONDS (3600) inside registerArtifact. */
   presignTtlSeconds?: number;
+  /**
+   * W12: when configured, generated artifacts carry a signed CDN URL (the
+   * object is immutable, so it is edge-cacheable for a year). Absent → the
+   * existing presigned-S3 path is unchanged.
+   */
+  cdn?: CdnConfig;
 }
 
 interface ErrorEnvelope {
@@ -329,6 +336,7 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
             ...(deps.presignTtlSeconds !== undefined
               ? { presignTtlSeconds: deps.presignTtlSeconds }
               : {}),
+            ...(deps.cdn !== undefined ? { cdn: deps.cdn } : {}),
           },
           source === "warm"
             ? {

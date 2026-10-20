@@ -18,6 +18,7 @@ import { createReadStream } from "node:fs";
 import { DEFAULT_PRESIGN_TTL_SECONDS } from "@ovid/shared";
 
 import type { StorageAdapter } from "./adapter.js";
+import { mintCdnUrl, type CdnConfig } from "./cdn.js";
 import { StorageError } from "./errors.js";
 import { contentTypeFor, type HydrateDbLike, type HydrateEventLog } from "./hydrate.js";
 import { r2Keys } from "./keys.js";
@@ -54,6 +55,13 @@ export interface ArtifactDeps {
   storage: StorageAdapter;
   /** Default DEFAULT_PRESIGN_TTL_SECONDS (3600). */
   presignTtlSeconds?: number;
+  /**
+   * W12: when configured, the artifact_created event (and the record returned
+   * to the worker's file service) carries a signed CDN URL instead of the
+   * presigned S3 GET. The object is immutable, so it is edge-cacheable for a
+   * year. Absent → the existing presign path is unchanged.
+   */
+  cdn?: CdnConfig;
   clock?: () => Date;
   /** The real @ovid/db repo namespaces, injected by the wiring layer. */
   workspaceObjects: ArtifactWorkspaceObjectsRepo;
@@ -153,7 +161,6 @@ export async function registerArtifact(
   const contentType = input.contentType ?? contentTypeFor(input.name);
 
   const id = newArtifactId(at.getTime());
-  const key = r2Keys.artifact(input.userId, input.sessionId, id, input.name);
 
   let sizeBytes: number;
   let sha256: string;
@@ -161,6 +168,14 @@ export async function registerArtifact(
     const content = input.content!;
     sizeBytes = content.length;
     sha256 = sha256Hex(content);
+    // W12: the key is content-addressed AND unique (id) — see r2Keys.
+    const key = r2Keys.contentAddressedArtifact(
+      input.userId,
+      input.sessionId,
+      id,
+      sha256,
+      input.name,
+    );
     const put = await deps.storage.put(key, content, { contentType, sha256Hex: sha256 });
     if (put.bytes !== sizeBytes) {
       throw new StorageError(
@@ -168,9 +183,19 @@ export async function registerArtifact(
         { code: "artifact_length_mismatch" },
       );
     }
-  } else {
-    const sourcePath = input.sourcePath!;
-    ({ sizeBytes, sha256Hex: sha256 } = await hashFile(sourcePath));
+    return finish(key);
+  }
+
+  const sourcePath = input.sourcePath!;
+  ({ sizeBytes, sha256Hex: sha256 } = await hashFile(sourcePath));
+  const key = r2Keys.contentAddressedArtifact(
+    input.userId,
+    input.sessionId,
+    id,
+    sha256,
+    input.name,
+  );
+  {
     const put = await deps.storage.put(key, createReadStream(sourcePath), {
       contentType,
       sha256Hex: sha256,
@@ -182,32 +207,53 @@ export async function registerArtifact(
       );
     }
   }
+  return finish(key);
 
-  await deps.workspaceObjects.registerArtifact(deps.db, {
-    id,
-    userId: input.userId,
-    sessionId: input.sessionId,
-    r2Key: key,
-    bytes: sizeBytes,
-    sha256,
-    contentType,
-    meta: { name: input.name },
-  });
+  /** Row + event + capability once the object is stored. */
+  async function finish(key: string): Promise<ArtifactRecord> {
+    await deps.workspaceObjects.registerArtifact(deps.db, {
+      id,
+      userId: input.userId,
+      sessionId: input.sessionId,
+      r2Key: key,
+      bytes: sizeBytes,
+      sha256,
+      contentType,
+      meta: { name: input.name },
+    });
 
-  const url = await deps.storage.presignGet(key, ttlSeconds);
-  const expiresAt = new Date(at.getTime() + ttlSeconds * 1000).toISOString();
+    // W12: prefer the CDN capability for immutable artifacts. The CDN URL is
+    // still a bearer capability until expiresAt and is NEVER logged; when the
+    // CDN is not configured the presign path is byte-for-byte unchanged.
+    let url: string;
+    let expiresAt: string;
+    if (deps.cdn !== undefined) {
+      const minted = mintCdnUrl(deps.cdn, {
+        key,
+        filename: input.name,
+        contentType,
+        disposition: "inline",
+        now: at,
+      });
+      url = minted.url;
+      expiresAt = minted.expiresAt;
+    } else {
+      url = await deps.storage.presignGet(key, ttlSeconds);
+      expiresAt = new Date(at.getTime() + ttlSeconds * 1000).toISOString();
+    }
 
-  const event = await deps.events.append(input.sessionId, "artifact_created", {
-    artifactId: id,
-    name: input.name,
-    sessionId: input.sessionId,
-    sizeBytes,
-    contentType,
-    url,
-    expiresAt,
-  });
-  await deps.eventMirror.put(deps.db, event);
+    const event = await deps.events.append(input.sessionId, "artifact_created", {
+      artifactId: id,
+      name: input.name,
+      sessionId: input.sessionId,
+      sizeBytes,
+      contentType,
+      url,
+      expiresAt,
+    });
+    await deps.eventMirror.put(deps.db, event);
 
-  // NEVER log `url` — it is a bearer capability until expiresAt.
-  return { id, key, sizeBytes, sha256Hex: sha256, contentType, url, expiresAt };
+    // NEVER log `url` — it is a bearer capability until expiresAt.
+    return { id, key, sizeBytes, sha256Hex: sha256, contentType, url, expiresAt };
+  }
 }

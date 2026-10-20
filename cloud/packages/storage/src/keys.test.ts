@@ -26,6 +26,19 @@ describe("r2Keys — spec §10 exact strings", () => {
       "users/u1/artifacts/s1/0192c0de-my_shot.png",
     );
   });
+
+  it("contentAddressedArtifact — unique id + sha256 prefix + sanitized name", () => {
+    const sha = "a".repeat(64);
+    expect(r2Keys.contentAddressedArtifact("u1", "s1", "0192c0de", sha, "my shot.png")).toBe(
+      `users/u1/artifacts/s1/0192c0de-${"a".repeat(16)}-my_shot.png`,
+    );
+  });
+
+  it("contentAddressedArtifact rejects a malformed digest", () => {
+    expect(() => r2Keys.contentAddressedArtifact("u1", "s1", "x", "not-hex", "a")).toThrow(
+      KeyLayoutError,
+    );
+  });
 });
 
 describe("assertSafeSegment", () => {

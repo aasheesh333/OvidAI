@@ -286,6 +286,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       // Workspace surfaces (P7 Task 12): presigning, activity bumps, the
       // worker file-service proxy, and the route knobs from the environment.
       storage,
+      ...(cfg.cdn !== undefined ? { cdn: cfg.cdn } : {}),
       activity,
       worker,
       inlineMaxBytes: cfg.fileInlineMaxBytes,

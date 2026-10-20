@@ -122,6 +122,12 @@ class ArtifactVaultClient {
   final String? Function()? accountId;
   final CloudRestClient _rest;
 
+  /// Set after a typed `cdn_not_configured`/`storage_not_configured` answer so
+  /// every later mint in this client goes straight to the canonical route
+  /// instead of paying a doomed CDN round trip. A new client (e.g. after a
+  /// settings change/restart) probes the CDN again.
+  bool _cdnUnavailable = false;
+
   /// The current account id, or null when signed out.
   String? currentAccountId() => accountId?.call();
 
@@ -181,6 +187,72 @@ class ArtifactVaultClient {
       },
     ));
   }
+
+  /// W12: prefer the signed CDN capability, falling back to the canonical
+  /// presign mint on any CDN-specific failure.
+  ///
+  /// Called only on explicit preview / download / share actions — never for
+  /// list rows. The returned URL is a short-lived bearer capability (15 min
+  /// by default) and is never persisted. [download] signs an
+  /// `attachment` disposition (share / open-with); previews stay inline.
+  ///
+  /// Fallback rules:
+  ///  - `cdn_not_configured` / `storage_not_configured` (503) → canonical
+  ///    `mintUrl`, so a deployment without the CDN behaves exactly as before;
+  ///  - typed object verdicts (`artifact_unavailable`, `artifact_incomplete`,
+  ///    `artifact_storage_unavailable`) are rethrown: the canonical mint would
+  ///    report the same verdict, and the UI's precise message must survive.
+  Future<MintedArtifactUrl> mintCdnUrl(
+    SessionArtifact artifact, {
+    bool download = false,
+  }) async {
+    final current = currentAccountId();
+    if (current == null || artifact.cloudAccountId != current) {
+      throw CloudApiException(
+        status: 409,
+        code: 'account_changed',
+        message: 'The account changed. Sign in again to use this file.',
+      );
+    }
+    final id = artifact.cloudArtifactId;
+    if (id == null || id.isEmpty) {
+      throw CloudApiException(
+        status: 400,
+        code: 'bad_request',
+        message: 'This file has no cloud identity.',
+      );
+    }
+    final source = artifact.origin == ArtifactOrigin.uploaded
+        ? 'uploaded'
+        : 'generated';
+    if (_cdnUnavailable) return mintUrl(artifact);
+    try {
+      return MintedArtifactUrl.fromJson(await _rest.getJson(
+        '/artifacts/$id/cdn-url',
+        query: <String, String>{
+          'source': source,
+          if (download) 'download': '1',
+        },
+      ));
+    } on CloudApiException catch (e) {
+      final cdnDisabled = e.code == 'cdn_not_configured' ||
+          e.code == 'storage_not_configured';
+      if (cdnDisabled) {
+        _cdnUnavailable = true;
+        return mintUrl(artifact);
+      }
+      rethrow;
+    }
+  }
+
+  /// The preferred mint for preview/download/share: CDN when configured,
+  /// canonical presign otherwise. Kept as a named seam so call sites express
+  /// intent ("fresh capability") without knowing the acceleration layer.
+  Future<MintedArtifactUrl> mintPreferredUrl(
+    SessionArtifact artifact, {
+    bool download = false,
+  }) =>
+      mintCdnUrl(artifact, download: download);
 }
 
 /// Change-notifier driving the Vault screen: fixed pages with an explicit

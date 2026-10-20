@@ -1,3 +1,6 @@
+import type { CdnConfig } from "@ovid/storage";
+import { loadCdnConfig } from "@ovid/storage";
+
 /**
  * OVID_APPCHECK_MODE — how the gateway treats `X-Firebase-AppCheck`.
  * - `required` (default): a missing or invalid token is rejected.
@@ -62,6 +65,11 @@ export interface GatewayEnv {
   mcpRedirectUri: string;
   /** OVID_APPCHECK_MODE (default `required`). See [AppCheckMode]. */
   appCheckMode: AppCheckMode;
+  /**
+   * W12: signed-token CDN config. Absent when OVID_CDN_BASE_URL is unset —
+   * the CDN is optional and its absence is a typed 503, never a boot error.
+   */
+  cdn?: CdnConfig;
 }
 
 const DEFAULT_PORT = 8081;
@@ -228,6 +236,11 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
   }
   const appCheckMode = appCheckModeRaw as AppCheckMode;
 
+  // W12: optional CDN acceleration. Unset = disabled (typed 503 from the
+  // mint routes); partially configured = loud boot failure inside
+  // loadCdnConfig (a missing/short signing secret would be forgeable).
+  const cdn = loadCdnConfig(raw) ?? undefined;
+
   return {
     nodeEnv,
     port,
@@ -248,5 +261,6 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
     masterKey: requiredMasterKey(),
     mcpRedirectUri,
     appCheckMode,
+    ...(cdn !== undefined ? { cdn } : {}),
   };
 }
