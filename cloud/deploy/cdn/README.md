@@ -209,3 +209,31 @@ rejection.
   origin read. This is normal edge behavior, not a correctness issue.
 - The Worker does not transform images (no resizing/format conversion); it
   streams the stored bytes.
+
+---
+
+## Deployed state (2026-10-20)
+
+Set up from the logged-in Cloudflare dashboard session on the VPS:
+
+| Item | Value |
+|---|---|
+| Cloudflare account | `7fb570ac615a8e2a41a6aff7913114d5` |
+| Zone | `ovidsi.com` (`649119932e1529b4b5f74977e329e681`) |
+| Worker | `ovid-cdn` (version deployed via `wrangler deploy`) |
+| R2 binding | `BUCKET` → `ovid-cloud` |
+| Secret | `OVID_CDN_SIGNING_SECRET` set on the Worker |
+| Custom domain | `cdn.ovidsi.com` attached to the Worker (cert issued) |
+| Gateway/worker env | `OVID_CDN_BASE_URL=https://cdn.ovidsi.com`, `OVID_CDN_TTL_SECONDS=900`, same signing secret in `cloud/deploy/.env` and `/opt/ovid-cloud/worker.env` |
+| Services restarted | `ovid-cloud-gateway-1` (healthy), `ovid-worker` (active) |
+
+Verification performed:
+
+- DNS: `cdn.ovidsi.com` resolves (Cloudflare anycast).
+- Unsigned key → `403`; tampered token → `403`; expired token → `403`; no token → `403`.
+- Valid signed token for a missing key → `404` (token accepted, object absent).
+- Valid signed token for a real object → `200`, correct `Content-Type`, `Cache-Control: public, max-age=60, s-maxage=60, must-revalidate`, `ETag`, `X-Content-Type-Options: nosniff`.
+
+Rollback: unset `OVID_CDN_BASE_URL` in both env files and restart; clients fall back to the
+canonical presigned mint automatically. To disable at the edge, remove the custom domain or
+delete the Worker — artifact access is unaffected because the presign path remains canonical.
