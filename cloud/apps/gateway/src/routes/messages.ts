@@ -5,6 +5,7 @@ import {
   byokKeysRepo,
   eventMirror,
   messages,
+  projectsRepo,
   runs,
   sessionState,
   sessions,
@@ -17,6 +18,7 @@ import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import {
   branchSessionBodySchema,
   CLOUD_PRESET_IDS,
+  MAX_PROJECT_REFS,
   MAX_SESSION_REFS,
   MintInternalError,
   regenerateBodySchema,
@@ -566,6 +568,46 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     const mentioned = await resolveTitleMentions(deps, uid, sessionId, content);
     const sessionRefs = [...new Set([...explicitRefs, ...mentioned])].slice(0, MAX_SESSION_REFS);
 
+    // W1 follow-up: explicit `@project:<id>` refs. FAIL-SAFE: the WHOLE send
+    // is refused (typed 400, before mint and any write) on an over-limit,
+    // duplicated, malformed, foreign or unknown ref. We never drop a bad ref
+    // and never partially include the rest — a silently missing project would
+    // make the model answer without context the user believes it has.
+    // Malformed ids and >MAX_PROJECT_REFS are rejected by the shared schema
+    // (zodBadRequest, 400) above; this loop covers the semantic cases.
+    const rawProjectRefs = settings.projectRefs ?? [];
+    if (rawProjectRefs.length > MAX_PROJECT_REFS) {
+      return sendError(
+        reply,
+        400,
+        "too_many_project_refs",
+        `You can reference at most ${MAX_PROJECT_REFS} projects in one message.`,
+      );
+    }
+    const seenProjectRefs = new Set<string>();
+    for (const ref of rawProjectRefs) {
+      if (seenProjectRefs.has(ref)) {
+        return sendError(
+          reply,
+          400,
+          "duplicate_project_ref",
+          "projectRefs contains the same project more than once.",
+        );
+      }
+      seenProjectRefs.add(ref);
+      // Owner-scoped: unknown and foreign are indistinguishable (no leaks).
+      const ownedProject = await projectsRepo.get(deps.db, uid, ref);
+      if (ownedProject === null) {
+        return sendError(
+          reply,
+          400,
+          "unknown_project_ref",
+          "projectRefs contains a project you do not own.",
+        );
+      }
+    }
+    const projectRefs = rawProjectRefs;
+
     // 3. Provision the users row (FK target for everything below); its tier
     //    sets the queue priority (free → 2, anything else → 1).
     const user = await users.ensure(deps.db, uid, email);
@@ -672,6 +714,9 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
           // see (R1).
           ...(settings.mode !== undefined ? { mode: settings.mode } : {}),
           ...(sessionRefs.length > 0 ? { sessionRefs } : {}),
+          // W1 follow-up: project refs ride the job for THIS run only. The
+          // worker injects their memory and never persists it on the session.
+          ...(projectRefs.length > 0 ? { projectRefs } : {}),
         },
         { jobId: run.id, priority },
       );

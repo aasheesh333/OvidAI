@@ -1092,6 +1092,38 @@ void main() {
       await h.ws.disconnect();
       h.facade.dispose();
     });
+
+    test('editing a queued row replaces its project refs before dispatch',
+        () async {
+      final h = await _build();
+      AppState.I.activeSessionId = 's1';
+      addTearDown(() => AppState.I.activeSessionId = null);
+      await h.facade.runTask('first', sessionId: 's1');
+      final socket = await h.socket();
+      socket.server(_eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+      await pumpEventQueue();
+
+      h.facade.enqueueMessage(
+        'use @project:old',
+        sessionId: 's1',
+        projectRefs: const ['0192f0a0-0000-7000-8000-000000000001'],
+      );
+      final id = h.facade.queuedMessageIdsFor('s1').single;
+      // The edit removes the tag and replaces the refs.
+      h.facade.editQueuedMessageById(id, 'plain now', projectRefs: const []);
+
+      socket.server(
+          _eventFrame('s1', '2-0', 'run_completed', {'runId': 'run-1'}));
+      await pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await pumpEventQueue();
+
+      expect(h.rest.sent.last.content, 'plain now');
+      expect(h.rest.lastTurn.projectRefs, isEmpty);
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
   });
 
   group('attachments', () {

@@ -19,9 +19,31 @@ export interface ProjectDto {
   createdAt: string;
   updatedAt: string;
   sessionCount: number;
+  /** Total used slots: project memory + attachments + active artifacts. */
   fileCount: number;
-  /** Per-project memory-file cap for the caller's plan (80/100/150/250). */
+  /** Per-project file cap for the caller's plan (80/100/150/250). */
   fileCap: number;
+  /** Total bytes across memory, attachments and active artifacts. */
+  fileBytes: number;
+  /** Per-bucket used counts (sums to fileCount). */
+  fileBreakdown: {
+    memory: number;
+    attachments: number;
+    artifacts: number;
+  };
+}
+
+/** `GET /projects` payload (W1 follow-up). */
+export interface ProjectsResponse {
+  items: ProjectDto[];
+  /**
+   * Server feature flags. `turnProjectRefs` is present (true) only once
+   * `POST /sessions/:id/messages` accepts and validates `projectRefs`; a
+   * client must not send the field until it has seen this.
+   */
+  capabilities: {
+    turnProjectRefs: boolean;
+  };
 }
 
 export interface MessageDto {
@@ -244,6 +266,8 @@ export type CloudPresetId = (typeof CLOUD_PRESET_IDS)[number];
 
 /** Max sessions one send may reference for cross-session context (R1 @-tags). */
 export const MAX_SESSION_REFS = 5;
+/** W1 follow-up: explicit `@project:<id>` refs one send may carry. */
+export const MAX_PROJECT_REFS = 5;
 
 /** Model ids: printable, no control characters (the effort suffix " · high" is allowed). */
 // eslint-disable-next-line no-control-regex
@@ -269,6 +293,10 @@ const MODEL_ID_RE = /^[^\u0000-\u001f\u007f]+$/;
  * - sessionRefs: sessions the user @-tagged (R1 — the ONLY way another
  *   session's context reaches this run unless "Share session memory" is on).
  *   Owner-checked; the gateway also resolves `@[Title]` tokens in content.
+ * - projectRefs: projects the user @-tagged for THIS turn (W1). Every id must
+ *   be an owned project; the gateway fails the WHOLE send (typed 400, no run)
+ *   on a missing/foreign/malformed/duplicated/over-limit ref. Their memory is
+ *   injected into the run and never persisted onto the session.
  */
 export const sendMessageBodySchema = z
   .object({
@@ -281,6 +309,7 @@ export const sendMessageBodySchema = z
     planMode: z.boolean().optional(),
     presetId: z.string().min(1).max(64).optional(),
     sessionRefs: z.array(z.string().uuid()).max(MAX_SESSION_REFS).optional(),
+    projectRefs: z.array(z.string().uuid()).max(MAX_PROJECT_REFS).optional(),
   })
   .strict();
 
@@ -337,6 +366,12 @@ export const projectDtoSchema: z.ZodType<ProjectDto> = z.object({
   sessionCount: z.number().int().nonnegative(),
   fileCount: z.number().int().nonnegative(),
   fileCap: z.number().int().positive(),
+  fileBytes: z.number().int().nonnegative(),
+  fileBreakdown: z.object({
+    memory: z.number().int().nonnegative(),
+    attachments: z.number().int().nonnegative(),
+    artifacts: z.number().int().nonnegative(),
+  }),
 });
 
 /** POST /cloud/v1/projects — name only, unknown keys rejected. */

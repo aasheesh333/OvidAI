@@ -9,6 +9,7 @@ import 'core/cloud/cloud_account_binding.dart';
 import 'core/cloud/cloud_agent_facade.dart';
 import 'core/cloud/cloud_session_store.dart';
 import 'core/cloud/cloud_ws.dart';
+import 'core/cloud/projects.dart';
 import 'core/cloud/push_service.dart';
 import 'core/diag.dart';
 import 'core/state.dart';
@@ -134,6 +135,11 @@ Future<void> main() async {
   // Unsaved Studio drafts survive process death (app-private directory).
   StudioDraftStore.I.enable();
   await AppState.I.initializeForFirstFrame();
+  // W1: install the ProjectsPort before any chat surface can read it. The
+  // controller is the sidebar's source of truth and the adapter makes the
+  // composer `@project:` rows / turn refs live (the gateway now validates
+  // them fail-closed).
+  ProjectsController.I;
   // Apply persisted theme BEFORE first frame (no dark flash on light).
   if (AppState.I.themeMode == 'system') {
     final brightness =

@@ -15,11 +15,13 @@ import { join } from "node:path";
 import { Redis } from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  attachments as attachmentsRepo,
   createDb,
   eventMirror as eventMirrorRepo,
   fileManifests as fileManifestsRepo,
   migrate,
   newId,
+  projectsRepo,
   runs as runsRepo,
   sessions as sessionsRepo,
   users,
@@ -115,6 +117,23 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       const session = await sessionsRepo.create(db, uid);
       createdSessions.push(session.id);
       return { uid, sid: session.id };
+    }
+
+    /**
+     * Pin a Free-cap plan (80) at position 0 for this user. The plans table is
+     * owner-editable and shared by test files; without this pin a leftover
+     * plan row at a lower position would map this user to another cap.
+     */
+    async function pinFreeCap(uid: string): Promise<void> {
+      // `projectFileCap` maps the user's tier to the LIVE plan list ordered by
+      // position. Pin the canonical `free` id first so the mapping is index 0
+      // (80) regardless of leftover test plans at the same position.
+      await db.$client.unsafe(
+        `INSERT INTO plans (id, name, price_usd, enabled, aliases, window_hours, mult, slow_mode, auto_oss, position)
+         VALUES ('free', 'Free', '0', true, '[]'::jsonb, 24, '1', false, false, -1000000)
+         ON CONFLICT (id) DO UPDATE SET enabled = true, position = -1000000`,
+      );
+      await db.$client.unsafe(`UPDATE users SET tier = 'free' WHERE uid = $1`, [uid]);
     }
 
     function dirOf(uid: string, sid: string): string {
@@ -321,6 +340,65 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         });
         expect(unknown.statusCode).toBe(404);
         expect(unknown.json()).toMatchObject({ error: { code: "not_found" } });
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("project chat at its file cap refuses the artifact redirect BEFORE storage/row; deleting one frees it", async () => {
+      const app = appFor();
+      try {
+        const png = Buffer.alloc(2 * 1024 * 1024, 7);
+        const { uid, sid } = await seedWarm({ "shot.png": png });
+        await pinFreeCap(uid);
+        const project = (await projectsRepo.create(db, uid, `File cap ${newId().slice(0, 8)}`))!;
+        await projectsRepo.moveSession(db, uid, sid, project.id);
+
+        // Fill the project budget (memory + uploads + active artifacts = 80).
+        for (let i = 0; i < 80; i++) {
+          await attachmentsRepo.create(db, {
+            id: newId(),
+            sessionId: sid,
+            userId: uid,
+            name: `seed-${i}.bin`,
+            size: 1,
+            r2Key: `file-svc-seed/${uid}/${i}/${newId()}`,
+            projectId: project.id,
+          });
+        }
+
+        const refused = await app.inject({
+          method: "GET",
+          url: `/internal/sessions/${sid}/file?path=shot.png`,
+          headers: headers(uid),
+        });
+        expect(refused.statusCode).toBe(409);
+        expect(refused.json()).toMatchObject({ error: { code: "project_file_limit" } });
+        const before = (await db.$client.unsafe(
+          `SELECT count(*)::int AS n FROM workspace_objects
+            WHERE session_id = $1 AND kind = 'artifact'`,
+          [sid],
+        )) as Array<{ n: number }>;
+        expect(before[0]!.n).toBe(0);
+
+        // Deleting an upload frees the slot; the same read now registers.
+        await db.$client.unsafe(
+          `DELETE FROM attachments WHERE session_id = $1 AND name = 'seed-0.bin'`,
+          [sid],
+        );
+        const accepted = await app.inject({
+          method: "GET",
+          url: `/internal/sessions/${sid}/file?path=shot.png`,
+          headers: headers(uid),
+        });
+        expect(accepted.statusCode).toBe(200);
+        expect((accepted.json() as { kind: string }).kind).toBe("redirect");
+        const after = (await db.$client.unsafe(
+          `SELECT count(*)::int AS n FROM workspace_objects
+            WHERE session_id = $1 AND kind = 'artifact'`,
+          [sid],
+        )) as Array<{ n: number }>;
+        expect(after[0]!.n).toBe(1);
       } finally {
         await app.close();
       }

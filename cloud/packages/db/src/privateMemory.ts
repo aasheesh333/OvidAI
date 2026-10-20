@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { isValidMemoryName, PrivateMemoryError, type MemoryFileDto, type PrivateMemoryNamespace, type PrivateMemoryStore } from "@ovid/shared";
 import type { Db } from "./client.js";
+import { lockProjectFiles, projectFileUsage } from "./projectFiles.js";
 import { privateMemoryFiles as files, projects, sessions, users } from "./schema.js";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -99,6 +100,10 @@ export function createPrivateMemoryStore(db: Db): PrivateMemoryStore {
       const target = await authorize(tx, uid, ns);
       const isProject = ns.projectId !== undefined;
       const maxFiles = isProject ? projectMaxFiles(ns) : SESSION_MAX_FILES;
+      // W1 follow-up (0022): project memory shares ONE budget with the
+      // project's uploads and active artifacts. Take the same lock the upload
+      // paths use so a concurrent save/upload cannot both claim the last slot.
+      if (isProject) await lockProjectFiles(tx, uid, target.projectId!);
       const rows = await tx.select({ name: files.name, revision: files.revision }).from(files).where(at(uid, target.scope)).limit(maxFiles + 1);
       const current = rows.find(r => r.name === name);
       const conflict = rows.find(r => r.name.toLowerCase() === name.toLowerCase() && r.name !== name);
@@ -106,14 +111,14 @@ export function createPrivateMemoryStore(db: Db): PrivateMemoryStore {
       if (current && ifRevision === undefined) throw new PrivateMemoryError("baseline_mismatch", "Read the current memory file before replacing it.");
       const revisionBefore = current?.revision ?? hash("");
       if (ifRevision !== undefined && ifRevision !== revisionBefore) throw new PrivateMemoryError("baseline_mismatch", "This memory changed since you opened it. Reload it and try again.");
-      // Projects enforce the owner-spec cap EXACTLY (80/100/150/250 files).
-      // Chat memory keeps its historical reserve-one-slot semantics for
-      // MEMORY.md (the pre-0019 behavior, pinned by privateMemory.test.ts).
+      // Projects enforce the owner-spec cap EXACTLY (80/100/150/250 files)
+      // across memory + attachments + active artifacts. Chat memory keeps its
+      // historical reserve-one-slot semantics for MEMORY.md.
       if (!current) {
         const full = isProject
-          ? rows.length >= maxFiles
+          ? (await projectFileUsage(tx, uid, target.projectId!, maxFiles)).used >= maxFiles
           : new Set(["MEMORY.md", ...rows.map(r => r.name)]).size >= maxFiles;
-        if (full) throw new PrivateMemoryError("limit_reached", isProject ? `This project is limited to ${maxFiles} memory files on your plan.` : `Memory is limited to ${maxFiles} files.`);
+        if (full) throw new PrivateMemoryError("limit_reached", isProject ? `This project is limited to ${maxFiles} files on your plan. Delete a file to free a slot.` : `Memory is limited to ${maxFiles} files.`);
       }
       const revision = hash(content);
       await tx.insert(files).values({ userId: uid, scope: target.scope, sessionId: target.sessionId, projectId: target.projectId, name, content, revision }).onConflictDoUpdate({

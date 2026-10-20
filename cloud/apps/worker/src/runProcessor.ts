@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { join } from "node:path";
-import { attachments, createPrivateMemoryStore, eventMirror, grantsRepo, messages, runs, sessions, userPreferences, type Db } from "@ovid/db";
+import { attachments, createPrivateMemoryStore, eventMirror, grantsRepo, messages, projectsRepo, runs, sessions, userPreferences, type Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
 import type { AgentRunJob } from "@ovid/queue";
 import {
@@ -461,20 +461,15 @@ const PROJECT_MEMORY_CONTEXT_MAX_FILES = 8;
 const PROJECT_MEMORY_CONTEXT_MAX_BYTES = 64 * 1024;
 
 /**
- * Build the Main Agent's project-memory block for an owned session. Returns
- * "" for a standalone chat, a foreign/unknown session, a project read
- * failure, or an empty project memory (fail closed — never leak). Subagent
- * runs do not call this at all.
+ * Build one project's memory block. Returns "" for a project read failure or
+ * an empty project memory (fail closed — never leak). The caller has already
+ * established ownership.
  */
-async function projectMemoryContextFor(
-  db: Db,
+async function projectMemoryContextForProject(
   store: PrivateMemoryStore,
   userId: string,
-  sessionId: string,
+  projectId: string,
 ): Promise<string> {
-  const session = await sessions.get(db, sessionId, userId);
-  const projectId = session?.projectId ?? null;
-  if (projectId === null) return "";
   try {
     const ns = { projectId, maxFiles: PROJECT_MEMORY_CONTEXT_MAX_FILES };
     const items = await store.list(userId, ns);
@@ -498,6 +493,53 @@ async function projectMemoryContextFor(
     // Fail closed: a memory read failure must never fail the run.
     return "";
   }
+}
+
+/**
+ * Build the Main Agent's project-memory block for an owned session. Returns
+ * "" for a standalone chat, a foreign/unknown session, a project read
+ * failure, or an empty project memory (fail closed — never leak). Subagent
+ * runs do not call this at all.
+ */
+async function projectMemoryContextFor(
+  db: Db,
+  store: PrivateMemoryStore,
+  userId: string,
+  sessionId: string,
+): Promise<{ projectId: string | null; block: string }> {
+  const session = await sessions.get(db, sessionId, userId);
+  const projectId = session?.projectId ?? null;
+  if (projectId === null) return { projectId: null, block: "" };
+  return { projectId, block: await projectMemoryContextForProject(store, userId, projectId) };
+}
+
+/**
+ * W1 follow-up: memory for projects the user explicitly @-tagged in THIS
+ * message. Ownership is re-checked here (defence in depth; the gateway
+ * already refused foreign/unknown refs). A project with no memory contributes
+ * nothing — never an error. The block is built per run and never persisted.
+ * [ownProjectId] is skipped because the session's own project is injected
+ * separately; a duplicate block would waste the context budget.
+ */
+async function referencedProjectMemoryContextFor(
+  db: Db,
+  store: PrivateMemoryStore,
+  userId: string,
+  projectRefs: readonly string[] | undefined,
+  ownProjectId: string | null,
+): Promise<string> {
+  const blocks: string[] = [];
+  for (const projectId of new Set(projectRefs ?? [])) {
+    if (projectId === ownProjectId) continue;
+    // Unknown/foreign ids contribute nothing; the gateway fails the send, so
+    // this is only reachable for a stale queued payload.
+    const project = await projectsRepo.get(db, userId, projectId);
+    if (project === null) continue;
+    const block = await projectMemoryContextForProject(store, userId, projectId);
+    if (block === "") continue;
+    blocks.push(`Project "${project.name}" memory (project ${projectId}):\n${block}`);
+  }
+  return blocks.join("\n\n");
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -1717,14 +1759,27 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     const memoryEnabled = prefs.memoryEnabled;
 
     // W1 (R1): project memory reaches MAIN AGENT runs only, and only when
-    // this chat belongs to a project. This processor serves queued root
-    // runs (subagents run through the supervisor's engine, not the queue), so
-    // no child run can receive it. It is read per run, bounded, and never
-    // persisted — so project A's facts cannot reach project B or a standalone
-    // chat.
-    const projectMemoryContext = memoryEnabled
-        ? await projectMemoryContextFor(deps.db, privateMemory, userId, sessionId)
-        : "";
+    // this chat belongs to a project OR the user explicitly @-tagged projects
+    // in THIS message. This processor serves queued root runs (subagents run
+    // through the supervisor's engine, not the queue), so no child run can
+    // receive it. Both blocks are read per run, bounded, and never persisted
+    // — so project A's facts cannot reach project B or a standalone chat, and
+    // a tagged project's context cannot survive into the next turn.
+    const ownProject = memoryEnabled
+      ? await projectMemoryContextFor(deps.db, privateMemory, userId, sessionId)
+      : { projectId: null, block: "" };
+    const referencedProjectMemory = memoryEnabled
+      ? await referencedProjectMemoryContextFor(
+          deps.db,
+          privateMemory,
+          userId,
+          job.data.projectRefs,
+          ownProject.projectId,
+        )
+      : "";
+    const projectMemoryContext = [ownProject.block, referencedProjectMemory]
+      .filter((block) => block !== "")
+      .join("\n\n");
 
     // Wave 1a (R1): context from the sessions the user explicitly @-tagged
     // in THIS message (gateway owner-checked; re-checked here). For this run

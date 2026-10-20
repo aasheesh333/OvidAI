@@ -145,7 +145,9 @@ export function relayWorkerError(
   // Wave 2 Studio (ST-007/ST-008): a lost precondition is the client's
   // signal to show its conflict UI — relayed verbatim, never collapsed to
   // 503. `not_warm` is NOT in this set: it drives the re-warm retry.
-  if (status === 409 && PRECONDITION_CODES.has(code)) {
+  // W1 follow-up (0022): a project file-budget refusal is also a typed 409
+  // the client must render (the worker registers artifacts on the read path).
+  if (status === 409 && (PRECONDITION_CODES.has(code) || code === "project_file_limit")) {
     return sendError(reply, 409, code, message);
   }
   return workerUnavailable(reply);

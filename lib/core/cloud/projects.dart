@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import '../chat_integration_ports.dart';
+import '../chat_pins.dart';
 import '../state.dart';
 import 'cloud_rest.dart';
 import 'models.dart';
@@ -18,8 +20,14 @@ class ProjectsController extends ChangeNotifier {
 
   static ProjectsController? _instance;
 
-  /// Process-wide default (the sidebar's controller).
-  static ProjectsController get I => _instance ??= ProjectsController();
+  /// Process-wide default (the sidebar's controller). Installing the chat
+  /// integration port here is what makes the composer `@project:` rows and
+  /// `CloudTurnOptions.projectRefs` live; W9's chat surface reads the port.
+  static ProjectsController get I {
+    final controller = _instance ??= ProjectsController();
+    ProjectsPort.instance ??= ProjectsPortAdapter(controller);
+    return controller;
+  }
 
   @visibleForTesting
   static void installForTest(ProjectsController controller) =>
@@ -31,12 +39,19 @@ class ProjectsController extends ChangeNotifier {
   List<ProjectDto> _projects = const <ProjectDto>[];
   bool _loading = false;
   bool _loadedOnce = false;
+  bool _serverTurnProjectRefs = false;
   String? _error;
 
   List<ProjectDto> get projects => List<ProjectDto>.unmodifiable(_projects);
   bool get loading => _loading;
   bool get loadedOnce => _loadedOnce;
   String? get error => _error;
+
+  /// True only after a successful `GET /projects` whose payload advertises
+  /// `capabilities.turnProjectRefs`. Defaults to false: an older gateway (or
+  /// an offline start) never receives `projectRefs`, so its strict send body
+  /// cannot 400 a chat send.
+  bool get serverSupportsTurnProjectRefs => _serverTurnProjectRefs;
 
   ProjectDto? byId(String id) {
     for (final project in _projects) {
@@ -53,7 +68,9 @@ class ProjectsController extends ChangeNotifier {
     _error = null;
     notifyListeners();
     try {
-      _projects = await _rest.listProjects();
+      final payload = await _rest.listProjectsPayload();
+      _projects = payload.items;
+      _serverTurnProjectRefs = payload.turnProjectRefs;
       _loadedOnce = true;
     } on CloudApiException catch (e) {
       _error = e.message;
@@ -167,5 +184,75 @@ class ProjectsController extends ChangeNotifier {
         sessionCount: count < 0 ? 0 : count,
         fileCount: p.fileCount,
         fileCap: p.fileCap,
+        fileBytes: p.fileBytes,
+        fileBreakdown: p.fileBreakdown,
       );
+}
+
+/// W1 → W9 bridge: exposes [ProjectsController] through the chat integration
+/// port so `chat_screen.dart` can offer `@project:` rows and send
+/// `projectRefs` without W1 editing the chat surface.
+///
+/// [supportsTurnProjectRefs] follows the SERVER's advertised capability
+/// (`GET /projects` → `capabilities.turnProjectRefs`), not a hard-coded
+/// constant: a client that ships before the gateway must not send a field a
+/// strict body would reject. `ProjectsPort.projectRefsIn` (base, shared) does
+/// the lenient token parsing — malformed/unknown ids dropped, duplicates
+/// collapsed, capped at 5 — so a stale composer token cannot turn an
+/// otherwise valid send into a 400. The SERVER still validates every ref for
+/// direct API callers.
+class ProjectsPortAdapter extends ProjectsPort {
+  ProjectsPortAdapter(this._controller) {
+    _controller.addListener(_onControllerChanged);
+    _syncOptions();
+  }
+
+  final ProjectsController _controller;
+
+  List<ProjectOption> _options = const <ProjectOption>[];
+
+  void _onControllerChanged() {
+    _syncOptions();
+    notifyListeners();
+  }
+
+  void _syncOptions() {
+    _options = <ProjectOption>[
+      for (final p in _controller.projects)
+        ProjectOption(
+          id: p.id,
+          name: p.name,
+          sessionCount: p.sessionCount,
+          fileCount: p.fileCount,
+          fileCap: p.fileCap,
+        ),
+    ];
+  }
+
+  @override
+  bool get ready => _controller.loadedOnce;
+
+  /// True only once the gateway advertised support (see class docs).
+  @override
+  bool get supportsTurnProjectRefs => _controller.serverSupportsTurnProjectRefs;
+
+  @override
+  List<ProjectOption> get projects => _options;
+
+  /// Pins are backed by W9's account-scoped local store, so they survive a
+  /// restart and the chat header glyph reads the same state.
+  @override
+  bool get supportsPin => true;
+
+  @override
+  bool isPinned(String sessionId) => ChatPinsStore.I.isPinned(sessionId);
+
+  @override
+  Future<void> setPinned(String sessionId, bool pinned) =>
+      ChatPinsStore.I.setPinned(sessionId, pinned);
+
+  @override
+  Future<void> addSessionToProject(String sessionId, String? projectId) async {
+    await _controller.moveSession(sessionId, projectId);
+  }
 }

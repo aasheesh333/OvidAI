@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gt, gte, inArray, isNull, lt, lte, ne, or, sql } fr
 import { uuidv7 } from "uuidv7";
 import type { MessageDto, SessionEvent, SessionEventType, UiManifest } from "@ovid/shared";
 import type { Db } from "./client.js";
+import { lockProjectFiles, projectFileUsage, ProjectFileLimitError } from "./projectFiles.js";
 import {
   attachments as attachmentsTable,
   fileManifests as fileManifestsTable,
@@ -984,10 +985,38 @@ export const attachments = {
       name: string;
       size: number;
       r2Key: string;
+      /**
+       * W1 follow-up (0022): optional explicit project attribution. The
+       * SESSION is authoritative when it has one — new writes always stamp
+       * the chat's current project; this is only a fallback for callers that
+       * create a row without a readable session (and for tests).
+       */
+      projectId?: string | null;
     },
   ): Promise<AttachmentRow> {
-    const [row] = await db.insert(attachmentsTable).values(a).returning();
-    return row!;
+    const { projectId: explicitProjectId, ...values } = a;
+    return db.transaction(async (tx) => {
+      const [session] = await tx
+        .select({ projectId: sessionsTable.projectId })
+        .from(sessionsTable)
+        .where(eq(sessionsTable.id, a.sessionId))
+        .limit(1);
+      const projectId = session?.projectId ?? explicitProjectId ?? null;
+      if (projectId !== null) {
+        // Serialize the last-slot check with every other project-file write,
+        // then re-count inside the lock. Refuse BEFORE the row exists (the
+        // gateway presigns only after its own pre-flight check, so no bytes
+        // have moved yet either).
+        await lockProjectFiles(tx, a.userId, projectId);
+        const usage = await projectFileUsage(tx, a.userId, projectId);
+        if (usage.used >= usage.cap) throw new ProjectFileLimitError(usage);
+      }
+      const [row] = await tx
+        .insert(attachmentsTable)
+        .values({ ...values, projectId })
+        .returning();
+      return row!;
+    });
   },
 
   /**
@@ -2073,21 +2102,40 @@ export const workspaceObjects = {
     },
   ): Promise<WorkspaceObjectRow> {
     assertBytes("bytes", i.bytes);
-    const [row] = await db
-      .insert(workspaceObjectsTable)
-      .values({
-        id: i.id,
-        userId: i.userId,
-        sessionId: i.sessionId,
-        kind: "artifact",
-        r2Key: i.r2Key,
-        bytes: i.bytes,
-        sha256: i.sha256,
-        contentType: i.contentType,
-        meta: i.meta,
-      })
-      .returning();
-    return row!;
+    return db.transaction(async (tx) => {
+      // W1 follow-up (0022): stamp the owning session's project at creation
+      // and enforce that project's cap under the shared project-file lock.
+      // The caller's pre-flight check runs BEFORE storage.put; this second
+      // check is the atomic backstop that guarantees no over-cap ROW is
+      // written by a concurrent registration.
+      const [session] = await tx
+        .select({ projectId: sessionsTable.projectId })
+        .from(sessionsTable)
+        .where(eq(sessionsTable.id, i.sessionId))
+        .limit(1);
+      const projectId = session?.projectId ?? null;
+      if (projectId !== null) {
+        await lockProjectFiles(tx, i.userId, projectId);
+        const usage = await projectFileUsage(tx, i.userId, projectId);
+        if (usage.used >= usage.cap) throw new ProjectFileLimitError(usage);
+      }
+      const [row] = await tx
+        .insert(workspaceObjectsTable)
+        .values({
+          id: i.id,
+          userId: i.userId,
+          sessionId: i.sessionId,
+          projectId,
+          kind: "artifact",
+          r2Key: i.r2Key,
+          bytes: i.bytes,
+          sha256: i.sha256,
+          contentType: i.contentType,
+          meta: i.meta,
+        })
+        .returning();
+      return row!;
+    });
   },
 
   /**
