@@ -26,6 +26,10 @@ import type { AgentTool, ToolContext, ToolResult } from "./types.js";
 /** Dispatch-level budget: the Dart _toolTimeoutFor map (run_shell 10 min; default 2 min). */
 const TOOL_TIMEOUT_MS: Record<string, number> = {
   run_shell: 600_000,
+  // W8: image generation is a long provider call. Keep this aligned with the
+  // image client's HTTP deadline (IMAGE_TOOL_TIMEOUT_MS).
+  generate_image: 180_000,
+  edit_image: 180_000,
 };
 const DEFAULT_TIMEOUT_MS = 120_000;
 

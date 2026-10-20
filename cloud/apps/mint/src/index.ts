@@ -53,6 +53,7 @@ import {
   pickBackends,
   taskFromRequest,
 } from "./images/routing.js";
+import { registerInternalImagesRoutes } from "./images/internalRoutes.js";
 import { registerImagesRoutes } from "./images/routes.js";
 import {
   createLiteLlmImageService,
@@ -176,6 +177,11 @@ export async function main(
   // validated below; an invalid value aborts the boot.
   const images = await buildImagesMount(mintDeps, cfg, litellm, adminApp);
   registerImagesRoutes(publicApp, mintDeps, images.service, images.admission);
+  // W8: the worker's image tools are server-to-server callers without a
+  // Firebase token. They use the SAME service + admission as the public
+  // routes, on the admin listener only (HMAC-signed; see
+  // cloud/docs/internal-mint-auth.md).
+  registerInternalImagesRoutes(adminApp, mintDeps, images.service, images.admission);
   // L5 (T13 review): the private-name projection must track discovery, not a
   // boot-time snapshot. This hook runs AFTER registerImagesRoutes' onReady
   // (hooks execute in registration order), replacing its snapshot.

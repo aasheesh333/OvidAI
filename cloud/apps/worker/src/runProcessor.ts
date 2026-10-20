@@ -77,6 +77,7 @@ import {
   type SkillCatalog,
   type SsrfGuard,
   type Tool as CoreTool,
+  type ToolContext as CoreToolContext,
   type ToolRegistry as CoreToolRegistry,
 } from "@ovid/agent-core";
 import { createRedisApprovalBridge } from "./approvalBridge.js";
@@ -96,9 +97,10 @@ import { createSandboxPort } from "./sandboxAdapter.js";
 import { usageFor, withUsageRecording } from "./usageRecorder.js";
 import { unattendedTimeoutPolicy, type UnattendedApprovalHook } from "./unattended.js";
 import { adaptAgentTools } from "./tools/agentToolAdapter.js";
+import type { ImageCapabilities, ImageTooling, ImageVisionGuard } from "./tools/imageTools.js";
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.js";
 import { MAX_TOOL_ROUNDS, SYSTEM_PROMPT_V1, TOOL_EVENT_CONTENT_CAP } from "./tools/systemPrompt.js";
-import type { ToolContext, ToolResult } from "./tools/types.js";
+import type { AgentTool, ToolContext, ToolResult } from "./tools/types.js";
 
 /**
  * Agent-run processor v1 (P3 Task 16): the P2-compat contract backed by the
@@ -364,6 +366,13 @@ export interface FullRunDeps {
    * deployments without a browser engine).
    */
   browserTools?: readonly CoreTool[];
+  /**
+   * W8: cloud image generation/editing. The tools execute host-side and call
+   * mint's signed internal image routes; provider keys never enter the
+   * sandbox. Absent → the roster advertises no image tools (tests and
+   * deployments without the internal surface).
+   */
+  images?: ImageTooling;
   /**
    * The run ended: release its hold on the user's browser. Wave 5 (R2): the
    * browser is ONE per user, so the composition releases it (stop cast,
@@ -1474,26 +1483,34 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     skills: SkillCatalog;
     /** Run-scoped tools that need the live engine/supervisor (Task 20). */
     extraTools?: readonly CoreTool[];
+    /** W8: image tools with this run's capability cards bound. */
+    imageTools?: readonly AgentTool[];
     /** The user's Memory preference (false → no memory_* tools at all). */
     memoryEnabled: boolean;
     /** The user's Share session memory preference (false → session-scoped search). */
     shareSessionMemory: boolean;
     referencedSessionIds: readonly string[];
   }): CoreToolRegistry => {
-    const p2Tools = adaptAgentTools(workerRegistry.tools, {
-      sandboxFor: async (ctx) =>
+    const adapterDeps = {
+      sandboxFor: async (ctx: CoreToolContext) =>
         deps.sandboxHandleFor !== undefined
           ? deps.sandboxHandleFor(ctx.userId, o.tier)
           : portBackedHandle(o.sandbox, ctx),
       emitEvent: async () => {},
-      emitEventFor: (ctx) => (type, payload) => sinkFor(ctx.sessionId).emit(type, payload),
-    });
+      emitEventFor: (ctx: CoreToolContext) => (type: SessionEventType, payload: Record<string, unknown>) =>
+        sinkFor(ctx.sessionId).emit(type, payload),
+    };
+    const p2Tools = adaptAgentTools(workerRegistry.tools, adapterDeps);
+    // W8: image tools are host-side (they never spawn in the sandbox) but
+    // still ride the P2 seam so they get the same event routing/timeouts.
+    const imageTools = adaptAgentTools(o.imageTools ?? [], adapterDeps);
 
     // P4 Task 13: additive roster extension (schedule tools in production).
     // Canonical tools spread beside the built-ins; the registry stays the
     // only roster builder.
     const coreTools = [
       ...p2Tools,
+      ...imageTools,
       ...(deps.extraTools ?? []),
       ...(deps.browserTools ?? []),
       ...createSandboxTools({ sandbox: o.sandbox }),
@@ -1944,12 +1961,57 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       },
     });
 
+    // ---- W8: image tools ------------------------------------------------
+    // Capability cards are fetched once per run (the composition root caches
+    // them), so the model sees the SAME truthful table the gateway enforces.
+    // A discovery failure leaves the tools registered with a generic
+    // description; the server remains authoritative.
+    const imageCapabilities: ImageCapabilities | null =
+      deps.images === undefined
+        ? null
+        : await deps.images.capabilities(userId).catch(() => null);
+    const imageVisionGuard: ImageVisionGuard | undefined =
+      deps.images === undefined
+        ? undefined
+        : async () => {
+            // Mirror the engine's own route (loop.ts → resolveRoute): the
+            // preset's G3 model pin outranks /model, the effort suffix is
+            // stripped, and an absent/AUTO alias falls back to the fleet
+            // default. The SAME resolution the attachment guard uses.
+            const current = await state.get(sessionId);
+            const preset = presetFor(current.presetId);
+            const presetModel = preset === null ? null : preset.model;
+            const winnerRaw =
+              presetModel != null && presetModel.trim() !== ""
+                ? presetModel
+                : (current.modelPin ?? "");
+            const { model: requested } = parseModelEffort(winnerRaw);
+            const model =
+              requested === "" || (AUTO_ALIASES as readonly string[]).includes(requested)
+                ? deps.defaultModel
+                : requested;
+            const catalog =
+              deps.modelCatalog === undefined
+                ? null
+                : await deps.modelCatalog().catch(() => null);
+            const decision = modelVisionSupport(model, catalog);
+            return {
+              supports: decision.supports,
+              model,
+              message: visionRefusalMessage(model),
+            };
+          };
+
     const registry = buildRegistry({
       sandbox: runSandbox,
       userId,
       tier,
       skills,
       extraTools: subagentTools,
+      imageTools: deps.images?.createTools({
+        capabilities: imageCapabilities,
+        ...(imageVisionGuard === undefined ? {} : { visionGuard: imageVisionGuard }),
+      }),
       memoryEnabled,
       shareSessionMemory: prefs.shareSessionMemory,
       referencedSessionIds,
