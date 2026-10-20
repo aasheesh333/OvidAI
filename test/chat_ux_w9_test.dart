@@ -9,15 +9,22 @@
 //   * the live subagent activity strip + trajectory drill-down;
 //   * voice-first mode's language sheet and TTS service seam.
 
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ovid_ai/core/chat_integration_ports.dart';
 import 'package:ovid_ai/core/chat_pins.dart';
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
+import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
+import 'package:ovid_ai/core/cloud/projects.dart';
+import 'package:ovid_ai/core/projects_port_adapter.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/core/voice_reply_service.dart';
@@ -100,6 +107,7 @@ void main() {
     FlutterSecureStorage.setMockInitialValues(const <String, String>{});
     AppState.resetTestInstance();
     CloudAgentFacade.resetForTest();
+    ProjectsController.resetForTest();
     ProjectsPort.installForTest(null);
     StudioBindingPort.installForTest(null);
     ChatPinsStore.I.clearForTest();
@@ -115,6 +123,7 @@ void main() {
   tearDown(() {
     CloudAgentFacade.resetForTest();
     CloudSessionStore.resetForTest();
+    ProjectsController.resetForTest();
     ProjectsPort.installForTest(null);
     StudioBindingPort.installForTest(null);
     ChatPinsStore.I.clearForTest();
@@ -207,6 +216,46 @@ void main() {
   });
 
   group('⋮ menu', () {
+    test('W1 adapter maps ProjectDto and never sends turn projectRefs', () async {
+      final rest = CloudRestClient(
+        restBase: 'https://cloud.test',
+        headers: CloudHeaders.forTest(),
+        httpClient: MockClient((request) async {
+          if (request.method == 'GET' && request.url.path == '/projects') {
+            return http.Response(
+              jsonEncode({
+                'items': [
+                  {
+                    'id': 'p1',
+                    'name': 'Launch',
+                    'createdAt': '2026-10-20T10:00:00.000Z',
+                    'updatedAt': '2026-10-20T10:00:00.000Z',
+                    'sessionCount': 2,
+                    'fileCount': 3,
+                    'fileCap': 100,
+                  },
+                ],
+              }),
+              200,
+            );
+          }
+          return http.Response('{}', 404);
+        }),
+      );
+      final controller = ProjectsController(rest: rest);
+      addTearDown(controller.dispose);
+      await controller.refresh();
+
+      final adapter = ProjectsControllerPort(controller: controller);
+      expect(adapter.ready, isTrue);
+      expect(adapter.supportsTurnProjectRefs, isFalse);
+      expect(adapter.projects.single.id, 'p1');
+      expect(adapter.projects.single.name, 'Launch');
+      expect(adapter.projects.single.sessionCount, 2);
+      expect(adapter.projects.single.fileCount, 3);
+      expect(adapter.projects.single.fileCap, 100);
+    });
+
     test('Add to Project needs the W1 port; Pin always works locally', () {
       final s = ChatSession(
         id: 's',

@@ -14,6 +14,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../core/chat_integration_ports.dart';
 import '../core/chat_pins.dart';
+import '../core/projects_port_adapter.dart';
 import '../core/theme.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
@@ -1136,6 +1137,8 @@ class _ChatScreenState extends State<ChatScreen>
     ConnectionService.I.addListener(_onConnectivityForHistory);
     _agent.addListener(_onAgentVoiceTick);
     unawaited(ChatPinsStore.I.bindCurrentAccount());
+    // W1's project list backs the ⋮ "Add to Project" item and the @ menu.
+    ProjectsControllerPort.ensureInstalled();
     unawaited(_bootCloud());
   }
 

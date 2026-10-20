@@ -6,11 +6,13 @@ import '../core/chat_integration_ports.dart';
 import '../core/chat_pins.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
+import '../core/cloud/projects.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import '../l10n/l10n.dart';
 import 'artifacts_screen.dart';
 import 'conversation_share_sheet.dart';
+import 'projects_section.dart';
 import 'session_actions.dart';
 import 'trajectory_screen.dart';
 import 'usage_screen.dart';
@@ -86,6 +88,7 @@ class ChatOverflowMenu extends StatelessWidget {
       animation: Listenable.merge([
         _agent,
         ChatPinsStore.I,
+        ProjectsController.I,
         if (ProjectsPort.instance != null) ProjectsPort.instance!,
       ]),
       builder: (context, _) {
@@ -287,93 +290,37 @@ class ChatOverflowMenu extends StatelessWidget {
     }
   }
 
-  /// W1 Projects sheet: move this chat into a project (or out of one).
+  /// W1's "Add to Project" picker, then [ProjectsController.moveSession]
+  /// (null projectId = "No project"). The controller updates the session's
+  /// `projectId` and the sidebar regroups before the next reconciliation.
   Future<void> _showAddToProjectSheet(
     BuildContext context,
     ChatSession session,
   ) async {
-    final port = ProjectsPort.instance;
-    if (port == null) return;
-    final projects = port.projects;
-    final picked = await showModalBottomSheet<String?>(
-      context: context,
-      backgroundColor: Aether.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 12),
-            const Text(
-              'Add to Project',
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 6),
-            if (projects.isEmpty)
-              const Padding(
-                padding: EdgeInsets.fromLTRB(20, 14, 20, 20),
-                child: Text(
-                  'No projects yet. Create one from the sidebar.',
-                  style: TextStyle(fontSize: 13),
-                ),
-              )
-            else ...[
-              ListTile(
-                key: const ValueKey('chat-add-project-none'),
-                dense: true,
-                leading: const Icon(Icons.folder_off_outlined, size: 18),
-                title: const Text(
-                  'No project',
-                  style: TextStyle(fontSize: 13.5),
-                ),
-                onTap: () => Navigator.pop(sheetContext, ''),
-              ),
-              for (final p in projects)
-                ListTile(
-                  key: ValueKey('chat-add-project-${p.id}'),
-                  dense: true,
-                  leading: const Icon(Icons.folder_outlined, size: 18),
-                  title: Text(p.name, style: const TextStyle(fontSize: 13.5)),
-                  subtitle: p.sessionCount == null
-                      ? null
-                      : Text(
-                          '${p.sessionCount} chat'
-                          '${p.sessionCount == 1 ? '' : 's'}',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Aether.textMuted,
-                          ),
-                        ),
-                  onTap: () => Navigator.pop(sheetContext, p.id),
-                ),
-            ],
-            const SizedBox(height: 10),
-          ],
-        ),
-      ),
+    final controller = ProjectsController.I;
+    if (!controller.loadedOnce) {
+      unawaited(controller.refresh());
+    }
+    final picked = await showAddToProjectSheet(
+      context,
+      sessionTitle: session.title,
+      projects: controller.projects,
+      currentProjectId: session.projectId,
     );
     if (picked == null) return;
-    try {
-      await port.addSessionToProject(session.id, picked);
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            picked.isEmpty ? 'Removed from project' : 'Added to project',
-          ),
-          behavior: SnackBarBehavior.floating,
+    final ok = await controller.moveSession(session.id, picked.projectId);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? (picked.projectId == null
+                    ? 'Removed from project'
+                    : 'Added to project')
+              : (controller.error ?? 'Could not move the chat.'),
         ),
-      );
-    } catch (e) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Could not move the chat: $e'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 }
