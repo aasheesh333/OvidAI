@@ -39,6 +39,13 @@ export interface BrowserEngineConfig {
   maxActiveScreencasts: number;
   /** OVID_SCREENCAST_LOAD_MAX, default 6.0 (os.loadavg()[0] step-down threshold on 8c) */
   screencastLoadMax: number;
+  /**
+   * Wave 6 W4: how long the screencast keeps rendering after the last viewer
+   * leaves before the browser goes headless (frames stop, context stays
+   * alive). Default 45_000; 0 disables the grace (tests / tight boxes).
+   * OVID_SCREENCAST_DETACH_GRACE_MS.
+   */
+  screencastDetachGraceMs: number;
   screencast: ScreencastConfig;
   /** OVID_BROWSER_STATE_DIR (null ⇒ no persistence) */
   stateDir: string | null;
@@ -178,6 +185,17 @@ function positiveInt(env: NodeJS.ProcessEnv, name: string): number | undefined {
   return n;
 }
 
+/** Like positiveInt, but 0 is meaningful (e.g. "disable the grace window"). */
+function nonNegativeInt(env: NodeJS.ProcessEnv, name: string): number | undefined {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`${name} must be a non-negative integer (got "${raw}")`);
+  }
+  return n;
+}
+
 function positiveNumber(env: NodeJS.ProcessEnv, name: string): number | undefined {
   const raw = env[name];
   if (raw === undefined || raw === "") return undefined;
@@ -236,6 +254,7 @@ export function loadBrowserEngineConfig(raw: NodeJS.ProcessEnv): BrowserEngineCo
     tier1TimeoutMs: positiveInt(raw, "TIER1_TIMEOUT_MS") ?? 20_000,
     maxActiveScreencasts: positiveInt(raw, "MAX_ACTIVE_SCREENCASTS") ?? 3,
     screencastLoadMax: positiveNumber(raw, "OVID_SCREENCAST_LOAD_MAX") ?? 6.0,
+    screencastDetachGraceMs: nonNegativeInt(raw, "OVID_SCREENCAST_DETACH_GRACE_MS") ?? 45_000,
     screencast: {
       width: positiveInt(raw, "OVID_SCREENCAST_WIDTH") ?? 1280,
       height: positiveInt(raw, "OVID_SCREENCAST_HEIGHT") ?? 800,

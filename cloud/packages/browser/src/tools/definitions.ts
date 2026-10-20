@@ -7,6 +7,7 @@
 import { inspectionTools } from "./inspection.js";
 import { interactionTools } from "./interaction.js";
 import { navigationTools } from "./navigation.js";
+import { credentialTools } from "./credentials.js";
 import { transferTools } from "./transfers.js";
 import type { BrowserToolDef, BrowserToolsDeps } from "./types.js";
 
@@ -26,7 +27,9 @@ export const BROWSER_TOOL_NAMES: readonly string[] = Object.freeze([
   "browser_find",
   "browser_forward",
   "browser_hover",
+  "browser_list_credentials",
   "browser_list_tabs",
+  "browser_login_with_credential",
   "browser_long_press",
   "browser_navigate",
   "browser_network",
@@ -56,5 +59,6 @@ export function createBrowserTools(deps: BrowserToolsDeps): BrowserToolDef[] {
     ...inspectionTools(deps),
     ...interactionTools(deps),
     ...transferTools(deps),
+    ...credentialTools(deps),
   ].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }

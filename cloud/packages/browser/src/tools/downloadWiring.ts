@@ -24,6 +24,13 @@ export const DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
 const wired = new WeakSet<object>();
 
 /**
+ * The chat workspace that receives page-initiated downloads. One browser is
+ * shared across a user's chats, so the LATEST tool call's chat wins (the
+ * listener is context-wide, not per tool call).
+ */
+const workspaceSession = new WeakMap<object, string>();
+
+/**
  * Reject anything that is not a single plain filename. `..`, absolute paths
  * and any path separator are refused, so a server's suggested filename can
  * never escape `browser/downloads/`.
@@ -38,10 +45,16 @@ export function sanitizeFilename(raw: string | null | undefined): string | null 
 }
 
 /** Attach the context download listener for `session` (idempotent). */
-export function wireDownloads(deps: BrowserToolsDeps, session: SessionBrowser): void {
+export function wireDownloads(
+  deps: BrowserToolsDeps,
+  session: SessionBrowser,
+  chatSessionId?: string,
+): void {
   const context = session.handle.context;
+  if (chatSessionId !== undefined) workspaceSession.set(context, chatSessionId);
   if (wired.has(context)) return;
   wired.add(context);
+  workspaceSession.set(context, chatSessionId ?? session.sessionId);
 
   context.on("download", (download) => {
     void (async () => {
@@ -72,10 +85,26 @@ export function wireDownloads(deps: BrowserToolsDeps, session: SessionBrowser): 
           return;
         }
 
-        const root = await deps.workspaceDir(session.userId, session.sessionId);
+        const chat = workspaceSession.get(context) ?? session.sessionId;
+        const root = await deps.workspaceDir(session.userId, chat);
         const dir = join(root, "browser", "downloads");
         await mkdir(dir, { recursive: true });
         await download.saveAs(join(dir, name));
+
+        // Wave 6 W4: the page's own download also lands in the account
+        // Artifact Vault. Failure is non-fatal — the workspace copy exists.
+        if (deps.artifactVault !== undefined) {
+          try {
+            await deps.artifactVault.registerFromWorkspace({
+              userId: session.userId,
+              sessionId: chat,
+              path: `browser/downloads/${name}`,
+              mimeType: "application/octet-stream",
+            });
+          } catch (err) {
+            deps.log?.("page download: artifact vault registration failed", err);
+          }
+        }
 
         session.network.push({
           ts: deps.now?.() ?? Date.now(),

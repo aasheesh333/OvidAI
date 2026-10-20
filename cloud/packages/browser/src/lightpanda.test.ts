@@ -38,6 +38,7 @@ function makeCfg(overrides: Partial<BrowserEngineConfig> = {}): BrowserEngineCon
     maxTier1Processes: 2,
     tier1TimeoutMs: 20_000,
     maxActiveScreencasts: 3,
+    screencastDetachGraceMs: 0,
     screencastLoadMax: 6.0,
     screencast: { width: 400, height: 300, quality: 60, everyNthFrame: 2, maxFramesInFlight: 2 },
     stateDir: null,

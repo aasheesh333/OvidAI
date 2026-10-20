@@ -16,7 +16,7 @@ import { registerAccountRoutes, type AccountRouteDeps } from "./routes/account.j
 import { registerArtifactRoutes } from "./routes/artifacts.js";
 import { registerArtifactVaultRoutes } from "./routes/artifactVault.js";
 import { registerAttachmentRoutes } from "./routes/attachments.js";
-import type { AttachmentPresigner } from "./routes/attachments.js";
+import { registerCredentialRoutes } from "./routes/credentials.js";import type { AttachmentPresigner } from "./routes/attachments.js";
 import { registerByokRoutes } from "./routes/byok.js";
 import type { ByokRouteOverrides } from "./routes/byok.js";
 import { registerDevicesRoutes } from "./routes/devices.js";
@@ -342,6 +342,8 @@ export function buildGateway(
       registerWorkspaceRoutes(scope, deps);
       registerArtifactRoutes(scope, deps);
       registerArtifactVaultRoutes(scope, deps);
+      // Wave 6 W4: browser Credentials Vault (metadata + sealed secrets).
+      registerCredentialRoutes(scope, deps);
 
       // P5 Task 15: MCP servers/catalog/oauth (authed half), plugins, and the
       // REST system-response path. Each answers a loud 503 when its optional

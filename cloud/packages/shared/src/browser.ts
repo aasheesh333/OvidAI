@@ -43,6 +43,20 @@ export const BROWSER_FRAME_FORMAT = { jpeg: 1, webp: 2 } as const;
 
 export type BrowserFrameFormat = "jpeg" | "webp";
 
+/**
+ * One open tab of the per-user browser (Wave 6 W4). The tab list is
+ * agent-owned: a user never opens a tab from the client, so an empty list is
+ * the honest "the agent has not opened a page yet" state.
+ */
+export interface BrowserTabDto {
+  /** 0-based position in the browser's tab strip. */
+  index: number;
+  url: string | null;
+  title: string | null;
+  /** True for the tab the screencast is showing. */
+  active: boolean;
+}
+
 /** Snapshot of the live browser tab, published on the state channel. */
 export interface BrowserStateDto {
   sessionId: string;
@@ -67,6 +81,13 @@ export interface BrowserStateDto {
    * another device". Optional so older workers stay schema-valid.
    */
   takeoverViewerId?: string | null;
+  /**
+   * Wave 6 W4: every open tab, in order. Absent on older workers — clients
+   * then fall back to the single active page they already know.
+   */
+  tabs?: BrowserTabDto[];
+  /** Index of the active tab (matches `tabs[].active`). Optional like `tabs`. */
+  activeTabIndex?: number;
 }
 
 /** A viewer interaction, published on the input channel in page CSS pixels. */
@@ -82,7 +103,13 @@ export type BrowserInputEvent =
 export type BrowserCtlMsg =
   | { type: "viewer_join"; viewerId: string }
   | { type: "viewer_leave"; viewerId: string }
-  | { type: "takeover"; enabled: boolean; viewerId?: string };
+  | { type: "takeover"; enabled: boolean; viewerId?: string }
+  /**
+   * Wave 6 W4: a viewer switched the active tab. Agent-first means viewers
+   * can only SELECT an existing tab — there is deliberately no `new_tab`
+   * ctl message; only the agent's browser_new_tab tool creates tabs.
+   */
+  | { type: "switch_tab"; index: number; viewerId?: string };
 
 // -- per-user browser (Wave 5, owner rule R2) ---------------------------------
 
@@ -122,6 +149,17 @@ export function browserInputChannel(sessionId: string): string {
   return `browser:${sessionId}:input`;
 }
 
+// -- credentials vault (Wave 6 W4) -------------------------------------------
+
+/**
+ * AAD record id for the AES-256-GCM envelope sealing one browser credential.
+ * Shared by the gateway (which seals) and the worker (which unseals for an
+ * automated login) so a ciphertext can never be replayed onto another row.
+ */
+export function browserCredentialRecordId(id: string): string {
+  return `browser_credentials:${id}`;
+}
+
 // -- validation building blocks ----------------------------------------------
 
 const id = z.string().min(1);
@@ -147,6 +185,17 @@ export const browserStateDtoSchema: z.ZodType<BrowserStateDto> = z.object({
   frameFormat: z.enum(["jpeg", "webp"]),
   viewport: z.object({ width: viewportDim, height: viewportDim }),
   takeoverViewerId: z.string().min(1).nullable().optional(),
+  tabs: z
+    .array(
+      z.object({
+        index: z.number().int().nonnegative(),
+        url: z.string().nullable(),
+        title: z.string().nullable(),
+        active: z.boolean(),
+      }),
+    )
+    .optional(),
+  activeTabIndex: z.number().int().nonnegative().optional(),
 });
 
 export const browserInputEventSchema: z.ZodType<BrowserInputEvent> = z.discriminatedUnion("type", [
@@ -200,6 +249,11 @@ export const browserCtlMsgSchema: z.ZodType<BrowserCtlMsg> = z.discriminatedUnio
   z.object({
     type: z.literal("takeover"),
     enabled: z.boolean(),
+    viewerId: id.optional(),
+  }),
+  z.object({
+    type: z.literal("switch_tab"),
+    index: z.number().int().nonnegative(),
     viewerId: id.optional(),
   }),
 ]);
