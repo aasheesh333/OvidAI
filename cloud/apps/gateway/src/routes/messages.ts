@@ -29,7 +29,17 @@ import {
 } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { DEFAULT_MINT_TIMEOUT_MS, MintTimeoutError } from "../keys.js";
-import { badRequest, isUuid, notFound, parsePageLimit, queryValue, sendError, zodBadRequest } from "./http.js";
+import {
+  badRequest,
+  etagFor,
+  isUuid,
+  matchesIfNoneMatch,
+  notFound,
+  parsePageLimit,
+  queryValue,
+  sendError,
+  zodBadRequest,
+} from "./http.js";
 
 // Message routes — all mounted inside the authenticated /cloud/v1 scope.
 
@@ -760,7 +770,28 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
         active,
       });
     }
-    return body;
+
+    // W12 — conditional GET for repeat history loads. Chat transcripts are
+    // PER-USER and MUTABLE, so this is deliberately NOT public caching:
+    // `private, no-cache` forbids shared/CDN storage and forces revalidation,
+    // while the ETag lets an unchanged page answer 304 with no body. Vary by
+    // Authorization so no intermediary can mix two users' representations.
+    // The ownership check above always runs first — a foreign uid still sees
+    // the same 404, never a 304 oracle.
+    const etag = etagFor(body);
+    const ifNoneMatch = request.headers["if-none-match"];
+    const inm = Array.isArray(ifNoneMatch) ? ifNoneMatch.join(",") : ifNoneMatch;
+    const headers = {
+      etag,
+      "cache-control": "private, no-cache",
+      pragma: "no-cache",
+      vary: "Authorization, Accept-Encoding",
+      "x-content-type-options": "nosniff",
+    };
+    if (matchesIfNoneMatch(inm, etag)) {
+      return reply.code(304).headers(headers).send();
+    }
+    return reply.headers(headers).send(body);
   });
 
   // -------------------------------------------------------------------------

@@ -68,6 +68,18 @@ void main() {
       expect(cloudArtifactIdOf(_presigned('stale')), _artifactId);
     });
 
+    test('recovers the workspace-object id from a signed CDN URL', () {
+      final key = 'users/u1/artifacts/$_sessionId/$_artifactId-shot.png';
+      final opaque =
+          base64Url.encode(utf8.encode(key)).replaceAll('=', '');
+      expect(
+        cloudArtifactIdOf(
+          'https://cdn.ovidsi.com/o/$opaque?t=tok&e=1700000000&c=immutable',
+        ),
+        _artifactId,
+      );
+    });
+
     test('returns null for URLs without the artifact key layout', () {
       expect(cloudArtifactIdOf(null), isNull);
       expect(cloudArtifactIdOf(''), isNull);

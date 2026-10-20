@@ -24,6 +24,30 @@ export const r2Keys = {
   artifact(userId: string, sessionId: string, artifactId: string, name: string): string {
     return `users/${userId}/artifacts/${sessionId}/${artifactId}-${sanitizeArtifactName(name)}`;
   },
+  /**
+   * W12 content-addressed artifact key:
+   * `users/${uid}/artifacts/${sid}/${artifactId}-${sha256[0..16]}-${name}`.
+   *
+   * The artifact id keeps the key UNIQUE (workspace_objects.r2Key is UNIQUE
+   * and deletion is not refcounted, so pure hash-addressing would collide on
+   * a re-generated identical file). The digest prefix still makes the object
+   * verifiably content-addressed and, together with the write-once UUID,
+   * justifies `Cache-Control: immutable` at the CDN.
+   */
+  contentAddressedArtifact(
+    userId: string,
+    sessionId: string,
+    artifactId: string,
+    sha256Hex: string,
+    name: string,
+  ): string {
+    if (!/^[0-9a-f]{64}$/i.test(sha256Hex)) {
+      throw new KeyLayoutError("artifact content digest must be 64 hex characters");
+    }
+    return `users/${userId}/artifacts/${sessionId}/${artifactId}-${sha256Hex
+      .toLowerCase()
+      .slice(0, 16)}-${sanitizeArtifactName(name)}`;
+  },
 } as const;
 
 /** True for C0/C1 control characters (and DEL). */

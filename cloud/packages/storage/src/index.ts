@@ -22,6 +22,7 @@ export * from "./workspaceOps.js";
 export * from "./warmLru.js";
 export * from "./sweeper.js";
 export * from "./artifacts.js";
+export * from "./cdn.js";
 export * from "./archive/format.js";
 export * from "./archive/memberStream.js";
 export * from "./archive/pack.js";

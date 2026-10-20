@@ -37,6 +37,7 @@ import {
   hibernateWorkspace,
   hydrateWorkspace,
   loadStorageEnv,
+  loadCdnConfig,
   maxWarmBytesFromEnv,
   reconcileStuckHibernations,
   STUCK_STATE_MS,
@@ -703,6 +704,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     console.error("[worker] hydrate worker error", err);
   });
 
+  // W12: optional signed-CDN capabilities for generated artifacts. Absent
+  // OVID_CDN_* keeps the presign path exactly as before; a partial config
+  // fails loudly here (same contract as the gateway).
+  const cdn = loadCdnConfig(env);
+
   // Internal HTTP: container network only (never a host-published port).
   const fileService = buildFileService({
     db,
@@ -719,6 +725,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     runs: runsRepo,
     eventMirror: eventMirrorRepo,
     workspaceObjects: workspaceObjectsRepo,
+    ...(cdn !== null ? { cdn } : {}),
   });
   await fileService.listen({ port: cfg.workerFilePort, host: "0.0.0.0" });
   console.log(`[worker] internal file service listening on :${cfg.workerFilePort}`);

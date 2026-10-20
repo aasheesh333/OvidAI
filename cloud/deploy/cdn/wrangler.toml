@@ -1,0 +1,29 @@
+# W12 — Cloudflare Worker deployment config (owner-gated).
+#
+#   cd cloud/deploy/cdn
+#   npx wrangler deploy
+#   npx wrangler secret put OVID_CDN_SIGNING_SECRET   # same value as gateway/worker
+#   # then add the custom domain cdn.ovidsi.com in the dashboard (or below)
+#
+# This file intentionally carries no secret. Set OVID_CDN_ALLOWED_ORIGINS /
+# OVID_CDN_MAX_TTL_SECONDS / OVID_CDN_CACHE as plain vars if needed.
+
+name = "ovid-cdn"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+workers_dev = false
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "ovid-cloud"
+
+# Optional: route the custom domain through the Worker. Prefer the dashboard
+# "Custom domain" flow if the zone is in the same account (it manages DNS).
+# [[routes]]
+# pattern = "cdn.ovidsi.com/*"
+# zone_name = "ovidsi.com"
+
+[vars]
+# OVID_CDN_ALLOWED_ORIGINS = "https://ovidsi.com,https://app.ovidsi.com"
+# OVID_CDN_MAX_TTL_SECONDS = "3600"
+# OVID_CDN_CACHE = "on"

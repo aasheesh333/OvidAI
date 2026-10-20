@@ -143,7 +143,15 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         content,
       });
 
-      expect(rec.key).toBe(r2Keys.artifact(uid, sid, rec.id, "notes.txt"));
+      expect(rec.key).toBe(
+        r2Keys.contentAddressedArtifact(
+          uid,
+          sid,
+          rec.id,
+          createHash("sha256").update(content).digest("hex"),
+          "notes.txt",
+        ),
+      );
       expect(rec.id).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
       );

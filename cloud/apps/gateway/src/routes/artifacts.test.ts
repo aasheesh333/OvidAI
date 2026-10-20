@@ -194,9 +194,10 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway artifact routes (real postgres)", (
     expect(urlRes.statusCode).toBe(200);
     const body = urlRes.json() as { url: string; expiresAt: string };
     expect(body.url.startsWith("file://")).toBe(true);
-    // r2Keys.artifact layout: …/artifacts/{sid}/{artifactId}-{sanitized name}
+    // W12 content-addressed layout: …/artifacts/{sid}/{artifactId}-{sha16}-{name}
     // (sanitizeArtifactName keeps dots — "report.pdf" stays "report.pdf").
-    expect(body.url).toContain(`${ids[0]}-report.pdf`);
+    expect(body.url).toContain(ids[0]!);
+    expect(body.url).toContain("-report.pdf");
     const ms = Date.parse(body.expiresAt);
     expect(ms).not.toBeNaN();
     expect(ms).toBeGreaterThan(Date.now());

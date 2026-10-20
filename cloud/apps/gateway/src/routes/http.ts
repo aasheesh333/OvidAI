@@ -1,5 +1,6 @@
 import type { FastifyReply } from "fastify";
 import type { ZodError } from "zod";
+import { createHash } from "node:crypto";
 import type { ApiError } from "@ovid/shared";
 
 // Shared route plumbing: the one error envelope (ApiError shape) and the
@@ -53,6 +54,31 @@ export function parsePageLimit(raw: string | string[] | undefined): number {
 export function queryValue(raw: string | string[] | undefined): string | null {
   const text = Array.isArray(raw) ? raw[0] : raw;
   return typeof text === "string" && text !== "" ? text : null;
+}
+
+/**
+ * Strong ETag over a response body (W12). `JSON.stringify` is stable for the
+ * route-constructed objects (fixed key insertion order), so the same snapshot
+ * yields the same tag across requests.
+ */
+export function etagFor(body: unknown): string {
+  const text = typeof body === "string" ? body : JSON.stringify(body);
+  const digest = createHash("sha256").update(text, "utf8").digest("base64url");
+  return `"${digest}"`;
+}
+
+/**
+ * RFC 9110 If-None-Match comparison: comma-separated list, weak tags
+ * (`W/"x"`) compare by opaque tag, `*` matches any current representation.
+ */
+export function matchesIfNoneMatch(header: string | undefined, etag: string): boolean {
+  if (header === undefined || header.trim() === "") return false;
+  const normalize = (value: string): string => value.trim().replace(/^W\//, "");
+  const target = normalize(etag);
+  return header.split(",").some((candidate) => {
+    const value = normalize(candidate);
+    return value === "*" || value === target;
+  });
 }
 
 // Canonical UUID shape: 8-4-4-4-12 hex digits, any version, case-insensitive.
