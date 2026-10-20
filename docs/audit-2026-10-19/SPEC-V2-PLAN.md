@@ -87,6 +87,17 @@ about).
   change plan, adjust free caps, inspect subagents.
 - Master system prompt + subagent worker system prompt injected on every task.
 
+### W12 — Cloudflare R2 CDN (owner request 2026-10-19)
+- Signed-token CDN URLs (`cdn.ovidsi.com/o/<key>?t=…&e=…`) served by a Cloudflare Worker that
+  validates an HMAC token, streams from R2, supports Range/HEAD/download disposition, and sets
+  cache headers. Immutable content-addressed objects get long TTL; named/mutable objects short TTL.
+- Gateway returns CDN URLs when configured, falling back to the existing presigned URLs.
+- Chat text is NOT public-CDN cached (per-user, mutable, private). Safe wins only: edge
+  compression, ETag/304 conditional GET on message pages, pagination, and offloading large
+  immutable payloads (tool output, images, attachments) to R2 objects behind signed CDN URLs.
+- Owner dashboard steps: custom domain, Worker route, cache rules; env `OVID_CDN_BASE_URL`,
+  `OVID_CDN_SIGNING_SECRET`, `OVID_CDN_TTL_SECONDS`.
+
 ## Rules for every workstream
 - Owner rules R1–R5 still apply (session isolation, shared per-user Studio/browser,
   screencast only while viewing, truthful UI, test before fix).
