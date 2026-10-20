@@ -59,6 +59,8 @@ export interface BridgeHandlers {
   onInput(sessionId: string, event: BrowserInputEvent): void;
   /** `viewerId` is the requesting gateway viewer (Wave 5 FE-026; absent from older gateways). */
   onTakeover(sessionId: string, enabled: boolean, viewerId?: string): void;
+  /** Wave 6 W4: a viewer selected an existing tab (never creates one). */
+  onSwitchTab(sessionId: string, index: number, viewerId?: string): void;
 }
 
 export interface BrowserBridge {
@@ -164,6 +166,8 @@ export function createRedisBrowserBridge(opts: {
       else session.viewers.delete(msg.viewerId);
       const after = session.viewers.size;
       if (after !== before) handlers.onViewersChange(sessionId, after);
+    } else if (msg.type === "switch_tab") {
+      handlers.onSwitchTab(sessionId, msg.index, msg.viewerId);
     } else {
       handlers.onTakeover(sessionId, msg.enabled, msg.viewerId);
     }

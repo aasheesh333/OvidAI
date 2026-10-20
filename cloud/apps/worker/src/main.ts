@@ -73,6 +73,7 @@ import { createPluginInstallProcessor } from "./pluginInstallProcessor.js";
 import { startWorkerPtyBridge } from "./ptyBridge.js";
 import { createSandboxPort, createStepLimiter } from "./sandboxAdapter.js";
 import { adaptBrowserTools, createUserBrowserLeases } from "./browserToolAdapter.js";
+import { createBrowserArtifactVaultPort, createBrowserCredentialsPort } from "./browserCredentials.js";
 import { createModelCatalogReader } from "./modelCapabilities.js";
 import { createSandboxSeam } from "./sandboxSeam.js";
 import { createScheduleFireProcessor, resyncScheduleMirror } from "./schedulerMirror.js";
@@ -601,6 +602,21 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     // `{root}/{uid}/workspace` — see the P7 block below).
     workspaceDir: (userId: string, sessionId: string) =>
       manager.workspaceDir(userId, sessionId),
+    // Wave 6 W4: owner-scoped credentials + the workspace/Artifact Vault
+    // bridge. Both are server-side only; the model never sees a secret.
+    credentials: createBrowserCredentialsPort({
+      db,
+      crypto: cfg.masterKey !== null ? createEnvelopeCrypto(cfg.masterKey) : null,
+    }),
+    artifactVault: createBrowserArtifactVaultPort({
+      db,
+      storage,
+      events,
+      workspaceObjects: workspaceObjectsRepo,
+      eventMirror: eventMirrorRepo,
+      workspaceDir: (userId: string, sessionId: string) =>
+        manager.workspaceDir(userId, sessionId),
+    }),
   });
 
   const browserLeases = createUserBrowserLeases(browser);

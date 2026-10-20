@@ -539,6 +539,43 @@ export const byokKeys = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Wave 6 W4: browser Credentials Vault.
+//
+// Owner-scoped login entries for the cloud browser. The password/token and
+// the optional notes are AES-256-GCM envelopes (same four-field shape as
+// BYOK/MCP secrets; recordId `browser_credentials:{id}`). `site` binds the
+// credential to a host: the worker refuses to inject it anywhere else.
+// Nothing secret is ever projected by the list route.
+// ---------------------------------------------------------------------------
+
+export const browserCredentials = pgTable(
+  "browser_credentials",
+  {
+    id: char("id", { length: 36 }).primaryKey(), // UUIDv7
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    label: text("label").notNull(),
+    /** URL or bare host the credential is valid for. */
+    site: text("site").notNull(),
+    username: text("username").notNull().default(""),
+    /** "password" | "token" */
+    secretKind: text("secret_kind").notNull().default("password"),
+    secretSealed: jsonb("secret_sealed").$type<SealedEnvelope>().notNull(),
+    notesSealed: jsonb("notes_sealed").$type<SealedEnvelope | null>(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("browser_credentials_user_label_idx").on(t.userId, t.label),
+    index("browser_credentials_user_id_idx").on(t.userId),
+    check("browser_credentials_label_len_check", sql`length(${t.label}) BETWEEN 1 AND 120`),
+    check("browser_credentials_site_len_check", sql`length(${t.site}) BETWEEN 1 AND 2048`),
+    check("browser_credentials_kind_check", sql`${t.secretKind} IN ('password','token')`),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // P5 Task 8: MCP servers, OAuth (tokens + PKCE flows), plugins, grants.
 //
 // Sealed columns hold a structured envelope produced by @ovid/mcp's

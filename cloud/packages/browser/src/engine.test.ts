@@ -162,6 +162,7 @@ function makeCfg(overrides: Partial<BrowserEngineConfig> = {}): BrowserEngineCon
     maxTier1Processes: 2,
     tier1TimeoutMs: 20_000,
     maxActiveScreencasts: 2,
+    screencastDetachGraceMs: 0,
     screencastLoadMax: 6.0,
     screencast: { width: 1280, height: 800, quality: 60, everyNthFrame: 2, maxFramesInFlight: 2 },
     stateDir: null,
@@ -313,6 +314,103 @@ describe.skipIf(!GATED)("BrowserEngine facade (real redis + chromium, harness pl
     await sleep(500); // the animated fixture cycles every 100 ms — 500 ms quiet proves the cast is dead
     expect(frameTap.received).toBe(atStop);
   });
+
+  it("W4 detach grace: frames continue for the window, then the browser goes headless (no frame after)", async () => {
+    const sid = randomUUID();
+    const frameTap = await openFrameTap(sid);
+    const stateTap = await openStateTap(sid);
+    rig = await mkEngine({ screencastDetachGraceMs: 500 });
+
+    await rig.engine.openSession(sid, "u1");
+    await tool(rig.engine, "browser_open").execute(
+      { url: server.url("/animated") },
+      { sessionId: sid, userId: "u1" },
+    );
+    await gw.publish(browserCtlChannel(sid), joinMsg("v1"));
+    await frameTap.next(10_000);
+
+    await gw.publish(browserCtlChannel(sid), leaveMsg("v1"));
+    await waitFor("the grace window arms", () => rig!.engine.detachGracePending(sid));
+    // Still rendering right after the leave — this is the whole point.
+    const atLeave = frameTap.received;
+    await sleep(200);
+    expect(rig.engine.detachGracePending(sid)).toBe(true);
+    expect(rig.engine.screencastCount()).toBe(1);
+    expect(frameTap.received).toBeGreaterThan(atLeave);
+    expect(rig.engine.registry.get(sid)).not.toBeNull();
+
+    await waitFor("the grace window expires", () => rig!.engine.screencastCount() === 0, 5_000);
+    expect(rig.engine.detachGracePending(sid)).toBe(false);
+    await stateTap.waitForState((s) => s.live && s.screencast === false, 5_000);
+    expect(rig.engine.registry.get(sid)).not.toBeNull(); // headless, not closed
+
+    const atStop = frameTap.received;
+    await sleep(500);
+    expect(frameTap.received).toBe(atStop); // no frame after headless
+  });
+
+  it("W4 re-opening within the grace window cancels the conversion and keeps the cast", async () => {
+    const sid = randomUUID();
+    const frameTap = await openFrameTap(sid);
+    rig = await mkEngine({ screencastDetachGraceMs: 1_500 });
+
+    await rig.engine.openSession(sid, "u1");
+    await tool(rig.engine, "browser_open").execute(
+      { url: server.url("/animated") },
+      { sessionId: sid, userId: "u1" },
+    );
+    await gw.publish(browserCtlChannel(sid), joinMsg("v1"));
+    await frameTap.next(10_000);
+
+    await gw.publish(browserCtlChannel(sid), leaveMsg("v1"));
+    await waitFor("the grace window arms", () => rig!.engine.detachGracePending(sid));
+    expect(rig.engine.detachGracePending(sid)).toBe(true);
+
+    await gw.publish(browserCtlChannel(sid), joinMsg("v2"));
+    await waitFor("grace cancelled", () => !rig!.engine.detachGracePending(sid));
+    await sleep(300);
+    expect(rig.engine.screencastCount()).toBe(1);
+    expect(rig.engine.viewerCount(sid)).toBe(1);
+    const before = frameTap.received;
+    await sleep(400);
+    expect(frameTap.received).toBeGreaterThan(before);
+  });
+
+  it("W4 tab switching: the viewer selects an agent-opened tab and the cast follows it", async () => {
+    const sid = randomUUID();
+    const stateTap = await openStateTap(sid);
+    rig = await mkEngine();
+
+    await rig.engine.openSession(sid, "u1");
+    await tool(rig.engine, "browser_open").execute(
+      { url: server.url("/animated") },
+      { sessionId: sid, userId: "u1" },
+    );
+    await tool(rig.engine, "browser_new_tab").execute(
+      { url: server.url("/click") },
+      { sessionId: sid, userId: "u1" },
+    );
+    await gw.publish(browserCtlChannel(sid), joinMsg("v1"));
+    const two = await stateTap.waitForState((s) => s.live && (s.tabs?.length ?? 0) === 2, 5_000);
+    expect(two.activeTabIndex).toBe(1);
+    expect(two.tabs![1].active).toBe(true);
+
+    await gw.publish(
+      browserCtlChannel(sid),
+      JSON.stringify({ type: "switch_tab", index: 0 } satisfies BrowserCtlMsg),
+    );
+    const first = await stateTap.waitForState(
+      (s) =>
+        s.live &&
+        (s.tabs?.length ?? 0) === 2 &&
+        s.activeTabIndex === 0 &&
+        s.tabs?.[0]?.active === true,
+      5_000,
+    );
+    expect(first.url).toBe(server.url("/animated"));
+    expect(first.tabs).toHaveLength(2);
+  });
+
 
   it("input under takeover flips the /click fixture to CLICKED (end-to-end injection, arrival-ordered)", async () => {
     const sid = randomUUID();

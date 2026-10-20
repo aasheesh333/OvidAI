@@ -20,6 +20,8 @@ export type WsClientMsg =
   | { op: "browser_detach"; sessionId: string }
   | { op: "browser_input"; sessionId: string; input: BrowserInputEvent }
   | { op: "browser_takeover"; sessionId: string; enabled: boolean }
+  /** Wave 6 W4: select an existing agent-opened tab (never creates one). */
+  | { op: "browser_switch_tab"; sessionId: string; index: number }
   // P3 Task 12 (approvals over WS) — additive discriminants only. The
   // client answers an approval_requested session event with this op; the
   // gateway validates session ownership, publishes to the approval
@@ -194,6 +196,11 @@ const wsClientMsgSchema = z.discriminatedUnion("op", [
     op: z.literal("browser_takeover"),
     sessionId: z.string().min(1),
     enabled: z.boolean(),
+  }),
+  z.object({
+    op: z.literal("browser_switch_tab"),
+    sessionId: z.string().min(1),
+    index: z.number().int().nonnegative(),
   }),
   z.object({
     op: z.literal("approval_response"),

@@ -37,6 +37,7 @@ function makeCfg(): BrowserEngineConfig {
     maxTier1Processes: 8,
     tier1TimeoutMs: 20_000,
     maxActiveScreencasts: 3,
+    screencastDetachGraceMs: 0,
     screencastLoadMax: 6.0,
     screencast: { width: 1280, height: 800, quality: 60, everyNthFrame: 2, maxFramesInFlight: 2 },
     stateDir: null,
@@ -410,10 +411,10 @@ describe.skipIf(!chromiumExecutableExists())("browser tools II", () => {
     expect(result.content).toContain("invalid arguments");
   });
 
-  it("exposes the final sorted 36-tool roster with no duplicates", () => {
+  it("exposes the final sorted 38-tool roster with no duplicates", () => {
     const names = createBrowserTools(deps).map((t) => t.name);
-    expect(names).toHaveLength(36);
-    expect(new Set(names).size).toBe(36);
+    expect(names).toHaveLength(38);
+    expect(new Set(names).size).toBe(38);
     expect([...names].sort()).toEqual(names);
     for (const name of names) expect(name.startsWith("browser_")).toBe(true);
     expect([...BROWSER_TOOL_NAMES]).toEqual(names);

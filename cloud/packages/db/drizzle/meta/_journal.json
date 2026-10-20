@@ -148,6 +148,13 @@
       "when": 1792510796692,
       "tag": "0020_projects",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1792513782785,
+      "tag": "0021_browser_credentials",
+      "breakpoints": true
     }
   ]
 }
