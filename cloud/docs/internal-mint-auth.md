@@ -5,6 +5,20 @@ server-to-server provisioning surface used by the gateway and the worker.
 It replaces the pre-P9 flow in which the gateway forwarded the caller's
 Firebase ID token and App Check token to the public mint endpoint.
 
+The same HMAC contract also authenticates the W8 image routes on the admin
+listener:
+
+- `POST /internal/v1/images/capabilities`
+- `POST /internal/v1/images/generations`
+- `POST /internal/v1/images/edits`
+
+They exist because the public `/v1/images/*` routes require a Firebase ID
+token + App Check token, which a background worker does not have. The worker
+tools execute host-side and use these routes; provider keys never enter the
+sandbox. Both surfaces call the SAME image service and admission bridge as
+the public routes, so quota, the durable ledger, receipts and capability
+routing are not reimplemented.
+
 ## Design
 
 - **One shared secret**, `OVID_INTERNAL_API_SECRET` (env only, ≥ 32 bytes).
@@ -15,8 +29,9 @@ Firebase ID token and App Check token to the public mint endpoint.
   ```
 
   - `METHOD` is upper-case (`POST`).
-  - `PATH` is the route path only (`/internal/mint-key`); queries are not
-    part of the contract.
+  - `PATH` is the route path only (`/internal/mint-key`,
+    `/internal/v1/images/generations`, …); queries are not part of the
+    contract.
   - `UID` is the body uid — the identity the request acts on.
   - `TIMESTAMP` is decimal epoch seconds.
 - **Headers** (base64):
@@ -42,8 +57,10 @@ The implementation lives in `packages/shared/src/internalAuth.ts` (sign +
 verify) and is consumed by:
 
 - `apps/mint/src/internalRoutes.ts` (admin listener only),
+- `apps/mint/src/images/internalRoutes.ts` (admin listener only; W8),
 - `apps/gateway/src/internalMint.ts` (gateway → mint),
-- `apps/worker/src/keyResolver.ts` (unattended-run minting).
+- `apps/worker/src/keyResolver.ts` (unattended-run minting),
+- `apps/worker/src/tools/imageTools.ts` (W8 image tools).
 
 ## Threat model
 

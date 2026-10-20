@@ -44,6 +44,11 @@ import type { SandboxPort } from "@ovid/agent-core";
 import type { KeyResolver, SessionEvent } from "@ovid/shared";
 import { createToolRegistry } from "./tools/registry.js";
 import type { ToolRegistry } from "./tools/registry.js";
+import {
+  createImageTools,
+  parseImageCapabilities,
+  type ImageTooling,
+} from "./tools/imageTools.js";
 import { SYSTEM_PROMPT_V1, TOOL_EVENT_CONTENT_CAP } from "./tools/systemPrompt.js";
 import type { ModelToolSpec } from "./tools/types.js";
 import type { AgentTool } from "./tools/types.js";
@@ -2080,6 +2085,60 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       ]) {
         expect(advertised).toContain(name);
       }
+    });
+
+    it("full processor: image tools are registered when the image seam is wired (W8)", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort();
+      const sse = await startTurnSse([textTurn("done")]);
+      const capabilities = parseImageCapabilities({
+        catalog_hash: "a".repeat(32),
+        models: [
+          {
+            slug: "ovid-image:img-one",
+            operations: { generate: {}, edit: {} },
+            sizes: ["1024x1024"],
+            input: { max_images: 1 },
+          },
+        ],
+      });
+      const images: ImageTooling = {
+        capabilities: async () => capabilities,
+        createTools: (o) =>
+          createImageTools({
+            call: async () => ({ ok: true, body: {} }),
+            capabilities: o.capabilities,
+            publishArtifact: async (input) => ({
+              id: "art-test",
+              url: "https://r2.invalid/art-test",
+              expiresAt: "2026-10-20T16:00:00.000Z",
+              sizeBytes: input.content.length,
+              contentType: input.contentType,
+            }),
+          }),
+      };
+      const processor = createFullAgentRunProcessor(
+        makeFullDeps(sse.url, sbx.port, { images }),
+      );
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      const advertised = (
+        sse.requests[0]!.tools as Array<{ function: { name: string } }>
+      ).map((t) => t.function.name);
+      expect(advertised).toContain("generate_image");
+      expect(advertised).toContain("edit_image");
+      // The description carries the discovered card, not a private model id.
+      const generate = (
+        sse.requests[0]!.tools as Array<{
+          function: { name: string; description: string };
+        }>
+      ).find((t) => t.function.name === "generate_image");
+      expect(generate?.function.description).toContain("ovid-image:img-one");
     });
 
     it("full processor: dispatch_agent runs a real child loop and returns its report (fix I-1)", async () => {

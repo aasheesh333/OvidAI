@@ -39,6 +39,7 @@ import {
   loadStorageEnv,
   maxWarmBytesFromEnv,
   reconcileStuckHibernations,
+  registerArtifact,
   STUCK_STATE_MS,
   SWEEP_INTERVAL_MS,
   sweepWorkspaces,
@@ -78,6 +79,13 @@ import { createModelCatalogReader } from "./modelCapabilities.js";
 import { createSandboxSeam } from "./sandboxSeam.js";
 import { createScheduleFireProcessor, resyncScheduleMirror } from "./schedulerMirror.js";
 import { createScheduleTools, toCoreTools } from "./scheduleTools.js";
+import {
+  createImageTools,
+  createInternalImageClient,
+  fetchImageCapabilities,
+  type ImageCapabilities,
+  type ImageTooling,
+} from "./tools/imageTools.js";
 import { startSchedulerLoop } from "./schedulerTick.js";
 import { sweepStaleRuns } from "./staleRuns.js";
 import { createColdRowScan, createStuckHibernationScan, createStuckHydrationScan } from "./storageScans.js";
@@ -446,6 +454,70 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   const system = createRedisSystemBus(redisQ);
   const notifier = createNotifier({ db, push: createFcmPushSender() });
 
+  // ---- W8: cloud image generation/editing tools --------------------------
+  // Host-side tools call mint's signed internal image routes. The worker
+  // never hands a provider key or the model pool to the sandbox. The
+  // capability response carries the USER'S plan quota, so the cache is
+  // per-uid (bounded) rather than global; failures are never cached.
+  const imageClient = createInternalImageClient({
+    baseUrl: cfg.internalMintUrl,
+    secret: cfg.internalApiSecret,
+  });
+  const imageCapabilitiesCache = new Map<string, { at: number; value: ImageCapabilities }>();
+  const IMAGE_CAPABILITIES_TTL_MS = 300_000;
+  const IMAGE_CAPABILITIES_CACHE_MAX = 1_000;
+  const imageTooling: ImageTooling = {
+    async capabilities(userId) {
+      const now = Date.now();
+      const cached = imageCapabilitiesCache.get(userId);
+      if (cached !== undefined && now - cached.at < IMAGE_CAPABILITIES_TTL_MS) {
+        return cached.value;
+      }
+      const value = await fetchImageCapabilities(imageClient, userId);
+      if (value !== null) {
+        imageCapabilitiesCache.set(userId, { at: now, value });
+        if (imageCapabilitiesCache.size > IMAGE_CAPABILITIES_CACHE_MAX) {
+          // Map preserves insertion order: drop the oldest entry.
+          const oldest = imageCapabilitiesCache.keys().next().value;
+          if (oldest !== undefined) imageCapabilitiesCache.delete(oldest);
+        }
+      }
+      return value;
+    },
+    createTools: (o) =>
+      createImageTools({
+        call: imageClient,
+        capabilities: o.capabilities,
+        notifier,
+        ...(o.visionGuard === undefined ? {} : { visionGuard: o.visionGuard }),
+        publishArtifact: async (input) => {
+          const record = await registerArtifact(
+            {
+              db,
+              events,
+              storage,
+              workspaceObjects: workspaceObjectsRepo,
+              eventMirror: eventMirrorRepo,
+            },
+            {
+              userId: input.userId,
+              sessionId: input.sessionId,
+              name: input.name,
+              contentType: input.contentType,
+              content: input.content,
+            },
+          );
+          return {
+            id: record.id,
+            url: record.url,
+            expiresAt: record.expiresAt,
+            sizeBytes: record.sizeBytes,
+            contentType: record.contentType,
+          };
+        },
+      }),
+  };
+
   // ---- P2 Task 12: the SandboxManager chain (pinned composition order). ----
   // Every step fails LOUDLY at boot: a worker without a rootfs must never run
   // (the systemd unit is ordered after the rootfs install — Task 16), and a
@@ -812,6 +884,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     // pay for it.
     notifier,
     modelCatalog: modelCatalogReader,
+    // W8: generate_image / edit_image (host-side; signed internal routes).
+    images: imageTooling,
     // Wave 5 (R2): ONE browser per user, shared across sessions — the leases
     // keep a run's end from closing a browser another run (or a live viewer)
     // still uses.

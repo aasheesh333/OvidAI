@@ -2,17 +2,38 @@
 
 ## Image generation
 
-The built-in `generate_image` endpoint has been retired. It is absent from the
-agent roster, Image Studio starts uninstalled, and stale calls return an explicit
-unavailable result without network requests. Existing plugin-state hydration
-clears stale installed flags because Image Studio no longer has executable backing.
-Existing generated-image rows and `read_image` keep their original behavior.
+The production worker registers `generate_image` and `edit_image` (W8).
+They execute host-side in the worker — never in the sandbox — and call mint's
+signed internal image routes (`POST /internal/v1/images/{capabilities,
+generations,edits}` on the admin listener). Provider keys and the private
+image model pool stay server-side; the sandbox only sees the resulting
+workspace file.
 
-No Ovid Cloud image-generation contract was established from the client gateway
-integration (mint, model listing, chat, usage). No replacement endpoint is inferred
-from OpenAI-compatible chat support. Built-in image generation has no configuration
-or provider implementation yet. Independently configured, existing image MCP
-integrations retain their own credentials and tool namespaces.
+Capability discovery uses the same public projection as the app
+(`/v1/images/capabilities`): opaque slugs, operations, sizes and relative
+tiers, never a provider name, base URL or price. The card table is rendered
+into each tool description and re-checked before dispatch. Unpriced models
+are never advertised or selectable.
+
+A successful generation/edit:
+
+1. writes the returned bytes to `generated/<op>_<request_id>.<png|jpg|webp>`
+   in the session workspace;
+2. publishes the file through the Artifact Vault pipeline
+   (`registerArtifact`), which appends `artifact_created` with a presigned
+   URL — the client folds that into an artifact row/chip;
+3. returns the workspace path, the served model slug and the durable receipt
+   (`state`, exact `charged` decimal) in the tool result.
+
+Quota is enforced by the SAME admission bridge the public image routes use:
+an exhausted allowance returns 402 `image_limit_reached` before any provider
+call, and the tool reports it as a graceful in-chat error. `edit_image`
+checks the selected chat model's vision capability first; a custom/text-only
+provider gets the pinned `model_no_vision` message and an FCM push through
+the existing notifier, with no paid provider call.
+
+The legacy Image Studio client code remains disconnected. No client-side
+billing calculation is performed.
 
 ## Tool contract
 
