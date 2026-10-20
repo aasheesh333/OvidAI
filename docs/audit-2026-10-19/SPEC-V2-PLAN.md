@@ -98,6 +98,20 @@ about).
 - Owner dashboard steps: custom domain, Worker route, cache rules; env `OVID_CDN_BASE_URL`,
   `OVID_CDN_SIGNING_SECRET`, `OVID_CDN_TTL_SECONDS`.
 
+### W13 — Unified per-user accounting (owner request 2026-10-19)
+"Every user's every thing counts in storage and usage."
+- **Usage ledger:** one row per billable action — LLM call (tokens), image generate/edit/resize
+  (units + resolution/steps as priced), browser/tool usage where priced — with model, provider,
+  unit counts, price basis and computed cost. Prices from LiteLLM; unpriced models are marked
+  `priced=false` and units still counted. Retries must not double-count.
+- **Storage accounting:** per-user bytes for chat text, attachments, artifacts/workspace objects
+  and stored browser state, with per-session and per-artifact breakdown; incremental on
+  write/delete plus periodic reconciliation; quota enforcement by plan (3/5/15/75 GB).
+- **APIs:** `GET /cloud/v1/usage/storage` (totals + breakdown) and extended usage history with
+  per-model, per-kind, per-day, per-session totals. The app shows percentages, not money;
+  admin sees underlying cost.
+- Consumes the W5 plan table and the W8 image tools; no duplicate counters.
+
 ## Rules for every workstream
 - Owner rules R1–R5 still apply (session isolation, shared per-user Studio/browser,
   screencast only while viewing, truthful UI, test before fix).
