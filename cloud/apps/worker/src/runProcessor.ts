@@ -22,6 +22,7 @@ import {
 import {
   sanitizeAttachmentName,
   type KeyResolver,
+  type PrivateMemoryStore,
   type SessionEvent,
   type SessionEventType,
 } from "@ovid/shared";
@@ -46,6 +47,7 @@ import {
   createGuardedEgressFetch,
   createHookEngine,
   createMemoryTools,
+  memoryContextBlock,
   createOpenAiAgentTransport,
   createPostgresSessionStateStore,
   createRepoTools,
@@ -439,6 +441,55 @@ const DEFAULT_CANCEL_CHECK_INTERVAL_MS = 1_000;
 
 /** Full-processor default context window (P3 spec §6). */
 const DEFAULT_WINDOW_TOKENS = 128_000;
+
+/**
+ * W1 project-memory injection bounds. The store's project scope may hold up
+ * to the plan cap (80–250) files; a run injects at most this many, and
+ * `memoryContextBlock` further caps the rendered text. Project memory is
+ * read per run and never persisted, so it cannot bleed into another run.
+ */
+const PROJECT_MEMORY_CONTEXT_MAX_FILES = 8;
+const PROJECT_MEMORY_CONTEXT_MAX_BYTES = 64 * 1024;
+
+/**
+ * Build the Main Agent's project-memory block for an owned session. Returns
+ * "" for a standalone chat, a foreign/unknown session, a project read
+ * failure, or an empty project memory (fail closed — never leak). Subagent
+ * runs do not call this at all.
+ */
+async function projectMemoryContextFor(
+  db: Db,
+  store: PrivateMemoryStore,
+  userId: string,
+  sessionId: string,
+): Promise<string> {
+  const session = await sessions.get(db, sessionId, userId);
+  const projectId = session?.projectId ?? null;
+  if (projectId === null) return "";
+  try {
+    const ns = { projectId, maxFiles: PROJECT_MEMORY_CONTEXT_MAX_FILES };
+    const items = await store.list(userId, ns);
+    // MEMORY.md is the entrypoint; include it plus the first few other files.
+    const names = [...new Set(["MEMORY.md", ...items.map((i) => i.name)])].slice(
+      0,
+      PROJECT_MEMORY_CONTEXT_MAX_FILES + 1,
+    );
+    const docs: Array<{ name: string; content: string }> = [];
+    let bytes = 0;
+    for (const name of names) {
+      const doc = await store.read(userId, ns, name);
+      if (doc === null) continue;
+      const size = Buffer.byteLength(doc.content, "utf8");
+      if (docs.length > 0 && bytes + size > PROJECT_MEMORY_CONTEXT_MAX_BYTES) break;
+      docs.push({ name: doc.name, content: doc.content });
+      bytes += size;
+    }
+    return docs.length === 0 ? "" : memoryContextBlock(docs);
+  } catch {
+    // Fail closed: a memory read failure must never fail the run.
+    return "";
+  }
+}
 
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise<void>((resolve) => {
@@ -1648,6 +1699,16 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     const prefs = await userPreferences.get(deps.db, userId);
     const memoryEnabled = prefs.memoryEnabled;
 
+    // W1 (R1): project memory reaches MAIN AGENT runs only, and only when
+    // this chat belongs to a project. This processor serves queued root
+    // runs (subagents run through the supervisor's engine, not the queue), so
+    // no child run can receive it. It is read per run, bounded, and never
+    // persisted — so project A's facts cannot reach project B or a standalone
+    // chat.
+    const projectMemoryContext = memoryEnabled
+        ? await projectMemoryContextFor(deps.db, privateMemory, userId, sessionId)
+        : "";
+
     // Wave 1a (R1): context from the sessions the user explicitly @-tagged
     // in THIS message (gateway owner-checked; re-checked here). For this run
     // only — the loop never persists it.
@@ -2072,6 +2133,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
         ? { maxOutputTokens: job.data.maxOutputTokens }
         : {}),
       ...(turnContext !== null ? { turnContext } : {}),
+      ...(projectMemoryContext !== "" ? { memoryContext: projectMemoryContext } : {}),
       // P4 Task 10: a scheduler-fired job carries `schedule`; that run has no
       // attending user, so it is unattended even though the scheduler's
       // enqueue payload predates the explicit flag.

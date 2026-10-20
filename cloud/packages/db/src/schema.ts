@@ -67,6 +67,26 @@ export const users = pgTable("users", {
   createdAt: timestamptz("created_at").notNull().defaultNow(),
 });
 
+// W1 Projects: a user-owned folder of chats with its own private memory.
+// Per-project file caps are plan-derived (owner spec §3 Screen 4); the rows
+// here carry only identity/name. Name uniqueness is per owner.
+export const projects = pgTable(
+  "projects",
+  {
+    id: char("id", { length: 36 }).primaryKey(), // UUIDv7
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("projects_user_id_name_idx").on(t.userId, t.name),
+    index("projects_user_id_idx").on(t.userId),
+  ],
+);
+
 export const sessions = pgTable(
   "sessions",
   {
@@ -76,6 +96,11 @@ export const sessions = pgTable(
       .references(() => users.uid),
     title: text("title"),
     mode: text("mode").notNull().default("auto"),
+    // W1: the project a chat belongs to. Deleting the project detaches its
+    // chats (SET NULL) rather than deleting their history.
+    projectId: char("project_id", { length: 36 }).references(() => projects.id, {
+      onDelete: "set null",
+    }),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
     updatedAt: timestamptz("updated_at").notNull().defaultNow(),
     archivedAt: timestamptz("archived_at"),
@@ -84,16 +109,22 @@ export const sessions = pgTable(
     // ownership joins in runs/searchMessages.
     deletedAt: timestamptz("deleted_at"),
   },
-  (t) => [index("sessions_user_id_idx").on(t.userId)],
+  (t) => [
+    index("sessions_user_id_idx").on(t.userId),
+    index("sessions_project_id_idx").on(t.projectId),
+  ],
 );
 
 // R1 private agent memory: deliberately NOT in the shared sandbox/Studio tree.
 // Account removal cascades; session-scoped rows cascade on hard chat deletion.
 // Soft-deleted chats cannot read/write memory (repository ownership checks).
+// W1: project memory reuses this store under the scope form `project:<uuid>`
+// (session_id NULL, project_id set) — no second table, same size/name guards.
 export const privateMemoryFiles = pgTable("private_memory_files", {
   userId: text("user_id").notNull().references(() => users.uid, { onDelete: "cascade" }),
-  scope: text("scope").notNull(), // "shared" or an owned session UUID
+  scope: text("scope").notNull(), // "shared", an owned session UUID, or "project:<uuid>"
   sessionId: char("session_id", { length: 36 }).references(() => sessions.id, { onDelete: "cascade" }),
+  projectId: char("project_id", { length: 36 }).references(() => projects.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
   content: text("content").notNull(),
   revision: char("revision", { length: 64 }).notNull(),
@@ -101,7 +132,8 @@ export const privateMemoryFiles = pgTable("private_memory_files", {
 }, (t) => [
   primaryKey({ columns: [t.userId, t.scope, t.name] }),
   index("private_memory_session_id_idx").on(t.sessionId),
-  check("private_memory_scope_check", sql`(${t.scope} = 'shared' AND ${t.sessionId} IS NULL) OR (${t.sessionId} IS NOT NULL AND ${t.scope} = ${t.sessionId})`),
+  index("private_memory_project_id_idx").on(t.projectId),
+  check("private_memory_scope_check", sql`(${t.scope} = 'shared' AND ${t.sessionId} IS NULL AND ${t.projectId} IS NULL) OR (${t.sessionId} IS NOT NULL AND ${t.projectId} IS NULL AND ${t.scope} = ${t.sessionId}) OR (${t.projectId} IS NOT NULL AND ${t.sessionId} IS NULL AND ${t.scope} = 'project:' || ${t.projectId}::text)`),
   check("private_memory_content_size_check", sql`octet_length(${t.content}) <= 32768`),
   check("private_memory_name_check", sql`length(${t.name}) <= 80 AND ${t.name} ~ '^[A-Za-z0-9][A-Za-z0-9_-]*(\\.[A-Za-z0-9_-]+)*\\.md$' AND (lower(${t.name}) <> 'memory.md' OR ${t.name} = 'MEMORY.md')`),
 ]);
@@ -219,6 +251,7 @@ export const attachments = pgTable(
 );
 
 export type UserRow = typeof users.$inferSelect;
+export type ProjectRow = typeof projects.$inferSelect;
 export type SessionRow = typeof sessions.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
 export type RunRow = typeof runs.$inferSelect;

@@ -141,6 +141,13 @@
       "when": 1792405552666,
       "tag": "0019_private_memory",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1792510796692,
+      "tag": "0020_projects",
+      "breakpoints": true
     }
   ]
 }

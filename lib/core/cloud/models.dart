@@ -30,12 +30,14 @@ class SessionDto {
     required this.mode,
     required this.createdAt,
     required this.updatedAt,
+    this.projectId,
   });
 
   factory SessionDto.fromJson(Map<String, dynamic> j) => SessionDto(
         id: j['id'] as String,
         title: j['title'] as String?,
         mode: j['mode'] as String,
+        projectId: j['projectId'] as String?,
         createdAt: DateTime.parse(j['createdAt'] as String),
         updatedAt: DateTime.parse(j['updatedAt'] as String),
       );
@@ -43,8 +45,43 @@ class SessionDto {
   final String id;
   final String? title;
   final String mode;
+
+  /// W1: the project this chat belongs to (null = ungrouped).
+  final String? projectId;
   final DateTime createdAt;
   final DateTime updatedAt;
+}
+
+/// W1 project row (`GET /projects`). Counts and the plan cap are computed by
+/// the server; the sidebar only renders them.
+class ProjectDto {
+  const ProjectDto({
+    required this.id,
+    required this.name,
+    required this.createdAt,
+    required this.updatedAt,
+    required this.sessionCount,
+    required this.fileCount,
+    required this.fileCap,
+  });
+
+  factory ProjectDto.fromJson(Map<String, dynamic> j) => ProjectDto(
+        id: j['id'] as String,
+        name: j['name'] as String,
+        createdAt: DateTime.parse(j['createdAt'] as String),
+        updatedAt: DateTime.parse(j['updatedAt'] as String),
+        sessionCount: (j['sessionCount'] as num?)?.toInt() ?? 0,
+        fileCount: (j['fileCount'] as num?)?.toInt() ?? 0,
+        fileCap: (j['fileCap'] as num?)?.toInt() ?? 80,
+      );
+
+  final String id;
+  final String name;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final int sessionCount;
+  final int fileCount;
+  final int fileCap;
 }
 
 /// `MessageDto` (rest.ts). `role` is "user" | "assistant" | "system" | "tool".

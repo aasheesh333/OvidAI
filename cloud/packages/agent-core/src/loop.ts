@@ -131,6 +131,13 @@ export interface AgentRunJob {
    * never leaks into a later run.
    */
   turnContext?: string;
+  /**
+   * W1: pre-rendered project memory for a Main Agent run whose session
+   * belongs to a project. Built per run from `project:<uuid>` rows; absent
+   * for standalone sessions and subagent runs, so memory never crosses
+   * projects or leaks into unrelated chats (R1).
+   */
+  memoryContext?: string;
   // ── P3 Task 20 (additive child-loop seam) ────────────────────────────────
   // A subagent run is a normal engine run on a CHILD session; these fields
   // carry the facts the loop would otherwise read off the (absent) parent.
@@ -954,7 +961,7 @@ export async function runAgentLoop(
         workspaceFolder: "",
         workspaceTreeSummary: "",
         skillsCatalog: await deps.skills.list(sessionId),
-        memoryContext: "",
+        memoryContext: job.memoryContext ?? "",
         todos: state.todos,
         goal: state.goal,
         ...(job.subagentBriefing !== undefined

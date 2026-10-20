@@ -182,10 +182,16 @@ export interface MemoryFileDto {
 }
 
 /** Private DB memory, never a path visible to shared Studio/shell/file tools. */
-export interface PrivateMemoryNamespace {
-  sessionId: string;
-  shared: boolean;
-}
+export type PrivateMemoryNamespace =
+  | { sessionId: string; shared: boolean; projectId?: undefined }
+  | {
+      /** W1 project memory: scope is `project:<projectId>` and the owner is checked live. */
+      projectId: string;
+      /** Plan-derived per-project file cap (owner spec §3 Screen 4). */
+      maxFiles?: number;
+      sessionId?: undefined;
+      shared?: undefined;
+    };
 export interface PrivateMemoryStore {
   list(uid: string, scope: PrivateMemoryNamespace): Promise<MemoryFileSummary[]>;
   read(uid: string, scope: PrivateMemoryNamespace, name: string): Promise<MemoryFileDto | null>;
