@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../core/chat_integration_ports.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
 import '../core/state.dart';
@@ -20,6 +23,8 @@ enum ChatMenuAction {
   newChat,
   jobs,
   rename,
+  addToProject,
+  pin,
   artifacts,
   trajectory,
   usage,
@@ -39,6 +44,7 @@ List<ChatMenuAction> chatMenuActionsFor(
   ChatSession? session,
   int jobCount, {
   List<Message>? transcript,
+  bool projectsAvailable = false,
 }) {
   final messages = transcript ?? session?.messages;
   final hasChat = messages != null && messages.isNotEmpty;
@@ -48,6 +54,8 @@ List<ChatMenuAction> chatMenuActionsFor(
     if (hasChat) ChatMenuAction.newChat,
     if (jobCount > 0) ChatMenuAction.jobs,
     if (own) ChatMenuAction.rename,
+    if (own && projectsAvailable) ChatMenuAction.addToProject,
+    if (own && projectsAvailable) ChatMenuAction.pin,
     ChatMenuAction.artifacts,
     if (session != null) ChatMenuAction.trajectory,
     ChatMenuAction.usage,
@@ -72,7 +80,10 @@ class ChatOverflowMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: _agent,
+      animation: Listenable.merge([
+        _agent,
+        if (ProjectsPort.instance != null) ProjectsPort.instance!,
+      ]),
       builder: (context, _) {
         final s = session;
         final jobs = s == null ? const [] : _agent.jobsFor(s.id);
@@ -80,10 +91,14 @@ class ChatOverflowMenu extends StatelessWidget {
         final l10n = context.l10n;
         // Cloud rows keep session.messages empty — the live projection is
         // the transcript the gating reads.
+        final projects = ProjectsPort.instance;
+        final projectsAvailable = projects != null && projects.ready;
+        final pinned = s != null && (projects?.isPinned(s.id) ?? false);
         final actions = chatMenuActionsFor(
           s,
           jobs.length,
           transcript: s == null ? null : CloudAgentFacade.I.transcriptFor(s.id),
+          projectsAvailable: projectsAvailable,
         );
         return PopupMenuButton<ChatMenuAction>(
           tooltip: jobs.isEmpty
@@ -112,12 +127,12 @@ class ChatOverflowMenu extends StatelessWidget {
                 ),
             ],
           ),
-          onSelected: (a) => _run(context, a),
+          onSelected: (a) => unawaited(_run(context, a)),
           itemBuilder: (_) => [
             for (var i = 0; i < actions.length; i++) ...[
               if (i > 0 && _startsGroup(actions[i - 1], actions[i]))
                 const PopupMenuDivider(height: 8),
-              _item(context, actions[i], jobs.length),
+              _item(context, actions[i], jobs.length, pinned: pinned),
             ],
           ],
         );
@@ -136,8 +151,9 @@ class ChatOverflowMenu extends StatelessWidget {
   PopupMenuItem<ChatMenuAction> _item(
     BuildContext context,
     ChatMenuAction a,
-    int jobCount,
-  ) {
+    int jobCount, {
+    bool pinned = false,
+  }) {
     final l10n = context.l10n;
     final (IconData icon, String label) = switch (a) {
       ChatMenuAction.share => (Icons.ios_share_outlined, l10n.chatMenuShare),
@@ -147,6 +163,14 @@ class ChatOverflowMenu extends StatelessWidget {
         l10n.chatMenuJobs(jobCount),
       ),
       ChatMenuAction.rename => (Icons.edit_outlined, l10n.chatMenuRename),
+      ChatMenuAction.addToProject => (
+        Icons.drive_file_move_outline,
+        'Add to Project',
+      ),
+      ChatMenuAction.pin => (
+        pinned ? Icons.push_pin : Icons.push_pin_outlined,
+        pinned ? 'Unpin Session' : 'Pin Session',
+      ),
       ChatMenuAction.artifacts => (
         Icons.folder_copy_outlined,
         l10n.artifactsTitle,
@@ -183,7 +207,7 @@ class ChatOverflowMenu extends StatelessWidget {
     );
   }
 
-  void _run(BuildContext context, ChatMenuAction a) {
+  Future<void> _run(BuildContext context, ChatMenuAction a) async {
     final s = session;
     final nav = Navigator.of(context);
     switch (a) {
@@ -202,6 +226,32 @@ class ChatOverflowMenu extends StatelessWidget {
         if (s != null) onJobs(s.id);
       case ChatMenuAction.rename:
         if (s != null) showRenameSessionDialog(context, s);
+      case ChatMenuAction.addToProject:
+        if (s != null) await _showAddToProjectSheet(context, s);
+      case ChatMenuAction.pin:
+        if (s != null) {
+          final port = ProjectsPort.instance;
+          if (port == null) return;
+          final next = !port.isPinned(s.id);
+          try {
+            await port.setPinned(s.id, next);
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(next ? 'Session pinned' : 'Session unpinned'),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
+          } catch (e) {
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Could not update the pin: $e'),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
+          }
+        }
       case ChatMenuAction.artifacts:
         nav.push(
           MaterialPageRoute<void>(
@@ -220,6 +270,96 @@ class ChatOverflowMenu extends StatelessWidget {
         nav.push(MaterialPageRoute<void>(builder: (_) => const UsageScreen()));
       case ChatMenuAction.delete:
         if (s != null) confirmAndDeleteSession(context, s);
+    }
+  }
+
+  /// W1 Projects sheet: move this chat into a project (or out of one).
+  Future<void> _showAddToProjectSheet(
+    BuildContext context,
+    ChatSession session,
+  ) async {
+    final port = ProjectsPort.instance;
+    if (port == null) return;
+    final projects = port.projects;
+    final picked = await showModalBottomSheet<String?>(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            const Text(
+              'Add to Project',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            if (projects.isEmpty)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 14, 20, 20),
+                child: Text(
+                  'No projects yet. Create one from the sidebar.',
+                  style: TextStyle(fontSize: 13),
+                ),
+              )
+            else ...[
+              ListTile(
+                key: const ValueKey('chat-add-project-none'),
+                dense: true,
+                leading: const Icon(Icons.folder_off_outlined, size: 18),
+                title: const Text(
+                  'No project',
+                  style: TextStyle(fontSize: 13.5),
+                ),
+                onTap: () => Navigator.pop(sheetContext, ''),
+              ),
+              for (final p in projects)
+                ListTile(
+                  key: ValueKey('chat-add-project-${p.id}'),
+                  dense: true,
+                  leading: const Icon(Icons.folder_outlined, size: 18),
+                  title: Text(p.name, style: const TextStyle(fontSize: 13.5)),
+                  subtitle: p.sessionCount == null
+                      ? null
+                      : Text(
+                          '${p.sessionCount} chat'
+                          '${p.sessionCount == 1 ? '' : 's'}',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Aether.textMuted,
+                          ),
+                        ),
+                  onTap: () => Navigator.pop(sheetContext, p.id),
+                ),
+            ],
+            const SizedBox(height: 10),
+          ],
+        ),
+      ),
+    );
+    if (picked == null) return;
+    try {
+      await port.addSessionToProject(session.id, picked);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            picked.isEmpty ? 'Removed from project' : 'Added to project',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not move the chat: $e'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
   }
 }

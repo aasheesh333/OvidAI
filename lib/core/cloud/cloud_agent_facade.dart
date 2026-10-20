@@ -1129,6 +1129,9 @@ class CloudAgentFacade extends ChangeNotifier
 
   @override
   bool busyFor(String sessionId) {
+    // Test seam: the raw local id may not have a server mapping yet, but a
+    // test that marked it busy still expects the UI to see it.
+    if (_activeRunForTest[sessionId] == true) return true;
     final id = _serverId(sessionId);
     if (id == null) return false;
     // A send between its synchronous entry and the POST landing (the
@@ -1234,10 +1237,12 @@ class CloudAgentFacade extends ChangeNotifier
     String? localId,
     String key, {
     List<String> sessionRefs = const <String>[],
+    List<String> projectRefs = const <String>[],
   }) {
     // A queue drain addresses the chat by its SERVER id while the row is
     // keyed by its local id — resolve through the id map too.
-    final session = AppState.I.sessionById(localId ?? '') ??
+    final session =
+        AppState.I.sessionById(localId ?? '') ??
         AppState.I.sessionById(key) ??
         _localSessionFor(key);
     final mode = _modes[key] ?? _persistedModeFor(session?.id ?? localId, key);
@@ -1248,6 +1253,7 @@ class CloudAgentFacade extends ChangeNotifier
       planMode: session?.planMode ?? false,
       presetId: (preset == null || preset.isEmpty) ? null : preset,
       sessionRefs: sessionRefs,
+      projectRefs: projectRefs,
     );
   }
 
@@ -1609,6 +1615,7 @@ class CloudAgentFacade extends ChangeNotifier
     List<({String name, String path, int size})>? attachments,
     String? clientMsgId,
     List<String> sessionRefs = const <String>[],
+    List<String> projectRefs = const <String>[],
     VoidCallback? onQueued,
   }) async {
     // freshTurn/expandRefsFor are local-loop concepts; the cloud run is
@@ -1640,8 +1647,13 @@ class CloudAgentFacade extends ChangeNotifier
     // it instead of dispatching a second run. Claimed before the first
     // await, released when the send settles either way.
     if (!_sending.add(key)) {
-      _enqueueRow(key, originalPrompt,
-          attachments ?? _attachments.remove(key), sessionRefs: sessionRefs);
+      _enqueueRow(
+        key,
+        originalPrompt,
+        attachments ?? _attachments.remove(key),
+        sessionRefs: sessionRefs,
+        projectRefs: projectRefs,
+      );
       onQueued?.call();
       return;
     }
@@ -1664,14 +1676,23 @@ class CloudAgentFacade extends ChangeNotifier
       final live = _attachments[key];
       if (attachments == null && live != null) {
         for (final sent in staged) {
-          final index = live.indexWhere((a) =>
-              a.name == sent.name && a.path == sent.path && a.size == sent.size);
+          final index = live.indexWhere(
+            (a) =>
+                a.name == sent.name &&
+                a.path == sent.path &&
+                a.size == sent.size,
+          );
           if (index >= 0) live.removeAt(index);
         }
         if (live.isEmpty) _attachments.remove(key);
       }
 
-      final turn = turnOptionsFor(localId, key, sessionRefs: sessionRefs);
+      final turn = turnOptionsFor(
+        localId,
+        key,
+        sessionRefs: sessionRefs,
+        projectRefs: projectRefs,
+      );
       _lastPrompts[key] = (text: originalPrompt, turn: turn);
 
       // The prompt is on screen immediately (CH-011), in order, before any
@@ -1794,22 +1815,22 @@ class CloudAgentFacade extends ChangeNotifier
   }
 
   @override
-  bool stopRequested({required String sessionId}) {
+  bool stopRequested({required String sessionId, bool dispatchQueued = false}) {
     final id = _serverId(sessionId);
     if (id == null) return false;
     // Test-seam busy state (see [setActiveRunForTest]) settles like a real
-    // stop: there is no server run to cancel.
+    // stop: there is no server run to cancel. It deliberately does NOT drain
+    // the queue — the seam models "the stop resolved locally", so callers
+    // can assert the steered queue order.
     if (_activeRunForTest.remove(id) == true) {
       _notify();
       return true;
     }
     final state = _sessions[id];
-    if (state == null ||
-        state.runState.runId == null ||
-        !state.runState.busy) {
+    if (state == null || state.runState.runId == null || !state.runState.busy) {
       return false;
     }
-    unawaited(_cancelRun(state));
+    unawaited(_cancelRun(state, dispatchQueued: dispatchQueued));
     return true;
   }
 
@@ -1821,11 +1842,13 @@ class CloudAgentFacade extends ChangeNotifier
         ops.add(_cancelRun(state));
       }
     }
-    _lastHardStop =
-        ops.isEmpty ? Future<void>.value() : Future.wait(ops);
+    _lastHardStop = ops.isEmpty ? Future<void>.value() : Future.wait(ops);
   }
 
-  Future<void> _cancelRun(_SessionCloudState state) async {
+  Future<void> _cancelRun(
+    _SessionCloudState state, {
+    bool dispatchQueued = false,
+  }) async {
     final runId = state.runState.runId;
     if (runId == null || !state.runState.busy) return;
     // CH-044: one cancel per run. Further taps while "Stopping…" are no-ops.
@@ -1834,6 +1857,12 @@ class CloudAgentFacade extends ChangeNotifier
     _notify();
     try {
       await _rest.cancelRun(runId);
+      // W9 Stop semantics: the cancel was accepted, so the queued message
+      // is dispatched NOW (the server FIFO runs it after the cancelled
+      // turn). Without this the row waited for the terminal event.
+      if (dispatchQueued) {
+        unawaited(_drainQueue(state.serverId, force: true));
+      }
     } on CloudApiException catch (e) {
       if (e.status == 409 && e.code == 'run_not_cancellable') {
         // Review Focus cancel-race: the run terminalized before the cancel
@@ -2193,6 +2222,16 @@ class CloudAgentFacade extends ChangeNotifier
     _notify();
   }
 
+  /// Test seam: append a projected row (e.g. a running `dispatch_agent`
+  /// card) without starting a WS subscription or a real run.
+  @visibleForTesting
+  void seedRowForTest(String sessionId, Message row) {
+    final id = _serverId(sessionId) ?? sessionId;
+    final state = _stateFor(id, subscribe: false);
+    state.projection.messages.add(row);
+    state.projection.notifyListeners();
+  }
+
   // -------------------------------------------------------------------------
   // AgentSurface — jobs / context (P2 / P3)
   // -------------------------------------------------------------------------
@@ -2323,8 +2362,12 @@ class CloudAgentFacade extends ChangeNotifier
   }
 
   @override
-  void enqueueMessage(String text,
-      {String? sessionId, List<String> sessionRefs = const <String>[]}) {
+  void enqueueMessage(
+    String text, {
+    String? sessionId,
+    List<String> sessionRefs = const <String>[],
+    List<String> projectRefs = const <String>[],
+  }) {
     if (text.trim().isEmpty) return;
     final id = _serverId(sessionId);
     if (id == null) return;
@@ -2334,7 +2377,13 @@ class CloudAgentFacade extends ChangeNotifier
     // to the NEXT message: the drain hands the row its own list, so the
     // direct-send fallback never lends later files to an earlier row.
     final staged = _attachments.remove(id);
-    _enqueueRow(id, text, staged, sessionRefs: sessionRefs);
+    _enqueueRow(
+      id,
+      text,
+      staged,
+      sessionRefs: sessionRefs,
+      projectRefs: projectRefs,
+    );
     if (!busyFor(id)) unawaited(_drainQueue(id));
   }
 
@@ -2347,16 +2396,21 @@ class CloudAgentFacade extends ChangeNotifier
     String text,
     List<({String name, String path, int size})>? staged, {
     List<String> sessionRefs = const <String>[],
+    List<String> projectRefs = const <String>[],
   }) {
     _queues
         .putIfAbsent(serverId, () => <_QueuedCloudMessage>[])
-        .add(_QueuedCloudMessage(
-          _nextQueueId++,
-          text,
-          attachments: List<({String name, String path, int size})>.from(
-              staged ?? const []),
-          sessionRefs: sessionRefs,
-        ));
+        .add(
+          _QueuedCloudMessage(
+            _nextQueueId++,
+            text,
+            attachments: List<({String name, String path, int size})>.from(
+              staged ?? const [],
+            ),
+            sessionRefs: sessionRefs,
+            projectRefs: projectRefs,
+          ),
+        );
     _notify();
   }
 
@@ -2417,9 +2471,10 @@ class CloudAgentFacade extends ChangeNotifier
     final entry = queue.removeAt(index);
     queue.insert(0, entry);
     _notify();
-    // Stop promotes the queue head (local-queue parity). The drain runs on
-    // the terminal event, so the row starts as soon as the run settles.
-    stopRequested(sessionId: resolved);
+    // Stop promotes the queue head (local-queue parity). The cancel is
+    // accepted before the row is dispatched, so "send now" really starts
+    // the next run instead of waiting for the current turn's terminal.
+    stopRequested(sessionId: resolved, dispatchQueued: true);
   }
 
   @override
@@ -2479,11 +2534,14 @@ class CloudAgentFacade extends ChangeNotifier
   /// concurrently — out of order. The in-flight flag serializes drains per
   /// session; a successful drain re-checks the queue so rows queued during
   /// the POST still leave in order.
-  Future<void> _drainQueue(String serverId) async {
+  Future<void> _drainQueue(String serverId, {bool force = false}) async {
     if (_disposed) return;
     final queue = _queues[serverId];
     if (queue == null || queue.isEmpty) return;
-    if (busyFor(serverId)) return;
+    // `force` is the Stop-button path: the cancel was accepted, so the
+    // queue head may be POSTed now and the server queues it behind the
+    // cancelled run (FIFO). Subagent runs are untouched.
+    if (!force && busyFor(serverId)) return;
     if (_store?.offline ?? false) return;
     if (!_draining.add(serverId)) return;
     var dispatched = false;
@@ -2499,12 +2557,14 @@ class CloudAgentFacade extends ChangeNotifier
         sessionId: serverId,
         attachments: head.attachments,
         sessionRefs: head.sessionRefs,
+        projectRefs: head.projectRefs,
       );
       // With an outbox the row is now durable there (delivered, retrying, or
       // "Not sent" with Retry) — never re-queued, never lost. Without one,
       // a failed send goes back to the head of the queue.
       final state = _sessions[serverId];
-      final failed = _store == null &&
+      final failed =
+          _store == null &&
           state != null &&
           !state.runState.busy &&
           state.runState.lastErrorCode != null;
@@ -2554,6 +2614,18 @@ class CloudAgentFacade extends ChangeNotifier
   List<SubagentInfo> subagentsOf(String sessionId) {
     final key = _serverId(sessionId) ?? sessionId;
     final rows = _subagentRows(sessionId);
+    String? handleOf(Message row) {
+      final raw = row.toolInput;
+      if (raw == null || raw.isEmpty) return null;
+      try {
+        final j = jsonDecode(raw);
+        final h = j is Map ? j['handle'] : null;
+        return h is String && h.isNotEmpty ? h : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
     return [
       for (var i = rows.length - 1; i >= 0; i--)
         SubagentInfo(
@@ -2564,6 +2636,7 @@ class CloudAgentFacade extends ChangeNotifier
           parentMode: mode,
           prompt: rows[i].toolSummary ?? '',
           agentType: rows[i].toolTitle ?? 'general-purpose',
+          handle: handleOf(rows[i]),
         )
           ..finished = rows[i].toolState != 'running'
           ..interrupted = rows[i].toolState == 'stopped',
@@ -2983,8 +3056,10 @@ class _QueuedCloudMessage {
     this.text, {
     List<({String name, String path, int size})>? attachments,
     this.sessionRefs = const <String>[],
+    this.projectRefs = const <String>[],
   }) : attachments = List<({String name, String path, int size})>.from(
-            attachments ?? const []);
+         attachments ?? const [],
+       );
 
   factory _QueuedCloudMessage.fromJson(Map<String, dynamic> j) =>
       _QueuedCloudMessage(
@@ -3003,24 +3078,32 @@ class _QueuedCloudMessage {
           for (final r in (j['sessionRefs'] as List? ?? const <dynamic>[]))
             if (r is String) r,
         ],
+        projectRefs: [
+          for (final r in (j['projectRefs'] as List? ?? const <dynamic>[]))
+            if (r is String) r,
+        ],
       );
 
   Map<String, Object> toJson() => <String, Object>{
-        'id': id,
-        'text': text,
-        if (attachments.isNotEmpty)
-          'attachments': [
-            for (final a in attachments)
-              {'name': a.name, 'path': a.path, 'size': a.size},
-          ],
-        if (sessionRefs.isNotEmpty) 'sessionRefs': sessionRefs,
-      };
+    'id': id,
+    'text': text,
+    if (attachments.isNotEmpty)
+      'attachments': [
+        for (final a in attachments)
+          {'name': a.name, 'path': a.path, 'size': a.size},
+      ],
+    if (sessionRefs.isNotEmpty) 'sessionRefs': sessionRefs,
+    if (projectRefs.isNotEmpty) 'projectRefs': projectRefs,
+  };
 
   final int id;
   String text;
 
   /// Sessions the user @-tagged in this row (R1) — they ride its send.
   final List<String> sessionRefs;
+
+  /// Projects the user @-tagged in this row (R1) — they ride its send.
+  final List<String> projectRefs;
 
   /// The files staged when this row was queued — the row's OWN attachments
   /// (chat P1), snapshotted at enqueue time. The drain passes them to

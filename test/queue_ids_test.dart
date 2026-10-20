@@ -240,82 +240,90 @@ void main() {
     expect(facade.queuedMessageIdsFor(s.id), ids);
   });
 
-  test('ids survive a stop-and-continue (head promoted, rest keep ids)', () async {
-    final s = session('qid-a');
-    await facade.runTask('start', sessionId: s.id);
-    expect(rest.sent, ['start']);
-    final wsSocket = await startRun(s, 'run-1');
-    facade.enqueueMessage('first');
-    facade.enqueueMessage('second');
-    final ids = facade.queuedMessageIdsFor(s.id);
+  test(
+    'ids survive a stop-and-continue (head promoted, rest keep ids)',
+    () async {
+      final s = session('qid-a');
+      await facade.runTask('start', sessionId: s.id);
+      expect(rest.sent, ['start']);
+      final wsSocket = await startRun(s, 'run-1');
+      facade.enqueueMessage('first');
+      facade.enqueueMessage('second');
+      final ids = facade.queuedMessageIdsFor(s.id);
 
-    // Stop only promotes a RUNNING session's queue: the cancel terminal
-    // drains the head as the next run.
-    expect(facade.stopRequested(sessionId: s.id), isTrue);
-    await pumpEventQueue();
-    final entered = Completer<void>();
-    final gate = Completer<void>();
-    rest.sendEntered['first'] = entered;
-    rest.sendGates['first'] = gate;
-    wsSocket.server(
-      _eventFrame(s.id, '2-0', 'run_completed', {'runId': 'run-1'}),
-    );
-    await until(() => entered.isCompleted);
-    // The promoted run goes live while its POST is in flight; without this
-    // the facade would keep draining the queue in the same pass.
-    wsSocket.server(
-      _eventFrame(s.id, '3-0', 'run_started', {'runId': 'run-2'}),
-    );
-    await pumpEventQueue();
-    gate.complete();
-    await until(() => rest.sent.length == 2);
-    await pumpEventQueue();
+      // Stop only promotes a RUNNING session's queue: the cancel terminal
+      // drains the head as the next run.
+      expect(facade.stopRequested(sessionId: s.id), isTrue);
+      await pumpEventQueue();
+      final entered = Completer<void>();
+      final gate = Completer<void>();
+      rest.sendEntered['first'] = entered;
+      rest.sendGates['first'] = gate;
+      wsSocket.server(
+        _eventFrame(s.id, '2-0', 'run_completed', {'runId': 'run-1'}),
+      );
+      await until(() => entered.isCompleted);
+      // The promoted run goes live while its POST is in flight; without this
+      // the facade would keep draining the queue in the same pass.
+      wsSocket.server(
+        _eventFrame(s.id, '3-0', 'run_started', {'runId': 'run-2'}),
+      );
+      await pumpEventQueue();
+      gate.complete();
+      await until(() => rest.sent.length == 2);
+      await pumpEventQueue();
 
-    // The head is promoted; the remaining id is untouched.
-    expect(rest.sent, ['start', 'first']);
-    expect(facade.queuedMessageIdsFor(s.id), [ids[1]]);
-    expect(facade.queuedMessages, ['second']);
-  });
+      // The head is promoted; the remaining id is untouched.
+      expect(rest.sent, ['start', 'first']);
+      expect(facade.queuedMessageIdsFor(s.id), [ids[1]]);
+      expect(facade.queuedMessages, ['second']);
+    },
+  );
 
-  test('quick send steers the row to front and promotes it on stop', () async {
-    final s = session('qid-a');
-    await facade.runTask('start', sessionId: s.id);
-    final wsSocket = await startRun(s, 'run-1');
-    facade.enqueueMessage('one');
-    facade.enqueueMessage('two');
-    facade.enqueueMessage('three');
-    final ids = facade.queuedMessageIdsFor(s.id);
+  test(
+    'quick send steers the row to front and dispatches it immediately',
+    () async {
+      final s = session('qid-a');
+      await facade.runTask('start', sessionId: s.id);
+      final wsSocket = await startRun(s, 'run-1');
+      facade.enqueueMessage('one');
+      facade.enqueueMessage('two');
+      facade.enqueueMessage('three');
+      final ids = facade.queuedMessageIdsFor(s.id);
 
-    // No sessionId passed: defaults to the resolved run's session key.
-    facade.quickSendQueuedMessage(ids[2]);
-    // Steered immediately, before the run settles.
-    expect(facade.queuedMessages, ['three', 'one', 'two']);
+      // W9: the cancel is accepted and the row is dispatched WITHOUT waiting
+      // for run-1's terminal event. Hold its POST so the queue snapshot is
+      // deterministic while the send is in flight.
+      final entered = Completer<void>();
+      final gate = Completer<void>();
+      rest.sendEntered['three'] = entered;
+      rest.sendGates['three'] = gate;
 
-    await pumpEventQueue();
-    final entered = Completer<void>();
-    final gate = Completer<void>();
-    rest.sendEntered['three'] = entered;
-    rest.sendGates['three'] = gate;
-    wsSocket.server(
-      _eventFrame(s.id, '2-0', 'run_completed', {'runId': 'run-1'}),
-    );
-    await until(() => entered.isCompleted);
-    // The promoted run goes live while its POST is in flight; without this
-    // the facade would keep draining the queue in the same pass.
-    wsSocket.server(
-      _eventFrame(s.id, '3-0', 'run_started', {'runId': 'run-2'}),
-    );
-    await pumpEventQueue();
-    gate.complete();
-    await until(() => rest.sent.length == 2);
-    await pumpEventQueue();
+      facade.quickSendQueuedMessage(ids[2]);
+      await until(() => entered.isCompleted);
+      // 'three' left the queue and its POST is in flight; the remaining rows
+      // keep their ids and order.
+      expect(facade.queuedMessages, ['one', 'two']);
+      expect(facade.queuedMessageIdsFor(s.id), [ids[0], ids[1]]);
 
-    // 'three' was steered to the front and the stop promoted it
-    // immediately; the remaining rows keep their ids and order.
-    expect(rest.sent, ['start', 'three']);
-    expect(facade.queuedMessages, ['one', 'two']);
-    expect(facade.queuedMessageIdsFor(s.id), [ids[0], ids[1]]);
-  });
+      // The cancelled run settles and the promoted run goes live while its
+      // POST is still gated.
+      wsSocket.server(
+        _eventFrame(s.id, '2-0', 'run_completed', {'runId': 'run-1'}),
+      );
+      await pumpEventQueue();
+      wsSocket.server(
+        _eventFrame(s.id, '3-0', 'run_started', {'runId': 'run-2'}),
+      );
+      await pumpEventQueue();
+      gate.complete();
+      await until(() => rest.sent.length == 2);
+      await pumpEventQueue();
+
+      expect(rest.sent, ['start', 'three']);
+      expect(facade.queuedMessages, ['one', 'two']);
+    },
+  );
 
   test('quick send is a no-op for unknown id or empty queue', () {
     final s = session('qid-a');

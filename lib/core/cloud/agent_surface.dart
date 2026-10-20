@@ -44,7 +44,12 @@ abstract class AgentSurface extends ChangeNotifier {
   /// Stops [sessionId]'s run. The facade returns whether a live run was
   /// found and a cancel posted (queueing is server-side there). Callers that
   /// only need the side effect can ignore the value.
-  bool stopRequested({required String sessionId});
+  ///
+  /// [dispatchQueued] (W9) promotes the composer queue head as soon as the
+  /// cancel is accepted, instead of waiting for the run's terminal event:
+  /// the red Stop button means "stop this Main Agent turn and start the
+  /// queued message now". Subagent runs are not touched.
+  bool stopRequested({required String sessionId, bool dispatchQueued = false});
 
   /// Stops every live run everywhere.
   void hardStopAll();
@@ -52,12 +57,20 @@ abstract class AgentSurface extends ChangeNotifier {
   /// Starts a turn. The local-only parameters ([freshTurn],
   /// [expandRefsFor]) are accepted for backward compatibility; the cloud
   /// facade forwards only the prompt and attachments.
+  ///
+  /// [sessionRefs] are the explicitly @-tagged chats (R1). [projectRefs] are
+  /// the explicitly @-tagged projects (R1); they are only sent when the
+  /// installed `ProjectsPort` says the gateway accepts them.
   Future<void> runTask(
     String originalPrompt, {
     String? sessionId,
     bool freshTurn = true,
     ChatSession? expandRefsFor,
     List<({String name, String path, int size})>? attachments,
+    String? clientMsgId,
+    List<String> sessionRefs = const <String>[],
+    List<String> projectRefs = const <String>[],
+    VoidCallback? onQueued,
   });
 
   /// Live status line for [sessionId] ("retrying in 9s…"), or null.
@@ -134,7 +147,15 @@ abstract class AgentSurface extends ChangeNotifier {
   List<int> queuedMessageIdsFor(String sessionId);
 
   /// Queues [text] for the session; starts it immediately when idle.
-  void enqueueMessage(String text, {String? sessionId});
+  ///
+  /// [sessionRefs]/[projectRefs] ride the queued row so an explicit @-tag
+  /// keeps its context when the row is dispatched later.
+  void enqueueMessage(
+    String text, {
+    String? sessionId,
+    List<String> sessionRefs = const <String>[],
+    List<String> projectRefs = const <String>[],
+  });
 
   /// Edits the queued message with stable [id].
   void editQueuedMessageById(int id, String newText);

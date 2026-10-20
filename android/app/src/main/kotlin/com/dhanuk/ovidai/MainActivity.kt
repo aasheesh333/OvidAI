@@ -23,6 +23,7 @@ import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
+import android.speech.tts.TextToSpeech
 import android.system.Os
 import android.system.OsConstants
 import android.system.ErrnoException
@@ -30,6 +31,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.URLConnection
+import java.util.Locale
 import com.android.installreferrer.api.InstallReferrerClient
 import com.android.installreferrer.api.InstallReferrerStateListener
 
@@ -58,6 +60,11 @@ class MainActivity : FlutterActivity() {
     // launch route is parked here and Dart pulls it with takePendingRoute.
     private var pendingRoute: String? = null
     private var pendingSessionId: String? = null
+
+    // W9 vernacular voice-first mode: the reply is spoken by the platform
+    // engine. Initialized on the Flutter engine and shut down with the host.
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
 
     private val safExportCoordinator = SafExportCoordinator<ParcelFileDescriptor, Uri> { source, destination ->
         val output = contentResolver.openOutputStream(destination, "w")
@@ -96,6 +103,11 @@ class MainActivity : FlutterActivity() {
         flutterEngine.platformViewsController.registry.registerViewFactory(
             "ovid/html-artifact", HtmlArtifactViewFactory(flutterEngine.dartExecutor.binaryMessenger),
         )
+        tts?.shutdown()
+        ttsReady = false
+        tts = TextToSpeech(this) { status ->
+            ttsReady = status == TextToSpeech.SUCCESS
+        }
         val nativeChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
         nativeChannel
             .setMethodCallHandler { call, rawResult ->
@@ -263,6 +275,40 @@ class MainActivity : FlutterActivity() {
                         } catch (e: Exception) {
                             result.success(false)
                         }
+                    }
+                    "ttsAvailable" -> {
+                        result.success(ttsReady)
+                    }
+                    "ttsSpeak" -> {
+                        val text = call.argument<String>("text")
+                        val engine = tts
+                        if (text.isNullOrBlank() || engine == null || !ttsReady) {
+                            result.success(false)
+                        } else {
+                            val localeId = call.argument<String>("locale")
+                            if (!localeId.isNullOrBlank()) {
+                                val parts = localeId.split("-")
+                                val locale = if (parts.size >= 2) {
+                                    Locale(parts[0], parts[1])
+                                } else {
+                                    Locale(localeId)
+                                }
+                                if (engine.isLanguageAvailable(locale) >= TextToSpeech.LANG_AVAILABLE) {
+                                    engine.language = locale
+                                }
+                            }
+                            val queued = engine.speak(
+                                text,
+                                TextToSpeech.QUEUE_FLUSH,
+                                null,
+                                "ovid-voice",
+                            )
+                            result.success(queued == TextToSpeech.SUCCESS)
+                        }
+                    }
+                    "ttsStop" -> {
+                        tts?.stop()
+                        result.success(null)
                     }
                     "shareText" -> {
                         val text = call.argument<String>("text")
@@ -475,6 +521,10 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         safExportCoordinator.cleanup()
+        tts?.stop()
+        tts?.shutdown()
+        tts = null
+        ttsReady = false
         super.onDestroy()
     }
 }
