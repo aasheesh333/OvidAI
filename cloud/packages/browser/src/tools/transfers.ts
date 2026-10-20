@@ -168,8 +168,28 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
         await mkdir(dir, { recursive: true });
         await writeFile(join(dir, name), body);
 
+        // Wave 6 W4: mirror the file into the account Artifact Vault. The
+        // workspace copy is authoritative; a vault failure never fails the
+        // download (the model still gets the bytes/path).
+        let vaulted = false;
+        if (deps.artifactVault !== undefined) {
+          try {
+            const rec = await deps.artifactVault.registerFromWorkspace({
+              userId: ctx.userId,
+              sessionId: artifactSessionId(ctx),
+              path: `${relDir}/${name}`,
+              mimeType: response.contentType ?? "application/octet-stream",
+            });
+            vaulted = rec !== null;
+          } catch (err) {
+            deps.log?.("browser_download: artifact vault registration failed", err);
+          }
+        }
+
         return {
-          content: `saved ${body.length} bytes to ${relDir}/${name}`,
+          content: `saved ${body.length} bytes to ${relDir}/${name}${
+            vaulted ? " (also in the Artifact Vault)" : ""
+          }`,
           artifacts: [
             {
               kind: "download",
@@ -186,19 +206,56 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
   const upload: BrowserToolSpec = {
     name: "browser_upload",
     description:
-      "Upload a file from the session workspace to a file input matching a CSS selector. The path is workspace-relative; paths outside the workspace are refused.",
+      "Upload a file to a file input matching a CSS selector. Source is either a workspace-relative path or an Artifact Vault id (artifactId). Paths outside the workspace are refused.",
     parameters: {
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector of the <input type=file>." },
         path: { type: "string", description: "Workspace-relative path of the file to upload." },
+        artifactId: {
+          type: "string",
+          description: "Artifact Vault id to upload instead of a workspace path.",
+        },
       },
-      required: ["selector", "path"],
+      required: ["selector"],
     },
-    inputSchema: z.object({ selector: z.string().min(1), path: z.string().min(1) }),
+    inputSchema: z
+      .object({
+        selector: z.string().min(1),
+        path: z.string().min(1).optional(),
+        artifactId: z.string().min(1).optional(),
+      })
+      .strict()
+      .superRefine((v, ctx) => {
+        if ((v.path === undefined) === (v.artifactId === undefined)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "exactly one of path or artifactId is required",
+          });
+        }
+      }),
     async execute(input, ctx) {
       const root = await deps.workspaceDir(ctx.userId, artifactSessionId(ctx));
-      const abs = resolve(root, input.path);
+      let relPath: string;
+      if (input.artifactId !== undefined) {
+        if (deps.artifactVault === undefined) {
+          return { content: `${TOOL_ERROR_PREFIX}the Artifact Vault bridge is not configured` };
+        }
+        const fetched = await deps.artifactVault.fetchToWorkspace({
+          userId: ctx.userId,
+          sessionId: artifactSessionId(ctx),
+          artifactId: input.artifactId,
+          destDir: "browser/uploads",
+        });
+        if (fetched === null) {
+          return { content: `${TOOL_ERROR_PREFIX}artifact not found: ${input.artifactId}` };
+        }
+        relPath = fetched.path;
+      } else {
+        relPath = input.path as string;
+      }
+
+      const abs = resolve(root, relPath);
       const rel = relative(root, abs);
       // Review Focus #4: the jail check is path-level, before any file work.
       if (rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) {
@@ -209,15 +266,15 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       try {
         info = await stat(abs);
       } catch {
-        return { content: `${TOOL_ERROR_PREFIX}file not found: ${input.path}` };
+        return { content: `${TOOL_ERROR_PREFIX}file not found: ${relPath}` };
       }
       if (!info.isFile()) {
-        return { content: `${TOOL_ERROR_PREFIX}file not found: ${input.path}` };
+        return { content: `${TOOL_ERROR_PREFIX}file not found: ${relPath}` };
       }
 
       return withSession(deps, ctx, async (_session, page) => {
         await page.setInputFiles(input.selector, abs);
-        return { content: `uploaded ${input.path} to ${input.selector}` };
+        return { content: `uploaded ${relPath} to ${input.selector}` };
       });
     },
   };

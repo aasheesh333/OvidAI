@@ -597,6 +597,7 @@ class CloudSessionStore extends ChangeNotifier {
             ? AppState.I.lastSelectedModel
             : 'Select a provider',
         mode: dto.mode,
+        projectId: dto.projectId,
         createdAt: dto.createdAt,
         updatedAt: dto.updatedAt,
       );
@@ -615,6 +616,7 @@ class CloudSessionStore extends ChangeNotifier {
           .then((_) {}, onError: (Object _) {}));
     }
     session.mode = dto.mode;
+    session.projectId = dto.projectId;
     session.updatedAt = dto.updatedAt;
   }
 

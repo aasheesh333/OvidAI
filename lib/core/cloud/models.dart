@@ -30,12 +30,14 @@ class SessionDto {
     required this.mode,
     required this.createdAt,
     required this.updatedAt,
+    this.projectId,
   });
 
   factory SessionDto.fromJson(Map<String, dynamic> j) => SessionDto(
         id: j['id'] as String,
         title: j['title'] as String?,
         mode: j['mode'] as String,
+        projectId: j['projectId'] as String?,
         createdAt: DateTime.parse(j['createdAt'] as String),
         updatedAt: DateTime.parse(j['updatedAt'] as String),
       );
@@ -43,8 +45,43 @@ class SessionDto {
   final String id;
   final String? title;
   final String mode;
+
+  /// W1: the project this chat belongs to (null = ungrouped).
+  final String? projectId;
   final DateTime createdAt;
   final DateTime updatedAt;
+}
+
+/// W1 project row (`GET /projects`). Counts and the plan cap are computed by
+/// the server; the sidebar only renders them.
+class ProjectDto {
+  const ProjectDto({
+    required this.id,
+    required this.name,
+    required this.createdAt,
+    required this.updatedAt,
+    required this.sessionCount,
+    required this.fileCount,
+    required this.fileCap,
+  });
+
+  factory ProjectDto.fromJson(Map<String, dynamic> j) => ProjectDto(
+        id: j['id'] as String,
+        name: j['name'] as String,
+        createdAt: DateTime.parse(j['createdAt'] as String),
+        updatedAt: DateTime.parse(j['updatedAt'] as String),
+        sessionCount: (j['sessionCount'] as num?)?.toInt() ?? 0,
+        fileCount: (j['fileCount'] as num?)?.toInt() ?? 0,
+        fileCap: (j['fileCap'] as num?)?.toInt() ?? 80,
+      );
+
+  final String id;
+  final String name;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final int sessionCount;
+  final int fileCount;
+  final int fileCap;
 }
 
 /// `MessageDto` (rest.ts). `role` is "user" | "assistant" | "system" | "tool".
@@ -228,6 +265,7 @@ class CloudTurnOptions {
     this.planMode,
     this.presetId,
     this.sessionRefs = const <String>[],
+    this.projectRefs = const <String>[],
   });
 
   factory CloudTurnOptions.fromJson(Map<String, dynamic> j) => CloudTurnOptions(
@@ -237,6 +275,10 @@ class CloudTurnOptions {
         presetId: j['presetId'] as String?,
         sessionRefs: <String>[
           for (final id in (j['sessionRefs'] as List? ?? const <dynamic>[]))
+            if (id is String && id.isNotEmpty) id,
+        ],
+        projectRefs: <String>[
+          for (final id in (j['projectRefs'] as List? ?? const <dynamic>[]))
             if (id is String && id.isNotEmpty) id,
         ],
       );
@@ -255,6 +297,13 @@ class CloudTurnOptions {
   /// Session context never crosses chats otherwise (owner rule R1).
   final List<String> sessionRefs;
 
+  /// Project ids the user explicitly @-tagged in this message (R1).
+  ///
+  /// Only populated when the installed `ProjectsPort` says the gateway
+  /// accepts the field; the server's send schema is strict, so sending an
+  /// unknown key would 400 the prompt.
+  final List<String> projectRefs;
+
   /// The wire fields (absent keys are omitted, never sent as null).
   Map<String, Object> toJson() => <String, Object>{
         if (model != null && model!.trim().isNotEmpty) 'model': model!,
@@ -262,6 +311,7 @@ class CloudTurnOptions {
         'planMode': ?planMode,
         if (presetId != null && presetId!.isNotEmpty) 'presetId': presetId!,
         if (sessionRefs.isNotEmpty) 'sessionRefs': sessionRefs,
+        if (projectRefs.isNotEmpty) 'projectRefs': projectRefs,
       };
 }
 
@@ -826,6 +876,10 @@ class SubagentInfo {
   final AgentMode parentMode;
   final String prompt;
 
+  /// W2's short @-address (`@sa-1a2b3c4d`), when the `subagent_started`
+  /// event carried it. Null on servers that predate the handle.
+  final String? handle;
+
   /// Follow-up instructions queued by `send_message` (FIFO inbox).
   final List<String> messages = [];
   final Set<int> userReferenceMessages = {};
@@ -858,6 +912,7 @@ class SubagentInfo {
     required this.prompt,
     this.background = false,
     this.agentType = 'general-purpose',
+    this.handle,
   });
 
   String get state => finished

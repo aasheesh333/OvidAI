@@ -22,15 +22,20 @@ import 'widgets/aether_primitives.dart';
 ///    user's chats: the mapped server id when the chat has one, otherwise
 ///    [BrowserStreamClient.userAlias] (an unsent chat still sees the browser).
 ///  * The worker streams 3–5 fps only while someone watches. Closing the
-///    screen, or backgrounding the app, sends `browser_detach`: the screencast
-///    stops and the browser idles headless. Coming back re-attaches.
+///    screen, or backgrounding the app, sends `browser_detach`: the worker
+///    keeps rendering for a 45 s grace window (so a quick re-open is
+///    seamless), then converts to headless and stops frames. Coming back
+///    re-attaches.
+///  * Tabs are AGENT-OWNED: the strip lists what the agent opened and lets
+///    the user select one; there is no client-side "new tab".
 ///  * Take control / Resume agent is server-acknowledged with a pending state
 ///    and a timeout, offered only while a live page exists (EM-019), and
 ///    scoped to this viewer: another device's control is shown read-only
 ///    (FE-026).
 ///  * While in control the user can tap, double-tap, long-press, scroll
-///    (natural direction, streamed while the finger moves — FE-009) and type
-///    through the soft keyboard incl. Enter/Tab/Backspace (FE-008).
+///    (natural direction, streamed while the finger moves — FE-009), pinch to
+///    zoom the view (one finger pans a zoomed page) and type through the soft
+///    keyboard incl. Enter/Tab/Backspace/arrows (FE-008).
 ///
 /// There is deliberately no omnibar navigation: navigation is the agent's
 /// `browser_navigate` tool. The address row is a read-only display; "Open in
@@ -123,6 +128,19 @@ class _BrowserScreenState extends State<BrowserScreen>
   Size _scrollBox = Size.zero;
   Timer? _scrollTimer;
 
+  // Pinch-zoom / zoomed-pan (Wave 6 W4). Client-side view transform only:
+  // input coordinates are divided back through the same transform, so the
+  // page never sees a zoom event.
+  static const double _maxZoom = 4.0;
+  double _zoom = 1.0;
+  Offset _zoomPan = Offset.zero;
+  double _scaleStartZoom = 1.0;
+  Offset _scaleStartFocal = Offset.zero;
+  double _scaleStartLeft = 0;
+  double _scaleStartTop = 0;
+  int _scalePointers = 0;
+  Offset _panStartZoomPan = Offset.zero;
+
   // Soft keyboard bridge (FE-008).
   final TextEditingController _keyboard =
       TextEditingController(text: _kSentinel);
@@ -213,6 +231,11 @@ class _BrowserScreenState extends State<BrowserScreen>
       if (_client.state != null || _client.error != null) {
         _waitExpired = false;
       }
+      // Leaving Take Control also leaves the zoomed view.
+      if (!_client.takeoverActive && (_zoom != 1.0 || _zoomPan != Offset.zero)) {
+        _zoom = 1.0;
+        _zoomPan = Offset.zero;
+      }
     });
     _releaseFrame(old);
     final notice = _client.notice;
@@ -280,8 +303,9 @@ class _BrowserScreenState extends State<BrowserScreen>
     final image = _frame?.image;
     _frame = null;
     if (image != null && _pendingRelease.remove(image)) image.dispose();
-    // R3: closing the viewer stops the screencast; the browser stays
-    // headless (and the server releases a takeover this viewer held).
+    // R3: closing the viewer detaches. The worker keeps rendering for the
+    // 45 s grace window, then converts to headless (and releases any
+    // takeover this viewer held).
     _client.detach();
     _keyboardFocus.removeListener(_onKeyboardFocusChanged);
     _keyboardFocus.dispose();
@@ -322,21 +346,151 @@ class _BrowserScreenState extends State<BrowserScreen>
     return scale;
   }
 
-  /// Page CSS pixels for a canvas-local point. The image is painted with
-  /// `BoxFit.contain`, so the same letterboxed rect is the coordinate space.
+  /// The displayed image rect for the current zoom/pan. `scale` is page CSS
+  /// px → canvas px (base contain scale × zoom).
+  _FrameLayout? _layout(Size box) {
+    final base = _scaleFor(box);
+    final s = _client.state;
+    if (base == null || s == null) return null;
+    final baseW = s.viewportWidth * base;
+    final baseH = s.viewportHeight * base;
+    final width = baseW * _zoom;
+    final height = baseH * _zoom;
+    final left = box.width / 2 - width / 2 + _zoomPan.dx;
+    final top = box.height / 2 - height / 2 + _zoomPan.dy;
+    return _FrameLayout(
+      scale: base * _zoom,
+      left: left,
+      top: top,
+      width: width,
+      height: height,
+    );
+  }
+
+  /// Page CSS pixels for a canvas-local point. The image is painted with the
+  /// same rect [layout] computes, so this is the exact inverse transform.
   ({double x, double y})? _toPage(Offset local, Size box) {
     final s = _client.state;
-    final scale = _scaleFor(box);
-    if (s == null || scale == null) return null;
-    final offsetX = (box.width - s.viewportWidth * scale) / 2;
-    final offsetY = (box.height - s.viewportHeight * scale) / 2;
-    final x = ((local.dx - offsetX) / scale)
+    final layout = _layout(box);
+    if (s == null || layout == null) return null;
+    final x = ((local.dx - layout.left) / layout.scale)
         .clamp(0, s.viewportWidth - 1)
         .toDouble();
-    final y = ((local.dy - offsetY) / scale)
+    final y = ((local.dy - layout.top) / layout.scale)
         .clamp(0, s.viewportHeight - 1)
         .toDouble();
     return (x: x, y: y);
+  }
+
+  /// Keep the zoomed image from sliding completely out of the canvas.
+  Offset _clampPan(Size box, double zoom, Offset pan) {
+    final s = _client.state;
+    final base = _scaleFor(box);
+    if (s == null || base == null) return Offset.zero;
+    final width = s.viewportWidth * base * zoom;
+    final height = s.viewportHeight * base * zoom;
+    var left = box.width / 2 - width / 2 + pan.dx;
+    var top = box.height / 2 - height / 2 + pan.dy;
+    if (width <= box.width) {
+      left = (box.width - width) / 2;
+    } else {
+      left = left.clamp(box.width - width, 0.0).toDouble();
+    }
+    if (height <= box.height) {
+      top = (box.height - height) / 2;
+    } else {
+      top = top.clamp(box.height - height, 0.0).toDouble();
+    }
+    return Offset(
+      left - (box.width / 2 - width / 2),
+      top - (box.height / 2 - height / 2),
+    );
+  }
+
+  void _resetZoom() {
+    if (_zoom == 1.0 && _zoomPan == Offset.zero) return;
+    setState(() {
+      _zoom = 1.0;
+      _zoomPan = Offset.zero;
+    });
+  }
+
+  // ---- Pinch zoom + scroll (Wave 6 W4) ------------------------------------
+
+  void _onScaleStart(ScaleStartDetails details, Size box) {
+    _scalePointers = details.pointerCount;
+    if (details.pointerCount >= 2) {
+      final layout = _layout(box);
+      _scaleStartZoom = _zoom;
+      _scaleStartFocal = details.localFocalPoint;
+      _scaleStartLeft = layout?.left ?? 0;
+      _scaleStartTop = layout?.top ?? 0;
+      return;
+    }
+    if (_zoom > 1.0) {
+      // Zoomed in: one finger pans the image.
+      _panStartZoomPan = _zoomPan;
+    } else {
+      _onPanStart(details.localFocalPoint, box);
+    }
+  }
+
+  void _onScaleUpdate(ScaleUpdateDetails details, Size box) {
+    if (details.pointerCount != _scalePointers) {
+      // A finger joined/left mid-gesture: re-baseline so the scale factor
+      // stays relative to the current span instead of jumping.
+      _scalePointers = details.pointerCount;
+      final layout = _layout(box);
+      _scaleStartZoom = _zoom;
+      _scaleStartFocal = details.localFocalPoint;
+      _scaleStartLeft = layout?.left ?? 0;
+      _scaleStartTop = layout?.top ?? 0;
+      _panStartZoomPan = _zoomPan;
+      return;
+    }
+    if (details.pointerCount >= 2) {
+      final next = (_scaleStartZoom * details.scale).clamp(1.0, _maxZoom).toDouble();
+      // Keep the base-image point that was under the initial focal point
+      // under the CURRENT focal point.
+      final baseX = (_scaleStartFocal.dx - _scaleStartLeft) / _scaleStartZoom;
+      final baseY = (_scaleStartFocal.dy - _scaleStartTop) / _scaleStartZoom;
+      final s = _client.state;
+      final base = _scaleFor(box);
+      if (s == null || base == null) return;
+      final width = s.viewportWidth * base * next;
+      final height = s.viewportHeight * base * next;
+      final left = details.localFocalPoint.dx - baseX * next;
+      final top = details.localFocalPoint.dy - baseY * next;
+      final pan = Offset(
+        left - (box.width / 2 - width / 2),
+        top - (box.height / 2 - height / 2),
+      );
+      setState(() {
+        _zoom = next;
+        _zoomPan = _clampPan(box, next, pan);
+      });
+      return;
+    }
+    if (_zoom > 1.0) {
+      setState(() {
+        _zoomPan = _clampPan(
+          box,
+          _zoom,
+          _panStartZoomPan + (details.localFocalPoint - _scaleStartFocal),
+        );
+      });
+    } else {
+      _onPanUpdate(
+        details.localFocalPoint,
+        details.focalPointDelta,
+        box,
+      );
+    }
+  }
+
+  void _onScaleEnd(ScaleEndDetails details) {
+    _scalePointers = 0;
+    if (_zoom <= 1.0) _onPanEnd();
   }
 
   // ---- Scroll (FE-009) -----------------------------------------------------
@@ -528,9 +682,9 @@ class _BrowserScreenState extends State<BrowserScreen>
         child: Column(
           children: [
             _TabStrip(
-              title: state?.title,
-              url: state?.url,
+              tabs: state?.tabs ?? const <BrowserTab>[],
               live: state?.live ?? false,
+              onSelect: (index) => unawaited(_client.switchTab(index)),
             ),
             _AddressRow(
               host: _host(state?.url),
@@ -551,6 +705,8 @@ class _BrowserScreenState extends State<BrowserScreen>
                       takeover: takeover,
                       error: _client.error,
                       waitExpired: _waitExpired,
+                      zoom: _zoom,
+                      zoomPan: _zoomPan,
                       onRetry: _retry,
                       onTap: (local, box) {
                         final point = _toPage(local, box);
@@ -568,11 +724,43 @@ class _BrowserScreenState extends State<BrowserScreen>
                           _client.sendLongPress(point.x, point.y);
                         }
                       },
-                      onPanStart: _onPanStart,
-                      onPanUpdate: _onPanUpdate,
-                      onPanEnd: _onPanEnd,
+                      onScaleStart: _onScaleStart,
+                      onScaleUpdate: _onScaleUpdate,
+                      onScaleEnd: _onScaleEnd,
                     ),
                   ),
+                  if (_zoom > 1.0)
+                    Positioned(
+                      right: 10,
+                      top: 10,
+                      child: Material(
+                        key: const ValueKey('browser-zoom'),
+                        color: Aether.surface,
+                        elevation: 2,
+                        borderRadius: BorderRadius.circular(14),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(14),
+                          onTap: _resetZoom,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 5,
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  '${_zoom.toStringAsFixed(1)}×',
+                                  style: const TextStyle(fontSize: 11.5),
+                                ),
+                                const SizedBox(width: 4),
+                                const Icon(Icons.zoom_out_map, size: 13),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   if (!online && _frame != null)
                     const Positioned(
                       left: 0,
@@ -628,58 +816,110 @@ class _BrowserScreenState extends State<BrowserScreen>
   }
 }
 
-/// The server's active page as a single tab chip.
-class _TabStrip extends StatelessWidget {
-  const _TabStrip({required this.title, required this.url, required this.live});
+/// The painted image rect (canvas-local) for the current contain-scale and
+/// pinch zoom. Shared by the painter and the input coordinate inverse.
+class _FrameLayout {
+  const _FrameLayout({
+    required this.scale,
+    required this.left,
+    required this.top,
+    required this.width,
+    required this.height,
+  });
 
-  final String? title;
-  final String? url;
+  /// Page CSS px → canvas px.
+  final double scale;
+  final double left;
+  final double top;
+  final double width;
+  final double height;
+}
+
+/// The agent's tab strip. Wave 6 W4: tabs are AGENT-OWNED — this widget has
+/// no "+" affordance and no create callback; an empty list renders nothing.
+class _TabStrip extends StatelessWidget {
+  const _TabStrip({
+    required this.tabs,
+    required this.live,
+    required this.onSelect,
+  });
+
+  final List<BrowserTab> tabs;
   final bool live;
+  final ValueChanged<int> onSelect;
+
+  String _label(BrowserTab tab) {
+    if (tab.title != null && tab.title!.isNotEmpty) return tab.title!;
+    final host = Uri.tryParse(tab.url ?? '')?.host ?? '';
+    if (host.isNotEmpty) return host;
+    return tab.url ?? 'Tab ${tab.index + 1}';
+  }
 
   @override
   Widget build(BuildContext context) {
-    final label = (title?.isNotEmpty ?? false)
-        ? title!
-        : (Uri.tryParse(url ?? '')?.host.isNotEmpty ?? false)
-            ? Uri.parse(url!).host
-            : (url ?? 'Cloud browser');
+    // Nothing to show before the agent opens its first page. This is the
+    // "empty browser" state — deliberately no tab-creation control.
+    if (tabs.isEmpty) return const SizedBox.shrink();
     return Container(
       key: const ValueKey('browser-tab-strip'),
       height: 44,
       color: Aether.surfaceAlt,
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      child: Row(
-        children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            decoration: BoxDecoration(
-              color: Aether.surface,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: tabs.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 6),
+        itemBuilder: (context, i) {
+          final tab = tabs[i];
+          return Material(
+            key: ValueKey('browser-tab-${tab.index}'),
+            color: tab.active ? Aether.surface : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+            child: InkWell(
               borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Aether.hairline),
-            ),
-            alignment: Alignment.center,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  live ? Icons.public : Icons.public_off,
-                  size: 13,
-                  color: live ? Aether.accent : Aether.textFaint,
-                ),
-                const SizedBox(width: 6),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 220),
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11.5),
+              onTap: tab.active ? null : () => onSelect(tab.index),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: tab.active ? Aether.accent : Aether.hairline,
                   ),
                 ),
-              ],
+                alignment: Alignment.center,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      tab.active && live
+                          ? Icons.public
+                          : Icons.public_off,
+                      size: 13,
+                      color: tab.active && live
+                          ? Aether.accent
+                          : Aether.textFaint,
+                    ),
+                    const SizedBox(width: 6),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 180),
+                      child: Text(
+                        _label(tab),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: tab.active
+                              ? FontWeight.w600
+                              : FontWeight.w400,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
-          ),
-        ],
+          );
+        },
       ),
     );
   }
@@ -773,13 +1013,15 @@ class _FrameCanvas extends StatelessWidget {
     required this.takeover,
     required this.error,
     required this.waitExpired,
+    required this.zoom,
+    required this.zoomPan,
     required this.onRetry,
     required this.onTap,
     required this.onDoubleTap,
     required this.onLongPress,
-    required this.onPanStart,
-    required this.onPanUpdate,
-    required this.onPanEnd,
+    required this.onScaleStart,
+    required this.onScaleUpdate,
+    required this.onScaleEnd,
   });
 
   final BrowserFrame? frame;
@@ -792,13 +1034,15 @@ class _FrameCanvas extends StatelessWidget {
   final bool takeover;
   final BrowserStreamError? error;
   final bool waitExpired;
+  final double zoom;
+  final Offset zoomPan;
   final VoidCallback onRetry;
   final void Function(Offset local, Size box) onTap;
   final void Function(Offset local, Size box) onDoubleTap;
   final void Function(Offset local, Size box) onLongPress;
-  final void Function(Offset local, Size box) onPanStart;
-  final void Function(Offset local, Offset delta, Size box) onPanUpdate;
-  final VoidCallback onPanEnd;
+  final void Function(ScaleStartDetails details, Size box) onScaleStart;
+  final void Function(ScaleUpdateDetails details, Size box) onScaleUpdate;
+  final void Function(ScaleEndDetails details) onScaleEnd;
 
   @override
   Widget build(BuildContext context) {
@@ -823,21 +1067,49 @@ class _FrameCanvas extends StatelessWidget {
             onDoubleTap: () => onDoubleTap(doubleTapAt, box),
             onLongPressStart: (details) =>
                 onLongPress(details.localPosition, box),
-            onPanStart: (details) => onPanStart(details.localPosition, box),
-            onPanUpdate: (details) =>
-                onPanUpdate(details.localPosition, details.delta, box),
-            onPanEnd: (_) => onPanEnd(),
+            // One recognizer for both gestures: one finger scrolls the page
+            // (or pans a zoomed view), two fingers pinch-zoom (Wave 6 W4).
+            onScaleStart: (details) => onScaleStart(details, box),
+            onScaleUpdate: (details) => onScaleUpdate(details, box),
+            onScaleEnd: onScaleEnd,
             child: Container(
               color: Aether.bg,
-              alignment: Alignment.center,
               child: Opacity(
                 opacity: online ? 1 : 0.55,
-                child: _FrameImage(frame: image),
+                child: _positionedFrame(box),
               ),
             ),
           ),
         );
       },
+    );
+  }
+
+  /// Paint the frame at the zoom/pan rect. The same rect drives input
+  /// coordinate inversion in the screen state, so a tap lands where the user
+  /// sees it even while zoomed.
+  Widget _positionedFrame(Size box) {
+    final image = frame;
+    final s = state;
+    if (image == null || s == null) return const SizedBox.shrink();
+    final base = math.min(
+      box.width / math.max(s.viewportWidth, 1),
+      box.height / math.max(s.viewportHeight, 1),
+    );
+    final width = s.viewportWidth * base * zoom;
+    final height = s.viewportHeight * base * zoom;
+    final left = box.width / 2 - width / 2 + zoomPan.dx;
+    final top = box.height / 2 - height / 2 + zoomPan.dy;
+    return Stack(
+      children: [
+        Positioned(
+          left: left,
+          top: top,
+          width: width,
+          height: height,
+          child: _FrameImage(frame: image),
+        ),
+      ],
     );
   }
 
@@ -1026,8 +1298,12 @@ class _KeyBar extends StatelessWidget {
             key('enter', 'Enter', 'Enter'),
             key('backspace', 'Delete', 'Backspace'),
             key('escape', 'Esc', 'Escape'),
+            key('left', '←', 'ArrowLeft'),
             key('up', '↑', 'ArrowUp'),
             key('down', '↓', 'ArrowDown'),
+            key('right', '→', 'ArrowRight'),
+            key('home', 'Home', 'Home'),
+            key('end', 'End', 'End'),
             IconButton(
               tooltip: 'Hide keyboard',
               icon: const Icon(Icons.keyboard_hide, size: 19),

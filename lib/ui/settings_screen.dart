@@ -18,6 +18,7 @@ import '../core/theme.dart';
 import '../l10n/l10n.dart';
 import 'auth_screen.dart';
 import 'billing_screen.dart';
+import 'credentials_vault_screen.dart';
 import 'history_import_sheet.dart' show ImportLocalChatsTile;
 import 'memory_screen.dart';
 import 'profile_avatar.dart';
@@ -82,6 +83,14 @@ class SettingsScreen extends StatelessWidget {
                   title: l.settingsUsage,
                   subtitle: l.settingsUsageSubtitle,
                   builder: (_) => const UsageScreen(),
+                ),
+                _hairline(),
+                // Wave 6 W4: the cloud browser's saved logins.
+                _NavTile(
+                  icon: Icons.password_outlined,
+                  title: 'Credentials vault',
+                  subtitle: 'Saved logins for the cloud browser',
+                  builder: (_) => const CredentialsVaultScreen(),
                 ),
               ],
             ),

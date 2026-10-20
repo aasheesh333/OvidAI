@@ -6,8 +6,22 @@ export interface SessionDto {
   title: string | null;
   /** Interaction mode. Spec D5: "safe" | "auto" | "drive" | "studio" — NO "control". */
   mode: "safe" | "auto" | "drive" | "studio";
+  /** W1: the project this chat belongs to, or null for an ungrouped chat. */
+  projectId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** W1 project row as the sidebar needs it (counts are computed live). */
+export interface ProjectDto {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  sessionCount: number;
+  fileCount: number;
+  /** Per-project memory-file cap for the caller's plan (80/100/150/250). */
+  fileCap: number;
 }
 
 export interface MessageDto {
@@ -310,9 +324,35 @@ export const sessionDtoSchema: z.ZodType<SessionDto> = z.object({
   id: z.string().min(1),
   title: z.string().nullable(),
   mode: sessionModeSchema,
+  projectId: z.string().min(1).nullable(),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
 });
+
+export const projectDtoSchema: z.ZodType<ProjectDto> = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  createdAt: z.string().min(1),
+  updatedAt: z.string().min(1),
+  sessionCount: z.number().int().nonnegative(),
+  fileCount: z.number().int().nonnegative(),
+  fileCap: z.number().int().positive(),
+});
+
+/** POST /cloud/v1/projects — name only, unknown keys rejected. */
+export const createProjectBodySchema = z
+  .object({ name: z.string().trim().min(1).max(80) })
+  .strict();
+
+/** PATCH /cloud/v1/projects/:id — rename only. */
+export const renameProjectBodySchema = z
+  .object({ name: z.string().trim().min(1).max(80) })
+  .strict();
+
+/** POST /cloud/v1/sessions/:id/project — move into a project or out (null). */
+export const moveSessionProjectBodySchema = z
+  .object({ projectId: z.string().min(1).nullable() })
+  .strict();
 
 /** PATCH /cloud/v1/sessions/:id body — at least one field required, unknown keys rejected. */
 export const sessionPatchSchema = z

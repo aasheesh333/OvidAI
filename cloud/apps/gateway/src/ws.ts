@@ -1097,6 +1097,16 @@ export async function handleWsConnection(
         }
         return;
       }
+      case "browser_switch_tab": {
+        // Wave 6 W4: viewers may SELECT an agent-opened tab. There is no
+        // client op that creates one — agent-first is enforced at the
+        // protocol boundary, not just in the UI.
+        const attach = requireBrowserAttach(msg.sessionId);
+        if (attach !== null) {
+          attach.publishCtl({ type: "switch_tab", index: msg.index, viewerId: attach.viewerId });
+        }
+        return;
+      }
       case "approval_response":
         await handleApprovalResponse(msg);
         return;

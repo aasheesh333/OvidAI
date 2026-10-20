@@ -393,6 +393,7 @@ describe("spine additivity (rest.ts untouched)", () => {
       id: "s1",
       title: null,
       mode: "auto",
+      projectId: null,
       createdAt: "2026-10-15T12:00:00.000Z",
       updatedAt: "2026-10-15T12:00:00.000Z",
     };

@@ -6,7 +6,8 @@
 ///
 ///  - client → server: `browser_attach{sessionId}`,
 ///    `browser_detach{sessionId}`, `browser_input{sessionId,input}`,
-///    `browser_takeover{sessionId,enabled}`;
+///    `browser_takeover{sessionId,enabled}`,
+///    `browser_switch_tab{sessionId,index}` (Wave 6 W4);
 ///  - server → client: `browser_state{state}` (JSON) and screencast frames as
 ///    raw BINARY WS messages — image bytes only. The gateway strips redis's
 ///    1-byte `BROWSER_FRAME_FORMAT` prefix before forwarding; the image format
@@ -85,6 +86,32 @@ class BrowserStreamError {
   final String message;
 }
 
+/// One open tab of the per-user browser (Wave 6 W4).
+///
+/// Tabs are AGENT-OWNED: the client can only select an existing tab, never
+/// create one. An empty [BrowserState.tabs] is the honest "the agent has not
+/// opened a page yet" state.
+class BrowserTab {
+  const BrowserTab({
+    required this.index,
+    required this.url,
+    required this.title,
+    required this.active,
+  });
+
+  factory BrowserTab.fromJson(Map<String, dynamic> json) => BrowserTab(
+        index: (json['index'] as num?)?.toInt() ?? 0,
+        url: json['url'] as String?,
+        title: json['title'] as String?,
+        active: json['active'] == true,
+      );
+
+  final int index;
+  final String? url;
+  final String? title;
+  final bool active;
+}
+
 /// The server's `BrowserStateDto` (`@ovid/shared` browser.ts).
 class BrowserState {
   const BrowserState({
@@ -98,22 +125,42 @@ class BrowserState {
     required this.viewportWidth,
     required this.viewportHeight,
     this.takeoverViewerId,
+    this.tabs = const <BrowserTab>[],
+    this.activeTabIndex = 0,
   });
 
   factory BrowserState.fromJson(Map<String, dynamic> json) {
     final viewport = json['viewport'];
     final view = viewport is Map ? viewport : const <String, dynamic>{};
+    final rawTabs = json['tabs'];
+    final tabs = rawTabs is List
+        ? rawTabs
+            .whereType<Map>()
+            .map((t) => BrowserTab.fromJson(Map<String, dynamic>.from(t)))
+            .toList(growable: false)
+        : const <BrowserTab>[];
+    final url = json['url'] as String?;
+    final title = json['title'] as String?;
+    // Pre-W4 workers have no tab list. Synthesize the single active tab so
+    // the viewer still shows what it always did.
+    final effectiveTabs = tabs.isNotEmpty || url == null
+        ? tabs
+        : <BrowserTab>[
+            BrowserTab(index: 0, url: url, title: title, active: true),
+          ];
     return BrowserState(
       sessionId: json['sessionId'] as String? ?? '',
       live: json['live'] == true,
-      url: json['url'] as String?,
-      title: json['title'] as String?,
+      url: url,
+      title: title,
       takeover: json['takeover'] == true,
       screencast: json['screencast'] == true,
       frameFormat: json['frameFormat'] as String? ?? 'webp',
       viewportWidth: (view['width'] as num?)?.toInt() ?? 1280,
       viewportHeight: (view['height'] as num?)?.toInt() ?? 800,
       takeoverViewerId: json['takeoverViewerId'] as String?,
+      tabs: effectiveTabs,
+      activeTabIndex: (json['activeTabIndex'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -141,6 +188,12 @@ class BrowserState {
   /// The gateway viewer that holds takeover (null when none, or an older
   /// server that does not say).
   final String? takeoverViewerId;
+
+  /// Every open tab, in order. Empty before the agent opens its first page.
+  final List<BrowserTab> tabs;
+
+  /// Index of the active tab (matches `tabs[].active`).
+  final int activeTabIndex;
 }
 
 /// Decodes one binary screencast frame. Replaceable so a test (or a platform
@@ -551,6 +604,21 @@ class BrowserStreamClient extends ChangeNotifier {
   void sendText(String text) {
     if (text.isEmpty) return;
     sendKey('Insert', text: text);
+  }
+
+  /// Wave 6 W4: select an existing tab. There is deliberately no
+  /// `newTab()` — tab creation belongs to the agent's `browser_new_tab`
+  /// tool, so an empty browser stays empty until the agent opens a page.
+  Future<void> switchTab(int index) async {
+    final id = _sessionId;
+    if (id == null || _disposed || index < 0) return;
+    final tabs = _state?.tabs ?? const <BrowserTab>[];
+    if (index >= tabs.length) return;
+    await _send(<String, Object?>{
+      'op': 'browser_switch_tab',
+      'sessionId': id,
+      'index': index,
+    });
   }
 
   void _sendInput(Map<String, Object?> input) {

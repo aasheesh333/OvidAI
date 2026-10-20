@@ -446,6 +446,46 @@ void main() {
       expect(sent.where((f) => f['op'] == 'browser_takeover'), isEmpty);
     });
 
+    test('W4 tabs: state carries the agent tab list; switchTab selects only an existing tab',
+        () async {
+      await client.attach('s1');
+      raw.add(<String, dynamic>{
+        'op': 'browser_state',
+        'sessionId': 's1',
+        'state': _stateJson()..['tabs'] = <Map<String, dynamic>>[
+          {'index': 0, 'url': 'https://a.test/', 'title': 'A', 'active': false},
+          {'index': 1, 'url': 'https://b.test/', 'title': 'B', 'active': true},
+        ]..['activeTabIndex'] = 1,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(client.state!.tabs.map((t) => t.title), <String?>['A', 'B']);
+      expect(client.state!.activeTabIndex, 1);
+
+      await client.switchTab(0);
+      expect(sent.last, <String, Object?>{
+        'op': 'browser_switch_tab',
+        'sessionId': 's1',
+        'index': 0,
+      });
+
+      // Out of range is a no-op — the client cannot invent a tab.
+      await client.switchTab(2);
+      expect(sent.where((f) => f['op'] == 'browser_switch_tab').length, 1);
+    });
+
+    test('W4 tabs: an older worker with no tab list still shows its single page',
+        () async {
+      await client.attach('s1');
+      raw.add(<String, dynamic>{
+        'op': 'browser_state',
+        'sessionId': 's1',
+        'state': _stateJson(),
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(client.state!.tabs, hasLength(1));
+      expect(client.state!.tabs.single.active, isTrue);
+    });
+
     test('keyboard: text is inserted, special keys are pressed (FE-008)',
         () async {
       await client.attach('s1');
@@ -616,6 +656,71 @@ void main() {
       expect(find.text('Take control'), findsOneWidget);
     });
 
+    testWidgets('W4 agent-first tabs: an empty browser has no tab strip and no create control',
+        (tester) async {
+      await pumpScreen(tester);
+      await pushState(
+        tester,
+        _stateJson(live: true, url: null, title: null),
+      );
+      expect(find.byKey(const ValueKey('browser-tab-strip')), findsNothing);
+      expect(find.text('New tab'), findsNothing);
+      expect(find.byIcon(Icons.add), findsNothing);
+    });
+
+    testWidgets('W4 tabs: the strip lists agent-opened tabs and switching sends the op',
+        (tester) async {
+      await pumpScreen(tester);
+      final state = _stateJson(sessionId: 'user-u1')
+        ..['tabs'] = <Map<String, dynamic>>[
+          {'index': 0, 'url': 'https://a.test/', 'title': 'First', 'active': true},
+          {'index': 1, 'url': 'https://b.test/', 'title': 'Second', 'active': false},
+        ]
+        ..['activeTabIndex'] = 0;
+      await pushState(tester, state);
+
+      expect(find.byKey(const ValueKey('browser-tab-0')), findsOneWidget);
+      expect(find.byKey(const ValueKey('browser-tab-1')), findsOneWidget);
+      expect(find.text('First'), findsOneWidget);
+      expect(find.text('Second'), findsOneWidget);
+      // Agent-first: no "+" anywhere in the strip.
+      expect(find.byIcon(Icons.add), findsNothing);
+
+      await tester.tap(find.byKey(const ValueKey('browser-tab-1')));
+      await tester.pump();
+      final switchOp = sent.lastWhere((f) => f['op'] == 'browser_switch_tab');
+      expect(switchOp['index'], 1);
+    });
+
+    testWidgets('W4 Take Control: pinch-zoom shows the zoom chip and reset returns to 1×',
+        (tester) async {
+      await pumpScreen(tester);
+      await pushState(tester, _stateJson(takeover: true));
+      await pushFrame(tester);
+
+      final canvas = find.byKey(const ValueKey('browser-canvas'));
+      final center = tester.getCenter(canvas);
+      final g1 = await tester.startGesture(center - const Offset(30, 0));
+      final g2 = await tester.startGesture(center + const Offset(30, 0));
+      await tester.pump();
+      await g1.moveTo(center - const Offset(110, 0));
+      await g2.moveTo(center + const Offset(110, 0));
+      await tester.pump();
+      await g1.up();
+      await g2.up();
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('browser-zoom')), findsOneWidget,
+          reason: 'two-finger pinch must zoom the live view');
+      await tester.tap(find.byKey(const ValueKey('browser-zoom')));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('browser-zoom')), findsNothing,
+          reason: 'tapping the chip resets to 1×');
+      // Drain the double-tap recognizer's timer before teardown.
+      await tester.pump(const Duration(milliseconds: 500));
+    });
+
+
     testWidgets('EM-019: no live browser ⇒ no "Agent is driving" chip, honest idle copy',
         (tester) async {
       await pumpScreen(tester);
@@ -778,6 +883,13 @@ void main() {
       await tester.pump();
       await tester.tap(find.byKey(const ValueKey('browser-key-tab')));
       await tester.tap(find.byKey(const ValueKey('browser-key-enter')));
+      // W4: the key bar is a full editing row, not just Enter/Delete.
+      for (final id in <String>['left', 'home', 'end', 'right']) {
+        final key = find.byKey(ValueKey('browser-key-$id'));
+        await tester.ensureVisible(key);
+        await tester.pump();
+        await tester.tap(key);
+      }
       await tester.pump();
       await tester.testTextInput.receiveAction(TextInputAction.go);
       await tester.pump();
@@ -787,6 +899,10 @@ void main() {
         <String, Object?>{'type': 'key', 'key': 'Backspace'},
         <String, Object?>{'type': 'key', 'key': 'Tab'},
         <String, Object?>{'type': 'key', 'key': 'Enter'},
+        <String, Object?>{'type': 'key', 'key': 'ArrowLeft'},
+        <String, Object?>{'type': 'key', 'key': 'Home'},
+        <String, Object?>{'type': 'key', 'key': 'End'},
+        <String, Object?>{'type': 'key', 'key': 'ArrowRight'},
         <String, Object?>{'type': 'key', 'key': 'Enter'},
       ]);
     });

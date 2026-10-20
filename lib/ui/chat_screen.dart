@@ -12,6 +12,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
 
+import '../core/chat_integration_ports.dart';
 import '../core/theme.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
@@ -24,6 +25,7 @@ import '../core/model_limits.dart';
 import 'content_report_sheet.dart';
 import '../core/format.dart';
 import '../core/voice_input_service.dart';
+import '../core/voice_reply_service.dart';
 import '../core/state.dart';
 import '../core/native_share.dart';
 import 'share_actions.dart';
@@ -33,7 +35,9 @@ import 'browser_screen.dart';
 import 'sidebar.dart';
 import 'settings_screen.dart';
 import 'studio_screen.dart' show openStudio;
+import 'studio_binding_sheet.dart';
 import 'subagent_screen.dart';
+import 'trajectory_screen.dart';
 import 'transcript_model.dart';
 import 'chat_layout.dart';
 import 'html_artifact_view.dart';
@@ -850,6 +854,18 @@ class _TurnProcessStripState extends State<_TurnProcessStrip> {
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
 
+  /// Test-visible R1 resolver: the explicit session refs a prompt carries.
+  @visibleForTesting
+  static List<String> sessionRefsInForTest(
+    String text,
+    String currentSessionId,
+  ) => _ChatScreenState.sessionRefsIn(text, currentSessionId);
+
+  /// Test-visible R1 resolver: the explicit project refs a prompt carries.
+  @visibleForTesting
+  static List<String> projectRefsInForTest(String text) =>
+      _ChatScreenState.projectRefsIn(text);
+
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
@@ -921,6 +937,45 @@ class _ChatScreenState extends State<ChatScreen>
   /// Send button's busy state.
   bool _executingCommand = false;
   String? _draftBindScheduledFor;
+
+  // ── Vernacular voice-first mode (W9) ─────────────────────────────────
+  /// When true the mic records, the final transcript is sent immediately,
+  /// and the assistant's answer is spoken + shown as a summary card.
+  bool _voiceFirst = false;
+  /// Language id (`en`, `hi`, `hinglish`, `ta`) — the label is shown in the
+  /// chip while the engine receives [VoiceReplyService.localeFor].
+  String _voiceLanguage = 'en';
+
+  /// Locale + label of the voice turn in flight per session; non-null means
+  /// the next settled assistant answer should be spoken.
+  final Map<String, ({String localeId, String label})> _voicePending =
+      <String, ({String localeId, String label})>{};
+
+  /// Transcript length when the voice turn was sent, so an older answer is
+  /// never spoken after a fast completion.
+  final Map<String, int> _voicePendingStart = <String, int>{};
+
+  /// The assistant row already spoken, so a rebuild cannot repeat it.
+  String? _voiceSpokenMessageId;
+  _VoiceSummary? _voiceSummary;
+
+  /// W3 STUDIO binding helpers (repo/branch gate).
+  StudioBinding? _studioBinding(ChatSession? s) {
+    final port = StudioBindingPort.instance;
+    final fromPort = s == null ? null : port?.bindingFor(s.id);
+    if (fromPort != null && fromPort.ready) return fromPort;
+    final repo = s?.repo?.trim() ?? '';
+    final branch = s?.branch?.trim() ?? '';
+    if (repo.isEmpty || branch.isEmpty) return null;
+    return StudioBinding(repo: repo, branch: branch);
+  }
+
+  bool _isStudioMode(ChatSession? s) =>
+      _agent.mode == AgentMode.studio || s?.mode == AgentMode.studio.name;
+
+  /// The STUDIO send gate: cannot send until a repo AND branch are bound.
+  bool _studioReady(ChatSession? s) =>
+      !_isStudioMode(s) || _studioBinding(s) != null;
 
   void _recordDraftEdit() {
     if (_observedDraftText == _input.text) return;
@@ -1078,7 +1133,74 @@ class _ChatScreenState extends State<ChatScreen>
       ComposerDraftStore.I.load().then((_) => _restorePersistedDraft()),
     );
     ConnectionService.I.addListener(_onConnectivityForHistory);
+    _agent.addListener(_onAgentVoiceTick);
     unawaited(_bootCloud());
+  }
+
+  /// Speaks a voice-first turn's answer once the Main Agent settles.
+  ///
+  /// Runs from the facade's change notifications (no polling). It is
+  /// defensive: an answer that predates the voice send is never spoken, a
+  /// row is spoken once, and a failed/empty answer simply shows no card.
+  void _onAgentVoiceTick() {
+    final sid = AppState.I.activeSessionId;
+    if (sid == null || !mounted) return;
+    final pending = _voicePending[sid];
+    if (pending == null) return;
+    if (_agent.busyFor(sid)) return;
+    final session = AppState.I.sessionById(sid);
+    if (session == null) return;
+    final start = _voicePendingStart[sid] ?? 0;
+    final rows = _messagesOf(session);
+    Message? answer;
+    for (var i = rows.length - 1; i >= start && i >= 0; i--) {
+      final m = rows[i];
+      if (m.role == 'assistant' &&
+          m.kind == MsgKind.text &&
+          m.content.trim().isNotEmpty) {
+        answer = m;
+        break;
+      }
+    }
+    if (answer == null || answer.privateSyncId == _voiceSpokenMessageId) {
+      return;
+    }
+    final settled = answer;
+    _voicePending.remove(sid);
+    _voicePendingStart.remove(sid);
+    _voiceSpokenMessageId = settled.privateSyncId;
+    final spoken = _speechText(settled.content);
+    if (spoken.isEmpty) return;
+    unawaited(
+      VoiceReplyService.I.speak(spoken, localeId: pending.localeId),
+    );
+    setState(() {
+      _voiceSummary = _VoiceSummary(
+        sessionId: sid,
+        messageId: settled.privateSyncId,
+        text: spoken,
+        localeId: pending.localeId,
+        languageLabel: pending.label,
+      );
+    });
+  }
+
+  /// Plain text for speech + the summary card: drops fenced code (spoken
+  /// code is noise), link targets and markdown emphasis, then bounds length.
+  static String _speechText(String markdown) {
+    var text = markdown.replaceAll(RegExp(r'```[\s\S]*?```'), ' ');
+    text = text.replaceAllMapped(
+      RegExp(r'\[([^\]]+)\]\([^)]+\)'),
+      (m) => m.group(1) ?? '',
+    );
+    text = text
+        .replaceAll(RegExp(r'[#>*_`~|]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (text.length > 1200) {
+      text = '${text.substring(0, 1200).trimRight()}…';
+    }
+    return text;
   }
 
   /// CH-035: a history page that failed while offline (or on a transient
@@ -1284,7 +1406,9 @@ class _ChatScreenState extends State<ChatScreen>
   void dispose() {
     _draftApp.removeListener(_onDraftAccountChanged);
     ConnectionService.I.removeListener(_onConnectivityForHistory);
+    _agent.removeListener(_onAgentVoiceTick);
     _fallbackNotice?.removeListener(_showModelFallbackNotice);
+    unawaited(VoiceReplyService.I.stop());
     unawaited(ComposerDraftStore.I.flush());
     _scroll.dispose();
     _input.dispose();
@@ -1639,6 +1763,10 @@ class _ChatScreenState extends State<ChatScreen>
           });
         }
         final wide = MediaQuery.sizeOf(context).width >= 840;
+        // W9 model lock: a run's model is fixed for the turn, so the header
+        // picker is disabled until it settles (no mid-run model switch that
+        // would silently apply to the NEXT run).
+        final modelLocked = s != null && _agent.busyFor(s.id);
         return Scaffold(
           backgroundColor: Aether.bg,
           drawer: wide
@@ -1653,33 +1781,45 @@ class _ChatScreenState extends State<ChatScreen>
             // A11Y: a labelled button with a 48dp-tall hit area.
             title: Semantics(
               button: true,
-              label: 'Change model',
+              label: modelLocked
+                  ? 'Model locked while Ovid is working'
+                  : 'Change model',
               child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () => _modelPicker(context),
-              child: ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: 48, minWidth: 48),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Flexible(
-                    child: Text(
-                      // Never "Select model" (owner directive 2026-10-18):
-                      // an empty/sentinel model means Auto is in effect.
-                      s?.model == null ||
-                              s!.model.trim().isEmpty ||
-                              s.model == 'Select a provider'
-                          ? 'Auto'
-                          : ovidModelLabel(s.model),
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 14),
-                    ),
+                behavior: HitTestBehavior.opaque,
+                onTap: modelLocked ? null : () => _modelPicker(context),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(
+                    minHeight: 48,
+                    minWidth: 48,
                   ),
-                  const SizedBox(width: 4),
-                  Icon(Icons.unfold_more, size: 16, color: Aether.textFaint),
-                ],
-              ),
-              ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          // Never "Select model" (owner directive 2026-10-18):
+                          // an empty/sentinel model means Auto is in effect.
+                          s?.model == null ||
+                                  s!.model.trim().isEmpty ||
+                                  s.model == 'Select a provider'
+                              ? 'Auto'
+                              : ovidModelLabel(s.model),
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: modelLocked ? Aether.textMuted : Aether.text,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Icon(
+                        modelLocked ? Icons.lock_outline : Icons.unfold_more,
+                        size: 16,
+                        color: Aether.textFaint,
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
             // Exactly three header actions (owner ask): Studio, Browser and
@@ -1729,11 +1869,24 @@ class _ChatScreenState extends State<ChatScreen>
                     const _GoalBar(),
                     const _TodoDock(),
                     const _StatsLine(),
-                    // The offline prompt outbox chip and the cloud
-                    // error-envelope row (402/409/503).
-                    _CloudOutboxChip(
+                    // W9: live subagent activity (rendered from the facade's
+                    // projection; unknown W2 events stay harmless no-ops).
+                    _SubagentActivityDock(
                       sessionId: AppState.I.activeSessionId,
                     ),
+                    // W9: voice-first reply summary card.
+                    if (_voiceSummary != null &&
+                        _voiceSummary!.sessionId == AppState.I.activeSessionId)
+                      _VoiceSummaryCard(
+                        summary: _voiceSummary!,
+                        onDismiss: () {
+                          unawaited(VoiceReplyService.I.stop());
+                          setState(() => _voiceSummary = null);
+                        },
+                      ),
+                    // The offline prompt outbox chip and the cloud
+                    // error-envelope row (402/409/503).
+                    _CloudOutboxChip(sessionId: AppState.I.activeSessionId),
                     _CloudErrorRow(
                       sessionId: AppState.I.activeSessionId,
                       onRetry: _retryFailedCloudPrompt,
@@ -1782,19 +1935,20 @@ class _ChatScreenState extends State<ChatScreen>
                             Expanded(
                               child: s == null || _messagesOf(s).isEmpty
                                   ? (s != null &&
-                                          _cloudTranscriptsFailed
-                                              .contains(s.id)
-                                      ? _HistoryLoadFailed(
-                                          loading: _cloudTranscriptsLoading
-                                              .contains(s.id),
-                                          onRetry: () => unawaited(
-                                            _loadCloudTranscript(
+                                            _cloudTranscriptsFailed.contains(
                                               s.id,
-                                              force: true,
+                                            )
+                                        ? _HistoryLoadFailed(
+                                            loading: _cloudTranscriptsLoading
+                                                .contains(s.id),
+                                            onRetry: () => unawaited(
+                                              _loadCloudTranscript(
+                                                s.id,
+                                                force: true,
+                                              ),
                                             ),
-                                          ),
-                                        )
-                                      : const _EmptyState())
+                                          )
+                                        : const _EmptyState())
                                   : Stack(
                                       children: [
                                         // Pinch-to-zoom: scales message text only.
@@ -2113,14 +2267,37 @@ class _ChatScreenState extends State<ChatScreen>
                               controller: _input,
                               focusNode: _inputFocus,
                               sessionId: s?.id,
-                              running: s == null
-                                  ? false
-                                  : _agent.busyFor(s.id),
+                              running: s == null ? false : _agent.busyFor(s.id),
                               // approval takeover parity: a pending approval LOCKS
                               // the composer — the user answers the card, not the box.
                               locked: _agent.pendingApproval != null,
                               editingQueue: _queueEdits.containsKey(s?.id),
                               commandBusy: _executingCommand,
+                              studioReady: _studioReady(s),
+                              onStudioBlocked: () {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      'Choose a repository and branch in Studio before sending.',
+                                    ),
+                                    behavior: SnackBarBehavior.floating,
+                                  ),
+                                );
+                              },
+                              voiceFirst: _voiceFirst,
+                              voiceLanguage: _voiceLanguage,
+                              onVoiceFirstChanged: (on) {
+                                setState(() {
+                                  _voiceFirst = on;
+                                  if (!on) {
+                                    _voicePending.remove(s?.id);
+                                    _voicePendingStart.remove(s?.id);
+                                  }
+                                });
+                              },
+                              onVoiceLanguageChanged: (language) {
+                                setState(() => _voiceLanguage = language);
+                              },
                               onCancelQueueEdit: () => setState(() {
                                 _queueEdits.remove(s?.id);
                               }),
@@ -2245,6 +2422,22 @@ class _ChatScreenState extends State<ChatScreen>
                                   // Unknown /command falls through to the agent.
                                 }
 
+                                // W9 STUDIO gate: a prompt cannot start until
+                                // a repo + branch are bound. Known composer
+                                // commands above are exempt (they do not run
+                                // the agent).
+                                if (!_studioReady(s)) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'Choose a repository and branch in Studio before sending.',
+                                      ),
+                                      behavior: SnackBarBehavior.floating,
+                                    ),
+                                  );
+                                  return;
+                                }
+
                                 // ── web-IDE busy behavior: typing while running either
                                 // queues the message (default) or interrupts the current
                                 // run and sends immediately, per the user's setting.
@@ -2335,6 +2528,23 @@ class _ChatScreenState extends State<ChatScreen>
                   await _pickAccessMode(context, m, sessionId);
                 },
               ),
+            Divider(height: 12, color: Aether.hairline),
+            ListTile(
+              key: const ValueKey('command-mode-custom'),
+              dense: true,
+              title: const Text(
+                'Custom modes',
+                style: TextStyle(fontSize: 13.5),
+              ),
+              subtitle: Text(
+                'Tool rosters and personas (presets) for this chat',
+                style: TextStyle(fontSize: 11, color: Aether.textMuted),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                _showPresetSheetFromCommand(context);
+              },
+            ),
             const SizedBox(height: 10),
           ],
         ),
@@ -2411,7 +2621,12 @@ class _ChatScreenState extends State<ChatScreen>
     }
     final agent = _agent;
     final previousIds = agent.queuedMessageIdsFor(session.id).toSet();
-    agent.enqueueMessage(text, sessionId: session.id);
+    agent.enqueueMessage(
+      text,
+      sessionId: session.id,
+      sessionRefs: sessionRefsIn(text, session.id),
+      projectRefs: projectRefsIn(text),
+    );
     // enqueue can reject admission. Never clear a rejected draft.
     if (!agent
         .queuedMessageIdsFor(session.id)
@@ -2443,31 +2658,74 @@ class _ChatScreenState extends State<ChatScreen>
     // P8 Task 20: the local provider/run arm is gone. There is no local
     // provider validation — the run is admitted server-side and the facade
     // owns staging.
-    unawaited(_sendCloudPrompt(session, t,
-        onAccepted: onAccepted, interrupt: interrupt));
+    unawaited(
+      _sendCloudPrompt(
+        session,
+        t,
+        onAccepted: onAccepted,
+        interrupt: interrupt,
+      ),
+    );
   }
 
-  /// Sessions the user @-tagged in [text] (`@[Chat title]`, inserted by the
-  /// @ menu): their server ids ride the send so the agent sees THOSE chats'
-  /// context for this turn only (owner rule R1). Unsynced chats are skipped;
-  /// the server also resolves the tag by title.
+  /// Sessions the user explicitly @-tagged in [text] (`@[Chat title]` or
+  /// `@session:<id>`, both inserted by the @ menu): their server ids ride
+  /// the send so the agent sees THOSE chats' context for this turn only
+  /// (owner rule R1). Unsynced chats are skipped; the server also resolves
+  /// the title tag by title.
   static List<String> sessionRefsIn(String text, String currentSessionId) {
     final store = CloudSessionStore.I;
     final refs = <String>[];
+    void add(String? serverId) {
+      if (serverId == null || serverId.isEmpty) return;
+      if (serverId == currentSessionId) return;
+      if (!refs.contains(serverId)) refs.add(serverId);
+    }
+
+    // Explicit id form: subagent cards and long titles use this so a rename
+    // cannot silently drop the reference.
+    for (final match in _sessionIdTag.allMatches(text)) {
+      if (refs.length >= 5) break;
+      final local = match.group(1)!.trim();
+      final session = AppState.I.sessionById(local);
+      add(
+        store.knownServerIdFor(session?.id ?? local) ??
+            (session == null && _uuid.hasMatch(local) ? local : null),
+      );
+    }
+
     for (final match in _sessionTag.allMatches(text)) {
+      if (refs.length >= 5) break;
       final title = match.group(1)!.trim().toLowerCase();
       for (final candidate in AppState.I.sessions) {
         if (candidate.id == currentSessionId) continue;
         if (candidate.title.trim().toLowerCase() != title) continue;
-        final serverId = store.knownServerIdFor(candidate.id);
-        if (serverId != null && !refs.contains(serverId)) refs.add(serverId);
+        add(store.knownServerIdFor(candidate.id));
       }
-      if (refs.length >= 5) break;
     }
     return refs;
   }
 
+  /// Projects explicitly @-tagged in [text]. Delegated to the W1 port so the
+  /// chat surface never guesses a project token format the server rejects.
+  static List<String> projectRefsIn(String text) {
+    final port = ProjectsPort.instance;
+    if (port == null || !port.supportsTurnProjectRefs) return const [];
+    try {
+      return port.projectRefsIn(text);
+    } catch (e) {
+      Diag.swallow('chat.projectRefsIn', e);
+      return const [];
+    }
+  }
+
   static final RegExp _sessionTag = RegExp(r'@\[([^\]\n]{1,120})\]');
+  static final RegExp _sessionIdTag = RegExp(
+    r'@session:([A-Za-z0-9_\-]{1,80})',
+  );
+  static final RegExp _uuid = RegExp(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+  );
 
   /// Cloud send path. The facade shows the prompt as a pending row at once
   /// and makes it durable in the outbox before anything touches the
@@ -2496,10 +2754,22 @@ class _ChatScreenState extends State<ChatScreen>
       CloudAgentFacade.renameSessionIfInstalled(session.id, session.title);
     }
     var queued = false;
+    final voice = _voiceFirst
+        ? (
+            localeId: VoiceReplyService.localeFor(_voiceLanguage),
+            label: VoiceReplyService.labelFor(_voiceLanguage),
+          )
+        : null;
+    if (voice != null) {
+      _voicePending[session.id] = voice;
+      _voicePendingStart[session.id] = _messagesOf(session).length;
+      _voiceSummary = null;
+    }
     await facade.runTask(
       text,
       sessionId: session.id,
       sessionRefs: sessionRefsIn(text, session.id),
+      projectRefs: projectRefsIn(text),
       onQueued: () {
         queued = true;
         onAccepted?.call();
@@ -2517,6 +2787,8 @@ class _ChatScreenState extends State<ChatScreen>
       // The prompt never left the composer (no chat yet, …): keep the
       // draft; the error row explains.
       _lastFailedCloudPrompt[session.id] = text;
+      _voicePending.remove(session.id);
+      _voicePendingStart.remove(session.id);
     } else {
       _lastFailedCloudPrompt.remove(session.id);
     }
@@ -2684,6 +2956,19 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   void _modelPicker(BuildContext context) {
+    // W9 model lock: the picker cannot change the model of a run in flight.
+    final active = AppState.I.activeSessionId;
+    if (active != null && _agent.busyFor(active)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'The model is locked while Ovid is working. Stop the task or wait for it to finish.',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -4305,20 +4590,40 @@ class _SubagentCardState extends State<_SubagentCard> {
                             ),
                           ),
                         if (m.toolSessionId != null)
-                          Align(
-                            alignment: Alignment.centerLeft,
-                            child: TextButton.icon(
-                              key: const ValueKey('chat-subagent-open'),
-                              onPressed: () => SubagentScreen.open(
-                                context,
-                                m.toolSessionId!,
+                          Wrap(
+                            spacing: 4,
+                            children: [
+                              TextButton.icon(
+                                key: const ValueKey('chat-subagent-open'),
+                                onPressed: () => SubagentScreen.open(
+                                  context,
+                                  m.toolSessionId!,
+                                ),
+                                icon: const Icon(Icons.open_in_new, size: 14),
+                                label: Text(
+                                  l10n.subagentOpenTranscript,
+                                  style: const TextStyle(fontSize: 12),
+                                ),
                               ),
-                              icon: const Icon(Icons.open_in_new, size: 14),
-                              label: Text(
-                                l10n.subagentOpenTranscript,
-                                style: const TextStyle(fontSize: 12),
+                              TextButton.icon(
+                                key: const ValueKey('chat-subagent-trajectory'),
+                                onPressed: () => Navigator.of(context).push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => TrajectoryScreen(
+                                      sessionId: m.toolSessionId!,
+                                    ),
+                                  ),
+                                ),
+                                icon: const Icon(
+                                  Icons.timeline_outlined,
+                                  size: 14,
+                                ),
+                                label: const Text(
+                                  'Trajectory',
+                                  style: TextStyle(fontSize: 12),
+                                ),
                               ),
-                            ),
+                            ],
                           ),
                       ],
                     ),
@@ -6448,6 +6753,363 @@ void _openFullscreenImage(BuildContext context, File file) {
   );
 }
 
+/// Voice-first reply summary shown above the composer after the Main Agent
+/// settles. The audio is best-effort (device TTS); this card is the durable,
+/// readable surface.
+class _VoiceSummary {
+  const _VoiceSummary({
+    required this.sessionId,
+    required this.messageId,
+    required this.text,
+    required this.localeId,
+    required this.languageLabel,
+  });
+
+  final String sessionId;
+  final String messageId;
+  final String text;
+  final String localeId;
+  final String languageLabel;
+}
+
+class _VoiceChip extends StatelessWidget {
+  const _VoiceChip({
+    required this.voiceFirst,
+    required this.languageId,
+    required this.onChanged,
+    required this.onLanguageChanged,
+  });
+
+  final bool voiceFirst;
+  final String languageId;
+  final ValueChanged<bool> onChanged;
+  final ValueChanged<String> onLanguageChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = voiceFirst
+        ? 'Voice · ${VoiceReplyService.labelFor(languageId)}'
+        : 'Voice';
+    final color = voiceFirst ? Aether.accent : Aether.textMuted;
+    return Padding(
+      padding: const EdgeInsets.only(left: 6),
+      child: InkWell(
+        key: const ValueKey('composer-voice-chip'),
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => _showVoiceSheet(context),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 32),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            color: color.withValues(alpha: voiceFirst ? 0.12 : 0.06),
+            border: Border.all(color: color.withValues(alpha: 0.4)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                voiceFirst
+                    ? Icons.graphic_eq
+                    : Icons.record_voice_over_outlined,
+                size: 14,
+                color: color,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  height: 20 / 13,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showVoiceSheet(BuildContext context) {
+    var enabled = voiceFirst;
+    var language = languageId;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: StatefulBuilder(
+          builder: (context, setSheet) => Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 12),
+              const Text(
+                'Voice-first mode',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+              ),
+              SwitchListTile(
+                key: const ValueKey('voice-first-switch'),
+                dense: true,
+                value: enabled,
+                onChanged: (on) {
+                  setSheet(() => enabled = on);
+                  onChanged(on);
+                },
+                title: const Text(
+                  'Speak, then listen',
+                  style: TextStyle(fontSize: 13.5),
+                ),
+                subtitle: Text(
+                  'The mic sends when you stop talking. Ovid answers with '
+                  'voice and a summary card.',
+                  style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                ),
+              ),
+              Divider(height: 8, color: Aether.hairline),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 6, 16, 2),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'LANGUAGE',
+                    style: TextStyle(
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.1,
+                      color: Aether.textFaint,
+                    ),
+                  ),
+                ),
+              ),
+              for (final l in VoiceReplyService.languages)
+                ListTile(
+                  key: ValueKey('voice-language-${l.id}'),
+                  dense: true,
+                  title: Text(l.label, style: const TextStyle(fontSize: 13.5)),
+                  trailing: language == l.id
+                      ? Icon(Icons.check, size: 16, color: Aether.accent)
+                      : null,
+                  onTap: () {
+                    setSheet(() => language = l.id);
+                    onLanguageChanged(l.id);
+                  },
+                ),
+              const SizedBox(height: 10),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _VoiceSummaryCard extends StatelessWidget {
+  const _VoiceSummaryCard({required this.summary, required this.onDismiss});
+
+  final _VoiceSummary summary;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const ValueKey('voice-summary-card'),
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+      padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
+      decoration: BoxDecoration(
+        color: Aether.accentSoft,
+        borderRadius: BorderRadius.circular(AetherRadius.rMd),
+        border: Border.all(color: Aether.accent.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.graphic_eq, size: 15, color: Aether.accent),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Voice reply · ${summary.languageLabel}',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: Aether.accent,
+                  ),
+                ),
+              ),
+              IconButton(
+                key: const ValueKey('voice-summary-dismiss'),
+                tooltip: 'Dismiss',
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                padding: EdgeInsets.zero,
+                onPressed: onDismiss,
+                icon: Icon(Icons.close, size: 15, color: Aether.textMuted),
+              ),
+            ],
+          ),
+          Text(
+            summary.text,
+            key: const ValueKey('voice-summary-text'),
+            maxLines: 4,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 12.5, height: 1.4, color: Aether.text),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              TextButton.icon(
+                key: const ValueKey('voice-summary-replay'),
+                onPressed: () => unawaited(
+                  VoiceReplyService.I.speak(
+                    summary.text,
+                    localeId: summary.localeId,
+                  ),
+                ),
+                icon: const Icon(Icons.play_arrow, size: 15),
+                label: const Text(
+                  'Listen again',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+              TextButton.icon(
+                key: const ValueKey('voice-summary-stop'),
+                onPressed: () => unawaited(VoiceReplyService.I.stop()),
+                icon: const Icon(Icons.stop, size: 15),
+                label: const Text('Stop', style: TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Live subagent activity strip (W2 events → facade projection).
+///
+/// The transcript's `dispatch_agent` cards remain the detailed surface; this
+/// strip keeps running children visible above the composer even when the
+/// user has scrolled away. Unknown/new W2 events are harmless: this reads the
+/// facade's public `subagentsOf` snapshot, never raw event payloads.
+class _SubagentActivityDock extends StatelessWidget {
+  const _SubagentActivityDock({this.sessionId});
+
+  final String? sessionId;
+
+  @override
+  Widget build(BuildContext context) {
+    final sid = sessionId;
+    if (sid == null) return const SizedBox.shrink();
+    return AnimatedBuilder(
+      animation: _agent,
+      builder: (_, _) {
+        List<SubagentInfo> running;
+        try {
+          running = [
+            for (final s in _agent.subagentsOf(sid))
+              if (!s.finished) s,
+          ];
+        } catch (e) {
+          // A facade without W2 wiring (or a malformed row) must never take
+          // the composer down.
+          Diag.swallow('chat.subagentActivity', e);
+          return const SizedBox.shrink();
+        }
+        if (running.isEmpty) return const SizedBox.shrink();
+        final shown = running.take(4).toList();
+        return Container(
+          key: const ValueKey('subagent-activity-dock'),
+          margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+          padding: const EdgeInsets.fromLTRB(10, 7, 6, 5),
+          decoration: BoxDecoration(
+            color: Aether.surface,
+            borderRadius: BorderRadius.circular(AetherRadius.rMd),
+            border: Border.all(color: Aether.accent.withValues(alpha: 0.3)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  _ChaseDot(Aether.accent),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      '${running.length} subagent'
+                      '${running.length == 1 ? '' : 's'} running',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                        color: Aether.textMuted,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              for (final s in shown)
+                Padding(
+                  padding: const EdgeInsets.only(top: 3),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: InkWell(
+                          key: ValueKey('subagent-activity-${s.id}'),
+                          borderRadius: BorderRadius.circular(8),
+                          onTap: () =>
+                              SubagentScreen.open(context, s.sessionId),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            child: Text(
+                              '${s.label} · ${formatCompactDuration(s.elapsed)}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Aether.text,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        key: ValueKey('subagent-activity-trajectory-${s.id}'),
+                        tooltip: 'Open trajectory',
+                        visualDensity: VisualDensity.compact,
+                        constraints: const BoxConstraints(
+                          minWidth: 32,
+                          minHeight: 32,
+                        ),
+                        padding: EdgeInsets.zero,
+                        onPressed: () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) =>
+                                TrajectoryScreen(sessionId: s.sessionId),
+                          ),
+                        ),
+                        icon: Icon(
+                          Icons.timeline_outlined,
+                          size: 15,
+                          color: Aether.textMuted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// Voice-input mic (press-to-talk): toggles on-device speech recognition,
 /// shows a stop button while listening, and INSERTS the final transcript
 /// into the composer (silence auto-stops, or tap stop) for the user to review
@@ -6459,7 +7121,24 @@ class _MicButton extends StatefulWidget {
   /// False while an approval locks the composer or no chat is selected; an
   /// in-progress dictation is cancelled so it cannot overwrite the field.
   final bool enabled;
-  const _MicButton({required this.controller, this.enabled = true});
+
+  /// W9 voice-first mode: the final transcript is sent immediately and the
+  /// reply is spoken. Off keeps the original review-then-send behaviour.
+  final bool voiceFirst;
+
+  /// STT locale (`en-IN`, `hi-IN`, `ta-IN`).
+  final String localeId;
+
+  /// Sends the composer content after a voice-first final transcript.
+  final VoidCallback onVoiceSend;
+
+  const _MicButton({
+    required this.controller,
+    this.enabled = true,
+    this.voiceFirst = false,
+    this.localeId = 'en-IN',
+    required this.onVoiceSend,
+  });
   @override
   State<_MicButton> createState() => _MicButtonState();
 }
@@ -6512,23 +7191,37 @@ class _MicButtonState extends State<_MicButton> {
       );
       if (isFinal) {
         // Dictation ended (silence or stop button): release the service
-        // flag so the next tap starts fresh. The transcript stays in the
-        // composer for review — recognition errors are never auto-sent.
+        // flag so the next tap starts fresh.
         unawaited(voice.stop());
         if (mounted) setState(() => _listening = false);
+        // Voice-first mode: the recognized text IS the message. The parent
+        // send path marks the turn for a spoken reply.
+        if (widget.voiceFirst && widget.controller.text.trim().isNotEmpty) {
+          widget.onVoiceSend();
+        }
+        // Otherwise the transcript stays in the composer for review —
+        // recognition errors are never auto-sent.
       }
-    });
+    }, localeId: widget.localeId);
     if (mounted) setState(() => _listening = started);
   }
 
   @override
   Widget build(BuildContext context) {
     return IconButton(
-      tooltip: _listening ? 'Stop dictation' : 'Voice',
+      tooltip: _listening
+          ? 'Stop dictation'
+          : widget.voiceFirst
+          ? 'Speak — sends when you stop talking'
+          : 'Voice',
       icon: Icon(
         _listening ? Icons.mic : Icons.mic_none,
         size: 20,
-        color: _listening ? Aether.accent : Aether.textMuted,
+        color: _listening
+            ? Aether.accent
+            : widget.voiceFirst
+            ? Aether.accent
+            : Aether.textMuted,
       ),
       onPressed: widget.enabled ? _toggle : null,
     );
@@ -6555,6 +7248,17 @@ class _InputBar extends StatefulWidget {
   final bool commandBusy;
   final VoidCallback onCancelQueueEdit;
 
+  /// W9 STUDIO gate: false while STUDIO mode has no repo/branch binding, so
+  /// Send is disabled and the chip explains what is missing.
+  final bool studioReady;
+  final VoidCallback onStudioBlocked;
+
+  /// W9 vernacular voice-first mode (mic auto-sends, reply is spoken).
+  final bool voiceFirst;
+  final String voiceLanguage;
+  final ValueChanged<bool> onVoiceFirstChanged;
+  final ValueChanged<String> onVoiceLanguageChanged;
+
   /// Shared width axis: the composer card is capped to [ChatLayout.composerWidth]
   /// and centered within the chat pane.
   final ChatLayout layout;
@@ -6572,6 +7276,12 @@ class _InputBar extends StatefulWidget {
     this.commandBusy = false,
     required this.onCancelQueueEdit,
     required this.onSend,
+    this.studioReady = true,
+    required this.onStudioBlocked,
+    this.voiceFirst = false,
+    this.voiceLanguage = 'en',
+    required this.onVoiceFirstChanged,
+    required this.onVoiceLanguageChanged,
   });
 
   @override
@@ -6755,19 +7465,39 @@ class _InputBarState extends State<_InputBar> {
     if (query.startsWith('file:')) query = query.substring('file:'.length);
     final scored = <({int score, int order, _SlashSuggestion s})>[];
     var order = 0;
+    // W1 project rows (only when the gateway accepts explicit project refs).
+    final projectsPort = ProjectsPort.instance;
+    final projectRows = <ProjectOption>[
+      if (projectsPort != null &&
+          projectsPort.ready &&
+          projectsPort.supportsTurnProjectRefs)
+        ...projectsPort.projects,
+    ];
+    // ALL of the user's root chats are offered (not just the newest page):
+    // scoring still ranks them, and the menu caps the visible list.
+    final roots =
+        [
+          for (final s in app.sessions)
+            if (!s.isSubagent && s.id != parent.id) s,
+        ]..sort(
+          (a, b) => (b.updatedAt ?? b.createdAt).compareTo(
+            a.updatedAt ?? a.createdAt,
+          ),
+        );
     for (final sub in agent.subagentsOf(parent.id)) {
       final child = app.sessionById(sub.sessionId);
       final label = child?.agentLabel ?? sub.label;
       final live = agent.busyFor(sub.sessionId);
       final state = live ? 'running' : sub.state;
-      final score = _fuzzyScore('${sub.id} $label', query);
+      final handle = sub.handle ?? sub.id;
+      final score = _fuzzyScore('$handle ${sub.id} $label', query);
       if (score == null) continue;
       scored.add((
         score: score,
         order: order++,
         s: _SlashSuggestion(
           icon: Icons.smart_toy_outlined,
-          name: sub.id,
+          name: handle,
           description:
               '$state · ${child?.messages.length ?? 0} rows — '
               '${cleanTruncate(label, 60)}',
@@ -6832,7 +7562,8 @@ class _InputBarState extends State<_InputBar> {
     // explaining what @ can reference instead of rendering nothing.
     if (listing != null &&
         fileHits == 0 &&
-        agent.subagentsOf(parent.id).isEmpty) {
+        agent.subagentsOf(parent.id).isEmpty &&
+        projectRows.isEmpty) {
       scored.add((
         score: 999,
         order: order++,
@@ -6848,11 +7579,29 @@ class _InputBarState extends State<_InputBar> {
         ),
       ));
     }
+    // ── @project: explicit project context for this turn only (R1). The
+    // rows exist only when W1's port is installed AND the gateway accepts
+    // `projectRefs`; otherwise a token would be a dead reference.
+    for (final p in projectRows) {
+      final score = _fuzzyScore(p.name, query);
+      if (score == null) continue;
+      scored.add((
+        score: score,
+        order: order++,
+        s: _SlashSuggestion(
+          icon: Icons.folder_outlined,
+          name: p.name,
+          description: 'Include this project\'s context in your message',
+          hint: '',
+          insert: projectsPort!.mentionToken(p),
+          group: 'Projects',
+        ),
+      ));
+    }
     // ── @[chat title]: include another chat's context in THIS message only
     // (owner rule R1 — chats never see each other unless tagged, or unless
     // "Share session memory" is on). The server resolves the tag.
-    for (final s in app.rootSessions.take(30)) {
-      if (s.id == parent.id) continue;
+    for (final s in roots) {
       final title = s.title.replaceAll(RegExp(r'[\[\]\n]'), ' ').trim();
       if (title.isEmpty || CloudSessionStore.isPlaceholderTitle(title)) {
         continue;
@@ -7451,12 +8200,19 @@ class _InputBarState extends State<_InputBar> {
                       scrollDirection: Axis.horizontal,
                       child: Row(
                         children: [
-                          // Studio mode: one chip that opens Studio.
+                          // Studio mode: repo/branch chip + gate (W3 port).
                           const _StudioChip(),
                           // web-IDE plan chip — amber, only while plan mode is on.
                           const _PlanChip(),
                           // web-IDE mode selector — icon + text chip, opens the mode sheet.
                           const _ModeChip(),
+                          // W9 vernacular voice-first toggle + language.
+                          _VoiceChip(
+                            voiceFirst: widget.voiceFirst,
+                            languageId: widget.voiceLanguage,
+                            onChanged: widget.onVoiceFirstChanged,
+                            onLanguageChanged: widget.onVoiceLanguageChanged,
+                          ),
                         ],
                       ),
                     ),
@@ -7465,6 +8221,9 @@ class _InputBarState extends State<_InputBar> {
                   _MicButton(
                     controller: controller,
                     enabled: !widget.locked && widget.sessionId != null,
+                    voiceFirst: widget.voiceFirst,
+                    localeId: VoiceReplyService.localeFor(widget.voiceLanguage),
+                    onVoiceSend: onSend,
                   ),
                   const SizedBox(width: 4),
                   // ── Stateful primary / stop button (web-IDE InputBar pattern) ──
@@ -7482,14 +8241,20 @@ class _InputBarState extends State<_InputBar> {
                       final runningNow =
                           hasSession && _agent.busyFor(sessionId);
                       final hasDraft = controller.text.trim().isNotEmpty;
+                      final isComposerCommand =
+                          controller.text.trimLeft().startsWith('/');
                       final hasQueued =
                           hasSession &&
-                          _agent
-                              .queuedMessagesFor(sessionId)
-                              .isNotEmpty;
+                          _agent.queuedMessagesFor(sessionId).isNotEmpty;
                       void stop() {
                         if (hasSession) {
-                          _agent.stopRequested(sessionId: sessionId);
+                          // W9: stop the Main Agent turn and dispatch the
+                          // queued message immediately. Subagent runs are
+                          // separate child runs and keep going.
+                          _agent.stopRequested(
+                            sessionId: sessionId,
+                            dispatchQueued: hasQueued,
+                          );
                         } else {
                           _agent.hardStopAll();
                         }
@@ -7509,11 +8274,13 @@ class _InputBarState extends State<_InputBar> {
                           hasDraft &&
                           !locked &&
                           !widget.commandBusy &&
+                          (widget.studioReady || isComposerCommand) &&
                           _agent.pendingApproval == null &&
                           (!widget.editingQueue ||
                               _agent.pendingAttachments.isEmpty);
                       final interrupt = AppState.I.sendWhileBusyInterrupt;
-                      final stopping = hasSession &&
+                      final stopping =
+                          hasSession &&
                           CloudAgentFacade.I.stoppingFor(sessionId);
                       final actionLabel = widget.editingQueue
                           ? 'Save'
@@ -7522,6 +8289,8 @@ class _InputBarState extends State<_InputBar> {
                           : 'Send';
                       final actionTooltip = !hasSession
                           ? 'Preparing your chat…'
+                          : !widget.studioReady
+                          ? 'Choose a repository and branch in Studio first'
                           : offline && !runningNow
                           ? "Send (you're offline — it sends when you're back)"
                           : widget.editingQueue
@@ -7559,7 +8328,7 @@ class _InputBarState extends State<_InputBar> {
                               tooltip: stopping
                                   ? 'Stopping…'
                                   : hasQueued
-                                  ? 'Stop session (next queued will run)'
+                                  ? 'Stop and send the queued message now'
                                   : 'Stop session',
                               icon: Icons.stop_rounded,
                               iconOnly: true,
@@ -8628,7 +9397,9 @@ class _QueueRowState extends State<_QueueRow> {
       // active session so the head starts now.
       agent.steerQueuedMessage(widget.index);
       final sid = AppState.I.activeSessionId;
-      if (sid != null) agent.stopRequested(sessionId: sid);
+      if (sid != null) {
+        agent.stopRequested(sessionId: sid, dispatchQueued: true);
+      }
     }
     widget.onEdited();
   }
@@ -8648,6 +9419,25 @@ class _QueueRowState extends State<_QueueRow> {
       padding: const EdgeInsets.only(top: 2),
       child: Row(
         children: [
+          if (widget.index == 0)
+            Container(
+              key: const ValueKey('queue-next-badge'),
+              margin: const EdgeInsets.only(right: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              decoration: BoxDecoration(
+                color: Aether.accent.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: Text(
+                'NEXT',
+                style: TextStyle(
+                  fontSize: 8.5,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: .6,
+                  color: Aether.accent,
+                ),
+              ),
+            ),
           Expanded(
             child: Text(
               widget.text,
@@ -9478,57 +10268,148 @@ class _QuestionsCardState extends State<_QuestionsCard> {
 class _StudioChip extends StatelessWidget {
   const _StudioChip();
 
+  static StudioBinding? _bindingFor(ChatSession? s) {
+    if (s == null) return null;
+    final fromPort = StudioBindingPort.instance?.bindingFor(s.id);
+    if (fromPort != null && fromPort.ready) return fromPort;
+    final repo = s.repo?.trim() ?? '';
+    final branch = s.branch?.trim() ?? '';
+    if (repo.isEmpty || branch.isEmpty) return null;
+    return StudioBinding(repo: repo, branch: branch);
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: Listenable.merge([AppState.I, _agent]),
+      animation: Listenable.merge([
+        AppState.I,
+        _agent,
+        StudioBindingPort.instance ?? const _NeverNotifies(),
+      ]),
       builder: (_, _) {
         final s = AppState.I.activeSession;
         final isStudio =
             _agent.mode == AgentMode.studio ||
             (s?.mode == AgentMode.studio.name);
         if (!isStudio) return const SizedBox.shrink();
+        final binding = _bindingFor(s);
+        final port = StudioBindingPort.instance;
+        final ready = binding != null;
+        final color = ready ? Aether.accent : Aether.warn;
+        final repoName = binding == null
+            ? ''
+            : (binding.repo.contains('/')
+                  ? binding.repo.split('/').last
+                  : binding.repo);
+        final label = ready ? '$repoName · ${binding.branch}' : 'Choose repo';
         return Padding(
           padding: const EdgeInsets.only(right: 6),
           child: Tooltip(
-            message: 'Open Studio',
-            child: InkWell(
-              key: const ValueKey('composer-studio-chip'),
-              borderRadius: BorderRadius.circular(16),
-              onTap: () => openStudio(context),
-              child: Container(
-                constraints: const BoxConstraints(minHeight: 32),
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
+            message: ready
+                ? '${binding.repo} · ${binding.branch}'
+                : 'Choose a repository and branch before sending',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                InkWell(
+                  key: const ValueKey('composer-studio-chip'),
                   borderRadius: BorderRadius.circular(16),
-                  color: Aether.accent.withValues(alpha: 0.12),
-                  border: Border.all(
-                    color: Aether.accent.withValues(alpha: 0.5),
+                  onTap: () {
+                    if (port != null && port.ready && s != null) {
+                      unawaited(
+                        showStudioBindingSheet(context, sessionId: s.id),
+                      );
+                    } else {
+                      // W3's picker is not installed yet: Studio is the
+                      // honest place to connect GitHub/choose a repo.
+                      unawaited(openStudio(context));
+                    }
+                  },
+                  child: Container(
+                    constraints: const BoxConstraints(minHeight: 32),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(16),
+                      color: color.withValues(alpha: 0.12),
+                      border: Border.all(color: color.withValues(alpha: 0.5)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          ready ? Icons.code : Icons.error_outline,
+                          size: 14,
+                          color: color,
+                        ),
+                        const SizedBox(width: 5),
+                        Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            height: 20 / 13,
+                            color: color,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.code, size: 14, color: Aether.accent),
-                    const SizedBox(width: 5),
-                    Text(
-                      'Studio',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                        height: 20 / 13,
-                        color: Aether.accent,
-                      ),
+                if (ready && port != null)
+                  IconButton(
+                    key: const ValueKey('composer-studio-sync'),
+                    tooltip: 'Sync latest changes',
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(
+                      minWidth: 32,
+                      minHeight: 32,
                     ),
-                  ],
-                ),
-              ),
+                    padding: EdgeInsets.zero,
+                    onPressed: s == null || port.syncingFor(s.id)
+                        ? null
+                        : () async {
+                            try {
+                              await port.syncLatest(s.id);
+                            } catch (e) {
+                              if (!context.mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Could not sync: $e'),
+                                  behavior: SnackBarBehavior.floating,
+                                ),
+                              );
+                            }
+                          },
+                    icon: Icon(
+                      Icons.sync,
+                      size: 15,
+                      color: port.syncingFor(s?.id ?? '')
+                          ? Aether.textFaint
+                          : color,
+                    ),
+                  ),
+              ],
             ),
           ),
         );
       },
     );
   }
+}
+
+/// A [Listenable] that never notifies, so an absent W3 port can sit in a
+/// `Listenable.merge` without a null branch.
+class _NeverNotifies implements Listenable {
+  const _NeverNotifies();
+  @override
+  void addListener(VoidCallback listener) {}
+  @override
+  void removeListener(VoidCallback listener) {}
 }
 
 /// web-IDE plan chip — amber "Plan" indicator in the composer, visible only
@@ -9675,7 +10556,85 @@ class _ModeChip extends StatelessWidget {
                     await _pickAccessMode(context, m, sessionId);
                   },
                 ),
+              Divider(height: 12, color: Aether.hairline),
+              ListTile(
+                key: const ValueKey('composer-mode-custom'),
+                dense: true,
+                leading: Icon(Icons.tune, size: 18, color: Aether.textMuted),
+                title: const Text(
+                  'Custom modes',
+                  style: TextStyle(fontSize: 13.5),
+                ),
+                subtitle: Text(
+                  'Tool rosters and personas (presets) for this chat',
+                  style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showCustomModes(context);
+                },
+              ),
               const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// "Custom modes" — the built-in and user presets. A preset changes the
+  /// tool roster/persona, so it is the product's custom-mode surface; the
+  /// server-owned custom presets are applied through the same `/preset`
+  /// command the settings screen uses.
+  void _showCustomModes(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Aether.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (_) => SafeArea(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 12),
+              const Text(
+                'Custom modes',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 6),
+              for (final p in PresetRegistry.all)
+                ListTile(
+                  key: ValueKey('composer-preset-${p.id}'),
+                  dense: true,
+                  leading: Icon(Icons.tune, size: 18, color: Aether.textMuted),
+                  title: Text(p.label, style: const TextStyle(fontSize: 13.5)),
+                  subtitle: Text(
+                    p.description,
+                    style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                  ),
+                  trailing: AppState.I.activeSession?.presetId == p.id
+                      ? Icon(Icons.check, size: 16, color: Aether.accent)
+                      : null,
+                  onTap: () async {
+                    Navigator.pop(context);
+                    final result = await CommandService.I.execute(
+                      '/preset ${p.id}',
+                    );
+                    if (!context.mounted) return;
+                    final feedback = result?.feedback;
+                    if (feedback != null && feedback.isNotEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(feedback),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                    }
+                  },
+                ),
+              const SizedBox(height: 10),
             ],
           ),
         ),

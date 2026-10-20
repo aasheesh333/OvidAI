@@ -34,6 +34,7 @@ function makeCfg(): BrowserEngineConfig {
     maxTier1Processes: 8,
     tier1TimeoutMs: 20_000,
     maxActiveScreencasts: 3,
+    screencastDetachGraceMs: 0,
     screencastLoadMax: 6.0,
     screencast: { width: 1280, height: 800, quality: 60, everyNthFrame: 2, maxFramesInFlight: 2 },
     stateDir: null,
@@ -393,7 +394,7 @@ describe.skipIf(!chromiumExecutableExists())("browser tools I", () => {
   // Roster pin
   // -------------------------------------------------------------------------
 
-  it("exposes the final sorted 36-tool roster with model-facing schemas", () => {
+  it("exposes the final sorted 38-tool roster with model-facing schemas", () => {
     const expected = [
       "browser_back",
       "browser_click",
@@ -409,7 +410,9 @@ describe.skipIf(!chromiumExecutableExists())("browser tools I", () => {
       "browser_find",
       "browser_forward",
       "browser_hover",
+      "browser_list_credentials",
       "browser_list_tabs",
+      "browser_login_with_credential",
       "browser_long_press",
       "browser_navigate",
       "browser_network",
