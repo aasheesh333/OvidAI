@@ -36,6 +36,7 @@ import { registerPreferenceRoutes } from "./routes/preferences.js";
 import { registerAccountSettingsRoutes } from "./routes/accountSettings.js";
 import { registerMemoryRoutes } from "./routes/memory.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
+import { registerProjectRoutes } from "./routes/projects.js";
 import { registerReportsRoutes } from "./routes/reports.js";
 import type { ReportsConfig } from "./routes/reports.js";
 import { registerRunRoutes } from "./routes/runs.js";
@@ -330,6 +331,7 @@ export function buildGateway(
       }));
 
       registerSessionRoutes(scope, deps);
+      registerProjectRoutes(scope, deps);
       registerMessageRoutes(scope, deps);
       registerPreferenceRoutes(scope, deps);
       // Wave 4: account settings (push, BYOK routing), custom presets, memory files.

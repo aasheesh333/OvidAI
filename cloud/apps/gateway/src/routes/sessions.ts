@@ -13,6 +13,7 @@ export function toSessionDto(row: SessionRow): SessionDto {
     id: row.id,
     title: row.title,
     mode: row.mode as SessionDto["mode"],
+    projectId: row.projectId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
