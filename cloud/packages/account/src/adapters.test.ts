@@ -420,7 +420,7 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
           ` image_deleted_accounts, image_cards, image_card_history, image_probe_log, image_probe_state,` +
           ` shares, share_forks, reports, account_deletions, byok_keys,` +
           ` mcp_servers, mcp_oauth_tokens, mcp_oauth_flows, plugins, plugin_grants, run_usage,` +
-          ` private_memory_files, projects CASCADE`,
+          ` private_memory_files, projects, browser_credentials CASCADE`,
       );
     } finally {
       await admin.end({ timeout: 5 });
