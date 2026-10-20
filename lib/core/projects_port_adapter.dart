@@ -11,9 +11,11 @@ import 'diag.dart';
 /// only needs a read-only project list plus move/pin calls. This adapter keeps
 /// the chat surface on the narrow port while W1 owns the server state.
 ///
-/// * `supportsTurnProjectRefs` stays **false**: the gateway's
-///   `sendMessageBodySchema` is strict and has no `projectRefs`, so the `@`
-///   menu never inserts a project token that would 400 the send.
+/// * `supportsTurnProjectRefs` follows the gateway's ADVERTISED capability
+///   (`GET /projects` → `capabilities.turnProjectRefs`, W1b): a client that
+///   ships before the server keeps the feature hidden, so an older strict
+///   `sendMessageBodySchema` never sees a `projectRefs` field it would 400.
+///   `serverSupportsTurnProjectRefs` is an explicit test override only.
 /// * Pinning is still W9-local ([ChatPinsStore]) because W1 does not own a
 ///   pin flag; `supportsPin` therefore stays false and the overflow menu
 ///   writes the local store.
@@ -26,16 +28,15 @@ class ProjectsControllerPort extends ProjectsPort {
   @override
   bool get ready => _controller.loadedOnce;
 
-  /// Server capability switch (W1b owns `projectRefs` in
-  /// `sendMessageBodySchema` + ownership resolution).
-  ///
-  /// Flip to `true` only once that contract is DEPLOYED: while false the `@`
-  /// menu hides project rows and no send carries the field, so an older
-  /// strict gateway cannot 400 a chat send.
-  static bool serverSupportsTurnProjectRefs = false;
+  /// Explicit override for tests. `null` (production) follows the gateway's
+  /// advertised `capabilities.turnProjectRefs` — never a hard-coded `true`,
+  /// so an older server cannot receive a field its strict body rejects.
+  static bool? serverSupportsTurnProjectRefs;
 
   @override
-  bool get supportsTurnProjectRefs => serverSupportsTurnProjectRefs;
+  bool get supportsTurnProjectRefs =>
+      serverSupportsTurnProjectRefs ??
+      _controller.serverSupportsTurnProjectRefs;
 
   @override
   List<ProjectOption> get projects => [

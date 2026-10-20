@@ -6,6 +6,7 @@ import 'package:http/testing.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/cloud/projects.dart';
+import 'package:ovid_ai/core/projects_port_adapter.dart';
 import 'package:ovid_ai/core/state.dart';
 
 Map<String, Object?> projectJson(
@@ -206,6 +207,42 @@ void main() {
 
     expect(await controller.moveSession('s1', 'missing'), isFalse);
     expect(controller.error, 'Project not found.');
+  });
+
+  test('chat port follows the gateway-advertised @project capability (fail-safe)', () async {
+    // The installed chat adapter must never hard-code support: an older
+    // gateway that does not advertise `capabilities.turnProjectRefs` keeps
+    // the feature hidden so a strict send body cannot 400.
+    ProjectsControllerPort.serverSupportsTurnProjectRefs = null;
+
+    final ids = ['0192f0a0-0000-7000-8000-0000000000a1'];
+    ProjectsController controllerFor(Map<String, Object?> body) {
+      final controller = ProjectsController(
+        rest: mockRest(<http.Request>[], (_) async => http.Response(jsonEncode(body), 200)),
+      );
+      addTearDown(controller.dispose);
+      return controller;
+    }
+
+    final advertised = controllerFor({
+      'items': [projectJson(ids[0], 'Work')],
+      'capabilities': {'turnProjectRefs': true},
+    });
+    await advertised.refresh();
+    expect(ProjectsControllerPort(controller: advertised).supportsTurnProjectRefs, isTrue);
+
+    final old = controllerFor({
+      'items': [projectJson(ids[0], 'Work')],
+      'capabilities': {'turnProjectRefs': false},
+    });
+    await old.refresh();
+    expect(ProjectsControllerPort(controller: old).supportsTurnProjectRefs, isFalse);
+
+    // No successful load yet (offline start) -> still false.
+    final offline = controllerFor({'items': <Object>[], 'capabilities': {'turnProjectRefs': true}});
+    expect(ProjectsControllerPort(controller: offline).supportsTurnProjectRefs, isFalse);
+
+    ProjectsControllerPort.serverSupportsTurnProjectRefs = null;
   });
 
   test('port enables @project refs and resolves only known uuid tokens', () async {
