@@ -2683,6 +2683,72 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(wireText(bReq)).not.toContain(markerA);
     }, 60_000);
 
+    it("W1 follow-up: @project refs inject only the tagged project's memory for that run", async () => {
+      const markerA = `refA${Date.now().toString(36)}`;
+      const markerB = `refB${Date.now().toString(36)}`;
+      const owner = await seedRun();
+      const projectA = (await projectsRepo.create(db, owner.uid, "Tag A"))!;
+      const projectB = (await projectsRepo.create(db, owner.uid, "Tag B"))!;
+      const emptyProject = (await projectsRepo.create(db, owner.uid, "Empty"))!;
+      const stranger = uid("w1b-stranger");
+      await users.ensure(db, stranger, null);
+      const foreignProject = (await projectsRepo.create(db, stranger, "Foreign"))!;
+      const store = createPrivateMemoryStore(db);
+      await store.save(owner.uid, { projectId: projectA.id }, "MEMORY.md", markerA);
+      await store.save(owner.uid, { projectId: projectB.id }, "MEMORY.md", markerB);
+
+      const runJob = async (data: AgentRunJob) => {
+        const sbx = makeFakePort();
+        const sse = await startTurnSse([textTurn("ok")]);
+        const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+        try {
+          await processor({ data });
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+        return sse.requests[0]!;
+      };
+      const runWith = async (projectRefs?: string[]) => {
+        const prompt = await messages.append(db, { sessionId: owner.sessionId, role: "user", content: "tagged" });
+        const run = await runs.create(db, { sessionId: owner.sessionId, promptMessageId: prompt.id });
+        return runJob({
+          runId: run.id,
+          sessionId: owner.sessionId,
+          userId: owner.uid,
+          prompt: "tagged",
+          ...(projectRefs !== undefined ? { projectRefs } : {}),
+        });
+      };
+
+      // Drain the run seedRun queued (no refs → neither project).
+      const plain = await runJob(jobOf(owner).data);
+      expect(wireText(plain)).not.toContain(markerA);
+      expect(wireText(plain)).not.toContain(markerB);
+
+      // Only the tagged project's memory reaches the model.
+      const taggedA = await runWith([projectA.id]);
+      expect(wireText(taggedA)).toContain(markerA);
+      expect(wireText(taggedA)).not.toContain(markerB);
+      expect(wireText(taggedA)).toContain("Tag A");
+
+      // A project with no memory contributes nothing and does not error.
+      const empty = await runWith([emptyProject.id]);
+      expect(wireText(empty)).not.toContain(markerA);
+      expect(wireText(empty)).not.toContain(markerB);
+
+      // A foreign project id contributes nothing (defence in depth; the
+      // gateway already refuses the whole send).
+      const foreign = await runWith([foreignProject.id]);
+      expect(wireText(foreign)).not.toContain(markerA);
+      expect(wireText(foreign)).not.toContain(markerB);
+
+      // Refs do not persist: the next untagged turn sees neither project.
+      const after = await runWith();
+      expect(wireText(after)).not.toContain(markerA);
+      expect(wireText(after)).not.toContain(markerB);
+    }, 60_000);
+
     it("R1: child loops inherit Memory OFF and isolated search, without parent or other chat history injection", async () => {
       const seeded = await seedRun();
       const marker = `childsecret${Date.now().toString(36)}`;

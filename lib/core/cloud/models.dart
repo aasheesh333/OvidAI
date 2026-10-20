@@ -17,6 +17,7 @@ library;
 import 'dart:async' show Completer;
 import 'dart:io' show Process;
 
+import 'package:flutter/foundation.dart' show immutable;
 import 'package:flutter/material.dart' show Color, IconData, Icons;
 
 import '../theme.dart' show Aether;
@@ -63,6 +64,8 @@ class ProjectDto {
     required this.sessionCount,
     required this.fileCount,
     required this.fileCap,
+    this.fileBytes = 0,
+    this.fileBreakdown = const ProjectFileBreakdown(),
   });
 
   factory ProjectDto.fromJson(Map<String, dynamic> j) => ProjectDto(
@@ -73,6 +76,10 @@ class ProjectDto {
         sessionCount: (j['sessionCount'] as num?)?.toInt() ?? 0,
         fileCount: (j['fileCount'] as num?)?.toInt() ?? 0,
         fileCap: (j['fileCap'] as num?)?.toInt() ?? 80,
+        fileBytes: (j['fileBytes'] as num?)?.toInt() ?? 0,
+        fileBreakdown: ProjectFileBreakdown.fromJson(
+          j['fileBreakdown'] as Map<String, dynamic>?,
+        ),
       );
 
   final String id;
@@ -80,8 +87,64 @@ class ProjectDto {
   final DateTime createdAt;
   final DateTime updatedAt;
   final int sessionCount;
+
+  /// Total used slots: project memory + attachments + active artifacts.
   final int fileCount;
+
+  /// Per-project cap for the caller's plan (80/100/150/250).
   final int fileCap;
+
+  /// Total bytes across memory, attachments and active artifacts.
+  final int fileBytes;
+
+  /// Per-bucket used counts (sums to [fileCount]).
+  final ProjectFileBreakdown fileBreakdown;
+}
+
+/// Per-bucket project file counts (W1 follow-up; server `fileBreakdown`).
+@immutable
+class ProjectFileBreakdown {
+  const ProjectFileBreakdown({    this.memory = 0,
+    this.attachments = 0,
+    this.artifacts = 0,
+  });
+
+  factory ProjectFileBreakdown.fromJson(Map<String, dynamic>? j) =>
+      ProjectFileBreakdown(
+        memory: (j?['memory'] as num?)?.toInt() ?? 0,
+        attachments: (j?['attachments'] as num?)?.toInt() ?? 0,
+        artifacts: (j?['artifacts'] as num?)?.toInt() ?? 0,
+      );
+
+  final int memory;
+  final int attachments;
+  final int artifacts;
+}
+
+/// `GET /projects` payload: the owner's projects plus the server's feature
+/// capabilities. [turnProjectRefs] is true only when the gateway accepts the
+/// optional `projectRefs` field on send (older servers omit it entirely).
+@immutable
+class ProjectsPayload {
+  const ProjectsPayload({
+    required this.items,
+    required this.turnProjectRefs,
+  });
+
+  factory ProjectsPayload.fromJson(Map<String, dynamic> j) {
+    final capabilities = j['capabilities'];
+    return ProjectsPayload(
+      items: <ProjectDto>[
+        for (final item in (j['items'] as List? ?? const <dynamic>[]))
+          if (item is Map<String, dynamic>) ProjectDto.fromJson(item),
+      ],
+      turnProjectRefs: capabilities is Map &&
+          capabilities['turnProjectRefs'] == true,
+    );
+  }
+
+  final List<ProjectDto> items;
+  final bool turnProjectRefs;
 }
 
 /// `MessageDto` (rest.ts). `role` is "user" | "assistant" | "system" | "tool".

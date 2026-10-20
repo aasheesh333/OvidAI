@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
+import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/cloud/projects.dart';
 import 'package:ovid_ai/core/state.dart';
 
@@ -205,5 +206,107 @@ void main() {
 
     expect(await controller.moveSession('s1', 'missing'), isFalse);
     expect(controller.error, 'Project not found.');
+  });
+
+  test('port enables @project refs and resolves only known uuid tokens', () async {
+    // Project ids are UUIDs on the wire; the composer token is `@project:<uuid>`.
+    final ids = [
+      for (var i = 1; i <= 6; i++)
+        '0192f0a0-0000-7000-8000-00000000000$i',
+    ];
+    final log = <http.Request>[];
+    final controller = ProjectsController(
+      rest: mockRest(log, (_) async => http.Response(
+            jsonEncode({
+              'items': [
+                for (var i = 0; i < ids.length; i++)
+                  projectJson(ids[i], 'Project ${i + 1}'),
+              ],
+              'capabilities': {'turnProjectRefs': true},
+            }),
+            200,
+          )),
+    );
+    addTearDown(controller.dispose);
+    await controller.refresh();
+    final port = ProjectsPortAdapter(controller);
+    addTearDown(port.dispose);
+
+    expect(port.supportsTurnProjectRefs, isTrue);
+    expect(port.supportsPin, isTrue);
+    expect(port.ready, isTrue);
+    expect(port.projects.map((p) => p.id), ids);
+    expect(port.mentionToken(port.projects.first), '@project:${ids[0]} ');
+
+    // Exact token the menu writes; surrounding prose is preserved.
+    expect(
+      port.projectRefsIn('use @project:${ids[0]} and @project:${ids[1]} please'),
+      [ids[0], ids[1]],
+    );
+    // Malformed and unknown ids never become refs (a stale token must not
+    // turn the whole send into a 400).
+    expect(
+      port.projectRefsIn(
+        '@project:not-a-uuid @project:00000000-0000-7000-8000-000000000000',
+      ),
+      isEmpty,
+    );
+    // Duplicates collapse (the server rejects duplicates) and the list is
+    // capped at the server's MAX_PROJECT_REFS = 5.
+    expect(
+      port.projectRefsIn('@project:${ids[0]} @project:${ids[0]} @project:${ids[1]}'),
+      [ids[0], ids[1]],
+    );
+    expect(
+      port.projectRefsIn([for (final id in ids) '@project:$id'].join(' ')),
+      ids.take(5).toList(),
+    );
+  });
+
+  test('the @project capability is FAIL-SAFE: false until the server advertises it', () async {
+    final ids = ['0192f0a0-0000-7000-8000-000000000001'];
+    final log = <http.Request>[];
+    final controller = ProjectsController(
+      rest: mockRest(log, (_) async => http.Response(
+            jsonEncode({
+              'items': [projectJson(ids[0], 'Alpha')],
+              // An older gateway: no capabilities object at all.
+            }),
+            200,
+          )),
+    );
+    addTearDown(controller.dispose);
+    await controller.refresh();
+    final port = ProjectsPortAdapter(controller);
+    addTearDown(port.dispose);
+
+    expect(port.supportsTurnProjectRefs, isFalse);
+    // No token is parsed, so no send can carry a field the strict body
+    // would reject.
+    expect(port.projectRefsIn('@project:${ids[0]}'), isEmpty);
+
+    // A capability payload that says false stays false.
+    final explicitFalse = ProjectsPayload.fromJson({
+      'items': <Object>[],
+      'capabilities': {'turnProjectRefs': false},
+    });
+    expect(explicitFalse.turnProjectRefs, isFalse);
+  });
+
+  test('ProjectDto parses fileBytes and the per-bucket breakdown additively', () {
+    final dto = ProjectDto.fromJson({
+      ...projectJson('p1', 'Alpha', fileCount: 3, fileCap: 80),
+      'fileBytes': 4096,
+      'fileBreakdown': {'memory': 1, 'attachments': 1, 'artifacts': 1},
+    });
+    expect(dto.fileBytes, 4096);
+    expect(dto.fileBreakdown.memory, 1);
+    expect(dto.fileBreakdown.attachments, 1);
+    expect(dto.fileBreakdown.artifacts, 1);
+
+    // Older servers omit the fields: defaults stay truthful (zero), not null.
+    final legacy = ProjectDto.fromJson(projectJson('p2', 'Legacy'));
+    expect(legacy.fileBytes, 0);
+    expect(legacy.fileBreakdown.memory, 0);
   });
 }

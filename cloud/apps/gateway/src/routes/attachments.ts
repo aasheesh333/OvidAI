@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { attachments, newId, sessions, users } from "@ovid/db";
+import { assertProjectFileCapacity, attachments, newId, ProjectFileLimitError, sessions, users } from "@ovid/db";
 import {
   sanitizeAttachmentName,
   type AttachmentUploadResponse,
@@ -76,6 +76,22 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
       );
     }
 
+    // 3b. W1 follow-up (0022): a project chat's uploads share the project's
+    //     file budget (memory + attachments + active artifacts). Check BEFORE
+    //     presigning and before any row: a refused upload costs neither a URL
+    //     nor a row, and the client never PUTs bytes. The insert repeats the
+    //     check under the project-file lock as the race backstop.
+    if (session.projectId !== null) {
+      try {
+        await assertProjectFileCapacity(deps.db, uid, session.projectId, 1);
+      } catch (err) {
+        if (err instanceof ProjectFileLimitError) {
+          return sendError(reply, 409, err.code, err.message);
+        }
+        throw err;
+      }
+    }
+
     // 4. Presign. The presigner is the injectable seam; when absent the route
     //    is loud, never a silent no-op. Signing happens BEFORE the insert, so
     //    a failing presigner leaves no attachment row behind.
@@ -100,14 +116,24 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
 
     // 5. Provision the users row (FK target) and persist the attachment.
     await users.ensure(deps.db, uid, email);
-    await attachments.create(deps.db, {
-      id: attachmentId,
-      sessionId,
-      userId: uid,
-      name,
-      size,
-      r2Key,
-    });
+    try {
+      await attachments.create(deps.db, {
+        id: attachmentId,
+        sessionId,
+        userId: uid,
+        name,
+        size,
+        r2Key,
+        // Stamp from the session the route already loaded (authoritative at
+        // creation time); the repo also re-checks the cap under its lock.
+        projectId: session.projectId,
+      });
+    } catch (err) {
+      if (err instanceof ProjectFileLimitError) {
+        return sendError(reply, 409, err.code, err.message);
+      }
+      throw err;
+    }
 
     // 6. Answer: the four-field wire contract. `path` is where the worker will
     //    materialize the file in the session workspace — uploads/{safe name}.

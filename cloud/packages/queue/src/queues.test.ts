@@ -103,6 +103,15 @@ describe("agentRunJobSchema", () => {
     expect(agentRunJobSchema.safeParse({ ...valid, sessionRefs: "s2" }).success).toBe(false);
   });
 
+  it("accepts an optional projectRefs list (W1 follow-up) and rejects malformed ones", () => {
+    expect(agentRunJobSchema.safeParse({ ...valid, projectRefs: ["p2"] })).toEqual({
+      success: true,
+      data: { ...valid, projectRefs: ["p2"] },
+    });
+    expect(agentRunJobSchema.safeParse({ ...valid, projectRefs: [""] }).success).toBe(false);
+    expect(agentRunJobSchema.safeParse({ ...valid, projectRefs: "p2" }).success).toBe(false);
+  });
+
   it("accepts an optional attachmentIds list (P8 Task 3) and rejects malformed ones", () => {
     expect(
       agentRunJobSchema.safeParse({ ...valid, attachmentIds: ["a1", "a2"] }),

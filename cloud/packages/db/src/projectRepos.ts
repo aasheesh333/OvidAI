@@ -2,10 +2,12 @@ import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { uuidv7 } from "uuidv7";
 import type { Db } from "./client.js";
 import {
+  attachments as attachmentsTable,
   plans as plansTable,
   projects as projectsTable,
   sessions as sessionsTable,
   users as usersTable,
+  workspaceObjects as workspaceObjectsTable,
   type ProjectRow,
   type SessionRow,
 } from "./schema.js";
@@ -23,9 +25,18 @@ export class ProjectError extends Error {
 
 export interface ProjectSummary extends ProjectRow {
   sessionCount: number;
+  /** Total used slots: project memory + attachments + active artifacts. */
   fileCount: number;
-  /** Plan-derived per-project memory-file cap (owner spec §3 Screen 4). */
+  /** Plan-derived per-project file cap (owner spec §3 Screen 4). */
   fileCap: number;
+  /** Total bytes across memory, attachments and active artifacts. */
+  fileBytes: number;
+  /** Per-bucket counts, so the sidebar/W13 can show a breakdown. */
+  fileBreakdown: {
+    memory: number;
+    attachments: number;
+    artifacts: number;
+  };
 }
 
 /**
@@ -36,6 +47,42 @@ export interface ProjectSummary extends ProjectRow {
  */
 export const PROJECT_FILE_CAPS = [80, 100, 150, 250] as const;
 export const MAX_PROJECT_NAME_LENGTH = 80;
+
+/** Fold the three counted buckets into the public summary shape. */
+function toSummary(
+  row: {
+    id: string;
+    userId: string;
+    name: string;
+    createdAt: Date;
+    updatedAt: Date;
+    sessionCount: number;
+    memoryFiles: number;
+    memoryBytes: number;
+    attachmentCount: number;
+    attachmentBytes: number;
+    artifactCount: number;
+    artifactBytes: number;
+  },
+  cap: number,
+): ProjectSummary {
+  return {
+    id: row.id,
+    userId: row.userId,
+    name: row.name,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    sessionCount: row.sessionCount,
+    fileCount: row.memoryFiles + row.attachmentCount + row.artifactCount,
+    fileCap: cap,
+    fileBytes: Math.trunc(row.memoryBytes + row.attachmentBytes + row.artifactBytes),
+    fileBreakdown: {
+      memory: row.memoryFiles,
+      attachments: row.attachmentCount,
+      artifacts: row.artifactCount,
+    },
+  };
+}
 
 function cleanName(name: string): string {
   const trimmed = name.trim();
@@ -54,8 +101,31 @@ function isUniqueViolation(err: unknown): boolean {
   return e.cause !== undefined && isUniqueViolation(e.cause);
 }
 
+/**
+ * W1 follow-up (0022): stamp every file row of a chat with its project (or
+ * NULL when it leaves). Runs inside `moveSession`'s transaction so a chat's
+ * uploads and artifacts follow the chat. Existing files are never deleted or
+ * refused here: a move may take a project over its cap, after which new
+ * writes fail closed until a file is deleted.
+ */
+async function stampSessionFiles(
+  db: Db | Parameters<Parameters<Db["transaction"]>[0]>[0],
+  sessionId: string,
+  projectId: string | null,
+): Promise<void> {
+  const q = db as Db;
+  await q
+    .update(attachmentsTable)
+    .set({ projectId })
+    .where(eq(attachmentsTable.sessionId, sessionId));
+  await q
+    .update(workspaceObjectsTable)
+    .set({ projectId })
+    .where(eq(workspaceObjectsTable.sessionId, sessionId));
+}
+
 export const projectsRepo = {
-  /** Owner-scoped list, oldest first, with live session and memory-file counts. */
+  /** Owner-scoped list, oldest first, with live session and file counts. */
   async list(db: Db, uid: string): Promise<ProjectSummary[]> {
     const rows = await db
       .select({
@@ -68,13 +138,42 @@ export const projectsRepo = {
         // `${projectsTable.id}` as bare "id", which would resolve to the
         // SUBQUERY's sessions.id. The literal outer table name is required.
         sessionCount: sql<number>`(select count(*)::int from sessions s where s.project_id = projects.id and s.deleted_at is null)`,
-        fileCount: sql<number>`(select count(*)::int from private_memory_files m where m.project_id = projects.id)`,
+        memoryFiles: sql<number>`(select count(*)::int from private_memory_files m where m.project_id = projects.id)`,
+        memoryBytes: sql<number>`(select coalesce(sum(octet_length(m.content)), 0)::double precision from private_memory_files m where m.project_id = projects.id)`,
+        attachmentCount: sql<number>`(select count(*)::int from attachments a left join sessions sa on sa.id = a.session_id where coalesce(a.project_id, sa.project_id) = projects.id and sa.deleted_at is null)`,
+        attachmentBytes: sql<number>`(select coalesce(sum(a.size), 0)::double precision from attachments a left join sessions sa on sa.id = a.session_id where coalesce(a.project_id, sa.project_id) = projects.id and sa.deleted_at is null)`,
+        artifactCount: sql<number>`(select count(*)::int from workspace_objects w left join sessions wa on wa.id = w.session_id where coalesce(w.project_id, wa.project_id) = projects.id and w.kind = 'artifact' and w.status = 'active')`,
+        artifactBytes: sql<number>`(select coalesce(sum(w.bytes), 0)::double precision from workspace_objects w left join sessions wa on wa.id = w.session_id where coalesce(w.project_id, wa.project_id) = projects.id and w.kind = 'artifact' and w.status = 'active')`,
       })
       .from(projectsTable)
       .where(eq(projectsTable.userId, uid))
       .orderBy(asc(projectsTable.createdAt), asc(projectsTable.id));
     const cap = await projectFileCap(db, uid);
-    return rows.map((row) => ({ ...row, fileCap: cap }));
+    return rows.map((row) => toSummary(row, cap));
+  },
+
+  /** Owner-scoped single-project summary (the detail API). */
+  async getSummary(db: Db, uid: string, projectId: string): Promise<ProjectSummary | null> {
+    const rows = await db
+      .select({
+        id: projectsTable.id,
+        userId: projectsTable.userId,
+        name: projectsTable.name,
+        createdAt: projectsTable.createdAt,
+        updatedAt: projectsTable.updatedAt,
+        sessionCount: sql<number>`(select count(*)::int from sessions s where s.project_id = projects.id and s.deleted_at is null)`,
+        memoryFiles: sql<number>`(select count(*)::int from private_memory_files m where m.project_id = projects.id)`,
+        memoryBytes: sql<number>`(select coalesce(sum(octet_length(m.content)), 0)::double precision from private_memory_files m where m.project_id = projects.id)`,
+        attachmentCount: sql<number>`(select count(*)::int from attachments a left join sessions sa on sa.id = a.session_id where coalesce(a.project_id, sa.project_id) = projects.id and sa.deleted_at is null)`,
+        attachmentBytes: sql<number>`(select coalesce(sum(a.size), 0)::double precision from attachments a left join sessions sa on sa.id = a.session_id where coalesce(a.project_id, sa.project_id) = projects.id and sa.deleted_at is null)`,
+        artifactCount: sql<number>`(select count(*)::int from workspace_objects w left join sessions wa on wa.id = w.session_id where coalesce(w.project_id, wa.project_id) = projects.id and w.kind = 'artifact' and w.status = 'active')`,
+        artifactBytes: sql<number>`(select coalesce(sum(w.bytes), 0)::double precision from workspace_objects w left join sessions wa on wa.id = w.session_id where coalesce(w.project_id, wa.project_id) = projects.id and w.kind = 'artifact' and w.status = 'active')`,
+      })
+      .from(projectsTable)
+      .where(and(eq(projectsTable.id, projectId), eq(projectsTable.userId, uid)))
+      .limit(1);
+    const row = rows[0];
+    return row === undefined ? null : toSummary(row, await projectFileCap(db, uid));
   },
 
   /** Ownership-scoped fetch: null on unknown id OR wrong owner (never 403). */
@@ -166,6 +265,12 @@ export const projectsRepo = {
         .set({ projectId, updatedAt: new Date() })
         .where(and(eq(sessionsTable.id, sessionId), eq(sessionsTable.userId, uid)))
         .returning();
+      if (row !== undefined) {
+        // W1 follow-up (0022): the chat's uploads/artifacts follow the chat.
+        // Files are never deleted here; a move may put a project over its cap,
+        // after which new writes fail closed until a file is deleted.
+        await stampSessionFiles(tx, sessionId, projectId);
+      }
       return row ?? null;
     });
   },

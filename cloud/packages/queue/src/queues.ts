@@ -100,6 +100,13 @@ export interface AgentRunJob {
    * context for THIS run only; absent = no other session's context.
    */
   sessionRefs?: string[];
+  /**
+   * W1 follow-up (additive, optional): projects the user explicitly
+   * @-tagged in this message (gateway owner-checked, whole send refused on
+   * any invalid ref). The worker injects each project's memory for THIS run
+   * only; absent = no project context beyond the chat's own project.
+   */
+  projectRefs?: string[];
 }
 
 // Wire-format ids are plain nonempty strings (same convention as
@@ -125,6 +132,7 @@ export const agentRunJobSchema: z.ZodType<AgentRunJob> = z.object({
   mode: z.enum(["safe", "auto", "drive", "studio"]).optional(),
   schedule: scheduleRunRefSchema.optional(),
   sessionRefs: z.array(z.string().min(1)).optional(),
+  projectRefs: z.array(z.string().min(1)).optional(),
 });
 
 /** Why a workspace is being hibernated (warm → cold). */

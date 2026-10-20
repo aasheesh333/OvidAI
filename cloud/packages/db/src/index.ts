@@ -11,6 +11,7 @@ export * from "./runUsageRepos.js";
 export * from "./accountSettingsRepos.js";
 export * from "./privateMemory.js";
 export * from "./projectRepos.js";
+export * from "./projectFiles.js";
 export * from "./browserCredentialsRepos.js";
 // Table objects share names with the repo namespaces above (sessions, messages,
 // runs), so the schema is exported under its own namespace instead of `export *`.

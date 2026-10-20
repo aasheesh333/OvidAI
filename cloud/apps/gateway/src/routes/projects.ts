@@ -9,6 +9,7 @@ import {
   renameProjectBodySchema,
   type MemoryFileSummary,
   type ProjectDto,
+  type ProjectsResponse,
 } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { badRequest, isUuid, notFound, sendError, zodBadRequest } from "./http.js";
@@ -32,6 +33,20 @@ function toProjectDto(row: ProjectSummary): ProjectDto {
     sessionCount: row.sessionCount,
     fileCount: row.fileCount,
     fileCap: row.fileCap,
+    fileBytes: row.fileBytes,
+    fileBreakdown: row.fileBreakdown,
+  };
+}
+
+/** Zero-usage fallback for the instant after create/rename (counts are live). */
+function emptySummary(row: { id: string; userId: string; name: string; createdAt: Date; updatedAt: Date }, cap: number): ProjectSummary {
+  return {
+    ...row,
+    sessionCount: 0,
+    fileCount: 0,
+    fileCap: cap,
+    fileBytes: 0,
+    fileBreakdown: { memory: 0, attachments: 0, artifacts: 0 },
   };
 }
 
@@ -102,9 +117,26 @@ export function registerProjectRoutes(app: FastifyInstance, deps: GatewayDeps): 
 
   // ── projects ─────────────────────────────────────────────────────────────
 
-  app.get("/projects", async (request): Promise<{ items: ProjectDto[] }> => {
+  app.get("/projects", async (request): Promise<ProjectsResponse> => {
     const rows = await projectsRepo.list(deps.db, request.principal.uid);
-    return { items: rows.map(toProjectDto) };
+    return {
+      items: rows.map(toProjectDto),
+      // Fail-safe capability signal: the client only inserts `@project:`
+      // tokens and sends `projectRefs` once it has SEEN this flag. A client
+      // shipped before the gateway therefore never sends a field the strict
+      // body would reject.
+      capabilities: { turnProjectRefs: true },
+    };
+  });
+
+  // W1 follow-up: per-project detail (counts + bytes), consumed by the
+  // sidebar and W13's storage view. Same owner-scoped 404 as every route.
+  app.get("/projects/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!isUuid(id)) return notFound(reply);
+    const summary = await projectsRepo.getSummary(deps.db, request.principal.uid, id);
+    if (summary === null) return notFound(reply);
+    return toProjectDto(summary);
   });
 
   app.post("/projects", async (request, reply) => {
@@ -116,9 +148,8 @@ export function registerProjectRoutes(app: FastifyInstance, deps: GatewayDeps): 
     try {
       const row = await projectsRepo.create(deps.db, uid, parsed.data.name);
       if (row === null) return sendError(reply, 409, "name_taken", "You already have a project with that name.");
-      const summary = await projectsRepo.list(deps.db, uid);
-      const created = summary.find((p) => p.id === row.id);
-      return reply.code(201).send(toProjectDto(created ?? { ...row, sessionCount: 0, fileCount: 0, fileCap: await projectFileCap(deps.db, uid) }));
+      const summary = await projectsRepo.getSummary(deps.db, uid, row.id);
+      return reply.code(201).send(toProjectDto(summary ?? emptySummary(row, await projectFileCap(deps.db, uid))));
     } catch (err) {
       return projectError(reply, err);
     }
@@ -132,8 +163,8 @@ export function registerProjectRoutes(app: FastifyInstance, deps: GatewayDeps): 
     try {
       const row = await projectsRepo.rename(deps.db, request.principal.uid, id, parsed.data.name);
       if (row === null) return notFound(reply);
-      const summary = (await projectsRepo.list(deps.db, request.principal.uid)).find((p) => p.id === id);
-      return toProjectDto(summary ?? { ...row, sessionCount: 0, fileCount: 0, fileCap: await projectFileCap(deps.db, request.principal.uid) });
+      const summary = await projectsRepo.getSummary(deps.db, request.principal.uid, id);
+      return toProjectDto(summary ?? emptySummary(row, await projectFileCap(deps.db, request.principal.uid)));
     } catch (err) {
       return projectError(reply, err);
     }

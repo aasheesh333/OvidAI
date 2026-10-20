@@ -28,6 +28,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../connection_service.dart';
 import '../diag.dart';
+import '../chat_integration_ports.dart';
 import '../state.dart';
 import 'agent_surface.dart';
 import 'cloud_errors.dart';
@@ -2418,8 +2419,8 @@ class CloudAgentFacade extends ChangeNotifier
   void editQueuedMessageById(
     int id,
     String newText, {
-    List<String> sessionRefs = const <String>[],
-    List<String> projectRefs = const <String>[],
+    List<String>? sessionRefs,
+    List<String>? projectRefs,
   }) {
     if (newText.trim().isEmpty) return;
     final queue = _queueFor(null);
@@ -2427,10 +2428,27 @@ class CloudAgentFacade extends ChangeNotifier
     for (final entry in queue) {
       if (entry.id == id) {
         entry.text = newText;
-        // Re-derive the row's explicit refs from the edited text so a
-        // removed/added @-tag cannot go stale (W1b projectRefs included).
-        entry.sessionRefs = List<String>.of(sessionRefs);
-        entry.projectRefs = List<String>.of(projectRefs);
+        // W1 follow-up: the edited text may add/remove @project/@session
+        // tokens. Replace the refs only when the caller parsed them; the
+        // row's previous refs are never silently kept for a changed text.
+        if (sessionRefs != null) {
+          entry.sessionRefs = List<String>.from(sessionRefs);
+        }
+        if (projectRefs != null) {
+          entry.projectRefs = List<String>.from(projectRefs);
+        } else {
+          // Fallback for callers that do not parse refs: re-read the project
+          // tokens from the edited text so a removed/added @project tag can
+          // never dispatch with the old context.
+          final port = ProjectsPort.instance;
+          if (port != null && port.supportsTurnProjectRefs) {
+            try {
+              entry.projectRefs = List<String>.from(port.projectRefsIn(newText));
+            } catch (e) {
+              Diag.swallow('facade.editQueuedProjectRefs', e);
+            }
+          }
+        }
         _notify();
         return;
       }

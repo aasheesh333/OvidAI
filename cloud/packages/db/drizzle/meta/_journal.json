@@ -155,6 +155,13 @@
       "when": 1792513782785,
       "tag": "0021_browser_credentials",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1792514234416,
+      "tag": "0022_project_file_scope",
+      "breakpoints": true
     }
   ]
 }

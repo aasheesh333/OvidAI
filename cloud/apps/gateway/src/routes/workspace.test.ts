@@ -569,6 +569,25 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(big.statusCode).toBe(413);
       expect(big.json().error.code).toBe("file_too_large");
 
+      // W1 follow-up (0022): the worker's project file-budget refusal is a
+      // typed 409 the client renders, not a generic 503.
+      stub.file.queue.push({
+        status: 409,
+        body: {
+          error: {
+            code: "project_file_limit",
+            message: "This project is limited to 80 files on your plan. Delete a file to free a slot.",
+          },
+        },
+      });
+      const capped = await app.inject({
+        method: "GET",
+        url: `/cloud/v1/sessions/${sid}/workspace/file?path=shot.png`,
+        headers: authHeaders(uid),
+      });
+      expect(capped.statusCode).toBe(409);
+      expect(capped.json().error.code).toBe("project_file_limit");
+
       const down = makeApp({ workerUrl: "http://127.0.0.1:1" });
       const downSid = await createSession(down, uid);
       const unavailable = await down.inject({

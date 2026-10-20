@@ -68,11 +68,13 @@ describe.skipIf(!TEST_DATABASE_URL)("W1 project routes (real postgres)", () => {
    */
   async function pinFreePlan(uid: string): Promise<void> {
     await users.ensure(db, uid, null);
-    const planId = `w1-free-${uid}`;
+    // `projectFileCap` maps the tier to the LIVE plan list ordered by
+    // position. Pin the canonical `free` row first (index 0 → cap 80) so
+    // leftover plans from other test files cannot shift the mapping.
     await db
       .insert(schema.plans)
       .values({
-        id: planId,
+        id: "free",
         name: "Free",
         priceUsd: "0",
         enabled: true,
@@ -87,10 +89,7 @@ describe.skipIf(!TEST_DATABASE_URL)("W1 project routes (real postgres)", () => {
         target: schema.plans.id,
         set: { enabled: true, position: -1_000_000 },
       });
-    await db.$client.unsafe("UPDATE users SET tier = $1 WHERE uid = $2", [
-      planId,
-      uid,
-    ]);
+    await db.$client.unsafe("UPDATE users SET tier = 'free' WHERE uid = $1", [uid]);
   }
 
   it("creates, lists, renames and deletes a project; duplicate names are 409", async () => {
@@ -101,6 +100,8 @@ describe.skipIf(!TEST_DATABASE_URL)("W1 project routes (real postgres)", () => {
     expect(created.sessionCount).toBe(0);
     expect(created.fileCount).toBe(0);
     expect(created.fileCap).toBe(80);
+    expect(created.fileBytes).toBe(0);
+    expect(created.fileBreakdown).toEqual({ memory: 0, attachments: 0, artifacts: 0 });
 
     const dup = await app.inject({
       method: "POST",
@@ -118,6 +119,9 @@ describe.skipIf(!TEST_DATABASE_URL)("W1 project routes (real postgres)", () => {
     });
     expect(list.statusCode).toBe(200);
     expect(list.json().items.map((p: ProjectDto) => p.name)).toEqual(["Research"]);
+    // W1 follow-up: the client gates @project turn refs on this capability,
+    // so a client that ships before the gateway never sends the field.
+    expect(list.json().capabilities).toEqual({ turnProjectRefs: true });
 
     const renamed = await app.inject({
       method: "PATCH",
@@ -338,5 +342,32 @@ describe.skipIf(!TEST_DATABASE_URL)("W1 project routes (real postgres)", () => {
     const row = list.json().items.find((p: ProjectDto) => p.id === project.id);
     expect(row.fileCount).toBe(80);
     expect(row.fileCap).toBe(80);
+  });
+
+  it("GET /projects/:id is owner-scoped: the detail DTO is returned to the owner and 404 to everyone else", async () => {
+    const owner = testUid("proj-detail-owner");
+    const stranger = testUid("proj-detail-stranger");
+    await pinFreePlan(owner);
+    await pinFreePlan(stranger);
+    const project = await createProject(owner, "Detail");
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/cloud/v1/projects/${project.id}`,
+      headers: authHeaders(owner),
+    });
+    expect(detail.statusCode).toBe(200);
+    const dto = projectDtoSchema.parse(detail.json());
+    expect(dto.id).toBe(project.id);
+    expect(dto.fileCount).toBe(0);
+    expect(dto.fileBytes).toBe(0);
+
+    const foreign = await app.inject({
+      method: "GET",
+      url: `/cloud/v1/projects/${project.id}`,
+      headers: authHeaders(stranger),
+    });
+    expect(foreign.statusCode).toBe(404);
+    expect(foreign.json().error.code).toBe("not_found");
   });
 });

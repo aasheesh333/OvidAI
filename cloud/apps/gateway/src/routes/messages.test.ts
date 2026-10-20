@@ -98,6 +98,17 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     return res.json().id as string;
   }
 
+  async function createProject(handle: TestApp, uid: string, name: string): Promise<string> {
+    const res = await handle.app.inject({
+      method: "POST",
+      url: "/cloud/v1/projects",
+      headers: authHeaders(uid),
+      payload: { name },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json().id as string;
+  }
+
   function sendMessage(
     handle: TestApp,
     uid: string,
@@ -901,5 +912,93 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     expect(other.statusCode).toBe(202);
     expect((other.json() as SendMessageResponse).runId).not.toBe((ok.json() as SendMessageResponse).runId);
     expect(await tableCounts(sidB)).toEqual({ messages: 1, runs: 1 });
+  });
+
+  // ── W1 follow-up: @project turn refs (fail-safe) ────────────────────────
+
+  it("projectRefs ride the job for that turn only and never persist into the next send", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-projrefs-ok");
+    const sid = await createSession(handle, uid);
+    const projectId = await createProject(handle, uid, "Tagged");
+
+    const first = await sendMessage(handle, uid, sid, {
+      content: `use @project:${projectId} context`,
+      projectRefs: [projectId],
+    });
+    expect(first.statusCode).toBe(202);
+    expect(handle.adds).toHaveLength(1);
+    expect(handle.adds[0]!.data.projectRefs).toEqual([projectId]);
+
+    // The next turn carries no refs unless the user tags again: project
+    // context is per-turn, never persisted onto the session.
+    const second = await sendMessage(handle, uid, sid, { content: "plain follow-up" });
+    expect(second.statusCode).toBe(202);
+    expect(handle.adds).toHaveLength(2);
+    expect(handle.adds[1]!.data.projectRefs).toBeUndefined();
+    expect(await tableCounts(sid)).toEqual({ messages: 2, runs: 2 });
+  });
+
+  it("foreign/unknown project refs fail the WHOLE send with a typed 400 and enqueue nothing", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-projrefs-foreign");
+    const other = testUid("msg-projrefs-other");
+    const sid = await createSession(handle, uid);
+    const foreign = await createProject(handle, other, "Not yours");
+
+    for (const projectId of [foreign, newId()]) {
+      const res = await sendMessage(handle, uid, sid, {
+        content: "should not send",
+        projectRefs: [projectId],
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe("unknown_project_ref");
+    }
+    // No message row, no run row, no job, no mint: validation precedes every
+    // side effect.
+    expect(await tableCounts(sid)).toEqual({ messages: 0, runs: 0 });
+    expect(handle.adds).toHaveLength(0);
+    expect(handle.mint.calls).toEqual([]);
+  });
+
+  it("duplicate, over-limit and malformed project refs are refused with 400 and no side effects", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-projrefs-bad");
+    const sid = await createSession(handle, uid);
+    const projectId = await createProject(handle, uid, "One");
+
+    const duplicate = await sendMessage(handle, uid, sid, {
+      content: "dup",
+      projectRefs: [projectId, projectId],
+    });
+    expect(duplicate.statusCode).toBe(400);
+    expect(duplicate.json().error.code).toBe("duplicate_project_ref");
+
+    const overLimit = await sendMessage(handle, uid, sid, {
+      content: "too many",
+      projectRefs: Array.from({ length: 6 }, () => projectId),
+    });
+    expect(overLimit.statusCode).toBe(400);
+    expect(overLimit.json().error.code).toBe("bad_request");
+
+    const malformed = await sendMessage(handle, uid, sid, {
+      content: "malformed",
+      projectRefs: ["not-a-uuid"],
+    });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json().error.code).toBe("bad_request");
+
+    expect(await tableCounts(sid)).toEqual({ messages: 0, runs: 0 });
+    expect(handle.adds).toHaveLength(0);
+    expect(handle.mint.calls).toEqual([]);
+  });
+
+  it("standalone sends are unaffected by project refs support", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-projrefs-standalone");
+    const sid = await createSession(handle, uid);
+    const res = await sendMessage(handle, uid, sid, { content: "no project" });
+    expect(res.statusCode).toBe(202);
+    expect(handle.adds[0]!.data.projectRefs).toBeUndefined();
   });
 });

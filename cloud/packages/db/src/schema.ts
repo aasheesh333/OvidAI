@@ -233,6 +233,13 @@ export const attachments = pgTable(
     userId: text("user_id")
       .notNull()
       .references(() => users.uid),
+    // W1 follow-up (0022): the project this upload counts against. Stamped at
+    // creation from the owning session's project_id; nullable because rows
+    // predate projects and because a standalone chat has none. ON DELETE SET
+    // NULL keeps the file row (and its object) when the folder is deleted.
+    projectId: char("project_id", { length: 36 }).references(() => projects.id, {
+      onDelete: "set null",
+    }),
     name: text("name").notNull(),
     size: integer("size").notNull(),
     r2Key: text("r2_key").notNull(),
@@ -247,6 +254,7 @@ export const attachments = pgTable(
   (t) => [
     index("attachments_session_id_idx").on(t.sessionId),
     index("attachments_message_id_idx").on(t.messageId),
+    index("attachments_project_id_idx").on(t.projectId),
   ],
 );
 
@@ -764,6 +772,12 @@ export const workspaceObjects = pgTable(
       .notNull()
       .references(() => users.uid),
     sessionId: char("session_id", { length: 36 }).references(() => sessions.id),
+    // W1 follow-up (0022): project attribution for artifact rows (the file
+    // cap counts kind='artifact' AND status='active' only). Stamped at
+    // registration from the session; SET NULL on project deletion.
+    projectId: char("project_id", { length: 36 }).references(() => projects.id, {
+      onDelete: "set null",
+    }),
     kind: text("kind").notNull(), // "workspace_archive" | "workspace_manifest" | "artifact"
     r2Key: text("r2_key").notNull().unique(),
     bytes: bigint("bytes", { mode: "number" }).notNull(),
@@ -777,6 +791,7 @@ export const workspaceObjects = pgTable(
   (t) => [
     index("workspace_objects_session_id_idx").on(t.sessionId),
     index("workspace_objects_user_id_kind_idx").on(t.userId, t.kind),
+    index("workspace_objects_project_id_idx").on(t.projectId),
   ],
 );
 

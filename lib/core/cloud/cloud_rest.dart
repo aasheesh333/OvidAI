@@ -474,12 +474,14 @@ class CloudRestClient {
   // ── W1 Projects ──────────────────────────────────────────────────────────
 
   /// GET /projects → every project the caller owns, with live counts.
-  Future<List<ProjectDto>> listProjects() async {
-    final json = await getJson('/projects');
-    return <ProjectDto>[
-      for (final item in (json['items'] as List? ?? const <dynamic>[]))
-        if (item is Map<String, dynamic>) ProjectDto.fromJson(item),
-    ];
+  Future<List<ProjectDto>> listProjects() async =>
+      (await listProjectsPayload()).items;
+
+  /// GET /projects with the server's capabilities. The capability flag gates
+  /// `@project` turn refs: a gateway that does not advertise them must never
+  /// receive the field (its strict send body would 400 the whole send).
+  Future<ProjectsPayload> listProjectsPayload() async {
+    return ProjectsPayload.fromJson(await getJson('/projects'));
   }
 
   Future<ProjectDto> createProject(String name) async {

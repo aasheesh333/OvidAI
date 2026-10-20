@@ -1308,6 +1308,7 @@ void main() {
           planMode: true,
           presetId: 'code',
           sessionRefs: ['srv-9'],
+          projectRefs: ['proj-1'],
         ),
       );
       final reloaded = CloudSessionStore(
@@ -1326,6 +1327,7 @@ void main() {
       expect(turn.planMode, isTrue);
       expect(turn.presetId, 'code');
       expect(turn.sessionRefs, ['srv-9']);
+      expect(turn.projectRefs, ['proj-1']);
       reloaded.dispose();
     });
   });

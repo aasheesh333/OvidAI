@@ -26,7 +26,7 @@
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import type { Db } from "@ovid/db";
+import { assertSessionFileCapacity, ProjectFileLimitError, type Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
 import type { UiManifest } from "@ovid/shared";
 import {
@@ -161,6 +161,11 @@ function sendEngineError(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof PreconditionFailedError) {
     // baseline_mismatch | already_exists | not_empty — the gateway relays
     // these 409s verbatim (only `not_warm` drives its re-warm retry).
+    return fail(reply, 409, err.code, err.message);
+  }
+  if (err instanceof ProjectFileLimitError) {
+    // W1 follow-up (0022): a project chat's file budget is full. Typed 4xx
+    // before storage.put; the gateway relays the envelope verbatim.
     return fail(reply, 409, err.code, err.message);
   }
   if (err instanceof StorageError) {
@@ -326,6 +331,18 @@ export function buildFileService(deps: FileServiceDeps): FastifyInstance {
         source: "warm" | "archive",
         bytes?: Buffer,
       ): Promise<unknown> => {
+        // W1 follow-up (0022): registering this download as an artifact in a
+        // project chat consumes a project file slot. Refuse BEFORE the object
+        // is stored (registerArtifact calls storage.put) and before any row.
+        // The repo repeats the check under the project-file lock.
+        try {
+          await assertSessionFileCapacity(deps.db, userId, req.params.sid, 1);
+        } catch (err) {
+          if (err instanceof ProjectFileLimitError) {
+            return fail(reply, 409, err.code, err.message);
+          }
+          throw err;
+        }
         const artifact = await registerArtifact(
           {
             db: deps.db,

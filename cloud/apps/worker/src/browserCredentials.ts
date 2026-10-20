@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import type { BrowserArtifactVaultPort, BrowserCredentialsPort } from "@ovid/browser";
-import { artifactVault, browserCredentialsRepo, type Db } from "@ovid/db";
+import { artifactVault, assertSessionFileCapacity, browserCredentialsRepo, type Db } from "@ovid/db";
 import type { EnvelopeCrypto } from "@ovid/escrow";
 import { browserCredentialRecordId } from "@ovid/shared";
 import { registerArtifact, type ArtifactEventMirror, type ArtifactWorkspaceObjectsRepo, type HydrateEventLog, type StorageAdapter } from "@ovid/storage";
@@ -114,6 +114,10 @@ export function createBrowserArtifactVaultPort(opts: {
 
     async registerFromWorkspace({ userId, sessionId, path, mimeType }) {
       try {
+        // W1 follow-up (0022): a browser download registered into a project
+        // chat counts against that project's file budget; refuse before the
+        // object is stored. The repo re-checks under the project-file lock.
+        await assertSessionFileCapacity(opts.db, userId, sessionId, 1);
         const root = await opts.workspaceDir(userId, sessionId);
         const rec = await registerArtifact(
           {

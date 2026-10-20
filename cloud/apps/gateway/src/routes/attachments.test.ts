@@ -108,6 +108,16 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
     });
   }
 
+  /** Pin the canonical Free plan first so the project cap is deterministically 80. */
+  async function pinFreeCap(uid: string): Promise<void> {
+    await db.$client.unsafe(
+      `INSERT INTO plans (id, name, price_usd, enabled, aliases, window_hours, mult, slow_mode, auto_oss, position)
+       VALUES ('free', 'Free', '0', true, '[]'::jsonb, 24, '1', false, false, -1000000)
+       ON CONFLICT (id) DO UPDATE SET enabled = true, position = -1000000`,
+    );
+    await db.$client.unsafe(`UPDATE users SET tier = 'free' WHERE uid = $1`, [uid]);
+  }
+
   it("create → 201 with attachmentId/uploadUrl/path/expiresAt, key layout pinned, db row written", async () => {
     const { app, presigner } = makeApp();
     const uid = testUid("att-ok");
@@ -262,6 +272,66 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
     // workspace-path concern, never a display rewrite).
     const rows = await attachments.getForSession(db, sid);
     expect(rows.map((r) => r.name)).toEqual(cases.map(([name]) => name));
+  });
+
+  it("project chat: cap 80 counts uploads; the 81st is refused BEFORE presign, deleting one frees it; standalone is unaffected", async () => {
+    const { app, presigner } = makeApp();
+    const uid = testUid("att-project-cap");
+    await pinFreeCap(uid);
+    const sid = await createSession(app, uid);
+
+    const projectRes = await app.inject({
+      method: "POST",
+      url: "/cloud/v1/projects",
+      headers: authHeaders(uid),
+      payload: { name: "Cap project" },
+    });
+    expect(projectRes.statusCode).toBe(201);
+    const projectId = projectRes.json().id as string;
+    const moved = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/sessions/${sid}/project`,
+      headers: authHeaders(uid),
+      payload: { projectId },
+    });
+    expect(moved.statusCode).toBe(200);
+
+    // Fill the project's budget directly (the route's own enforcement is what
+    // this test exercises; the seed goes through the same repo check).
+    for (let i = 0; i < 80; i++) {
+      await attachments.create(db, {
+        id: newId(),
+        sessionId: sid,
+        userId: uid,
+        name: `f${i}.bin`,
+        size: 1,
+        r2Key: `seed/${uid}/${i}/${newId()}`,
+        projectId,
+      });
+    }
+    expect(await attachments.getForSession(db, sid)).toHaveLength(80);
+
+    const refused = await postAttachment(app, uid, sid, { name: "81.bin", size: 1 });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toEqual({
+      error: { code: "project_file_limit", message: expect.any(String) as string },
+    });
+    // Refused before signing and before any row: no presign call, still 80.
+    expect(presigner.calls).toEqual([]);
+    expect(await attachments.getForSession(db, sid)).toHaveLength(80);
+
+    // Deleting a file frees exactly one slot.
+    const [oldest] = await attachments.getForSession(db, sid);
+    await db.$client`delete from attachments where id = ${oldest!.id}`;
+    const accepted = await postAttachment(app, uid, sid, { name: "again.bin", size: 1 });
+    expect(accepted.statusCode).toBe(201);
+    expect(presigner.calls).toHaveLength(1);
+    expect(await attachments.getForSession(db, sid)).toHaveLength(80);
+
+    // A standalone chat in the same account is not subject to the project cap.
+    const standalone = await createSession(app, uid);
+    const standaloneRes = await postAttachment(app, uid, standalone, { name: "free.bin", size: 1 });
+    expect(standaloneRes.statusCode).toBe(201);
   });
 
   it("attachment routes answer 401 unauthenticated with the shared envelope", async () => {

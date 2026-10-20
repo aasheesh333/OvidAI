@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CLOUD_PRESET_IDS,
   DEFAULT_USER_PREFERENCES,
+  MAX_PROJECT_REFS,
   MAX_SESSION_REFS,
   sendMessageBodySchema,
   userPreferencesPatchSchema,
@@ -11,7 +12,7 @@ import {
 const UUID = "6f9619ff-8b86-d011-b42d-00cf4fc964ff";
 
 describe("Wave 1a send-body settings", () => {
-  it("accepts model, mode, planMode, presetId and sessionRefs", () => {
+  it("accepts model, mode, planMode, presetId, sessionRefs and projectRefs", () => {
     const body = {
       content: "hi",
       model: "glm-5.3 · high",
@@ -19,6 +20,7 @@ describe("Wave 1a send-body settings", () => {
       planMode: true,
       presetId: "code",
       sessionRefs: [UUID],
+      projectRefs: [UUID],
     };
     expect(sendMessageBodySchema.parse(body)).toEqual(body);
     expect(sendMessageBodySchema.parse({ content: "hi", model: "auto" }).model).toBe("auto");
@@ -32,10 +34,17 @@ describe("Wave 1a send-body settings", () => {
     expect(() => sendMessageBodySchema.parse({ content: "hi", planMode: "yes" })).toThrow();
     expect(() => sendMessageBodySchema.parse({ content: "hi", presetId: "" })).toThrow();
     expect(() => sendMessageBodySchema.parse({ content: "hi", sessionRefs: ["nope"] })).toThrow();
+    expect(() => sendMessageBodySchema.parse({ content: "hi", projectRefs: ["nope"] })).toThrow();
     expect(() =>
       sendMessageBodySchema.parse({
         content: "hi",
         sessionRefs: Array.from({ length: MAX_SESSION_REFS + 1 }, () => UUID),
+      }),
+    ).toThrow();
+    expect(() =>
+      sendMessageBodySchema.parse({
+        content: "hi",
+        projectRefs: Array.from({ length: MAX_PROJECT_REFS + 1 }, () => UUID),
       }),
     ).toThrow();
   });

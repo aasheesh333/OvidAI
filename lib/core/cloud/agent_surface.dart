@@ -157,15 +157,15 @@ abstract class AgentSurface extends ChangeNotifier {
     List<String> projectRefs = const <String>[],
   });
 
-  /// Edits the queued message with stable [id].
-  ///
-  /// [sessionRefs]/[projectRefs] replace the row's refs so an edited @-tag
-  /// is honoured when the row is dispatched (the row's attachments stay).
+  /// Edits the queued message with stable [id]. Passing [sessionRefs] /
+  /// [projectRefs] replaces the row's @-tag context so an edited row cannot
+  /// dispatch with stale refs; omitted lists leave the existing refs intact
+  /// (callers that do not parse refs keep the old behavior).
   void editQueuedMessageById(
     int id,
     String newText, {
-    List<String> sessionRefs = const <String>[],
-    List<String> projectRefs = const <String>[],
+    List<String>? sessionRefs,
+    List<String>? projectRefs,
   });
 
   /// Removes the queued message at [index] in the foreground queue.
