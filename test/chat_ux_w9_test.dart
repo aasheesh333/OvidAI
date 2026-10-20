@@ -23,6 +23,7 @@ import 'package:ovid_ai/core/chat_pins.dart';
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
+import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/cloud/projects.dart';
 import 'package:ovid_ai/core/projects_port_adapter.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -60,12 +61,6 @@ class _FakeProjects extends ProjectsPort {
     }
     notifyListeners();
   }
-
-  @override
-  List<String> projectRefsIn(String text) => [
-    for (final m in RegExp(r'@project:([A-Za-z0-9_\-]+)').allMatches(text))
-      m.group(1)!,
-  ];
 }
 
 class _FakeStudio extends StudioBindingPort {
@@ -201,15 +196,18 @@ void main() {
     });
 
     test('projectRefsIn delegates to the installed port', () {
+      const pid = '0199aaaa-0000-7000-8000-00000000e001';
       ProjectsPort.installForTest(
         _FakeProjects(
-          projects: const [ProjectOption(id: 'p1', name: 'Launch')],
+          projects: const [ProjectOption(id: pid, name: 'Launch')],
         ),
       );
-      expect(ChatScreen.projectRefsInForTest('use @project:p1 please'), ['p1']);
+      expect(ChatScreen.projectRefsInForTest('use @project:$pid please'), [
+        pid,
+      ]);
       ProjectsPort.installForTest(null);
       expect(
-        ChatScreen.projectRefsInForTest('use @project:p1 please'),
+        ChatScreen.projectRefsInForTest('use @project:$pid please'),
         isEmpty,
       );
     });
@@ -254,6 +252,46 @@ void main() {
       expect(adapter.projects.single.sessionCount, 2);
       expect(adapter.projects.single.fileCount, 3);
       expect(adapter.projects.single.fileCap, 100);
+    });
+
+    test('projectRefsIn is fail-safe: uuid-only, deduped, capped, known', () {
+      final a = '0199aaaa-0000-7000-8000-00000000e00a';
+      final b = '0199aaaa-0000-7000-8000-00000000e00b';
+      final c = '0199aaaa-0000-7000-8000-00000000e00c';
+      final d = '0199aaaa-0000-7000-8000-00000000e00d';
+      final e = '0199aaaa-0000-7000-8000-00000000e00e';
+      final f = '0199aaaa-0000-7000-8000-00000000e00f';
+      final unknown = '0199aaaa-0000-7000-8000-00000000e999';
+      final port = _FakeProjects(
+        projects: [
+          for (final id in [a, b, c, d, e, f])
+            ProjectOption(id: id, name: id.substring(id.length - 4)),
+        ],
+      );
+      port.supportsTurnProjectRefs = true;
+
+      final refs = port.projectRefsIn(
+        '@project:$a @project:$a @project:not-a-uuid '
+        '@project:$unknown @project:$b @project:$c @project:$d '
+        '@project:$e @project:$f',
+      );
+      expect(refs, [a, b, c, d, e], reason: 'dedupe, drop invalid/unknown, cap 5');
+
+      port.supportsTurnProjectRefs = false;
+      expect(port.projectRefsIn('@project:$a'), isEmpty);
+    });
+
+    test('CloudTurnOptions carries projectRefs through outbox JSON', () {
+      const id = '0199aaaa-0000-7000-8000-00000000e00a';
+      final json = const CloudTurnOptions(
+        projectRefs: [id],
+        sessionRefs: ['0199aaaa-0000-7000-8000-00000000e00b'],
+      ).toJson();
+      expect(json['projectRefs'], [id]);
+
+      final restored = CloudTurnOptions.fromJson(json);
+      expect(restored.projectRefs, [id]);
+      expect(restored.sessionRefs, ['0199aaaa-0000-7000-8000-00000000e00b']);
     });
 
     test('Add to Project needs the W1 port; Pin always works locally', () {
@@ -304,7 +342,7 @@ void main() {
       );
       ProjectsPort.installForTest(
         _FakeProjects(
-          projects: const [ProjectOption(id: 'p1', name: 'Project One')],
+          projects: const [ProjectOption(id: '0199aaaa-0000-7000-8000-00000000e001', name: 'Project One')],
         ),
       );
       CloudAgentFacade.I.seedRowForTest(
@@ -337,7 +375,7 @@ void main() {
     ) async {
       addSession('root', title: 'Current');
       final port = _FakeProjects(
-        projects: const [ProjectOption(id: 'p1', name: 'Project One')],
+        projects: const [ProjectOption(id: '0199aaaa-0000-7000-8000-00000000e001', name: 'Project One')],
       )..supportsTurnProjectRefs = false;
       ProjectsPort.installForTest(port);
       await pumpChat(tester);

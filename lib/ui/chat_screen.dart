@@ -2371,7 +2371,12 @@ class _ChatScreenState extends State<ChatScreen>
                                     );
                                     return;
                                   }
-                                  agent.editQueuedMessageById(edit.id, t);
+                                  agent.editQueuedMessageById(
+                                    edit.id,
+                                    t,
+                                    sessionRefs: sessionRefsIn(t, s.id),
+                                    projectRefs: projectRefsIn(t),
+                                  );
                                   setState(() => _queueEdits.remove(s.id));
                                   clearSubmitted();
                                   return;

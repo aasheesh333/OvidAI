@@ -228,6 +228,37 @@ void main() {
     expect(facade.queuedMessageIdsFor(s.id), [ids[2], ids[0], ids[1]]);
   });
 
+  test('editing a queued row replaces its refs; they ride the next send',
+      () async {
+    final s = session('qid-a');
+    await facade.runTask('start', sessionId: s.id);
+    await startRun(s, 'run-1');
+    const oldId = '0199aaaa-0000-7000-8000-00000000e0aa';
+    const newId = '0199aaaa-0000-7000-8000-00000000e0bb';
+    const sessionId = '0199aaaa-0000-7000-8000-00000000e0cc';
+    facade.enqueueMessage(
+      'one',
+      sessionId: s.id,
+      sessionRefs: const [sessionId],
+      projectRefs: const [oldId],
+    );
+    final id = facade.queuedMessageIdsFor(s.id).single;
+
+    facade.editQueuedMessageById(
+      id,
+      'one edited',
+      sessionRefs: const [sessionId],
+      projectRefs: const [newId],
+    );
+
+    expect(facade.stopRequested(sessionId: s.id, dispatchQueued: true), isTrue);
+    await until(() => rest.sent.length == 2);
+
+    expect(rest.sent, ['start', 'one edited']);
+    expect(rest.lastTurn.projectRefs, [newId]);
+    expect(rest.lastTurn.sessionRefs, [sessionId]);
+  });
+
   test('edit by id replaces exactly that message', () {
     final s = session('qid-a');
     facade.setActiveRunForTest(s.id, 'run-a');

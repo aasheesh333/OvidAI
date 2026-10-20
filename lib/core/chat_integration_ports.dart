@@ -90,10 +90,41 @@ abstract class ProjectsPort extends ChangeNotifier {
 
   /// Project ids explicitly tagged in [text] for THIS turn only (R1).
   ///
-  /// W1 resolves the tokens its own `mentionToken` wrote and returns the ids
-  /// that should ride `CloudTurnOptions.projectRefs`. Returning an empty list
-  /// means "no explicit project context".
-  List<String> projectRefsIn(String text) => const <String>[];
+  /// Fail-safe parsing for the strict server contract (W1b):
+  /// * only `@project:<uuid>` tokens are considered (malformed tokens are
+  ///   dropped, never forwarded);
+  /// * duplicates are collapsed (the server rejects duplicates with a 400);
+  /// * the list is capped at [maxTurnProjectRefs] (the server's max);
+  /// * ids not in the loaded [projects] list are dropped, so a stale or
+  ///   foreign token cannot produce a 400 that would refuse the whole send.
+  ///
+  /// When [supportsTurnProjectRefs] is false the result is always empty, so
+  /// an older gateway never receives the field.
+  List<String> projectRefsIn(String text) {
+    if (!supportsTurnProjectRefs) return const <String>[];
+    final known = {for (final p in projects) p.id};
+    if (known.isEmpty) return const <String>[];
+    final refs = <String>[];
+    for (final match in turnProjectToken.allMatches(text)) {
+      final id = match.group(1)!;
+      if (!uuidPattern.hasMatch(id)) continue;
+      if (!known.contains(id)) continue;
+      if (refs.contains(id)) continue;
+      refs.add(id);
+      if (refs.length >= maxTurnProjectRefs) break;
+    }
+    return refs;
+  }
+
+  /// The server's per-turn project-ref cap (shared/src/rest.ts).
+  static const int maxTurnProjectRefs = 5;
+
+  /// `@project:<id>` tokens; the id is validated separately.
+  static final RegExp turnProjectToken = RegExp(r'@project:([^\s\[\]()]+)');
+
+  static final RegExp uuidPattern = RegExp(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+  );
 }
 
 /// A resolved repo/branch binding for one chat.

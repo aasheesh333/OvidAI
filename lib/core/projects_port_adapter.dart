@@ -26,8 +26,16 @@ class ProjectsControllerPort extends ProjectsPort {
   @override
   bool get ready => _controller.loadedOnce;
 
+  /// Server capability switch (W1b owns `projectRefs` in
+  /// `sendMessageBodySchema` + ownership resolution).
+  ///
+  /// Flip to `true` only once that contract is DEPLOYED: while false the `@`
+  /// menu hides project rows and no send carries the field, so an older
+  /// strict gateway cannot 400 a chat send.
+  static bool serverSupportsTurnProjectRefs = false;
+
   @override
-  bool get supportsTurnProjectRefs => false;
+  bool get supportsTurnProjectRefs => serverSupportsTurnProjectRefs;
 
   @override
   List<ProjectOption> get projects => [

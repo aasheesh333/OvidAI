@@ -2415,13 +2415,22 @@ class CloudAgentFacade extends ChangeNotifier
   }
 
   @override
-  void editQueuedMessageById(int id, String newText) {
+  void editQueuedMessageById(
+    int id,
+    String newText, {
+    List<String> sessionRefs = const <String>[],
+    List<String> projectRefs = const <String>[],
+  }) {
     if (newText.trim().isEmpty) return;
     final queue = _queueFor(null);
     if (queue == null) return;
     for (final entry in queue) {
       if (entry.id == id) {
         entry.text = newText;
+        // Re-derive the row's explicit refs from the edited text so a
+        // removed/added @-tag cannot go stale (W1b projectRefs included).
+        entry.sessionRefs = List<String>.of(sessionRefs);
+        entry.projectRefs = List<String>.of(projectRefs);
         _notify();
         return;
       }
@@ -3100,10 +3109,10 @@ class _QueuedCloudMessage {
   String text;
 
   /// Sessions the user @-tagged in this row (R1) — they ride its send.
-  final List<String> sessionRefs;
+  List<String> sessionRefs;
 
   /// Projects the user @-tagged in this row (R1) — they ride its send.
-  final List<String> projectRefs;
+  List<String> projectRefs;
 
   /// The files staged when this row was queued — the row's OWN attachments
   /// (chat P1), snapshotted at enqueue time. The drain passes them to
