@@ -228,6 +228,7 @@ class CloudTurnOptions {
     this.planMode,
     this.presetId,
     this.sessionRefs = const <String>[],
+    this.projectRefs = const <String>[],
   });
 
   factory CloudTurnOptions.fromJson(Map<String, dynamic> j) => CloudTurnOptions(
@@ -237,6 +238,10 @@ class CloudTurnOptions {
         presetId: j['presetId'] as String?,
         sessionRefs: <String>[
           for (final id in (j['sessionRefs'] as List? ?? const <dynamic>[]))
+            if (id is String && id.isNotEmpty) id,
+        ],
+        projectRefs: <String>[
+          for (final id in (j['projectRefs'] as List? ?? const <dynamic>[]))
             if (id is String && id.isNotEmpty) id,
         ],
       );
@@ -255,6 +260,13 @@ class CloudTurnOptions {
   /// Session context never crosses chats otherwise (owner rule R1).
   final List<String> sessionRefs;
 
+  /// Project ids the user explicitly @-tagged in this message (R1).
+  ///
+  /// Only populated when the installed `ProjectsPort` says the gateway
+  /// accepts the field; the server's send schema is strict, so sending an
+  /// unknown key would 400 the prompt.
+  final List<String> projectRefs;
+
   /// The wire fields (absent keys are omitted, never sent as null).
   Map<String, Object> toJson() => <String, Object>{
         if (model != null && model!.trim().isNotEmpty) 'model': model!,
@@ -262,6 +274,7 @@ class CloudTurnOptions {
         'planMode': ?planMode,
         if (presetId != null && presetId!.isNotEmpty) 'presetId': presetId!,
         if (sessionRefs.isNotEmpty) 'sessionRefs': sessionRefs,
+        if (projectRefs.isNotEmpty) 'projectRefs': projectRefs,
       };
 }
 
@@ -826,6 +839,10 @@ class SubagentInfo {
   final AgentMode parentMode;
   final String prompt;
 
+  /// W2's short @-address (`@sa-1a2b3c4d`), when the `subagent_started`
+  /// event carried it. Null on servers that predate the handle.
+  final String? handle;
+
   /// Follow-up instructions queued by `send_message` (FIFO inbox).
   final List<String> messages = [];
   final Set<int> userReferenceMessages = {};
@@ -858,6 +875,7 @@ class SubagentInfo {
     required this.prompt,
     this.background = false,
     this.agentType = 'general-purpose',
+    this.handle,
   });
 
   String get state => finished
