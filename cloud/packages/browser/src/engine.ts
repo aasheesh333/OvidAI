@@ -40,6 +40,7 @@ import type { BrowserInputEvent, BrowserStateDto } from "@ovid/shared";
 
 import { createRedisBrowserBridge } from "./bridge.js";
 import type { BrowserEngineConfig } from "./config.js";
+import { createDetachGrace } from "./detachGrace.js";
 import { applyInputEvent } from "./input.js";
 import { createLightpandaPool, lightpandaAvailable, type LightpandaPool } from "./lightpanda.js";
 import { createBrowserPool, type BrowserPool } from "./pool.js";
@@ -59,7 +60,11 @@ import { createBrowserSessionRegistry, type BrowserSessionRegistry, type Session
 import type { StorageStatePersistence } from "./stateStore.js";
 import type { StorageState } from "./storageState.js";
 import { createBrowserTools } from "./tools/definitions.js";
-import type { BrowserToolDef } from "./tools/types.js";
+import type {
+  BrowserArtifactVaultPort,
+  BrowserCredentialsPort,
+  BrowserToolDef,
+} from "./tools/types.js";
 import { prepareBrowserUidDrop, type BrowserUidDrop } from "./uidDrop.js";
 import { createSsrfGuardedFetch } from "./url.js";
 
@@ -83,6 +88,10 @@ export interface BrowserEngineDeps {
    * setpriv, unusable Chromium) fails loudly instead of falling back to root.
    */
   prepareUidDrop?(cfg: BrowserEngineConfig): Promise<BrowserUidDrop | null>;
+  /** Wave 6 W4: the owner-scoped credentials vault (agent list/use only). */
+  credentials?: BrowserCredentialsPort;
+  /** Wave 6 W4: workspace ↔ Artifact Vault bridge for browser uploads/downloads. */
+  artifactVault?: BrowserArtifactVaultPort;
   now?(): number;
   log?(msg: string, err?: unknown): void;
 }
@@ -101,6 +110,8 @@ export interface BrowserEngine {
   screencastCount(): number;
   /** Attached viewers of a browser key (gateway viewer_join minus leaves/sweeps). */
   viewerCount(sessionId: string): number;
+  /** Wave 6 W4: true while the detach grace window is holding the cast open. */
+  detachGracePending(sessionId: string): boolean;
   /** True while the engine listens on the key's ctl/input channels. */
   isWatching(sessionId: string): boolean;
   /** releaseSession(all live, flushing state) → bridge.close → research.close → pool.close; idempotent. */
@@ -143,6 +154,12 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
 
   const registry = createBrowserSessionRegistry({ now });
 
+  // Wave 6 W4: after the last viewer leaves, keep rendering for the
+  // configured window before converting to headless. While pending, the
+  // browser is pinned exactly like a watched one — the pool's idle lease must
+  // not close the context before the window elapses.
+  const detachGrace = createDetachGrace({ graceMs: cfg.screencastDetachGraceMs });
+
   // The pool's idle-eviction hook is the engine's flush-before-close path;
   // it only ever runs after construction, so it may reference the bridge and
   // the screencast bookkeeping declared below.
@@ -152,7 +169,9 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     onIdleEvict: (sessionId: string, context: BrowserContext) => onPoolIdleEvict(sessionId, context),
     // Wave 5 R3: a browser someone is watching is never idle-evicted; once
     // the last viewer leaves it idles headless until the normal lease ends.
-    isPinned: (sessionId: string) => bridge.viewerCount(sessionId) > 0,
+    // Wave 6 W4: the detach grace window pins it too.
+    isPinned: (sessionId: string) =>
+      bridge.viewerCount(sessionId) > 0 || detachGrace.pending(sessionId),
   });
 
   const bridge = createRedisBrowserBridge({
@@ -164,6 +183,8 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       onInput: (sessionId: string, event: BrowserInputEvent) => onInput(sessionId, event),
       onTakeover: (sessionId: string, enabled: boolean, viewerId?: string) =>
         onTakeover(sessionId, enabled, viewerId),
+      onSwitchTab: (sessionId: string, index: number, viewerId?: string) =>
+        onSwitchTab(sessionId, index, viewerId),
     },
   });
 
@@ -206,6 +227,8 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     notifyState: (sessionId: string) => publishState(sessionId),
     log,
     now,
+    ...(deps.credentials !== undefined ? { credentials: deps.credentials } : {}),
+    ...(deps.artifactVault !== undefined ? { artifactVault: deps.artifactVault } : {}),
   });
 
   // -------------------------------------------------------------------------
@@ -228,11 +251,17 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     return webpSupport === true ? "webp" : "jpeg";
   }
 
+  /** Wave 6 W4: keep casting for viewers OR a pending detach grace window. */
+  function shouldCast(sessionId: string): boolean {
+    return bridge.viewerCount(sessionId) > 0 || detachGrace.pending(sessionId);
+  }
+
   async function startScreencastFor(sessionId: string): Promise<void> {
     if (casts.has(sessionId) || starting.has(sessionId)) return;
     if (casts.size + starting.size >= cfg.maxActiveScreencasts) return; // overflow: stay off
     const page = registry.activePage(sessionId);
     if (page === null) return; // no session yet — openSession re-triggers after ensure
+    if (!shouldCast(sessionId)) return;
 
     starting.add(sessionId);
     try {
@@ -254,14 +283,14 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
         }
       }
       // Viewers may have left while the probe ran — never start an orphan cast.
-      if (bridge.viewerCount(sessionId) === 0) return;
+      if (!shouldCast(sessionId)) return;
       const handle = await startScreencast(
         page,
         cfg.screencast,
         (frame) => bridge.publishFrame(sessionId, frame),
         { format: currentFormat() },
       );
-      if (bridge.viewerCount(sessionId) === 0) {
+      if (!shouldCast(sessionId)) {
         await handle.stop().catch(() => {});
         return;
       }
@@ -312,7 +341,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
         if (active === null || active !== entry.page || entry.page.isClosed()) {
           // The screencast follows the active tab: restart it on the new page.
           await stopScreencast(sessionId);
-          if (closePromise === null && bridge.viewerCount(sessionId) > 0) {
+          if (closePromise === null && shouldCast(sessionId)) {
             await startScreencastFor(sessionId);
           }
           continue;
@@ -337,6 +366,9 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
 
   /** page.title() is async — the cache backs the sync publishState. */
   const titleCache = new Map<string, string>();
+  /** Per-page tab titles (Wave 6 W4); pruned whenever a session publishes. */
+  const tabTitleCache = new Map<Page, string>();
+  const refreshingTabTitles = new Set<string>();
 
   function deadState(sessionId: string): BrowserStateDto {
     return {
@@ -349,6 +381,8 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       screencast: false,
       frameFormat: currentFormat(),
       viewport: { width: cfg.screencast.width, height: cfg.screencast.height },
+      tabs: [],
+      activeTabIndex: 0,
     };
   }
 
@@ -403,6 +437,15 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     ensureWatched(sessionId);
     const page = session.tabs[session.activeIndex] ?? session.handle.page;
     const viewport = page.viewportSize() ?? { width: cfg.screencast.width, height: cfg.screencast.height };
+    // Wave 6 W4: the tab strip is agent-owned. The list only ever contains
+    // pages the agent opened; a viewer has no "new tab" path.
+    const activeIndex = session.tabs.indexOf(page) === -1 ? session.activeIndex : session.tabs.indexOf(page);
+    const tabs = session.tabs.map((tab, index) => ({
+      index,
+      url: tab.url() || null,
+      title: tabTitleCache.get(tab) ?? (index === activeIndex ? titleCache.get(sessionId) ?? null : null),
+      active: index === activeIndex,
+    }));
     bridge.publishState(sessionId, {
       sessionId,
       live: true,
@@ -413,10 +456,47 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       screencast: casts.has(sessionId),
       frameFormat: currentFormat(),
       viewport,
+      tabs,
+      activeTabIndex: activeIndex,
     });
     // The first publish after a navigation carries the previous title; the
     // refresh republishes with the fresh one. The gateway keeps the latest.
     void refreshTitle(sessionId, page);
+    void refreshTabTitles(sessionId);
+  }
+
+  /**
+   * Tab titles are only known asynchronously. Refresh them after a publish
+   * and republish once when anything changed — guarded per session so the
+   * republish cannot recurse.
+   */
+  async function refreshTabTitles(sessionId: string): Promise<void> {
+    if (refreshingTabTitles.has(sessionId)) return;
+    const session = registry.get(sessionId);
+    if (session === null) return;
+    refreshingTabTitles.add(sessionId);
+    try {
+      let changed = false;
+      const live = new Set(session.tabs);
+      for (const tab of session.tabs) {
+        try {
+          const title = await tab.title();
+          if (tabTitleCache.get(tab) !== title) {
+            tabTitleCache.set(tab, title);
+            changed = true;
+          }
+        } catch {
+          // Page/context gone — the next publish drops it from `tabs`.
+        }
+      }
+      // Drop cache entries for pages no longer in this session's strip.
+      for (const cached of [...tabTitleCache.keys()]) {
+        if (!live.has(cached)) tabTitleCache.delete(cached);
+      }
+      if (changed && registry.get(sessionId) !== null) publishState(sessionId);
+    } finally {
+      refreshingTabTitles.delete(sessionId);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -439,9 +519,19 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       // drops the whole entry). Mirrors onTakeover's set + publish.
       registry.setTakeover(sessionId, false);
       publishState(sessionId);
-      void stopScreencast(sessionId);
+      // Wave 6 W4: keep the visual renderer alive for the grace window, then
+      // convert to headless. With grace 0 this is the pre-W4 immediate stop.
+      if (casts.has(sessionId) || starting.has(sessionId)) {
+        detachGrace.schedule(sessionId, () => {
+          void stopScreencast(sessionId).catch((err: unknown) =>
+            log(`screencast stop after detach grace failed for session ${sessionId}`, err),
+          );
+        });
+      }
       return;
     }
+    // A viewer is back (or another one is): the grace conversion is moot.
+    detachGrace.cancel(sessionId);
     // FE-026: takeover belongs to ONE viewer. When that viewer is gone
     // (leave or stale sweep) while others still watch, release it — the
     // remaining viewers must not inherit someone else's control.
@@ -545,6 +635,29 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     publishState(sessionId);
   }
 
+  /**
+   * Wave 6 W4: a viewer selected an existing tab. Switching is view-only —
+   * there is no path here that creates a page. The screencast follows the
+   * active tab immediately rather than waiting for the 10 s monitor.
+   */
+  function onSwitchTab(sessionId: string, index: number, _viewerId?: string): void {
+    const session = registry.get(sessionId);
+    if (session === null) return;
+    const previous = session.tabs[session.activeIndex] ?? null;
+    if (!registry.switchTab(sessionId, index)) return;
+    const next = registry.activePage(sessionId);
+    publishState(sessionId);
+    if (next === null || next === previous) return;
+    const cast = casts.get(sessionId);
+    if (cast === undefined || cast.page === next) return;
+    void (async () => {
+      await stopScreencast(sessionId);
+      if (bridge.viewerCount(sessionId) > 0 || detachGrace.pending(sessionId)) {
+        await startScreencastFor(sessionId);
+      }
+    })().catch((err: unknown) => log(`tab-switch screencast restart failed for session ${sessionId}`, err));
+  }
+
   // -------------------------------------------------------------------------
   // Session lifecycle
   // -------------------------------------------------------------------------
@@ -564,6 +677,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   }
 
   async function releaseSession(sessionId: string): Promise<void> {
+    detachGrace.cancel(sessionId);
     await stopScreencast(sessionId);
     // capture → flush → registry.close → pool.releaseLive → notify {live:false}
     await releaseSessionOps(ops, sessionId);
@@ -579,6 +693,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
    * teardown, then the {live:false} publish — the exact pinned ordering.
    */
   async function onPoolIdleEvict(sessionId: string, context: BrowserContext): Promise<void> {
+    detachGrace.cancel(sessionId);
     await stopScreencast(sessionId);
     const session = registry.get(sessionId);
     if (session !== null) {
@@ -606,6 +721,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     if (closePromise !== null) return closePromise;
     closePromise = (async () => {
       clearInterval(monitorTimer);
+      detachGrace.clear();
       // Flush BEFORE any process dies (Review Focus #2): every live session
       // goes through the full capture→flush→close path first. The REGISTRY
       // is the enumeration source (the "context alive" set) — the engine's
@@ -646,6 +762,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     publishState,
     screencastCount: () => casts.size,
     viewerCount: (sessionId: string) => bridge.viewerCount(sessionId),
+    detachGracePending: (sessionId: string) => detachGrace.pending(sessionId),
     isWatching: (sessionId: string) => bridge.isWatching(sessionId),
     close,
   };

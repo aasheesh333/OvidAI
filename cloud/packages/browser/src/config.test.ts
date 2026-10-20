@@ -21,6 +21,19 @@ describe("screencast frame-rate cap (Wave 5 R3)", () => {
   });
 });
 
+describe("detach grace (Wave 6 W4)", () => {
+  it("OVID_SCREENCAST_DETACH_GRACE_MS overrides the 45 s default and accepts 0", () => {
+    expect(loadBrowserEngineConfig({ OVID_SCREENCAST_DETACH_GRACE_MS: "1200" }).screencastDetachGraceMs).toBe(1200);
+    expect(loadBrowserEngineConfig({ OVID_SCREENCAST_DETACH_GRACE_MS: "0" }).screencastDetachGraceMs).toBe(0);
+  });
+
+  it("a malformed grace fails fast naming the variable", () => {
+    expect(() => loadBrowserEngineConfig({ OVID_SCREENCAST_DETACH_GRACE_MS: "-1" })).toThrow(
+      /OVID_SCREENCAST_DETACH_GRACE_MS/,
+    );
+  });
+});
+
 describe("loadBrowserEngineConfig defaults", () => {
   it("returns the exact default admission numbers and screencast shape", () => {
     const cfg = loadBrowserEngineConfig(bareEnv());
@@ -32,6 +45,8 @@ describe("loadBrowserEngineConfig defaults", () => {
     expect(cfg.tier1TimeoutMs).toBe(20_000);
     expect(cfg.maxActiveScreencasts).toBe(3);
     expect(cfg.screencastLoadMax).toBe(6.0);
+    // Wave 6 W4: the visual renderer survives a detach for 45 s.
+    expect(cfg.screencastDetachGraceMs).toBe(45_000);
     expect(cfg.screencast).toEqual({
       width: 1280,
       height: 800,

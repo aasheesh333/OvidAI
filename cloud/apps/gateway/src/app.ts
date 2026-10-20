@@ -17,6 +17,7 @@ import { registerArtifactCdnRoutes } from "./routes/artifactCdn.js";
 import { registerArtifactRoutes } from "./routes/artifacts.js";
 import { registerArtifactVaultRoutes } from "./routes/artifactVault.js";
 import { registerAttachmentRoutes } from "./routes/attachments.js";
+import { registerCredentialRoutes } from "./routes/credentials.js";
 import type { AttachmentPresigner } from "./routes/attachments.js";
 import { registerByokRoutes } from "./routes/byok.js";
 import type { ByokRouteOverrides } from "./routes/byok.js";
@@ -37,6 +38,7 @@ import { registerPreferenceRoutes } from "./routes/preferences.js";
 import { registerAccountSettingsRoutes } from "./routes/accountSettings.js";
 import { registerMemoryRoutes } from "./routes/memory.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
+import { registerProjectRoutes } from "./routes/projects.js";
 import { registerReportsRoutes } from "./routes/reports.js";
 import type { ReportsConfig } from "./routes/reports.js";
 import { registerRunRoutes } from "./routes/runs.js";
@@ -338,6 +340,7 @@ export function buildGateway(
       }));
 
       registerSessionRoutes(scope, deps);
+      registerProjectRoutes(scope, deps);
       registerMessageRoutes(scope, deps);
       registerPreferenceRoutes(scope, deps);
       // Wave 4: account settings (push, BYOK routing), custom presets, memory files.
@@ -353,6 +356,8 @@ export function buildGateway(
       // W12: signed CDN URL mints (additive; 503 cdn_not_configured without
       // OVID_CDN_* so the client falls back to the canonical presign).
       registerArtifactCdnRoutes(scope, deps);
+      // Wave 6 W4: browser Credentials Vault (metadata + sealed secrets).
+      registerCredentialRoutes(scope, deps);
 
       // P5 Task 15: MCP servers/catalog/oauth (authed half), plugins, and the
       // REST system-response path. Each answers a loud 503 when its optional

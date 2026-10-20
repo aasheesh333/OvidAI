@@ -9,12 +9,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   accountSettings,
   createDb,
+  createPrivateMemoryStore,
   customPresets,
   attachments,
   eventMirror,
   messages,
   migrate,
   newId,
+  projectsRepo,
   runs,
   sessionState,
   sessions,
@@ -2570,6 +2572,57 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       }
       expect(wireText(sse.requests[0]!)).not.toContain(marker);
     });
+
+    it("W1: project memory reaches only Main Agent runs in that project", async () => {
+      const markerA = `projA${Date.now().toString(36)}`;
+      const markerB = `projB${Date.now().toString(36)}`;
+      const owner = await seedRun();
+      const projectA = (await projectsRepo.create(db, owner.uid, "Alpha"))!;
+      const projectB = (await projectsRepo.create(db, owner.uid, "Beta"))!;
+      const store = createPrivateMemoryStore(db);
+      await store.save(owner.uid, { projectId: projectA.id }, "MEMORY.md", markerA);
+      await store.save(owner.uid, { projectId: projectB.id }, "MEMORY.md", markerB);
+      await projectsRepo.moveSession(db, owner.uid, owner.sessionId, projectA.id);
+
+      const runJob = async (data: AgentRunJob) => {
+        const sbx = makeFakePort();
+        const sse = await startTurnSse([textTurn("ok")]);
+        const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+        try {
+          await processor({ data });
+        } finally {
+          await processor.close();
+          await sse.close();
+        }
+        return sse.requests[0]!;
+      };
+      const runNew = async (sessionId: string, userId: string) => {
+        const prompt = await messages.append(db, { sessionId, role: "user", content: "hi" });
+        const run = await runs.create(db, { sessionId, promptMessageId: prompt.id });
+        return runJob({ runId: run.id, sessionId, userId, prompt: "hi" });
+      };
+
+      // Project A's session sees A, never B. (This also drains the run row
+      // seedRun queued for the same session.)
+      const aReq = await runJob(jobOf(owner).data);
+      expect(wireText(aReq)).toContain(markerA);
+      expect(wireText(aReq)).not.toContain(markerB);
+
+      // A standalone chat of the SAME user sees neither project.
+      const standalone = await sessions.create(db, owner.uid, "Standalone");
+      createdSessions.push(standalone.id);
+      const plainReq = await runNew(standalone.id, owner.uid);
+      expect(wireText(plainReq)).not.toContain(markerA);
+      expect(wireText(plainReq)).not.toContain(markerB);
+
+      // A chat in project B sees B, never A.
+      const bSession = await sessions.create(db, owner.uid, "Beta chat");
+      createdSessions.push(bSession.id);
+      await projectsRepo.moveSession(db, owner.uid, bSession.id, projectB.id);
+      const bReq = await runNew(bSession.id, owner.uid);
+      expect(wireText(bReq)).toContain(markerB);
+      expect(wireText(bReq)).not.toContain(markerA);
+    }, 60_000);
 
     it("R1: child loops inherit Memory OFF and isolated search, without parent or other chat history injection", async () => {
       const seeded = await seedRun();

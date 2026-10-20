@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BROWSER_FRAME_FORMAT,
+  browserCredentialRecordId,
   browserCtlChannel,
   browserCtlMsgSchema,
   browserFramesChannel,
@@ -148,5 +149,45 @@ describe("per-user browser (Wave 5 R2)", () => {
       type: "takeover",
       enabled: false,
     });
+  });
+});
+
+describe("agent-first tabs (Wave 6 W4)", () => {
+  it("state DTO carries the tab list and active index", () => {
+    const parsed = browserStateDtoSchema.parse({
+      ...validState,
+      tabs: [
+        { index: 0, url: "https://a.test/", title: "A", active: false },
+        { index: 1, url: "https://b.test/", title: "B", active: true },
+      ],
+      activeTabIndex: 1,
+    });
+    expect(parsed.tabs).toHaveLength(2);
+    expect(parsed.activeTabIndex).toBe(1);
+  });
+
+  it("tabs/activeTabIndex stay optional for older workers", () => {
+    const parsed = browserStateDtoSchema.parse(validState);
+    expect(parsed.tabs).toBeUndefined();
+    expect(parsed.activeTabIndex).toBeUndefined();
+  });
+
+  it("switch_tab is a ctl message; a negative index is rejected", () => {
+    expect(browserCtlMsgSchema.parse({ type: "switch_tab", index: 2, viewerId: "v1" })).toEqual({
+      type: "switch_tab",
+      index: 2,
+      viewerId: "v1",
+    });
+    expect(() => browserCtlMsgSchema.parse({ type: "switch_tab", index: -1 })).toThrow();
+  });
+
+  it("there is no ctl message that CREATES a tab", () => {
+    expect(() => browserCtlMsgSchema.parse({ type: "new_tab", url: "https://x.test/" })).toThrow();
+  });
+});
+
+describe("credentials vault record ids (Wave 6 W4)", () => {
+  it("binds the envelope AAD to the row", () => {
+    expect(browserCredentialRecordId("abc")).toBe("browser_credentials:abc");
   });
 });

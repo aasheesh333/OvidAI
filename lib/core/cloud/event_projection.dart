@@ -1095,6 +1095,23 @@ class EventTranscriptProjector {
       target._appendMessage(row);
     }
     row.toolSessionId = childSessionId;
+    // W2's short @-address rides the event; keep it on the card's input so
+    // the @ menu can offer the same handle the server/agent uses.
+    final handle = _str(payload, 'handle');
+    if (handle != null && handle.isNotEmpty) {
+      var input = <String, dynamic>{};
+      final raw = row.toolInput;
+      if (raw != null && raw.isNotEmpty) {
+        try {
+          final decoded = jsonDecode(raw);
+          if (decoded is Map) input = Map<String, dynamic>.from(decoded);
+        } catch (_) {
+          // A malformed input blob is not worth failing the card for.
+        }
+      }
+      input['handle'] = handle;
+      row.toolInput = jsonEncode(input);
+    }
     final type = _str(payload, 'agentType');
     if (type != null && type.isNotEmpty && type != 'general-purpose') {
       row.toolTitle = type;

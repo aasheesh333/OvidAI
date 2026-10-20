@@ -32,11 +32,12 @@ describe.skipIf(!TEST_DATABASE_URL)("searchMessages + sessionState against real 
       // Every table any migration creates (P8-T3 rerunnability invariant);
       // session_agent_state joins the list with this task's migration.
       await admin.unsafe(
-        `DROP TABLE IF EXISTS schedules, schedule_runs, devices, notifications, grants, file_manifests, workspace_objects, attachments, session_event_mirror, runs, messages, sessions, users,` +
+        `DROP TABLE IF EXISTS browser_credentials, private_memory_files, schedules, schedule_runs, devices, notifications, grants, file_manifests, workspace_objects, attachments, session_event_mirror, runs, messages, sessions, users,` +
           ` plans, mint_settings, user_plan_overrides, mint_audit, billing_purchases, image_jobs,` +
           ` image_deleted_accounts, image_cards, image_card_history, image_probe_log, image_probe_state,` +
           ` shares, share_forks, reports, account_deletions, byok_keys,` +
-          ` mcp_servers, mcp_oauth_tokens, mcp_oauth_flows, plugins, plugin_grants, session_agent_state, run_usage CASCADE`,
+          ` mcp_servers, mcp_oauth_tokens, mcp_oauth_flows, plugins, plugin_grants, session_agent_state, run_usage,` +
+          ` private_memory_files, projects CASCADE`,
       );
     } finally {
       await admin.end({ timeout: 5 });

@@ -57,6 +57,69 @@ export interface BrowserToolResult {
   artifacts?: BrowserArtifactRef[];
 }
 
+// ---------------------------------------------------------------------------
+// Wave 6 W4 — credentials vault + file bridge seams
+// ---------------------------------------------------------------------------
+
+/**
+ * Non-secret projection of one vault entry. The secret NEVER crosses this
+ * shape: it only exists inside [BrowserCredentialsPort.resolve], which the
+ * login tool consumes without echoing.
+ */
+export interface BrowserCredentialSummary {
+  id: string;
+  label: string;
+  /** Site identity the credential is bound to (URL or bare host). */
+  site: string;
+  /** Username/e-mail shown to the owner and the agent. Not a secret. */
+  username: string;
+  secretKind: "password" | "token";
+  hasNotes: boolean;
+}
+
+/** Decrypted credential, returned ONLY to the login tool body. */
+export interface BrowserCredentialSecret extends BrowserCredentialSummary {
+  secret: string;
+  notes: string | null;
+}
+
+/** Owner-scoped vault access (implemented in the worker over @ovid/db). */
+export interface BrowserCredentialsPort {
+  list(userId: string): Promise<BrowserCredentialSummary[]>;
+  /** null = unknown id or another owner's row. */
+  resolve(userId: string, id: string): Promise<BrowserCredentialSecret | null>;
+}
+
+/**
+ * Workspace ↔ Artifact Vault bridge. Implemented in the worker over
+ * @ovid/db + @ovid/storage; the browser package never talks to R2 itself.
+ */
+export interface BrowserArtifactVaultPort {
+  /**
+   * Materialize an account artifact inside the session workspace so
+   * Playwright can upload it. Returns the workspace-relative path, or null
+   * when the artifact is not owned/available.
+   */
+  fetchToWorkspace(input: {
+    userId: string;
+    sessionId: string;
+    artifactId: string;
+    /** Workspace-relative directory the port may create and write into. */
+    destDir: string;
+  }): Promise<{ path: string; mimeType: string; bytes: number } | null>;
+  /**
+   * Register a workspace file as an Artifact Vault object (R2 + ledger row +
+   * artifact_created event). Returns the new artifact id, or null when the
+   * vault is unavailable (the workspace copy still exists).
+   */
+  registerFromWorkspace(input: {
+    userId: string;
+    sessionId: string;
+    path: string;
+    mimeType: string;
+  }): Promise<{ id: string } | null>;
+}
+
 export interface BrowserToolDef {
   /** "browser_open", … */
   name: string;
@@ -89,6 +152,10 @@ export interface BrowserToolsDeps {
    * stays "50 MB" regardless — it describes the production policy.
    */
   downloadMaxBytes?: number;
+  /** Wave 6 W4: owner-scoped credentials vault; absent ⇒ the tools refuse loudly. */
+  credentials?: BrowserCredentialsPort;
+  /** Wave 6 W4: workspace ↔ Artifact Vault bridge; absent ⇒ workspace-only transfers. */
+  artifactVault?: BrowserArtifactVaultPort;
 }
 
 /** Every failure content starts with this (except takeover/URL refusals). */
@@ -182,11 +249,11 @@ export function defineBrowserTool(deps: BrowserToolsDeps, spec: BrowserToolSpec)
       // that just created one (browser_open), so a subsequent click/link
       // download is always captured.
       const existing = deps.registry.get(ctx.sessionId);
-      if (existing !== null) wireDownloads(deps, existing);
+      if (existing !== null) wireDownloads(deps, existing, artifactSessionId(ctx));
       try {
         const result = await spec.execute(parsed.data, ctx, deps);
         const current = deps.registry.get(ctx.sessionId);
-        if (current !== null) wireDownloads(deps, current);
+        if (current !== null) wireDownloads(deps, current, artifactSessionId(ctx));
         return result;
       } catch (err) {
         if (err instanceof BrowserToolFailure) return { content: err.content };
