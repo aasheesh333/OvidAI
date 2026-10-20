@@ -3393,6 +3393,54 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Diagnostics copied. Paste them into your message to support.'**
   String get statusDiagnosticsCopied;
+
+  /// Snackbar after pinning a chat.
+  ///
+  /// In en, this message translates to:
+  /// **'Session pinned'**
+  String get sessionPinned;
+
+  /// Snackbar after unpinning a chat.
+  ///
+  /// In en, this message translates to:
+  /// **'Session unpinned'**
+  String get sessionUnpinned;
+
+  /// Snackbar when pinning a chat fails.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not update the pin. Please try again.'**
+  String get pinUpdateFailed;
+
+  /// Snackbar after moving a chat into a project.
+  ///
+  /// In en, this message translates to:
+  /// **'Added to project'**
+  String get addedToProject;
+
+  /// Snackbar after removing a chat from its project.
+  ///
+  /// In en, this message translates to:
+  /// **'Removed from project'**
+  String get removedFromProject;
+
+  /// Snackbar when moving a chat to a project fails.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not move the chat. Please try again.'**
+  String get moveChatFailed;
+
+  /// Settings row title for saved browser logins.
+  ///
+  /// In en, this message translates to:
+  /// **'Credentials vault'**
+  String get credentialsVault;
+
+  /// Settings row subtitle for saved browser logins.
+  ///
+  /// In en, this message translates to:
+  /// **'Saved logins for the cloud browser'**
+  String get credentialsVaultSubtitle;
 }
 
 class _AppLocalizationsDelegate

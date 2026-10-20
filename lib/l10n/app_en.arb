@@ -1,1243 +1,2680 @@
 {
   "@@locale": "en",
-
   "actionRetry": "Retry",
-  "@actionRetry": {"description": "Button that repeats a failed action."},
-
+  "@actionRetry": {
+    "description": "Button that repeats a failed action."
+  },
   "errorDetailsShow": "Details",
-  "@errorDetailsShow": {"description": "Expands technical details under an error message."},
+  "@errorDetailsShow": {
+    "description": "Expands technical details under an error message."
+  },
   "errorDetailsHide": "Hide details",
-  "@errorDetailsHide": {"description": "Collapses technical details under an error message."},
+  "@errorDetailsHide": {
+    "description": "Collapses technical details under an error message."
+  },
   "errorDetailsCopy": "Copy details",
-  "@errorDetailsCopy": {"description": "Tooltip: copies the technical error details for support."},
+  "@errorDetailsCopy": {
+    "description": "Tooltip: copies the technical error details for support."
+  },
   "errorDetailsCopied": "Details copied",
-  "@errorDetailsCopied": {"description": "Confirmation after error details were copied to the clipboard."},
-
+  "@errorDetailsCopied": {
+    "description": "Confirmation after error details were copied to the clipboard."
+  },
   "errorGeneric": "Something went wrong. Please try again.",
-  "@errorGeneric": {"description": "Fallback for an error Ovid cannot classify."},
+  "@errorGeneric": {
+    "description": "Fallback for an error Ovid cannot classify."
+  },
   "errorOffline": "Ovid couldn't connect. Check your internet connection and try again.",
-  "@errorOffline": {"description": "Network unreachable, DNS failure, connection refused."},
+  "@errorOffline": {
+    "description": "Network unreachable, DNS failure, connection refused."
+  },
   "errorTimeout": "That took too long to respond. Please try again.",
-  "@errorTimeout": {"description": "A request or operation timed out."},
+  "@errorTimeout": {
+    "description": "A request or operation timed out."
+  },
   "errorUnauthorized": "Your sign-in or key was rejected. Check it and try again.",
-  "@errorUnauthorized": {"description": "HTTP 401 or a rejected credential."},
+  "@errorUnauthorized": {
+    "description": "HTTP 401 or a rejected credential."
+  },
   "errorForbidden": "You don't have permission to do that.",
-  "@errorForbidden": {"description": "HTTP 403."},
+  "@errorForbidden": {
+    "description": "HTTP 403."
+  },
   "errorNotFound": "Ovid couldn't find what it was looking for.",
-  "@errorNotFound": {"description": "HTTP 404 or a missing resource."},
+  "@errorNotFound": {
+    "description": "HTTP 404 or a missing resource."
+  },
   "errorRateLimited": "Too many requests right now. Wait a moment and try again.",
-  "@errorRateLimited": {"description": "HTTP 429."},
+  "@errorRateLimited": {
+    "description": "HTTP 429."
+  },
   "errorQuotaExceeded": "You've reached your plan limit. It resets automatically.",
-  "@errorQuotaExceeded": {"description": "HTTP 402 — the plan allowance is used up."},
+  "@errorQuotaExceeded": {
+    "description": "HTTP 402 — the plan allowance is used up."
+  },
   "errorServer": "The service is having trouble right now. Please try again later.",
-  "@errorServer": {"description": "HTTP 5xx."},
+  "@errorServer": {
+    "description": "HTTP 5xx."
+  },
   "errorBadResponse": "Ovid received an unexpected response. Please try again.",
-  "@errorBadResponse": {"description": "Malformed or unexpected data (parse/type errors)."},
+  "@errorBadResponse": {
+    "description": "Malformed or unexpected data (parse/type errors)."
+  },
   "errorDevice": "Your device couldn't complete that action.",
-  "@errorDevice": {"description": "A platform/plugin call failed (file picker, storage, etc.)."},
+  "@errorDevice": {
+    "description": "A platform/plugin call failed (file picker, storage, etc.)."
+  },
   "errorFile": "Ovid couldn't read or write the file.",
-  "@errorFile": {"description": "A file-system operation failed."},
+  "@errorFile": {
+    "description": "A file-system operation failed."
+  },
   "errorNotNow": "That can't be done right now.",
-  "@errorNotNow": {"description": "An action was refused because of the app's current state."},
+  "@errorNotNow": {
+    "description": "An action was refused because of the app's current state."
+  },
   "errorWidgetFallback": "Something went wrong showing this part of the screen.",
-  "@errorWidgetFallback": {"description": "Shown in place of a widget that failed to build in release builds."},
-
+  "@errorWidgetFallback": {
+    "description": "Shown in place of a widget that failed to build in release builds."
+  },
   "scheduleErrorResumeBackgroundFirst": "Background execution is paused. Resume it to run this task.",
-  "@scheduleErrorResumeBackgroundFirst": {"description": "Resuming a scheduled task while background execution is stopped."},
+  "@scheduleErrorResumeBackgroundFirst": {
+    "description": "Resuming a scheduled task while background execution is stopped."
+  },
   "scheduleActionResumeBackground": "Resume background",
-  "@scheduleActionResumeBackground": {"description": "Inline action that resumes background execution."},
+  "@scheduleActionResumeBackground": {
+    "description": "Inline action that resumes background execution."
+  },
   "scheduleErrorPreviousRunStopping": "The previous run is still stopping. Try again in a moment.",
-  "@scheduleErrorPreviousRunStopping": {"description": "Resuming a task whose previous run has not finished stopping."},
+  "@scheduleErrorPreviousRunStopping": {
+    "description": "Resuming a task whose previous run has not finished stopping."
+  },
   "scheduleErrorPauseBeforeEdit": "Pause this task before editing it.",
-  "@scheduleErrorPauseBeforeEdit": {"description": "Editing a task that is currently running."},
+  "@scheduleErrorPauseBeforeEdit": {
+    "description": "Editing a task that is currently running."
+  },
   "scheduleErrorInvalid": "That schedule isn't valid. Check the time, interval and retries.",
-  "@scheduleErrorInvalid": {"description": "The schedule specification was rejected."},
+  "@scheduleErrorInvalid": {
+    "description": "The schedule specification was rejected."
+  },
   "scheduleUpdated": "Schedule updated.",
-  "@scheduleUpdated": {"description": "A schedule action succeeded."},
+  "@scheduleUpdated": {
+    "description": "A schedule action succeeded."
+  },
   "scheduleUpdateFailed": "Couldn't update the schedule. {reason}",
   "@scheduleUpdateFailed": {
     "description": "A schedule action failed; reason is a full friendly sentence.",
-    "placeholders": {"reason": {"type": "String", "example": "Please try again."}}
+    "placeholders": {
+      "reason": {
+        "type": "String",
+        "example": "Please try again."
+      }
+    }
   },
-
   "providerFetchKeyRejected": "Key rejected by provider. Check the API key and try again.",
-  "@providerFetchKeyRejected": {"description": "Fetching models returned HTTP 401/403."},
+  "@providerFetchKeyRejected": {
+    "description": "Fetching models returned HTTP 401/403."
+  },
   "providerFetchNoModelsEndpoint": "No /models endpoint at this URL. Check the base URL.",
-  "@providerFetchNoModelsEndpoint": {"description": "Fetching models returned HTTP 404. Do not translate /models."},
+  "@providerFetchNoModelsEndpoint": {
+    "description": "Fetching models returned HTTP 404. Do not translate /models."
+  },
   "providerFetchUnreachable": "Couldn't reach provider. Check the URL and your connection.",
-  "@providerFetchUnreachable": {"description": "Fetching models failed with a timeout or network error."},
+  "@providerFetchUnreachable": {
+    "description": "Fetching models failed with a timeout or network error."
+  },
   "providerFetchUnexpectedResponse": "Unexpected response from provider. Check the base URL.",
-  "@providerFetchUnexpectedResponse": {"description": "The /models response could not be parsed."},
+  "@providerFetchUnexpectedResponse": {
+    "description": "The /models response could not be parsed."
+  },
   "providerFetchRateLimited": "Provider is limiting requests. Try again shortly.",
-  "@providerFetchRateLimited": {"description": "Fetching models returned HTTP 429."},
+  "@providerFetchRateLimited": {
+    "description": "Fetching models returned HTTP 429."
+  },
   "providerFetchServerError": "Provider is having trouble right now. Try again later.",
-  "@providerFetchServerError": {"description": "Fetching models returned HTTP 5xx."},
+  "@providerFetchServerError": {
+    "description": "Fetching models returned HTTP 5xx."
+  },
   "providerFetchFailed": "Provider refused the request. Check the key and URL.",
-  "@providerFetchFailed": {"description": "Fetching models returned another non-200 status."},
+  "@providerFetchFailed": {
+    "description": "Fetching models returned another non-200 status."
+  },
   "providerFetchInvalidKey": "API key looks invalid (contains whitespace or extra text). Please re-enter your key.",
-  "@providerFetchInvalidKey": {"description": "The saved key cannot be sent as an HTTP header."},
-
+  "@providerFetchInvalidKey": {
+    "description": "The saved key cannot be sent as an HTTP header."
+  },
   "skillsLoadFailed": "Couldn't load your skills.",
-  "@skillsLoadFailed": {"description": "Skills screen failed to list uploaded skills."},
+  "@skillsLoadFailed": {
+    "description": "Skills screen failed to list uploaded skills."
+  },
   "skillsUploadFailed": "Couldn't upload skills. {reason}",
   "@skillsUploadFailed": {
     "description": "Picking or saving skill files failed; reason is a full friendly sentence.",
-    "placeholders": {"reason": {"type": "String", "example": "Your device couldn't complete that action."}}
+    "placeholders": {
+      "reason": {
+        "type": "String",
+        "example": "Your device couldn't complete that action."
+      }
+    }
   },
   "skillsUploadFileFailed": "{name} — {reason}",
   "@skillsUploadFileFailed": {
     "description": "One skill file could not be copied.",
     "placeholders": {
-      "name": {"type": "String", "example": "notes.md"},
-      "reason": {"type": "String", "example": "Ovid couldn't read or write the file."}
+      "name": {
+        "type": "String",
+        "example": "notes.md"
+      },
+      "reason": {
+        "type": "String",
+        "example": "Ovid couldn't read or write the file."
+      }
     }
   },
-
   "storageMeasureFailed": "Couldn't measure storage.",
-  "@storageMeasureFailed": {"description": "Storage screen could not compute folder sizes."},
+  "@storageMeasureFailed": {
+    "description": "Storage screen could not compute folder sizes."
+  },
   "storageSizeUnknown": "—",
-  "@storageSizeUnknown": {"description": "Placeholder for a size that could not be measured."},
+  "@storageSizeUnknown": {
+    "description": "Placeholder for a size that could not be measured."
+  },
   "storageCookiesCleared": "Signed out of websites in the in-app browser.",
-  "@storageCookiesCleared": {"description": "All in-app browser cookies were cleared."},
+  "@storageCookiesCleared": {
+    "description": "All in-app browser cookies were cleared."
+  },
   "storageCookiesPartial": "Signed out of websites, but {count, plural, =1{1 chat browser profile} other{{count} chat browser profiles}} couldn't be cleared. Try again.",
   "@storageCookiesPartial": {
     "description": "Some per-chat browser cookie jars could not be cleared.",
-    "placeholders": {"count": {"type": "int", "example": "2"}}
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "2"
+      }
+    }
   },
   "storageCookiesFailed": "Couldn't clear cookies on this device.",
-  "@storageCookiesFailed": {"description": "Clearing cookies failed entirely."},
-
+  "@storageCookiesFailed": {
+    "description": "Clearing cookies failed entirely."
+  },
   "settingsExportFailed": "Couldn't export chats. {reason}",
   "@settingsExportFailed": {
     "description": "Exporting chats to a JSON file failed; reason is a full friendly sentence.",
-    "placeholders": {"reason": {"type": "String", "example": "Ovid couldn't read or write the file."}}
+    "placeholders": {
+      "reason": {
+        "type": "String",
+        "example": "Ovid couldn't read or write the file."
+      }
+    }
   },
-
   "backupInvalidArchive": "This file isn't a valid Ovid transcript archive.",
-  "@backupInvalidArchive": {"description": "The selected backup file failed validation."},
+  "@backupInvalidArchive": {
+    "description": "The selected backup file failed validation."
+  },
   "backupFailedUnchanged": "{operation} failed. {reason} No data was changed.",
   "@backupFailedUnchanged": {
     "description": "A backup step failed before anything was written.",
     "placeholders": {
-      "operation": {"type": "String", "example": "Restore"},
-      "reason": {"type": "String", "example": "This file isn't a valid Ovid transcript archive."}
+      "operation": {
+        "type": "String",
+        "example": "Restore"
+      },
+      "reason": {
+        "type": "String",
+        "example": "This file isn't a valid Ovid transcript archive."
+      }
     }
   },
   "backupRestoreRolledBack": "Restore failed. {reason} Any partial changes were undone.",
   "@backupRestoreRolledBack": {
     "description": "Restore failed while saving and the partial write was rolled back.",
-    "placeholders": {"reason": {"type": "String", "example": "Please try again."}}
+    "placeholders": {
+      "reason": {
+        "type": "String",
+        "example": "Please try again."
+      }
+    }
   },
   "backupRestoreRollbackUnverified": "Restore failed, and Ovid couldn't confirm the partial restore was undone. Some restored chats or settings may remain. Check your chat list before trying again.",
-  "@backupRestoreRollbackUnverified": {"description": "Restore failed and its rollback could not be verified."},
-
+  "@backupRestoreRollbackUnverified": {
+    "description": "Restore failed and its rollback could not be verified."
+  },
   "cloudModelCount": "{count, plural, =1{1 model} other{{count} models}}",
-  "@cloudModelCount": {"description": "Number of Ovid Cloud models available.", "placeholders": {"count": {"type": "int", "example": "12"}}},
-
+  "@cloudModelCount": {
+    "description": "Number of Ovid Cloud models available.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "12"
+      }
+    }
+  },
   "cloudStatusNotConnected": "Not connected",
-  "@cloudStatusNotConnected": {"description": "Ovid Cloud tile: idle with a stored key."},
-
+  "@cloudStatusNotConnected": {
+    "description": "Ovid Cloud tile: idle with a stored key."
+  },
   "cloudStatusSignInToActivate": "Sign in to activate",
-  "@cloudStatusSignInToActivate": {"description": "Ovid Cloud tile: idle without an account."},
-
+  "@cloudStatusSignInToActivate": {
+    "description": "Ovid Cloud tile: idle without an account."
+  },
   "cloudStatusConnecting": "Connecting your account…",
-  "@cloudStatusConnecting": {"description": "Ovid Cloud tile: minting the gateway key."},
-
+  "@cloudStatusConnecting": {
+    "description": "Ovid Cloud tile: minting the gateway key."
+  },
   "cloudStatusLoadingCatalog": "Loading models…",
-  "@cloudStatusLoadingCatalog": {"description": "Ovid Cloud tile: fetching the model catalog."},
-
+  "@cloudStatusLoadingCatalog": {
+    "description": "Ovid Cloud tile: fetching the model catalog."
+  },
   "cloudStatusReady": "Signed in · {models}",
-  "@cloudStatusReady": {"description": "Ovid Cloud tile: connected.", "placeholders": {"models": {"type": "String", "example": "12 models"}}},
-
+  "@cloudStatusReady": {
+    "description": "Ovid Cloud tile: connected.",
+    "placeholders": {
+      "models": {
+        "type": "String",
+        "example": "12 models"
+      }
+    }
+  },
   "cloudStatusFailed": "Ovid Cloud connection failed.",
-  "@cloudStatusFailed": {"description": "Ovid Cloud tile: failed with no specific reason."},
-
+  "@cloudStatusFailed": {
+    "description": "Ovid Cloud tile: failed with no specific reason."
+  },
   "cloudCatalogStale": "{models} available · catalog may be out of date",
-  "@cloudCatalogStale": {"description": "Ovid Cloud tile: shown under a failure, with the last known model count.", "placeholders": {"models": {"type": "String", "example": "12 models"}}},
-
+  "@cloudCatalogStale": {
+    "description": "Ovid Cloud tile: shown under a failure, with the last known model count.",
+    "placeholders": {
+      "models": {
+        "type": "String",
+        "example": "12 models"
+      }
+    }
+  },
   "cloudRefreshModels": "Refresh models",
-  "@cloudRefreshModels": {"description": "Button: re-fetch the Ovid Cloud model catalog."},
-
+  "@cloudRefreshModels": {
+    "description": "Button: re-fetch the Ovid Cloud model catalog."
+  },
   "cloudConnectingButton": "Connecting…",
-  "@cloudConnectingButton": {"description": "Disabled retry button while connecting."},
-
+  "@cloudConnectingButton": {
+    "description": "Disabled retry button while connecting."
+  },
   "cloudRetryConnection": "Retry connection",
-  "@cloudRetryConnection": {"description": "Button: retry the Ovid Cloud connection."},
-
+  "@cloudRetryConnection": {
+    "description": "Button: retry the Ovid Cloud connection."
+  },
   "cloudSignOut": "Sign out",
-  "@cloudSignOut": {"description": "Button: sign out after the Ovid Cloud session expired."},
-
+  "@cloudSignOut": {
+    "description": "Button: sign out after the Ovid Cloud session expired."
+  },
   "scheduleStopBackgroundTitle": "Pause background execution?",
-  "@scheduleStopBackgroundTitle": {"description": "Confirm dialog title for pausing all schedules."},
-
+  "@scheduleStopBackgroundTitle": {
+    "description": "Confirm dialog title for pausing all schedules."
+  },
   "scheduleStopBackgroundMessage": "This pauses {count, plural, =1{1 scheduled task} other{{count} scheduled tasks}} across all chats, and any scheduled run in progress is stopped. Replies you started yourself keep running. Resume brings the paused tasks back.",
-  "@scheduleStopBackgroundMessage": {"description": "Confirm dialog body for pausing all schedules.", "placeholders": {"count": {"type": "int", "example": "3"}}},
-
+  "@scheduleStopBackgroundMessage": {
+    "description": "Confirm dialog body for pausing all schedules.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "3"
+      }
+    }
+  },
   "scheduleStopBackgroundConfirm": "Pause schedules",
-  "@scheduleStopBackgroundConfirm": {"description": "Confirm button for pausing all schedules."},
-
+  "@scheduleStopBackgroundConfirm": {
+    "description": "Confirm button for pausing all schedules."
+  },
   "scheduleCancelTask": "Cancel task",
-  "@scheduleCancelTask": {"description": "Menu item and confirm button that permanently cancels a scheduled task."},
-
+  "@scheduleCancelTask": {
+    "description": "Menu item and confirm button that permanently cancels a scheduled task."
+  },
   "scheduleCancelTaskTitle": "Cancel this task?",
-  "@scheduleCancelTaskTitle": {"description": "Confirm dialog title for cancelling a scheduled task."},
-
+  "@scheduleCancelTaskTitle": {
+    "description": "Confirm dialog title for cancelling a scheduled task."
+  },
   "scheduleCancelTaskRunningMessage": "The task is running now and will be stopped. A cancelled task never runs again; this cannot be undone.",
-  "@scheduleCancelTaskRunningMessage": {"description": "Cancel-task confirmation when the task is running."},
-
+  "@scheduleCancelTaskRunningMessage": {
+    "description": "Cancel-task confirmation when the task is running."
+  },
   "scheduleCancelTaskMessage": "A cancelled task never runs again; this cannot be undone. Use Pause to stop it temporarily.",
-  "@scheduleCancelTaskMessage": {"description": "Cancel-task confirmation when the task is idle."},
-
+  "@scheduleCancelTaskMessage": {
+    "description": "Cancel-task confirmation when the task is idle."
+  },
   "scheduleKeepTask": "Keep task",
-  "@scheduleKeepTask": {"description": "Dismiss button of the cancel-task confirmation."},
-
+  "@scheduleKeepTask": {
+    "description": "Dismiss button of the cancel-task confirmation."
+  },
   "scheduleMinimumInterval": "Minimum 5 minutes.",
-  "@scheduleMinimumInterval": {"description": "Schedule editor: smallest allowed interval."},
-
+  "@scheduleMinimumInterval": {
+    "description": "Schedule editor: smallest allowed interval."
+  },
   "scheduleRecurrence": "Recurrence",
-  "@scheduleRecurrence": {"description": "Schedule editor: label above One-off / Daily / Interval."},
-
+  "@scheduleRecurrence": {
+    "description": "Schedule editor: label above One-off / Daily / Interval."
+  },
   "scheduleAdvanced": "Advanced",
-  "@scheduleAdvanced": {"description": "Schedule editor: expands the raw spec field."},
-
+  "@scheduleAdvanced": {
+    "description": "Schedule editor: expands the raw spec field."
+  },
   "schedulePreview": "Preview",
-  "@schedulePreview": {"description": "Schedule editor: label above the next-run preview."},
-
+  "@schedulePreview": {
+    "description": "Schedule editor: label above the next-run preview."
+  },
   "scheduleDescription": "Description",
-  "@scheduleDescription": {"description": "Schedule details: label above the task prompt."},
-
+  "@scheduleDescription": {
+    "description": "Schedule details: label above the task prompt."
+  },
   "scheduleRawSpec": "Raw spec",
-  "@scheduleRawSpec": {"description": "Schedule details: label above the raw schedule spec."},
-
+  "@scheduleRawSpec": {
+    "description": "Schedule details: label above the raw schedule spec."
+  },
   "backupLimitReachedTitle": "Backup limit reached",
-  "@backupLimitReachedTitle": {"description": "Dialog title when chats exceed a backup limit."},
-
+  "@backupLimitReachedTitle": {
+    "description": "Dialog title when chats exceed a backup limit."
+  },
   "backupExportRecent": "Export recent chats",
-  "@backupExportRecent": {"description": "Button: export only the chats that fit the backup limits."},
-
+  "@backupExportRecent": {
+    "description": "Button: export only the chats that fit the backup limits."
+  },
   "backupRestoreTitle": "Restore backup?",
-  "@backupRestoreTitle": {"description": "Confirm dialog title before restoring a backup."},
-
+  "@backupRestoreTitle": {
+    "description": "Confirm dialog title before restoring a backup."
+  },
   "backupRestoreConfirm": "Restore",
-  "@backupRestoreConfirm": {"description": "Confirm button: restore the validated backup."},
-
+  "@backupRestoreConfirm": {
+    "description": "Confirm button: restore the validated backup."
+  },
   "backupCancel": "Cancel",
-  "@backupCancel": {"description": "Dismiss button in backup dialogs."},
-
+  "@backupCancel": {
+    "description": "Dismiss button in backup dialogs."
+  },
   "backupJsonExport": "JSON (for other tools)",
-  "@backupJsonExport": {"description": "Button: export chats as JSON for other tools (not restorable)."},
-
+  "@backupJsonExport": {
+    "description": "Button: export chats as JSON for other tools (not restorable)."
+  },
   "backupExportReadyTitle": "Export-ready archive",
-  "@backupExportReadyTitle": {"description": "Card title for the portable backup archive format."},
-
+  "@backupExportReadyTitle": {
+    "description": "Card title for the portable backup archive format."
+  },
   "promptCachingTitle": "Prompt caching",
-  "@promptCachingTitle": {"description": "Section title for the prompt caching settings and the per-provider caching option."},
-
+  "@promptCachingTitle": {
+    "description": "Section title for the prompt caching settings and the per-provider caching option."
+  },
   "promptCachePrefixTitle": "Cache the prompt prefix",
-  "@promptCachePrefixTitle": {"description": "Switch title: reuse the system prompt, tools and history between turns."},
-
+  "@promptCachePrefixTitle": {
+    "description": "Switch title: reuse the system prompt, tools and history between turns."
+  },
   "promptCachePrefixSubtitle": "Reuses system prompt, tools and history between turns on providers that support it (Claude, and automatic caches). Cache reads cost about 0.1x input.",
-  "@promptCachePrefixSubtitle": {"description": "Explains what prompt prefix caching does and its cost effect."},
-
+  "@promptCachePrefixSubtitle": {
+    "description": "Explains what prompt prefix caching does and its cost effect."
+  },
   "promptCacheExtendedTitle": "Extended 1-hour cache",
-  "@promptCacheExtendedTitle": {"description": "Switch title: keep the prompt cache for one hour instead of five minutes."},
-
+  "@promptCacheExtendedTitle": {
+    "description": "Switch title: keep the prompt cache for one hour instead of five minutes."
+  },
   "promptCacheExtendedSubtitle": "For long 24/7 sessions with pauses over 5 minutes. Cache writes cost 2x input instead of 1.25x; reads stay 0.1x. Claude only.",
-  "@promptCacheExtendedSubtitle": {"description": "Explains the one-hour cache trade-off."},
-
+  "@promptCacheExtendedSubtitle": {
+    "description": "Explains the one-hour cache trade-off."
+  },
   "promptCacheProviderHelp": "Auto sends cache markers only where the endpoint is known to accept them. On forces markers for Anthropic-compatible proxies; Off never sends them.",
-  "@promptCacheProviderHelp": {"description": "Help text under the per-provider prompt caching choice (Auto / On / Off)."},
-
+  "@promptCacheProviderHelp": {
+    "description": "Help text under the per-provider prompt caching choice (Auto / On / Off)."
+  },
   "attachmentRemove": "Remove attachment {name}",
   "@attachmentRemove": {
     "description": "Tooltip and screen-reader label of the small x button that removes a staged attachment from the composer.",
-    "placeholders": {"name": {"type": "String", "example": "report.pdf"}}
+    "placeholders": {
+      "name": {
+        "type": "String",
+        "example": "report.pdf"
+      }
+    }
   },
-
   "attachmentCount": "{count}/{max} files",
   "@attachmentCount": {
     "description": "Hint above the composer attachment row when the per-message attachment limit is near.",
-    "placeholders": {"count": {"type": "int", "example": "18"}, "max": {"type": "int", "example": "20"}}
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "18"
+      },
+      "max": {
+        "type": "int",
+        "example": "20"
+      }
+    }
   },
-
   "attachmentSemantics": "{name}, {type}, {size}",
   "@attachmentSemantics": {
     "description": "Screen-reader label of an attachment tile: full file name, file type and file size.",
     "placeholders": {
-      "name": {"type": "String", "example": "report.pdf"},
-      "type": {"type": "String", "example": "PDF document"},
-      "size": {"type": "String", "example": "1.2 MB"}
+      "name": {
+        "type": "String",
+        "example": "report.pdf"
+      },
+      "type": {
+        "type": "String",
+        "example": "PDF document"
+      },
+      "size": {
+        "type": "String",
+        "example": "1.2 MB"
+      }
     }
   },
-
   "attachmentPreviewHint": "Preview",
-  "@attachmentPreviewHint": {"description": "Screen-reader hint: tapping an attachment tile opens its preview."},
-
+  "@attachmentPreviewHint": {
+    "description": "Screen-reader hint: tapping an attachment tile opens its preview."
+  },
   "attachmentStaging": "Adding file…",
-  "@attachmentStaging": {"description": "Label of the placeholder tile shown while a picked file is being copied into the chat."},
-
+  "@attachmentStaging": {
+    "description": "Label of the placeholder tile shown while a picked file is being copied into the chat."
+  },
   "attachmentPreviewError": "Preview unavailable",
-  "@attachmentPreviewError": {"description": "Shown on an image attachment tile whose thumbnail could not be loaded."},
-
+  "@attachmentPreviewError": {
+    "description": "Shown on an image attachment tile whose thumbnail could not be loaded."
+  },
   "attachmentOpen": "Open",
-  "@attachmentOpen": {"description": "Button in the attachment info sheet: open the file in another app."},
-
+  "@attachmentOpen": {
+    "description": "Button in the attachment info sheet: open the file in another app."
+  },
   "attachmentShare": "Share",
-  "@attachmentShare": {"description": "Button in the attachment info sheet: share the file through the system share sheet."},
-
+  "@attachmentShare": {
+    "description": "Button in the attachment info sheet: share the file through the system share sheet."
+  },
   "attachmentNoApp": "No app can open {name}",
   "@attachmentNoApp": {
     "description": "Snackbar when no installed app can open an attachment.",
-    "placeholders": {"name": {"type": "String", "example": "report.pdf"}}
+    "placeholders": {
+      "name": {
+        "type": "String",
+        "example": "report.pdf"
+      }
+    }
   },
-
   "attachmentMissing": "This file is no longer available on this device.",
-  "@attachmentMissing": {"description": "Shown in the attachment info sheet when the file path of an older message is unknown."},
-
+  "@attachmentMissing": {
+    "description": "Shown in the attachment info sheet when the file path of an older message is unknown."
+  },
   "attachmentTypeImage": "Image",
-  "@attachmentTypeImage": {"description": "Attachment type name for screen readers: an image file."},
+  "@attachmentTypeImage": {
+    "description": "Attachment type name for screen readers: an image file."
+  },
   "attachmentTypePdf": "PDF document",
-  "@attachmentTypePdf": {"description": "Attachment type name for screen readers: a PDF file."},
+  "@attachmentTypePdf": {
+    "description": "Attachment type name for screen readers: a PDF file."
+  },
   "attachmentTypeDoc": "Document",
-  "@attachmentTypeDoc": {"description": "Attachment type name for screen readers: a word-processor or rich-text document."},
+  "@attachmentTypeDoc": {
+    "description": "Attachment type name for screen readers: a word-processor or rich-text document."
+  },
   "attachmentTypeSheet": "Spreadsheet",
-  "@attachmentTypeSheet": {"description": "Attachment type name for screen readers: a spreadsheet such as XLS or XLSX."},
+  "@attachmentTypeSheet": {
+    "description": "Attachment type name for screen readers: a spreadsheet such as XLS or XLSX."
+  },
   "attachmentTypeCsv": "CSV table",
-  "@attachmentTypeCsv": {"description": "Attachment type name for screen readers: a comma-separated values file."},
+  "@attachmentTypeCsv": {
+    "description": "Attachment type name for screen readers: a comma-separated values file."
+  },
   "attachmentTypeArchive": "Archive",
-  "@attachmentTypeArchive": {"description": "Attachment type name for screen readers: a ZIP or other compressed archive."},
+  "@attachmentTypeArchive": {
+    "description": "Attachment type name for screen readers: a ZIP or other compressed archive."
+  },
   "attachmentTypeCode": "Code or text file",
-  "@attachmentTypeCode": {"description": "Attachment type name for screen readers: source code or plain text."},
+  "@attachmentTypeCode": {
+    "description": "Attachment type name for screen readers: source code or plain text."
+  },
   "attachmentTypeAudio": "Audio",
-  "@attachmentTypeAudio": {"description": "Attachment type name for screen readers: an audio recording or music file."},
+  "@attachmentTypeAudio": {
+    "description": "Attachment type name for screen readers: an audio recording or music file."
+  },
   "attachmentTypeVideo": "Video",
-  "@attachmentTypeVideo": {"description": "Attachment type name for screen readers: a video file."},
+  "@attachmentTypeVideo": {
+    "description": "Attachment type name for screen readers: a video file."
+  },
   "attachmentTypeOther": "File",
-  "@attachmentTypeOther": {"description": "Attachment type name for screen readers: any other kind of file."},
-
+  "@attachmentTypeOther": {
+    "description": "Attachment type name for screen readers: any other kind of file."
+  },
   "receiptResultNotOnDeviceTitle": "Image not saved on this device",
-  "@receiptResultNotOnDeviceTitle": {"description": "Image receipts: heading when a completed image request has no saved copy on this device."},
+  "@receiptResultNotOnDeviceTitle": {
+    "description": "Image receipts: heading when a completed image request has no saved copy on this device."
+  },
   "receiptResultNotOnDeviceBody": "Recover image downloads it again from this receipt. It never starts a new paid request.",
-  "@receiptResultNotOnDeviceBody": {"description": "Image receipts: explains the Recover image button for a completed request with no local copy."},
+  "@receiptResultNotOnDeviceBody": {
+    "description": "Image receipts: explains the Recover image button for a completed request with no local copy."
+  },
   "receiptResultFailedTitle": "No image: the request failed",
-  "@receiptResultFailedTitle": {"description": "Image receipts: heading for a failed image request, which produced no image."},
+  "@receiptResultFailedTitle": {
+    "description": "Image receipts: heading for a failed image request, which produced no image."
+  },
   "receiptResultFailedBody": "Nothing was produced for this request. The summary above shows whether it was charged.",
-  "@receiptResultFailedBody": {"description": "Image receipts: body text for a failed image request."},
+  "@receiptResultFailedBody": {
+    "description": "Image receipts: body text for a failed image request."
+  },
   "receiptResultPendingTitle": "Result not ready yet",
-  "@receiptResultPendingTitle": {"description": "Image receipts: heading while an image request is pending or its outcome is unknown."},
+  "@receiptResultPendingTitle": {
+    "description": "Image receipts: heading while an image request is pending or its outcome is unknown."
+  },
   "receiptResultPendingBody": "Check status to update this request. Do not submit a replacement.",
-  "@receiptResultPendingBody": {"description": "Image receipts: body text while an image request is pending or unknown."},
+  "@receiptResultPendingBody": {
+    "description": "Image receipts: body text while an image request is pending or unknown."
+  },
   "receiptResultPreviewFailedTitle": "Image preview failed",
-  "@receiptResultPreviewFailedTitle": {"description": "Image receipts: heading when a saved or recovered image could not be decoded for preview."},
+  "@receiptResultPreviewFailedTitle": {
+    "description": "Image receipts: heading when a saved or recovered image could not be decoded for preview."
+  },
   "receiptOutcomeNotOnServer": "Image no longer available from the server",
-  "@receiptOutcomeNotOnServer": {"description": "Image receipts: result line after Recover image when the server no longer keeps the image bytes."},
-
+  "@receiptOutcomeNotOnServer": {
+    "description": "Image receipts: result line after Recover image when the server no longer keeps the image bytes."
+  },
   "usageTitle": "Usage",
-  "@usageTitle": {"description": "Usage screen app bar title."},
+  "@usageTitle": {
+    "description": "Usage screen app bar title."
+  },
   "usageMoreActions": "More actions",
-  "@usageMoreActions": {"description": "Tooltip for the Usage screen overflow menu."},
+  "@usageMoreActions": {
+    "description": "Tooltip for the Usage screen overflow menu."
+  },
   "usageImageReceipts": "Image receipts",
-  "@usageImageReceipts": {"description": "Usage screen menu item that opens the image receipts screen."},
+  "@usageImageReceipts": {
+    "description": "Usage screen menu item that opens the image receipts screen."
+  },
   "usageCloudName": "Ovid Cloud",
-  "@usageCloudName": {"description": "Product name shown in the Usage header. Usually not translated."},
+  "@usageCloudName": {
+    "description": "Product name shown in the Usage header. Usually not translated."
+  },
   "usagePlanSemantics": "Plan: {plan}",
   "@usagePlanSemantics": {
     "description": "Screen reader label for the plan pill in the Usage header.",
-    "placeholders": {"plan": {"type": "String", "example": "PLUS"}}
+    "placeholders": {
+      "plan": {
+        "type": "String",
+        "example": "PLUS"
+      }
+    }
   },
   "usagePlanSaved": "Saved plan · awaiting server confirmation",
-  "@usagePlanSaved": {"description": "Usage header freshness line before the server has answered."},
+  "@usagePlanSaved": {
+    "description": "Usage header freshness line before the server has answered."
+  },
   "usagePlanLastKnown": "Last known plan and allowance",
-  "@usagePlanLastKnown": {"description": "Usage header freshness line when the latest refresh failed and older data is shown."},
+  "@usagePlanLastKnown": {
+    "description": "Usage header freshness line when the latest refresh failed and older data is shown."
+  },
   "usagePlanConfirmed": "Server-confirmed plan and allowance",
-  "@usagePlanConfirmed": {"description": "Usage header freshness line when the server answered."},
+  "@usagePlanConfirmed": {
+    "description": "Usage header freshness line when the server answered."
+  },
   "usageServerAuthoritative": "Server-authoritative",
-  "@usageServerAuthoritative": {"description": "Caption noting the allowance comes from the server, not the device."},
+  "@usageServerAuthoritative": {
+    "description": "Caption noting the allowance comes from the server, not the device."
+  },
   "usageRemainingPercent": "{percent}% remaining",
   "@usageRemainingPercent": {
     "description": "Overall plan allowance left, as a percentage. Never a price.",
-    "placeholders": {"percent": {"type": "int", "example": "37"}}
+    "placeholders": {
+      "percent": {
+        "type": "int",
+        "example": "37"
+      }
+    }
   },
   "usageRemainingUnknown": "Usage unavailable",
-  "@usageRemainingUnknown": {"description": "Shown instead of the overall allowance bar when the server has not reported it."},
+  "@usageRemainingUnknown": {
+    "description": "Shown instead of the overall allowance bar when the server has not reported it."
+  },
   "usageOverallBarLabel": "Plan allowance remaining",
-  "@usageOverallBarLabel": {"description": "Screen reader label for the overall allowance progress bar."},
+  "@usageOverallBarLabel": {
+    "description": "Screen reader label for the overall allowance progress bar."
+  },
   "usageResetsUnderMinute": "Resets in under a minute",
-  "@usageResetsUnderMinute": {"description": "Allowance reset countdown, less than one minute left."},
+  "@usageResetsUnderMinute": {
+    "description": "Allowance reset countdown, less than one minute left."
+  },
   "usageResetsInMinutes": "Resets in {minutes}m",
   "@usageResetsInMinutes": {
     "description": "Allowance reset countdown in minutes (m = minutes).",
-    "placeholders": {"minutes": {"type": "int", "example": "9"}}
+    "placeholders": {
+      "minutes": {
+        "type": "int",
+        "example": "9"
+      }
+    }
   },
   "usageResetsInHoursMinutes": "Resets in {hours}h {minutes}m",
   "@usageResetsInHoursMinutes": {
     "description": "Allowance reset countdown in hours and minutes (h = hours, m = minutes).",
-    "placeholders": {"hours": {"type": "int", "example": "4"}, "minutes": {"type": "int", "example": "12"}}
+    "placeholders": {
+      "hours": {
+        "type": "int",
+        "example": "4"
+      },
+      "minutes": {
+        "type": "int",
+        "example": "12"
+      }
+    }
   },
   "usageResetsInDays": "Resets in {days}d",
   "@usageResetsInDays": {
     "description": "Allowance reset countdown in whole days (d = days).",
-    "placeholders": {"days": {"type": "int", "example": "3"}}
+    "placeholders": {
+      "days": {
+        "type": "int",
+        "example": "3"
+      }
+    }
   },
   "usageResetsInDaysHours": "Resets in {days}d {hours}h",
   "@usageResetsInDaysHours": {
     "description": "Allowance reset countdown in days and hours (d = days, h = hours).",
-    "placeholders": {"days": {"type": "int", "example": "3"}, "hours": {"type": "int", "example": "5"}}
+    "placeholders": {
+      "days": {
+        "type": "int",
+        "example": "3"
+      },
+      "hours": {
+        "type": "int",
+        "example": "5"
+      }
+    }
   },
   "usageUpgradeUsedUp": "Allowance used up · See plans",
-  "@usageUpgradeUsedUp": {"description": "Usage header button when the allowance is exhausted."},
+  "@usageUpgradeUsedUp": {
+    "description": "Usage header button when the allowance is exhausted."
+  },
   "usageUpgradeLow": "Running low · Upgrade",
-  "@usageUpgradeLow": {"description": "Usage header button when less than 10% of the allowance is left."},
+  "@usageUpgradeLow": {
+    "description": "Usage header button when less than 10% of the allowance is left."
+  },
   "usageTodayTitle": "Today",
-  "@usageTodayTitle": {"description": "Section heading for today's usage counters in the Usage header."},
+  "@usageTodayTitle": {
+    "description": "Section heading for today's usage counters in the Usage header."
+  },
   "usageTodayRequests": "Requests",
-  "@usageTodayRequests": {"description": "Label under today's request count."},
+  "@usageTodayRequests": {
+    "description": "Label under today's request count."
+  },
   "usageTodayInput": "Input tokens",
-  "@usageTodayInput": {"description": "Label under today's input (prompt) token count."},
+  "@usageTodayInput": {
+    "description": "Label under today's input (prompt) token count."
+  },
   "usageTodayOutput": "Output tokens",
-  "@usageTodayOutput": {"description": "Label under today's output (reply) token count."},
+  "@usageTodayOutput": {
+    "description": "Label under today's output (reply) token count."
+  },
   "usageTodayImages": "Images",
-  "@usageTodayImages": {"description": "Label under today's generated image count."},
+  "@usageTodayImages": {
+    "description": "Label under today's generated image count."
+  },
   "usageTodayDeviceNote": "Counted on this device",
-  "@usageTodayDeviceNote": {"description": "Note under today's counters when they come from this device instead of the server."},
+  "@usageTodayDeviceNote": {
+    "description": "Note under today's counters when they come from this device instead of the server."
+  },
   "usageTodayEstimatedNote": "≈ Includes estimates where the model sent no token counts",
-  "@usageTodayEstimatedNote": {"description": "Note when some of today's token counts are local estimates."},
+  "@usageTodayEstimatedNote": {
+    "description": "Note when some of today's token counts are local estimates."
+  },
   "usageTodayAutoNote": "{count, plural, =1{Includes 1 request in Auto mode} other{Includes {count} requests in Auto mode}}",
   "@usageTodayAutoNote": {
     "description": "Note that Auto-mode requests are included in today's request count.",
-    "placeholders": {"count": {"type": "int", "example": "3"}}
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "3"
+      }
+    }
   },
   "usageModelsTitle": "Remaining by model",
-  "@usageModelsTitle": {"description": "Section heading for the per-model remaining usage list."},
+  "@usageModelsTitle": {
+    "description": "Section heading for the per-model remaining usage list."
+  },
   "usageModelsFootnote": "Each model has its own remaining usage: larger models use more of your plan per message, so they show fewer messages left.",
-  "@usageModelsFootnote": {"description": "Explains why models show different remaining counts. Must not mention prices or currency."},
+  "@usageModelsFootnote": {
+    "description": "Explains why models show different remaining counts. Must not mention prices or currency."
+  },
   "usageModelMessagesLeft": "{count, plural, =0{No messages left} =1{≈ 1 message left} other{≈ {count} messages left}}",
   "@usageModelMessagesLeft": {
     "description": "Approximate chat messages left for one model in the current window.",
-    "placeholders": {"count": {"type": "int", "example": "120"}}
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "120"
+      }
+    }
   },
   "usageModelImagesLeft": "{count, plural, =0{No images left} =1{≈ 1 image left} other{≈ {count} images left}}",
   "@usageModelImagesLeft": {
     "description": "Approximate images left for one image model in the current window.",
-    "placeholders": {"count": {"type": "int", "example": "8"}}
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "8"
+      }
+    }
   },
   "usageModelRemainingUnknown": "Remaining usage not known",
-  "@usageModelRemainingUnknown": {"description": "Screen reader label for a model whose remaining usage is unknown (shown as a dash)."},
+  "@usageModelRemainingUnknown": {
+    "description": "Screen reader label for a model whose remaining usage is unknown (shown as a dash)."
+  },
   "usageModelAuto": "Auto",
-  "@usageModelAuto": {"description": "Pill on the Auto model row: Auto picks a model for each request."},
+  "@usageModelAuto": {
+    "description": "Pill on the Auto model row: Auto picks a model for each request."
+  },
   "usageModelEstimateNote": "Estimate · Auto picks a model for each request",
-  "@usageModelEstimateNote": {"description": "Note under the Auto row explaining its remaining count is a conservative estimate."},
+  "@usageModelEstimateNote": {
+    "description": "Note under the Auto row explaining its remaining count is a conservative estimate."
+  },
   "usageProviderAutoRequests": "{count, plural, =1{1 request in Auto mode} other{{count} requests in Auto mode}}",
   "@usageProviderAutoRequests": {
     "description": "Provider card line: requests sent in Auto mode, also counted under their served model.",
-    "placeholders": {"count": {"type": "int", "example": "5"}}
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "5"
+      }
+    }
   },
-
   "notificationOpen": "Open",
-  "@notificationOpen": {"description": "Snackbar action: opens the chat or screen a background notification refers to."},
+  "@notificationOpen": {
+    "description": "Snackbar action: opens the chat or screen a background notification refers to."
+  },
   "bgCardTitle": "Background reliability",
-  "@bgCardTitle": {"description": "Settings card heading: whether Ovid can keep working while closed."},
+  "@bgCardTitle": {
+    "description": "Settings card heading: whether Ovid can keep working while closed."
+  },
   "bgCardReady": "All set. Ovid can run schedules and agent tasks while it is closed.",
-  "@bgCardReady": {"description": "Card summary when every background permission is granted."},
+  "@bgCardReady": {
+    "description": "Card summary when every background permission is granted."
+  },
   "bgCardNeedsAttention": "{count, plural, =1{1 setting needs attention} other{{count} settings need attention}}",
-  "@bgCardNeedsAttention": {"description": "Card summary: number of background permissions still missing.", "placeholders": {"count": {"type": "int", "example": "2"}}},
+  "@bgCardNeedsAttention": {
+    "description": "Card summary: number of background permissions still missing.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "2"
+      }
+    }
+  },
   "bgNotificationsTitle": "Notifications",
-  "@bgNotificationsTitle": {"description": "Requirement row: Android notification permission."},
+  "@bgNotificationsTitle": {
+    "description": "Requirement row: Android notification permission."
+  },
   "bgNotificationsOk": "Allowed. You'll hear when a task finishes or needs you.",
-  "@bgNotificationsOk": {"description": "Notification permission granted."},
+  "@bgNotificationsOk": {
+    "description": "Notification permission granted."
+  },
   "bgNotificationsNeeded": "Blocked. Ovid can't tell you when work finishes or needs approval.",
-  "@bgNotificationsNeeded": {"description": "Notification permission missing."},
+  "@bgNotificationsNeeded": {
+    "description": "Notification permission missing."
+  },
   "bgBatteryTitle": "Battery optimization",
-  "@bgBatteryTitle": {"description": "Requirement row: exemption from Android battery optimization."},
+  "@bgBatteryTitle": {
+    "description": "Requirement row: exemption from Android battery optimization."
+  },
   "bgBatteryOk": "Unrestricted. Android won't pause Ovid in the background.",
-  "@bgBatteryOk": {"description": "Battery optimization exemption granted."},
+  "@bgBatteryOk": {
+    "description": "Battery optimization exemption granted."
+  },
   "bgBatteryNeeded": "Restricted. Android may pause Ovid and delay scheduled tasks.",
-  "@bgBatteryNeeded": {"description": "Battery optimization still applies to Ovid."},
+  "@bgBatteryNeeded": {
+    "description": "Battery optimization still applies to Ovid."
+  },
   "bgExactTitle": "Exact alarms",
-  "@bgExactTitle": {"description": "Requirement row: Android 'Alarms & reminders' permission."},
+  "@bgExactTitle": {
+    "description": "Requirement row: Android 'Alarms & reminders' permission."
+  },
   "bgExactOk": "Allowed. Scheduled tasks start on time.",
-  "@bgExactOk": {"description": "Exact alarm permission granted (or not needed)."},
+  "@bgExactOk": {
+    "description": "Exact alarm permission granted (or not needed)."
+  },
   "bgExactNeeded": "Not allowed. Scheduled tasks may start late because Android batches them.",
-  "@bgExactNeeded": {"description": "Exact alarm permission missing."},
+  "@bgExactNeeded": {
+    "description": "Exact alarm permission missing."
+  },
   "bgOemTitle": "{maker} background settings",
-  "@bgOemTitle": {"description": "Requirement row for phone makers with aggressive battery managers.", "placeholders": {"maker": {"type": "String", "example": "Xiaomi"}}},
+  "@bgOemTitle": {
+    "description": "Requirement row for phone makers with aggressive battery managers.",
+    "placeholders": {
+      "maker": {
+        "type": "String",
+        "example": "Xiaomi"
+      }
+    }
+  },
   "bgOemBody": "{maker} phones can stop apps despite the settings above. Allow Ovid to autostart and run in the background.",
-  "@bgOemBody": {"description": "Guidance for phone makers that kill background apps.", "placeholders": {"maker": {"type": "String", "example": "Xiaomi"}}},
+  "@bgOemBody": {
+    "description": "Guidance for phone makers that kill background apps.",
+    "placeholders": {
+      "maker": {
+        "type": "String",
+        "example": "Xiaomi"
+      }
+    }
+  },
   "bgActionAllow": "Allow",
-  "@bgActionAllow": {"description": "Button that requests a missing background permission."},
+  "@bgActionAllow": {
+    "description": "Button that requests a missing background permission."
+  },
   "bgActionOpen": "Open",
-  "@bgActionOpen": {"description": "Button that opens the phone maker's background/autostart settings."},
+  "@bgActionOpen": {
+    "description": "Button that opens the phone maker's background/autostart settings."
+  },
   "bgActionGuide": "Guide",
-  "@bgActionGuide": {"description": "Button that opens a web guide for the phone maker's battery settings."},
+  "@bgActionGuide": {
+    "description": "Button that opens a web guide for the phone maker's battery settings."
+  },
   "bgStatusOk": "Done",
-  "@bgStatusOk": {"description": "Accessibility label for a granted requirement tick."},
+  "@bgStatusOk": {
+    "description": "Accessibility label for a granted requirement tick."
+  },
   "bgStatusNeeded": "Needs attention",
-  "@bgStatusNeeded": {"description": "Accessibility label for a missing requirement."},
+  "@bgStatusNeeded": {
+    "description": "Accessibility label for a missing requirement."
+  },
   "bgKeepActiveTitle": "Keep Ovid active in background",
-  "@bgKeepActiveTitle": {"description": "Switch: keep the background service running."},
+  "@bgKeepActiveTitle": {
+    "description": "Switch: keep the background service running."
+  },
   "bgKeepActiveOn": "On. A quiet status notification keeps schedules and agent runs working when Ovid is closed, and after a restart.",
-  "@bgKeepActiveOn": {"description": "Subtitle when keep-active is on."},
+  "@bgKeepActiveOn": {
+    "description": "Subtitle when keep-active is on."
+  },
   "bgKeepActiveOff": "Off. Ovid only wakes for scheduled tasks and while a run is in progress.",
-  "@bgKeepActiveOff": {"description": "Subtitle when keep-active is off."},
+  "@bgKeepActiveOff": {
+    "description": "Subtitle when keep-active is off."
+  },
   "bgChannelsTitle": "Notification types",
-  "@bgChannelsTitle": {"description": "Heading above per-type notification settings."},
+  "@bgChannelsTitle": {
+    "description": "Heading above per-type notification settings."
+  },
   "bgChannelAgent": "Agent updates",
-  "@bgChannelAgent": {"description": "Notification type: agent run finished / needs input / long job done."},
+  "@bgChannelAgent": {
+    "description": "Notification type: agent run finished / needs input / long job done."
+  },
   "bgChannelAgentHint": "Finished, needs input or approval, long jobs done",
-  "@bgChannelAgentHint": {"description": "Explains the Agent updates notification type."},
+  "@bgChannelAgentHint": {
+    "description": "Explains the Agent updates notification type."
+  },
   "bgChannelSchedule": "Scheduled task results",
-  "@bgChannelSchedule": {"description": "Notification type: results of scheduled tasks."},
+  "@bgChannelSchedule": {
+    "description": "Notification type: results of scheduled tasks."
+  },
   "bgChannelScheduleHint": "Success or failure, with a short summary",
-  "@bgChannelScheduleHint": {"description": "Explains the Scheduled task results notification type."},
+  "@bgChannelScheduleHint": {
+    "description": "Explains the Scheduled task results notification type."
+  },
   "bgChannelStatus": "Background status",
-  "@bgChannelStatus": {"description": "Notification type: silent 'Ovid is active' service notification."},
+  "@bgChannelStatus": {
+    "description": "Notification type: silent 'Ovid is active' service notification."
+  },
   "bgChannelStatusHint": "Silent notification while Ovid is active",
-  "@bgChannelStatusHint": {"description": "Explains the Background status notification type."},
+  "@bgChannelStatusHint": {
+    "description": "Explains the Background status notification type."
+  },
   "bgSoundChime": "Ovid chime",
-  "@bgSoundChime": {"description": "Sound choice: Ovid's own notification sound."},
+  "@bgSoundChime": {
+    "description": "Sound choice: Ovid's own notification sound."
+  },
   "bgSoundSystem": "System default",
-  "@bgSoundSystem": {"description": "Sound choice: the phone's default notification sound."},
+  "@bgSoundSystem": {
+    "description": "Sound choice: the phone's default notification sound."
+  },
   "bgSoundSilent": "Silent",
-  "@bgSoundSilent": {"description": "Sound choice: no sound."},
+  "@bgSoundSilent": {
+    "description": "Sound choice: no sound."
+  },
   "bgSoundLabel": "Sound",
-  "@bgSoundLabel": {"description": "Label of the notification sound picker."},
+  "@bgSoundLabel": {
+    "description": "Label of the notification sound picker."
+  },
   "bgChannelSystemSettings": "Android settings for this notification type",
-  "@bgChannelSystemSettings": {"description": "Tooltip: opens Android's settings for one notification channel."},
+  "@bgChannelSystemSettings": {
+    "description": "Tooltip: opens Android's settings for one notification channel."
+  },
   "actionCancel": "Cancel",
-  "@actionCancel": {"description": "Generic button that dismisses a dialog without changes."},
+  "@actionCancel": {
+    "description": "Generic button that dismisses a dialog without changes."
+  },
   "actionSave": "Save",
-  "@actionSave": {"description": "Generic button that saves the dialog's changes."},
+  "@actionSave": {
+    "description": "Generic button that saves the dialog's changes."
+  },
   "actionDelete": "Delete",
-  "@actionDelete": {"description": "Generic destructive confirm button."},
+  "@actionDelete": {
+    "description": "Generic destructive confirm button."
+  },
   "chatHeaderStudio": "Studio — your cloud files",
-  "@chatHeaderStudio": {"description": "Tooltip of the chat header button that opens Studio (the cloud workspace file editor)."},
+  "@chatHeaderStudio": {
+    "description": "Tooltip of the chat header button that opens Studio (the cloud workspace file editor)."
+  },
   "chatHeaderBrowser": "Browser — agent & login",
-  "@chatHeaderBrowser": {"description": "Tooltip of the chat header button that opens the in-app browser."},
+  "@chatHeaderBrowser": {
+    "description": "Tooltip of the chat header button that opens the in-app browser."
+  },
   "chatMenuMore": "More options",
-  "@chatMenuMore": {"description": "Tooltip of the three-dot overflow menu button."},
+  "@chatMenuMore": {
+    "description": "Tooltip of the three-dot overflow menu button."
+  },
   "chatMenuMoreJobs": "More options, {count, plural, =1{1 background job} other{{count} background jobs}}",
-  "@chatMenuMoreJobs": {"description": "Accessibility label of the overflow menu button while background jobs exist.", "placeholders": {"count": {"type": "int", "example": "2"}}},
+  "@chatMenuMoreJobs": {
+    "description": "Accessibility label of the overflow menu button while background jobs exist.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "2"
+      }
+    }
+  },
   "chatMenuShare": "Share chat",
-  "@chatMenuShare": {"description": "Overflow menu item: share the current conversation."},
+  "@chatMenuShare": {
+    "description": "Overflow menu item: share the current conversation."
+  },
   "chatMenuNewChat": "New chat",
-  "@chatMenuNewChat": {"description": "Overflow menu item: start a new, empty chat."},
+  "@chatMenuNewChat": {
+    "description": "Overflow menu item: start a new, empty chat."
+  },
   "chatMenuJobs": "Background jobs ({count})",
-  "@chatMenuJobs": {"description": "Overflow menu item that lists this chat's background jobs.", "placeholders": {"count": {"type": "int", "example": "2"}}},
+  "@chatMenuJobs": {
+    "description": "Overflow menu item that lists this chat's background jobs.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "2"
+      }
+    }
+  },
   "chatMenuRename": "Rename chat",
-  "@chatMenuRename": {"description": "Overflow menu item: rename the current chat."},
+  "@chatMenuRename": {
+    "description": "Overflow menu item: rename the current chat."
+  },
   "chatMenuTrajectory": "Trajectory",
-  "@chatMenuTrajectory": {"description": "Overflow menu item: open the chat's event ledger (trajectory)."},
+  "@chatMenuTrajectory": {
+    "description": "Overflow menu item: open the chat's event ledger (trajectory)."
+  },
   "chatMenuUsage": "Usage & limits",
-  "@chatMenuUsage": {"description": "Overflow menu item: open usage statistics and plan limits."},
+  "@chatMenuUsage": {
+    "description": "Overflow menu item: open usage statistics and plan limits."
+  },
   "chatMenuDelete": "Delete chat",
-  "@chatMenuDelete": {"description": "Overflow menu item: delete the current chat (asks for confirmation)."},
+  "@chatMenuDelete": {
+    "description": "Overflow menu item: delete the current chat (asks for confirmation)."
+  },
   "chatThinking": "Thinking…",
-  "@chatThinking": {"description": "Live label of the reasoning block while the model is thinking."},
+  "@chatThinking": {
+    "description": "Live label of the reasoning block while the model is thinking."
+  },
   "chatThinkingFor": "Thinking… {duration}",
-  "@chatThinkingFor": {"description": "Live label of the reasoning block with the elapsed thinking time.", "placeholders": {"duration": {"type": "String", "example": "4s"}}},
+  "@chatThinkingFor": {
+    "description": "Live label of the reasoning block with the elapsed thinking time.",
+    "placeholders": {
+      "duration": {
+        "type": "String",
+        "example": "4s"
+      }
+    }
+  },
   "chatThoughts": "Thoughts",
-  "@chatThoughts": {"description": "Title of a finished reasoning block when its duration is unknown."},
+  "@chatThoughts": {
+    "description": "Title of a finished reasoning block when its duration is unknown."
+  },
   "chatThoughtFor": "Thought for {duration}",
-  "@chatThoughtFor": {"description": "Title of a finished reasoning block with how long the model thought.", "placeholders": {"duration": {"type": "String", "example": "12s"}}},
+  "@chatThoughtFor": {
+    "description": "Title of a finished reasoning block with how long the model thought.",
+    "placeholders": {
+      "duration": {
+        "type": "String",
+        "example": "12s"
+      }
+    }
+  },
   "toolStatusRunning": "Running",
-  "@toolStatusRunning": {"description": "Accessibility label of a tool call that is still running."},
+  "@toolStatusRunning": {
+    "description": "Accessibility label of a tool call that is still running."
+  },
   "toolStatusDone": "Done",
-  "@toolStatusDone": {"description": "Accessibility label of a tool call that finished successfully."},
+  "@toolStatusDone": {
+    "description": "Accessibility label of a tool call that finished successfully."
+  },
   "toolStatusFailed": "Failed",
-  "@toolStatusFailed": {"description": "Accessibility label of a tool call that failed."},
+  "@toolStatusFailed": {
+    "description": "Accessibility label of a tool call that failed."
+  },
   "toolStatusStopped": "Stopped",
-  "@toolStatusStopped": {"description": "Accessibility label of a tool call that was stopped."},
+  "@toolStatusStopped": {
+    "description": "Accessibility label of a tool call that was stopped."
+  },
   "toolStatusUnknown": "Status unknown",
-  "@toolStatusUnknown": {"description": "Accessibility label of a tool call whose outcome is unknown (interrupted)."},
+  "@toolStatusUnknown": {
+    "description": "Accessibility label of a tool call whose outcome is unknown (interrupted)."
+  },
   "toolDetailInput": "Input",
-  "@toolDetailInput": {"description": "Section label above a tool call's arguments in its expanded details."},
+  "@toolDetailInput": {
+    "description": "Section label above a tool call's arguments in its expanded details."
+  },
   "toolDetailOutput": "Output",
-  "@toolDetailOutput": {"description": "Section label above a tool call's result in its expanded details."},
+  "@toolDetailOutput": {
+    "description": "Section label above a tool call's result in its expanded details."
+  },
   "toolDetailCopy": "Copy output",
-  "@toolDetailCopy": {"description": "Tooltip: copies a tool call's output."},
+  "@toolDetailCopy": {
+    "description": "Tooltip: copies a tool call's output."
+  },
   "subagentDefaultName": "Subagent",
-  "@subagentDefaultName": {"description": "Name shown on a subagent card when the agent type is unknown."},
+  "@subagentDefaultName": {
+    "description": "Name shown on a subagent card when the agent type is unknown."
+  },
   "subagentStatusRunning": "Running",
-  "@subagentStatusRunning": {"description": "Subagent card status while the subagent works."},
+  "@subagentStatusRunning": {
+    "description": "Subagent card status while the subagent works."
+  },
   "subagentStatusDone": "Done",
-  "@subagentStatusDone": {"description": "Subagent card status after the subagent finished."},
+  "@subagentStatusDone": {
+    "description": "Subagent card status after the subagent finished."
+  },
   "subagentStatusFailed": "Failed",
-  "@subagentStatusFailed": {"description": "Subagent card status after the subagent failed."},
+  "@subagentStatusFailed": {
+    "description": "Subagent card status after the subagent failed."
+  },
   "subagentStatusStopped": "Stopped",
-  "@subagentStatusStopped": {"description": "Subagent card status after the subagent was stopped."},
+  "@subagentStatusStopped": {
+    "description": "Subagent card status after the subagent was stopped."
+  },
   "subagentToolUses": "{count, plural, =0{No tool uses} =1{1 tool use} other{{count} tool uses}}",
-  "@subagentToolUses": {"description": "Subagent card: how many tools the subagent called.", "placeholders": {"count": {"type": "int", "example": "3"}}},
+  "@subagentToolUses": {
+    "description": "Subagent card: how many tools the subagent called.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "3"
+      }
+    }
+  },
   "subagentEarlierTools": "{count, plural, =1{1 earlier tool use} other{{count} earlier tool uses}}",
-  "@subagentEarlierTools": {"description": "Subagent card: older tool rows hidden above the latest ones.", "placeholders": {"count": {"type": "int", "example": "5"}}},
+  "@subagentEarlierTools": {
+    "description": "Subagent card: older tool rows hidden above the latest ones.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "5"
+      }
+    }
+  },
   "subagentNoToolsYet": "No tool calls yet",
-  "@subagentNoToolsYet": {"description": "Subagent card body before the subagent called any tool."},
+  "@subagentNoToolsYet": {
+    "description": "Subagent card body before the subagent called any tool."
+  },
   "subagentOpenTranscript": "Open transcript",
-  "@subagentOpenTranscript": {"description": "Subagent card button that opens the subagent's full transcript."},
+  "@subagentOpenTranscript": {
+    "description": "Subagent card button that opens the subagent's full transcript."
+  },
   "subagentCardSemantics": "Subagent {name}: {status}",
-  "@subagentCardSemantics": {"description": "Accessibility label of a subagent card header.", "placeholders": {"name": {"type": "String", "example": "reviewer"}, "status": {"type": "String", "example": "Running"}}},
+  "@subagentCardSemantics": {
+    "description": "Accessibility label of a subagent card header.",
+    "placeholders": {
+      "name": {
+        "type": "String",
+        "example": "reviewer"
+      },
+      "status": {
+        "type": "String",
+        "example": "Running"
+      }
+    }
+  },
   "chatProducedFiles": "{count, plural, =1{Produced 1 file} other{Produced {count} files}}",
-  "@chatProducedFiles": {"description": "Header of the card listing files the agent produced this run.", "placeholders": {"count": {"type": "int", "example": "3"}}},
+  "@chatProducedFiles": {
+    "description": "Header of the card listing files the agent produced this run.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "3"
+      }
+    }
+  },
   "chatProducedMore": "{count, plural, =1{+1 more file} other{+{count} more files}}",
-  "@chatProducedMore": {"description": "Button that shows the remaining produced files.", "placeholders": {"count": {"type": "int", "example": "2"}}},
+  "@chatProducedMore": {
+    "description": "Button that shows the remaining produced files.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "2"
+      }
+    }
+  },
   "artifactsTitle": "Artifacts",
-  "@artifactsTitle": {"description": "Title of the Artifacts screen and its sidebar / menu entry (uploaded and generated files)."},
+  "@artifactsTitle": {
+    "description": "Title of the Artifacts screen and its sidebar / menu entry (uploaded and generated files)."
+  },
   "artifactsFilterAll": "All",
-  "@artifactsFilterAll": {"description": "Artifacts filter tab: every item."},
+  "@artifactsFilterAll": {
+    "description": "Artifacts filter tab: every item."
+  },
   "artifactsFilterUploaded": "Uploaded",
-  "@artifactsFilterUploaded": {"description": "Artifacts filter tab: files the user attached."},
+  "@artifactsFilterUploaded": {
+    "description": "Artifacts filter tab: files the user attached."
+  },
   "artifactsFilterGenerated": "Generated",
-  "@artifactsFilterGenerated": {"description": "Artifacts filter tab: files Ovid produced."},
+  "@artifactsFilterGenerated": {
+    "description": "Artifacts filter tab: files Ovid produced."
+  },
   "artifactsScopeAllChats": "All chats",
-  "@artifactsScopeAllChats": {"description": "Artifacts toggle: show items from every chat instead of only the current one."},
+  "@artifactsScopeAllChats": {
+    "description": "Artifacts toggle: show items from every chat instead of only the current one."
+  },
   "artifactsEmptyTitle": "No artifacts yet",
-  "@artifactsEmptyTitle": {"description": "Artifacts empty-state title."},
+  "@artifactsEmptyTitle": {
+    "description": "Artifacts empty-state title."
+  },
   "artifactsEmptyBody": "Files you attach and files, images and pages Ovid creates will appear here.",
-  "@artifactsEmptyBody": {"description": "Artifacts empty-state explanation."},
+  "@artifactsEmptyBody": {
+    "description": "Artifacts empty-state explanation."
+  },
   "artifactOriginUploaded": "Uploaded by you",
-  "@artifactOriginUploaded": {"description": "Badge tooltip: the user attached this file."},
+  "@artifactOriginUploaded": {
+    "description": "Badge tooltip: the user attached this file."
+  },
   "artifactOriginGenerated": "Generated by Ovid",
-  "@artifactOriginGenerated": {"description": "Badge tooltip: Ovid produced this file."},
+  "@artifactOriginGenerated": {
+    "description": "Badge tooltip: Ovid produced this file."
+  },
   "artifactActionsHint": "Share or remove",
-  "@artifactActionsHint": {"description": "Accessibility hint for the long-press action on an artifact row."},
+  "@artifactActionsHint": {
+    "description": "Accessibility hint for the long-press action on an artifact row."
+  },
   "artifactShare": "Share",
-  "@artifactShare": {"description": "Shares an artifact file."},
+  "@artifactShare": {
+    "description": "Shares an artifact file."
+  },
   "artifactRemoveFromList": "Remove from list",
-  "@artifactRemoveFromList": {"description": "Hides an artifact from the Artifacts list; the file and chat stay."},
+  "@artifactRemoveFromList": {
+    "description": "Hides an artifact from the Artifacts list; the file and chat stay."
+  },
   "artifactRemoved": "Removed from Artifacts",
-  "@artifactRemoved": {"description": "Snackbar after hiding an artifact (with Undo)."},
+  "@artifactRemoved": {
+    "description": "Snackbar after hiding an artifact (with Undo)."
+  },
   "artifactOpenSemantics": "Open {name}",
-  "@artifactOpenSemantics": {"description": "Accessibility label of an artifact card.", "placeholders": {"name": {"type": "String", "example": "report.md"}}},
+  "@artifactOpenSemantics": {
+    "description": "Accessibility label of an artifact card.",
+    "placeholders": {
+      "name": {
+        "type": "String",
+        "example": "report.md"
+      }
+    }
+  },
   "artifactKindImage": "Image",
-  "@artifactKindImage": {"description": "Artifact type label."},
+  "@artifactKindImage": {
+    "description": "Artifact type label."
+  },
   "artifactKindHtml": "Web page",
-  "@artifactKindHtml": {"description": "Artifact type label for HTML artifacts."},
+  "@artifactKindHtml": {
+    "description": "Artifact type label for HTML artifacts."
+  },
   "artifactKindCode": "Code",
-  "@artifactKindCode": {"description": "Artifact type label."},
+  "@artifactKindCode": {
+    "description": "Artifact type label."
+  },
   "artifactKindDocument": "Document",
-  "@artifactKindDocument": {"description": "Artifact type label."},
+  "@artifactKindDocument": {
+    "description": "Artifact type label."
+  },
   "artifactKindFile": "File",
-  "@artifactKindFile": {"description": "Artifact type label for other files."},
+  "@artifactKindFile": {
+    "description": "Artifact type label for other files."
+  },
   "artifactCopy": "Copy",
-  "@artifactCopy": {"description": "Tooltip: copies the previewed text/code."},
+  "@artifactCopy": {
+    "description": "Tooltip: copies the previewed text/code."
+  },
   "artifactCopied": "Copied to clipboard",
-  "@artifactCopied": {"description": "Snackbar after copying an artifact's text."},
+  "@artifactCopied": {
+    "description": "Snackbar after copying an artifact's text."
+  },
   "artifactOpenWith": "Open with…",
-  "@artifactOpenWith": {"description": "Opens the artifact in another installed app."},
+  "@artifactOpenWith": {
+    "description": "Opens the artifact in another installed app."
+  },
   "artifactOpenInStudio": "Open in Studio",
-  "@artifactOpenInStudio": {"description": "Opens a generated workspace file in Studio's editor."},
+  "@artifactOpenInStudio": {
+    "description": "Opens a generated workspace file in Studio's editor."
+  },
   "artifactNotOnDevice": "This file isn't on this device anymore.",
-  "@artifactNotOnDevice": {"description": "The artifact's file was moved, deleted, or lives only in a remote repo."},
+  "@artifactNotOnDevice": {
+    "description": "The artifact's file was moved, deleted, or lives only in a remote repo."
+  },
   "artifactMissingTitle": "File not available",
-  "@artifactMissingTitle": {"description": "Preview title when the artifact file is missing."},
+  "@artifactMissingTitle": {
+    "description": "Preview title when the artifact file is missing."
+  },
   "artifactTooLargeTitle": "Too large to preview",
-  "@artifactTooLargeTitle": {"description": "Preview title for a text file above the preview size limit."},
+  "@artifactTooLargeTitle": {
+    "description": "Preview title for a text file above the preview size limit."
+  },
   "artifactTooLargeBody": "Open it in another app to read it.",
-  "@artifactTooLargeBody": {"description": "Preview hint for a file too large to show inline."},
+  "@artifactTooLargeBody": {
+    "description": "Preview hint for a file too large to show inline."
+  },
   "artifactNoPreviewTitle": "No preview available",
-  "@artifactNoPreviewTitle": {"description": "Preview title for a binary file type Ovid cannot render."},
+  "@artifactNoPreviewTitle": {
+    "description": "Preview title for a binary file type Ovid cannot render."
+  },
   "artifactNoPreviewBody": "Open it with another app or share it.",
-  "@artifactNoPreviewBody": {"description": "Preview hint for a binary file type."},
+  "@artifactNoPreviewBody": {
+    "description": "Preview hint for a binary file type."
+  },
   "vaultTabGenerated": "Created by Ovid",
-  "@vaultTabGenerated": {"description": "Artifact Vault tab: files Ovid produced across the account's chats."},
+  "@vaultTabGenerated": {
+    "description": "Artifact Vault tab: files Ovid produced across the account's chats."
+  },
   "vaultTabUploaded": "Uploaded by User",
-  "@vaultTabUploaded": {"description": "Artifact Vault tab: files the user attached across the account's chats."},
+  "@vaultTabUploaded": {
+    "description": "Artifact Vault tab: files the user attached across the account's chats."
+  },
   "vaultTypeAll": "All types",
-  "@vaultTypeAll": {"description": "Artifact Vault type filter: no file-type restriction."},
+  "@vaultTypeAll": {
+    "description": "Artifact Vault type filter: no file-type restriction."
+  },
   "vaultSearchHint": "Search files",
-  "@vaultSearchHint": {"description": "Hint text of the Artifact Vault search field."},
+  "@vaultSearchHint": {
+    "description": "Hint text of the Artifact Vault search field."
+  },
   "vaultLoadMore": "Load more",
-  "@vaultLoadMore": {"description": "Button at the end of the Artifact Vault list: fetches the next page."},
+  "@vaultLoadMore": {
+    "description": "Button at the end of the Artifact Vault list: fetches the next page."
+  },
   "vaultErrorTitle": "Couldn't load your files",
-  "@vaultErrorTitle": {"description": "Artifact Vault error-state title when the inventory request failed."},
+  "@vaultErrorTitle": {
+    "description": "Artifact Vault error-state title when the inventory request failed."
+  },
   "vaultPolicyNote": "Files from every chat in your account. Links to open or share are temporary and expire about an hour after they are created.",
-  "@vaultPolicyNote": {"description": "Footnote in the Artifact Vault explaining account scope and link expiry."},
+  "@vaultPolicyNote": {
+    "description": "Footnote in the Artifact Vault explaining account scope and link expiry."
+  },
   "vaultLocalScope": "On this device — only files saved locally are listed. Sign in to see every file in your account.",
-  "@vaultLocalScope": {"description": "Footnote in the guest-only local Artifacts view explaining its scope."},
+  "@vaultLocalScope": {
+    "description": "Footnote in the guest-only local Artifacts view explaining its scope."
+  },
   "artifactCloudMissingTitle": "File not available",
-  "@artifactCloudMissingTitle": {"description": "Preview title when a cloud Vault file could not be fetched."},
+  "@artifactCloudMissingTitle": {
+    "description": "Preview title when a cloud Vault file could not be fetched."
+  },
   "artifactCloudUnavailableBody": "This file is no longer stored in Ovid Cloud.",
-  "@artifactCloudUnavailableBody": {"description": "Preview message for the typed artifact_unavailable mint failure."},
+  "@artifactCloudUnavailableBody": {
+    "description": "Preview message for the typed artifact_unavailable mint failure."
+  },
   "artifactCloudIncompleteBody": "This file did not finish uploading. Remove and re-attach it.",
-  "@artifactCloudIncompleteBody": {"description": "Preview message for the typed artifact_incomplete mint failure."},
+  "@artifactCloudIncompleteBody": {
+    "description": "Preview message for the typed artifact_incomplete mint failure."
+  },
   "artifactCloudErrorBody": "Ovid Cloud could not prepare this file. Check your connection and retry.",
-  "@artifactCloudErrorBody": {"description": "Preview message for any other typed cloud mint failure."},
+  "@artifactCloudErrorBody": {
+    "description": "Preview message for any other typed cloud mint failure."
+  },
   "artifactCloudAccountTitle": "Account changed",
-  "@artifactCloudAccountTitle": {"description": "Preview title when the file belongs to the previously signed-in account."},
+  "@artifactCloudAccountTitle": {
+    "description": "Preview title when the file belongs to the previously signed-in account."
+  },
   "artifactCloudAccountBody": "This file belongs to a different account. Sign back in to open it.",
-  "@artifactCloudAccountBody": {"description": "Preview message when the previewing account no longer owns the file."},
+  "@artifactCloudAccountBody": {
+    "description": "Preview message when the previewing account no longer owns the file."
+  },
   "sessionRenameTitle": "Rename session",
-  "@sessionRenameTitle": {"description": "Rename-chat dialog title."},
+  "@sessionRenameTitle": {
+    "description": "Rename-chat dialog title."
+  },
   "sessionRenameEmpty": "Session name cannot be empty",
-  "@sessionRenameEmpty": {"description": "Rename-chat validation error."},
+  "@sessionRenameEmpty": {
+    "description": "Rename-chat validation error."
+  },
   "sessionDeleteTitle": "Delete {title}?",
-  "@sessionDeleteTitle": {"description": "Delete-chat confirmation title.", "placeholders": {"title": {"type": "String", "example": "Trip plan"}}},
+  "@sessionDeleteTitle": {
+    "description": "Delete-chat confirmation title.",
+    "placeholders": {
+      "title": {
+        "type": "String",
+        "example": "Trip plan"
+      }
+    }
+  },
   "sessionDeleteImpactUndo": "This deletes the chat and its history on all your devices. Files in your Studio workspace are kept. You can undo for a few seconds.",
-  "@sessionDeleteImpactUndo": {"description": "Delete-chat confirmation body when nothing else is affected."},
+  "@sessionDeleteImpactUndo": {
+    "description": "Delete-chat confirmation body when nothing else is affected."
+  },
   "sessionDeleteImpactDetails": "This deletes the chat and its history on all your devices, and {details}. Files in your Studio workspace are kept. You can undo for a few seconds.",
-  "@sessionDeleteImpactDetails": {"description": "Delete-chat confirmation body listing what else is deleted or stopped.", "placeholders": {"details": {"type": "String", "example": "2 child sessions, 1 sandbox workspace"}}},
+  "@sessionDeleteImpactDetails": {
+    "description": "Delete-chat confirmation body listing what else is deleted or stopped.",
+    "placeholders": {
+      "details": {
+        "type": "String",
+        "example": "2 child sessions, 1 sandbox workspace"
+      }
+    }
+  },
   "sessionDeleteChildSessions": "{count, plural, =1{1 child session} other{{count} child sessions}}",
-  "@sessionDeleteChildSessions": {"description": "Delete-chat impact item.", "placeholders": {"count": {"type": "int", "example": "2"}}},
+  "@sessionDeleteChildSessions": {
+    "description": "Delete-chat impact item.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "2"
+      }
+    }
+  },
   "sessionDeleteSandboxes": "{count, plural, =1{1 sandbox workspace} other{{count} sandbox workspaces}}",
-  "@sessionDeleteSandboxes": {"description": "Delete-chat impact item.", "placeholders": {"count": {"type": "int", "example": "1"}}},
+  "@sessionDeleteSandboxes": {
+    "description": "Delete-chat impact item.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "1"
+      }
+    }
+  },
   "sessionDeleteStopsRunning": "the running chat will be stopped",
-  "@sessionDeleteStopsRunning": {"description": "Delete-chat impact item when the chat is mid-reply."},
+  "@sessionDeleteStopsRunning": {
+    "description": "Delete-chat impact item when the chat is mid-reply."
+  },
   "sessionDeleteStopsDescendants": "{count, plural, =1{1 running descendant will be stopped} other{{count} running descendants will be stopped}}",
-  "@sessionDeleteStopsDescendants": {"description": "Delete-chat impact item for running subagents.", "placeholders": {"count": {"type": "int", "example": "2"}}},
+  "@sessionDeleteStopsDescendants": {
+    "description": "Delete-chat impact item for running subagents.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "2"
+      }
+    }
+  },
   "sessionDeleted": "Chat deleted",
-  "@sessionDeleted": {"description": "Snackbar after deleting a chat (with Undo)."},
+  "@sessionDeleted": {
+    "description": "Snackbar after deleting a chat (with Undo)."
+  },
   "sessionDeleteFailed": "The chat could not be deleted and has been restored. Try again.",
-  "@sessionDeleteFailed": {"description": "Snackbar when the durable delete failed and the chat was restored."},
+  "@sessionDeleteFailed": {
+    "description": "Snackbar when the durable delete failed and the chat was restored."
+  },
   "scheduleCloudEmptyTitle": "Schedules run in Ovid Cloud",
-  "@scheduleCloudEmptyTitle": {"description": "Schedule screen empty state when the cloud-schedule feature is unavailable in this build."},
+  "@scheduleCloudEmptyTitle": {
+    "description": "Schedule screen empty state when the cloud-schedule feature is unavailable in this build."
+  },
   "scheduleCloudEmptyMessage": "Sign in to Ovid Cloud to see and manage scheduled tasks. This build has no on-device scheduler.",
-  "@scheduleCloudEmptyMessage": {"description": "Schedule screen empty state body when cloud schedules are unavailable."},
+  "@scheduleCloudEmptyMessage": {
+    "description": "Schedule screen empty state body when cloud schedules are unavailable."
+  },
   "scheduleLoadErrorTitle": "Could not load schedules",
-  "@scheduleLoadErrorTitle": {"description": "Schedule screen error card title when the server list request fails."},
+  "@scheduleLoadErrorTitle": {
+    "description": "Schedule screen error card title when the server list request fails."
+  },
   "scheduleCloudActive": "Cloud scheduling active",
-  "@scheduleCloudActive": {"description": "Schedule screen status strip headline."},
+  "@scheduleCloudActive": {
+    "description": "Schedule screen status strip headline."
+  },
   "scheduleCloudActiveMessage": "Scheduled tasks run in Ovid Cloud, even when Ovid is closed. Results appear here and arrive as notifications.",
-  "@scheduleCloudActiveMessage": {"description": "Schedule screen status strip explanation of server-side scheduling."},
+  "@scheduleCloudActiveMessage": {
+    "description": "Schedule screen status strip explanation of server-side scheduling."
+  },
   "scheduleRanLate": "ran late",
-  "@scheduleRanLate": {"description": "Badge on a schedule whose last run fired inside the missed-run grace window."},
+  "@scheduleRanLate": {
+    "description": "Badge on a schedule whose last run fired inside the missed-run grace window."
+  },
   "scheduleMissedRun": "missed run",
-  "@scheduleMissedRun": {"description": "Badge on a schedule paused because an occurrence was missed beyond the grace window."},
+  "@scheduleMissedRun": {
+    "description": "Badge on a schedule paused because an occurrence was missed beyond the grace window."
+  },
   "scheduleCron": "Cron",
-  "@scheduleCron": {"description": "Recurrence choice for a cron trigger."},
+  "@scheduleCron": {
+    "description": "Recurrence choice for a cron trigger."
+  },
   "scheduleCronLabel": "Cron expression",
-  "@scheduleCronLabel": {"description": "Field label for a five-field cron expression."},
+  "@scheduleCronLabel": {
+    "description": "Field label for a five-field cron expression."
+  },
   "scheduleCronHelper": "Five fields (minute hour day month weekday).",
-  "@scheduleCronHelper": {"description": "Helper text under the cron expression field."},
-
+  "@scheduleCronHelper": {
+    "description": "Helper text under the cron expression field."
+  },
   "schedulesTitle": "Schedules",
-  "@schedulesTitle": {"description": "App bar title of the screen listing every scheduled task on the account."},
+  "@schedulesTitle": {
+    "description": "App bar title of the screen listing every scheduled task on the account."
+  },
   "scheduleNew": "New schedule",
-  "@scheduleNew": {"description": "Button / tooltip / sheet title to create a scheduled task without the agent."},
+  "@scheduleNew": {
+    "description": "Button / tooltip / sheet title to create a scheduled task without the agent."
+  },
   "scheduleScopeAll": "All chats",
-  "@scheduleScopeAll": {"description": "Filter chip: show the schedules of every chat."},
+  "@scheduleScopeAll": {
+    "description": "Filter chip: show the schedules of every chat."
+  },
   "scheduleUseDeviceZone": "Use device zone ({zone})",
   "@scheduleUseDeviceZone": {
     "description": "Button that switches a daily/cron schedule to the phone's current time zone.",
-    "placeholders": {"zone": {"type": "String", "example": "America/New_York"}}
+    "placeholders": {
+      "zone": {
+        "type": "String",
+        "example": "America/New_York"
+      }
+    }
   },
   "scheduleResultsGoTo": "Results go to",
-  "@scheduleResultsGoTo": {"description": "Label above the choice of chat that receives a new schedule's results."},
+  "@scheduleResultsGoTo": {
+    "description": "Label above the choice of chat that receives a new schedule's results."
+  },
   "scheduleTargetNewChat": "A new chat",
-  "@scheduleTargetNewChat": {"description": "Choice: a new schedule runs in its own new chat."},
+  "@scheduleTargetNewChat": {
+    "description": "Choice: a new schedule runs in its own new chat."
+  },
   "scheduleQuickStart": "Quick start",
-  "@scheduleQuickStart": {"description": "Label above the preset chips (every hour, every day, custom) when creating a schedule."},
+  "@scheduleQuickStart": {
+    "description": "Label above the preset chips (every hour, every day, custom) when creating a schedule."
+  },
   "scheduleRecoverEdit": "Edit task",
-  "@scheduleRecoverEdit": {"description": "Recovery button on a failed schedule: open the editor."},
+  "@scheduleRecoverEdit": {
+    "description": "Recovery button on a failed schedule: open the editor."
+  },
   "scheduleRecoverResume": "Resume schedule",
-  "@scheduleRecoverResume": {"description": "Recovery button on a failed schedule: make it active again after review."},
+  "@scheduleRecoverResume": {
+    "description": "Recovery button on a failed schedule: make it active again after review."
+  },
   "scheduleRecoverRunOnce": "Run once now",
-  "@scheduleRecoverRunOnce": {"description": "Recovery button on a failed schedule: run it a single time now."},
+  "@scheduleRecoverRunOnce": {
+    "description": "Recovery button on a failed schedule: run it a single time now."
+  },
   "scheduleRunNow": "Run now",
-  "@scheduleRunNow": {"description": "Menu action: run a scheduled task immediately (its schedule is unchanged)."},
+  "@scheduleRunNow": {
+    "description": "Menu action: run a scheduled task immediately (its schedule is unchanged)."
+  },
   "scheduleDuplicate": "Duplicate",
-  "@scheduleDuplicate": {"description": "Menu action: create a new schedule pre-filled from this one."},
+  "@scheduleDuplicate": {
+    "description": "Menu action: create a new schedule pre-filled from this one."
+  },
   "scheduleOpenChat": "Open chat",
-  "@scheduleOpenChat": {"description": "Opens the chat that receives a schedule's results."},
+  "@scheduleOpenChat": {
+    "description": "Opens the chat that receives a schedule's results."
+  },
   "scheduleRunHistory": "Run history",
-  "@scheduleRunHistory": {"description": "Section title listing a schedule's past runs."},
+  "@scheduleRunHistory": {
+    "description": "Section title listing a schedule's past runs."
+  },
   "scheduleNoRuns": "No runs yet.",
-  "@scheduleNoRuns": {"description": "Run history is empty."},
+  "@scheduleNoRuns": {
+    "description": "Run history is empty."
+  },
   "scheduleStripChecking": "Checking cloud scheduling…",
-  "@scheduleStripChecking": {"description": "Schedule status strip while the list is loading."},
+  "@scheduleStripChecking": {
+    "description": "Schedule status strip while the list is loading."
+  },
   "scheduleStripError": "Couldn't reach cloud scheduling",
-  "@scheduleStripError": {"description": "Schedule status strip when the list could not be loaded (never shown as active)."},
-
-    "settingsTitle": "Settings",
-  "@settingsTitle": {"description": "Settings screen title."},
+  "@scheduleStripError": {
+    "description": "Schedule status strip when the list could not be loaded (never shown as active)."
+  },
+  "settingsTitle": "Settings",
+  "@settingsTitle": {
+    "description": "Settings screen title."
+  },
   "settingsAccount": "Account",
-  "@settingsAccount": {"description": "Settings section heading."},
+  "@settingsAccount": {
+    "description": "Settings section heading."
+  },
   "settingsYou": "You",
-  "@settingsYou": {"description": "Account row title when signed out."},
+  "@settingsYou": {
+    "description": "Account row title when signed out."
+  },
   "settingsSignInPrompt": "Sign in to your account",
-  "@settingsSignInPrompt": {"description": "Account row subtitle when signed out."},
+  "@settingsSignInPrompt": {
+    "description": "Account row subtitle when signed out."
+  },
   "settingsPlan": "Plan & billing",
-  "@settingsPlan": {"description": "Settings row: plan and billing screen."},
+  "@settingsPlan": {
+    "description": "Settings row: plan and billing screen."
+  },
   "settingsPlanSubtitle": "Your Ovid Cloud plan and upgrades",
-  "@settingsPlanSubtitle": {"description": "Subtitle of the Plan & billing row."},
+  "@settingsPlanSubtitle": {
+    "description": "Subtitle of the Plan & billing row."
+  },
   "settingsUsage": "Usage",
-  "@settingsUsage": {"description": "Settings row: usage screen."},
+  "@settingsUsage": {
+    "description": "Settings row: usage screen."
+  },
   "settingsUsageSubtitle": "Today's allowance and recent spend",
-  "@settingsUsageSubtitle": {"description": "Subtitle of the Usage row."},
+  "@settingsUsageSubtitle": {
+    "description": "Subtitle of the Usage row."
+  },
   "settingsChat": "Chat",
-  "@settingsChat": {"description": "Settings section heading for chat preferences."},
+  "@settingsChat": {
+    "description": "Settings section heading for chat preferences."
+  },
   "settingsShowReasoning": "Show reasoning",
-  "@settingsShowReasoning": {"description": "Toggle: show the model reasoning in chats."},
+  "@settingsShowReasoning": {
+    "description": "Toggle: show the model reasoning in chats."
+  },
   "settingsShowReasoningOn": "On: reasoning shows before answers",
-  "@settingsShowReasoningOn": {"description": "Show reasoning toggle, on state."},
+  "@settingsShowReasoningOn": {
+    "description": "Show reasoning toggle, on state."
+  },
   "settingsShowReasoningOff": "Off: answers only",
-  "@settingsShowReasoningOff": {"description": "Show reasoning toggle, off state."},
+  "@settingsShowReasoningOff": {
+    "description": "Show reasoning toggle, off state."
+  },
   "settingsMemory": "Memory",
-  "@settingsMemory": {"description": "Toggle: let Ovid save and recall memories."},
+  "@settingsMemory": {
+    "description": "Toggle: let Ovid save and recall memories."
+  },
   "settingsMemoryOn": "On: Ovid can save and recall facts you ask it to remember",
-  "@settingsMemoryOn": {"description": "Memory toggle, on state."},
+  "@settingsMemoryOn": {
+    "description": "Memory toggle, on state."
+  },
   "settingsMemoryOff": "Off: Ovid does not save or read memories",
-  "@settingsMemoryOff": {"description": "Memory toggle, off state."},
+  "@settingsMemoryOff": {
+    "description": "Memory toggle, off state."
+  },
   "settingsShareMemory": "Share memory across chats",
-  "@settingsShareMemory": {"description": "Toggle: let chats search each other for context."},
+  "@settingsShareMemory": {
+    "description": "Toggle: let chats search each other for context."
+  },
   "settingsShareMemoryOn": "On: Ovid can search your other chats for context",
-  "@settingsShareMemoryOn": {"description": "Share memory toggle, on state."},
+  "@settingsShareMemoryOn": {
+    "description": "Share memory toggle, on state."
+  },
   "settingsShareMemoryOff": "Off: each chat only sees itself. Tag a chat with @ to include it.",
-  "@settingsShareMemoryOff": {"description": "Share memory toggle, off state."},
+  "@settingsShareMemoryOff": {
+    "description": "Share memory toggle, off state."
+  },
   "settingsShareMemoryNeedsMemory": "Turn on Memory to use this",
-  "@settingsShareMemoryNeedsMemory": {"description": "Share memory toggle while Memory is off."},
+  "@settingsShareMemoryNeedsMemory": {
+    "description": "Share memory toggle while Memory is off."
+  },
   "settingsMemoryFiles": "Memory files",
-  "@settingsMemoryFiles": {"description": "Settings row: view and edit what Ovid remembers."},
+  "@settingsMemoryFiles": {
+    "description": "Settings row: view and edit what Ovid remembers."
+  },
   "settingsMemoryFilesSubtitle": "See, edit or delete what Ovid remembers",
-  "@settingsMemoryFilesSubtitle": {"description": "Subtitle of the Memory files row."},
+  "@settingsMemoryFilesSubtitle": {
+    "description": "Subtitle of the Memory files row."
+  },
   "settingsModels": "Models & keys",
-  "@settingsModels": {"description": "Settings section heading for models, keys and presets."},
+  "@settingsModels": {
+    "description": "Settings section heading for models, keys and presets."
+  },
   "settingsKeysSubtitle": "Run chats on your own provider account",
-  "@settingsKeysSubtitle": {"description": "Subtitle of the Your API keys row."},
+  "@settingsKeysSubtitle": {
+    "description": "Subtitle of the Your API keys row."
+  },
   "settingsPresetsSubtitle": "Choose which tools and model the agent uses",
-  "@settingsPresetsSubtitle": {"description": "Subtitle of the Agent presets row."},
+  "@settingsPresetsSubtitle": {
+    "description": "Subtitle of the Agent presets row."
+  },
   "settingsResponsesSubtitle": "Answer length and the \"still working\" hint",
-  "@settingsResponsesSubtitle": {"description": "Subtitle of the Responses row."},
+  "@settingsResponsesSubtitle": {
+    "description": "Subtitle of the Responses row."
+  },
   "settingsNotifications": "Notifications",
-  "@settingsNotifications": {"description": "Settings section heading and notifications toggle title."},
+  "@settingsNotifications": {
+    "description": "Settings section heading and notifications toggle title."
+  },
   "settingsData": "Data & privacy",
-  "@settingsData": {"description": "Settings section heading."},
+  "@settingsData": {
+    "description": "Settings section heading."
+  },
   "settingsExport": "Export & import",
-  "@settingsExport": {"description": "Settings row: export or import chat archives."},
+  "@settingsExport": {
+    "description": "Settings row: export or import chat archives."
+  },
   "settingsExportSubtitle": "Download your cloud chats or upload an archive",
-  "@settingsExportSubtitle": {"description": "Subtitle of the Export & import row."},
+  "@settingsExportSubtitle": {
+    "description": "Subtitle of the Export & import row."
+  },
   "settingsTelemetry": "Crash reports & analytics",
-  "@settingsTelemetry": {"description": "Telemetry consent toggle title."},
+  "@settingsTelemetry": {
+    "description": "Telemetry consent toggle title."
+  },
   "settingsTelemetryOn": "On: share crash reports and anonymous usage to help fix bugs",
-  "@settingsTelemetryOn": {"description": "Telemetry toggle, on state."},
+  "@settingsTelemetryOn": {
+    "description": "Telemetry toggle, on state."
+  },
   "settingsTelemetryOff": "Off",
-  "@settingsTelemetryOff": {"description": "Telemetry toggle, off state."},
+  "@settingsTelemetryOff": {
+    "description": "Telemetry toggle, off state."
+  },
   "settingsTelemetryUnavailable": "Not available in this build",
-  "@settingsTelemetryUnavailable": {"description": "Telemetry toggle when Firebase is not configured."},
+  "@settingsTelemetryUnavailable": {
+    "description": "Telemetry toggle when Firebase is not configured."
+  },
   "settingsStorage": "Storage",
-  "@settingsStorage": {"description": "Settings row and screen title: on-device storage."},
+  "@settingsStorage": {
+    "description": "Settings row and screen title: on-device storage."
+  },
   "settingsStorageSubtitle": "Space Ovid uses on this phone",
-  "@settingsStorageSubtitle": {"description": "Subtitle of the Storage row."},
+  "@settingsStorageSubtitle": {
+    "description": "Subtitle of the Storage row."
+  },
   "settingsClearDevice": "Clear this device",
-  "@settingsClearDevice": {"description": "Settings row: sign out and wipe local data."},
+  "@settingsClearDevice": {
+    "description": "Settings row: sign out and wipe local data."
+  },
   "settingsClearDeviceSubtitle": "Signs out and removes local data. Your cloud chats are kept.",
-  "@settingsClearDeviceSubtitle": {"description": "Subtitle of the Clear this device row."},
+  "@settingsClearDeviceSubtitle": {
+    "description": "Subtitle of the Clear this device row."
+  },
   "settingsUnavailable": "Unavailable in this build",
-  "@settingsUnavailable": {"description": "Subtitle for an action this build cannot run."},
+  "@settingsUnavailable": {
+    "description": "Subtitle for an action this build cannot run."
+  },
   "settingsDeleteAccount": "Delete account",
-  "@settingsDeleteAccount": {"description": "Settings row: delete the account and cloud data."},
+  "@settingsDeleteAccount": {
+    "description": "Settings row: delete the account and cloud data."
+  },
   "settingsDeleteAccountSubtitle": "Permanently delete your account and cloud data",
-  "@settingsDeleteAccountSubtitle": {"description": "Subtitle of the Delete account row."},
+  "@settingsDeleteAccountSubtitle": {
+    "description": "Subtitle of the Delete account row."
+  },
   "settingsHelp": "Help & about",
-  "@settingsHelp": {"description": "Settings section heading."},
+  "@settingsHelp": {
+    "description": "Settings section heading."
+  },
   "settingsStatusSubtitle": "Check that Ovid Cloud and this device are working",
-  "@settingsStatusSubtitle": {"description": "Subtitle of the Service status row."},
+  "@settingsStatusSubtitle": {
+    "description": "Subtitle of the Service status row."
+  },
   "settingsShare": "Share Ovid",
-  "@settingsShare": {"description": "Row that shares the Ovid website."},
+  "@settingsShare": {
+    "description": "Row that shares the Ovid website."
+  },
   "settingsPrivacy": "Privacy policy",
-  "@settingsPrivacy": {"description": "Row that opens the privacy policy."},
+  "@settingsPrivacy": {
+    "description": "Row that opens the privacy policy."
+  },
   "settingsAbout": "About",
-  "@settingsAbout": {"description": "Settings row and screen title."},
+  "@settingsAbout": {
+    "description": "Settings row and screen title."
+  },
   "settingsAboutSubtitle": "Ovid Si {version}",
-  "@settingsAboutSubtitle": {"description": "Subtitle of the About row.", "placeholders": {"version": {"type": "String"}}},
+  "@settingsAboutSubtitle": {
+    "description": "Subtitle of the About row.",
+    "placeholders": {
+      "version": {
+        "type": "String"
+      }
+    }
+  },
   "settingsSaveFailed": "Couldn't save that setting. Try again.",
-  "@settingsSaveFailed": {"description": "A preference failed to save."},
+  "@settingsSaveFailed": {
+    "description": "A preference failed to save."
+  },
   "themeTitle": "Theme",
-  "@themeTitle": {"description": "Theme selector title."},
+  "@themeTitle": {
+    "description": "Theme selector title."
+  },
   "themeAutoLight": "Auto (default): follows your phone, light now",
-  "@themeAutoLight": {"description": "Theme subtitle in auto mode while light."},
+  "@themeAutoLight": {
+    "description": "Theme subtitle in auto mode while light."
+  },
   "themeAutoDark": "Auto (default): follows your phone, dark now",
-  "@themeAutoDark": {"description": "Theme subtitle in auto mode while dark."},
+  "@themeAutoDark": {
+    "description": "Theme subtitle in auto mode while dark."
+  },
   "themeLight": "Light",
-  "@themeLight": {"description": "Theme subtitle in light mode."},
+  "@themeLight": {
+    "description": "Theme subtitle in light mode."
+  },
   "themeDark": "Dark",
-  "@themeDark": {"description": "Theme subtitle in dark mode."},
+  "@themeDark": {
+    "description": "Theme subtitle in dark mode."
+  },
   "themeOptionAuto": "Auto",
-  "@themeOptionAuto": {"description": "Theme option that follows the OS."},
+  "@themeOptionAuto": {
+    "description": "Theme option that follows the OS."
+  },
   "themeOptionLight": "Light",
-  "@themeOptionLight": {"description": "Theme option."},
+  "@themeOptionLight": {
+    "description": "Theme option."
+  },
   "themeOptionDark": "Dark",
-  "@themeOptionDark": {"description": "Theme option."},
+  "@themeOptionDark": {
+    "description": "Theme option."
+  },
   "notificationsOn": "On: get notified when a cloud run finishes, fails or needs your approval",
-  "@notificationsOn": {"description": "Notifications toggle, on state."},
+  "@notificationsOn": {
+    "description": "Notifications toggle, on state."
+  },
   "notificationsOnBlocked": "On, but Android is blocking notifications for Ovid",
-  "@notificationsOnBlocked": {"description": "Notifications toggle on while the OS permission is denied."},
+  "@notificationsOnBlocked": {
+    "description": "Notifications toggle on while the OS permission is denied."
+  },
   "notificationsOff": "Off: Ovid Cloud sends no notifications to your devices",
-  "@notificationsOff": {"description": "Notifications toggle, off state."},
+  "@notificationsOff": {
+    "description": "Notifications toggle, off state."
+  },
   "notificationsBlockedTitle": "Blocked by Android",
-  "@notificationsBlockedTitle": {"description": "Row shown when notifications are blocked by the OS."},
+  "@notificationsBlockedTitle": {
+    "description": "Row shown when notifications are blocked by the OS."
+  },
   "notificationsBlockedBody": "Allow notifications for Ovid in system settings.",
-  "@notificationsBlockedBody": {"description": "Explains how to unblock notifications."},
+  "@notificationsBlockedBody": {
+    "description": "Explains how to unblock notifications."
+  },
   "notificationsOpenSettings": "Open settings",
-  "@notificationsOpenSettings": {"description": "Button: opens Android notification settings."},
+  "@notificationsOpenSettings": {
+    "description": "Button: opens Android notification settings."
+  },
   "integrityTitle": "Device integrity",
-  "@integrityTitle": {"description": "Row title for the device integrity check."},
+  "@integrityTitle": {
+    "description": "Row title for the device integrity check."
+  },
   "integrityChecking": "Checking…",
-  "@integrityChecking": {"description": "Device integrity check in progress."},
+  "@integrityChecking": {
+    "description": "Device integrity check in progress."
+  },
   "integrityUnavailable": "This device didn't return a complete result",
-  "@integrityUnavailable": {"description": "Device integrity probe incomplete."},
+  "@integrityUnavailable": {
+    "description": "Device integrity probe incomplete."
+  },
   "integrityClean": "No signs of root, hooking tools or a debugger (basic check)",
-  "@integrityClean": {"description": "Device integrity: nothing suspicious found."},
+  "@integrityClean": {
+    "description": "Device integrity: nothing suspicious found."
+  },
   "integrityEmulator": "This is an emulator, so its integrity can't be verified",
-  "@integrityEmulator": {"description": "Device integrity on a virtual device."},
+  "@integrityEmulator": {
+    "description": "Device integrity on a virtual device."
+  },
   "integrityAtRisk": "At risk: {flags}. Your sign-in could be read by other apps.",
-  "@integrityAtRisk": {"description": "Device integrity: problems found.", "placeholders": {"flags": {"type": "String"}}},
+  "@integrityAtRisk": {
+    "description": "Device integrity: problems found.",
+    "placeholders": {
+      "flags": {
+        "type": "String"
+      }
+    }
+  },
   "integrityFlagRooted": "rooted",
-  "@integrityFlagRooted": {"description": "Integrity flag: device is rooted."},
+  "@integrityFlagRooted": {
+    "description": "Integrity flag: device is rooted."
+  },
   "integrityFlagHooking": "hooking framework",
-  "@integrityFlagHooking": {"description": "Integrity flag: a hooking framework is installed."},
+  "@integrityFlagHooking": {
+    "description": "Integrity flag: a hooking framework is installed."
+  },
   "integrityFlagDebugger": "debugger attached",
-  "@integrityFlagDebugger": {"description": "Integrity flag: a debugger is attached."},
+  "@integrityFlagDebugger": {
+    "description": "Integrity flag: a debugger is attached."
+  },
   "integrityRechecked": "Checked again",
-  "@integrityRechecked": {"description": "Snackbar after re-running the integrity check."},
+  "@integrityRechecked": {
+    "description": "Snackbar after re-running the integrity check."
+  },
   "storageOnDevice": "On this device",
-  "@storageOnDevice": {"description": "Storage screen section heading."},
+  "@storageOnDevice": {
+    "description": "Storage screen section heading."
+  },
   "storageIntro": "Your chats live in Ovid Cloud. This is the space the app uses on this phone.",
-  "@storageIntro": {"description": "Storage screen intro."},
+  "@storageIntro": {
+    "description": "Storage screen intro."
+  },
   "storageChats": "Offline chat cache",
-  "@storageChats": {"description": "Storage row: cached chats."},
+  "@storageChats": {
+    "description": "Storage row: cached chats."
+  },
   "storageChatsSubtitle": "Recent chats kept for offline reading",
-  "@storageChatsSubtitle": {"description": "Storage row subtitle."},
+  "@storageChatsSubtitle": {
+    "description": "Storage row subtitle."
+  },
   "storageCache": "Temporary files",
-  "@storageCache": {"description": "Storage row: cache directory."},
+  "@storageCache": {
+    "description": "Storage row: cache directory."
+  },
   "storageCacheSubtitle": "Safe to clear",
-  "@storageCacheSubtitle": {"description": "Storage row subtitle."},
+  "@storageCacheSubtitle": {
+    "description": "Storage row subtitle."
+  },
   "storageApp": "App data",
-  "@storageApp": {"description": "Storage row: support files."},
+  "@storageApp": {
+    "description": "Storage row: support files."
+  },
   "storageAppSubtitle": "Needed to run Ovid. Removed by Clear this device.",
-  "@storageAppSubtitle": {"description": "Storage row subtitle."},
+  "@storageAppSubtitle": {
+    "description": "Storage row subtitle."
+  },
   "storageTotal": "Total",
-  "@storageTotal": {"description": "Storage total row."},
+  "@storageTotal": {
+    "description": "Storage total row."
+  },
   "storageClearTitle": "Clear temporary files?",
-  "@storageClearTitle": {"description": "Confirm dialog title."},
+  "@storageClearTitle": {
+    "description": "Confirm dialog title."
+  },
   "storageClearBody": "Frees {size}. Chats and settings are not touched.",
-  "@storageClearBody": {"description": "Confirm dialog body.", "placeholders": {"size": {"type": "String"}}},
+  "@storageClearBody": {
+    "description": "Confirm dialog body.",
+    "placeholders": {
+      "size": {
+        "type": "String"
+      }
+    }
+  },
   "storageClearConfirm": "Clear temporary files",
-  "@storageClearConfirm": {"description": "Button that clears the cache."},
+  "@storageClearConfirm": {
+    "description": "Button that clears the cache."
+  },
   "storageCleared": "Cleared {size}.",
-  "@storageCleared": {"description": "Snackbar after clearing the cache.", "placeholders": {"size": {"type": "String"}}},
+  "@storageCleared": {
+    "description": "Snackbar after clearing the cache.",
+    "placeholders": {
+      "size": {
+        "type": "String"
+      }
+    }
+  },
   "storageClearIncomplete": "Some files couldn't be cleared. Try again in a moment.",
-  "@storageClearIncomplete": {"description": "Cache clear partly failed."},
+  "@storageClearIncomplete": {
+    "description": "Cache clear partly failed."
+  },
   "aboutVersion": "Version {version}",
-  "@aboutVersion": {"description": "About screen version line.", "placeholders": {"version": {"type": "String"}}},
+  "@aboutVersion": {
+    "description": "About screen version line.",
+    "placeholders": {
+      "version": {
+        "type": "String"
+      }
+    }
+  },
   "aboutMaker": "by Dhanuk Softwares",
-  "@aboutMaker": {"description": "About screen maker line. Company name, do not translate."},
+  "@aboutMaker": {
+    "description": "About screen maker line. Company name, do not translate."
+  },
   "aboutTagline": "Your AI agent in the cloud: chat, files, browsing and schedules.",
-  "@aboutTagline": {"description": "About screen tagline."},
+  "@aboutTagline": {
+    "description": "About screen tagline."
+  },
   "aboutWebsite": "Website",
-  "@aboutWebsite": {"description": "Link to the website."},
+  "@aboutWebsite": {
+    "description": "Link to the website."
+  },
   "aboutTerms": "Terms of Service",
-  "@aboutTerms": {"description": "Link to the terms."},
+  "@aboutTerms": {
+    "description": "Link to the terms."
+  },
   "aboutLicenses": "Open-source licenses",
-  "@aboutLicenses": {"description": "Row that opens the licenses page."},
+  "@aboutLicenses": {
+    "description": "Row that opens the licenses page."
+  },
   "aboutLicensesSubtitle": "Third-party software used by Ovid Si",
-  "@aboutLicensesSubtitle": {"description": "Licenses row subtitle."},
+  "@aboutLicensesSubtitle": {
+    "description": "Licenses row subtitle."
+  },
   "aboutCopyright": "© {year} Dhanuk Softwares",
-  "@aboutCopyright": {"description": "Copyright line.", "placeholders": {"year": {"type": "int"}}},
+  "@aboutCopyright": {
+    "description": "Copyright line.",
+    "placeholders": {
+      "year": {
+        "type": "int"
+      }
+    }
+  },
   "timeJustNow": "just now",
-  "@timeJustNow": {"description": "Relative time under a minute."},
+  "@timeJustNow": {
+    "description": "Relative time under a minute."
+  },
   "timeMinutesAgo": "{count, plural, =1{1 min ago} other{{count} min ago}}",
-  "@timeMinutesAgo": {"description": "Relative time in minutes.", "placeholders": {"count": {"type": "int"}}},
+  "@timeMinutesAgo": {
+    "description": "Relative time in minutes.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "timeHoursAgo": "{count, plural, =1{1 hour ago} other{{count} hours ago}}",
-  "@timeHoursAgo": {"description": "Relative time in hours.", "placeholders": {"count": {"type": "int"}}},
+  "@timeHoursAgo": {
+    "description": "Relative time in hours.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "timeDaysAgo": "{count, plural, =1{1 day ago} other{{count} days ago}}",
-  "@timeDaysAgo": {"description": "Relative time in days.", "placeholders": {"count": {"type": "int"}}},
+  "@timeDaysAgo": {
+    "description": "Relative time in days.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "durationSeconds": "{count, plural, =1{1 second} other{{count} seconds}}",
-  "@durationSeconds": {"description": "A duration in seconds.", "placeholders": {"count": {"type": "int"}}},
+  "@durationSeconds": {
+    "description": "A duration in seconds.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "durationMinutes": "{count, plural, =1{1 minute} other{{count} minutes}}",
-  "@durationMinutes": {"description": "A duration in minutes.", "placeholders": {"count": {"type": "int"}}},
+  "@durationMinutes": {
+    "description": "A duration in minutes.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "keysTitle": "Your API keys",
-  "@keysTitle": {"description": "Screen title and settings row for the user's own provider keys."},
+  "@keysTitle": {
+    "description": "Screen title and settings row for the user's own provider keys."
+  },
   "keysIntro": "Add a key from a model provider to run your chats on your own account with that provider. Keys are encrypted on Ovid's servers and never shown again.",
-  "@keysIntro": {"description": "Intro text of the keys screen."},
+  "@keysIntro": {
+    "description": "Intro text of the keys screen."
+  },
   "keysLoadFailed": "Couldn't load your keys",
-  "@keysLoadFailed": {"description": "Keys failed to load."},
+  "@keysLoadFailed": {
+    "description": "Keys failed to load."
+  },
   "keysChatsUseTitle": "Your chats use",
-  "@keysChatsUseTitle": {"description": "Card title showing which models chats run on."},
+  "@keysChatsUseTitle": {
+    "description": "Card title showing which models chats run on."
+  },
   "keysChatsUseOvid": "Ovid models, counted against your Ovid allowance.",
-  "@keysChatsUseOvid": {"description": "Chats run on Ovid models."},
+  "@keysChatsUseOvid": {
+    "description": "Chats run on Ovid models."
+  },
   "keysChatsUseKey": "{model} with your {provider} key. These runs bill your provider account, not your Ovid allowance.",
-  "@keysChatsUseKey": {"description": "Chats run on the user's own key.", "placeholders": {"model": {"type": "String"}, "provider": {"type": "String"}}},
+  "@keysChatsUseKey": {
+    "description": "Chats run on the user's own key.",
+    "placeholders": {
+      "model": {
+        "type": "String"
+      },
+      "provider": {
+        "type": "String"
+      }
+    }
+  },
   "keysUseOvidAction": "Use Ovid models instead",
-  "@keysUseOvidAction": {"description": "Button: stop using the user's key for chats."},
+  "@keysUseOvidAction": {
+    "description": "Button: stop using the user's key for chats."
+  },
   "keysEmpty": "No keys yet.",
-  "@keysEmpty": {"description": "Empty state of the keys list."},
+  "@keysEmpty": {
+    "description": "Empty state of the keys list."
+  },
   "keysAdd": "Add a key",
-  "@keysAdd": {"description": "Button: add a provider key."},
+  "@keysAdd": {
+    "description": "Button: add a provider key."
+  },
   "keysInUse": "Used for chats",
-  "@keysInUse": {"description": "Pill on the key chats use."},
+  "@keysInUse": {
+    "description": "Pill on the key chats use."
+  },
   "keysNeverTested": "Not tested yet",
-  "@keysNeverTested": {"description": "Key test status."},
+  "@keysNeverTested": {
+    "description": "Key test status."
+  },
   "keysLastTestedOk": "Tested {ago}: working",
-  "@keysLastTestedOk": {"description": "Key test status, success.", "placeholders": {"ago": {"type": "String"}}},
+  "@keysLastTestedOk": {
+    "description": "Key test status, success.",
+    "placeholders": {
+      "ago": {
+        "type": "String"
+      }
+    }
+  },
   "keysLastTestedFailed": "Tested {ago}: not working",
-  "@keysLastTestedFailed": {"description": "Key test status, failure.", "placeholders": {"ago": {"type": "String"}}},
+  "@keysLastTestedFailed": {
+    "description": "Key test status, failure.",
+    "placeholders": {
+      "ago": {
+        "type": "String"
+      }
+    }
+  },
   "keysTest": "Test",
-  "@keysTest": {"description": "Button: test a key."},
+  "@keysTest": {
+    "description": "Button: test a key."
+  },
   "keysTesting": "Testing…",
-  "@keysTesting": {"description": "Key test in progress."},
+  "@keysTesting": {
+    "description": "Key test in progress."
+  },
   "keysTestOk": "{provider} accepted the key.",
-  "@keysTestOk": {"description": "Key test succeeded.", "placeholders": {"provider": {"type": "String"}}},
+  "@keysTestOk": {
+    "description": "Key test succeeded.",
+    "placeholders": {
+      "provider": {
+        "type": "String"
+      }
+    }
+  },
   "keysTestFailed": "The provider didn't accept the key. Check the key and try again.",
-  "@keysTestFailed": {"description": "Key test failed."},
+  "@keysTestFailed": {
+    "description": "Key test failed."
+  },
   "keysUseForChats": "Use for my chats",
-  "@keysUseForChats": {"description": "Button: route chats through this key."},
+  "@keysUseForChats": {
+    "description": "Button: route chats through this key."
+  },
   "keysChangeModel": "Change model",
-  "@keysChangeModel": {"description": "Button: change the model used with this key."},
+  "@keysChangeModel": {
+    "description": "Button: change the model used with this key."
+  },
   "keysUseForChatsTitle": "Use this key for your chats",
-  "@keysUseForChatsTitle": {"description": "Dialog title."},
+  "@keysUseForChatsTitle": {
+    "description": "Dialog title."
+  },
   "keysUseForChatsBody": "Every chat and scheduled task will run on this {provider} model. Enter the model id as your provider names it.",
-  "@keysUseForChatsBody": {"description": "Dialog body.", "placeholders": {"provider": {"type": "String"}}},
+  "@keysUseForChatsBody": {
+    "description": "Dialog body.",
+    "placeholders": {
+      "provider": {
+        "type": "String"
+      }
+    }
+  },
   "keysModelLabel": "Model",
-  "@keysModelLabel": {"description": "Field label: provider model id."},
+  "@keysModelLabel": {
+    "description": "Field label: provider model id."
+  },
   "keysModelRequired": "Enter a model id.",
-  "@keysModelRequired": {"description": "Validation: model id missing."},
+  "@keysModelRequired": {
+    "description": "Validation: model id missing."
+  },
   "keysUsingNow": "Your chats now use {model}.",
-  "@keysUsingNow": {"description": "Snackbar after choosing a key for chats.", "placeholders": {"model": {"type": "String"}}},
+  "@keysUsingNow": {
+    "description": "Snackbar after choosing a key for chats.",
+    "placeholders": {
+      "model": {
+        "type": "String"
+      }
+    }
+  },
   "keysUsingOvid": "Your chats now use Ovid models.",
-  "@keysUsingOvid": {"description": "Snackbar after switching back to Ovid models."},
+  "@keysUsingOvid": {
+    "description": "Snackbar after switching back to Ovid models."
+  },
   "keysRemove": "Remove",
-  "@keysRemove": {"description": "Button: remove a key."},
+  "@keysRemove": {
+    "description": "Button: remove a key."
+  },
   "keysRemoving": "Removing…",
-  "@keysRemoving": {"description": "Key removal in progress."},
+  "@keysRemoving": {
+    "description": "Key removal in progress."
+  },
   "keysRemoveTitle": "Remove this key?",
-  "@keysRemoveTitle": {"description": "Confirm dialog title."},
+  "@keysRemoveTitle": {
+    "description": "Confirm dialog title."
+  },
   "keysRemoveBody": "The key is deleted from Ovid. You can add it again later.",
-  "@keysRemoveBody": {"description": "Confirm dialog body."},
+  "@keysRemoveBody": {
+    "description": "Confirm dialog body."
+  },
   "keysRemoveInUseBody": "Your chats use this key. After removing it they go back to Ovid models. You can add the key again later.",
-  "@keysRemoveInUseBody": {"description": "Confirm dialog body when the key is in use."},
+  "@keysRemoveInUseBody": {
+    "description": "Confirm dialog body when the key is in use."
+  },
   "keysRemoveConfirm": "Remove key",
-  "@keysRemoveConfirm": {"description": "Confirm button."},
+  "@keysRemoveConfirm": {
+    "description": "Confirm button."
+  },
   "keysRemoved": "Key removed.",
-  "@keysRemoved": {"description": "Snackbar after removing a key."},
+  "@keysRemoved": {
+    "description": "Snackbar after removing a key."
+  },
   "keysSaved": "Key saved.",
-  "@keysSaved": {"description": "Snackbar after adding a key."},
+  "@keysSaved": {
+    "description": "Snackbar after adding a key."
+  },
   "keysDeviceTitle": "Keys saved on this phone only",
-  "@keysDeviceTitle": {"description": "Section title for keys older versions stored on the device."},
+  "@keysDeviceTitle": {
+    "description": "Section title for keys older versions stored on the device."
+  },
   "keysDeviceBody": "Older versions kept these keys on this phone, and Ovid Cloud never used them. Move a key to your account to use it, or delete it.",
-  "@keysDeviceBody": {"description": "Explains device-only keys."},
+  "@keysDeviceBody": {
+    "description": "Explains device-only keys."
+  },
   "keysDeviceMove": "Move to my account",
-  "@keysDeviceMove": {"description": "Button and screen title: move a device key to the cloud."},
+  "@keysDeviceMove": {
+    "description": "Button and screen title: move a device key to the cloud."
+  },
   "keysDeviceMoveIntro": "This uploads the key to your Ovid account, encrypted. It is then removed from this phone.",
-  "@keysDeviceMoveIntro": {"description": "Intro of the move-key screen."},
+  "@keysDeviceMoveIntro": {
+    "description": "Intro of the move-key screen."
+  },
   "keysDeviceDeleteTitle": "Delete this key from this phone?",
-  "@keysDeviceDeleteTitle": {"description": "Confirm dialog title."},
+  "@keysDeviceDeleteTitle": {
+    "description": "Confirm dialog title."
+  },
   "keysDeviceDeleteBody": "The {provider} key is deleted from this phone. This can't be undone.",
-  "@keysDeviceDeleteBody": {"description": "Confirm dialog body.", "placeholders": {"provider": {"type": "String"}}},
+  "@keysDeviceDeleteBody": {
+    "description": "Confirm dialog body.",
+    "placeholders": {
+      "provider": {
+        "type": "String"
+      }
+    }
+  },
   "keysDeviceDeleteConfirm": "Delete",
-  "@keysDeviceDeleteConfirm": {"description": "Confirm button and action label."},
+  "@keysDeviceDeleteConfirm": {
+    "description": "Confirm button and action label."
+  },
   "keysDeviceDeleted": "Key deleted from this phone.",
-  "@keysDeviceDeleted": {"description": "Snackbar."},
+  "@keysDeviceDeleted": {
+    "description": "Snackbar."
+  },
   "keysAddTitle": "Add a key",
-  "@keysAddTitle": {"description": "Add-key screen title."},
+  "@keysAddTitle": {
+    "description": "Add-key screen title."
+  },
   "keysAddIntro": "Pick your provider and paste an API key from its dashboard.",
-  "@keysAddIntro": {"description": "Add-key screen intro."},
+  "@keysAddIntro": {
+    "description": "Add-key screen intro."
+  },
   "keysProviderLabel": "Provider",
-  "@keysProviderLabel": {"description": "Field label."},
+  "@keysProviderLabel": {
+    "description": "Field label."
+  },
   "keysProviderOther": "Other (OpenAI-compatible)",
-  "@keysProviderOther": {"description": "Provider option for any OpenAI-compatible API."},
+  "@keysProviderOther": {
+    "description": "Provider option for any OpenAI-compatible API."
+  },
   "keysProviderNameLabel": "Provider name",
-  "@keysProviderNameLabel": {"description": "Field label for a custom provider."},
+  "@keysProviderNameLabel": {
+    "description": "Field label for a custom provider."
+  },
   "keysProviderNameRequired": "Enter a name for this provider.",
-  "@keysProviderNameRequired": {"description": "Validation."},
+  "@keysProviderNameRequired": {
+    "description": "Validation."
+  },
   "keysEndpointLabel": "API address",
-  "@keysEndpointLabel": {"description": "Field label: provider API base URL."},
+  "@keysEndpointLabel": {
+    "description": "Field label: provider API base URL."
+  },
   "keysEndpointHelper": "The provider's official HTTPS API address, for example https://api.example.com/v1",
-  "@keysEndpointHelper": {"description": "Helper text."},
+  "@keysEndpointHelper": {
+    "description": "Helper text."
+  },
   "keysEndpointRequired": "Enter the API address.",
-  "@keysEndpointRequired": {"description": "Validation."},
+  "@keysEndpointRequired": {
+    "description": "Validation."
+  },
   "keysEndpointHttps": "Use the provider's official https:// API address.",
-  "@keysEndpointHttps": {"description": "Validation: not an https URL."},
+  "@keysEndpointHttps": {
+    "description": "Validation: not an https URL."
+  },
   "keysApiKeyLabel": "API key",
-  "@keysApiKeyLabel": {"description": "Field label."},
+  "@keysApiKeyLabel": {
+    "description": "Field label."
+  },
   "keysApiKeyHelper": "Sent once, encrypted, never shown again",
-  "@keysApiKeyHelper": {"description": "Helper text under the key field."},
+  "@keysApiKeyHelper": {
+    "description": "Helper text under the key field."
+  },
   "keysApiKeyRequired": "Paste your API key.",
-  "@keysApiKeyRequired": {"description": "Validation."},
+  "@keysApiKeyRequired": {
+    "description": "Validation."
+  },
   "keysApiKeyInvalid": "The key has spaces or line breaks. Paste just the key.",
-  "@keysApiKeyInvalid": {"description": "Validation."},
+  "@keysApiKeyInvalid": {
+    "description": "Validation."
+  },
   "keysNameLabel": "Name (optional)",
-  "@keysNameLabel": {"description": "Field label for a key nickname."},
+  "@keysNameLabel": {
+    "description": "Field label for a key nickname."
+  },
   "keysSave": "Save key",
-  "@keysSave": {"description": "Button."},
+  "@keysSave": {
+    "description": "Button."
+  },
   "keysSaving": "Saving…",
-  "@keysSaving": {"description": "Save in progress."},
+  "@keysSaving": {
+    "description": "Save in progress."
+  },
   "keysErrorEndpoint": "Use the provider's official HTTPS API address.",
-  "@keysErrorEndpoint": {"description": "Server rejected the endpoint."},
+  "@keysErrorEndpoint": {
+    "description": "Server rejected the endpoint."
+  },
   "keysErrorLimit": "You've reached the limit of saved keys. Remove one first.",
-  "@keysErrorLimit": {"description": "Server key limit reached."},
+  "@keysErrorLimit": {
+    "description": "Server key limit reached."
+  },
   "keysErrorUnavailable": "Saving keys isn't available right now. Try again later.",
-  "@keysErrorUnavailable": {"description": "Key store unavailable."},
+  "@keysErrorUnavailable": {
+    "description": "Key store unavailable."
+  },
   "presetsTitle": "Agent presets",
-  "@presetsTitle": {"description": "Screen title and settings row."},
+  "@presetsTitle": {
+    "description": "Screen title and settings row."
+  },
   "presetsIntro": "A preset decides which tools the agent may use, and can pin a model and temperature. Ovid enforces it on every run in that chat.",
-  "@presetsIntro": {"description": "Presets screen intro."},
+  "@presetsIntro": {
+    "description": "Presets screen intro."
+  },
   "presetsLoadFailed": "Couldn't load presets",
-  "@presetsLoadFailed": {"description": "Presets failed to load."},
+  "@presetsLoadFailed": {
+    "description": "Presets failed to load."
+  },
   "presetsBuiltIn": "Built in",
-  "@presetsBuiltIn": {"description": "Section heading for built-in presets."},
+  "@presetsBuiltIn": {
+    "description": "Section heading for built-in presets."
+  },
   "presetsCustom": "Yours",
-  "@presetsCustom": {"description": "Section heading for custom presets."},
+  "@presetsCustom": {
+    "description": "Section heading for custom presets."
+  },
   "presetsCustomEmpty": "No custom presets yet.",
-  "@presetsCustomEmpty": {"description": "Empty state."},
+  "@presetsCustomEmpty": {
+    "description": "Empty state."
+  },
   "presetsNew": "New preset",
-  "@presetsNew": {"description": "Button and screen title."},
+  "@presetsNew": {
+    "description": "Button and screen title."
+  },
   "presetsEdit": "Edit",
-  "@presetsEdit": {"description": "Button."},
+  "@presetsEdit": {
+    "description": "Button."
+  },
   "presetsEditTitle": "Edit preset",
-  "@presetsEditTitle": {"description": "Screen title."},
+  "@presetsEditTitle": {
+    "description": "Screen title."
+  },
   "presetsUseInChat": "Use in this chat",
-  "@presetsUseInChat": {"description": "Button: apply the preset to the open chat."},
+  "@presetsUseInChat": {
+    "description": "Button: apply the preset to the open chat."
+  },
   "presetsInThisChat": "In this chat",
-  "@presetsInThisChat": {"description": "Pill on the preset the open chat uses."},
+  "@presetsInThisChat": {
+    "description": "Pill on the preset the open chat uses."
+  },
   "presetsApplied": "Preset applied. It takes effect from your next message.",
-  "@presetsApplied": {"description": "Snackbar after applying a preset."},
+  "@presetsApplied": {
+    "description": "Snackbar after applying a preset."
+  },
   "presetsNeedChat": "Open a chat and send a message first, then apply a preset.",
-  "@presetsNeedChat": {"description": "Snackbar when there is no cloud chat to apply to."},
+  "@presetsNeedChat": {
+    "description": "Snackbar when there is no cloud chat to apply to."
+  },
   "presetsSaved": "Saved {name}.",
-  "@presetsSaved": {"description": "Snackbar after saving a preset.", "placeholders": {"name": {"type": "String"}}},
+  "@presetsSaved": {
+    "description": "Snackbar after saving a preset.",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
   "presetsDeleteTitle": "Delete this preset?",
-  "@presetsDeleteTitle": {"description": "Confirm title."},
+  "@presetsDeleteTitle": {
+    "description": "Confirm title."
+  },
   "presetsDeleteBody": "{name} is deleted. Chats using it go back to Standard.",
-  "@presetsDeleteBody": {"description": "Confirm body.", "placeholders": {"name": {"type": "String"}}},
+  "@presetsDeleteBody": {
+    "description": "Confirm body.",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
   "presetsDeleteConfirm": "Delete",
-  "@presetsDeleteConfirm": {"description": "Confirm button and action label."},
+  "@presetsDeleteConfirm": {
+    "description": "Confirm button and action label."
+  },
   "presetsDeleted": "Preset deleted.",
-  "@presetsDeleted": {"description": "Snackbar."},
+  "@presetsDeleted": {
+    "description": "Snackbar."
+  },
   "presetsAllTools": "All tools",
-  "@presetsAllTools": {"description": "Preset summary: nothing switched off."},
+  "@presetsAllTools": {
+    "description": "Preset summary: nothing switched off."
+  },
   "presetsToolsOff": "Off: {tools}",
-  "@presetsToolsOff": {"description": "Preset summary: switched-off tool families.", "placeholders": {"tools": {"type": "String"}}},
+  "@presetsToolsOff": {
+    "description": "Preset summary: switched-off tool families.",
+    "placeholders": {
+      "tools": {
+        "type": "String"
+      }
+    }
+  },
   "presetsModelPin": "Model: {model}",
-  "@presetsModelPin": {"description": "Preset summary: pinned model.", "placeholders": {"model": {"type": "String"}}},
+  "@presetsModelPin": {
+    "description": "Preset summary: pinned model.",
+    "placeholders": {
+      "model": {
+        "type": "String"
+      }
+    }
+  },
   "presetsTemperatureValue": "Temperature {value}",
-  "@presetsTemperatureValue": {"description": "Preset temperature.", "placeholders": {"value": {"type": "String"}}},
+  "@presetsTemperatureValue": {
+    "description": "Preset temperature.",
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
   "presetsNameLabel": "Name",
-  "@presetsNameLabel": {"description": "Field label."},
+  "@presetsNameLabel": {
+    "description": "Field label."
+  },
   "presetsNameRequired": "Give the preset a name.",
-  "@presetsNameRequired": {"description": "Validation."},
+  "@presetsNameRequired": {
+    "description": "Validation."
+  },
   "presetsDescriptionLabel": "Description (optional)",
-  "@presetsDescriptionLabel": {"description": "Field label."},
+  "@presetsDescriptionLabel": {
+    "description": "Field label."
+  },
   "presetsToolsTitle": "Tools",
-  "@presetsToolsTitle": {"description": "Section heading."},
+  "@presetsToolsTitle": {
+    "description": "Section heading."
+  },
   "presetsToolsHelp": "Switch off what this agent must not do. Switched-off tools are removed and refused.",
-  "@presetsToolsHelp": {"description": "Help text."},
+  "@presetsToolsHelp": {
+    "description": "Help text."
+  },
   "presetsModelLabel": "Model",
-  "@presetsModelLabel": {"description": "Field label."},
+  "@presetsModelLabel": {
+    "description": "Field label."
+  },
   "presetsModelChat": "The chat's model",
-  "@presetsModelChat": {"description": "Model option: do not pin a model."},
+  "@presetsModelChat": {
+    "description": "Model option: do not pin a model."
+  },
   "presetsTemperatureLabel": "Set temperature",
-  "@presetsTemperatureLabel": {"description": "Toggle label."},
+  "@presetsTemperatureLabel": {
+    "description": "Toggle label."
+  },
   "presetsTemperatureDefault": "Provider default",
-  "@presetsTemperatureDefault": {"description": "Temperature not set."},
+  "@presetsTemperatureDefault": {
+    "description": "Temperature not set."
+  },
   "presetsSave": "Save preset",
-  "@presetsSave": {"description": "Button."},
+  "@presetsSave": {
+    "description": "Button."
+  },
   "responsesTitle": "Responses",
-  "@responsesTitle": {"description": "Screen title and settings row."},
+  "@responsesTitle": {
+    "description": "Screen title and settings row."
+  },
   "responsesLengthTitle": "Answer length",
-  "@responsesLengthTitle": {"description": "Section heading."},
+  "@responsesLengthTitle": {
+    "description": "Section heading."
+  },
   "responsesLengthHelp": "The most an answer can use. Ovid Cloud allows up to 8K tokens.",
-  "@responsesLengthHelp": {"description": "Help text."},
+  "@responsesLengthHelp": {
+    "description": "Help text."
+  },
   "responsesLengthAuto": "Auto",
-  "@responsesLengthAuto": {"description": "Answer length option: provider default."},
+  "@responsesLengthAuto": {
+    "description": "Answer length option: provider default."
+  },
   "responsesHintTitle": "\"Still working\" hint",
-  "@responsesHintTitle": {"description": "Section heading."},
+  "@responsesHintTitle": {
+    "description": "Section heading."
+  },
   "responsesHintHelp": "When to show \"Still working…\" if the agent is quiet. It never stops the run.",
-  "@responsesHintHelp": {"description": "Help text."},
+  "@responsesHintHelp": {
+    "description": "Help text."
+  },
   "responsesHintDefault": "Default",
-  "@responsesHintDefault": {"description": "Marks the default option."},
+  "@responsesHintDefault": {
+    "description": "Marks the default option."
+  },
   "responsesContextTitle": "Context window",
-  "@responsesContextTitle": {"description": "Section heading."},
+  "@responsesContextTitle": {
+    "description": "Section heading."
+  },
   "responsesContextHelp": "For information. Ovid Cloud summarizes long chats automatically.",
-  "@responsesContextHelp": {"description": "Help text."},
+  "@responsesContextHelp": {
+    "description": "Help text."
+  },
   "responsesContextInfo": "Model: {model}\nContext window: {window} tokens\nOvid summarizes older messages at about {threshold} tokens.",
-  "@responsesContextInfo": {"description": "Context window details.", "placeholders": {"model": {"type": "String"}, "window": {"type": "String"}, "threshold": {"type": "String"}}},
+  "@responsesContextInfo": {
+    "description": "Context window details.",
+    "placeholders": {
+      "model": {
+        "type": "String"
+      },
+      "window": {
+        "type": "String"
+      },
+      "threshold": {
+        "type": "String"
+      }
+    }
+  },
   "memoryTitle": "Memory files",
-  "@memoryTitle": {"description": "Screen title."},
+  "@memoryTitle": {
+    "description": "Screen title."
+  },
   "memoryIntro": "Memory stays in the current chat unless you explicitly turn on sharing.",
   "memoryScopeChat": "Current chat only. Other chats cannot use these notes unless you explicitly tag this chat or turn on memory sharing.",
-  "@memoryScopeChat": {"description": "Memory screen: per-chat scope explanation."},
+  "@memoryScopeChat": {
+    "description": "Memory screen: per-chat scope explanation."
+  },
   "memoryScopeShared": "Shared memory is on. These notes can be used by your chats. Turn off sharing in Settings to return to chat-only notes.",
-  "@memoryScopeShared": {"description": "Memory screen: shared-scope explanation."},
+  "@memoryScopeShared": {
+    "description": "Memory screen: shared-scope explanation."
+  },
   "memoryNeedChat": "Open a cloud chat first to manage its memory. A chat that has not been sent yet has no saved memory.",
-  "@memoryNeedChat": {"description": "Memory screen: no active chat guidance."},
-  "@memoryIntro": {"description": "Screen intro."},
+  "@memoryNeedChat": {
+    "description": "Memory screen: no active chat guidance."
+  },
+  "@memoryIntro": {
+    "description": "Screen intro."
+  },
   "memoryEmpty": "Nothing saved yet. Ask Ovid to remember something in a chat.",
-  "@memoryEmpty": {"description": "Empty state."},
+  "@memoryEmpty": {
+    "description": "Empty state."
+  },
   "memoryNew": "New memory file",
-  "@memoryNew": {"description": "Button and screen title."},
+  "@memoryNew": {
+    "description": "Button and screen title."
+  },
   "memorySize": "{bytes} bytes",
-  "@memorySize": {"description": "File size.", "placeholders": {"bytes": {"type": "int"}}},
+  "@memorySize": {
+    "description": "File size.",
+    "placeholders": {
+      "bytes": {
+        "type": "int"
+      }
+    }
+  },
   "memoryDeleteTitle": "Delete this memory file?",
-  "@memoryDeleteTitle": {"description": "Confirm title."},
+  "@memoryDeleteTitle": {
+    "description": "Confirm title."
+  },
   "memoryDeleteBody": "Ovid forgets everything in {name}. This can't be undone.",
-  "@memoryDeleteBody": {"description": "Confirm body.", "placeholders": {"name": {"type": "String"}}},
+  "@memoryDeleteBody": {
+    "description": "Confirm body.",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
   "memoryDeleteConfirm": "Delete",
-  "@memoryDeleteConfirm": {"description": "Confirm button and tooltip."},
+  "@memoryDeleteConfirm": {
+    "description": "Confirm button and tooltip."
+  },
   "memoryDeleted": "Deleted {name}.",
-  "@memoryDeleted": {"description": "Snackbar.", "placeholders": {"name": {"type": "String"}}},
+  "@memoryDeleted": {
+    "description": "Snackbar.",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
   "memorySave": "Save",
-  "@memorySave": {"description": "Button."},
+  "@memorySave": {
+    "description": "Button."
+  },
   "memorySaved": "Memory saved.",
-  "@memorySaved": {"description": "Snackbar."},
+  "@memorySaved": {
+    "description": "Snackbar."
+  },
   "memoryNameLabel": "File name",
-  "@memoryNameLabel": {"description": "Field label."},
+  "@memoryNameLabel": {
+    "description": "Field label."
+  },
   "memoryNameHelper": "Letters, numbers, - or _, ending in .md",
-  "@memoryNameHelper": {"description": "Helper text."},
+  "@memoryNameHelper": {
+    "description": "Helper text."
+  },
   "memoryNameInvalid": "Use a short name like notes.md (letters, numbers, - or _).",
-  "@memoryNameInvalid": {"description": "Validation."},
+  "@memoryNameInvalid": {
+    "description": "Validation."
+  },
   "memoryContentLabel": "Notes (Markdown)",
-  "@memoryContentLabel": {"description": "Field label."},
+  "@memoryContentLabel": {
+    "description": "Field label."
+  },
   "memoryTooLong": "Memory files can be up to 32 KB.",
-  "@memoryTooLong": {"description": "Validation."},
+  "@memoryTooLong": {
+    "description": "Validation."
+  },
   "memoryNoWorkspace": "Start a chat first. Memory lives in your cloud workspace.",
-  "@memoryNoWorkspace": {"description": "No workspace yet."},
+  "@memoryNoWorkspace": {
+    "description": "No workspace yet."
+  },
   "memoryConflict": "This memory changed since you opened it. Go back and open it again.",
-  "@memoryConflict": {"description": "Edit conflict."},
+  "@memoryConflict": {
+    "description": "Edit conflict."
+  },
   "statusTitle": "Service status",
-  "@statusTitle": {"description": "Screen title and settings row."},
+  "@statusTitle": {
+    "description": "Screen title and settings row."
+  },
   "statusChecking": "Checking…",
-  "@statusChecking": {"description": "Check in progress."},
+  "@statusChecking": {
+    "description": "Check in progress."
+  },
   "statusRecheck": "Check again",
-  "@statusRecheck": {"description": "Tooltip: re-run the checks."},
+  "@statusRecheck": {
+    "description": "Tooltip: re-run the checks."
+  },
   "statusAllGood": "Everything is working",
-  "@statusAllGood": {"description": "Headline: all checks pass."},
+  "@statusAllGood": {
+    "description": "Headline: all checks pass."
+  },
   "statusPartial": "Mostly working. Some things may be slow or unavailable.",
-  "@statusPartial": {"description": "Headline: degraded."},
+  "@statusPartial": {
+    "description": "Headline: degraded."
+  },
   "statusProblem": "Something isn't working. Chats may fail until it's fixed.",
-  "@statusProblem": {"description": "Headline: a check failed."},
+  "@statusProblem": {
+    "description": "Headline: a check failed."
+  },
   "statusUnreachable": "Ovid couldn't reach Ovid Cloud. Check your connection.",
-  "@statusUnreachable": {"description": "Headline: server unreachable."},
+  "@statusUnreachable": {
+    "description": "Headline: server unreachable."
+  },
   "statusCloudSection": "Ovid Cloud",
-  "@statusCloudSection": {"description": "Section heading."},
+  "@statusCloudSection": {
+    "description": "Section heading."
+  },
   "statusDeviceSection": "This device",
-  "@statusDeviceSection": {"description": "Section heading."},
+  "@statusDeviceSection": {
+    "description": "Section heading."
+  },
   "statusStorage": "Chats and history",
-  "@statusStorage": {"description": "Check: database."},
+  "@statusStorage": {
+    "description": "Check: database."
+  },
   "statusQueue": "Run queue",
-  "@statusQueue": {"description": "Check: queue."},
+  "@statusQueue": {
+    "description": "Check: queue."
+  },
   "statusAgents": "Agents",
-  "@statusAgents": {"description": "Check: workers consuming runs."},
+  "@statusAgents": {
+    "description": "Check: workers consuming runs."
+  },
   "statusModels": "Models",
-  "@statusModels": {"description": "Check: model catalog."},
+  "@statusModels": {
+    "description": "Check: model catalog."
+  },
   "statusAccount": "Sign-in",
-  "@statusAccount": {"description": "Check: authenticated request."},
+  "@statusAccount": {
+    "description": "Check: authenticated request."
+  },
   "statusSignedOut": "You're signed out",
-  "@statusSignedOut": {"description": "Detail when signed out."},
+  "@statusSignedOut": {
+    "description": "Detail when signed out."
+  },
   "statusLive": "Live updates",
-  "@statusLive": {"description": "Check: realtime ticket."},
+  "@statusLive": {
+    "description": "Check: realtime ticket."
+  },
   "statusPush": "Notifications",
-  "@statusPush": {"description": "Check: push registration."},
+  "@statusPush": {
+    "description": "Check: push registration."
+  },
   "statusPushOff": "This device isn't registered for notifications",
-  "@statusPushOff": {"description": "Detail when push is not registered."},
+  "@statusPushOff": {
+    "description": "Detail when push is not registered."
+  },
   "statusOk": "Working",
-  "@statusOk": {"description": "Row state."},
+  "@statusOk": {
+    "description": "Row state."
+  },
   "statusWarn": "Limited",
-  "@statusWarn": {"description": "Row state."},
+  "@statusWarn": {
+    "description": "Row state."
+  },
   "statusDown": "Not working",
-  "@statusDown": {"description": "Row state."},
+  "@statusDown": {
+    "description": "Row state."
+  },
   "statusVersion": "App version {version}",
-  "@statusVersion": {"description": "Version line.", "placeholders": {"version": {"type": "String"}}},
+  "@statusVersion": {
+    "description": "Version line.",
+    "placeholders": {
+      "version": {
+        "type": "String"
+      }
+    }
+  },
   "statusCopyDiagnostics": "Copy diagnostics",
-  "@statusCopyDiagnostics": {"description": "Button: copy a support report."},
+  "@statusCopyDiagnostics": {
+    "description": "Button: copy a support report."
+  },
   "statusDiagnosticsCopied": "Diagnostics copied. Paste them into your message to support.",
-  "@statusDiagnosticsCopied": {"description": "Snackbar."}
+  "@statusDiagnosticsCopied": {
+    "description": "Snackbar."
+  },
+  "sessionPinned": "Session pinned",
+  "@sessionPinned": {
+    "description": "Snackbar after pinning a chat."
+  },
+  "sessionUnpinned": "Session unpinned",
+  "@sessionUnpinned": {
+    "description": "Snackbar after unpinning a chat."
+  },
+  "pinUpdateFailed": "Could not update the pin. Please try again.",
+  "@pinUpdateFailed": {
+    "description": "Snackbar when pinning a chat fails."
+  },
+  "addedToProject": "Added to project",
+  "@addedToProject": {
+    "description": "Snackbar after moving a chat into a project."
+  },
+  "removedFromProject": "Removed from project",
+  "@removedFromProject": {
+    "description": "Snackbar after removing a chat from its project."
+  },
+  "moveChatFailed": "Could not move the chat. Please try again.",
+  "@moveChatFailed": {
+    "description": "Snackbar when moving a chat to a project fails."
+  },
+  "credentialsVault": "Credentials vault",
+  "@credentialsVault": {
+    "description": "Settings row title for saved browser logins."
+  },
+  "credentialsVaultSubtitle": "Saved logins for the cloud browser",
+  "@credentialsVaultSubtitle": {
+    "description": "Settings row subtitle for saved browser logins."
+  }
 }

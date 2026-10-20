@@ -88,8 +88,8 @@ class SettingsScreen extends StatelessWidget {
                 // Wave 6 W4: the cloud browser's saved logins.
                 _NavTile(
                   icon: Icons.password_outlined,
-                  title: 'Credentials vault',
-                  subtitle: 'Saved logins for the cloud browser',
+                  title: l.credentialsVault,
+                  subtitle: l.credentialsVaultSubtitle,
                   builder: (_) => const CredentialsVaultScreen(),
                 ),
               ],

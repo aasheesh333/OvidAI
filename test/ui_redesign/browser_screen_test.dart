@@ -82,7 +82,9 @@ void main() {
     await pumpScreen(tester);
 
     expect(find.byType(AetherGradientHeader), findsOneWidget);
-    expect(find.byKey(const ValueKey('browser-tab-strip')), findsOneWidget);
+    // Agent-first tabs (W4): before the agent opens a page there is no tab
+    // strip and no way to create one — the strip appears with the first tab.
+    expect(find.byKey(const ValueKey('browser-tab-strip')), findsNothing);
     expect(find.byKey(const ValueKey('browser-url-field')), findsOneWidget);
     expect(find.byKey(const ValueKey('browser-canvas')), findsOneWidget);
     expect(find.byKey(const ValueKey('browser-takeover')), findsNothing);

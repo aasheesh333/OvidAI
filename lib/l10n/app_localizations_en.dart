@@ -2043,4 +2043,28 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get statusDiagnosticsCopied =>
       'Diagnostics copied. Paste them into your message to support.';
+
+  @override
+  String get sessionPinned => 'Session pinned';
+
+  @override
+  String get sessionUnpinned => 'Session unpinned';
+
+  @override
+  String get pinUpdateFailed => 'Could not update the pin. Please try again.';
+
+  @override
+  String get addedToProject => 'Added to project';
+
+  @override
+  String get removedFromProject => 'Removed from project';
+
+  @override
+  String get moveChatFailed => 'Could not move the chat. Please try again.';
+
+  @override
+  String get credentialsVault => 'Credentials vault';
+
+  @override
+  String get credentialsVaultSubtitle => 'Saved logins for the cloud browser';
 }

@@ -255,7 +255,7 @@ class ChatOverflowMenu extends StatelessWidget {
             if (!context.mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
-                content: Text(next ? 'Session pinned' : 'Session unpinned'),
+                content: Text(next ? context.l10n.sessionPinned : context.l10n.sessionUnpinned),
                 behavior: SnackBarBehavior.floating,
               ),
             );
@@ -263,7 +263,7 @@ class ChatOverflowMenu extends StatelessWidget {
             if (!context.mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
-                content: Text('Could not update the pin: $e'),
+                content: Text(context.l10n.pinUpdateFailed),
                 behavior: SnackBarBehavior.floating,
               ),
             );
@@ -315,9 +315,9 @@ class ChatOverflowMenu extends StatelessWidget {
         content: Text(
           ok
               ? (picked.projectId == null
-                    ? 'Removed from project'
-                    : 'Added to project')
-              : (controller.error ?? 'Could not move the chat.'),
+                    ? context.l10n.removedFromProject
+                    : context.l10n.addedToProject)
+              : context.l10n.moveChatFailed,
         ),
         behavior: SnackBarBehavior.floating,
       ),
