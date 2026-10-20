@@ -33,11 +33,17 @@ class ProjectOption {
     required this.id,
     required this.name,
     this.sessionCount,
+    this.fileCount,
+    this.fileCap,
   });
 
   final String id;
   final String name;
   final int? sessionCount;
+
+  /// Project-memory file usage (W1's per-plan cap), when the server reports it.
+  final int? fileCount;
+  final int? fileCap;
 }
 
 /// Port implemented by W1 (Projects).
@@ -57,10 +63,15 @@ abstract class ProjectsPort extends ChangeNotifier {
 
   /// True when the gateway accepts `projectRefs` on `POST /sessions/:id/messages`.
   ///
-  /// W1 should return true only after the server-side route validates the
-  /// field; until then W9 never inserts `@project:` tokens or sends
-  /// `projectRefs`, so a strict gateway cannot 400 a chat send.
+  /// W1's adapter returns **false** until the strict server send schema grows
+  /// the optional field (and ownership resolution). While false W9 never
+  /// inserts `@project:` tokens or sends `projectRefs`, so a strict gateway
+  /// cannot 400 a chat send.
   bool get supportsTurnProjectRefs;
+
+  /// True when [setPinned]/[isPinned] persist. When false the chat surface
+  /// falls back to its local [ChatPinsStore] so the menu item still works.
+  bool get supportsPin => false;
 
   /// Projects owned by the signed-in user, in display order.
   List<ProjectOption> get projects;

@@ -15,6 +15,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ovid_ai/core/chat_integration_ports.dart';
+import 'package:ovid_ai/core/chat_pins.dart';
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/cloud_session_store.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -101,6 +102,7 @@ void main() {
     CloudAgentFacade.resetForTest();
     ProjectsPort.installForTest(null);
     StudioBindingPort.installForTest(null);
+    ChatPinsStore.I.clearForTest();
     VoiceReplyService.I.speakOverrideForTest = null;
     VoiceReplyService.I.stopOverrideForTest = null;
     VoiceReplyService.I.availableOverrideForTest = null;
@@ -115,6 +117,7 @@ void main() {
     CloudSessionStore.resetForTest();
     ProjectsPort.installForTest(null);
     StudioBindingPort.installForTest(null);
+    ChatPinsStore.I.clearForTest();
     VoiceReplyService.I.speakOverrideForTest = null;
     VoiceReplyService.I.stopOverrideForTest = null;
     VoiceReplyService.I.availableOverrideForTest = null;
@@ -204,7 +207,7 @@ void main() {
   });
 
   group('⋮ menu', () {
-    test('Add to Project / Pin appear only when the W1 port is available', () {
+    test('Add to Project needs the W1 port; Pin always works locally', () {
       final s = ChatSession(
         id: 's',
         title: 'T',
@@ -214,11 +217,31 @@ void main() {
       );
       final without = chatMenuActionsFor(s, 0);
       expect(without, isNot(contains(ChatMenuAction.addToProject)));
-      expect(without, isNot(contains(ChatMenuAction.pin)));
+      expect(
+        without,
+        contains(ChatMenuAction.pin),
+        reason: 'the local pin store backs Pin even before W1 lands',
+      );
 
       final withProjects = chatMenuActionsFor(s, 0, projectsAvailable: true);
       expect(withProjects, contains(ChatMenuAction.addToProject));
       expect(withProjects, contains(ChatMenuAction.pin));
+    });
+
+    testWidgets('Pin Session persists locally and shows in the header', (
+      tester,
+    ) async {
+      addSession('pinnable', title: 'Pinnable');
+      await pumpChat(tester);
+
+      expect(find.byKey(const ValueKey('chat-header-pinned')), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('chat-header-more')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('chat-menu-pin')));
+      await tester.pumpAndSettle();
+
+      expect(ChatPinsStore.I.isPinned('pinnable'), isTrue);
+      expect(find.byKey(const ValueKey('chat-header-pinned')), findsOneWidget);
     });
   });
 

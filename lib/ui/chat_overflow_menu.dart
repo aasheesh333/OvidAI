@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../core/chat_integration_ports.dart';
+import '../core/chat_pins.dart';
 import '../core/cloud/agent_surface.dart';
 import '../core/cloud/cloud_agent_facade.dart';
 import '../core/state.dart';
@@ -55,7 +56,9 @@ List<ChatMenuAction> chatMenuActionsFor(
     if (jobCount > 0) ChatMenuAction.jobs,
     if (own) ChatMenuAction.rename,
     if (own && projectsAvailable) ChatMenuAction.addToProject,
-    if (own && projectsAvailable) ChatMenuAction.pin,
+    // Pin is always available: W1's port when it owns pinning, otherwise the
+    // account-scoped local store (visible in the chat header).
+    if (own) ChatMenuAction.pin,
     ChatMenuAction.artifacts,
     if (session != null) ChatMenuAction.trajectory,
     ChatMenuAction.usage,
@@ -82,6 +85,7 @@ class ChatOverflowMenu extends StatelessWidget {
     return AnimatedBuilder(
       animation: Listenable.merge([
         _agent,
+        ChatPinsStore.I,
         if (ProjectsPort.instance != null) ProjectsPort.instance!,
       ]),
       builder: (context, _) {
@@ -93,7 +97,12 @@ class ChatOverflowMenu extends StatelessWidget {
         // the transcript the gating reads.
         final projects = ProjectsPort.instance;
         final projectsAvailable = projects != null && projects.ready;
-        final pinned = s != null && (projects?.isPinned(s.id) ?? false);
+        // Pin persistence: W1's port when it owns pinning, otherwise the
+        // account-scoped local store. The pin is visible in the chat header.
+        final pinned = s != null &&
+            (projects != null && projects.supportsPin
+                ? projects.isPinned(s.id)
+                : ChatPinsStore.I.isPinned(s.id));
         final actions = chatMenuActionsFor(
           s,
           jobs.length,
@@ -231,10 +240,15 @@ class ChatOverflowMenu extends StatelessWidget {
       case ChatMenuAction.pin:
         if (s != null) {
           final port = ProjectsPort.instance;
-          if (port == null) return;
-          final next = !port.isPinned(s.id);
+          final next = !(port != null && port.supportsPin
+              ? port.isPinned(s.id)
+              : ChatPinsStore.I.isPinned(s.id));
           try {
-            await port.setPinned(s.id, next);
+            if (port != null && port.supportsPin) {
+              await port.setPinned(s.id, next);
+            } else {
+              await ChatPinsStore.I.setPinned(s.id, next);
+            }
             if (!context.mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
