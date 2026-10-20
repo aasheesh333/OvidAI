@@ -267,6 +267,8 @@ async function startMockGateway(mockLlmUrl: string): Promise<MockGateway> {
           id: `sess-${++ticketSeq}-${Date.now().toString(36)}`,
           title: null,
           mode: "safe" as const,
+          // W1: SessionDto.projectId is required (null = standalone chat).
+          projectId: null,
           createdAt: now,
           updatedAt: now,
         };
