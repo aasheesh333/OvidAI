@@ -219,6 +219,15 @@ dependencies {
         }
     }
     implementation("com.android.installreferrer:installreferrer:2.2")
+    // Ovid ships on Google Play only. RevenueCat's hybrid-common pulls the
+    // Amazon Appstore store as a sibling module; it merges an Amazon IAP
+    // receiver and permission into our manifest, and that SDK's bytecode has
+    // no stackmap frames, so every Robolectric host test dies with
+    // java.lang.VerifyError while the merged manifest is parsed. Excluding it
+    // keeps the Google store (com.revenuecat.purchases:purchases) intact.
+    configurations.configureEach {
+        exclude(group = "com.revenuecat.purchases", module = "purchases-store-amazon")
+    }
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

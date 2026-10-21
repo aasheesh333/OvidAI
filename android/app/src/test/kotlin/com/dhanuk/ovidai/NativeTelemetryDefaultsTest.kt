@@ -9,7 +9,9 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [23, 24, 26])
+// minSdk is 24, so Robolectric cannot parse the merged manifest for 23
+// ("Requires newer sdk version #24"). 26 covers the notification-channel path.
+@Config(sdk = [24, 26, 33])
 class NativeTelemetryDefaultsTest {
     @Test fun mergedManifestDisablesCollectionBeforeDartRestoresConsent() {
         val app = RuntimeEnvironment.getApplication()
