@@ -153,6 +153,12 @@ export interface BrowserToolsDeps {
    * stays "50 MB" regardless — it describes the production policy.
    */
   downloadMaxBytes?: number;
+  /**
+   * Test seam for the upload source ceiling. Production omits it;
+   * `browser_upload` then uses UPLOAD_MAX_BYTES (50 MB), with the same
+   * production-policy refusal copy.
+   */
+  uploadMaxBytes?: number;
   /** Wave 6 W4: owner-scoped credentials vault; absent ⇒ the tools refuse loudly. */
   credentials?: BrowserCredentialsPort;
   /** Wave 6 W4: workspace ↔ Artifact Vault bridge; absent ⇒ workspace-only transfers. */

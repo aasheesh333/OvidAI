@@ -1,56 +1,111 @@
 /**
- * Transfers (P6 Task 13): explicit downloads and workspace uploads.
+ * Transfers (P6 Task 13; hardened in P3): explicit downloads and workspace
+ * uploads through one typed, path-safe API.
+ *
+ *   - PATHS: every upload source is resolved against the session workspace
+ *     jail (`/workspace` in the sandbox) both lexically and via `realpath`, so
+ *     `../` and symlinks that point outside are refused (transferPolicy.ts).
+ *     Downloads resolve their destination directory the same way, and the
+ *     body is written to a fresh temp name then renamed into place, so a
+ *     planted symlink is replaced, never followed.
+ *   - SIZE: `browser_download` reads with a BOUNDED stream — the declared
+ *     Content-Length is checked before any body byte is read, and an
+ *     undeclared (chunked) body is aborted as soon as the running count
+ *     crosses the cap. Uploads stat the source first. Both default to 50 MB
+ *     (`downloadMaxBytes` / `uploadMaxBytes` are test seams; the refusal copy
+ *     always states the production policy).
+ *   - MIME: downloads must declare an allowed attachment type (images,
+ *     documents, text, archives, media — never active content or
+ *     executables); uploads are typed by extension against the same policy.
  *
  * `browser_download` shares the session's cookie jar (authenticated downloads
- * work without re-login) and reads the body with a BOUNDED stream: the
- * declared Content-Length is checked before any body byte is read, and an
- * undeclared (chunked) body is aborted as soon as the running count crosses
- * the cap. Nothing past the cap is ever buffered — a multi-GB URL cannot OOM
- * the worker. `BrowserToolsDeps.downloadMaxBytes` is a test seam (production
- * defaults to 50 MB). Filenames are single-component only — a server-supplied
- * basename or a caller-supplied `../` can never escape `browser/downloads/`.
- *
- * `browser_upload` resolves the caller's path against the P2 workspace jail
- * and refuses anything outside it (Review Focus #4), then hands the absolute
- * path to Playwright's `setInputFiles` (which fires the page's `change`
- * handler exactly like a user picking the file).
+ * work without re-login). `browser_upload` hands an absolute, jailed path to
+ * Playwright's `setInputFiles`, which fires the page's `change` handler
+ * exactly like a user picking the file.
  */
 
-import { mkdir, stat, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 
 import type { BrowserContext } from "playwright-core";
 import { z } from "zod";
 
 import { guardUrl, withSession } from "../sessionOps.js";
-import { DOWNLOAD_MAX_BYTES, sanitizeFilename } from "./downloadWiring.js";
+import {
+  DOWNLOAD_MAX_BYTES,
+  TRANSFER_MIME_ALLOWLIST,
+  UPLOAD_MAX_BYTES,
+  isAllowedTransferMime,
+  mimeTypeForFilename,
+  normalizeMimeType,
+  resolveWorkspaceDir,
+  resolveWorkspaceEntry,
+  sanitizeFilename,
+  type WorkspacePathReason,
+} from "./transferPolicy.js";
 import {
   TOOL_ERROR_PREFIX,
   artifactSessionId,
   defineBrowserTool,
   messageOf,
+  randomSuffix,
   type BrowserToolDef,
   type BrowserToolSpec,
   type BrowserToolsDeps,
 } from "./types.js";
 
-export { DOWNLOAD_MAX_BYTES };
+// The typed transfer policy is part of the package surface (index.ts exports
+// this module), so callers and tests share one allowlist / jail implementation.
+export {
+  DOWNLOAD_MAX_BYTES,
+  TRANSFER_MIME_ALLOWLIST,
+  UPLOAD_MAX_BYTES,
+  isAllowedTransferMime,
+  mimeTypeForFilename,
+  normalizeMimeType,
+  resolveWorkspaceDir,
+  resolveWorkspaceEntry,
+  sanitizeFilename,
+};
+export type { WorkspacePathReason, WorkspacePathResult } from "./transferPolicy.js";
 
 /** Fetch timeout for explicit downloads. */
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 
+/** Model-facing copy for a refused upload path. */
+function uploadPathRefusal(reason: WorkspacePathReason, relPath: string): string {
+  switch (reason) {
+    case "escape":
+      return "Upload refused: path escapes the session workspace.";
+    case "invalid":
+      return `${TOOL_ERROR_PREFIX}invalid path: ${relPath}`;
+    case "not-found":
+      return `${TOOL_ERROR_PREFIX}file not found: ${relPath}`;
+  }
+}
+
+/** Extension shown in the MIME refusal (never a path). */
+function extensionOf(filename: string): string {
+  const dot = filename.lastIndexOf(".");
+  return dot > 0 ? filename.slice(dot).toLowerCase() : "no extension";
+}
+
 interface BoundedResponse {
   status: number;
   ok: boolean;
-  contentType: string | null;
+  /** Normalized MIME (parameters stripped); octet-stream when absent. */
+  contentType: string;
   body: Buffer | null;
   tooLarge: boolean;
+  /** Non-null when the declared type is outside TRANSFER_MIME_ALLOWLIST. */
+  refusedMime: string | null;
 }
 
 /**
  * GET `url` with the context's cookies, reading at most `maxBytes` of body.
  * `tooLarge` short-circuits before the body is touched when Content-Length
  * declares more than the cap, and aborts mid-stream when it does not.
+ * Disallowed content types are refused before the body is read.
  */
 async function boundedGet(
   context: BrowserContext,
@@ -77,17 +132,25 @@ async function boundedGet(
   const base = {
     status: response.status,
     ok: response.ok,
-    contentType: response.headers.get("content-type"),
+    contentType: normalizeMimeType(response.headers.get("content-type")),
   };
-  if (!response.ok) return { ...base, body: null, tooLarge: false };
+  if (!response.ok) return { ...base, body: null, tooLarge: false, refusedMime: null };
+
+  if (!isAllowedTransferMime(base.contentType)) {
+    controller.abort();
+    await response.body?.cancel().catch(() => {});
+    return { ...base, body: null, tooLarge: false, refusedMime: base.contentType };
+  }
 
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
     controller.abort();
-    return { ...base, body: null, tooLarge: true };
+    return { ...base, body: null, tooLarge: true, refusedMime: null };
   }
 
-  if (response.body === null) return { ...base, body: Buffer.alloc(0), tooLarge: false };
+  if (response.body === null) {
+    return { ...base, body: Buffer.alloc(0), tooLarge: false, refusedMime: null };
+  }
 
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -101,7 +164,7 @@ async function boundedGet(
         // Stop the transfer at the boundary — never buffer the remainder.
         controller.abort();
         await reader.cancel().catch(() => {});
-        return { ...base, body: null, tooLarge: true };
+        return { ...base, body: null, tooLarge: true, refusedMime: null };
       }
       chunks.push(value);
     }
@@ -110,7 +173,12 @@ async function boundedGet(
     throw new Error(`download failed: ${messageOf(err)}`);
   }
 
-  return { ...base, body: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))), tooLarge: false };
+  return {
+    ...base,
+    body: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))),
+    tooLarge: false,
+    refusedMime: null,
+  };
 }
 
 /** Default filename from a URL's last path segment, or null when absent/invalid. */
@@ -125,11 +193,35 @@ function defaultFilename(url: string): string | null {
   }
 }
 
+/** Types for the two transfer tools (also usable by callers of this package). */
+export const browserDownloadInputSchema = z.object({
+  url: z.string().min(1),
+  filename: z.string().min(1).optional(),
+});
+export type BrowserDownloadInput = z.infer<typeof browserDownloadInputSchema>;
+
+export const browserUploadInputSchema = z
+  .object({
+    selector: z.string().min(1),
+    path: z.string().min(1).optional(),
+    artifactId: z.string().min(1).optional(),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if ((v.path === undefined) === (v.artifactId === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "exactly one of path or artifactId is required",
+      });
+    }
+  });
+export type BrowserUploadInput = z.infer<typeof browserUploadInputSchema>;
+
 function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
   const download: BrowserToolSpec = {
     name: "browser_download",
     description:
-      "Download a URL to the session workspace (browser/downloads/) using the session's cookies. Returns a workspace-relative artifact reference. Files over 50 MB are refused.",
+      "Download a URL to the session workspace (browser/downloads/) using the session's cookies. Returns a workspace-relative artifact reference. Files over 50 MB and non-attachment content types (active content, executables) are refused.",
     parameters: {
       type: "object",
       properties: {
@@ -138,7 +230,7 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       },
       required: ["url"],
     },
-    inputSchema: z.object({ url: z.string().min(1), filename: z.string().min(1).optional() }),
+    inputSchema: browserDownloadInputSchema,
     async execute(input, ctx) {
       const url: string = input.url;
       const refusal = await guardUrl(url, "browser_download", deps.cfg);
@@ -149,6 +241,11 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
         const response = await boundedGet(session.handle.context, url, limit);
         if (!response.ok) {
           return { content: `${TOOL_ERROR_PREFIX}download failed: HTTP ${response.status} ${url}` };
+        }
+        if (response.refusedMime !== null) {
+          return {
+            content: `Download refused: content type ${response.refusedMime} is not allowed.`,
+          };
         }
         if (response.tooLarge || response.body === null) {
           return { content: "Download refused: file exceeds the 50 MB limit." };
@@ -164,9 +261,22 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
 
         const root = await deps.workspaceDir(ctx.userId, artifactSessionId(ctx));
         const relDir = "browser/downloads";
-        const dir = join(root, relDir);
-        await mkdir(dir, { recursive: true });
-        await writeFile(join(dir, name), body);
+        const dir = await resolveWorkspaceDir(root, relDir);
+        if (dir === null) {
+          return { content: "Download refused: destination escapes the session workspace." };
+        }
+
+        // Write-then-rename: `rename` REPLACES a pre-existing symlink rather
+        // than following it outside the jail.
+        const dest = join(dir, name);
+        const temp = join(dir, `.part-${randomSuffix()}`);
+        try {
+          await writeFile(temp, body, { flag: "wx", mode: 0o600 });
+          await rename(temp, dest);
+        } catch (err) {
+          await rm(temp, { force: true }).catch(() => {});
+          throw err;
+        }
 
         // Wave 6 W4: mirror the file into the account Artifact Vault. The
         // workspace copy is authoritative; a vault failure never fails the
@@ -178,7 +288,7 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
               userId: ctx.userId,
               sessionId: artifactSessionId(ctx),
               path: `${relDir}/${name}`,
-              mimeType: response.contentType ?? "application/octet-stream",
+              mimeType: response.contentType,
             });
             vaulted = rec !== null;
           } catch (err) {
@@ -194,7 +304,7 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
             {
               kind: "download",
               path: `${relDir}/${name}`,
-              mimeType: response.contentType ?? "application/octet-stream",
+              mimeType: response.contentType,
               bytes: body.length,
             },
           ],
@@ -206,7 +316,7 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
   const upload: BrowserToolSpec = {
     name: "browser_upload",
     description:
-      "Upload a file to a file input matching a CSS selector. Source is either a workspace-relative path or an Artifact Vault id (artifactId). Paths outside the workspace are refused.",
+      "Upload a file to a file input matching a CSS selector. Source is either a workspace-relative path or an Artifact Vault id (artifactId). Paths outside the workspace, files over 50 MB, and file types outside the attachment allowlist (images, documents, text, ZIP, audio/video) are refused.",
     parameters: {
       type: "object",
       properties: {
@@ -219,21 +329,7 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       },
       required: ["selector"],
     },
-    inputSchema: z
-      .object({
-        selector: z.string().min(1),
-        path: z.string().min(1).optional(),
-        artifactId: z.string().min(1).optional(),
-      })
-      .strict()
-      .superRefine((v, ctx) => {
-        if ((v.path === undefined) === (v.artifactId === undefined)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: "exactly one of path or artifactId is required",
-          });
-        }
-      }),
+    inputSchema: browserUploadInputSchema,
     async execute(input, ctx) {
       const root = await deps.workspaceDir(ctx.userId, artifactSessionId(ctx));
       let relPath: string;
@@ -255,16 +351,14 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
         relPath = input.path as string;
       }
 
-      const abs = resolve(root, relPath);
-      const rel = relative(root, abs);
-      // Review Focus #4: the jail check is path-level, before any file work.
-      if (rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) {
-        return { content: "Upload refused: path escapes the session workspace." };
-      }
+      // Review Focus #4: lexical + realpath jail check BEFORE any file work —
+      // this also validates a vault port's returned path.
+      const resolved = await resolveWorkspaceEntry(root, relPath);
+      if (!resolved.ok) return { content: uploadPathRefusal(resolved.reason, relPath) };
 
       let info;
       try {
-        info = await stat(abs);
+        info = await stat(resolved.abs);
       } catch {
         return { content: `${TOOL_ERROR_PREFIX}file not found: ${relPath}` };
       }
@@ -272,8 +366,19 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
         return { content: `${TOOL_ERROR_PREFIX}file not found: ${relPath}` };
       }
 
+      if (info.size > (deps.uploadMaxBytes ?? UPLOAD_MAX_BYTES)) {
+        return { content: "Upload refused: file exceeds the 50 MB limit." };
+      }
+
+      const name = basename(resolved.abs);
+      if (mimeTypeForFilename(name) === null) {
+        return {
+          content: `Upload refused: file type not allowed (${extensionOf(name)}).`,
+        };
+      }
+
       return withSession(deps, ctx, async (_session, page) => {
-        await page.setInputFiles(input.selector, abs);
+        await page.setInputFiles(input.selector, resolved.abs);
         return { content: `uploaded ${relPath} to ${input.selector}` };
       });
     },

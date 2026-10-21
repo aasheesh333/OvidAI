@@ -240,6 +240,7 @@ const AVAILABLE: ToolSpec[] = [
   "send_message",
   "interrupt_agent",
   "list_agents",
+  "read_subagent_log",
   "report",
 ].map(spec);
 
@@ -354,6 +355,16 @@ describe("projectChildRoster", () => {
     expect(names).toEqual(
       expect.arrayContaining(["send_message", "list_agents", "interrupt_agent", "report"]),
     );
+    // Main-agent-only tools never reach a child roster.
+    expect(names).not.toContain("read_subagent_log");
+  });
+
+  it("read_subagent_log stays denied even when the policy explicitly allows it", () => {
+    const policy = subagentToolPolicy(["read_subagent_log", "*"]);
+    expect(subagentPolicyAllows("read_subagent_log", policy)).toBe(false);
+    const names = projectChildRoster(AVAILABLE, policy).map((t) => t.name);
+    expect(names).not.toContain("read_subagent_log");
+    expect(names).toContain("file_read");
   });
 });
 

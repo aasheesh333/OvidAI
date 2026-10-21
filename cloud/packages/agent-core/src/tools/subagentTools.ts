@@ -1,5 +1,5 @@
 // Subagent management tools (P3 Task 20) — dispatch_agent, send_message,
-// interrupt_agent, list_agents, report.
+// interrupt_agent, list_agents, read_subagent_log, report.
 //
 // PORT OF: lib/core/agent_service.dart's tool schemas (dispatch_agent
 // AS:9394–9465, send_message AS:9550–9561, interrupt_agent AS:9567–9578,
@@ -15,19 +15,29 @@
 //  • send_message/interrupt_agent default to the NEWEST RUNNING CHILD when no
 //    sessionId is given (a cloud convenience; Dart is handle-id based).
 //  • list_agents renders children of the CURRENT session.
+//  • read_subagent_log returns a BOUNDED tail of a child's append-only log
+//    (default 200 lines, max 2,000, truncation marker) and is MAIN-AGENT ONLY:
+//    a subagent calling it is refused with the same no-nesting guard as
+//    dispatch_agent.
 //  • report records the child's final report (the supervisor uses it as the
 //    dispatch result) and returns the literal `Report delivered.`
-//  • dispatch_agent's result is the BARE report/last-assistant text — no
-//    `[<id> <state> · <elapsed>s]` wrapper (Dart AS:24559–24563).
+//  • dispatch_agent's result is the strict five-key JSON summary
+//    (subagentSummary.ts) — never the child's transcript and no
+//    `[<id> <state> · <elapsed>s]` wrapper.
 
 import type { EventSink } from "../ports.js";
 import {
+  READ_SUBAGENT_LOG_TOOL_NAME,
   renderChildLine,
   subagentResultJson,
   SubagentRefusalError,
   type ChildHandle,
   type SubagentSupervisor,
 } from "../subagents.js";
+import {
+  clampSubagentLogTailLines,
+  SUBAGENT_LOG_TRUNCATION_MARKER,
+} from "../subagentLog.js";
 import type { SessionStateStore } from "../ports.js";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
 
@@ -36,6 +46,17 @@ export const DISPATCH_AGENT_TIMEOUT_MS = 1_800_000;
 function argString(args: Record<string, unknown>, key: string): string {
   const value = args[key];
   return typeof value === "string" ? value.trim() : "";
+}
+
+/** Number args tolerate a numeric string (models often send "500"). */
+function argNumber(args: Record<string, unknown>, key: string): number | undefined {
+  const value = args[key];
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
 }
 
 function argStrings(args: Record<string, unknown>, key: string): string[] | undefined {
@@ -265,6 +286,87 @@ export function createSubagentTools(deps: {
     },
   };
 
+  const readSubagentLog: Tool = {
+    spec: {
+      name: READ_SUBAGENT_LOG_TOOL_NAME,
+      description:
+        "Read the tail of a subagent's append-only log: the task prompt, " +
+        "tool calls with their outputs, lifecycle events and the final " +
+        "result. MAIN AGENT ONLY. Returns the last 200 lines by default " +
+        "(maximum 2,000) and says when earlier lines were omitted.",
+      parameters: {
+        type: "object",
+        properties: {
+          subagentId: {
+            type: "string",
+            description: "Child session id (list_agents shows them)",
+          },
+          tailLines: {
+            type: "number",
+            description:
+              "How many trailing lines to return (default 200, maximum 2,000)",
+          },
+        },
+        required: ["subagentId"],
+      },
+    },
+    timeoutMs: 30_000,
+    async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+      // Same no-nesting guard as dispatch_agent: a subagent never reads
+      // subagent logs (it cannot even see this tool in its roster).
+      if (ctx.isSubagent || ctx.depth > 0) {
+        return {
+          content:
+            "read_subagent_log is only available to the main agent — a " +
+            "subagent cannot read subagent logs. Put what you found in your " +
+            "report or final answer instead.",
+          isError: true,
+        };
+      }
+      const id = argString(args, "subagentId");
+      if (id === "") return { content: "subagentId is required", isError: true };
+      const child = findChild(deps.supervisor, ctx.sessionId, id);
+      if (child === undefined) {
+        return {
+          content: `Subagent ${id} not found (list_agents shows ids).`,
+          isError: true,
+        };
+      }
+      // Bound at the tool boundary too: a replaced reader must never make
+      // this result unbounded.
+      const tailLines = clampSubagentLogTailLines(argNumber(args, "tailLines"));
+      try {
+        const tail = await deps.supervisor.readLog(child.sessionId, { tailLines });
+        let lines = tail.lines;
+        let truncated = tail.truncated;
+        if (lines.length > tailLines) {
+          lines = lines.slice(lines.length - tailLines);
+          truncated = true;
+        }
+        if (lines.length === 0) {
+          return { content: `Subagent ${child.sessionId} log is empty.` };
+        }
+        const body = lines.join("\n");
+        const marker =
+          truncated && !body.includes(SUBAGENT_LOG_TRUNCATION_MARKER)
+            ? `\n${SUBAGENT_LOG_TRUNCATION_MARKER}`
+            : "";
+        const scope = truncated
+          ? `last ${lines.length} lines, earlier lines omitted`
+          : `${lines.length} lines`;
+        return {
+          content: `Subagent ${child.sessionId} log (${scope}):\n${body}${marker}`,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: `Could not read the log of subagent ${child.sessionId}: ${message}`,
+          isError: true,
+        };
+      }
+    },
+  };
+
   const report: Tool = {
     spec: {
       name: "report",
@@ -304,5 +406,5 @@ export function createSubagentTools(deps: {
     },
   };
 
-  return [dispatchAgent, sendMessage, interruptAgent, listAgents, report];
+  return [dispatchAgent, sendMessage, interruptAgent, listAgents, readSubagentLog, report];
 }

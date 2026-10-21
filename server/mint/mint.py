@@ -20,13 +20,14 @@ import math
 import hmac
 import hashlib
 import datetime
+import re
 import urllib.request
 
 import jwt  # PyJWT
 from jwt import PyJWKClient
 import redis
 import httpx
-from fastapi import Body, FastAPI, Header, HTTPException, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel
@@ -35,6 +36,20 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ovid_plans as plans  # noqa: E402  (shared with the LiteLLM pools hook)
 import m1_alerts  # noqa: E402  (injectable webhook/log alert sink)
+
+# Per-key IP fan-out guard lives in server/security (shared with the account
+# service). A single-file deploy can also drop key_ip_fanout.py next to mint.py.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+try:
+    from server.security.key_ip_fanout import (  # noqa: E402
+        KeyIpFanoutBlocked, KeyIpFanoutGuard, RedisKeyIpStore, key_ref as key_ip_ref,
+    )
+except ImportError:  # pragma: no cover - deployment fallback
+    from key_ip_fanout import (  # type: ignore[no-redef]  # noqa: E402
+        KeyIpFanoutBlocked, KeyIpFanoutGuard, RedisKeyIpStore, key_ref as key_ip_ref,
+    )
 
 # ── config (from env; secrets never in code) ──
 FIREBASE_PROJECT = os.environ["FIREBASE_PROJECT_ID"]          # e.g. ovid-ai
@@ -293,6 +308,31 @@ MINT_WINDOW_S = int(os.environ.get("MINT_WINDOW_S", "3600"))
 # trips this and pauses new sign-ups, raising an admin alert.
 GLOBAL_NEWKEYS_PER_WINDOW = int(os.environ.get("GLOBAL_NEWKEYS_PER_WINDOW", "500"))
 NEWKEY_WINDOW_S = int(os.environ.get("NEWKEY_WINDOW_S", "3600"))
+
+# Per-key IP fan-out (spec §12): one key is one account on one platform, so a
+# key seen from more than N distinct /24s inside a short window is a leaked or
+# shared key. Normal mobile use (Wi-Fi + carrier + a commute) stays well under
+# the default 5 / 15 min. A block returns 403 `key_ip_fanout`, blocks the key
+# in LiteLLM, and queues exactly one operator email per block event.
+KEY_IP_FANOUT_LIMIT = int(os.environ.get("KEY_IP_FANOUT_LIMIT", "5"))
+KEY_IP_FANOUT_WINDOW_S = int(os.environ.get("KEY_IP_FANOUT_WINDOW_S", "900"))   # 15 min
+KEY_IP_FANOUT_BLOCK_S = int(os.environ.get("KEY_IP_FANOUT_BLOCK_S", str(24 * 3600)))
+KEY_IP_EMAIL_QUEUE = "security:key_ip:emails"
+KEY_IP_EMAIL_QUEUE_MAX = int(os.environ.get("KEY_IP_EMAIL_QUEUE_MAX", "1000"))
+# Injectable transport: KEY_IP_EMAIL_FACTORY=module:attribute (returns a
+# callable) or a test assignment. Unset → the sweeper logs the event and keeps
+# it in the sanitized /admin/alerts history.
+KEY_IP_EMAIL_HOOK = None       # enqueue hook used by the guard (tests override)
+KEY_IP_EMAIL_SENDER = None     # delivery callable used by flush_key_ip_emails()
+
+# Response redaction: fields that must never leave a non-mint endpoint.
+SENSITIVE_FIELDS = frozenset({
+    "key", "keys_raw", "keyid", "key_id", "key_hash", "hashed_key", "api_key",
+    "apikey", "token", "access_token", "secret", "master_key",
+    "base_url", "baseurl", "api_base", "litellm_base", "authorization",
+})
+_RAW_KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]{6,}")
+_BEARER_RE = re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]+")
 
 GOOGLE_JWKS = "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"
 APPCHECK_JWKS = "https://firebaseappcheck.googleapis.com/v1/jwks"
@@ -825,6 +865,7 @@ def _sweeper() -> None:
         try:
             sweep_slow_mode()
             flush_user_spend_alerts()
+            flush_key_ip_emails()
             refresh_model_groups()
         except Exception as e:  # noqa: BLE001
             print(f"[mint] sweeper: {type(e).__name__}", flush=True)
@@ -953,6 +994,191 @@ def enforce_ip_signup_quota(uid: str, ip: str) -> None:
     rds.sadd(seen_key, uid)
     rds.expire(seen_key, IP_ACCOUNT_WINDOW_S)
 
+
+# ── per-key IP fan-out + response redaction ──
+def _key_platform(ns: str) -> str:
+    return "web" if ns else "android"
+
+
+def _key_namespace(platform: str) -> str:
+    return "web:" if platform == "web" else ""
+
+
+def _fanout_guard() -> KeyIpFanoutGuard:
+    """A guard bound to the live Redis (rebuilt per call so tests can swap rds)."""
+    return KeyIpFanoutGuard(
+        RedisKeyIpStore(rds),
+        limit=KEY_IP_FANOUT_LIMIT,
+        window_seconds=KEY_IP_FANOUT_WINDOW_S,
+        block_seconds=KEY_IP_FANOUT_BLOCK_S,
+        email_hook=KEY_IP_EMAIL_HOOK or _enqueue_key_ip_email,
+    )
+
+
+def _enqueue_key_ip_email(event: dict) -> None:
+    """Queue exactly one operator email event (the guard dedupes per event)."""
+    try:
+        rds.lpush(KEY_IP_EMAIL_QUEUE, json.dumps(event, sort_keys=True))
+        rds.ltrim(KEY_IP_EMAIL_QUEUE, 0, KEY_IP_EMAIL_QUEUE_MAX - 1)
+    except Exception as e:  # noqa: BLE001 — alerting must not break the block
+        print(f"[mint] key-ip email enqueue failed: {type(e).__name__}", flush=True)
+
+
+def flush_key_ip_emails(limit: int = 50) -> int:
+    """Deliver queued key-IP emails (sweeper + /admin/sweep).
+
+    Payloads are sanitized: no key, key hash, token, full IP or prompt. With no
+    transport configured the event is logged and kept in /admin/alerts.
+    """
+    sent = 0
+    while sent < max(1, int(limit)):
+        # RPOP is atomic: two mint instances cannot deliver the same event.
+        raw = rds.rpop(KEY_IP_EMAIL_QUEUE)
+        if not raw:
+            break
+        try:
+            event = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        payload = {k: event.get(k) for k in (
+            "type", "event_id", "key_ref", "uid", "platform", "reason",
+            "distinct_prefixes", "limit", "window_seconds", "blocked_at",
+            "blocked_until", "at")}
+        delivery = "log"
+        if callable(KEY_IP_EMAIL_SENDER):
+            try:
+                KEY_IP_EMAIL_SENDER(payload)
+                delivery = "email"
+            except Exception as e:  # noqa: BLE001
+                delivery = "log_fallback"
+                print(f"[mint] key-ip email send failed: {type(e).__name__}", flush=True)
+        else:
+            print(f"[mint] KEY_IP_EMAIL {json.dumps(payload, sort_keys=True)}", flush=True)
+        _record_recent_alert(payload, delivery)
+        sent += 1
+    return sent
+
+
+def _block_key_id(key_id: str, blocked: bool = True) -> bool:
+    """Block/unblock one LiteLLM key by its stored key id."""
+    try:
+        with litellm_client(15) as c:
+            r = c.post("/key/block" if blocked else "/key/unblock",
+                       headers=_admin_headers(), json={"key": key_id})
+        if r.status_code >= 300:
+            print(f"[mint] key {'block' if blocked else 'unblock'} {r.status_code}", flush=True)
+            return False
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[mint] key block error: {type(e).__name__}", flush=True)
+        return False
+
+
+def _key_ip_fanout_http() -> HTTPException:
+    return HTTPException(403, "key_ip_fanout",
+                         headers={"x-ovid-error": "key_ip_fanout"})
+
+
+def _enforce_key_block(key_id: str | None) -> None:
+    if not key_id:
+        return
+    try:
+        _fanout_guard().check(key_id)
+    except KeyIpFanoutBlocked:
+        raise _key_ip_fanout_http() from None
+
+
+def _observe_key_ip(uid: str, ns: str, key_id: str | None, ip: str, *,
+                    seen_at: float | None = None,
+                    raise_on_block: bool = True,
+                    platform: str | None = None):
+    """Record one key sighting; block the key on fan-out.
+
+    ``raise_on_block=False`` blocks the key but lets the current request finish
+    (used when scanning a user's *other* platform key in spend logs).
+    """
+    if not key_id or not ip or ip == "unknown":
+        return None
+    try:
+        return _fanout_guard().observe(
+            key_id, uid, ip, platform=platform or _key_platform(ns),
+            seen_at=seen_at)
+    except KeyIpFanoutBlocked as e:
+        if e.new:
+            # One upstream block + one audit row per event; an existing block
+            # is already enforced by /mint and /usage before this point.
+            _block_key_id(key_id, True)
+            audit(None, "key-ip-fanout", {"uid": uid, "key_ref": e.key_ref},
+                  None, {"reason": e.reason, "event_id": e.event_id,
+                         "distinct_prefixes": e.distinct_prefixes,
+                         "blocked_until": e.blocked_until})
+        if raise_on_block:
+            raise _key_ip_fanout_http() from None
+        return None
+
+
+def _find_key_id(ref: str, uid: str | None = None,
+                 platform: str | None = None) -> tuple[str, str, str] | None:
+    """Resolve an admin's key_ref back to (uid, namespace, key id)."""
+    uids = [uid] if uid else sorted(rds.smembers(ALL_UIDS_SET))
+    for candidate in uids:
+        for ns, kid in user_key_ids(candidate).items():
+            if platform and _key_platform(ns) != platform:
+                continue
+            try:
+                if key_ip_ref(kid) == ref:
+                    return candidate, ns, kid
+            except ValueError:
+                continue
+    return None
+
+
+def _response_secrets(uid: str | None = None) -> set[str]:
+    """Values that must never appear in a non-mint response."""
+    secrets = {
+        LITELLM_MASTER_KEY,
+        LITELLM_BASE,
+        os.environ.get("PUBLIC_BASE_URL", "https://cloud.dhanuksoftwares.com/v1"),
+    }
+    if uid:
+        for kid in user_key_ids(uid).values():
+            secrets.add(kid)
+            secrets.add(hashlib.sha256(kid.encode()).hexdigest())
+        for ns in KEY_NAMESPACES:
+            raw = rds.get(f"user:{uid}:{ns}key")
+            if raw:
+                secrets.add(raw)
+                secrets.add(hashlib.sha256(raw.encode()).hexdigest())
+    return {s for s in secrets if s}
+
+
+def redact_sensitive(value, *, secrets=()):
+    """Recursively drop/redact key material, key hashes and base URLs.
+
+    Used on every non-mint response (the app's one legitimate key delivery is
+    POST /mint).  Defence in depth: even a future field added by mistake cannot
+    leak a key through /usage or an admin endpoint.
+    """
+    if isinstance(value, dict):
+        return {k: redact_sensitive(v, secrets=secrets)
+                for k, v in value.items()
+                if str(k).lower() not in SENSITIVE_FIELDS}
+    if isinstance(value, (list, tuple)):
+        return [redact_sensitive(v, secrets=secrets) for v in value]
+    if isinstance(value, str):
+        out = value
+        for secret in secrets:
+            if secret and secret in out:
+                out = out.replace(secret, "[redacted]")
+        out = _RAW_KEY_RE.sub("[redacted]", out)
+        return _BEARER_RE.sub("Bearer [redacted]", out)
+    return value
+
+
+def _redacted(uid: str | None, body):
+    return redact_sensitive(body, secrets=_response_secrets(uid))
 
 
 # ── LiteLLM admin calls (local, on-box) ──
@@ -1148,6 +1374,7 @@ def upgrade(
 
 @app.post("/mint", response_model=MintResp)
 def mint(
+    response: Response,
     authorization: str = Header(...),
     x_firebase_appcheck: str = Header(default=""),
     x_forwarded_for: str = Header(default=""),
@@ -1185,6 +1412,10 @@ def mint(
     # Spam-signup defense: cap new free accounts per IP per window.
     enforce_ip_signup_quota(uid, ip)
 
+    # A key already blocked for IP fan-out must not be handed back to the app.
+    ns = _key_namespace(platform)
+    _enforce_key_block(rds.get(f"user:{uid}:{ns}keyid"))
+
     tier = effective_tier(uid)
     # M1 kill switch + free-plan token ceilings (50M/24h, 1.5B/30d), decided
     # before any model call. The kill switch is a distinct 503 code.
@@ -1206,6 +1437,11 @@ def mint(
         raise HTTPException(402, "monthly free limit reached")
 
     key = litellm_mint_or_get(uid, tier, platform)
+    # Record this key's network. The 403 is returned before the app can use a
+    # key that just crossed the fan-out limit.
+    _observe_key_ip(uid, ns, rds.get(f"user:{uid}:{ns}keyid") or key, ip,
+                    platform=platform)
+    response.headers["Cache-Control"] = "no-store"
     return MintResp(
         key=key,
         tier=plans.stored_tier(plan_for(uid)),  # legacy ids (3x/7x/15x) for app builds
@@ -1258,6 +1494,30 @@ def _suffix(model: str) -> str:
     return model.split("/", 1)[-1] if model else model
 
 
+SIZE_RE = re.compile(r"^([1-9][0-9]{2,3})x([1-9][0-9]{2,3})$")
+DEFAULT_IMAGE_SIZE = "1024x1024"
+
+
+def _zero(v) -> bool:
+    try:
+        return float(v) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _sizes_from(value) -> list[str]:
+    """Native sizes declared by LiteLLM (`supported_sizes`/`sizes`), filtered
+    to the WxH shape the image gateway accepts and de-duplicated."""
+    out: list[str] = []
+    for item in value if isinstance(value, (list, tuple)) else []:
+        if not isinstance(item, str):
+            continue
+        size = item.strip().lower().replace("-x-", "x").replace("*", "x")
+        if SIZE_RE.match(size) and size not in out:
+            out.append(size)
+    return out
+
+
 def model_catalog(c: httpx.Client) -> dict:
     """Owner-published models from LiteLLM /model/info, grouped by public name
     (the 'auto' group has one deployment per member model)."""
@@ -1281,6 +1541,8 @@ def model_catalog(c: httpx.Client) -> dict:
         g = groups.setdefault(name, {
             "id": name, "name": name, "inputs": [], "outputs": [], "per_image": [],
             "modes": set(), "underlying": [], "legacy": {},
+            # Image capability facts from model_info (never a base URL or key).
+            "endpoints": set(), "sizes": [], "edit": False, "free": False,
         })
         disp = info.get("display_name") or info.get("ovid_display_name")
         if disp:
@@ -1288,11 +1550,29 @@ def model_catalog(c: httpx.Client) -> dict:
         for field, bucket in (("input_cost_per_token", "inputs"),
                               ("output_cost_per_token", "outputs"),
                               ("output_cost_per_image", "per_image")):
-            p = _price(info.get(field))
+            raw = info.get(field)
+            p = _price(raw)
             if p is not None:
                 g[bucket].append(p)
+            elif raw is not None and field != "input_cost_per_token" and _zero(raw):
+                # An explicit zero output/per-image price is a free model: it
+                # must stay usable when the allowance is exhausted.
+                g["free"] = True
         if info.get("mode"):
             g["modes"].add(str(info["mode"]))
+        oi = str(info.get("output_modality") or "").lower()
+        if oi == "image":
+            g["modes"].add("image_generation")
+        for source in (info, params):
+            eps = source.get("supported_endpoints")
+            if isinstance(eps, (list, tuple)):
+                g["endpoints"].update(str(e).strip().lower() for e in eps if isinstance(e, str))
+            for size in _sizes_from(source.get("supported_sizes") or source.get("sizes")):
+                if size not in g["sizes"]:
+                    g["sizes"].append(size)
+            if any(source.get(k) is True for k in
+                   ("supports_image_editing", "supports_editing", "supports_edit")):
+                g["edit"] = True
         if under:
             g["underlying"].append(under)
         # Back-compat: the old /usage de-duped by name, last deployment wins.
@@ -1319,6 +1599,31 @@ def _group_kind(g: dict | None) -> str:
     if g["modes"] & IMAGE_MODES or (g["per_image"] and not g["inputs"]):
         return "image"
     return "chat"
+
+
+def image_capabilities(g: dict | None, backends: list[dict] | None = None) -> dict:
+    """Public image-model capabilities: can it generate, can it edit, which
+    native sizes does it accept. Built from LiteLLM capability fields only
+    (``model_info`` / capability params); base URLs and keys are never read.
+
+    Conservative by design: edit is advertised only when the owner or LiteLLM
+    declares it (the image gateway probes the truth in the background)."""
+    found = [x for x in ([g] if g else []) + list(backends or []) if x]
+    modes: set = set()
+    endpoints: set = set()
+    sizes: list[str] = []
+    for item in found:
+        modes |= item.get("modes") or set()
+        endpoints |= item.get("endpoints") or set()
+        for size in item.get("sizes") or ():
+            if size not in sizes:
+                sizes.append(size)
+    edit = ("image_edit" in modes or any(item.get("edit") for item in found)
+            or any(e.endswith("/images/edits") or e.endswith("/images/edit") for e in endpoints))
+    # An edit-only deployment does not advertise generation.
+    generate = not (modes == {"image_edit"})
+    return {"generate": generate, "edit": bool(edit),
+            "sizes": sizes or [DEFAULT_IMAGE_SIZE]}
 
 
 def attribute_row(row: dict, cat: dict) -> tuple[str, bool]:
@@ -1523,9 +1828,44 @@ def model_estimates(cat: dict, st: dict, settings: dict, measured_img: dict | No
     return out
 
 
-def compute_usage(uid: str) -> tuple[dict, dict]:
+def image_models(cat: dict, models: list[dict]) -> list[dict]:
+    """Image-model surface of /usage: one row per available image model with
+    generate/edit/size capabilities. Kept separate from `models` so older
+    clients keep the exact per-model row contract."""
+    groups = cat["groups"]
+    shown = {m.get("id") for m in models}
+    private = [g for name, g in groups.items()
+               if name not in shown and _group_kind(g) == "image"]
+    out = []
+    for m in models:
+        if m.get("kind") != "image":
+            continue
+        g = groups.get(m.get("id"))
+        backends = [g] if g else private
+        out.append({
+            "id": m["id"], "name": m["name"], "kind": "image",
+            "capabilities": image_capabilities(g, None if g else private),
+            "priced": bool(m.get("priced")),
+            # Explicit zero price = free forever (no allowance consumed).
+            # Unpriced/unknown is NOT advertised as free.
+            "free": bool(backends) and not m.get("priced")
+                    and all(b.get("free") for b in backends),
+            "remaining_images": m.get("remaining_images"),
+            "slow_mode": bool(m.get("slow_mode")),
+        })
+    return out
+
+
+def compute_usage(uid: str, *, observe_ips: bool = False,
+                  platform: str | None = None) -> tuple[dict, dict]:
     """(public /usage body, admin-only detail). Spend comes from LiteLLM for
-    ALL of the user's keys (android + web) plus the hook's per-user counter."""
+    ALL of the user's keys (android + web) plus the hook's per-user counter.
+
+    With ``observe_ips`` (the /usage path only) each spend-log row's requester
+    IP is fed to the per-key fan-out guard. A fan-out on the caller's platform
+    key aborts with 403 ``key_ip_fanout``; a fan-out on the other key blocks
+    that key without failing the current request.
+    """
     s = get_settings()
     plan = plan_for(uid, s)
     pools = plans.user_pools(s, plan, user_free_daily(uid, s), user_pool_override(uid))
@@ -1550,7 +1890,21 @@ def compute_usage(uid: str) -> tuple[dict, dict]:
                          max_parallel_requests=info.get("max_parallel_requests"),
                          blocked=bool(info.get("blocked")))
             key_detail.append(d)
-            rows.extend(_spend_logs(c, _token_id(kid), since, now))
+            key_rows = _spend_logs(c, _token_id(kid), since, now)
+            if observe_ips:
+                platform_ns = _key_namespace(platform or "android")
+                for row in key_rows:
+                    row_ip = (row.get("requester_ip")
+                              or row.get("requester_ip_address") or "")
+                    if not row_ip:
+                        continue
+                    seen = _parse_time(row.get("startTime") or row.get("start_time"))
+                    _observe_key_ip(
+                        uid, ns, kid, row_ip,
+                        seen_at=seen.timestamp() if seen is not None else now.timestamp(),
+                        raise_on_block=(ns == platform_ns),
+                        platform=_key_platform(ns))
+            rows.extend(key_rows)
         if start is None:
             times = [t for t in (_parse_time(r.get("startTime") or r.get("start_time")) for r in rows) if t]
             start, _ = window_bounds(uid, pools, first_use=min(times) if times else now)
@@ -1588,6 +1942,10 @@ def compute_usage(uid: str) -> tuple[dict, dict]:
     pool_list = [{"class": "all", "remaining_fraction": fraction, "resets_at": resets_iso,
                   "slow_mode": bool(st["slow_mode"])}]
     window = plans.window_str(pools["window_hours"])
+    models = model_estimates(
+        cat, st, s, measured, fraction,
+        auto_members=[m["model"] for m in s["auto_oss_members"]] if pools["auto_oss"] else None,
+        visible=[r["model"] for r in _available_models() if r.get("model")])
     body = {
         "tier": plans.stored_tier(plan),
         "is_paid": plan["id"] != "free",
@@ -1609,10 +1967,8 @@ def compute_usage(uid: str) -> tuple[dict, dict]:
         "remaining_fraction": fraction,
         "pools": pool_list,
         "tokens": tokens_body,
-        "models": model_estimates(
-            cat, st, s, measured, fraction,
-            auto_members=[m["model"] for m in s["auto_oss_members"]] if pools["auto_oss"] else None,
-            visible=[r["model"] for r in _available_models() if r.get("model")]),
+        "models": models,
+        "image_models": image_models(cat, models),
     }
     detail = {"keys": key_detail, "spend_usd": round(spent, 6), "logged_spend_usd": round(log_spend, 6),
               "hook_counter_usd": counters, "pools_usd": pools,
@@ -1645,35 +2001,50 @@ class UsageResp(BaseModel):
     pools: list[dict]
     tokens: dict | None = None
     models: list[dict]
+    image_models: list[dict] = []
 
 
 @app.post("/usage", response_model=UsageResp)
 def usage(
+    response: Response,
     authorization: str = Header(...),
     x_firebase_appcheck: str = Header(default=""),
+    x_forwarded_for: str = Header(default=""),
+    x_real_ip: str = Header(default=""),
 ):
     """Server-authoritative usage for the signed-in user.
 
     Spend and counts are read from LiteLLM (the source of truth), NOT computed
     on the device. Users never see prices: availability is expressed as pool
-    fractions and remaining messages / images per model.
+    fractions and remaining messages / images per model. This response never
+    contains a raw key, a key hash or a base URL.
     """
     if not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "missing bearer id token")
     id_token = authorization.split(" ", 1)[1]
     if APPCHECK_ENABLED and not x_firebase_appcheck:
         raise HTTPException(401, "missing app check token")
-    verify_app_check(x_firebase_appcheck)
+    platform = verify_app_check(x_firebase_appcheck)
     claims = verify_google_id_token(id_token)
     uid = claims["sub"]
     remember_email(uid, claims.get("email"))
+    ns = _key_namespace(platform)
+    key_id = rds.get(f"user:{uid}:{ns}keyid")
+    # A blocked key cannot continue; answer with the machine code before any
+    # spend-log work (and before the cache, which must not mask a block).
+    _enforce_key_block(key_id)
+    ip = client_ip(x_forwarded_for, x_real_ip)
+    _observe_key_ip(uid, ns, key_id, ip, platform=platform)
     if USAGE_CACHE_S > 0:
         cached = rds.get(f"usagecache:{uid}")
         if cached:
+            response.headers["Cache-Control"] = "no-store"
             return json.loads(cached)
-    body, _ = compute_usage(uid)
+    body, _ = compute_usage(uid, observe_ips=True, platform=platform)
+    body = _redacted(uid, body)
     if USAGE_CACHE_S > 0:
         rds.set(f"usagecache:{uid}", json.dumps(body), ex=USAGE_CACHE_S)
+    response.headers["Cache-Control"] = "no-store"
     return body
 
 
@@ -1800,6 +2171,77 @@ def admin_unban(body: AdminAction, request: Request, authorization: str = Header
     audit(request, "unban", {"uid": body.uid, "ip": body.ip})
     return {"ok": True}
 
+
+# ── admin: per-key IP fan-out blocks ──
+class UnblockKeyAction(BaseModel):
+    key_ref: str
+    reason: str = ""
+    uid: str | None = None
+    platform: str | None = None
+
+
+@app.get("/admin/blocked-keys")
+def admin_blocked_keys(limit: int = 100, authorization: str = Header(default="")):
+    """Keys blocked for IP fan-out, newest first, with the reason and evidence.
+
+    Only the truncated ``key_ref`` fingerprint is shown — never the key or its
+    full hash. Resolve it to a user/key with the list or GET the detail route.
+    """
+    _require_admin(authorization)
+    limit = max(1, min(int(limit), 500))
+    now = time.time()
+    blocks = _fanout_guard().blocked_keys(now=now)
+    return {
+        "blocked": [_redacted(None, row) for row in blocks[:limit]],
+        "count": len(blocks),
+        "limit": limit,
+        "policy": {"limit": KEY_IP_FANOUT_LIMIT,
+                   "window_seconds": KEY_IP_FANOUT_WINDOW_S,
+                   "block_seconds": KEY_IP_FANOUT_BLOCK_S},
+    }
+
+
+@app.get("/admin/blocked-keys/{key_ref}")
+def admin_blocked_key(key_ref: str, authorization: str = Header(default="")):
+    """One blocked key's reason, evidence and expiry."""
+    _require_admin(authorization)
+    record = _fanout_guard().block_for(key_ref, now=time.time())
+    if record is None:
+        raise HTTPException(404, "key is not blocked")
+    return {"blocked": _redacted(None, record)}
+
+
+@app.post("/admin/blocked-keys/unblock")
+def admin_unblock_key(body: UnblockKeyAction, request: Request,
+                      authorization: str = Header(default="")):
+    """Clear a fan-out block (and its observation window) and unblock the key.
+
+    A reason is required for the audit trail. If the key is still present in
+    Redis it is also unblocked in LiteLLM; otherwise the guard record is
+    cleared and the operator can use /admin/unban by uid.
+    """
+    _require_admin(authorization)
+    ref = (body.key_ref or "").strip()
+    reason = (body.reason or "").strip()
+    if not ref:
+        raise HTTPException(400, "key_ref required")
+    if not reason:
+        raise HTTPException(400, "reason required")
+    now = time.time()
+    guard = _fanout_guard()
+    record = guard.block_for(ref, now=now)
+    if record is None:
+        raise HTTPException(404, "key is not blocked")
+    found = _find_key_id(ref, body.uid or record.get("uid"),
+                         body.platform or record.get("platform"))
+    upstream = _block_key_id(found[2], False) if found else False
+    guard.unblock(ref, actor="master-key", reason=reason, now=now)
+    uid = found[0] if found else record.get("uid")
+    platform = _key_platform(found[1]) if found else record.get("platform")
+    audit(request, "key-unblock", {"uid": uid, "key_ref": ref}, record,
+          {"reason": reason, "upstream_unblocked": upstream})
+    return {"ok": True, "key_ref": ref, "uid": uid, "platform": platform,
+            "reason": reason, "upstream_unblocked": upstream}
 
 
 def _validate_pool_override(p: dict) -> dict:
@@ -2057,7 +2499,7 @@ def admin_user(q: str, authorization: str = Header(default="")):
     body, detail = compute_usage(uid)
     s = get_settings()
     plan = plan_for(uid, s)
-    return {
+    return _redacted(uid, {
         "uid": uid,
         "email": rds.get(f"user:{uid}:email"),
         "tier": body["tier"],
@@ -2082,7 +2524,7 @@ def admin_user(q: str, authorization: str = Header(default="")):
         "remaining_fraction": body["remaining_fraction"],
         "keys": detail["keys"],
         "app_view": body,
-    }
+    })
 
 
 
@@ -2124,12 +2566,12 @@ def admin_alerts(limit: int = 50, authorization: str = Header(default="")):
             entries.append(json.loads(raw))
         except (TypeError, ValueError):
             continue
-    return {
+    return _redacted(None, {
         "alerts": entries,
         "pending": rds.scard(plans.SPEND_ALERT_PENDING),
         "webhook_configured": bool(getattr(ALERT_SINK, "webhook_url", "")),
         "limit": limit,
-    }
+    })
 
 
 class KillSwitchAction(BaseModel):
@@ -2175,6 +2617,7 @@ def admin_sweep(request: Request, authorization: str = Header(default="")):
     _require_admin(authorization)
     out = sweep_slow_mode()
     out["user_spend_alerts"] = flush_user_spend_alerts()
+    out["key_ip_emails"] = flush_key_ip_emails()
     return out
 
 
@@ -2188,7 +2631,8 @@ def admin_export(authorization: str = Header(default="")):
         st = _user_state(uid)
         st["email"] = rds.get(f"user:{uid}:email")
         users[uid] = st
-    return {"exported_at": _now_iso(), "settings": get_settings(), "users": users}
+    return _redacted(None, {"exported_at": _now_iso(), "settings": get_settings(),
+                            "users": users})
 
 
 

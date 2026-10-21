@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -29,6 +30,8 @@ interface Harness {
   vaultRegisters: Array<Record<string, unknown>>;
   fireDownload(download: unknown): Promise<void>;
   root: string;
+  /** Mutable seams (downloadMaxBytes / uploadMaxBytes) after construction. */
+  deps: BrowserToolsDeps;
 }
 
 async function harness(root: string): Promise<Harness> {
@@ -124,6 +127,7 @@ async function harness(root: string): Promise<Harness> {
       await new Promise((r) => setTimeout(r, 20));
     },
     root,
+    deps,
   };
 }
 
@@ -235,5 +239,146 @@ describe("browser file bridge (W4)", () => {
         mimeType: "application/octet-stream",
       },
     ]);
+  });
+
+  it("refuses an oversized upload before touching the page", async () => {
+    await mkdir(join(root, "uploads"), { recursive: true });
+    await writeFile(join(root, "uploads", "big.txt"), "0123456789");
+    const h = await harness(root);
+    h.deps.uploadMaxBytes = 4;
+
+    const result = await exec(h, "browser_upload", {
+      selector: "#file",
+      path: "uploads/big.txt",
+    });
+    expect(result.content).toBe("Upload refused: file exceeds the 50 MB limit.");
+    expect(h.uploaded).toEqual([]);
+  });
+
+  it("refuses an upload type outside the allowlist", async () => {
+    await mkdir(join(root, "uploads"), { recursive: true });
+    await writeFile(join(root, "uploads", "run.sh"), "rm -rf /");
+    const h = await harness(root);
+
+    const result = await exec(h, "browser_upload", {
+      selector: "#file",
+      path: "uploads/run.sh",
+    });
+    expect(result.content).toBe("Upload refused: file type not allowed (.sh).");
+    expect(h.uploaded).toEqual([]);
+  });
+
+  it("refuses a symlink that escapes the workspace on upload", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "ovid-browser-outside-"));
+    try {
+      await writeFile(join(outside, "secret.txt"), "not yours");
+      await symlink(outside, join(root, "linked"), "dir");
+      const h = await harness(root);
+
+      const result = await exec(h, "browser_upload", {
+        selector: "#file",
+        path: "linked/secret.txt",
+      });
+      expect(result.content).toBe("Upload refused: path escapes the session workspace.");
+      expect(h.uploaded).toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("downloads normalize an allowed content type and keep the vault type", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const body = Buffer.from("plain body");
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8", "content-length": String(body.length) },
+        });
+      }),
+    );
+    const h = await harness(root);
+    const result = await exec(h, "browser_download", {
+      url: "http://127.0.0.1:1/notes.txt",
+      filename: "notes.txt",
+    });
+
+    expect(result.artifacts?.[0]?.mimeType).toBe("text/plain");
+    expect(h.vaultRegisters[0]?.mimeType).toBe("text/plain");
+    expect(await readFile(join(root, "browser/downloads/notes.txt"), "utf8")).toBe("plain body");
+  });
+
+  it("refuses a download with an active content type without writing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const body = Buffer.from("<script>alert(1)</script>");
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8", "content-length": String(body.length) },
+        });
+      }),
+    );
+    const h = await harness(root);
+    const result = await exec(h, "browser_download", {
+      url: "http://127.0.0.1:1/page.html",
+      filename: "page.html",
+    });
+
+    expect(result.content).toBe("Download refused: content type text/html is not allowed.");
+    expect(existsSync(join(root, "browser", "downloads", "page.html"))).toBe(false);
+    expect(h.vaultRegisters).toEqual([]);
+  });
+
+  it("refuses an oversized download without writing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const body = Buffer.from("too large");
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/plain", "content-length": String(body.length) },
+        });
+      }),
+    );
+    const h = await harness(root);
+    h.deps.downloadMaxBytes = 4;
+
+    const result = await exec(h, "browser_download", {
+      url: "http://127.0.0.1:1/big.txt",
+      filename: "big.txt",
+    });
+    expect(result.content).toBe("Download refused: file exceeds the 50 MB limit.");
+    expect(existsSync(join(root, "browser", "downloads", "big.txt"))).toBe(false);
+    expect(h.vaultRegisters).toEqual([]);
+  });
+
+  it("refuses a download destination that is a symlink outside the workspace", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "ovid-browser-outside-"));
+    try {
+      await symlink(outside, join(root, "browser"), "dir");
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          const body = Buffer.from("bytes");
+          return new Response(body, {
+            status: 200,
+            headers: { "content-type": "text/plain", "content-length": String(body.length) },
+          });
+        }),
+      );
+      const h = await harness(root);
+      const result = await exec(h, "browser_download", {
+        url: "http://127.0.0.1:1/report.txt",
+        filename: "report.txt",
+      });
+
+      expect(result.content).toBe("Download refused: destination escapes the session workspace.");
+      // Not even the directory may be created through the symlink.
+      expect(existsSync(join(outside, "downloads"))).toBe(false);
+      expect(h.vaultRegisters).toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 });

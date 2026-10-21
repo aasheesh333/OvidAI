@@ -11,14 +11,20 @@
  * importing transfers.ts from there would create a runtime cycle.
  */
 
-import { mkdir, stat } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { rename, rm, stat } from "node:fs/promises";
+import { join } from "node:path";
 
 import { NETWORK_BUFFER_CAP, type SessionBrowser } from "../sessions.js";
+import {
+  DOWNLOAD_MAX_BYTES,
+  resolveWorkspaceDir,
+  sanitizeFilename,
+} from "./transferPolicy.js";
 import type { BrowserToolsDeps } from "./types.js";
 
-/** Hard download ceiling (Dart parity) — shared by explicit and page downloads. */
-export const DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
+// Kept on this module for compatibility with existing imports.
+export { DOWNLOAD_MAX_BYTES, sanitizeFilename };
 
 /** One wiring per context — re-wiring would double-save every download. */
 const wired = new WeakSet<object>();
@@ -29,20 +35,6 @@ const wired = new WeakSet<object>();
  * listener is context-wide, not per tool call).
  */
 const workspaceSession = new WeakMap<object, string>();
-
-/**
- * Reject anything that is not a single plain filename. `..`, absolute paths
- * and any path separator are refused, so a server's suggested filename can
- * never escape `browser/downloads/`.
- */
-export function sanitizeFilename(raw: string | null | undefined): string | null {
-  if (typeof raw !== "string") return null;
-  const trimmed = raw.trim();
-  if (trimmed === "" || trimmed === "." || trimmed === "..") return null;
-  if (trimmed.includes("\0") || trimmed.includes("/") || trimmed.includes("\\")) return null;
-  if (isAbsolute(trimmed)) return null;
-  return trimmed;
-}
 
 /** Attach the context download listener for `session` (idempotent). */
 export function wireDownloads(
@@ -87,9 +79,34 @@ export function wireDownloads(
 
         const chat = workspaceSession.get(context) ?? session.sessionId;
         const root = await deps.workspaceDir(session.userId, chat);
-        const dir = join(root, "browser", "downloads");
-        await mkdir(dir, { recursive: true });
-        await download.saveAs(join(dir, name));
+        // Same jail as explicit downloads: a symlinked `browser/` component is
+        // refused instead of silently creating `downloads/` outside the root.
+        const dir = await resolveWorkspaceDir(root, "browser/downloads");
+        if (dir === null) {
+          await download.delete().catch(() => {});
+          session.network.push({
+            ts: deps.now?.() ?? Date.now(),
+            url,
+            method: "GET",
+            status: null,
+            failure: "download refused: destination escapes the workspace",
+          });
+          if (session.network.length > NETWORK_BUFFER_CAP) {
+            session.network.splice(0, session.network.length - NETWORK_BUFFER_CAP);
+          }
+          return;
+        }
+
+        // Save to a fresh name and rename into place: `rename` replaces a
+        // planted symlink instead of following it outside the jail.
+        const temp = join(dir, `.part-${randomBytes(6).toString("hex")}`);
+        try {
+          await download.saveAs(temp);
+          await rename(temp, join(dir, name));
+        } catch (err) {
+          await rm(temp, { force: true }).catch(() => {});
+          throw err;
+        }
 
         // Wave 6 W4: the page's own download also lands in the account
         // Artifact Vault. Failure is non-fatal — the workspace copy exists.

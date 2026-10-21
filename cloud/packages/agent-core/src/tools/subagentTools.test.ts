@@ -11,6 +11,7 @@ import {
 } from "./subagentTools.js";
 import type { ChildHandle, ChildStatus, DispatchArgs, SubagentSupervisor } from "../subagents.js";
 import { SubagentLimitError } from "../subagents.js";
+import type { SubagentLogTail } from "../subagentLog.js";
 import type { ToolContext } from "../types.js";
 
 function ctx(o: Partial<ToolContext> = {}): ToolContext {
@@ -72,13 +73,19 @@ function fakeSupervisor(o: {
   children?: ChildHandle[];
   dispatch?: (parent: ToolContext, args: DispatchArgs) => Promise<ChildHandle>;
   reportOk?: boolean;
+  /** Log tail returned by `readLog` (default: one line per entry of `logText`). */
+  logText?: string;
+  logTruncated?: boolean;
+  readLog?: (sessionId: string, options?: { tailLines?: number }) => Promise<SubagentLogTail>;
 }): {
   supervisor: SubagentSupervisor;
   dispatched: DispatchArgs[];
   reports: Array<{ sessionId: string; summary: string }>;
+  logReads: Array<{ sessionId: string; tailLines?: number }>;
 } {
   const dispatched: DispatchArgs[] = [];
   const reports: Array<{ sessionId: string; summary: string }> = [];
+  const logReads: Array<{ sessionId: string; tailLines?: number }> = [];
   const supervisor: SubagentSupervisor = {
     async dispatch(parent, args) {
       dispatched.push(args);
@@ -92,8 +99,24 @@ function fakeSupervisor(o: {
       reports.push({ sessionId, summary });
       return o.reportOk ?? true;
     },
+    async readLog(sessionId, options) {
+      logReads.push({
+        sessionId,
+        ...(options?.tailLines !== undefined ? { tailLines: options.tailLines } : {}),
+      });
+      if (o.readLog) return o.readLog(sessionId, options);
+      const text = o.logText ?? "";
+      return {
+        sessionId,
+        path: `/logs/subagent_${sessionId}.log`,
+        tailLines: options?.tailLines ?? 200,
+        lines: text === "" ? [] : text.split("\n"),
+        truncated: o.logTruncated ?? false,
+        text,
+      };
+    },
   };
-  return { supervisor, dispatched, reports };
+  return { supervisor, dispatched, reports, logReads };
 }
 
 function fakeSink(): { sink: EventSink; events: Array<{ type: string; payload: Record<string, unknown> }> } {
@@ -129,13 +152,14 @@ function byName(list: ReturnType<typeof createSubagentTools>, name: string) {
 }
 
 describe("createSubagentTools — registration", () => {
-  it("registers the five management tools; dispatch_agent pins 1_800_000 ms", () => {
+  it("registers the management tools; dispatch_agent pins 1_800_000 ms", () => {
     const list = tools({}).tools;
     expect(list.map((t) => t.spec.name)).toEqual([
       "dispatch_agent",
       "send_message",
       "interrupt_agent",
       "list_agents",
+      "read_subagent_log",
       "report",
     ]);
     expect(byName(list, "dispatch_agent").timeoutMs).toBe(1_800_000);
@@ -330,6 +354,159 @@ describe("list_agents", () => {
     const { tools: list } = tools({ children: [] });
     const result = await byName(list, "list_agents").execute({}, ctx());
     expect(result.content).toBe("No subagents dispatched (children).");
+  });
+});
+
+describe("read_subagent_log", () => {
+  const child = () => handle({ sessionId: "child-1", status: "completed" });
+
+  it("the main agent reads a bounded tail of its own child's log", async () => {
+    const { tools: list, logReads } = tools({
+      children: [child()],
+      logText: '{"type":"tool_started","name":"file_read"}\n{"type":"subagent_result"}',
+    });
+    const result = await byName(list, "read_subagent_log").execute(
+      { subagentId: "child-1", tailLines: 50 },
+      ctx(),
+    );
+    expect(result.isError).toBeUndefined();
+    expect(result.content).toContain("Subagent child-1 log");
+    expect(result.content).toContain("2 lines");
+    expect(result.content).toContain('"name":"file_read"');
+    expect(result.content).toContain('"type":"subagent_result"');
+    expect(logReads).toEqual([{ sessionId: "child-1", tailLines: 50 }]);
+  });
+
+  it("defaults to 200 lines and clamps the request to 2,000", async () => {
+    const { tools: list, logReads } = tools({ children: [child()], logText: "a\nb" });
+    await byName(list, "read_subagent_log").execute({ subagentId: "child-1" }, ctx());
+    await byName(list, "read_subagent_log").execute(
+      { subagentId: "child-1", tailLines: 999_999 },
+      ctx(),
+    );
+    await byName(list, "read_subagent_log").execute(
+      { subagentId: "child-1", tailLines: "75" },
+      ctx(),
+    );
+    expect(logReads.map((r) => r.tailLines)).toEqual([200, 2_000, 75]);
+  });
+
+  it("refuses a subagent — same no-nesting guard, no read performed", async () => {
+    const { tools: list, logReads } = tools({ children: [child()] });
+    const result = await byName(list, "read_subagent_log").execute(
+      { subagentId: "child-1" },
+      ctx({ sessionId: "child-1", isSubagent: true, depth: 1 }),
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("only available to the main agent");
+    expect(logReads).toHaveLength(0);
+  });
+
+  it("depth alone is enough to refuse (missing isSubagent backstop)", async () => {
+    const { tools: list, logReads } = tools({ children: [child()] });
+    const result = await byName(list, "read_subagent_log").execute(
+      { subagentId: "child-1" },
+      ctx({ sessionId: "child-1", isSubagent: false, depth: 1 }),
+    );
+    expect(result.isError).toBe(true);
+    expect(logReads).toHaveLength(0);
+  });
+
+  it("an unknown id is an error string, not a throw", async () => {
+    const { tools: list, logReads } = tools({ children: [child()] });
+    const result = await byName(list, "read_subagent_log").execute(
+      { subagentId: "ghost" },
+      ctx(),
+    );
+    expect(result).toEqual({
+      content: "Subagent ghost not found (list_agents shows ids).",
+      isError: true,
+    });
+    expect(logReads).toHaveLength(0);
+  });
+
+  it("requires a subagentId", async () => {
+    const { tools: list } = tools({ children: [child()] });
+    const result = await byName(list, "read_subagent_log").execute({}, ctx());
+    expect(result).toEqual({ content: "subagentId is required", isError: true });
+  });
+
+  it("a missing log file is a tool error, not a throw", async () => {
+    const { tools: list } = tools({
+      children: [child()],
+      readLog: async () => {
+        throw new Error("no subagent log found for child-1");
+      },
+    });
+    const result = await byName(list, "read_subagent_log").execute(
+      { subagentId: "child-1" },
+      ctx(),
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("Could not read the log of subagent child-1");
+    expect(result.content).toContain("no subagent log found");
+  });
+
+  it("always surfaces a truncation marker when the read was shortened", async () => {
+    const { tools: list } = tools({
+      children: [child()],
+      logText: "line-1\nline-2",
+      logTruncated: true,
+    });
+    const result = await byName(list, "read_subagent_log").execute(
+      { subagentId: "child-1" },
+      ctx(),
+    );
+    expect(result.content).toContain("earlier lines omitted");
+    expect(result.content).toContain("…[truncated]");
+  });
+
+  it("never renders more than the requested tail even if the reader over-returns", async () => {
+    const many = Array.from({ length: 500 }, (_, i) => `line-${i}`);
+    const { tools: list } = tools({
+      children: [child()],
+      readLog: async (sessionId, options) => ({
+        sessionId,
+        path: "/logs/x.log",
+        tailLines: options?.tailLines ?? 200,
+        lines: many,
+        truncated: false,
+        text: many.join("\n"),
+      }),
+    });
+    const result = await byName(list, "read_subagent_log").execute(
+      { subagentId: "child-1", tailLines: 10 },
+      ctx(),
+    );
+    const body = result.content.split("\n").slice(1);
+    expect(body.filter((line) => line.startsWith("line-"))).toHaveLength(10);
+    expect(result.content).toContain("line-499");
+    expect(result.content).not.toContain("line-489");
+    expect(result.content).toContain("…[truncated]");
+  });
+
+  it("leaves the dispatch result a strict five-key JSON summary", async () => {
+    const { tools: list } = tools({
+      children: [child()],
+      logText: "a\nb",
+      dispatch: async () => handle({ status: "completed", result: "found it" }),
+    });
+    const read = await byName(list, "read_subagent_log").execute(
+      { subagentId: "child-1" },
+      ctx(),
+    );
+    expect(read.isError).toBeUndefined();
+    const dispatched = await byName(list, "dispatch_agent").execute(
+      { prompt: "audit" },
+      ctx(),
+    );
+    expect(Object.keys(JSON.parse(dispatched.content)).sort()).toEqual([
+      "artifacts_created",
+      "error_if_any",
+      "files_modified",
+      "key_findings",
+      "status",
+    ]);
   });
 });
 

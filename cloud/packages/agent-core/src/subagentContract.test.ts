@@ -10,7 +10,7 @@
 //    RELEASES the slot.
 
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -29,8 +29,15 @@ import {
 } from "./subagents.js";
 import {
   createSubagentLog,
+  readSubagentLogTail,
+  SUBAGENT_LOG_LINE_MAX_CHARS,
+  SUBAGENT_LOG_TAIL_DEFAULT,
+  SUBAGENT_LOG_TAIL_MAX,
+  SUBAGENT_LOG_TRUNCATION_MARKER,
+  SubagentLogNotFoundError,
   subagentLogPath,
   SubagentLogPathError,
+  tailSubagentLogText,
 } from "./subagentLog.js";
 import {
   buildSubagentSummary,
@@ -459,6 +466,134 @@ describe("subagent log (SI spec §9: /workspace/.ovid/logs/subagent_{id}.log)", 
     const dir = logDir();
     expect(() => subagentLogPath("../evil", dir)).toThrow(SubagentLogPathError);
     expect(() => subagentLogPath("a/b", dir)).toThrow(SubagentLogPathError);
+  });
+
+  it("the supervisor reads its configured dir and clamps the tail", async () => {
+    const dir = logDir();
+    const fake = fakeStore();
+    const { supervisor } = build({ fake, engine: completingEngine(fake), dir });
+    const handle = await supervisor.dispatch(parentCtx(), { prompt: "log me" });
+
+    const tail = await supervisor.readLog(handle.sessionId, { tailLines: 999_999 });
+    expect(tail.tailLines).toBe(SUBAGENT_LOG_TAIL_MAX);
+    expect(tail.path).toBe(subagentLogPath(handle.sessionId, dir));
+    expect(tail.lines.length).toBeGreaterThan(0);
+    expect(tail.text).toContain('"type":"subagent_result"');
+  });
+});
+
+// ── 3b. bounded on-demand read (read_subagent_log backing reader) ──────────
+
+describe("readSubagentLogTail (bounded on-demand read)", () => {
+  function writeLog(dir: string, id: string, lines: readonly string[]): void {
+    writeFileSync(subagentLogPath(id, dir), `${lines.join("\n")}\n`);
+  }
+
+  const numbered = (count: number): string[] =>
+    Array.from({ length: count }, (_, i) => `line-${String(i).padStart(4, "0")}`);
+
+  it("defaults to the last 200 lines and marks the read truncated", async () => {
+    const dir = logDir();
+    writeLog(dir, "child-1", numbered(1_000));
+
+    const tail = await readSubagentLogTail({ sessionId: "child-1", dir });
+    expect(tail.tailLines).toBe(SUBAGENT_LOG_TAIL_DEFAULT);
+    expect(tail.lines).toHaveLength(SUBAGENT_LOG_TAIL_DEFAULT);
+    expect(tail.lines[0]).toBe("line-0800");
+    expect(tail.lines.at(-1)).toBe("line-0999");
+    expect(tail.truncated).toBe(true);
+    expect(tail.text).toContain(SUBAGENT_LOG_TRUNCATION_MARKER);
+    // The whole file is never returned.
+    expect(tail.text).not.toContain("line-0000");
+  });
+
+  it("caps an oversized tailLines request at 2,000", async () => {
+    const dir = logDir();
+    writeLog(dir, "big", numbered(5_000));
+
+    const tail = await readSubagentLogTail({ sessionId: "big", dir, tailLines: 999_999 });
+    expect(tail.tailLines).toBe(SUBAGENT_LOG_TAIL_MAX);
+    expect(tail.lines).toHaveLength(SUBAGENT_LOG_TAIL_MAX);
+    expect(tail.lines[0]).toBe("line-3000");
+    expect(tail.lines.at(-1)).toBe("line-4999");
+    expect(tail.truncated).toBe(true);
+    expect(tail.text).toContain(SUBAGENT_LOG_TRUNCATION_MARKER);
+  });
+
+  it("clamps the lower bound to one line", async () => {
+    const dir = logDir();
+    writeLog(dir, "child-1", numbered(5));
+
+    const tail = await readSubagentLogTail({ sessionId: "child-1", dir, tailLines: 0 });
+    expect(tail.tailLines).toBe(1);
+    expect(tail.lines).toEqual(["line-0004"]);
+    expect(tail.truncated).toBe(true);
+  });
+
+  it("returns a small log whole and untruncated", async () => {
+    const dir = logDir();
+    writeLog(dir, "child-1", ["a", "b", "c"]);
+
+    const tail = await readSubagentLogTail({ sessionId: "child-1", dir });
+    expect(tail.lines).toEqual(["a", "b", "c"]);
+    expect(tail.truncated).toBe(false);
+    expect(tail.text).not.toContain(SUBAGENT_LOG_TRUNCATION_MARKER);
+  });
+
+  it("clips one enormous line instead of returning it", async () => {
+    const dir = logDir();
+    writeLog(dir, "child-1", ["x".repeat(50_000)]);
+
+    const tail = await readSubagentLogTail({ sessionId: "child-1", dir });
+    expect(tail.lines).toHaveLength(1);
+    expect(tail.lines[0]!.length).toBeLessThanOrEqual(SUBAGENT_LOG_LINE_MAX_CHARS);
+    expect(tail.truncated).toBe(true);
+    expect(tail.text).toContain(SUBAGENT_LOG_TRUNCATION_MARKER);
+  });
+
+  it("an unknown id throws SubagentLogNotFoundError", async () => {
+    const dir = logDir();
+    await expect(readSubagentLogTail({ sessionId: "ghost", dir })).rejects.toBeInstanceOf(
+      SubagentLogNotFoundError,
+    );
+  });
+
+  it("rejects an unsafe id before touching the filesystem", async () => {
+    const dir = logDir();
+    await expect(
+      readSubagentLogTail({ sessionId: "../evil", dir }),
+    ).rejects.toBeInstanceOf(SubagentLogPathError);
+  });
+});
+
+describe("tailSubagentLogText (in-memory helper for a sandbox reader)", () => {
+  const numbered = (count: number): string[] =>
+    Array.from({ length: count }, (_, i) => `line-${String(i).padStart(4, "0")}`);
+
+  it("applies the same default/cap/marker bounds to a whole log string", () => {
+    const tail = tailSubagentLogText(`${numbered(1_000).join("\n")}\n`);
+    expect(tail.lines).toHaveLength(SUBAGENT_LOG_TAIL_DEFAULT);
+    expect(tail.lines[0]).toBe("line-0800");
+    expect(tail.lines.at(-1)).toBe("line-0999");
+    expect(tail.truncated).toBe(true);
+    expect(tail.text).toContain(SUBAGENT_LOG_TRUNCATION_MARKER);
+
+    const capped = tailSubagentLogText(numbered(5_000).join("\n"), 999_999);
+    expect(capped.lines).toHaveLength(SUBAGENT_LOG_TAIL_MAX);
+    expect(capped.lines[0]).toBe("line-3000");
+    expect(capped.truncated).toBe(true);
+  });
+
+  it("returns a short log whole and clips one enormous line", () => {
+    const short = tailSubagentLogText("a\nb\n");
+    expect(short.lines).toEqual(["a", "b"]);
+    expect(short.truncated).toBe(false);
+    expect(short.text).not.toContain(SUBAGENT_LOG_TRUNCATION_MARKER);
+
+    const huge = tailSubagentLogText("x".repeat(50_000));
+    expect(huge.lines[0]!.length).toBeLessThanOrEqual(SUBAGENT_LOG_LINE_MAX_CHARS);
+    expect(huge.truncated).toBe(true);
+    expect(huge.text).toContain(SUBAGENT_LOG_TRUNCATION_MARKER);
   });
 });
 

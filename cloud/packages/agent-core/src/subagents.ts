@@ -34,7 +34,16 @@ import type { EventSink, HookEngine, HookStopResult, SessionStateStore } from ".
 import { presetById, type AgentPreset } from "./presets.js";
 import { canonicalTools } from "./promptCache.js";
 import { CHILD_DENIED_TOOLS, computeToolRoster } from "./roster.js";
-import { createSubagentLog, type SubagentLog, type CreateSubagentLogOptions } from "./subagentLog.js";
+import {
+  clampSubagentLogTailLines,
+  createSubagentLog,
+  readSubagentLogTail,
+  SUBAGENT_LOG_DIR,
+  type SubagentLog,
+  type CreateSubagentLogOptions,
+  type SubagentLogReader,
+  type SubagentLogTail,
+} from "./subagentLog.js";
 import {
   buildSubagentSummary,
   serializeSubagentSummary,
@@ -61,6 +70,20 @@ export const DEFAULT_SUBAGENT_MAX_RUNTIME_MS = 8 * 60 * 60 * 1000;
 
 /** The JSONB key holding the durable parent link on a child's agent state. */
 export const SUBAGENT_PARENT_KEY = "subagentParentSessionId";
+
+/** The main agent's on-demand log reader tool (never offered to a child). */
+export const READ_SUBAGENT_LOG_TOOL_NAME = "read_subagent_log";
+
+/**
+ * Tools only a MAIN agent may call. Kept separate from CHILD_DENIED_TOOLS
+ * (roster.ts) so this module can enforce the child-side denial without
+ * widening the roster contract: `projectChildRoster` strips them even when a
+ * dispatch policy explicitly lists them, and the tool itself re-checks
+ * `ctx.isSubagent` at execution time (the no-nesting backstop).
+ */
+export const MAIN_AGENT_ONLY_TOOLS: ReadonlySet<string> = new Set([
+  READ_SUBAGENT_LOG_TOOL_NAME,
+]);
 
 export type ChildStatus = "running" | "completed" | "failed" | "cancelled" | "timeout";
 
@@ -101,6 +124,14 @@ export interface SubagentSupervisor {
   childrenOf(sessionId: string): readonly ChildHandle[];
   /** The `report` tool's write path; false = unknown/foreign child session. */
   recordReport(sessionId: string, summary: string): boolean;
+  /**
+   * Read the bounded tail of a child's append-only log (the main agent's
+   * `read_subagent_log` tool). Bounded by construction: default 200 lines,
+   * hard cap 2,000, truncation marker when anything was omitted. The ACCESS
+   * check (main agent only, child of the calling session) lives in the tool;
+   * this seam only reads.
+   */
+  readLog(childSessionId: string, options?: { tailLines?: number }): Promise<SubagentLogTail>;
 }
 
 /** A refusal the dispatch tool renders as an ordinary tool error. */
@@ -194,14 +225,16 @@ function entryMatches(entry: string, name: string): boolean {
 
 /**
  * The policy gate applied ON TOP of the roster (Dart `SubagentToolPolicy.
- * allows`): always-denied/spawn tools never pass even when explicitly listed;
- * deny entries subtract; an empty allow list inherits.
+ * allows`): always-denied/spawn tools and main-agent-only tools never pass
+ * even when explicitly listed; deny entries subtract; an empty allow list
+ * inherits.
  */
 export function subagentPolicyAllows(
   name: string,
   policy: { allow: readonly string[]; deny: readonly string[] },
 ): boolean {
   if (CHILD_DENIED_TOOLS.has(name)) return false;
+  if (MAIN_AGENT_ONLY_TOOLS.has(name)) return false;
   if (policy.deny.some((entry) => entryMatches(entry, name))) return false;
   if (policy.allow.length === 0 || policy.allow.includes("*")) return true;
   return policy.allow.some((entry) => entryMatches(entry, name));
@@ -209,8 +242,9 @@ export function subagentPolicyAllows(
 
 /**
  * Project the child's model-visible roster: parent tools minus
- * CHILD_DENIED_TOOLS (layer 2), then the persisted subagent policy.
- * Canonicalized so the child's cache prefix is byte-stable (Task 3).
+ * CHILD_DENIED_TOOLS (layer 2) — plus the main-agent-only set, denied by the
+ * same policy gate — then the persisted subagent policy. Canonicalized so the
+ * child's cache prefix is byte-stable (Task 3).
  */
 export function projectChildRoster(
   available: readonly ToolSpec[],
@@ -375,6 +409,12 @@ export interface SubagentSupervisorDeps {
    * that writes through the sandbox (the spec path lives INSIDE the jail).
    */
   logFactory?: (options: CreateSubagentLogOptions) => Promise<SubagentLog>;
+  /**
+   * Read seam, the counterpart of `logFactory`: a sandbox-backed writer must
+   * be paired with a sandbox-backed reader or `read_subagent_log` will look
+   * on the worker host. Defaults to `readSubagentLogTail` over `logDir`.
+   */
+  logReader?: SubagentLogReader;
 }
 
 class MutableChildHandle implements ChildHandle {
@@ -897,6 +937,18 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
       if (handle === undefined) return false;
       handle.setReport(summary);
       return true;
+    },
+
+    readLog(childSessionId, options = {}) {
+      // Clamp HERE as well as in the default reader: a replaced reader must
+      // never be handed an unbounded tailLines.
+      const tailLines = clampSubagentLogTailLines(options.tailLines);
+      const reader = deps.logReader ?? readSubagentLogTail;
+      return reader({
+        sessionId: childSessionId,
+        dir: deps.logDir ?? SUBAGENT_LOG_DIR,
+        tailLines,
+      });
     },
   };
 }

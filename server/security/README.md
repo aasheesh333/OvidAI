@@ -61,6 +61,34 @@ error rather than a silent fallback.
   no usable IP address. An already blocked session still returns the normal
   `403 session_blocked_ip_hop`.
 
+## Per-key IP fan-out (`key_ip_fanout.py`)
+
+One key belongs to one account on one platform, so a key seen from many
+unrelated networks at once is a leaked or shared key.
+
+- Every sighting of a key records the coarse prefix (IPv4 `/24`, IPv6 `/48`).
+- More than `limit` distinct prefixes inside `window_seconds` → the key is
+  blocked for `block_seconds`, callers get `403 key_ip_fanout`, and exactly one
+  operator email event is queued **per block event** (the event key is claimed
+  once; repeated sightings of an already-blocked key never re-alert).
+- At or below the limit is allowed: Wi-Fi + carrier + a commute is normal
+  mobile use.
+- Admin unblock clears the block *and* the observation window so a reviewed
+  key does not instantly re-block, and writes an `unblock` audit row.
+- The email payload carries `key_ref` (truncated SHA-256 fingerprint), the uid,
+  the platform, the coarse prefixes and counters — never the key, its full
+  hash, a bearer token or a full IP address.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `KEY_IP_FANOUT_LIMIT` | `5` | Distinct prefixes allowed inside the window. |
+| `KEY_IP_FANOUT_WINDOW_S` | `900` | Observation window (15 min). |
+| `KEY_IP_FANOUT_BLOCK_S` | `86400` | Block duration. |
+
+Stores: `MemoryKeyIpStore` (tests) and `RedisKeyIpStore` (production, the mint
+Redis db 2). The guard is used by mint's `/mint` and `/usage`; the same module
+can be mounted in the account service.
+
 ## Retention
 
 `guard.prune(now)` removes observations older than `retention_seconds`, bounds

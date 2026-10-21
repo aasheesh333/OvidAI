@@ -124,6 +124,10 @@ class MemoryRedis:
         lst = self.lists.get(k, [])
         return lst[start:None if end == -1 else end + 1]
 
+    def rpop(self, k):
+        lst = self.lists.get(k, [])
+        return lst.pop() if lst else None
+
     def scan_iter(self, match="*"):
         for k in list(self.kv):
             if fnmatch.fnmatch(k, match):
@@ -190,12 +194,13 @@ class FakeLiteLLM:
         self.models.append({"model_name": name, "litellm_params": {"model": under}, "model_info": info})
 
     def add_log(self, token, model, group=None, pin=100, pout=50, spend=0.001, call_type="acompletion",
-                ago_min=5, status="success", model_id=None):
+                ago_min=5, status="success", model_id=None, requester_ip=None):
         now = datetime.datetime.now(datetime.timezone.utc)
         self.logs.append({"api_key": token, "model": model, "model_group": group, "prompt_tokens": pin,
                           "completion_tokens": pout, "spend": spend, "call_type": call_type,
                           "startTime": iso(now - datetime.timedelta(minutes=ago_min)),
-                          "status": status, "model_id": model_id})
+                          "status": status, "model_id": model_id,
+                          "requester_ip": requester_ip})
 
     def posts(self, path):
         return [b for (m, p, b) in self.calls if m == "POST" and p == path]
