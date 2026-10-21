@@ -1,13 +1,13 @@
 # Ovid Si rebuild — living TODO
 
-**Updated:** 2026-10-21 (P0 wave landed)
+**Updated:** 2026-10-21 (P4 wiring wave landed)
 **Branch:** `feat/ovid-si-rebuild`
 **Overall production readiness:** ~88 %
 **UI rebuild (design system + 51 screens + shell wiring):** ~99 %
 
 Verified now:
 - `flutter analyze` → **No issues found**
-- `flutter test` → **3057 passed, 0 failed** (2 skipped)
+- `flutter test` → **3956 passed, 0 failed** (2 skipped)
 - 320 dp / 200 % text ratchet → **102 passed** (51 screens × light/dark)
 - Server: `python3 -m pytest server -q` → **1058 passed, 138 skipped**
 - Cloud: agent-core **734**, browser **279**, sandbox **369**, worker **207**, shared **239**, gateway **168** (503 with PG/Redis)
@@ -19,7 +19,7 @@ Verified now:
 | Track | Covers | Done | State |
 |---|---|---:|---|
 | 0 | Tokens, theme, motion, components | 100 % | done |
-| 5 | 51 v2 screens + gallery + shell | 97 % | audited, wired, ratcheted |
+| 5 | 51 v2 screens + gallery + shell | 99 % | audited, wired, ratcheted; inline sidebar search replaces the search screen |
 | 1 | Isolation, memory, runtime | 88 % | engine + acceptance coverage; live multi-tenant soak pending |
 | 2 | Gateway, plans, free caps | 90 % | 50M/24h + 1.5B/30d + M1 alert delivery + admin kill switch landed |
 | 3 | Studio, browser, subagents | 92 % | credential helper, queue wiring, sandbox logs, fps/headless, 300-token JSON |
@@ -46,6 +46,10 @@ Verified now:
 - [x] Share link revoke
 - [x] Gallery separated behind `OVID_UI_GALLERY`
 - [x] Route builders: trajectory, subagent, collab live/members, Studio workspace/branch/changes/preview
+- [x] Inline sidebar search over sessions + projects; the standalone search screen is gone
+- [x] Persistent bottom nav (`lib/ui/v2/app/bottom_nav.dart`)
+- [x] Gallery: interactive Auto/manual picker (Free/Go vs Plus/Pro) and a chat variant that names the answering model
+- [x] Sheet previews get a real height bound so list rows render instead of collapsing
 
 ### Server
 - [x] Free caps: 50M tokens/24 h + 1.5B/30 d, hard ceilings, no pool, typed 429 with reset time
@@ -78,11 +82,10 @@ Verified now:
 
 ## Remaining P1
 
-- [ ] Open collab live/members from a shared chat in the v2 shell (routes exist)
-- [ ] Open subagent detail from a `dispatch_agent` row (route exists)
-- [ ] Live preview deep link from Studio workspace
+- [ ] Open collab live/members from a shared chat in the v2 shell (routes exist, no entry point)
+- [ ] Open subagent detail from a `dispatch_agent` row (route exists, no entry point)
+- [ ] "Sync latest" / Live Preview entry from the Studio workspace (route exists in `v2_studio_routes.dart`)
 - [ ] Notification permission banner wired to the Android state
-- [ ] Voice language persistence in Settings → Chat
 - [ ] `@project:` capability gate when the gateway lacks `turnProjectRefs`
 
 ## Remaining P2
@@ -92,6 +95,8 @@ Verified now:
 - [ ] Cold-start + first-token traces; crash-free/ANR dashboards
 - [ ] `dart format lib/ui/v2`
 - [ ] Remove local `OPill`/`_Tag` workarounds now that the shared pill is fixed
+- [ ] `docs/play/DATA-SAFETY.md` still says a 7-day deletion grace (code is 24 h) and "Name: No"
+- [ ] Plan table says Starter/Pro/Max at $5/$25/$60; the product spec is Go $5 / Plus $18 / Pro $99. `server/mint/ovid_plans.py` and `OvidPlanCatalog.fallback` agree with each other but not with the spec, so the rename + repricing has to land on both at once.
 
 ---
 
@@ -105,7 +110,8 @@ Done in the consoles:
 - Play Console: service account added with *View financial data*, *Manage orders and subscriptions*, *View app information*
 - RevenueCat project `Ovid Si` (`afe58e73`), Play Store app `app3f89cc64b6`, public SDK key embedded
 - RevenueCat entitlements created: `go`, `plus`, `pro`
-- Internal testing release `1 (1.0.0)` published and **Active**; testers list "Ovid internal" (4 emails)
+- Internal testing release `2 (1.0.0)` published and **Active**; testers list "Ovid internal" (4 emails)
+- Version bumped to `1.0.0+3` for the next internal upload (AAB not uploaded yet)
 - **Production track is empty — the app is NOT live to the public**
 - Release AAB built with the upload key (`android/keystore.properties`, gitignored)
 - minSdk raised 23 → 24 (Play automatic protection requirement)
