@@ -85,6 +85,8 @@ void main() {
   testWidgets('close action is shown only when wired', (tester) async {
     await _pump(tester);
     expect(find.byIcon(Icons.close_rounded), findsNothing);
+    // Welcome is the root of the tour: no back arrow that cannot pop.
+    expect(find.byIcon(Icons.arrow_back_rounded), findsNothing);
 
     await _pump(tester, onClose: () {});
     expect(find.byIcon(Icons.close_rounded), findsOneWidget);

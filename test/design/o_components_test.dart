@@ -253,6 +253,47 @@ void main() {
     expect(find.text('Free plan'), findsOneWidget);
   });
 
+  testWidgets('OPill renders an icon, a dot and a semantic label', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        const Center(
+          child: OPill(
+            label: 'Most popular',
+            tone: OPillTone.accent,
+            icon: Icons.star_rounded,
+            dot: true,
+            semanticLabel: 'Most popular plan',
+          ),
+        ),
+      ),
+    );
+    expect(find.text('Most popular'), findsOneWidget);
+    expect(find.byIcon(Icons.star_rounded), findsOneWidget);
+    expect(find.bySemanticsLabel('Most popular plan'), findsOneWidget);
+    handle.dispose();
+  });
+
+  testWidgets('compact button still keeps a 48dp target', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        Center(
+          child: OButton(
+            label: 'Copy',
+            size: OButtonSize.compact,
+            onPressed: () {},
+          ),
+        ),
+      ),
+    );
+    expect(
+      tester.getSize(find.byType(OButton)).height,
+      greaterThanOrEqualTo(48),
+    );
+  });
+
   testWidgets('OPressable announces disabled, not tappable', (tester) async {
     final handle = tester.ensureSemantics();
     await tester.pumpWidget(

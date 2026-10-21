@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
@@ -12,36 +10,6 @@ import 'subagent_summary.dart';
 enum V2SubagentStatus { loading, empty, error, ready }
 
 enum V2SubagentLogTone { normal, success, accent }
-
-/// The strict ≤300-token summary a subagent returns to the main agent.
-///
-/// The keys follow the runtime contract:
-/// `{status, files_modified, artifacts_created, key_findings, error_if_any}`.
-@immutable
-class V2SubagentSummary {
-  const V2SubagentSummary({
-    this.status = '',
-    this.filesModified = const [],
-    this.artifactsCreated = const [],
-    this.keyFindings = const [],
-    this.errorIfAny,
-  });
-
-  final String status;
-  final List<String> filesModified;
-  final List<String> artifactsCreated;
-  final List<String> keyFindings;
-  final String? errorIfAny;
-
-  /// The exact JSON the subagent returned, pretty-printed for display.
-  String get json => const JsonEncoder.withIndent('  ').convert({
-    'status': status,
-    'files_modified': filesModified,
-    'artifacts_created': artifactsCreated,
-    'key_findings': keyFindings,
-    'error_if_any': errorIfAny,
-  });
-}
 
 /// One line in the subagent log preview.
 @immutable
@@ -73,6 +41,7 @@ class V2SubagentPageData {
     required this.totalLogLines,
     this.working = true,
     this.progress = 0,
+    this.progressKnown = true,
     this.files = const [],
     this.logLines = const [],
     this.logPath = '',
@@ -85,6 +54,10 @@ class V2SubagentPageData {
   final String instanceLabel;
   final bool working;
   final double progress;
+
+  /// False when the runtime reports no progress measurement. The page then
+  /// hides the percentage instead of showing an invented 0 % or 100 %.
+  final bool progressKnown;
   final String stepLabel;
   final String paceLabel;
   final String goal;
@@ -101,7 +74,7 @@ class V2SubagentPageData {
   final String logPath;
 
   /// The strict JSON summary the subagent returned, when it has finished.
-  final V2SubagentSummary? summary;
+  final V2SubagentSummaryData? summary;
 
   final V2SubagentStatus status;
   final String errorMessage;
@@ -183,7 +156,7 @@ class SubagentPage extends StatelessWidget {
               _DetailsCard(data: data, onFileTap: onFileTap),
               const SizedBox(height: OSpace.m),
               SubagentSummaryCard(
-                summary: _summaryData(data.summary),
+                summary: data.summary,
                 status: data.summary == null
                     ? V2SubagentSummaryStatus.empty
                     : V2SubagentSummaryStatus.ready,
@@ -197,20 +170,22 @@ class SubagentPage extends StatelessWidget {
                 onReadFullLog: onReadFullLog,
               ),
               const SizedBox(height: OSpace.l),
-              OButton(
-                label: 'Stop subagent',
-                icon: Icons.stop_circle_outlined,
-                variant: OButtonVariant.dangerFill,
-                expand: true,
-                onPressed: onStop,
-              ),
-              const SizedBox(height: OSpace.s),
-              Text(
-                'Stopping pauses tasks and saves your changes.',
-                textAlign: TextAlign.center,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-              const SizedBox(height: OSpace.xs),
+              if (data.working && onStop != null) ...[
+                OButton(
+                  label: 'Stop subagent',
+                  icon: Icons.stop_circle_outlined,
+                  variant: OButtonVariant.dangerFill,
+                  expand: true,
+                  onPressed: onStop,
+                ),
+                const SizedBox(height: OSpace.s),
+                Text(
+                  'Stopping pauses tasks and saves your changes.',
+                  textAlign: TextAlign.center,
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+                const SizedBox(height: OSpace.xs),
+              ],
               Text(
                 'Subagents cannot start other subagents.',
                 textAlign: TextAlign.center,
@@ -222,19 +197,6 @@ class SubagentPage extends StatelessWidget {
       ],
     );
   }
-}
-
-/// Maps the page's summary onto the shared card, which owns the strict-key
-/// rendering and the raw-JSON reveal.
-V2SubagentSummaryData? _summaryData(V2SubagentSummary? summary) {
-  if (summary == null) return null;
-  return V2SubagentSummaryData(
-    status: summary.status,
-    filesModified: summary.filesModified,
-    artifactsCreated: summary.artifactsCreated,
-    keyFindings: summary.keyFindings,
-    errorIfAny: summary.errorIfAny,
-  );
 }
 
 class _HeroCard extends StatelessWidget {
@@ -282,28 +244,30 @@ class _HeroCard extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                           style: OType.h2.copyWith(color: c.text),
                         ),
-                        const SizedBox(height: OSpace.xs),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.memory_rounded,
-                              size: 13,
-                              color: c.textMuted,
-                            ),
-                            const SizedBox(width: OSpace.xs),
-                            Flexible(
-                              child: Text(
-                                data.instanceLabel,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: OType.caption.copyWith(
-                                  color: c.textMuted,
+                        if (data.instanceLabel.trim().isNotEmpty) ...[
+                          const SizedBox(height: OSpace.xs),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.memory_rounded,
+                                size: 13,
+                                color: c.textMuted,
+                              ),
+                              const SizedBox(width: OSpace.xs),
+                              Flexible(
+                                child: Text(
+                                  data.instanceLabel,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: OType.caption.copyWith(
+                                    color: c.textMuted,
+                                  ),
                                 ),
                               ),
-                            ),
-                          ],
-                        ),
+                            ],
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -312,27 +276,29 @@ class _HeroCard extends StatelessWidget {
               _WorkingPill(working: data.working),
             ],
           ),
-          const SizedBox(height: OSpace.l),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Overall progress',
-                  style: OType.caption.copyWith(color: c.textMuted),
+          if (data.progressKnown) ...[
+            const SizedBox(height: OSpace.l),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Overall progress',
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  ),
                 ),
-              ),
-              const SizedBox(width: OSpace.s),
-              Text(
-                '${(data.progress * 100).round()}%',
-                style: OType.bodySm.copyWith(
-                  color: c.text,
-                  fontWeight: FontWeight.w600,
+                const SizedBox(width: OSpace.s),
+                Text(
+                  '${(data.progress * 100).round()}%',
+                  style: OType.bodySm.copyWith(
+                    color: c.text,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.s),
-          OProgressBar(value: data.progress),
+              ],
+            ),
+            const SizedBox(height: OSpace.s),
+            OProgressBar(value: data.progress),
+          ],
           const SizedBox(height: OSpace.s),
           Row(
             children: [
@@ -342,17 +308,19 @@ class _HeroCard extends StatelessWidget {
                   style: OType.caption.copyWith(color: c.textMuted),
                 ),
               ),
-              Icon(Icons.speed_rounded, size: 14, color: c.success),
-              const SizedBox(width: OSpace.xs),
-              Flexible(
-                child: Text(
-                  data.paceLabel,
-                  style: OType.caption.copyWith(
-                    color: c.success,
-                    fontWeight: FontWeight.w600,
+              if (data.paceLabel.trim().isNotEmpty) ...[
+                Icon(Icons.speed_rounded, size: 14, color: c.success),
+                const SizedBox(width: OSpace.xs),
+                Flexible(
+                  child: Text(
+                    data.paceLabel,
+                    style: OType.caption.copyWith(
+                      color: c.success,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
-              ),
+              ],
             ],
           ),
         ],
@@ -707,23 +675,24 @@ class _LogCard extends StatelessWidget {
                     ),
                     const SizedBox(height: OSpace.s),
                   ],
-                  OButton(
-                    label: 'View full log (${data.totalLogLines} lines)',
-                    icon: Icons.open_in_new_rounded,
-                    variant: OButtonVariant.secondary,
-                    expand: true,
-                    onPressed: onViewLog,
-                  ),
-                  const SizedBox(height: OSpace.xs),
-                  OButton(
-                    label: 'Read full log',
-                    icon: Icons.article_outlined,
-                    variant: OButtonVariant.ghost,
-                    expand: true,
-                    onPressed: onReadFullLog == null
-                        ? null
-                        : () => onReadFullLog!(data.logPath),
-                  ),
+                  if (onViewLog != null)
+                    OButton(
+                      label: 'View full log (${data.totalLogLines} lines)',
+                      icon: Icons.open_in_new_rounded,
+                      variant: OButtonVariant.secondary,
+                      expand: true,
+                      onPressed: onViewLog,
+                    ),
+                  if (onReadFullLog != null && data.logPath.isNotEmpty) ...[
+                    const SizedBox(height: OSpace.xs),
+                    OButton(
+                      label: 'Read full log',
+                      icon: Icons.article_outlined,
+                      variant: OButtonVariant.ghost,
+                      expand: true,
+                      onPressed: () => onReadFullLog!(data.logPath),
+                    ),
+                  ],
                 ],
               ),
             ),

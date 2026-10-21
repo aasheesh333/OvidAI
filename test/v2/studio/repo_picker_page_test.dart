@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
@@ -19,6 +21,7 @@ Widget _app(Widget child, {bool dark = false, double textScale = 1}) =>
     );
 
 void _noopConfirm(V2Repo repo, String branch) {}
+void _noopSelect(V2Repo repo) {}
 
 const _repos = <V2Repo>[
   V2Repo(
@@ -288,6 +291,114 @@ void main() {
     expect(find.text('acme/empty'), findsOneWidget);
   });
 
+  testWidgets('loads real branches when the snapshot has none', (tester) async {
+    V2Repo? confirmedRepo;
+    String? confirmedBranch;
+    var loads = 0;
+
+    await tester.pumpWidget(
+      _app(
+        V2RepoPickerPage(
+          data: const V2RepoPickerData(
+            repos: <V2Repo>[
+              V2Repo(id: 'acme/api', name: 'api', owner: 'acme'),
+            ],
+          ),
+          onLoadBranches: (repo) async {
+            loads++;
+            return const <V2RepoBranch>[
+              V2RepoBranch(name: 'main', isDefault: true),
+              V2RepoBranch(name: 'release/1.2'),
+            ];
+          },
+          onConfirm: (repo, branch) {
+            confirmedRepo = repo;
+            confirmedBranch = branch;
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('acme/api'));
+    await tester.pumpAndSettle();
+
+    expect(loads, 1);
+    expect(find.text('main'), findsOneWidget);
+    expect(find.text('release/1.2'), findsOneWidget);
+
+    // The default branch is preselected, so the gate is open.
+    final primary = tester.widget<OButton>(
+      find.byKey(const Key('repo-picker-primary')),
+    );
+    expect(primary.onPressed, isNotNull);
+
+    await tester.tap(find.byKey(const Key('repo-picker-primary')));
+    await tester.pumpAndSettle();
+    expect(confirmedRepo?.id, 'acme/api');
+    expect(confirmedBranch, 'main');
+  });
+
+  testWidgets('a failed branch load offers a retry', (tester) async {
+    var loads = 0;
+    await tester.pumpWidget(
+      _app(
+        V2RepoPickerPage(
+          data: const V2RepoPickerData(
+            repos: <V2Repo>[
+              V2Repo(id: 'acme/api', name: 'api', owner: 'acme'),
+            ],
+          ),
+          onLoadBranches: (repo) async {
+            loads++;
+            if (loads == 1) throw StateError('offline');
+            return const <V2RepoBranch>[V2RepoBranch(name: 'main')];
+          },
+          onConfirm: _noopConfirm,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('acme/api'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Branches did not load'), findsOneWidget);
+    await tester.ensureVisible(find.text('Try again'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+
+    expect(loads, 2);
+    expect(find.text('main'), findsOneWidget);
+  });
+
+  testWidgets('without a confirm handler the picker cannot pretend to start', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        const V2RepoPickerPage(
+          data: V2RepoPickerData(repos: _repos),
+          onSelectRepo: _noopSelect,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('acme/landing-page'));
+    await tester.pumpAndSettle();
+
+    final primary = tester.widget<OButton>(
+      find.byKey(const Key('repo-picker-primary')),
+    );
+    expect(primary.onPressed, isNull);
+    expect(
+      find.textContaining('Studio setup is not connected yet'),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('search filters the repository list', (tester) async {
     await tester.pumpWidget(
       _app(const V2RepoPickerPage(data: V2RepoPickerData(repos: _repos))),
@@ -461,6 +572,70 @@ void main() {
               '(${dark ? 'dark' : 'light'})',
         );
       }
+    }
+  });
+
+  testWidgets('320 dp at 200% text fits branch loading and error states', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    const repoData = V2RepoPickerData(
+      repos: <V2Repo>[V2Repo(id: 'acme/api', name: 'api', owner: 'acme')],
+    );
+
+    for (final dark in <bool>[false, true]) {
+      // Loading: a future that never completes keeps the spinner on screen.
+      final pending = Completer<List<V2RepoBranch>>();
+      await tester.pumpWidget(
+        _app(
+          V2RepoPickerPage(
+            key: ValueKey('branch-loading-$dark'),
+            data: repoData,
+            onLoadBranches: (_) => pending.future,
+            onConfirm: _noopConfirm,
+          ),
+          dark: dark,
+          textScale: 2,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('acme/api'));
+      await tester.pump();
+      expect(
+        find.byKey(const Key('repo-picker-branches-loading')),
+        findsOneWidget,
+      );
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: 'branch loading overflowed (${dark ? 'dark' : 'light'})',
+      );
+
+      // Error: the retry copy must fit too.
+      await tester.pumpWidget(
+        _app(
+          V2RepoPickerPage(
+            key: ValueKey('branch-error-$dark'),
+            data: repoData,
+            onLoadBranches: (_) async => throw StateError('offline'),
+            onConfirm: _noopConfirm,
+          ),
+          dark: dark,
+          textScale: 2,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('acme/api'));
+      await tester.pumpAndSettle();
+      expect(find.text('Branches did not load'), findsOneWidget);
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: 'branch error overflowed (${dark ? 'dark' : 'light'})',
+      );
     }
   });
 

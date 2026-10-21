@@ -1,5 +1,8 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
+import '../../../core/cloud/cloud_backup.dart';
+import '../../../core/settings_backup_service.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
@@ -7,6 +10,10 @@ import 'confirm_typed_sheet.dart';
 import 'export_picker_sheet.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
+
+/// Writes a backup archive to a destination the user chose and returns that
+/// destination, or null when the user cancelled the save dialog.
+typedef V2ExportFileWriter = Future<String?> Function();
 
 /// Result of checking a backup file before it is imported.
 @immutable
@@ -89,6 +96,7 @@ class V2DataControlPageData {
     this.memorySummaryLabel = '',
     this.onExportImport,
     this.onExport,
+    this.onSaveExport,
     this.onChooseImport,
     this.onImport,
     this.onExportSessionToggled,
@@ -133,6 +141,10 @@ class V2DataControlPageData {
 
   final VoidCallback? onExportImport;
   final VoidCallback? onExport;
+
+  /// Saves the archive to a real destination. When null the page writes a real
+  /// zip and opens the platform save dialog itself.
+  final V2ExportFileWriter? onSaveExport;
   final VoidCallback? onChooseImport;
   final VoidCallback? onImport;
   final V2ExportSessionToggle? onExportSessionToggled;
@@ -410,6 +422,13 @@ class DataControlPage extends StatelessWidget {
                           : () => _handleExport(context),
                     ),
                     OButton(
+                      key: const ValueKey('save-export-button'),
+                      label: 'Save to device',
+                      icon: Icons.save_alt_rounded,
+                      variant: OButtonVariant.secondary,
+                      onPressed: () => _handleExport(context, save: true),
+                    ),
+                    OButton(
                       label: 'Choose backup',
                       icon: Icons.upload_file_rounded,
                       variant: OButtonVariant.ghost,
@@ -437,11 +456,15 @@ class DataControlPage extends StatelessWidget {
   /// inline list. Everything the sheet shows comes from this page's immutable
   /// session list; every checkbox and the export action go back through the
   /// page's callbacks.
-  Future<void> _handleExport(BuildContext context) async {
+  Future<void> _handleExport(BuildContext context, {bool save = false}) async {
     final export = data.onExport;
-    if (export == null) return;
+    if (!save && export == null) return;
     if (!data.showExportSelection) {
-      export();
+      if (save) {
+        await _saveExport(context);
+      } else {
+        export!();
+      }
       return;
     }
     final toggle = data.onExportSessionToggled;
@@ -468,10 +491,54 @@ class DataControlPage extends StatelessWidget {
       onToggleSession: toggle,
       onSelectAll: toggle == null ? null : _applySelection,
       onExport: () {
-        export();
         Navigator.of(context).maybePop();
+        if (save) {
+          _saveExport(context);
+        } else {
+          export?.call();
+        }
       },
       onRetry: data.onRetry,
+    );
+  }
+
+  /// Writes the archive to a destination the person picks. The default writer
+  /// builds the same zip the export uses and hands it to the platform save
+  /// dialog, so "Save to device" produces a real file instead of a toast.
+  Future<void> _saveExport(BuildContext context) async {
+    try {
+      final writer = data.onSaveExport;
+      final path = writer != null ? await writer() : await _defaultSaveExport();
+      if (!context.mounted) return;
+      if (path == null) {
+        _snack(context, 'Export cancelled.');
+        return;
+      }
+      _snack(context, 'Saved to $path');
+    } on BackupLimitException catch (e) {
+      if (context.mounted) _snack(context, e.message);
+    } catch (_) {
+      if (context.mounted) {
+        _snack(context, 'Could not save the export. Try again.');
+      }
+    }
+  }
+
+  Future<String?> _defaultSaveExport() async {
+    final snapshot = await CloudBackup().fetchHistory();
+    final plan = SettingsBackupService.planExport(snapshot.sessions);
+    if (plan.included.isEmpty) {
+      throw BackupLimitException(
+        plan.limitHit ?? 'There is nothing to export yet.',
+      );
+    }
+    final bytes = await SettingsBackupService().export(plan.included);
+    return FilePicker.platform.saveFile(
+      dialogTitle: 'Save Ovid backup',
+      fileName: 'ovid-transcripts-v1.zip',
+      type: FileType.custom,
+      allowedExtensions: const <String>['zip'],
+      bytes: bytes,
     );
   }
 
@@ -868,6 +935,13 @@ class DataControlPage extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  void _snack(BuildContext context, String message) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _confirmDelete(BuildContext context) async {

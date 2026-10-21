@@ -57,10 +57,68 @@ class V2AgentPresetsPageData {
 }
 
 /// Agent presets: built-in approaches plus the user's own presets.
-class AgentPresetsPage extends StatelessWidget {
+///
+/// The screen keeps a working copy of the list so a selection or a deletion
+/// is visible at once. The caller still persists it; a page pushed once from
+/// Settings has no listener on `AppState`, so rendering only the injected
+/// snapshot made every tap look ignored until the screen was reopened.
+class AgentPresetsPage extends StatefulWidget {
   const AgentPresetsPage({super.key, required this.data});
 
   final V2AgentPresetsPageData data;
+
+  @override
+  State<AgentPresetsPage> createState() => _AgentPresetsPageState();
+}
+
+class _AgentPresetsPageState extends State<AgentPresetsPage> {
+  late List<V2AgentPreset> _presets;
+  String? _selectedId;
+
+  V2AgentPresetsPageData get data => widget.data;
+
+  @override
+  void initState() {
+    super.initState();
+    _adopt(data, null);
+  }
+
+  @override
+  void didUpdateWidget(covariant AgentPresetsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.data, widget.data)) {
+      _adopt(widget.data, oldWidget.data);
+    }
+  }
+
+  /// Adopts only what the caller changed, so an unchanged rebuild cannot
+  /// undo an optimistic selection or deletion.
+  void _adopt(V2AgentPresetsPageData next, V2AgentPresetsPageData? prev) {
+    if (prev == null || !identical(next.presets, prev.presets)) {
+      _presets = List<V2AgentPreset>.of(next.presets);
+    }
+    if (prev == null || next.selectedId != prev.selectedId) {
+      _selectedId = next.selectedId;
+    }
+  }
+
+  void _select(V2AgentPreset preset) {
+    final handler = data.onSelect;
+    if (handler == null) return;
+    setState(() => _selectedId = preset.id);
+    handler(preset.id);
+  }
+
+  void _delete(V2AgentPreset preset) {
+    setState(() {
+      _presets = [
+        for (final item in _presets)
+          if (item.id != preset.id) item,
+      ];
+      if (_selectedId == preset.id) _selectedId = null;
+    });
+    data.onDelete?.call(preset.id);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -77,7 +135,7 @@ class AgentPresetsPage extends StatelessWidget {
     if (data.status == V2AgentPresetsStatus.error) {
       return OErrorState(message: data.errorMessage, onRetry: data.onRetry);
     }
-    if (data.status == V2AgentPresetsStatus.empty || data.presets.isEmpty) {
+    if (data.status == V2AgentPresetsStatus.empty || _presets.isEmpty) {
       return OEmptyState(
         icon: Icons.auto_awesome_outlined,
         title: 'No presets yet',
@@ -90,8 +148,8 @@ class AgentPresetsPage extends StatelessWidget {
       );
     }
 
-    final builtIn = data.presets.where((preset) => preset.builtIn).toList();
-    final custom = data.presets.where((preset) => !preset.builtIn).toList();
+    final builtIn = _presets.where((preset) => preset.builtIn).toList();
+    final custom = _presets.where((preset) => !preset.builtIn).toList();
 
     return OFadeSlide(
       child: SingleChildScrollView(
@@ -176,11 +234,12 @@ class AgentPresetsPage extends StatelessWidget {
 
   Widget _presetCard(BuildContext context, V2AgentPreset preset) {
     final c = OColors.of(context);
-    final selected = data.selectedId == preset.id;
+    final selected = _selectedId == preset.id;
     return OCard(
+      key: ValueKey<String>('preset-${preset.id}'),
       accent: selected,
       padding: EdgeInsets.zero,
-      onTap: data.onSelect == null ? null : () => data.onSelect!(preset.id),
+      onTap: data.onSelect == null ? null : () => _select(preset),
       semanticLabel:
           '${preset.name} preset${selected ? ', selected' : ''}. '
           '${preset.description}',
@@ -275,10 +334,7 @@ class AgentPresetsPage extends StatelessWidget {
     required Color background,
   }) {
     return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 10,
-        vertical: OSpace.xs,
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: OSpace.xs),
       decoration: BoxDecoration(
         color: background,
         borderRadius: BorderRadius.circular(ORadius.pill),
@@ -373,8 +429,6 @@ class AgentPresetsPage extends StatelessWidget {
         );
       },
     );
-    if (confirmed == true) {
-      data.onDelete?.call(preset.id);
-    }
+    if (confirmed == true) _delete(preset);
   }
 }

@@ -168,11 +168,13 @@ class _V2CodeViewerPageState extends State<V2CodeViewerPage> {
       icon: Icons.code_off_rounded,
       title: 'No file selected',
       message: 'Pick a file in Studio to read its code here.',
-      action: OButton(
-        label: 'Back to workspace',
-        variant: OButtonVariant.secondary,
-        onPressed: widget.onBack,
-      ),
+      action: widget.onBack == null
+          ? null
+          : OButton(
+              label: 'Back to workspace',
+              variant: OButtonVariant.secondary,
+              onPressed: widget.onBack,
+            ),
     );
   }
 

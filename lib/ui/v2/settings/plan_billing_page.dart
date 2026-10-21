@@ -217,6 +217,17 @@ class V2Plan {
   final bool popular;
   final String? ctaLabel;
 
+  /// Canonical plan id (`free`, `go`, `plus`, `pro`) for this plan.
+  ///
+  /// Server tiers use `3x`/`7x`/`15x`; the store sells them as Go/Plus/Pro.
+  /// Resolving through [planLimits] means a card, its comparison column and
+  /// the purchase request always name the same plan.
+  String get canonicalId => planLimits.id;
+
+  /// The Google Play / RevenueCat product for [period], or null for Free.
+  String? productIdFor(V2BillingPeriod period) =>
+      V2PlanProducts.forPlan(canonicalId, period);
+
   /// The limits to render for this plan. Explicit [limits] win; otherwise the
   /// canonical table fills in everything the server does not send.
   V2PlanLimits get planLimits {
@@ -262,8 +273,65 @@ class V2Plan {
   String periodSuffix(V2BillingPeriod period) =>
       period == V2BillingPeriod.monthly ? '/ month' : '/ year';
 
-  String get actionLabel =>
-      ctaLabel ?? (popular ? 'Upgrade to $name' : 'Select $name');
+  String get actionLabel => ctaLabel ??
+      (canonicalId == 'free'
+          // A paid account downgrades/cancels in Play, it never "selects Free".
+          ? 'Manage in Google Play'
+          : popular
+          ? 'Upgrade to $name'
+          : 'Select $name');
+}
+
+/// The store products each plan is sold as, per billing period.
+///
+/// The monthly ids are the ones the Play/RevenueCat layer already verifies
+/// (`kOvidPlayProducts`): Go → `ovid_plus_monthly`, Plus → `ovid_pro_monthly`,
+/// Pro → `ovid_max_monthly`. The yearly ids follow the same naming so the
+/// purchase request names a distinct product for the yearly toggle.
+abstract final class V2PlanProducts {
+  static const monthly = <String, String>{
+    'go': 'ovid_plus_monthly',
+    'plus': 'ovid_pro_monthly',
+    'pro': 'ovid_max_monthly',
+  };
+
+  static const yearly = <String, String>{
+    'go': 'ovid_plus_yearly',
+    'plus': 'ovid_pro_yearly',
+    'pro': 'ovid_max_yearly',
+  };
+
+  /// Canonical plan id → server/RevenueCat tier id.
+  static const tiers = <String, String>{
+    'free': 'free',
+    'go': '3x',
+    'plus': '7x',
+    'pro': '15x',
+  };
+
+  static String? forPlan(String planId, V2BillingPeriod period) =>
+      (period == V2BillingPeriod.yearly ? yearly : monthly)[planId];
+
+  static String tierForPlan(String planId) => tiers[planId] ?? planId;
+}
+
+/// One purchase request from a plan card: which plan, which product and which
+/// billing period. The page never picks a tier on the user's behalf.
+@immutable
+class V2PlanPurchase {
+  const V2PlanPurchase({required this.plan, required this.period});
+
+  final V2Plan plan;
+  final V2BillingPeriod period;
+
+  /// Canonical plan id (`free`, `go`, `plus`, `pro`).
+  String get planId => plan.canonicalId;
+
+  /// Server/RevenueCat tier id (`free`, `3x`, `7x`, `15x`).
+  String get tier => V2PlanProducts.tierForPlan(planId);
+
+  /// The store product for this plan and period; null for Free.
+  String? get productId => plan.productIdFor(period);
 }
 
 @immutable
@@ -302,14 +370,12 @@ class V2PlanBillingData {
     this.currentPlanId = 'free',
     this.plans = const [],
     this.history = const [],
-    this.currentCtaLabel = 'Upgrade to Pro',
     this.legalNote =
         'Subscriptions renew automatically each month until canceled. '
         'You can cancel anytime from Google Play Store subscriptions.',
     this.onCurrencyChanged,
     this.onPeriodChanged,
-    this.onSelectPlan,
-    this.onUpgrade,
+    this.onPurchase,
     this.onRestorePurchases,
     this.onHistoryTap,
     this.onRetry,
@@ -323,22 +389,40 @@ class V2PlanBillingData {
   final String currentPlanId;
   final List<V2Plan> plans;
   final List<V2BillingHistoryEntry> history;
-  final String currentCtaLabel;
   final String legalNote;
   final ValueChanged<V2Currency>? onCurrencyChanged;
   final ValueChanged<V2BillingPeriod>? onPeriodChanged;
-  final ValueChanged<V2Plan>? onSelectPlan;
-  final VoidCallback? onUpgrade;
+
+  /// The real purchase entry point. It receives the plan the user tapped and
+  /// the period currently selected on screen, so the caller never has to guess
+  /// a tier (the old screen hard-coded Plus here).
+  final ValueChanged<V2PlanPurchase>? onPurchase;
   final VoidCallback? onRestorePurchases;
   final ValueChanged<V2BillingHistoryEntry>? onHistoryTap;
   final VoidCallback? onRetry;
   final String errorMessage;
 }
 
-class PlanBillingPage extends StatelessWidget {
+class PlanBillingPage extends StatefulWidget {
   const PlanBillingPage({super.key, required this.data});
 
   final V2PlanBillingData data;
+
+  @override
+  State<PlanBillingPage> createState() => _PlanBillingPageState();
+}
+
+class _PlanBillingPageState extends State<PlanBillingPage> {
+  final ScrollController _scroll = ScrollController();
+  final GlobalKey _plansKey = GlobalKey();
+
+  V2PlanBillingData get data => widget.data;
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -360,12 +444,21 @@ class PlanBillingPage extends StatelessWidget {
     );
   }
 
+  /// The current plan in canonical form (`3x` → `go`), so the badge, the
+  /// comparison column and the plan card all agree.
+  String get _currentCanonicalId =>
+      V2PlanLimits.forId(data.currentPlanId)?.id ?? data.currentPlanId;
+
+  bool _isCurrent(V2Plan plan) =>
+      plan.canonicalId == _currentCanonicalId ||
+      plan.id == data.currentPlanId;
+
   /// The page's plans and the selected currency/period are mapped onto the
   /// shared comparison contract, so the table always matches the plan cards.
   V2PlanCompareData _compareData() {
     return V2PlanCompareData(
       plans: [for (final plan in data.plans) _comparePlan(plan)],
-      currentPlanId: data.currentPlanId,
+      currentPlanId: _currentCanonicalId,
       onRetry: data.onRetry,
     );
   }
@@ -373,7 +466,7 @@ class PlanBillingPage extends StatelessWidget {
   V2PlanComparePlan _comparePlan(V2Plan plan) {
     final limits = plan.planLimits;
     return V2PlanComparePlan(
-      id: plan.id,
+      id: plan.canonicalId,
       name: plan.name,
       priceLabel: plan.priceLabel(data.currency, period: data.period),
       pricePeriodLabel: plan.periodSuffix(data.period),
@@ -402,20 +495,22 @@ class PlanBillingPage extends StatelessWidget {
     );
   }
 
+  /// Scrolls the payment-history "See plans" action back up to the plan list.
+  void _scrollToPlans() {
+    final target = _plansKey.currentContext;
+    if (target == null) return;
+    Scrollable.ensureVisible(
+      target,
+      duration: OMotion.medium,
+      curve: OMotion.standard,
+      alignment: 0.05,
+    );
+  }
+
   Widget _content(BuildContext context) {
     final c = OColors.of(context);
-    V2Plan? current;
-    for (final plan in data.plans) {
-      if (plan.id == data.currentPlanId) {
-        current = plan;
-        break;
-      }
-    }
-    final upgrades = data.plans
-        .where((plan) => plan.id != current?.id)
-        .toList(growable: false);
-
     return SingleChildScrollView(
+      controller: _scroll,
       padding: const EdgeInsets.fromLTRB(
         OSpace.screen,
         OSpace.l,
@@ -460,56 +555,45 @@ class PlanBillingPage extends StatelessWidget {
               ),
             ],
           ),
-          if (current != null) ...[
-            const SizedBox(height: OSpace.l),
-            _CurrentPlanCard(
-              plan: current,
-              currency: data.currency,
-              period: data.period,
-              ctaLabel: data.currentCtaLabel,
-              onUpgrade: data.onUpgrade,
-            ),
-          ],
-          if (upgrades.isNotEmpty) ...[
-            const SizedBox(height: OSpace.xl),
-            OSectionHeader(
-              label: 'Available upgrades',
-              padding: EdgeInsets.zero,
-              trailing: Align(
-                alignment: Alignment.centerRight,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.bolt_rounded, size: 15, color: c.accent),
-                    const SizedBox(width: OSpace.xs),
-                    Flexible(
-                      child: Text(
-                        'Instant activation',
-                        textAlign: TextAlign.end,
-                        style: OType.caption.copyWith(color: c.accent),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: OSpace.m),
-            OStagger(
-              children: [
-                for (final plan in upgrades)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: OSpace.m),
-                    child: _PlanCard(
-                      plan: plan,
-                      currency: data.currency,
-                      period: data.period,
-                      current: plan.id == data.currentPlanId,
-                      onSelect: data.onSelectPlan,
+          const SizedBox(height: OSpace.xl),
+          OSectionHeader(
+            key: _plansKey,
+            label: 'Plans',
+            padding: EdgeInsets.zero,
+            trailing: Align(
+              alignment: Alignment.centerRight,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.bolt_rounded, size: 15, color: c.accent),
+                  const SizedBox(width: OSpace.xs),
+                  Flexible(
+                    child: Text(
+                      'Instant activation',
+                      textAlign: TextAlign.end,
+                      style: OType.caption.copyWith(color: c.accent),
                     ),
                   ),
-              ],
+                ],
+              ),
             ),
-          ],
+          ),
+          const SizedBox(height: OSpace.m),
+          OStagger(
+            children: [
+              for (final plan in data.plans)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: OSpace.m),
+                  child: _PlanCard(
+                    plan: plan,
+                    currency: data.currency,
+                    period: data.period,
+                    current: _isCurrent(plan),
+                    onPurchase: data.onPurchase,
+                  ),
+                ),
+            ],
+          ),
           const SizedBox(height: OSpace.xl),
           OSectionHeader(label: 'Plan limits', padding: EdgeInsets.zero),
           const SizedBox(height: OSpace.m),
@@ -546,13 +630,11 @@ class PlanBillingPage extends StatelessWidget {
                 icon: Icons.receipt_long_outlined,
                 title: 'No payments yet',
                 message: 'Your receipts will appear here after you upgrade.',
-                action: data.onUpgrade == null
-                    ? null
-                    : OButton(
-                        label: 'See plans',
-                        icon: Icons.arrow_upward_rounded,
-                        onPressed: data.onUpgrade,
-                      ),
+                action: OButton(
+                  label: 'See plans',
+                  icon: Icons.arrow_upward_rounded,
+                  onPressed: _scrollToPlans,
+                ),
               ),
             )
           else
@@ -780,106 +862,28 @@ class _PeriodOption extends StatelessWidget {
   }
 }
 
-class _CurrentPlanCard extends StatelessWidget {
-  const _CurrentPlanCard({
-    required this.plan,
-    required this.currency,
-    required this.period,
-    required this.ctaLabel,
-    required this.onUpgrade,
-  });
-
-  final V2Plan plan;
-  final V2Currency currency;
-  final V2BillingPeriod period;
-  final String ctaLabel;
-  final VoidCallback? onUpgrade;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      key: ValueKey<String>('plan-card-${plan.id}'),
-      padding: const EdgeInsets.all(OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: OPill(
-              label: 'Current plan',
-              tone: OPillTone.success,
-              dot: true,
-            ),
-          ),
-          const SizedBox(height: OSpace.s),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Text(plan.name, style: OType.h2.copyWith(color: c.text)),
-              ),
-              const SizedBox(width: OSpace.m),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    plan.priceLabel(currency, period: period),
-                    style: OType.h2.copyWith(color: c.text),
-                  ),
-                  Text(
-                    plan.periodSuffix(period),
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.m),
-          _PlanMeta(plan: plan),
-          if (plan.features.isNotEmpty) const SizedBox(height: OSpace.s),
-          for (final feature in plan.features)
-            _FeatureLine(
-              label: feature,
-              icon: Icons.check_circle_rounded,
-              color: c.success,
-            ),
-          if (onUpgrade != null) ...[
-            const SizedBox(height: OSpace.s),
-            OButton(
-              label: ctaLabel,
-              expand: true,
-              trailing: const Icon(Icons.arrow_downward_rounded, size: 18),
-              onPressed: onUpgrade,
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
 class _PlanCard extends StatelessWidget {
   const _PlanCard({
     required this.plan,
     required this.currency,
     required this.period,
     required this.current,
-    required this.onSelect,
+    required this.onPurchase,
   });
 
   final V2Plan plan;
   final V2Currency currency;
   final V2BillingPeriod period;
   final bool current;
-  final ValueChanged<V2Plan>? onSelect;
+  final ValueChanged<V2PlanPurchase>? onPurchase;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final canBuy = !current && onPurchase != null;
     return OCard(
       key: ValueKey<String>('plan-card-${plan.id}'),
-      accent: plan.popular,
+      accent: plan.popular || current,
       padding: const EdgeInsets.all(OSpace.l),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -892,7 +896,8 @@ class _PlanCard extends StatelessWidget {
                 runSpacing: OSpace.xs,
                 children: [
                   if (current)
-                    const OPill(
+                    OPill(
+                      key: ValueKey<String>('plan-current-${plan.id}'),
                       label: 'Current plan',
                       tone: OPillTone.success,
                       dot: true,
@@ -951,12 +956,20 @@ class _PlanCard extends StatelessWidget {
             ),
           const SizedBox(height: OSpace.s),
           OButton(
-            label: plan.actionLabel,
+            key: ValueKey<String>('plan-cta-${plan.id}'),
+            label: current ? 'Current plan' : plan.actionLabel,
             variant: plan.popular
                 ? OButtonVariant.primary
                 : OButtonVariant.secondary,
             expand: true,
-            onPressed: onSelect == null ? null : () => onSelect!(plan),
+            // The current plan can never be bought again. A disabled CTA is
+            // the honest state: tapping it would only re-purchase a plan the
+            // account already owns.
+            onPressed: canBuy
+                ? () => onPurchase!(
+                    V2PlanPurchase(plan: plan, period: period),
+                  )
+                : null,
           ),
         ],
       ),

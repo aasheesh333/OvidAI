@@ -1,10 +1,10 @@
-import 'dart:ui' show Tristate;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/states/state_tiles.dart';
 import 'package:ovid_ai/ui/v2/states/system_states_page.dart';
+
+void _noop() {}
 
 Widget _app(Widget home, {bool dark = false}) =>
     MaterialApp(theme: dark ? OTheme.dark() : OTheme.light(), home: home);
@@ -26,7 +26,8 @@ void main() {
     expect(find.text('Something went wrong'), findsOneWidget);
     expect(find.text('Daily limit reached'), findsOneWidget);
     expect(find.text('Resets soon'), findsOneWidget);
-    expect(find.text('See plans'), findsOneWidget);
+    // No handler is supplied, so the action buttons stay hidden.
+    expect(find.text('See plans'), findsNothing);
     expect(
       find.text(
         'Your chats and files stay safe in every state. Nothing is lost.',
@@ -94,7 +95,7 @@ void main() {
     expect(find.text('Resets soon'), findsNothing);
   });
 
-  testWidgets('actions without callbacks are disabled and announced', (
+  testWidgets('actions without callbacks are hidden, not left dead', (
     tester,
   ) async {
     final handle = tester.ensureSemantics();
@@ -102,12 +103,13 @@ void main() {
     await tester.pumpWidget(_app(const V2SystemStatesPage()));
     await tester.pumpAndSettle();
 
-    expect(
-      tester.widget<FilledButton>(find.byType(FilledButton).first).onPressed,
-      isNull,
-    );
-    final node = tester.getSemantics(find.bySemanticsLabel('See plans').first);
-    expect(node.flagsCollection.isEnabled, Tristate.isFalse);
+    // Every tile still renders its copy…
+    expect(find.text('Daily limit reached'), findsOneWidget);
+    // …but no action button exists for a callback the host did not supply.
+    expect(find.byType(FilledButton), findsNothing);
+    expect(find.text('See plans'), findsNothing);
+    expect(find.text('Try again'), findsNothing);
+    expect(find.text('Restore'), findsNothing);
     handle.dispose();
   });
 
@@ -147,11 +149,11 @@ void main() {
 
         // The body scrolls, so every state and action stays reachable.
         await tester.scrollUntilVisible(
-          find.text('See plans'),
+          find.text('Daily limit reached'),
           200,
           scrollable: find.byType(Scrollable).first,
         );
-        expect(find.text('See plans'), findsOneWidget);
+        expect(find.text('Daily limit reached'), findsOneWidget);
       },
     );
   }
@@ -173,7 +175,21 @@ void main() {
     tester,
   ) async {
     await _tall(tester);
-    await tester.pumpWidget(_app(const V2SystemStatesPage()));
+    var fired = 0;
+    await tester.pumpWidget(
+      _app(
+        V2SystemStatesPage(
+          onTryExample: () => fired++,
+          onRetryConnection: () => fired++,
+          onTryAgain: () => fired++,
+          onViewErrorDetails: () => fired++,
+          onSeePlans: () => fired++,
+          onManageStorage: () => fired++,
+          onGetHelp: () => fired++,
+          onRestoreAccount: () => fired++,
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
 
     // One custom tile for the empty prompt and one for each of the six
@@ -219,8 +235,8 @@ void main() {
     await _tall(tester);
     await tester.pumpWidget(
       _app(
-        const V2SystemStatesPage(
-          data: V2SystemStatesData(
+        V2SystemStatesPage(
+          data: const V2SystemStatesData(
             storageTitle: 'Workspace is full',
             storageMessage: 'Delete a preview to free space.',
             storageActionLabel: 'Clean up',
@@ -231,6 +247,9 @@ void main() {
             deletionMessage: 'Sign in again within 24 hours to restore it.',
             deletionActionLabel: 'Restore now',
           ),
+          onManageStorage: _noop,
+          onGetHelp: _noop,
+          onRestoreAccount: _noop,
         ),
       ),
     );

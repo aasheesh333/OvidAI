@@ -31,7 +31,8 @@ class V2SystemStatesData {
     this.errorDetailsLabel = 'View error details',
     this.limitTitle = 'Daily limit reached',
     this.limitMessage =
-        "You have used all 50M of today's free tokens. Your balance resets at midnight UTC.",
+        "You have used all 50M of today's free tokens. Your allowance resets "
+        'at the end of its 24-hour window.',
     this.limitResetLabel = 'Resets soon',
     this.limitActionLabel = 'See plans',
     this.storageTitle,
@@ -81,10 +82,14 @@ class V2SystemStatesData {
   final String footerNote;
 }
 
-/// A calm showcase of the six system states used across chat.
+/// A calm showcase of the system states used across chat.
 ///
 /// It also keeps the friendly empty state, so the page shows every state a
 /// conversation can start or stop in.
+///
+/// Every action is optional: a tile whose handler is null renders without an
+/// action button instead of showing a control that cannot do anything. The
+/// gallery registry supplies none, so it stays a pure preview.
 class V2SystemStatesPage extends StatelessWidget {
   const V2SystemStatesPage({
     super.key,
@@ -112,6 +117,12 @@ class V2SystemStatesPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    // A null handler hides its button: the gallery must never render a next
+    // step that cannot run.
+    String labelFor(String label, VoidCallback? handler) =>
+        handler == null ? '' : label;
+    String labelOr(String? override, String fallback, VoidCallback? handler) =>
+        handler == null ? '' : (override ?? fallback);
     return OScaffold(
       appBar: const OAppBar(
         title: 'System states',
@@ -139,7 +150,10 @@ class V2SystemStatesPage extends StatelessWidget {
                         icon: Icons.waving_hand_rounded,
                         title: data.emptyTitle,
                         message: data.emptyMessage,
-                        actionLabel: data.emptyActionLabel,
+                        actionLabel: labelFor(
+                          data.emptyActionLabel,
+                          onTryExample,
+                        ),
                         actionVariant: OButtonVariant.secondary,
                       ),
                       onAction: onTryExample,
@@ -150,7 +164,10 @@ class V2SystemStatesPage extends StatelessWidget {
                       copy: V2StateTileCopy.offline.copyWith(
                         title: data.offlineTitle,
                         message: data.offlineMessage,
-                        actionLabel: data.offlineActionLabel,
+                        actionLabel: labelFor(
+                          data.offlineActionLabel,
+                          onRetryConnection,
+                        ),
                       ),
                       onAction: onRetryConnection,
                     ),
@@ -160,7 +177,10 @@ class V2SystemStatesPage extends StatelessWidget {
                       copy: V2StateTileCopy.planLimited.copyWith(
                         title: data.limitTitle,
                         message: data.limitMessage,
-                        actionLabel: data.limitActionLabel,
+                        actionLabel: labelFor(
+                          data.limitActionLabel,
+                          onSeePlans,
+                        ),
                       ),
                       detail: data.limitResetLabel,
                       onAction: onSeePlans,
@@ -171,8 +191,14 @@ class V2SystemStatesPage extends StatelessWidget {
                       copy: V2StateTileCopy.serverError.copyWith(
                         title: data.errorTitle,
                         message: data.errorMessage,
-                        actionLabel: data.errorActionLabel,
-                        secondaryActionLabel: data.errorDetailsLabel,
+                        actionLabel: labelFor(
+                          data.errorActionLabel,
+                          onTryAgain,
+                        ),
+                        secondaryActionLabel: labelFor(
+                          data.errorDetailsLabel,
+                          onViewErrorDetails,
+                        ),
                       ),
                       onAction: onTryAgain,
                       onSecondaryAction: onViewErrorDetails,
@@ -183,7 +209,11 @@ class V2SystemStatesPage extends StatelessWidget {
                       copy: V2StateTileCopy.storageFull.copyWith(
                         title: data.storageTitle,
                         message: data.storageMessage,
-                        actionLabel: data.storageActionLabel,
+                        actionLabel: labelOr(
+                          data.storageActionLabel,
+                          V2StateTileCopy.storageFull.actionLabel,
+                          onManageStorage,
+                        ),
                       ),
                       onAction: onManageStorage,
                     ),
@@ -193,7 +223,11 @@ class V2SystemStatesPage extends StatelessWidget {
                       copy: V2StateTileCopy.abuseBlocked.copyWith(
                         title: data.abuseTitle,
                         message: data.abuseMessage,
-                        actionLabel: data.abuseActionLabel,
+                        actionLabel: labelOr(
+                          data.abuseActionLabel,
+                          V2StateTileCopy.abuseBlocked.actionLabel,
+                          onGetHelp,
+                        ),
                       ),
                       onAction: onGetHelp,
                     ),
@@ -203,7 +237,11 @@ class V2SystemStatesPage extends StatelessWidget {
                       copy: V2StateTileCopy.deletionPending.copyWith(
                         title: data.deletionTitle,
                         message: data.deletionMessage,
-                        actionLabel: data.deletionActionLabel,
+                        actionLabel: labelOr(
+                          data.deletionActionLabel,
+                          V2StateTileCopy.deletionPending.actionLabel,
+                          onRestoreAccount,
+                        ),
                       ),
                       onAction: onRestoreAccount,
                     ),

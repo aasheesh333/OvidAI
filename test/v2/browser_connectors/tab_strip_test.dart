@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:ui' show Tristate;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/browser/tab_strip.dart';
@@ -114,6 +115,37 @@ void main() {
     semantics.dispose();
   });
 
+  testWidgets('no tap, long-press or key can create a tab', (tester) async {
+    final semantics = tester.ensureSemantics();
+    var selects = 0;
+    await _pump(
+      tester,
+      BrowserTabStrip(tabs: _tabs, onSelectTab: (_) => selects++),
+    );
+
+    final plus = find.byKey(const ValueKey('v2-browser-tab-add'));
+    final button = tester.widget<IconButton>(
+      find.descendant(of: plus, matching: find.byType(IconButton)),
+    );
+    // No activation path at all: no tap, no long-press, no key handler.
+    expect(button.onPressed, isNull);
+    expect(button.onLongPress, isNull);
+    expect(button.focusNode?.canRequestFocus ?? false, isFalse);
+
+    await tester.longPress(plus);
+    await tester.tap(plus, warnIfMissed: false);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // The strip still holds exactly the tabs the agent opened.
+    expect(find.byKey(const ValueKey('v2-browser-tab-docs')), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-github')), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-inbox')), findsOneWidget);
+    expect(find.text('New tab'), findsNothing);
+    expect(selects, 0);
+    semantics.dispose();
+  });
+
   testWidgets('the active tab is marked and only one tab is active', (
     tester,
   ) async {
@@ -194,7 +226,10 @@ void main() {
   });
 
   testWidgets('close controls are 48 dp targets for every tab', (tester) async {
-    await _pump(tester, const BrowserTabStrip(tabs: _tabs));
+    await _pump(
+      tester,
+      BrowserTabStrip(tabs: _tabs, onCloseTab: (_) {}),
+    );
 
     for (final tab in _tabs) {
       final size = tester.getSize(
@@ -205,15 +240,16 @@ void main() {
     }
   });
 
-  testWidgets('closing is announced when the wiring has no close callback', (
+  testWidgets('a tab with no close callback has no close control', (
     tester,
   ) async {
     final semantics = tester.ensureSemantics();
     await _pump(tester, const BrowserTabStrip(tabs: _tabs));
 
-    final node = tester.getSemantics(find.bySemanticsLabel('Close Docs'));
-    expect(node.flagsCollection.isButton, isTrue);
-    expect(node.flagsCollection.isEnabled, Tristate.isFalse);
+    // There is no server close op, so an un-wired strip must not show an X
+    // that cannot close anything.
+    expect(find.byIcon(Icons.close_rounded), findsNothing);
+    expect(find.bySemanticsLabel('Close Docs'), findsNothing);
     semantics.dispose();
   });
 

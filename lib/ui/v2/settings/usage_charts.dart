@@ -156,11 +156,7 @@ class V2DailyTokensChart extends StatelessWidget {
       icon: Icons.bar_chart_rounded,
       title: emptyTitle,
       message: emptyMessage,
-      action: OButton(
-        label: 'Start a chat',
-        icon: Icons.chat_bubble_outline_rounded,
-        onPressed: onStartChat ?? onRetry,
-      ),
+      action: _emptyAction(onStartChat: onStartChat, onRetry: onRetry),
     );
   }
 
@@ -287,11 +283,7 @@ class V2ModelShareChart extends StatelessWidget {
       icon: Icons.pie_chart_outline_rounded,
       title: emptyTitle,
       message: emptyMessage,
-      action: OButton(
-        label: 'Start a chat',
-        icon: Icons.chat_bubble_outline_rounded,
-        onPressed: onStartChat ?? onRetry,
-      ),
+      action: _emptyAction(onStartChat: onStartChat, onRetry: onRetry),
     );
   }
 
@@ -409,11 +401,7 @@ class V2ImageUsageChart extends StatelessWidget {
       icon: Icons.image_outlined,
       title: emptyTitle,
       message: emptyMessage,
-      action: OButton(
-        label: 'Start a chat',
-        icon: Icons.chat_bubble_outline_rounded,
-        onPressed: onStartChat ?? onRetry,
-      ),
+      action: _emptyAction(onStartChat: onStartChat, onRetry: onRetry),
     );
   }
 
@@ -1008,6 +996,31 @@ class _ImageLinePainter extends CustomPainter {
       oldDelegate.gridColor != gridColor ||
       oldDelegate.baselineColor != baselineColor ||
       oldDelegate.progress != progress;
+}
+
+/// The empty-state action that is actually wired.
+///
+/// The old charts always labelled the button "Start a chat" even when no chat
+/// callback existed and the tap merely retried the fetch.
+Widget? _emptyAction({
+  required VoidCallback? onStartChat,
+  required VoidCallback? onRetry,
+}) {
+  if (onStartChat != null) {
+    return OButton(
+      label: 'Start a chat',
+      icon: Icons.chat_bubble_outline_rounded,
+      onPressed: onStartChat,
+    );
+  }
+  if (onRetry != null) {
+    return OButton(
+      label: 'Try again',
+      icon: Icons.refresh_rounded,
+      onPressed: onRetry,
+    );
+  }
+  return null;
 }
 
 Color _sliceColor(OColors c, int index) {

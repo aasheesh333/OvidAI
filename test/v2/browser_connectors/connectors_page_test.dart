@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/connectors/catalog_data.dart';
+import 'package:ovid_ai/ui/v2/connectors/connector_store.dart';
 import 'package:ovid_ai/ui/v2/connectors/connectors_page.dart';
 
 Widget _app(Widget child, {ThemeData? theme}) =>
@@ -580,16 +581,33 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('a switch with no callback is announced as disabled', (
+  testWidgets('the installed switch is wired even without a host callback', (
     tester,
   ) async {
+    // The page persists the change itself, so the switch must never be
+    // announced as disabled on a real screen.
     final handle = tester.ensureSemantics();
-    await _pump(tester, ConnectorsPage(data: _data()));
+    final store = V2MemoryConnectorStore(const [
+      V2ConnectorConnection(
+        id: 'github',
+        name: 'GitHub',
+        endpoint: 'https://api.github.com',
+        custom: false,
+      ),
+    ]);
+    await _pump(
+      tester,
+      ConnectorsPage(data: _data(), store: store),
+    );
 
     final data = tester
         .getSemantics(find.byType(Switch).first)
         .getSemanticsData();
-    expect(data.flagsCollection.isEnabled.toBoolOrNull(), isFalse);
+    expect(data.flagsCollection.isEnabled.toBoolOrNull(), isNot(false));
+
+    await tester.tap(find.byType(Switch).first);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect((await store.find('github'))!.enabled, isFalse);
     handle.dispose();
   });
 

@@ -20,6 +20,28 @@ class V2MemoryProject {
   final String detail;
 }
 
+/// The scope a memory entry belongs to. Also used by the filter chips so the
+/// screen can show one scope at a time instead of one long list.
+enum V2MemoryScope {
+  all('All'),
+  global('Global'),
+  project('Project'),
+  session('Session');
+
+  const V2MemoryScope(this.label);
+
+  final String label;
+}
+
+/// One learned fact with a stable id, so it can be forgotten individually.
+@immutable
+class V2MemoryEntry {
+  const V2MemoryEntry({required this.id, required this.text});
+
+  final String id;
+  final String text;
+}
+
 /// A file cached for the current chat.
 @immutable
 class V2MemoryFile {
@@ -43,9 +65,11 @@ class V2MemoryPageData {
     this.memoryEnabled = true,
     this.shareSessionMemory = false,
     this.globalMemory = const <String>[],
+    this.globalEntries,
     this.globalVersionLabel = '',
     this.projects = const <V2MemoryProject>[],
     this.sessionFiles = const <V2MemoryFile>[],
+    this.initialScope = V2MemoryScope.all,
     this.loading = false,
     this.errorMessage,
     this.onMemoryEnabledChanged,
@@ -53,6 +77,7 @@ class V2MemoryPageData {
     this.onEditGlobal,
     this.onProjectTap,
     this.onFileDownload,
+    this.onForgetMemory,
     this.onExport,
     this.onResetAll,
     this.onRetry,
@@ -63,9 +88,16 @@ class V2MemoryPageData {
   /// Whether facts from this chat may be reused by projects and shared chats.
   final bool shareSessionMemory;
   final List<String> globalMemory;
+
+  /// Facts with stable ids. When null, [globalMemory] is shown and each fact's
+  /// text doubles as its id.
+  final List<V2MemoryEntry>? globalEntries;
   final String globalVersionLabel;
   final List<V2MemoryProject> projects;
   final List<V2MemoryFile> sessionFiles;
+
+  /// Scope selected when the screen opens. The chips then change it locally.
+  final V2MemoryScope initialScope;
   final bool loading;
   final String? errorMessage;
 
@@ -74,19 +106,100 @@ class V2MemoryPageData {
   final VoidCallback? onEditGlobal;
   final ValueChanged<String>? onProjectTap;
   final ValueChanged<String>? onFileDownload;
+
+  /// Deletes one entry. Global entries pass their id (or text when no id was
+  /// supplied), project rows their project id and session rows their file id.
+  final void Function(V2MemoryScope scope, String id)? onForgetMemory;
   final VoidCallback? onExport;
   final VoidCallback? onResetAll;
   final VoidCallback? onRetry;
 
+  /// Global facts as entries, whether the caller supplied ids or plain text.
+  List<V2MemoryEntry> get resolvedGlobalEntries {
+    final explicit = globalEntries;
+    if (explicit != null) return explicit;
+    return [
+      for (var i = 0; i < globalMemory.length; i++)
+        V2MemoryEntry(id: '$i:${globalMemory[i]}', text: globalMemory[i]),
+    ];
+  }
+
   bool get isEmpty =>
-      globalMemory.isEmpty && projects.isEmpty && sessionFiles.isEmpty;
+      globalMemory.isEmpty &&
+      (globalEntries?.isEmpty ?? true) &&
+      projects.isEmpty &&
+      sessionFiles.isEmpty;
 }
 
 /// Memory settings: what Ovid remembers between chats, and how to clear it.
-class MemoryPage extends StatelessWidget {
+class MemoryPage extends StatefulWidget {
   const MemoryPage({super.key, required this.data});
 
   final V2MemoryPageData data;
+
+  @override
+  State<MemoryPage> createState() => _MemoryPageState();
+}
+
+class _MemoryPageState extends State<MemoryPage> {
+  late V2MemoryScope _scope = widget.data.initialScope;
+  late List<V2MemoryEntry> _global = widget.data.resolvedGlobalEntries;
+  late List<V2MemoryProject> _projects = widget.data.projects;
+  late List<V2MemoryFile> _files = widget.data.sessionFiles;
+
+  @override
+  void didUpdateWidget(covariant MemoryPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A parent rebuild is the source of truth: re-sync the working copies so a
+    // delete that failed server-side reappears instead of staying hidden.
+    if (!identical(oldWidget.data, widget.data)) {
+      _global = widget.data.resolvedGlobalEntries;
+      _projects = widget.data.projects;
+      _files = widget.data.sessionFiles;
+    }
+  }
+
+  V2MemoryPageData get data => widget.data;
+
+  bool _shows(V2MemoryScope scope) =>
+      _scope == V2MemoryScope.all || _scope == scope;
+
+  int get _scopeCount => switch (_scope) {
+    V2MemoryScope.all => _global.length + _projects.length + _files.length,
+    V2MemoryScope.global => _global.length,
+    V2MemoryScope.project => _projects.length,
+    V2MemoryScope.session => _files.length,
+  };
+
+  bool get _locallyEmpty =>
+      _global.isEmpty && _projects.isEmpty && _files.isEmpty;
+
+  /// Removes the entry locally, then reports it so the owner can delete it for
+  /// real. The list updates immediately, which is what makes "Forget" honest.
+  void _forget(V2MemoryScope scope, String id) {
+    setState(() {
+      switch (scope) {
+        case V2MemoryScope.global:
+          _global = [
+            for (final entry in _global)
+              if (entry.id != id) entry,
+          ];
+        case V2MemoryScope.project:
+          _projects = [
+            for (final project in _projects)
+              if (project.id != id) project,
+          ];
+        case V2MemoryScope.session:
+          _files = [
+            for (final file in _files)
+              if (file.id != id) file,
+          ];
+        case V2MemoryScope.all:
+          break;
+      }
+    });
+    data.onForgetMemory?.call(scope, id);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -103,7 +216,7 @@ class MemoryPage extends StatelessWidget {
     if (data.errorMessage != null) {
       return OErrorState(message: data.errorMessage!, onRetry: data.onRetry);
     }
-    if (data.isEmpty) {
+    if (_locallyEmpty) {
       final canTurnOn =
           !data.memoryEnabled && data.onMemoryEnabledChanged != null;
       return OEmptyState(
@@ -134,14 +247,53 @@ class MemoryPage extends StatelessWidget {
         child: OStagger(
           children: [
             _notice(context),
+            _scopeFilter(context),
             _toggleCard(context),
             _shareSessionCard(context),
-            _globalMemory(context),
-            _projectMemory(context),
-            _sessionFiles(context),
+            if (_shows(V2MemoryScope.global)) _globalMemory(context),
+            if (_shows(V2MemoryScope.project)) _projectMemory(context),
+            if (_shows(V2MemoryScope.session)) _sessionFiles(context),
             _footer(context),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Scope chips. Selecting one really filters the sections and their counts;
+  /// it is not a label. `All` restores the full screen.
+  Widget _scopeFilter(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.l),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('SHOW', style: OType.overline.copyWith(color: c.textMuted)),
+          const SizedBox(height: OSpace.s),
+          Wrap(
+            spacing: OSpace.s,
+            runSpacing: OSpace.s,
+            children: [
+              for (final scope in V2MemoryScope.values)
+                OChip(
+                  key: ValueKey<String>('memory-scope-${scope.name}'),
+                  label: scope.label,
+                  selected: _scope == scope,
+                  onTap: () => setState(() => _scope = scope),
+                ),
+            ],
+          ),
+          const SizedBox(height: OSpace.xs),
+          Text(
+            _scope == V2MemoryScope.all
+                ? '$_scopeCount memories across every scope'
+                : '$_scopeCount ${_scope.label.toLowerCase()} '
+                      '${_scopeCount == 1 ? 'memory' : 'memories'}',
+            key: const ValueKey<String>('memory-scope-count'),
+            style: OType.caption.copyWith(color: c.textFaint),
+          ),
+        ],
       ),
     );
   }
@@ -284,7 +436,7 @@ class MemoryPage extends StatelessWidget {
 
   Widget _globalMemory(BuildContext context) {
     final c = OColors.of(context);
-    final entries = data.globalMemory.length;
+    final entries = _global.length;
     final largeText = _largeText(context);
     final editButton = OButton(
       label: 'Edit',
@@ -337,15 +489,15 @@ class MemoryPage extends StatelessWidget {
                     style: OType.caption.copyWith(color: c.textFaint),
                   ),
                 const SizedBox(height: OSpace.s),
-                if (data.globalMemory.isEmpty)
+                if (_global.isEmpty)
                   Text(
                     'No global memories yet.',
                     style: OType.bodySm.copyWith(color: c.textMuted),
                   )
                 else
-                  for (var i = 0; i < data.globalMemory.length; i++) ...[
+                  for (var i = 0; i < _global.length; i++) ...[
                     if (i > 0) const SizedBox(height: OSpace.s),
-                    _memoryLine(context, data.globalMemory[i]),
+                    _memoryLine(context, _global[i]),
                   ],
               ],
             ),
@@ -385,10 +537,16 @@ class MemoryPage extends StatelessWidget {
   bool _largeText(BuildContext context) =>
       MediaQuery.textScalerOf(context).scale(14) > 18;
 
-  Widget _memoryLine(BuildContext context, String text) {
+  Widget _memoryLine(BuildContext context, V2MemoryEntry entry) {
     final c = OColors.of(context);
+    final canForget = data.onForgetMemory != null;
     return Container(
-      padding: const EdgeInsets.all(OSpace.m),
+      padding: EdgeInsets.fromLTRB(
+        OSpace.m,
+        OSpace.m,
+        canForget ? OSpace.xs : OSpace.m,
+        OSpace.m,
+      ),
       decoration: BoxDecoration(
         color: c.surfaceAlt,
         borderRadius: BorderRadius.circular(ORadius.m),
@@ -396,11 +554,25 @@ class MemoryPage extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.check_circle_rounded, size: 18, color: c.accent),
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Icon(Icons.check_circle_rounded, size: 18, color: c.accent),
+          ),
           const SizedBox(width: OSpace.m),
           Expanded(
-            child: Text(text, style: OType.bodySm.copyWith(color: c.text)),
+            child: Text(
+              entry.text,
+              style: OType.bodySm.copyWith(color: c.text),
+            ),
           ),
+          if (canForget)
+            OIconButton(
+              key: ValueKey<String>('memory-forget-global-${entry.id}'),
+              icon: Icons.delete_outline_rounded,
+              semanticLabel: 'Forget ${entry.text}',
+              tooltip: 'Forget this memory',
+              onPressed: () => _forget(V2MemoryScope.global, entry.id),
+            ),
         ],
       ),
     );
@@ -408,7 +580,8 @@ class MemoryPage extends StatelessWidget {
 
   Widget _projectMemory(BuildContext context) {
     final c = OColors.of(context);
-    final active = data.projects.length;
+    final active = _projects.length;
+    final canForget = data.onForgetMemory != null;
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.l),
       child: Column(
@@ -417,9 +590,12 @@ class MemoryPage extends StatelessWidget {
           _sectionHeader(
             context,
             'Project memory',
-            Text('$active active', style: OType.caption.copyWith(color: c.success)),
+            Text(
+              '$active active',
+              style: OType.caption.copyWith(color: c.success),
+            ),
           ),
-          if (data.projects.isEmpty)
+          if (_projects.isEmpty)
             OCard(
               child: Text(
                 'No project memories yet. Ovid learns a project as you work in it.',
@@ -431,15 +607,30 @@ class MemoryPage extends StatelessWidget {
               padding: EdgeInsets.zero,
               child: Column(
                 children: [
-                  for (var i = 0; i < data.projects.length; i++) ...[
+                  for (var i = 0; i < _projects.length; i++) ...[
                     if (i > 0) Divider(color: c.hairline, height: 1),
                     OListRow(
                       icon: Icons.folder_rounded,
-                      title: data.projects[i].name,
-                      subtitle: data.projects[i].detail,
+                      title: _projects[i].name,
+                      subtitle: _projects[i].detail,
                       onTap: data.onProjectTap == null
                           ? null
-                          : () => data.onProjectTap!(data.projects[i].id),
+                          : () => data.onProjectTap!(_projects[i].id),
+                      trailing: !canForget
+                          ? null
+                          : OIconButton(
+                              key: ValueKey<String>(
+                                'memory-forget-project-${_projects[i].id}',
+                              ),
+                              icon: Icons.delete_outline_rounded,
+                              semanticLabel:
+                                  'Forget ${_projects[i].name} memory',
+                              tooltip: 'Forget project memory',
+                              onPressed: () => _forget(
+                                V2MemoryScope.project,
+                                _projects[i].id,
+                              ),
+                            ),
                     ),
                   ],
                 ],
@@ -452,7 +643,7 @@ class MemoryPage extends StatelessWidget {
 
   Widget _sessionFiles(BuildContext context) {
     final c = OColors.of(context);
-    final count = data.sessionFiles.length;
+    final count = _files.length;
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.l),
       child: Column(
@@ -466,7 +657,7 @@ class MemoryPage extends StatelessWidget {
               style: OType.caption.copyWith(color: c.textMuted),
             ),
           ),
-          if (data.sessionFiles.isEmpty)
+          if (_files.isEmpty)
             OCard(
               child: Text(
                 'No files are cached for this chat. Add a file in chat to keep it here.',
@@ -478,9 +669,9 @@ class MemoryPage extends StatelessWidget {
               padding: EdgeInsets.zero,
               child: Column(
                 children: [
-                  for (var i = 0; i < data.sessionFiles.length; i++) ...[
+                  for (var i = 0; i < _files.length; i++) ...[
                     if (i > 0) Divider(color: c.hairline, height: 1),
-                    _fileRow(context, data.sessionFiles[i]),
+                    _fileRow(context, _files[i]),
                   ],
                 ],
               ),
@@ -546,6 +737,14 @@ class MemoryPage extends StatelessWidget {
                   ? null
                   : () => data.onFileDownload!(file.id),
             ),
+            if (data.onForgetMemory != null)
+              OIconButton(
+                key: ValueKey<String>('memory-forget-file-${file.id}'),
+                icon: Icons.delete_outline_rounded,
+                semanticLabel: 'Forget ${file.name}',
+                tooltip: 'Forget this file',
+                onPressed: () => _forget(V2MemoryScope.session, file.id),
+              ),
           ],
         ),
       ),

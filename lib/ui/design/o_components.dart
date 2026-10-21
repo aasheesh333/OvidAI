@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 
 import 'o_motion.dart';
 import 'o_tokens.dart';
@@ -37,7 +38,9 @@ class OButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final enabled = onPressed != null && !loading;
-    final height = size == OButtonSize.compact ? 44.0 : OSpace.touch;
+    // Compact is shorter *content* (tighter horizontal padding), never a
+    // smaller hit area: both sizes keep the 48 dp touch floor.
+    final height = OSpace.touch;
     final content = Row(
       mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
       mainAxisAlignment: MainAxisAlignment.center,
@@ -59,15 +62,25 @@ class OButton extends StatelessWidget {
           Icon(icon, size: 19),
         if (loading || icon != null) const SizedBox(width: OSpace.s),
         Flexible(
-          child: Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: OType.label.copyWith(
-              color: _foreground(c, enabled),
-              fontSize: size == OButtonSize.compact ? 13 : 14,
-            ),
-          ),
+          child: semanticLabel == null
+              ? Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.label.copyWith(
+                    color: _foreground(c, enabled),
+                  ),
+                )
+              : ExcludeSemantics(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: OType.label.copyWith(
+                      color: _foreground(c, enabled),
+                    ),
+                  ),
+                ),
         ),
         if (trailing != null) ...[const SizedBox(width: OSpace.s), trailing!],
       ],
@@ -76,7 +89,7 @@ class OButton extends StatelessWidget {
     final shape = const StadiumBorder();
     final padded = Padding(
       padding: EdgeInsets.symmetric(
-        horizontal: size == OButtonSize.compact ? 16 : 20,
+        horizontal: size == OButtonSize.compact ? OSpace.m : OSpace.buttonPad,
       ),
       child: content,
     );
@@ -152,6 +165,17 @@ class OButton extends StatelessWidget {
       label: semanticLabel ?? label,
       button: true,
       enabled: enabled,
+      // A button nested inside a tappable row or card must stay its own node;
+      // without a container its label is merged into the parent's and the
+      // action becomes unreachable for a screen reader.
+      container: true,
+      // The label above is the whole button. Keeping the inner Text in the
+      // tree as well produced a second node with the same label, so a
+      // `find.bySemanticsLabel('Retry')` matched twice and TalkBack read the
+      // button twice. Excluding the child also drops its tap action, so the
+      // wrapper declares the action itself.
+      excludeSemantics: true,
+      onTap: enabled ? onPressed : null,
       child: sized,
     );
   }
@@ -216,6 +240,9 @@ class OIconButton extends StatelessWidget {
       label: semanticLabel,
       button: true,
       enabled: enabled,
+      // See OButton: keep the icon button's own node so an overflow menu
+      // inside a tappable card is still reachable.
+      container: true,
       child: tooltip == null ? button : Tooltip(message: tooltip!, child: button),
     );
   }
@@ -300,60 +327,80 @@ class OListRow extends StatelessWidget {
         (icon == null
             ? null
             : Container(
-                width: 36,
-                height: 36,
+                width: OSpace.iconTile,
+                height: OSpace.iconTile,
                 decoration: BoxDecoration(
                   color: danger ? c.danger.withValues(alpha: 0.10) : c.surfaceAlt,
                   borderRadius: BorderRadius.circular(ORadius.m),
                 ),
                 child: Icon(icon, size: 19, color: danger ? c.danger : c.textMuted),
               ));
-    final row = ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: OSpace.listRow),
-      child: Padding(
-        padding: padding,
-        child: Row(
-          children: [
-            if (leadingWidget != null) ...[
-              leadingWidget,
-              const SizedBox(width: OSpace.m),
-            ],
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    title,
-                    style: OType.body.copyWith(
-                      color: fg,
-                      fontWeight: FontWeight.w500,
-                    ),
+    // The visible title/subtitle text is decoration once the row has an
+    // explicit label: leaving it in the tree makes TalkBack read every row
+    // twice ("Rename chat, Rename chat"). Trailing/leading controls keep their
+    // own semantics.
+    final content = Row(
+      children: [
+        if (leadingWidget != null) ...[
+          leadingWidget,
+          const SizedBox(width: OSpace.m),
+        ],
+        Expanded(
+          child: ExcludeSemantics(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  title,
+                  style: OType.body.copyWith(
+                    color: fg,
+                    fontWeight: FontWeight.w500,
                   ),
-                  if (subtitle != null) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle!,
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ],
+                ),
+                if (subtitle != null) ...[
+                  const SizedBox(height: OSpace.xxs),
+                  Text(
+                    subtitle!,
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  ),
                 ],
-              ),
+              ],
             ),
-            if (trailing != null) ...[
-              const SizedBox(width: OSpace.s),
-              trailing!,
-            ] else if (showChevron && onTap != null)
-              Icon(Icons.chevron_right_rounded, size: 20, color: c.textFaint),
-          ],
+          ),
         ),
-      ),
+        if (trailing != null) ...[
+          const SizedBox(width: OSpace.s),
+          trailing!,
+        ] else if (showChevron && onTap != null)
+          Icon(Icons.chevron_right_rounded, size: 20, color: c.textFaint),
+      ],
     );
-    if (onTap == null || !enabled) {
+    final labelledRow = ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: OSpace.listRow),
+      child: Padding(padding: padding, child: content),
+    );
+    if (onTap == null) {
+      // A row without an action is informational unless the caller explicitly
+      // marked it disabled. Announcing "disabled" on a value row ("Storage
+      // left, 3 GB") is wrong: it is not a control at all.
+      if (enabled) {
+        return Semantics(
+          label: subtitle == null ? title : '$title, $subtitle',
+          child: labelledRow,
+        );
+      }
       return Semantics(
         label: subtitle == null ? title : '$title, $subtitle',
-        enabled: enabled,
-        child: row,
+        enabled: false,
+        child: labelledRow,
+      );
+    }
+    if (!enabled) {
+      return Semantics(
+        label: subtitle == null ? title : '$title, $subtitle',
+        enabled: false,
+        child: labelledRow,
       );
     }
     return Material(
@@ -364,7 +411,7 @@ class OListRow extends StatelessWidget {
         child: Semantics(
           label: subtitle == null ? title : '$title, $subtitle',
           button: true,
-          child: row,
+          child: labelledRow,
         ),
       ),
     );
@@ -397,11 +444,15 @@ class OSectionHeader extends StatelessWidget {
       child: Row(
         children: [
           Expanded(
-            child: Text(
-              label.toUpperCase(),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.overline.copyWith(color: c.textMuted),
+            child: Semantics(
+              container: true,
+              header: true,
+              child: Text(
+                label.toUpperCase(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: OType.overline.copyWith(color: c.textMuted),
+              ),
             ),
           ),
           if (trailing != null)
@@ -442,7 +493,10 @@ class OChip extends StatelessWidget {
       duration: OMotion.fast,
       curve: OMotion.standard,
       constraints: const BoxConstraints(minHeight: 34),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+      padding: const EdgeInsets.symmetric(
+        horizontal: OSpace.controlPad,
+        vertical: OSpace.xs,
+      ),
       decoration: BoxDecoration(
         color: selected ? c.accentSoft : c.surface,
         borderRadius: BorderRadius.circular(ORadius.m),
@@ -455,7 +509,7 @@ class OChip extends StatelessWidget {
         children: [
           if (icon != null) ...[
             Icon(icon, size: 15, color: fg),
-            const SizedBox(width: 6),
+            const SizedBox(width: OSpace.iconGap),
           ],
           Flexible(
             child: Text(
@@ -464,7 +518,6 @@ class OChip extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: OType.label.copyWith(
                 color: fg,
-                fontSize: 13,
                 fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
               ),
             ),
@@ -494,12 +547,33 @@ class OChip extends StatelessWidget {
 
 enum OPillTone { neutral, accent, success, warn, danger }
 
+/// The one pill/tag in the rebuilt UI: a 24 dp status label with an optional
+/// leading dot or icon.
+///
+/// This replaces the ~25 screen-local `_Tag` / `_Pill` / `_Badge` / `_Chip`
+/// copies that each re-implemented the same tone switch with a bare 10 dp
+/// padding and a hand-rolled radius. Any new tag belongs here.
 class OPill extends StatelessWidget {
-  const OPill({super.key, required this.label, this.tone = OPillTone.neutral, this.dot = false});
+  const OPill({
+    super.key,
+    required this.label,
+    this.tone = OPillTone.neutral,
+    this.dot = false,
+    this.icon,
+    this.semanticLabel,
+  });
 
   final String label;
   final OPillTone tone;
+
+  /// A 6 dp status dot before the label.
   final bool dot;
+
+  /// A leading glyph, for tags that need one ("Most popular", "Connected").
+  final IconData? icon;
+
+  /// Overrides the spoken label when the visible text is an abbreviation.
+  final String? semanticLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -511,9 +585,12 @@ class OPill extends StatelessWidget {
       OPillTone.warn => (c.warn.withValues(alpha: 0.12), c.warn),
       OPillTone.danger => (c.danger.withValues(alpha: 0.12), c.danger),
     };
-    return Container(
+    final pill = Container(
       constraints: const BoxConstraints(minHeight: 24),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+      padding: const EdgeInsets.symmetric(
+        horizontal: OSpace.pillPad,
+        vertical: OSpace.xxs,
+      ),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(ORadius.pill),
@@ -527,7 +604,11 @@ class OPill extends StatelessWidget {
               height: 6,
               decoration: BoxDecoration(color: fg, shape: BoxShape.circle),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: OSpace.iconGap),
+          ],
+          if (icon != null) ...[
+            Icon(icon, size: 13, color: fg),
+            const SizedBox(width: OSpace.xs),
           ],
           Flexible(
             child: Text(
@@ -542,6 +623,13 @@ class OPill extends StatelessWidget {
           ),
         ],
       ),
+    );
+    if (semanticLabel == null) return pill;
+    return Semantics(
+      label: semanticLabel,
+      container: true,
+      excludeSemantics: true,
+      child: pill,
     );
   }
 }
@@ -583,11 +671,15 @@ class OAvatar extends StatelessWidget {
         alignment: Alignment.center,
         child: image != null
             ? null
-            : Text(
-                label,
-                style: OType.label.copyWith(
-                  color: c.accent,
-                  fontSize: size * 0.36,
+            : ExcludeSemantics(
+                child: Text(
+                  label,
+                  style: OType.label.copyWith(
+                    color: c.accent,
+                    // Initials scale with the circle but never drop below the
+                    // 11 sp floor or above the 18 sp cap.
+                    fontSize: (size * 0.36).clamp(11.0, 18.0),
+                  ),
                 ),
               ),
       ),
@@ -627,7 +719,7 @@ class OSearchField extends StatelessWidget {
         hintText: hint,
         prefixIcon: Icon(Icons.search_rounded, size: 20, color: c.textFaint),
         suffixIcon: trailing,
-        contentPadding: const EdgeInsets.symmetric(vertical: 12),
+        contentPadding: const EdgeInsets.symmetric(vertical: OSpace.m),
       ),
     );
   }
@@ -672,10 +764,14 @@ class OEmptyState extends StatelessWidget {
                 child: Icon(icon, size: compact ? 26 : 32, color: c.accent),
               ),
               SizedBox(height: compact ? OSpace.m : OSpace.l),
-              Text(
-                title,
-                textAlign: TextAlign.center,
-                style: OType.h2.copyWith(color: c.text),
+              Semantics(
+                container: true,
+                header: true,
+                child: Text(
+                  title,
+                  textAlign: TextAlign.center,
+                  style: OType.h2.copyWith(color: c.text),
+                ),
               ),
               const SizedBox(height: OSpace.s),
               ConstrainedBox(
@@ -897,7 +993,14 @@ class OAppBar extends StatelessWidget implements PreferredSizeWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return AppBar(
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
+      // TalkBack reads the tree in widget order; the Scaffold lays the body
+      // out before the app bar, which would read content before its title.
+      // Sort keys keep the visible top-to-bottom order.
+      sortKey: OrdinalSortKey(0),
+      child: AppBar(
       automaticallyImplyLeading: false,
       leading: leading ??
           (showBack
@@ -914,11 +1017,15 @@ class OAppBar extends StatelessWidget implements PreferredSizeWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              title,
-              style: OType.h2.copyWith(color: c.text),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+            Semantics(
+              container: true,
+              header: true,
+              child: Text(
+                title,
+                style: OType.h2.copyWith(color: c.text),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
             if (subtitle != null)
               Text(
@@ -935,6 +1042,7 @@ class OAppBar extends StatelessWidget implements PreferredSizeWidget {
         const SizedBox(width: OSpace.s),
       ],
       bottom: bottom,
+      ),
     );
   }
 }
@@ -964,7 +1072,12 @@ class OScaffold extends StatelessWidget {
     return Scaffold(
       backgroundColor: backgroundColor ?? c.bg,
       appBar: appBar,
-      body: SafeArea(child: body),
+      body: Semantics(
+        container: true,
+        explicitChildNodes: true,
+        sortKey: OrdinalSortKey(1),
+        child: SafeArea(child: body),
+      ),
       floatingActionButton: floatingActionButton,
       bottomNavigationBar: bottomNavigationBar,
       resizeToAvoidBottomInset: resizeToAvoidBottomInset,
@@ -998,10 +1111,10 @@ Future<T?> showOSheet<T>(
             const SizedBox(height: OSpace.s),
             Container(
               width: 36,
-              height: 4,
+              height: OSpace.xs,
               decoration: BoxDecoration(
                 color: c.hairlineStrong,
-                borderRadius: BorderRadius.circular(2),
+                borderRadius: BorderRadius.circular(ORadius.pill),
               ),
             ),
             if (title != null)
@@ -1058,7 +1171,7 @@ class OProgressBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return ClipRRect(
-      borderRadius: BorderRadius.circular(height),
+      borderRadius: BorderRadius.circular(ORadius.pill),
       child: TweenAnimationBuilder<double>(
         tween: Tween<double>(begin: 0, end: value.clamp(0, 1)),
         duration: OMotion.slow,

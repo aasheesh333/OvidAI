@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
@@ -47,6 +49,7 @@ V2DataControlPageData _data({
   V2ImportValidation? importValidation,
   VoidCallback? onExportImport,
   VoidCallback? onExport,
+  V2ExportFileWriter? onSaveExport,
   VoidCallback? onChooseImport,
   VoidCallback? onImport,
   V2ExportSessionToggle? onExportSessionToggled,
@@ -72,6 +75,7 @@ V2DataControlPageData _data({
     memorySummaryLabel: memorySummaryLabel,
     onExportImport: onExportImport,
     onExport: onExport,
+    onSaveExport: onSaveExport,
     onChooseImport: onChooseImport,
     onImport: onImport,
     onExportSessionToggled: onExportSessionToggled,
@@ -837,6 +841,107 @@ void main() {
     expect(find.text('Your data settings could not load.'), findsOneWidget);
     await tester.tap(find.text('Try again'));
     expect(retried, isTrue);
+  });
+
+  testWidgets('save to device writes a real file at the chosen path', (
+    tester,
+  ) async {
+    final dir = Directory.systemTemp.createTempSync('ovid-export-test');
+    addTearDown(() {
+      if (dir.existsSync()) dir.deleteSync(recursive: true);
+    });
+    final path = '${dir.path}/ovid-transcripts-v1.zip';
+
+    await tester.pumpWidget(
+      _app(
+        DataControlPage(
+          data: _data(
+            onSaveExport: () async {
+              File(path).writeAsBytesSync(const [1, 2, 3]);
+              return path;
+            },
+          ),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Save to device'));
+    await tester.tap(find.text('Save to device'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(File(path).existsSync(), isTrue);
+    expect(File(path).lengthSync(), 3);
+    expect(find.text('Saved to $path'), findsOneWidget);
+  });
+
+  testWidgets('cancelling the save dialog reports it and leaves no file', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        DataControlPage(data: _data(onSaveExport: () async => null)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Save to device'));
+    await tester.tap(find.text('Save to device'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Export cancelled.'), findsOneWidget);
+  });
+
+  testWidgets('delete without a contact requires the word DELETE exactly', (
+    tester,
+  ) async {
+    var deleted = false;
+    await tester.pumpWidget(
+      _app(
+        DataControlPage(
+          data: _data(
+            accountContact: '',
+            onDeleteData: () => deleted = true,
+          ),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Delete your data'));
+    await tester.tap(find.text('Delete your data'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Type DELETE to confirm'), findsOneWidget);
+    expect(find.text('DELETE'), findsWidgets);
+    expect(find.text('Confirmation word'), findsOneWidget);
+
+    final confirm = find.byKey(const ValueKey('confirm-typed-button'));
+    expect(tester.widget<OButton>(confirm).onPressed, isNull);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('confirm-typed-field')),
+      'delete me',
+    );
+    await tester.pump();
+    expect(tester.widget<OButton>(confirm).onPressed, isNull);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('confirm-typed-field')),
+      'DELETE',
+    );
+    await tester.pump();
+    expect(tester.widget<OButton>(confirm).onPressed, isNotNull);
+
+    await tester.ensureVisible(confirm);
+    await tester.pumpAndSettle();
+    await tester.tap(confirm);
+    await tester.pumpAndSettle();
+    expect(deleted, isTrue);
   });
 }
 

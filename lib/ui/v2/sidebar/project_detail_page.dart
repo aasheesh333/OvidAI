@@ -193,14 +193,14 @@ class ProjectDetailContent extends StatelessWidget {
           icon: Icons.folder_open_rounded,
           title: 'Nothing here yet',
           message: 'Start a chat in this project or add a memory file.',
-          action: OButton(
-            key: const Key('v2-project-detail-empty-add'),
-            label: 'Add memory',
-            icon: Icons.add_rounded,
-            onPressed: onSaveMemory == null
-                ? null
-                : () => _openEditor(context, null),
-          ),
+          action: onSaveMemory == null
+              ? null
+              : OButton(
+                  key: const Key('v2-project-detail-empty-add'),
+                  label: 'Add memory',
+                  icon: Icons.add_rounded,
+                  onPressed: () => _openEditor(context, null),
+                ),
         ),
       );
     }
@@ -242,14 +242,14 @@ class ProjectDetailContent extends StatelessWidget {
           const SizedBox(height: OSpace.s),
           _Section(
             label: 'Memory',
-            trailing: OIconButton(
-              icon: Icons.add_rounded,
-              semanticLabel: 'Add memory',
-              size: 18,
-              onPressed: onSaveMemory == null
-                  ? null
-                  : () => _openEditor(context, null),
-            ),
+            trailing: onSaveMemory == null
+                ? null
+                : OIconButton(
+                    icon: Icons.add_rounded,
+                    semanticLabel: 'Add memory',
+                    size: 18,
+                    onPressed: () => _openEditor(context, null),
+                  ),
             children: [
               if (data.memoryFiles.isEmpty)
                 _MemoryHint(
@@ -630,12 +630,13 @@ class _MemoryRow extends StatelessWidget {
             ),
           ),
         ),
-        OIconButton(
-          icon: Icons.delete_outline_rounded,
-          semanticLabel: 'Delete memory ${file.name}',
-          size: 18,
-          onPressed: onDelete,
-        ),
+        if (onDelete != null)
+          OIconButton(
+            icon: Icons.delete_outline_rounded,
+            semanticLabel: 'Delete memory ${file.name}',
+            size: 18,
+            onPressed: onDelete,
+          ),
       ],
     );
   }
@@ -674,13 +675,15 @@ class _MemoryHint extends StatelessWidget {
                   'Memory is what this project remembers between chats.',
                   style: OType.caption.copyWith(color: c.textMuted),
                 ),
-                const SizedBox(height: OSpace.s),
-                OButton(
-                  label: 'Add memory',
-                  icon: Icons.add_rounded,
-                  size: OButtonSize.compact,
-                  onPressed: onAdd,
-                ),
+                if (onAdd != null) ...[
+                  const SizedBox(height: OSpace.s),
+                  OButton(
+                    label: 'Add memory',
+                    icon: Icons.add_rounded,
+                    size: OButtonSize.compact,
+                    onPressed: onAdd,
+                  ),
+                ],
               ],
             ),
           ),

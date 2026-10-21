@@ -31,6 +31,33 @@ extension V2ArtifactTypeFilterX on V2ArtifactTypeFilter {
   };
 }
 
+/// When an artifact was added. The page applies it against the library's
+/// injectable clock, so a preview or a test never depends on wall time.
+enum V2ArtifactDateFilter { all, today, week, month }
+
+extension V2ArtifactDateFilterX on V2ArtifactDateFilter {
+  String get label => switch (this) {
+    V2ArtifactDateFilter.all => 'Any time',
+    V2ArtifactDateFilter.today => 'Today',
+    V2ArtifactDateFilter.week => 'Last 7 days',
+    V2ArtifactDateFilter.month => 'Last 30 days',
+  };
+
+  String get description => switch (this) {
+    V2ArtifactDateFilter.all => 'Every date',
+    V2ArtifactDateFilter.today => 'Added since midnight',
+    V2ArtifactDateFilter.week => 'Added in the last week',
+    V2ArtifactDateFilter.month => 'Added in the last 30 days',
+  };
+
+  IconData get icon => switch (this) {
+    V2ArtifactDateFilter.all => Icons.event_available_outlined,
+    V2ArtifactDateFilter.today => Icons.today_rounded,
+    V2ArtifactDateFilter.week => Icons.date_range_rounded,
+    V2ArtifactDateFilter.month => Icons.calendar_month_rounded,
+  };
+}
+
 /// Where an artifact came from. [all] keeps generated and uploaded files.
 enum V2ArtifactSourceFilter { all, generated, uploaded }
 
@@ -128,12 +155,16 @@ class V2ArtifactFilters {
   const V2ArtifactFilters({
     this.type = V2ArtifactTypeFilter.all,
     this.source = V2ArtifactSourceFilter.all,
+    this.date = V2ArtifactDateFilter.all,
     this.sessionId,
     this.sort = V2ArtifactSort.newest,
   });
 
   final V2ArtifactTypeFilter type;
   final V2ArtifactSourceFilter source;
+
+  /// When the artifact was added. The page resolves it against its clock.
+  final V2ArtifactDateFilter date;
 
   /// `null` means every session, including uploads with no session.
   final String? sessionId;
@@ -143,6 +174,7 @@ class V2ArtifactFilters {
   bool get isActive =>
       type != V2ArtifactTypeFilter.all ||
       source != V2ArtifactSourceFilter.all ||
+      date != V2ArtifactDateFilter.all ||
       sessionId != null ||
       sort != V2ArtifactSort.newest;
 
@@ -150,12 +182,14 @@ class V2ArtifactFilters {
   V2ArtifactFilters copyWith({
     V2ArtifactTypeFilter? type,
     V2ArtifactSourceFilter? source,
+    V2ArtifactDateFilter? date,
     V2ArtifactSort? sort,
     Object? sessionId = _unsetFilterValue,
   }) {
     return V2ArtifactFilters(
       type: type ?? this.type,
       source: source ?? this.source,
+      date: date ?? this.date,
       sort: sort ?? this.sort,
       sessionId: identical(sessionId, _unsetFilterValue)
           ? this.sessionId
@@ -169,11 +203,12 @@ class V2ArtifactFilters {
       other is V2ArtifactFilters &&
           other.type == type &&
           other.source == source &&
+          other.date == date &&
           other.sessionId == sessionId &&
           other.sort == sort;
 
   @override
-  int get hashCode => Object.hash(type, source, sessionId, sort);
+  int get hashCode => Object.hash(type, source, date, sessionId, sort);
 }
 
 /// Size and count line shown under the controls.
@@ -355,6 +390,16 @@ class ArtifactFilterBar extends StatelessWidget {
               onTap: _interactive ? () => _pickSession(context) : null,
             ),
             _FilterButton(
+              key: const ValueKey<String>('artifact-filter-date'),
+              icon: filters.date.icon,
+              label: filters.date.label,
+              semanticLabel: 'Added: ${filters.date.label}',
+              hint: 'Opens the date filter',
+              selected: filters.date != V2ArtifactDateFilter.all,
+              maxWidth: maxWidth,
+              onTap: _interactive ? () => _pickDate(context) : null,
+            ),
+            _FilterButton(
               key: const ValueKey<String>('artifact-filter-sort'),
               icon: filters.sort.icon,
               label: filters.sort.label,
@@ -462,8 +507,31 @@ class ArtifactFilterBar extends StatelessWidget {
     );
   }
 
-  Future<void> _pickSort(BuildContext context) async {
-    final picked = await showOSheet<V2ArtifactSort>(
+  Future<void> _pickDate(BuildContext context) async {
+    final picked = await showOSheet<V2ArtifactDateFilter>(
+      context,
+      title: 'Added',
+      builder: (sheetContext) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.only(bottom: OSpace.l),
+        children: [
+          for (final date in V2ArtifactDateFilter.values)
+            OListRow(
+              title: date.label,
+              subtitle: date.description,
+              icon: date.icon,
+              showChevron: false,
+              trailing: date == filters.date ? _check(sheetContext) : null,
+              onTap: () => Navigator.of(sheetContext).pop(date),
+            ),
+        ],
+      ),
+    );
+    if (!context.mounted || picked == null) return;
+    _change(filters.copyWith(date: picked));
+  }
+
+  Future<void> _pickSort(BuildContext context) async {    final picked = await showOSheet<V2ArtifactSort>(
       context,
       title: 'Sort by',
       builder: (sheetContext) => ListView(

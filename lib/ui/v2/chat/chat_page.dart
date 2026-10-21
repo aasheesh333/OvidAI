@@ -1,14 +1,19 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import '../a11y/live_region.dart';
 import 'composer_attachments.dart';
 import 'composer_mentions.dart';
+import 'composer_plus_sheet.dart';
 import 'composer_voice.dart';
 import 'model_chip.dart';
+import 'permission_sheet.dart';
 import 'queue_dock.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
@@ -129,6 +134,7 @@ class V2ChatPage extends StatefulWidget {
     this.onSubmit,
     this.mentionSource,
     this.attachmentPicker,
+    this.imagePicker,
     this.voiceService,
     this.voiceLanguage,
   });
@@ -173,6 +179,10 @@ class V2ChatPage extends StatefulWidget {
   /// selection (legacy wiring).
   final V2AttachmentPicker? attachmentPicker;
 
+  /// Image-only picker for the plus menu's Photo row. Defaults to the
+  /// platform image picker.
+  final V2ImagePicker? imagePicker;
+
   /// Voice seam. When set (or when [onMic] is null) the composer owns
   /// dictation; otherwise [onMic] keeps the host in control.
   final V2VoiceService? voiceService;
@@ -199,6 +209,11 @@ class _V2ChatPageState extends State<V2ChatPage> {
   String? _attachmentError;
   bool _syncingDraft = false;
 
+  /// Last asynchronous result, announced through a live region. Cleared after
+  /// two seconds so the same result can be announced again.
+  String _announcement = '';
+  Timer? _announcementTimer;
+
   @override
   void initState() {
     super.initState();
@@ -218,6 +233,9 @@ class _V2ChatPageState extends State<V2ChatPage> {
   @override
   void didUpdateWidget(V2ChatPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.data.queuedCount > oldWidget.data.queuedCount) {
+      _announce('Message queued');
+    }
     if (widget.data.draft != oldWidget.data.draft &&
         widget.data.draft != _controller.text) {
       _syncingDraft = true;
@@ -233,6 +251,7 @@ class _V2ChatPageState extends State<V2ChatPage> {
 
   @override
   void dispose() {
+    _announcementTimer?.cancel();
     if (_voice.listening) unawaited(_voice.cancel());
     _voice
       ..removeListener(_handleVoiceChanged)
@@ -320,14 +339,45 @@ class _V2ChatPageState extends State<V2ChatPage> {
       widget.onPlus!();
       return;
     }
-    final picker = widget.attachmentPicker;
-    if (picker == null && widget.onAttach != null) {
+    await _openPlusMenu();
+  }
+
+  /// The composer owns the "+" menu when the host does not supply one. Every
+  /// row it shows performs a real action: File and Photo stage files, and the
+  /// blocked Studio row opens Studio (when the host wired it). Camera has no
+  /// capture implementation in this build, so it is disabled with an honest
+  /// reason instead of opening a gallery picker that pretends to be a camera.
+  /// Connectors has no route here, so the row is omitted rather than dead.
+  Future<void> _openPlusMenu() async {
+    if (!mounted) return;
+    await showV2ComposerPlusSheet(
+      context,
+      data: const V2ComposerPlusData(
+        cameraAvailable: false,
+        cameraUnavailableReason: V2ComposerPlusSheet.cameraBuildReason,
+        showConnectors: false,
+      ),
+      onPhoto: () => unawaited(_pickAttachments(images: true)),
+      onFile: () => unawaited(_pickAttachments(images: false)),
+      onOpenStudio: widget.onStudio,
+    );
+  }
+
+  Future<void> _pickAttachments({required bool images}) async {
+    if (_locked || _running) return;
+    // Legacy host wiring: when a host supplies `onAttach` and no picker, the
+    // host owns file selection. Images always use the composer's picker
+    // because the host seam has no image variant.
+    if (!images && widget.attachmentPicker == null && widget.onAttach != null) {
       widget.onAttach!();
       return;
     }
+    final picker = images
+        ? (widget.imagePicker ?? pickV2ImageFiles)
+        : (widget.attachmentPicker ?? pickV2AttachmentFiles);
     List<V2ComposerAttachment>? picked;
     try {
-      picked = await (picker ?? pickV2AttachmentFiles)();
+      picked = await picker();
     } catch (_) {
       if (mounted) {
         setState(() {
@@ -364,6 +414,15 @@ class _V2ChatPageState extends State<V2ChatPage> {
     await _voice.toggle(_controller.text);
   }
 
+  void _announce(String message) {
+    if (!mounted) return;
+    _announcementTimer?.cancel();
+    setState(() => _announcement = message);
+    _announcementTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _announcement = '');
+    });
+  }
+
   void _send() {
     final text = _controller.text.trim();
     if (text.isEmpty && _attachments.isEmpty) return;
@@ -388,6 +447,7 @@ class _V2ChatPageState extends State<V2ChatPage> {
       widget.onSend?.call(text);
     }
     _clearComposer();
+    _announce('Message sent');
   }
 
   void _clearComposer() {
@@ -489,10 +549,10 @@ class _V2ChatPageState extends State<V2ChatPage> {
                       onSend: _send,
                       onStop: widget.onStop,
                       onAttach: _attach,
-                      onPlus: widget.onPlus,
                       onPermissionTap: widget.onPermissionTap,
                       onMic: _toggleVoice,
                     ),
+                    OLiveRegion(message: _announcement),
                   ],
                 ),
               ),
@@ -568,15 +628,19 @@ class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return AppBar(
-      automaticallyImplyLeading: false,
-      titleSpacing: 0,
-      leadingWidth: OSpace.touch,
-      leading: OIconButton(
-        icon: Icons.menu_rounded,
-        semanticLabel: 'Open menu',
-        onPressed: onMenu,
-      ),
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
+      sortKey: OrdinalSortKey(0),
+      child: AppBar(
+        automaticallyImplyLeading: false,
+        titleSpacing: 0,
+        leadingWidth: OSpace.touch,
+        leading: OIconButton(
+          icon: Icons.menu_rounded,
+          semanticLabel: 'Open menu',
+          onPressed: onMenu,
+        ),
       title: Row(
         children: [
           // The chip and the title share the bar. Both are flexible so a
@@ -595,11 +659,15 @@ class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
           const SizedBox(width: OSpace.xs),
           Flexible(
             flex: 2,
-            child: Text(
-              title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.h2.copyWith(color: c.text),
+            child: Semantics(
+              container: true,
+              header: true,
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: OType.h2.copyWith(color: c.text),
+              ),
             ),
           ),
         ],
@@ -615,16 +683,18 @@ class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
           semanticLabel: 'Open Browser',
           onPressed: onBrowser,
         ),
-        OIconButton(
-          icon: Icons.more_vert_rounded,
-          semanticLabel: 'More options',
-          onPressed: onMore,
-        ),
+        if (onMore != null)
+          OIconButton(
+            icon: Icons.more_vert_rounded,
+            semanticLabel: 'More options',
+            onPressed: onMore,
+          ),
         const SizedBox(width: OSpace.xs),
       ],
       bottom: PreferredSize(
         preferredSize: const Size.fromHeight(1),
         child: Divider(height: 1, color: c.hairline),
+      ),
       ),
     );
   }
@@ -678,10 +748,14 @@ class _HomeContent extends StatelessWidget {
               ),
             ),
             const SizedBox(height: OSpace.l),
-            Text(
-              data.headline,
-              textAlign: TextAlign.center,
-              style: OType.h1.copyWith(color: c.text),
+            Semantics(
+              container: true,
+              header: true,
+              child: Text(
+                data.headline,
+                textAlign: TextAlign.center,
+                style: OType.h1.copyWith(color: c.text),
+              ),
             ),
             const SizedBox(height: OSpace.s),
             Text(
@@ -964,7 +1038,6 @@ class _Composer extends StatelessWidget {
     required this.onSend,
     required this.onStop,
     required this.onAttach,
-    required this.onPlus,
     required this.onPermissionTap,
     required this.onMic,
   });
@@ -982,7 +1055,6 @@ class _Composer extends StatelessWidget {
   final VoidCallback onSend;
   final VoidCallback? onStop;
   final VoidCallback? onAttach;
-  final VoidCallback? onPlus;
   final VoidCallback? onPermissionTap;
   final VoidCallback? onMic;
 
@@ -1016,36 +1088,44 @@ class _Composer extends StatelessWidget {
             children: [
               OIconButton(
                 icon: Icons.add_rounded,
-                semanticLabel: onPlus != null
-                    ? 'Add attachment or action'
-                    : 'Attach a file',
+                semanticLabel: 'Add attachment or action',
                 onPressed: enabled ? onAttach : null,
               ),
               Expanded(
                 child: Padding(
                   padding: const EdgeInsets.only(top: 3, right: OSpace.s),
-                  child: TextField(
-                    controller: controller,
-                    enabled: enabled,
-                    minLines: 1,
-                    maxLines: 4,
-                    keyboardType: TextInputType.multiline,
-                    textInputAction: TextInputAction.newline,
-                    style: OType.body.copyWith(color: c.text),
-                    decoration: InputDecoration(
-                      hintText: running
-                          ? 'Ovid is working...'
-                          : locked
-                          ? 'Upgrade to keep building'
-                          : data.composerHint,
-                      hintStyle: OType.body.copyWith(color: c.textFaint),
-                      filled: false,
-                      isDense: true,
-                      border: InputBorder.none,
-                      enabledBorder: InputBorder.none,
-                      focusedBorder: InputBorder.none,
-                      disabledBorder: InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                  child: CallbackShortcuts(
+                    bindings: {
+                      const SingleActivator(LogicalKeyboardKey.enter): () {
+                        if (canSend) onSend();
+                      },
+                      const SingleActivator(LogicalKeyboardKey.numpadEnter): () {
+                        if (canSend) onSend();
+                      },
+                    },
+                    child: TextField(
+                      controller: controller,
+                      enabled: enabled,
+                      minLines: 1,
+                      maxLines: 4,
+                      keyboardType: TextInputType.multiline,
+                      textInputAction: TextInputAction.newline,
+                      style: OType.body.copyWith(color: c.text),
+                      decoration: InputDecoration(
+                        hintText: running
+                            ? 'Ovid is working...'
+                            : locked
+                            ? 'Upgrade to keep building'
+                            : data.composerHint,
+                        hintStyle: OType.body.copyWith(color: c.textFaint),
+                        filled: false,
+                        isDense: true,
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        disabledBorder: InputBorder.none,
+                        contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
                     ),
                   ),
                 ),
@@ -1059,7 +1139,7 @@ class _Composer extends StatelessWidget {
                 Expanded(
                   child: Align(
                     alignment: Alignment.centerLeft,
-                    child: _PermissionChip(
+                    child: V2PermissionChip(
                       label: data.permissionLabel,
                       onTap: onPermissionTap,
                     ),
@@ -1089,68 +1169,6 @@ class _Composer extends StatelessWidget {
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _PermissionChip extends StatelessWidget {
-  const _PermissionChip({required this.label, required this.onTap});
-
-  final String label;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Semantics(
-      label: 'Permission: $label. Change',
-      button: true,
-      enabled: onTap != null,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(ORadius.pill),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: OSpace.touch),
-            child: Center(
-              child: Container(
-                constraints: const BoxConstraints(minHeight: 32),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: OSpace.s,
-                  vertical: 5,
-                ),
-                decoration: BoxDecoration(
-                  color: c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(ORadius.pill),
-                  border: Border.all(color: c.hairline),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.shield_outlined, size: 16, color: c.accent),
-                    const SizedBox(width: 4),
-                    Flexible(
-                      child: Text(
-                        label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.label.copyWith(color: c.textMuted),
-                      ),
-                    ),
-                    const SizedBox(width: 2),
-                    Icon(
-                      Icons.keyboard_arrow_down_rounded,
-                      size: 16,
-                      color: c.textFaint,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
       ),
     );
   }

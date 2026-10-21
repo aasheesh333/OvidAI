@@ -9,8 +9,9 @@ import '../../design/o_tokens.dart';
 /// The four states a run history list can be in.
 enum V2RunTimelineStatus { loading, content, empty, error }
 
-/// How a single scheduled run ended.
-enum V2RunOutcome { succeeded, failed }
+/// How a single scheduled run ended. [unknown] is a run the server recorded
+/// without an outcome — it must never be painted as a success.
+enum V2RunOutcome { succeeded, failed, running, skipped, unknown }
 
 /// One run on the vertical history rail.
 ///
@@ -22,9 +23,10 @@ class V2TimelineRun {
     required this.id,
     required this.dayLabel,
     required this.timeLabel,
-    required this.durationLabel,
+    this.durationLabel,
     required this.outcome,
     required this.summary,
+    this.statusLabel,
     this.artifactName,
     this.failureDetail,
   });
@@ -37,13 +39,18 @@ class V2TimelineRun {
   /// Clock label for when the run started, e.g. "9:00 AM".
   final String timeLabel;
 
-  /// How long the run took, e.g. "1m 12s".
-  final String durationLabel;
+  /// How long the run took, e.g. "1m 12s". Null when the server did not record
+  /// both a start and a finish; the row says so instead of inventing a value.
+  final String? durationLabel;
 
   final V2RunOutcome outcome;
 
   /// One line describing what happened, e.g. "Saved 12 items to daily.md".
+  /// Empty when the run produced no result yet.
   final String summary;
+
+  /// Overrides the default status word, e.g. "Retry scheduled".
+  final String? statusLabel;
 
   /// A file the run produced. When set, the row offers a link to open it.
   final String? artifactName;
@@ -52,8 +59,32 @@ class V2TimelineRun {
   final String? failureDetail;
 
   bool get failed => outcome == V2RunOutcome.failed;
+  bool get succeeded => outcome == V2RunOutcome.succeeded;
+  bool get running => outcome == V2RunOutcome.running;
 
-  String get outcomeLabel => failed ? 'Failed' : 'Completed';
+  String get outcomeLabel => statusLabel ??
+      switch (outcome) {
+        V2RunOutcome.succeeded => 'Completed',
+        V2RunOutcome.failed => 'Failed',
+        V2RunOutcome.running => 'Running',
+        V2RunOutcome.skipped => 'Skipped',
+        V2RunOutcome.unknown => 'No result',
+      };
+
+  /// The summary, or an honest line when the run has no result yet.
+  String get summaryLabel {
+    final text = summary.trim();
+    if (text.isNotEmpty) return text;
+    return switch (outcome) {
+      V2RunOutcome.running => 'Still running.',
+      V2RunOutcome.skipped => 'Skipped before it produced a result.',
+      V2RunOutcome.failed => 'Failed without a summary.',
+      _ => 'No result was recorded for this run.',
+    };
+  }
+
+  String get durationText =>
+      durationLabel?.trim().isNotEmpty == true ? durationLabel! : 'Not recorded';
 }
 
 /// A consecutive set of runs that share a [V2TimelineRun.dayLabel].
@@ -84,14 +115,20 @@ class V2RunTimelineData {
   final String errorMessage;
 
   /// Runs bucketed into consecutive day groups. Empty groups are dropped.
+  ///
+  /// Accumulates into one list per day. The previous version rebuilt the
+  /// group list on every run, which was O(n²) for a single long day.
   List<V2TimelineDay> get days {
     final groups = <V2TimelineDay>[];
+    List<V2TimelineRun>? current;
+    var label = '';
     for (final run in runs) {
-      if (groups.isNotEmpty && groups.last.label == run.dayLabel) {
-        final last = groups.removeLast();
-        groups.add(V2TimelineDay(label: last.label, runs: [...last.runs, run]));
+      if (current != null && label == run.dayLabel) {
+        current.add(run);
       } else {
-        groups.add(V2TimelineDay(label: run.dayLabel, runs: [run]));
+        label = run.dayLabel;
+        current = <V2TimelineRun>[run];
+        groups.add(V2TimelineDay(label: label, runs: current));
       }
     }
     return groups;
@@ -210,15 +247,31 @@ class _DayGroup extends StatelessWidget {
           ],
         ),
         const SizedBox(height: OSpace.s),
-        OStagger(
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             for (var i = 0; i < day.runs.length; i++)
-              _RunRow(
-                run: day.runs[i],
-                isLast: i == day.runs.length - 1,
-                onOpenArtifact: onOpenArtifact,
-                onRetryRun: onRetryRun,
-              ),
+              if (i >= 8)
+                _RunRow(
+                  run: day.runs[i],
+                  isLast: i == day.runs.length - 1,
+                  onOpenArtifact: onOpenArtifact,
+                  onRetryRun: onRetryRun,
+                )
+              else
+                // A day can hold hundreds of runs; only the first screenful
+                // gets an entrance delay.
+                OFadeSlide(
+                  delay: OMotion.stagger * i > const Duration(milliseconds: 400)
+                      ? const Duration(milliseconds: 400)
+                      : OMotion.stagger * i,
+                  child: _RunRow(
+                    run: day.runs[i],
+                    isLast: i == day.runs.length - 1,
+                    onOpenArtifact: onOpenArtifact,
+                    onRetryRun: onRetryRun,
+                  ),
+                ),
           ],
         ),
       ],
@@ -273,10 +326,15 @@ class _RunRow extends StatelessWidget {
                           _metaLine(c),
                           const SizedBox(height: OSpace.xs),
                           Text(
-                            run.summary,
-                            style: OType.bodySm.copyWith(color: c.text),
+                            run.summaryLabel,
+                            style: OType.bodySm.copyWith(
+                              color: run.outcome == V2RunOutcome.unknown ||
+                                      run.outcome == V2RunOutcome.skipped
+                                  ? c.textMuted
+                                  : c.text,
+                            ),
                           ),
-                          if (run.failureDetail != null) ...[
+                          if (run.failed && run.failureDetail != null) ...[
                             const SizedBox(height: OSpace.xs),
                             _failureLine(c, run.failureDetail!),
                           ],
@@ -314,14 +372,35 @@ class _RunRow extends StatelessWidget {
     );
   }
 
-  /// Time and duration wrap onto separate lines instead of squeezing at
-  /// 320 dp or 200 % text.
+  /// Time, status and duration wrap onto separate lines instead of squeezing at
+  /// 320 dp or 200 % text. Every run states its real outcome; a run the server
+  /// recorded without a result says so instead of showing a tick.
   Widget _metaLine(OColors c) {
+    final color = _outcomeColor(c);
+    final recorded = run.durationLabel?.trim().isNotEmpty == true;
     return Wrap(
       spacing: OSpace.s,
       runSpacing: OSpace.xs,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
+        Container(
+          key: ValueKey<String>('run-outcome-${run.id}'),
+          padding: const EdgeInsets.symmetric(
+            horizontal: OSpace.s,
+            vertical: 2,
+          ),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(ORadius.pill),
+          ),
+          child: Text(
+            run.outcomeLabel,
+            style: OType.caption.copyWith(
+              color: color,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -342,14 +421,18 @@ class _RunRow extends StatelessWidget {
             Icon(Icons.timer_outlined, size: 13, color: c.textFaint),
             const SizedBox(width: OSpace.xs),
             Text(
-              run.durationLabel,
-              style: OType.caption.copyWith(color: c.textMuted),
+              run.durationText,
+              style: OType.caption.copyWith(
+                color: recorded ? c.textMuted : c.textFaint,
+              ),
             ),
           ],
         ),
       ],
     );
   }
+
+  Color _outcomeColor(OColors c) => _runOutcomeColor(c, run.outcome);
 
   Widget _failureLine(OColors c, String detail) {
     return Row(
@@ -365,14 +448,27 @@ class _RunRow extends StatelessWidget {
   }
 
   String _semanticLabel(V2TimelineRun run) {
-    final detail = run.failureDetail;
-    return '${run.outcomeLabel} run at ${run.timeLabel}, '
-        'took ${run.durationLabel}. ${run.summary}'
+    final detail = run.failed ? run.failureDetail : null;
+    final recorded = run.durationLabel?.trim().isNotEmpty == true;
+    final duration = recorded
+        ? 'took ${run.durationLabel}'
+        : 'duration not recorded';
+    return '${run.outcomeLabel} run at ${run.timeLabel}, $duration. '
+        '${run.summaryLabel}'
         '${detail == null ? '' : ' $detail'}';
   }
 }
 
-/// A status dot with a shape cue: a check for success, a cross for failure.
+Color _runOutcomeColor(OColors c, V2RunOutcome outcome) => switch (outcome) {
+  V2RunOutcome.succeeded => c.success,
+  V2RunOutcome.failed => c.danger,
+  V2RunOutcome.running => c.accent,
+  V2RunOutcome.skipped => c.warn,
+  V2RunOutcome.unknown => c.textMuted,
+};
+
+/// A status dot with a shape cue: a check for success, a cross for failure, a
+/// cycle for a run still in flight and a dash for a run with no result.
 class _StatusDot extends StatelessWidget {
   const _StatusDot({required this.run});
 
@@ -381,7 +477,14 @@ class _StatusDot extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final color = run.failed ? c.danger : c.success;
+    final color = _runOutcomeColor(c, run.outcome);
+    final icon = switch (run.outcome) {
+      V2RunOutcome.succeeded => Icons.check_rounded,
+      V2RunOutcome.failed => Icons.close_rounded,
+      V2RunOutcome.running => Icons.autorenew_rounded,
+      V2RunOutcome.skipped => Icons.skip_next_rounded,
+      V2RunOutcome.unknown => Icons.help_outline_rounded,
+    };
     return Container(
       key: ValueKey<String>('run-status-${run.id}'),
       width: 22,
@@ -391,11 +494,7 @@ class _StatusDot extends StatelessWidget {
         shape: BoxShape.circle,
         border: Border.all(color: color.withValues(alpha: 0.35)),
       ),
-      child: Icon(
-        run.failed ? Icons.close_rounded : Icons.check_rounded,
-        size: 12,
-        color: color,
-      ),
+      child: Icon(icon, size: 12, color: color),
     );
   }
 }

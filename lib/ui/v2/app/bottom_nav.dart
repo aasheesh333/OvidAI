@@ -65,17 +65,20 @@ const List<V2NavItem> v2WorkNavItems = <V2NavItem>[
 
 /// Bottom navigation with a hairline top border and an accent pill on the
 /// active tab. Every target is at least 48 dp and announces its selection.
+///
+/// [onSelect] is required: the bar never renders a tab that cannot go
+/// anywhere. The host owns [current] and decides which tab a route belongs to.
 class V2BottomNav extends StatelessWidget {
   const V2BottomNav({
     super.key,
     required this.current,
     this.items = v2ChatNavItems,
-    this.onSelect,
+    required this.onSelect,
   });
 
   final V2NavTab current;
   final List<V2NavItem> items;
-  final ValueChanged<V2NavTab>? onSelect;
+  final ValueChanged<V2NavTab> onSelect;
 
   @override
   Widget build(BuildContext context) {
@@ -100,11 +103,10 @@ class V2BottomNav extends StatelessWidget {
                 for (final item in items)
                   Expanded(
                     child: _NavButton(
+                      key: ValueKey<String>('v2-nav-${item.tab.name}'),
                       item: item,
                       selected: item.tab == current,
-                      onTap: onSelect == null
-                          ? null
-                          : () => onSelect!(item.tab),
+                      onTap: () => onSelect(item.tab),
                     ),
                   ),
               ],
@@ -118,6 +120,7 @@ class V2BottomNav extends StatelessWidget {
 
 class _NavButton extends StatelessWidget {
   const _NavButton({
+    super.key,
     required this.item,
     required this.selected,
     required this.onTap,
@@ -125,22 +128,17 @@ class _NavButton extends StatelessWidget {
 
   final V2NavItem item;
   final bool selected;
-  final VoidCallback? onTap;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final enabled = onTap != null;
-    final fg = !enabled
-        ? c.textFaint
-        : selected
-        ? c.accent
-        : c.textMuted;
+    final fg = selected ? c.accent : c.textMuted;
     return Semantics(
       label: item.label,
       button: true,
       selected: selected,
-      enabled: enabled,
+      enabled: true,
       onTap: onTap,
       excludeSemantics: true,
       child: InkWell(

@@ -95,6 +95,25 @@ class V2LivePreviewData {
   /// content.
   final ImageProvider? frame;
   final String? errorMessage;
+
+  bool get hasFrame => frame != null;
+
+  /// Real copy for the previewed site. A lone [siteName] is not enough: the
+  /// header alone must not be presented as a loaded preview.
+  bool get hasSiteCopy =>
+      eyebrow.trim().isNotEmpty ||
+      headline.trim().isNotEmpty ||
+      description.trim().isNotEmpty ||
+      primaryCta.trim().isNotEmpty ||
+      secondaryCta.trim().isNotEmpty ||
+      metrics.isNotEmpty ||
+      featureTitle.trim().isNotEmpty ||
+      featureBody.trim().isNotEmpty ||
+      featureBadge.trim().isNotEmpty;
+
+  /// True only when there is something real to show. Drives the "Live" and
+  /// "Online" indicators so they can never describe an empty box.
+  bool get hasPreviewContent => hasFrame || hasSiteCopy;
 }
 
 /// A phone-sized preview of the site in the workspace.
@@ -155,12 +174,16 @@ class V2LivePreviewPage extends StatelessWidget {
         V2PreviewStatus.empty => OEmptyState(
           icon: Icons.play_circle_outline_rounded,
           title: 'No preview running',
-          message: 'Start a preview to see your site on a phone.',
-          action: OButton(
-            label: 'Start preview',
-            icon: Icons.play_arrow_rounded,
-            onPressed: onStart,
-          ),
+          message: onStart == null
+              ? 'A preview cannot be started from here yet.'
+              : 'Start a preview to see your site on a phone.',
+          action: onStart == null
+              ? null
+              : OButton(
+                  label: 'Start preview',
+                  icon: Icons.play_arrow_rounded,
+                  onPressed: onStart,
+                ),
         ),
         V2PreviewStatus.content => _buildContent(context),
       },
@@ -203,9 +226,9 @@ class V2LivePreviewPage extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const _PreviewHeader(),
+                _PreviewHeader(data: data),
                 const SizedBox(height: OSpace.m),
-                _PhoneFrame(data: data),
+                _PhoneFrame(data: data, onRetry: onRetry),
                 const SizedBox(height: OSpace.m),
                 const _ReadOnlyNote(),
                 if (data.expiresLabel.isNotEmpty || data.expiresAt != null) ...[
@@ -232,20 +255,28 @@ class V2LivePreviewPage extends StatelessWidget {
 }
 
 class _PreviewHeader extends StatelessWidget {
-  const _PreviewHeader();
+  const _PreviewHeader({required this.data});
 
+  final V2LivePreviewData data;
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final live = data.hasPreviewContent;
     return Row(
       children: [
-        const OPill(label: 'Online', tone: OPillTone.success, dot: true),
+        OPill(
+          label: live ? 'Online' : 'Starting',
+          tone: live ? OPillTone.success : OPillTone.neutral,
+          dot: true,
+        ),
         const SizedBox(width: OSpace.s),
         Expanded(
           child: Text(
-            'Changes from Studio show up here.',
+            live
+                ? 'Changes from Studio show up here.'
+                : 'Waiting for the first frame from your workspace.',
             style: OType.caption.copyWith(color: c.textMuted),
-            maxLines: 1,
+            maxLines: 2,
             overflow: TextOverflow.ellipsis,
           ),
         ),
@@ -315,6 +346,7 @@ class _PreviewActions extends StatelessWidget {
     );
     final open = OButton(
       label: 'Open in browser',
+      semanticLabel: 'Open preview in browser',
       icon: Icons.open_in_new_rounded,
       variant: OButtonVariant.secondary,
       onPressed: onOpenInBrowser,
@@ -364,9 +396,10 @@ class _PreviewActions extends StatelessWidget {
 }
 
 class _PhoneFrame extends StatelessWidget {
-  const _PhoneFrame({required this.data});
+  const _PhoneFrame({required this.data, this.onRetry});
 
   final V2LivePreviewData data;
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -405,21 +438,21 @@ class _PhoneFrame extends StatelessWidget {
                           semanticLabel: data.siteName.isEmpty
                               ? 'Live preview'
                               : 'Live preview of ${data.siteName}',
+                          errorBuilder: (context, error, stack) =>
+                              _FrameError(onRetry: onRetry),
                         )
-                      : data.headline.trim().isEmpty &&
-                            data.eyebrow.trim().isEmpty &&
-                            data.description.trim().isEmpty
-                      ? const _WaitingFrame()
-                      : _SiteContent(data: data),
+                      : data.hasSiteCopy
+                      ? _SiteContent(data: data)
+                      : _WaitingFrame(onRetry: onRetry),
                 ),
               ),
-              const Padding(
-                padding: EdgeInsets.only(
+              Padding(
+                padding: const EdgeInsets.only(
                   left: OSpace.m,
                   right: OSpace.m,
                   bottom: OSpace.m,
                 ),
-                child: _LiveChip(),
+                child: _LiveChip(live: data.hasPreviewContent),
               ),
             ],
           ),
@@ -429,13 +462,59 @@ class _PhoneFrame extends StatelessWidget {
   }
 }
 
-class _WaitingFrame extends StatelessWidget {
-  const _WaitingFrame();
+/// Shown when the sandbox frame cannot be decoded. It is explicitly an error,
+/// never a blank rectangle that looks loaded.
+class _FrameError extends StatelessWidget {
+  const _FrameError({this.onRetry});
+
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return ConstrainedBox(
+      key: const Key('preview-frame-error'),
+      constraints: const BoxConstraints(minHeight: 260),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.broken_image_outlined, size: 40, color: c.danger),
+          const SizedBox(height: OSpace.m),
+          Text(
+            'The preview frame could not load',
+            textAlign: TextAlign.center,
+            style: OType.body.copyWith(color: c.text),
+          ),
+          const SizedBox(height: OSpace.xs),
+          Text(
+            'The sandbox is running but its frame did not arrive.',
+            textAlign: TextAlign.center,
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+          if (onRetry != null) ...[
+            const SizedBox(height: OSpace.m),
+            OButton(
+              label: 'Try again',
+              variant: OButtonVariant.secondary,
+              onPressed: onRetry,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _WaitingFrame extends StatelessWidget {
+  const _WaitingFrame({this.onRetry});
+
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return ConstrainedBox(
+      key: const Key('preview-waiting-frame'),
       constraints: const BoxConstraints(minHeight: 260),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -453,6 +532,14 @@ class _WaitingFrame extends StatelessWidget {
             textAlign: TextAlign.center,
             style: OType.caption.copyWith(color: c.textMuted),
           ),
+          if (onRetry != null) ...[
+            const SizedBox(height: OSpace.m),
+            OButton(
+              label: 'Check again',
+              variant: OButtonVariant.secondary,
+              onPressed: onRetry,
+            ),
+          ],
         ],
       ),
     );
@@ -467,6 +554,7 @@ class _BrowserChrome extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final hasUrl = url.trim().isNotEmpty;
     return Container(
       constraints: const BoxConstraints(minHeight: 44),
       color: c.surfaceAlt,
@@ -503,12 +591,20 @@ class _BrowserChrome extends StatelessWidget {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(Icons.lock_outline_rounded, size: 12, color: c.success),
+                  Icon(
+                    hasUrl
+                        ? Icons.lock_outline_rounded
+                        : Icons.hourglass_empty_rounded,
+                    size: 12,
+                    color: hasUrl ? c.success : c.textFaint,
+                  ),
                   const SizedBox(width: OSpace.xs),
                   Flexible(
                     child: Text(
-                      url,
-                      style: OType.caption.copyWith(color: c.textMuted),
+                      hasUrl ? url : 'Waiting for preview URL',
+                      style: OType.caption.copyWith(
+                        color: hasUrl ? c.textMuted : c.textFaint,
+                      ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -797,7 +893,9 @@ class _FeatureCard extends StatelessWidget {
 }
 
 class _LiveChip extends StatelessWidget {
-  const _LiveChip();
+  const _LiveChip({required this.live});
+
+  final bool live;
 
   @override
   Widget build(BuildContext context) {
@@ -819,12 +917,17 @@ class _LiveChip extends StatelessWidget {
           Container(
             width: 8,
             height: 8,
-            decoration: BoxDecoration(color: c.success, shape: BoxShape.circle),
+            decoration: BoxDecoration(
+              color: live ? c.success : c.textFaint,
+              shape: BoxShape.circle,
+            ),
           ),
           const SizedBox(width: OSpace.s),
           Flexible(
             child: Text(
-              'Live · Preview from your workspace',
+              live
+                  ? 'Live · Preview from your workspace'
+                  : 'Waiting for the first frame',
               style: OType.caption.copyWith(color: c.text),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,

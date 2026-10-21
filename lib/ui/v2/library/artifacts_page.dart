@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import '../chat/transcript_actions.dart';
+import 'artifact_actions.dart';
+import 'artifact_detail_page.dart';
 import 'artifact_filters.dart';
 
 /// The four artifact families shown by the filter chips.
@@ -27,6 +30,7 @@ class V2ArtifactItem {
     this.source = V2ArtifactSource.generated,
     this.sessionTitle = '',
     this.thumbnail,
+    this.url,
     this.badge,
     this.live = false,
   });
@@ -46,6 +50,11 @@ class V2ArtifactItem {
   /// entries and for uploads that are not tied to a session.
   final String sessionTitle;
   final ImageProvider? thumbnail;
+
+  /// A fresh, signed URL for the file, when the wiring layer has one. It backs
+  /// the image thumbnail, the download action and "copy link"; when it is null
+  /// those controls are not offered at all.
+  final String? url;
   final String? badge;
   final bool live;
 }
@@ -120,9 +129,9 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
   bool get _filtering => _query.trim().isNotEmpty || _filters.isActive;
 
   /// One filter option per chat title, with how many files it made.
-  List<V2ArtifactSession> get _sessions {
+  List<V2ArtifactSession> _sessionsFor(List<V2ArtifactItem> artifacts) {
     final counts = <String, int>{};
-    for (final artifact in widget.data.artifacts) {
+    for (final artifact in artifacts) {
       final title = artifact.sessionTitle.trim();
       if (title.isEmpty) continue;
       counts[title] = (counts[title] ?? 0) + 1;
@@ -139,40 +148,74 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
 
   String _sessionId(String title) => 'session:$title';
 
-  String? get _selectedSessionTitle {
-    final id = _filters.sessionId;
-    if (id == null) return null;
-    for (final session in _sessions) {
-      if (session.id == id) return session.title;
-    }
-    return null;
-  }
-
   List<V2ArtifactItem> get _visible {
     final query = _query.trim().toLowerCase();
-    final sessionTitle = _selectedSessionTitle;
-    final items = widget.data.artifacts.where((artifact) {
-      if (_filters.source == V2ArtifactSourceFilter.generated &&
-          artifact.source != V2ArtifactSource.generated) {
-        return false;
-      }
-      if (_filters.source == V2ArtifactSourceFilter.uploaded &&
-          artifact.source != V2ArtifactSource.uploaded) {
-        return false;
-      }
-      if (_filters.type != V2ArtifactTypeFilter.all &&
-          artifact.kind != _kindFor(_filters.type)) {
-        return false;
-      }
-      if (sessionTitle != null &&
-          artifact.sessionTitle.trim() != sessionTitle) {
-        return false;
-      }
-      if (query.isEmpty) return true;
-      return artifact.name.toLowerCase().contains(query) ||
-          artifact.sessionTitle.toLowerCase().contains(query);
-    }).toList();
+    final items = widget.data.artifacts
+        .where(
+          (artifact) =>
+              _matchesSource(artifact) &&
+              _matchesType(artifact) &&
+              _matchesDate(artifact) &&
+              _matchesSession(artifact) &&
+              (query.isEmpty ||
+                  artifact.name.toLowerCase().contains(query) ||
+                  artifact.sessionTitle.toLowerCase().contains(query)),
+        )
+        .toList();
     return _sorted(items);
+  }
+
+  bool _matchesSource(V2ArtifactItem artifact) => switch (_filters.source) {
+    V2ArtifactSourceFilter.all => true,
+    V2ArtifactSourceFilter.generated =>
+      artifact.source == V2ArtifactSource.generated,
+    V2ArtifactSourceFilter.uploaded =>
+      artifact.source == V2ArtifactSource.uploaded,
+  };
+
+  /// Type families are exclusive: an HTML page is a "Page", never a "Doc", and
+  /// "Other" only catches the data files the four named families miss.
+  bool _matchesType(V2ArtifactItem artifact) => switch (_filters.type) {
+    V2ArtifactTypeFilter.all => true,
+    V2ArtifactTypeFilter.image => artifact.kind == V2ArtifactKind.image,
+    V2ArtifactTypeFilter.page => _isPage(artifact),
+    V2ArtifactTypeFilter.code => artifact.kind == V2ArtifactKind.code,
+    V2ArtifactTypeFilter.doc =>
+      artifact.kind == V2ArtifactKind.document && !_isPage(artifact),
+    V2ArtifactTypeFilter.other => artifact.kind == V2ArtifactKind.data,
+  };
+
+  /// HTML artifacts are the library's pages. The vault maps them onto the
+  /// document kind, so the file name is what tells a page from a PDF.
+  bool _isPage(V2ArtifactItem artifact) {
+    if (artifact.kind != V2ArtifactKind.document) return false;
+    final ext = _extension(artifact.name).toLowerCase();
+    return ext == 'html' || ext == 'htm';
+  }
+
+  bool _matchesDate(V2ArtifactItem artifact) {
+    final filter = _filters.date;
+    if (filter == V2ArtifactDateFilter.all) return true;
+    final now = widget.data.now ?? DateTime.now();
+    final created = artifact.createdAt.toLocal();
+    final today = DateTime(now.year, now.month, now.day);
+    final day = DateTime(created.year, created.month, created.day);
+    final days = today.difference(day).inDays;
+    // A future timestamp (clock skew) still counts as "today".
+    if (days < 0) return true;
+    return switch (filter) {
+      V2ArtifactDateFilter.all => true,
+      V2ArtifactDateFilter.today => days == 0,
+      V2ArtifactDateFilter.week => days < 7,
+      V2ArtifactDateFilter.month => days < 30,
+    };
+  }
+
+  bool _matchesSession(V2ArtifactItem artifact) {
+    final id = _filters.sessionId;
+    if (id == null) return true;
+    final title = artifact.sessionTitle.trim();
+    return title.isNotEmpty && _sessionId(title) == id;
   }
 
   List<V2ArtifactItem> _sorted(List<V2ArtifactItem> items) {
@@ -195,17 +238,6 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     return sorted;
   }
 
-  /// The artifact family that matches a filter chip. [V2ArtifactTypeFilter.page]
-  /// has no library kind, so it matches nothing.
-  V2ArtifactKind? _kindFor(V2ArtifactTypeFilter type) => switch (type) {
-    V2ArtifactTypeFilter.all => null,
-    V2ArtifactTypeFilter.image => V2ArtifactKind.image,
-    V2ArtifactTypeFilter.doc => V2ArtifactKind.document,
-    V2ArtifactTypeFilter.code => V2ArtifactKind.code,
-    V2ArtifactTypeFilter.other => V2ArtifactKind.data,
-    V2ArtifactTypeFilter.page => null,
-  };
-
   void _setQuery(String value) {
     setState(() => _query = value);
   }
@@ -222,30 +254,37 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final showFab =
-        widget.data.status == V2ArtifactsStatus.content ||
-        widget.data.status == V2ArtifactsStatus.empty;
+        widget.onNewArtifact != null &&
+        (widget.data.status == V2ArtifactsStatus.content ||
+            widget.data.status == V2ArtifactsStatus.empty);
 
     return OScaffold(
       appBar: OAppBar(
         title: 'Ovid Si',
         subtitle: 'Artifacts Library',
         showBack: false,
-        leading: OIconButton(
-          icon: Icons.menu_rounded,
-          semanticLabel: 'Open menu',
-          onPressed: widget.onOpenMenu,
-        ),
+        // Host-level chrome is only drawn when the host can actually handle it:
+        // a visible icon with a null handler is a dead control.
+        leading: widget.onOpenMenu == null
+            ? null
+            : OIconButton(
+                icon: Icons.menu_rounded,
+                semanticLabel: 'Open menu',
+                onPressed: widget.onOpenMenu,
+              ),
         actions: [
-          OIconButton(
-            icon: Icons.search_rounded,
-            semanticLabel: 'Search artifacts',
-            onPressed: widget.onSearch,
-          ),
-          OIconButton(
-            icon: Icons.notifications_none_rounded,
-            semanticLabel: 'Notifications',
-            onPressed: widget.onNotifications,
-          ),
+          if (widget.onSearch != null)
+            OIconButton(
+              icon: Icons.search_rounded,
+              semanticLabel: 'Search artifacts',
+              onPressed: widget.onSearch,
+            ),
+          if (widget.onNotifications != null)
+            OIconButton(
+              icon: Icons.notifications_none_rounded,
+              semanticLabel: 'Notifications',
+              onPressed: widget.onNotifications,
+            ),
         ],
       ),
       floatingActionButton: showFab
@@ -274,128 +313,154 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     );
   }
 
+  /// Shown when the library itself is empty (status empty). Distinct from
+  /// "No matches", which means artifacts exist but none pass the filters.
   Widget _empty() {
     return OEmptyState(
       icon: Icons.auto_awesome_rounded,
-      title: 'Nothing here yet',
+      title: 'No artifacts yet',
       message:
           'Files Ovid makes in any chat, plus files you upload, show up here. '
           'Studio drafts stay in Studio. Deleting an artifact frees its '
           'storage right away.',
-      action: OButton(
-        label: 'See what Ovid can make',
-        icon: Icons.arrow_forward_rounded,
-        onPressed: widget.onSeeIdeas,
-      ),
+      action: widget.onSeeIdeas == null
+          ? null
+          : OButton(
+              label: 'See what Ovid can make',
+              icon: Icons.arrow_forward_rounded,
+              onPressed: widget.onSeeIdeas,
+            ),
     );
   }
 
   Widget _content(OColors c) {
     final items = _visible;
-    final rows = <Widget>[];
-    for (var i = 0; i < items.length; i += 2) {
-      final left = items[i];
-      final right = i + 1 < items.length ? items[i + 1] : null;
-      rows.add(
-        IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(child: _card(c, left)),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: right == null
-                    ? const SizedBox.shrink()
-                    : _card(c, right),
+    final sessions = _sessionsFor(widget.data.artifacts);
+    final rowCount = (items.length + 1) ~/ 2;
+    // The header and footer are fixed; the grid itself is lazy, so a library
+    // with thousands of artifacts only builds the visible rows.
+    final header = <Widget>[
+      _librarySummary(c),
+      const SizedBox(height: OSpace.m),
+      OSearchField(
+        controller: _searchController,
+        hint: 'Search files and chats',
+        onChanged: _setQuery,
+        trailing: _query.isEmpty
+            ? null
+            : OIconButton(
+                icon: Icons.close_rounded,
+                semanticLabel: 'Clear search',
+                size: 18,
+                onPressed: () {
+                  _searchController.clear();
+                  _setQuery('');
+                },
               ),
-            ],
+      ),
+      const SizedBox(height: OSpace.m),
+      ArtifactFilterBar(
+        filters: _filters,
+        summary: _sizeSummary(items),
+        sessions: sessions,
+        onChanged: (next) => setState(() => _filters = next),
+      ),
+      const SizedBox(height: OSpace.l),
+      Row(
+        children: [
+          Expanded(
+            child: OSectionHeader(
+              label: _filtering ? 'Matching artifacts' : 'Recent artifacts',
+              padding: EdgeInsets.zero,
+            ),
           ),
-        ),
-      );
-    }
+          Text(
+            '${items.length} ${items.length == 1 ? 'item' : 'items'}',
+            style: OType.caption.copyWith(color: c.accent),
+          ),
+        ],
+      ),
+      const SizedBox(height: OSpace.m),
+    ];
+    final bodyCount = items.isEmpty ? 1 : rowCount;
 
-    return ListView(
+    return ListView.builder(
       padding: const EdgeInsets.fromLTRB(
         OSpace.screen,
         OSpace.s,
         OSpace.screen,
         OSpace.huge + OSpace.huge,
       ),
-      children: [
-        _librarySummary(c),
-        const SizedBox(height: OSpace.m),
-        OSearchField(
-          controller: _searchController,
-          hint: 'Search files and chats',
-          onChanged: _setQuery,
-          trailing: _query.isEmpty
-              ? null
-              : OIconButton(
-                  icon: Icons.close_rounded,
-                  semanticLabel: 'Clear search',
-                  size: 18,
-                  onPressed: () {
-                    _searchController.clear();
-                    _setQuery('');
-                  },
+      itemCount: header.length + bodyCount + 2,
+      itemBuilder: (context, index) {
+        if (index < header.length) return header[index];
+        final body = index - header.length;
+        if (body < bodyCount) {
+          if (items.isEmpty) return _emptyResults(c);
+          final left = items[body * 2];
+          final rightIndex = body * 2 + 1;
+          final right = rightIndex < items.length ? items[rightIndex] : null;
+          final row = IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(child: _card(context, c, left)),
+                const SizedBox(width: OSpace.m),
+                Expanded(
+                  child: right == null
+                      ? const SizedBox.shrink()
+                      : _card(context, c, right),
                 ),
-        ),
-        const SizedBox(height: OSpace.m),
-        ArtifactFilterBar(
-          filters: _filters,
-          summary: _sizeSummary(items),
-          sessions: _sessions,
-          onChanged: (next) => setState(() => _filters = next),
-        ),
-        const SizedBox(height: OSpace.l),
-        Row(
-          children: [
-            Expanded(
-              child: OSectionHeader(
-                label: _filtering ? 'Matching artifacts' : 'Recent artifacts',
-                padding: EdgeInsets.zero,
+              ],
+            ),
+          );
+          // Only the first screenful animates; lazily-built rows must not
+          // each schedule an entrance timer.
+          if (body >= 8) return row;
+          final delay = OMotion.stagger * body;
+          return OFadeSlide(
+            delay: delay > const Duration(milliseconds: 400)
+                ? const Duration(milliseconds: 400)
+                : delay,
+            child: row,
+          );
+        }
+        if (body == bodyCount) return const SizedBox(height: OSpace.xl);
+        return _callout(c);
+      },
+    );
+  }
+
+  Widget _emptyResults(OColors c) {
+    if (!_filtering) {
+      return OEmptyState(
+        compact: true,
+        icon: Icons.auto_awesome_rounded,
+        title: 'No artifacts yet',
+        message:
+            'Files from every chat and every upload show up here. '
+            'Deleting an artifact frees its storage right away.',
+        action: widget.onNewArtifact == null
+            ? null
+            : OButton(
+                label: 'New artifact',
+                icon: Icons.add_rounded,
+                onPressed: widget.onNewArtifact,
               ),
-            ),
-            Text(
-              '${items.length} ${items.length == 1 ? 'item' : 'items'}',
-              style: OType.caption.copyWith(color: c.accent),
-            ),
-          ],
-        ),
-        const SizedBox(height: OSpace.m),
-        if (items.isEmpty)
-          _filtering
-              ? OEmptyState(
-                  compact: true,
-                  icon: Icons.search_off_rounded,
-                  title: 'No matches',
-                  message:
-                      'Try another search or filter. Deleting an artifact '
-                      'here frees its storage.',
-                  action: OButton(
-                    label: 'Clear filters',
-                    variant: OButtonVariant.secondary,
-                    onPressed: _clearFilters,
-                  ),
-                )
-              : OEmptyState(
-                  compact: true,
-                  icon: Icons.auto_awesome_rounded,
-                  title: 'Nothing here yet',
-                  message:
-                      'Files from every chat and every upload show up here. '
-                      'Deleting an artifact frees its storage right away.',
-                  action: OButton(
-                    label: 'New artifact',
-                    icon: Icons.add_rounded,
-                    onPressed: widget.onNewArtifact,
-                  ),
-                )
-        else
-          OStagger(children: rows),
-        const SizedBox(height: OSpace.xl),
-        _callout(c),
-      ],
+      );
+    }
+    return OEmptyState(
+      compact: true,
+      icon: Icons.search_off_rounded,
+      title: 'No matches',
+      message:
+          'No artifacts match these filters. Try another search '
+          'or clear them.',
+      action: OButton(
+        label: 'Clear filters',
+        variant: OButtonVariant.secondary,
+        onPressed: _clearFilters,
+      ),
     );
   }
 
@@ -456,14 +521,14 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     );
   }
 
-  Widget _card(OColors c, V2ArtifactItem item) {
+  Widget _card(BuildContext context, OColors c, V2ArtifactItem item) {
     final ext = _extension(item.name);
     final sourceLabel = item.source == V2ArtifactSource.uploaded
         ? 'Uploaded'
         : 'Generated';
     return OCard(
       padding: EdgeInsets.zero,
-      onTap: () => widget.onArtifactTap?.call(item),
+      onTap: () => _open(item),
       semanticLabel:
           '${item.name}, $sourceLabel, ${_filterLabel(item.kind)}, '
           '${item.sizeLabel}, ${_dateLabel(item.createdAt, widget.data.now ?? DateTime.now())}'
@@ -480,7 +545,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  _thumb(c, item),
+                  _thumb(context, c, item),
                   if (item.live || item.badge != null)
                     Positioned(
                       top: OSpace.s,
@@ -544,7 +609,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
                       icon: Icons.more_vert_rounded,
                       semanticLabel: 'More options for ${item.name}',
                       size: 18,
-                      onPressed: () => widget.onArtifactMenu?.call(item),
+                      onPressed: () => _openMenu(item),
                     ),
                   ],
                 ),
@@ -593,11 +658,178 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     );
   }
 
-  Widget _thumb(OColors c, V2ArtifactItem item) {
+  /// Opening a card always goes somewhere real: the host callback when it has
+  /// one, otherwise the library's own detail route built from the item.
+  void _open(V2ArtifactItem item) {
+    final handler = widget.onArtifactTap;
+    if (handler != null) {
+      handler(item);
+      return;
+    }
+    _openDetail(item);
+  }
+
+  void _openDetail(V2ArtifactItem item) {
+    final now = widget.data.now ?? DateTime.now();
+    final link = _link(item);
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ArtifactDetailPage(
+          data: V2ArtifactDetailData(
+            name: item.name,
+            typeLabel: _filterLabel(item.kind),
+            sizeLabel: item.sizeLabel,
+            createdLabel: 'Created ${_dateLabel(item.createdAt, now).toLowerCase()}',
+            sourceChatTitle: item.sessionTitle,
+            previewKind: _previewKindFor(item),
+            previewCodeFile: item.name,
+            thumbnail: item.thumbnail,
+            downloadUrl: link ?? '',
+            shareUrl: link ?? '',
+            details: <V2ArtifactDetailRow>[
+              V2ArtifactDetailRow(
+                label: 'Type',
+                value: _filterLabel(item.kind),
+              ),
+              V2ArtifactDetailRow(label: 'Size', value: item.sizeLabel),
+              V2ArtifactDetailRow(
+                label: 'Added',
+                value: _dateLabel(item.createdAt, now),
+              ),
+              V2ArtifactDetailRow(
+                label: 'Source',
+                value: item.source == V2ArtifactSource.uploaded
+                    ? 'Uploaded'
+                    : 'Made by Ovid',
+              ),
+              if (item.sessionTitle.isNotEmpty)
+                V2ArtifactDetailRow(label: 'Chat', value: item.sessionTitle),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  V2ArtifactPreviewKind _previewKindFor(V2ArtifactItem item) =>
+      switch (item.kind) {
+        V2ArtifactKind.image => V2ArtifactPreviewKind.image,
+        V2ArtifactKind.code => V2ArtifactPreviewKind.code,
+        V2ArtifactKind.document => _isPage(item)
+            ? V2ArtifactPreviewKind.code
+            : V2ArtifactPreviewKind.document,
+        V2ArtifactKind.data => V2ArtifactPreviewKind.data,
+      };
+
+  String? _link(V2ArtifactItem item) {
+    final url = item.url;
+    if (url == null || url.isEmpty) return null;
+    return url;
+  }
+
+  /// The card menu. A host menu wins; otherwise the library offers only
+  /// actions it can really perform with the item it was given.
+  Future<void> _openMenu(V2ArtifactItem item) async {
+    final handler = widget.onArtifactMenu;
+    if (handler != null) {
+      handler(item);
+      return;
+    }
+    final link = _link(item);
+    final action = await showOSheet<String>(
+      context,
+      title: item.name,
+      builder: (sheetContext) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.only(bottom: OSpace.l),
+        children: [
+          OListRow(
+            title: 'Open',
+            icon: Icons.open_in_new_rounded,
+            showChevron: false,
+            onTap: () => Navigator.of(sheetContext).pop('open'),
+          ),
+          OListRow(
+            title: 'Copy file name',
+            icon: Icons.copy_rounded,
+            showChevron: false,
+            onTap: () => Navigator.of(sheetContext).pop('copy-name'),
+          ),
+          if (link != null) ...[
+            OListRow(
+              title: 'Copy link',
+              icon: Icons.link_rounded,
+              showChevron: false,
+              onTap: () => Navigator.of(sheetContext).pop('copy-link'),
+            ),
+            OListRow(
+              title: 'Download',
+              icon: Icons.download_rounded,
+              showChevron: false,
+              onTap: () => Navigator.of(sheetContext).pop('download'),
+            ),
+          ],
+        ],
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case 'open':
+        _open(item);
+      case 'copy-name':
+        {
+          final copied = await v2CopyArtifactText(item.name);
+          if (!mounted) return;
+          _notify(
+            copied ? 'File name copied' : 'Could not copy the file name',
+          );
+        }
+      case 'copy-link':
+        {
+          if (link == null) return;
+          final copied = await v2CopyArtifactText(link);
+          if (!mounted) return;
+          _notify(copied ? 'Link copied' : 'Could not copy the link');
+        }
+      case 'download':
+        {
+          if (link == null) return;
+          await v2SaveTranscriptLink(
+            context,
+            link,
+            suggestedName: item.name,
+          );
+        }
+    }
+  }
+
+  void _notify(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(context)
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Widget _thumb(BuildContext context, OColors c, V2ArtifactItem item) {
+    // Decode at roughly the width the card is drawn at instead of full
+    // resolution: a 12 MP upload no longer decodes 48 MB into memory.
+    final cardWidth =
+        (MediaQuery.sizeOf(context).width - OSpace.screen * 2 - OSpace.m) / 2;
+    final cacheWidth =
+        (cardWidth * MediaQuery.devicePixelRatioOf(context)).round();
     final thumbnail = item.thumbnail;
     if (thumbnail != null) {
       return Image(
-        image: thumbnail,
+        image: ResizeImage.resizeIfNeeded(cacheWidth, null, thumbnail),
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => _mockThumb(c, item.kind),
+      );
+    }
+    final link = _link(item);
+    if (item.kind == V2ArtifactKind.image && link != null) {
+      return Image.network(
+        link,
+        cacheWidth: cacheWidth,
         fit: BoxFit.cover,
         errorBuilder: (_, _, _) => _mockThumb(c, item.kind),
       );
@@ -834,12 +1066,13 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
             ],
           ),
           const SizedBox(height: OSpace.m),
-          OButton(
-            label: 'See what Ovid can make',
-            variant: OButtonVariant.ghost,
-            icon: Icons.arrow_forward_rounded,
-            onPressed: widget.onSeeIdeas,
-          ),
+          if (widget.onSeeIdeas != null)
+            OButton(
+              label: 'See what Ovid can make',
+              variant: OButtonVariant.ghost,
+              icon: Icons.arrow_forward_rounded,
+              onPressed: widget.onSeeIdeas,
+            ),
         ],
       ),
     );

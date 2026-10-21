@@ -337,4 +337,50 @@ void main() {
 
     handle.dispose();
   });
+
+  testWidgets('the master toggle updates the screen without a parent rebuild', (
+    tester,
+  ) async {
+    await _pump(tester, _ready(enabled: false, onEnabledChanged: (_) {}));
+
+    expect(find.text('Sharing off'), findsNWidgets(2));
+    await tester.tap(
+      find.byKey(const ValueKey<String>('shared-memory-master-switch')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sharing on'), findsNWidgets(2));
+    expect(find.text('Sharing off'), findsNothing);
+  });
+
+  testWidgets('a scope switch really changes the shared count', (tester) async {
+    await _pump(tester, _ready(onScopeChanged: (_, _) {}));
+
+    expect(find.text('1 of 3 shared'), findsOneWidget);
+    final projectSwitch = find.byKey(
+      const ValueKey<String>('shared-memory-scope-project-switch'),
+    );
+    await tester.ensureVisible(projectSwitch);
+    await tester.tap(projectSwitch);
+    await tester.pumpAndSettle();
+
+    expect(find.text('2 of 3 shared'), findsOneWidget);
+    expect(tester.widget<Switch>(projectSwitch).value, isTrue);
+  });
+
+  testWidgets('forget clears the shared facts and every scope', (tester) async {
+    await _pump(tester, _ready(factCount: 3, onForget: () {}));
+
+    final button = find.byKey(const ValueKey<String>('forget-shared-facts'));
+    await tester.ensureVisible(button);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Forget'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('0 facts shared'), findsOneWidget);
+    expect(find.text('0 of 3 shared'), findsOneWidget);
+    expect(find.text('There are no shared facts to forget.'), findsOneWidget);
+    expect(tester.widget<OButton>(button).onPressed, isNull);
+  });
 }

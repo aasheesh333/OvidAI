@@ -70,6 +70,12 @@ Widget _narrow(
   );
 }
 
+/// The drawer's own scrollable (the search field has one too).
+final Finder _sidebarScrollable = find.descendant(
+  of: find.byKey(const Key('v2-sidebar-list')),
+  matching: find.byType(Scrollable),
+);
+
 void _useNarrowScreen(WidgetTester tester) {
   tester.view.physicalSize = const Size(320, 720);
   tester.view.devicePixelRatio = 1;
@@ -333,7 +339,11 @@ void main() {
       expect(find.text('Settings'), findsOneWidget);
 
       // The body scrolls, so the last row stays reachable at 200 %.
-      await tester.ensureVisible(find.text('Synthesize research PDF'));
+      await tester.scrollUntilVisible(
+        find.text('Synthesize research PDF'),
+        100,
+        scrollable: _sidebarScrollable,
+      );
       await tester.pumpAndSettle();
       await tester.tap(find.text('Synthesize research PDF'));
       expect(tapped?.id, 'y1');
@@ -376,9 +386,21 @@ void main() {
     await tester.pump();
 
     expect(find.text('PINNED'), findsOneWidget);
-    expect(find.text('TODAY'), findsOneWidget);
-    expect(find.text('YESTERDAY'), findsOneWidget);
     expect(find.text('Next.js Portfolio Setup'), findsOneWidget);
+
+    // The drawer list is lazy, so later sections mount as they scroll in.
+    await tester.scrollUntilVisible(
+      find.text('TODAY'),
+      100,
+      scrollable: _sidebarScrollable,
+    );
+    expect(find.text('TODAY'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('YESTERDAY'),
+      100,
+      scrollable: _sidebarScrollable,
+    );
+    expect(find.text('YESTERDAY'), findsOneWidget);
   });
 
   testWidgets('project memory chip opens the project detail sheet', (
@@ -614,6 +636,280 @@ void main() {
       // Dismiss the sheet so the next theme starts from the drawer.
       await tester.tapAt(const Offset(160, 20));
       await tester.pumpAndSettle();
+    }
+  });
+
+  testWidgets('drawer keeps the profile → new session → search → projects → '
+      'sessions → footer order', (tester) async {
+    await tester.pumpWidget(_app(Sidebar(data: _contentData())));
+    await tester.pumpAndSettle();
+
+    final order = <(String, Finder)>[
+      ('profile', find.text('Alex Rivera')),
+      ('new session', find.text('New session')),
+      ('search', find.byKey(const Key('v2-sidebar-search'))),
+      ('projects', find.text('PROJECTS')),
+      ('sessions', find.text('TODAY')),
+      (
+        'footer',
+        find.byKey(const ValueKey<String>('v2-sidebar-footer-settings')),
+      ),
+    ];
+    double? previous;
+    for (final (label, finder) in order) {
+      expect(finder, findsOneWidget, reason: label);
+      final top = tester.getTopLeft(finder).dy;
+      if (previous != null) {
+        expect(top, greaterThan(previous), reason: label);
+      }
+      previous = top;
+    }
+  });
+
+  testWidgets('profile header reports the tap', (tester) async {
+    var profiles = 0;
+    await tester.pumpWidget(
+      _app(Sidebar(data: _contentData(), onProfile: () => profiles++)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Alex Rivera'));
+    expect(profiles, 1);
+  });
+
+  testWidgets('inline search filters chats and projects, then clears', (
+    tester,
+  ) async {
+    const projectChat = V2SidebarSession(
+      id: 't9',
+      title: 'Tone notes',
+      modelLabel: 'Auto',
+      projectName: 'Brand Voice',
+    );
+    await tester.pumpWidget(
+      _app(
+        Sidebar(
+          data: const V2SidebarData(
+            name: 'Alex Rivera',
+            today: <V2SidebarSession>[_today, projectChat],
+            yesterday: <V2SidebarSession>[_yesterday],
+            projects: <V2SidebarProject>[_project],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // A chat title.
+    await tester.enterText(
+      find.byKey(const Key('v2-sidebar-search')),
+      'landing',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Landing page copy review'), findsOneWidget);
+    expect(find.text('Synthesize research PDF'), findsNothing);
+    expect(find.text('Mobile App Redesign'), findsNothing);
+    expect(find.text('1 CHAT'), findsOneWidget);
+
+    // A project name, which also matches the chat filed under it.
+    await tester.enterText(find.byKey(const Key('v2-sidebar-search')), 'brand');
+    await tester.pumpAndSettle();
+    expect(find.text('Tone notes'), findsOneWidget);
+    expect(find.text('Brand Voice'), findsOneWidget);
+    expect(find.text('Mobile App Redesign'), findsNothing);
+    expect(find.text('1 CHAT'), findsOneWidget);
+
+    // A project name on its own.
+    await tester.enterText(
+      find.byKey(const Key('v2-sidebar-search')),
+      'mobile',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Mobile App Redesign'), findsOneWidget);
+    expect(find.text('Tone notes'), findsNothing);
+    expect(find.text('Landing page copy review'), findsNothing);
+
+    // Nothing matches: an empty state with a way back.
+    await tester.enterText(
+      find.byKey(const Key('v2-sidebar-search')),
+      'no such thing',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('No matches'), findsOneWidget);
+    expect(find.text('Mobile App Redesign'), findsNothing);
+
+    await tester.tap(find.text('Clear search'));
+    await tester.pumpAndSettle();
+    expect(find.text('Landing page copy review'), findsOneWidget);
+    expect(find.text('Synthesize research PDF'), findsOneWidget);
+    expect(find.text('Mobile App Redesign'), findsOneWidget);
+    expect(find.text('No matches'), findsNothing);
+
+    // The clear control inside the field restores the drawer too.
+    await tester.enterText(
+      find.byKey(const Key('v2-sidebar-search')),
+      'landing',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Synthesize research PDF'), findsNothing);
+    await tester.tap(find.byIcon(Icons.close_rounded));
+    await tester.pumpAndSettle();
+    expect(find.text('Synthesize research PDF'), findsOneWidget);
+  });
+
+  testWidgets('search results open the chat and project rows', (tester) async {
+    V2SidebarSession? session;
+    V2SidebarProject? project;
+    await tester.pumpWidget(
+      _app(
+        Sidebar(
+          data: _contentData(),
+          onSessionTap: (row) => session = row,
+          onProjectTap: (row) => project = row,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const Key('v2-sidebar-search')),
+      'landing',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Landing page copy review'));
+
+    await tester.enterText(
+      find.byKey(const Key('v2-sidebar-search')),
+      'mobile',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Mobile App Redesign'));
+
+    expect(session?.id, 't1');
+    expect(project?.id, 'pr1');
+  });
+
+  testWidgets('search is hidden while the drawer has no index to filter', (
+    tester,
+  ) async {
+    for (final status in <V2SidebarStatus>[
+      V2SidebarStatus.loading,
+      V2SidebarStatus.error,
+    ]) {
+      await tester.pumpWidget(
+        _app(
+          Sidebar(
+            data: V2SidebarData(name: 'Alex Rivera', status: status),
+          ),
+        ),
+      );
+      // The loading skeleton shimmers forever, so settle only for the error.
+      await tester.pump();
+      if (status == V2SidebarStatus.error) {
+        await tester.pumpAndSettle();
+      }
+
+      expect(
+        find.byKey(const Key('v2-sidebar-search')),
+        findsNothing,
+        reason: status.name,
+      );
+      expect(find.text('New session'), findsOneWidget);
+    }
+  });
+
+  testWidgets('long chat titles ellipsize and still open', (tester) async {
+    _useNarrowScreen(tester);
+    const longTitle =
+        'Rewrite the entire onboarding flow, the pricing page, the billing '
+        'emails and every empty state for the new release, with screenshots';
+    const longSession = V2SidebarSession(
+      id: 'long1',
+      title: longTitle,
+      modelLabel: 'Auto',
+      timeLabel: '3h ago',
+    );
+
+    for (final theme in <ThemeData>[OTheme.light(), OTheme.dark()]) {
+      V2SidebarSession? tapped;
+      await tester.pumpWidget(
+        _narrow(
+          Sidebar(
+            data: const V2SidebarData(
+              name: 'Alex Rivera',
+              today: <V2SidebarSession>[longSession],
+            ),
+            onSessionTap: (row) => tapped = row,
+          ),
+          theme: theme,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      final title = tester.widget<Text>(find.text(longTitle));
+      expect(title.maxLines, 1);
+      expect(title.overflow, TextOverflow.ellipsis);
+
+      await tester.tap(find.text(longTitle));
+      expect(tapped?.id, 'long1');
+    }
+  });
+
+  testWidgets('a project without a memory handler shows an info chip, not a '
+      'dead control', (tester) async {
+    final handle = tester.ensureSemantics();
+    V2SidebarProject? opened;
+    await tester.pumpWidget(
+      _app(
+        Sidebar(
+          data: const V2SidebarData(
+            name: 'Alex Rivera',
+            projects: <V2SidebarProject>[_project],
+          ),
+          onProjectTap: (row) => opened = row,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // No handler and no detail payload: the chip is information only.
+    final chip = find.byKey(const ValueKey<String>('v2-sidebar-memory-pr1'));
+    expect(chip, findsOneWidget);
+    expect(
+      find.descendant(of: chip, matching: find.byType(GestureDetector)),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: chip, matching: find.byType(InkWell)),
+      findsNothing,
+    );
+
+    // The tap falls through to the project row instead of doing nothing.
+    await tester.tap(find.text('3 files'));
+    expect(opened?.id, 'pr1');
+    handle.dispose();
+  });
+
+  testWidgets('search results fit 320 dp at 200 % text in both themes', (
+    tester,
+  ) async {
+    _useNarrowScreen(tester);
+
+    for (final theme in <ThemeData>[OTheme.light(), OTheme.dark()]) {
+      await tester.pumpWidget(
+        _narrow(Sidebar(data: _contentData()), theme: theme),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const Key('v2-sidebar-search')),
+        'next',
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Next.js Portfolio Setup'), findsOneWidget);
     }
   });
 }

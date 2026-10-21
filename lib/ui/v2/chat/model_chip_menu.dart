@@ -140,9 +140,13 @@ class V2ModelChipMenu extends StatelessWidget {
                 spacing: OSpace.s,
                 runSpacing: OSpace.xs,
                 children: [
-                  Text(
-                    'MODEL SELECTION',
-                    style: OType.overline.copyWith(color: c.textMuted),
+                  Semantics(
+                    container: true,
+                    header: true,
+                    child: Text(
+                      'MODEL SELECTION',
+                      style: OType.overline.copyWith(color: c.textMuted),
+                    ),
                   ),
                   Text(
                     'Tier: ${data.tierLabel}',
@@ -287,6 +291,7 @@ class _AutoRow extends StatelessWidget {
     return Semantics(
       label: '${data.autoName}, ${data.autoTag}',
       button: true,
+      enabled: true,
       selected: data.autoSelected,
       onTap: onTap,
       excludeSemantics: true,
@@ -375,6 +380,7 @@ class _ManualRow extends StatelessWidget {
     return Semantics(
       label: '${model.name}, ${model.subtitle}',
       button: true,
+      enabled: true,
       selected: selected,
       onTap: onTap,
       excludeSemantics: true,
@@ -527,6 +533,7 @@ class _ActionRow extends StatelessWidget {
     return Semantics(
       label: trailing == null ? label : '$label, $trailing',
       button: true,
+      enabled: true,
       onTap: onTap,
       excludeSemantics: true,
       child: Material(

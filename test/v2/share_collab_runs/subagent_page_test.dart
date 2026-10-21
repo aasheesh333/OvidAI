@@ -43,7 +43,7 @@ V2SubagentPageData _data({
     logLines: _logLines,
     logPath: '/workspace/.ovid/logs/subagent_a402.log',
     summary: withSummary
-        ? const V2SubagentSummary(
+        ? const V2SubagentSummaryData(
             status: 'completed',
             filesModified: ['Hero.tsx', 'Navbar.tsx', 'globals.css'],
             artifactsCreated: ['preview-screenshot.png'],
@@ -108,7 +108,16 @@ void main() {
     tester,
   ) async {
     for (final theme in [OTheme.light(), OTheme.dark()]) {
-      await _pump(tester, SubagentPage(data: _data()), theme);
+      await _pump(
+        tester,
+        SubagentPage(
+          data: _data(),
+          onStop: () {},
+          onViewLog: () {},
+          onReadFullLog: (_) {},
+        ),
+        theme,
+      );
 
       expect(find.text('Subagent'), findsOneWidget);
       expect(find.text('Frontend builder'), findsOneWidget);
@@ -290,22 +299,11 @@ void main() {
     expect(find.text('Paused'), findsNWidgets(2));
   });
 
-  testWidgets('stop is announced as disabled without a callback', (
+  testWidgets('stop is hidden when the host has no stop action', (
     tester,
   ) async {
-    final handle = tester.ensureSemantics();
     await _pump(tester, SubagentPage(data: _data()), OTheme.light());
-
-    await tester.ensureVisible(find.text('Stop subagent'));
-    await tester.pump(const Duration(milliseconds: 400));
-    final semantics = tester.widget<Semantics>(
-      find.byWidgetPredicate(
-        (w) => w is Semantics && w.properties.label == 'Stop subagent',
-      ),
-    );
-    expect(semantics.properties.button, isTrue);
-    expect(semantics.properties.enabled, isFalse);
-    handle.dispose();
+    expect(find.text('Stop subagent'), findsNothing);
   });
 
   testWidgets('renders at 320 dp with 200% text in light and dark', (
@@ -314,7 +312,7 @@ void main() {
     for (final theme in [OTheme.light(), OTheme.dark()]) {
       await _pump(
         tester,
-        SubagentPage(data: _data()),
+        SubagentPage(data: _data(), onStop: () {}),
         theme,
         size: const Size(320, 700),
         textScale: 2,
@@ -433,5 +431,30 @@ void main() {
     expect(empty.summary, isNull);
     expect(empty.status, V2SubagentSummaryStatus.empty);
     expect(find.text('No summary yet'), findsOneWidget);
+  });
+
+  testWidgets('unknown progress is hidden, not shown as 0 %', (tester) async {
+    await _pump(
+      tester,
+      SubagentPage(
+        data: V2SubagentPageData(
+          name: 'Frontend builder',
+          instanceLabel: 'deepseek-chat',
+          stepLabel: 'Working',
+          paceLabel: '',
+          goal: 'Build the navbar.',
+          startedLabel: '10:41',
+          elapsedLabel: '2m',
+          timeLimitLabel: 'Not reported',
+          remainingLabel: '',
+          totalLogLines: 0,
+          progressKnown: false,
+        ),
+      ),
+      OTheme.light(),
+    );
+
+    expect(find.text('Overall progress'), findsNothing);
+    expect(find.text('0%'), findsNothing);
   });
 }

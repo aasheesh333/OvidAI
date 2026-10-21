@@ -43,6 +43,11 @@ class V2ConfirmTypedSheetData {
     this.lockHint = 'The button below stays locked until it matches.',
     this.disabledHint =
         'Type the email or phone on your account to enable this action.',
+    this.noContactPrompt = 'Type DELETE to confirm',
+    this.noContactFieldLabel = 'Confirmation word',
+    this.noContactLockHint =
+        'The button below stays locked until you type DELETE.',
+    this.noContactDisabledHint = 'Type DELETE to enable this action.',
     this.confirmLabel = 'Delete after 24 hours',
     this.cancelLabel = 'Keep account',
   });
@@ -74,11 +79,27 @@ class V2ConfirmTypedSheetData {
   final String matchedMessage;
   final String lockHint;
   final String disabledHint;
+
+  /// Copy used when the account has no email or phone and the fallback word
+  /// `DELETE` is the confirmation target.
+  final String noContactPrompt;
+  final String noContactFieldLabel;
+  final String noContactLockHint;
+  final String noContactDisabledHint;
   final String confirmLabel;
   final String cancelLabel;
 
   /// True when the account has an email or phone to type.
   bool get hasContact => contact.trim().isNotEmpty;
+
+  String get activePrompt => hasContact ? prompt : noContactPrompt;
+
+  String get activeFieldLabel => hasContact ? fieldLabel : noContactFieldLabel;
+
+  String get activeLockHint => hasContact ? lockHint : noContactLockHint;
+
+  String get activeDisabledHint =>
+      hasContact ? disabledHint : noContactDisabledHint;
 
   bool get isEmailContact => hasContact && contact.contains('@');
 
@@ -221,7 +242,7 @@ class _V2ConfirmTypedSheetState extends State<V2ConfirmTypedSheet> {
                       ),
                       const SizedBox(height: OSpace.s),
                       Semantics(
-                        hint: _canConfirm ? null : data.disabledHint,
+                        hint: _canConfirm ? null : data.activeDisabledHint,
                         child: OButton(
                           key: const ValueKey('confirm-typed-button'),
                           label: data.confirmLabel,
@@ -406,7 +427,7 @@ class _V2ConfirmTypedSheetState extends State<V2ConfirmTypedSheet> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text(
-          data.prompt,
+          data.activePrompt,
           style: OType.bodySm.copyWith(
             color: c.text,
             fontWeight: FontWeight.w600,
@@ -461,7 +482,7 @@ class _V2ConfirmTypedSheetState extends State<V2ConfirmTypedSheet> {
           onChanged: (_) => setState(() {}),
           onSubmitted: (_) => _confirm(),
           decoration: InputDecoration(
-            labelText: data.fieldLabel,
+            labelText: data.activeFieldLabel,
             hintText: data.confirmationTarget,
             prefixIcon: Icon(
               email
@@ -483,7 +504,7 @@ class _V2ConfirmTypedSheetState extends State<V2ConfirmTypedSheet> {
               const SizedBox(width: OSpace.xs),
               Expanded(
                 child: Text(
-                  data.lockHint,
+                  data.activeLockHint,
                   style: OType.caption.copyWith(color: c.textFaint),
                 ),
               ),

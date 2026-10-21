@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'connector_models.dart';
+import 'connector_store.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
 
@@ -47,6 +49,7 @@ class V2ConnectorPermissionTool {
     required this.scope,
     this.description = '',
     this.permissionId,
+    this.enabled = true,
   });
 
   final String id;
@@ -54,6 +57,10 @@ class V2ConnectorPermissionTool {
   final V2ConnectorPermissionScope scope;
   final String description;
   final String? permissionId;
+
+  /// The per-tool switch. A disabled tool stays listed but Ovid may not call
+  /// it even when the permission above is granted.
+  final bool enabled;
 }
 
 /// Immutable data for the per-connector permissions screen.
@@ -108,7 +115,9 @@ class ConnectorPermissionsPage extends StatefulWidget {
     this.onBack,
     this.onRevokePermission,
     this.onRevokeAll,
+    this.onToolChanged,
     this.onRetry,
+    this.store,
   });
 
   final V2ConnectorPermissionsData data;
@@ -119,7 +128,13 @@ class ConnectorPermissionsPage extends StatefulWidget {
 
   /// Called after the person confirms revoking every permission.
   final VoidCallback? onRevokeAll;
+
+  /// Called with the tool id and its new switch value.
+  final void Function(String toolId, bool enabled)? onToolChanged;
   final VoidCallback? onRetry;
+
+  /// Persisted connector state, used when the host does not pass callbacks.
+  final V2ConnectorStore? store;
 
   @override
   State<ConnectorPermissionsPage> createState() =>
@@ -131,16 +146,55 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
   /// up. Cleared when a new data object arrives.
   final Set<String> _revoked = <String>{};
 
+  /// Tools the person turned off on this screen, before the host catches up.
+  final Set<String> _disabledTools = <String>{};
+
   V2ConnectorPermissionsData get _data => widget.data;
+
+  V2ConnectorStore get _store => widget.store ?? v2ConnectorStore;
 
   @override
   void didUpdateWidget(covariant ConnectorPermissionsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.data != widget.data) _revoked.clear();
+    if (oldWidget.data != widget.data) {
+      _revoked.clear();
+      _disabledTools.clear();
+    }
   }
 
   bool _isGranted(V2ConnectorPermissionItem item) =>
       item.granted && !_revoked.contains(item.id);
+
+  bool _isToolEnabled(V2ConnectorPermissionTool tool) =>
+      tool.enabled && !_disabledTools.contains(tool.id);
+
+  Future<void> _setToolEnabled(V2ConnectorPermissionTool tool, bool value) async {
+    setState(() {
+      if (value) {
+        _disabledTools.remove(tool.id);
+      } else {
+        _disabledTools.add(tool.id);
+      }
+    });
+    final external = widget.onToolChanged;
+    if (external != null) {
+      external(tool.id, value);
+      return;
+    }
+    try {
+      await _store.setToolEnabled(_data.connectorId, tool.id, value);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        if (value) {
+          _disabledTools.add(tool.id);
+        } else {
+          _disabledTools.remove(tool.id);
+        }
+      });
+      showOSnack(context, 'Could not save that tool. Try again.');
+    }
+  }
 
   List<V2ConnectorPermissionItem> get _granted =>
       _data.permissions.where(_isGranted).toList(growable: false);
@@ -175,8 +229,27 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
     );
     if (confirmed != true || !mounted) return;
     setState(() => _revoked.add(item.id));
-    widget.onRevokePermission?.call(item.id);
+    final external = widget.onRevokePermission;
+    if (external != null) {
+      external(item.id);
+    } else {
+      await _persistRevoke(item.id);
+    }
+    if (!mounted) return;
     showOSnack(context, '“${item.name}” revoked.');
+  }
+
+  Future<void> _persistRevoke(String permissionId) async {
+    final kind = V2ConnectorPermissionKind.values
+        .where((value) => value.name == permissionId)
+        .firstOrNull;
+    if (kind == null) return;
+    try {
+      await _store.setPermission(_data.connectorId, kind, false);
+    } catch (_) {
+      if (!mounted) return;
+      showOSnack(context, 'Could not save that change. Try again.');
+    }
   }
 
   Future<void> _confirmRevokeAll() async {
@@ -203,7 +276,15 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
         _revoked.add(item.id);
       }
     });
-    widget.onRevokeAll?.call();
+    final external = widget.onRevokeAll;
+    if (external != null) {
+      external();
+    } else {
+      for (final item in _data.permissions) {
+        await _persistRevoke(item.id);
+      }
+    }
+    if (!mounted) return;
     showOSnack(context, 'All ${_data.connectorName} access revoked.');
   }
 
@@ -564,9 +645,7 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
                   label: 'Revoke',
                   semanticLabel: 'Revoke ${item.name}',
                   variant: OButtonVariant.danger,
-                  onPressed: widget.onRevokePermission == null
-                      ? null
-                      : () => _confirmRevoke(item),
+                  onPressed: () => _confirmRevoke(item),
                 ),
             ],
           ),
@@ -651,51 +730,83 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
   Widget _toolRow(BuildContext context, V2ConnectorPermissionTool tool) {
     final c = OColors.of(context);
     final blocked = _toolBlocked(tool);
+    final enabled = _isToolEnabled(tool) && !blocked;
     final tint = _scopeColor(tool.scope, c);
 
-    return Padding(
-      key: ValueKey('connector-permissions-tool-${tool.id}'),
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.l,
-        vertical: OSpace.m,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            tool.name,
-            style: OType.mono.copyWith(
-              color: blocked ? c.textMuted : c.text,
-              fontWeight: FontWeight.w600,
+    return MergeSemantics(
+      child: Padding(
+        key: ValueKey('connector-permissions-tool-${tool.id}'),
+        padding: const EdgeInsets.symmetric(
+          horizontal: OSpace.l,
+          vertical: OSpace.m,
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    tool.name,
+                    style: OType.mono.copyWith(
+                      color: enabled ? c.text : c.textMuted,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: OSpace.xs),
+                  Wrap(
+                    spacing: OSpace.s,
+                    runSpacing: OSpace.xs,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      OPill(
+                        label: _scopeLabel(tool.scope),
+                        tone: _scopeTone(tool.scope),
+                      ),
+                      if (blocked)
+                        const OPill(
+                          label: 'Blocked',
+                          tone: OPillTone.danger,
+                          dot: true,
+                        )
+                      else if (!enabled)
+                        const OPill(label: 'Off', tone: OPillTone.neutral)
+                      else
+                        Icon(
+                          Icons.check_circle_outline_rounded,
+                          size: 15,
+                          color: tint,
+                        ),
+                    ],
+                  ),
+                  if (tool.description.isNotEmpty) ...[
+                    const SizedBox(height: OSpace.xs),
+                    Text(
+                      blocked
+                          ? '${tool.description} Needs a revoked permission.'
+                          : enabled
+                          ? tool.description
+                          : '${tool.description} Ovid will not call this tool.',
+                      style: OType.bodySm.copyWith(color: c.textMuted),
+                    ),
+                  ],
+                ],
+              ),
             ),
-          ),
-          const SizedBox(height: OSpace.xs),
-          Wrap(
-            spacing: OSpace.s,
-            runSpacing: OSpace.xs,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              OPill(label: _scopeLabel(tool.scope), tone: _scopeTone(tool.scope)),
-              if (blocked)
-                const OPill(
-                  label: 'Blocked',
-                  tone: OPillTone.danger,
-                  dot: true,
-                )
-              else
-                Icon(Icons.check_circle_outline_rounded, size: 15, color: tint),
-            ],
-          ),
-          if (tool.description.isNotEmpty) ...[
-            const SizedBox(height: OSpace.xs),
-            Text(
-              blocked
-                  ? '${tool.description} Needs a revoked permission.'
-                  : tool.description,
-              style: OType.bodySm.copyWith(color: c.textMuted),
+            const SizedBox(width: OSpace.s),
+            SizedBox(
+              height: OSpace.touch,
+              child: Switch(
+                key: ValueKey('connector-permissions-tool-switch-${tool.id}'),
+                value: enabled,
+                onChanged: blocked
+                    ? null
+                    : (value) => _setToolEnabled(tool, value),
+              ),
             ),
           ],
-        ],
+        ),
       ),
     );
   }
@@ -867,9 +978,7 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
             icon: Icons.link_off_rounded,
             variant: OButtonVariant.dangerFill,
             expand: true,
-            onPressed: widget.onRevokeAll == null || granted == 0
-                ? null
-                : _confirmRevokeAll,
+            onPressed: granted == 0 ? null : _confirmRevokeAll,
           ),
         ],
       ),

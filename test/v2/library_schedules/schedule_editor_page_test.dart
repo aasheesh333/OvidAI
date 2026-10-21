@@ -226,12 +226,13 @@ void main() {
     expect(taps, 1);
   });
 
-  testWidgets('a custom cadence must be described before saving', (
+  testWidgets('a custom cadence must be a cron or RRULE before saving', (
     tester,
   ) async {
     _phone(tester);
+    V2ScheduleDraft? saved;
     await tester.pumpWidget(
-      _app(ScheduleEditorPage(data: _data, onSave: _noopSave)),
+      _app(ScheduleEditorPage(data: _data, onSave: (draft) => saved = draft)),
     );
     await tester.pumpAndSettle();
 
@@ -239,25 +240,21 @@ void main() {
     await tester.pumpAndSettle();
 
     await _scrollTo(tester, find.text('Save schedule'));
-    expect(
-      tester
-          .widget<OButton>(find.widgetWithText(OButton, 'Save schedule'))
-          .onPressed,
-      isNull,
-    );
+    await tester.tap(find.text('Save schedule'));
+    await tester.pumpAndSettle();
+    expect(saved, isNull, reason: 'an empty custom rule must not save');
 
     final rule = find.byKey(const ValueKey('cadence-custom-rule'));
     await _scrollTo(tester, rule);
-    await tester.enterText(rule, 'Every other Monday at 6 PM');
+    await tester.enterText(rule, '0 18 * * 1');
     await tester.pumpAndSettle();
 
     await _scrollTo(tester, find.text('Save schedule'));
-    expect(
-      tester
-          .widget<OButton>(find.widgetWithText(OButton, 'Save schedule'))
-          .onPressed,
-      isNotNull,
-    );
+    await tester.tap(find.text('Save schedule'));
+    await tester.pumpAndSettle();
+    expect(saved, isNotNull);
+    expect(saved!.cron, '0 18 * * 1');
+    expect(saved!.cadence!.frequency, V2CadenceFrequency.custom);
   });
 
   testWidgets('frequency segment updates the preview sentence', (tester) async {
@@ -353,29 +350,41 @@ void main() {
     );
   });
 
-  testWidgets('save is disabled and announced when the prompt is empty', (
+  testWidgets('an empty prompt is rejected inline and blocks the save', (
     tester,
   ) async {
     _phone(tester);
-    final semantics = tester.ensureSemantics();
+    var saves = 0;
     await tester.pumpWidget(
       _app(
-        const ScheduleEditorPage(
-          data: V2ScheduleEditorData(prompt: ''),
-          onSave: _noopSave,
+        ScheduleEditorPage(
+          data: const V2ScheduleEditorData(prompt: ''),
+          onSave: (_) => saves++,
         ),
       ),
     );
     await tester.pumpAndSettle();
 
     await _scrollTo(tester, find.text('Save schedule'));
-    final save = tester.getSemantics(find.text('Save schedule'));
-    expect(
-      save.getSemanticsData().flagsCollection.isEnabled.toBoolOrNull(),
-      isFalse,
-    );
+    await tester.tap(find.text('Save schedule'));
+    await tester.pumpAndSettle();
 
-    semantics.dispose();
+    expect(saves, 0, reason: 'the prompt is required');
+
+    // The error sits under the prompt card, above the save button, so scroll
+    // back up until the (lazy) row is built again.
+    final size = tester.view.physicalSize / tester.view.devicePixelRatio;
+    var guard = 0;
+    while (find.text('Write the prompt Ovid should run.').evaluate().isEmpty &&
+        guard < 40) {
+      await tester.dragFrom(
+        Offset(size.width - 6, size.height / 2),
+        const Offset(0, 240),
+      );
+      await tester.pumpAndSettle();
+      guard++;
+    }
+    expect(find.text('Write the prompt Ovid should run.'), findsOneWidget);
   });
 
   testWidgets('every control meets the 48 dp target and has a label', (

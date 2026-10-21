@@ -49,6 +49,9 @@ class OnboardingWelcomePage extends StatelessWidget {
     return OScaffold(
       appBar: OAppBar(
         title: 'Welcome',
+        // Welcome is the first route of the tour: the default back arrow would
+        // have nothing to pop, so it is suppressed unless a host wires one.
+        showBack: false,
         actions: [
           if (onClose != null)
             OIconButton(
@@ -87,10 +90,14 @@ class OnboardingWelcomePage extends StatelessWidget {
               const SizedBox(height: OSpace.xl),
               const _EnginePill(),
               const SizedBox(height: OSpace.l),
-              Text(
-                'Your always-on personal agent.',
-                textAlign: TextAlign.center,
-                style: OType.h1.copyWith(color: c.text),
+              Semantics(
+                container: true,
+                header: true,
+                child: Text(
+                  'Your always-on personal agent.',
+                  textAlign: TextAlign.center,
+                  style: OType.h1.copyWith(color: c.text),
+                ),
               ),
               const SizedBox(height: OSpace.m),
               Text(

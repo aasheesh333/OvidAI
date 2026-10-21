@@ -456,4 +456,46 @@ void main() {
     expect(errors, isEmpty);
     _expectNoOverflow(tester);
   });
+
+  testWidgets('a state change is announced as a live region', (tester) async {
+    final handle = tester.ensureSemantics();
+    await _tall(tester);
+    await tester.pumpWidget(_app(V2StateTile.offline(onAction: () {})));
+    await tester.pumpAndSettle();
+
+    final node = tester.getSemantics(find.byType(V2StateTile));
+    expect(node.flagsCollection.isLiveRegion, isTrue);
+    handle.dispose();
+  });
+
+  testWidgets('unbroken tokens wrap at 320 dp and 200 % text', (tester) async {
+    _setNarrowView(tester);
+    final token = 'a' * 140;
+
+    final errors = <FlutterErrorDetails>[];
+    final previous = FlutterError.onError;
+    FlutterError.onError = errors.add;
+    addTearDown(() => FlutterError.onError = previous);
+
+    await tester.pumpWidget(
+      _narrowApp(
+        V2StateTile(
+          kind: V2StateTileKind.planLimited,
+          copy: V2StateTileCopy.planLimited.copyWith(
+            title: 'Plan limit for $token',
+            message: 'See https://example.com/$token before you upgrade.',
+            actionLabel: 'See plans',
+          ),
+          detail: token,
+          onAction: () {},
+        ),
+        dark: true,
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+
+    expect(errors, isEmpty);
+    _expectNoOverflow(tester);
+  });
 }

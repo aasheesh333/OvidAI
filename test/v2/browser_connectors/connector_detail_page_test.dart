@@ -70,6 +70,15 @@ V2ConnectorDetailData _data({
   );
 }
 
+Future<void> _scrollTo(WidgetTester tester, Finder finder) async {
+  await tester.scrollUntilVisible(
+    finder,
+    300,
+    scrollable: find.byType(Scrollable).first,
+  );
+  await tester.pump(const Duration(milliseconds: 300));
+}
+
 Future<void> _pump(
   WidgetTester tester,
   Widget child, {
@@ -89,6 +98,7 @@ void main() {
     expect(find.text('Connector details'), findsOneWidget);
     expect(find.text('GitHub'), findsOneWidget);
     expect(find.text('Connected'), findsOneWidget);
+    await _scrollTo(tester, find.text('Permissions granted'));
     expect(find.text('Permissions granted'), findsOneWidget);
     expect(find.text('Read your repositories'), findsOneWidget);
 
@@ -125,6 +135,7 @@ void main() {
       ),
     );
 
+    await _scrollTo(tester, find.byKey(const Key('connector-safety-note')));
     expect(find.byKey(const Key('connector-safety-note')), findsOneWidget);
     expect(find.text('Built-in safety'), findsOneWidget);
 
@@ -153,6 +164,7 @@ void main() {
       ),
     );
 
+    await _scrollTo(tester, find.text('Custom connector safety'));
     expect(find.text('Custom connector safety'), findsOneWidget);
     expect(
       find.text(
@@ -186,6 +198,7 @@ void main() {
 
     expect(find.text('Connector details'), findsOneWidget);
     expect(find.text('GitHub'), findsOneWidget);
+    await _scrollTo(tester, find.text('Permissions granted'));
     expect(find.text('Permissions granted'), findsOneWidget);
   });
 
@@ -370,14 +383,10 @@ void main() {
       ),
     );
 
+    await _scrollTo(tester, find.byKey(const Key('connector-permissions-entry')));
     expect(
       find.byKey(const Key('connector-permissions-entry')),
       findsOneWidget,
-    );
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('connector-permissions-entry')),
-      300,
-      scrollable: find.byType(Scrollable).first,
     );
     await tester.tap(find.byKey(const Key('connector-permissions-entry')));
     await tester.pumpAndSettle();
@@ -426,14 +435,17 @@ void main() {
       ),
     );
 
+    final readSwitch = find.byKey(
+      const ValueKey('connector-permission-switch-read'),
+    );
     await tester.scrollUntilVisible(
-      find.byType(Switch).first,
+      readSwitch,
       300,
       scrollable: find.byType(Scrollable).first,
     );
-    await tester.ensureVisible(find.byType(Switch).first);
+    await tester.ensureVisible(readSwitch);
     await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.byType(Switch).first);
+    await tester.tap(readSwitch);
     await tester.pump(const Duration(milliseconds: 300));
     expect(permissionId, 'read');
     expect(granted, isFalse);
@@ -465,14 +477,13 @@ void main() {
       ),
     );
 
-    await tester.scrollUntilVisible(
-      find.byType(Switch).last,
-      300,
-      scrollable: find.byType(Scrollable).first,
+    final autoSyncSwitch = find.byKey(
+      const Key('connector-autosync-switch'),
     );
-    await tester.drag(find.byType(Scrollable).first, const Offset(0, -240));
+    await _scrollTo(tester, autoSyncSwitch);
+    await tester.ensureVisible(autoSyncSwitch);
     await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.byType(Switch).last);
+    await tester.tap(autoSyncSwitch);
     await tester.pump(const Duration(milliseconds: 300));
     expect(autoSync, isFalse);
   });
@@ -485,6 +496,7 @@ void main() {
           id: 'github',
           name: 'GitHub',
           description: 'Read repositories and review code.',
+          connected: true,
         ),
       ),
     );
@@ -520,6 +532,10 @@ void main() {
 
     expect(find.bySemanticsLabel('Back'), findsOneWidget);
     expect(find.bySemanticsLabel('Connector menu'), findsOneWidget);
+    await _scrollTo(
+      tester,
+      find.bySemanticsLabel('Read your repositories permission'),
+    );
     expect(
       find.bySemanticsLabel('Read your repositories permission'),
       findsOneWidget,
@@ -533,7 +549,11 @@ void main() {
     final disconnect = tester.widget<OutlinedButton>(
       find.widgetWithText(OutlinedButton, 'Disconnect GitHub'),
     );
-    expect(disconnect.onPressed, isNull);
+    expect(
+      disconnect.onPressed,
+      isNotNull,
+      reason: 'disconnect is wired to the store by default',
+    );
 
     handle.dispose();
   });

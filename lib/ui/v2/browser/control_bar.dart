@@ -12,12 +12,12 @@ import '../../design/o_tokens.dart';
 ///
 ///  * Ovid's tab history (back / forward);
 ///  * the human-input tools (take control, keyboard, trackpad);
-///  * upload and download;
 ///  * the announced frame rate and the headless countdown.
 ///
 /// Every control keeps a 48 × 48 dp target and a tooltip plus screen-reader
-/// label. Controls with no callback are announced as disabled instead of
-/// disappearing, so the bar keeps its shape while a session reconnects.
+/// label. A tool whose callback is null is not rendered at all: the bar only
+/// shows actions this build can actually perform. History controls are the
+/// exception — they stay visible but disabled while there is nowhere to go.
 class BrowserControlBar extends StatelessWidget {
   const BrowserControlBar({
     super.key,
@@ -35,8 +35,6 @@ class BrowserControlBar extends StatelessWidget {
     this.onToggleTrackpad,
     this.onBack,
     this.onForward,
-    this.onUpload,
-    this.onDownload,
     this.takeControlLabel = 'Take control',
     this.releaseControlLabel = 'Return control',
     this.showKeyboardLabel = 'Show keyboard',
@@ -45,8 +43,6 @@ class BrowserControlBar extends StatelessWidget {
     this.hideTrackpadLabel = 'Hide trackpad',
     this.backLabel = 'Back',
     this.forwardLabel = 'Forward',
-    this.uploadLabel = 'Upload file',
-    this.downloadLabel = 'Download file',
     this.fpsSemanticLabel = 'Live frame rate',
     this.countdownSemanticLabel = 'Time until the live view goes headless',
     this.semanticLabel = 'Browser controls',
@@ -59,8 +55,6 @@ class BrowserControlBar extends StatelessWidget {
   static const trackpadKey = ValueKey<String>('browser-control-trackpad');
   static const backKey = ValueKey<String>('browser-control-back');
   static const forwardKey = ValueKey<String>('browser-control-forward');
-  static const uploadKey = ValueKey<String>('browser-control-upload');
-  static const downloadKey = ValueKey<String>('browser-control-download');
   static const fpsKey = ValueKey<String>('browser-control-fps');
   static const countdownKey = ValueKey<String>('browser-control-countdown');
 
@@ -94,8 +88,6 @@ class BrowserControlBar extends StatelessWidget {
   final VoidCallback? onToggleTrackpad;
   final VoidCallback? onBack;
   final VoidCallback? onForward;
-  final VoidCallback? onUpload;
-  final VoidCallback? onDownload;
 
   final String takeControlLabel;
   final String releaseControlLabel;
@@ -105,8 +97,6 @@ class BrowserControlBar extends StatelessWidget {
   final String hideTrackpadLabel;
   final String backLabel;
   final String forwardLabel;
-  final String uploadLabel;
-  final String downloadLabel;
   final String fpsSemanticLabel;
   final String countdownSemanticLabel;
   final String semanticLabel;
@@ -143,8 +133,10 @@ class BrowserControlBar extends StatelessWidget {
                   countdownSemanticLabel: countdownSemanticLabel,
                   takeControl: _takeControl(context),
                 ),
-                const SizedBox(height: OSpace.xs),
-                _tools(context),
+                if (_tools(context) case final tools?) ...[
+                  const SizedBox(height: OSpace.xs),
+                  tools,
+                ],
               ],
             ),
           ),
@@ -153,12 +145,14 @@ class BrowserControlBar extends StatelessWidget {
     );
   }
 
-  Widget _takeControl(BuildContext context) {
+  Widget? _takeControl(BuildContext context) {
     final label = controlling ? releaseControlLabel : takeControlLabel;
     final icon = controlling
         ? Icons.front_hand_rounded
         : Icons.front_hand_outlined;
     final onPressed = controlling ? onReleaseControl : onTakeControl;
+    // Nothing to hand over and nothing to hand back: no control at all.
+    if (onPressed == null) return null;
     if (showTakeControlLabel) {
       return OButton(
         key: takeControlKey,
@@ -180,9 +174,12 @@ class BrowserControlBar extends StatelessWidget {
     );
   }
 
-  Widget _tools(BuildContext context) {
-    return Wrap(
-      children: [
+  /// The tool row, or null when this build has no tool to offer. History
+  /// stays visible while there is a history handler so the bar keeps its
+  /// shape; input tools appear only when they can actually drive the page.
+  Widget? _tools(BuildContext context) {
+    final children = <Widget>[
+      if (onBack != null)
         OIconButton(
           key: backKey,
           icon: Icons.arrow_back_rounded,
@@ -190,6 +187,7 @@ class BrowserControlBar extends StatelessWidget {
           tooltip: backLabel,
           onPressed: canGoBack ? onBack : null,
         ),
+      if (onForward != null)
         OIconButton(
           key: forwardKey,
           icon: Icons.arrow_forward_rounded,
@@ -197,6 +195,7 @@ class BrowserControlBar extends StatelessWidget {
           tooltip: forwardLabel,
           onPressed: canGoForward ? onForward : null,
         ),
+      if (onToggleKeyboard != null)
         OIconButton(
           key: keyboardKey,
           icon: keyboard ? Icons.keyboard_hide_rounded : Icons.keyboard_rounded,
@@ -205,6 +204,7 @@ class BrowserControlBar extends StatelessWidget {
           active: keyboard,
           onPressed: onToggleKeyboard,
         ),
+      if (onToggleTrackpad != null)
         OIconButton(
           key: trackpadKey,
           icon: trackpad ? Icons.touch_app_rounded : Icons.mouse_outlined,
@@ -213,22 +213,9 @@ class BrowserControlBar extends StatelessWidget {
           active: trackpad,
           onPressed: onToggleTrackpad,
         ),
-        OIconButton(
-          key: uploadKey,
-          icon: Icons.upload_rounded,
-          semanticLabel: uploadLabel,
-          tooltip: uploadLabel,
-          onPressed: onUpload,
-        ),
-        OIconButton(
-          key: downloadKey,
-          icon: Icons.download_rounded,
-          semanticLabel: downloadLabel,
-          tooltip: downloadLabel,
-          onPressed: onDownload,
-        ),
-      ],
-    );
+    ];
+    if (children.isEmpty) return null;
+    return Wrap(children: children);
   }
 }
 
@@ -247,7 +234,7 @@ class _StatusLine extends StatelessWidget {
   final String countdownLabel;
   final String fpsSemanticLabel;
   final String countdownSemanticLabel;
-  final Widget takeControl;
+  final Widget? takeControl;
 
   @override
   Widget build(BuildContext context) {
@@ -271,7 +258,7 @@ class _StatusLine extends StatelessWidget {
             semanticLabel: '$countdownSemanticLabel, $countdownLabel',
             tone: _ChipTone.warn,
           ),
-        takeControl,
+        ?takeControl,
       ],
     );
   }

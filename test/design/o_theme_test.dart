@@ -17,7 +17,7 @@ void main() {
       expect(OColors.dark.bg.toARGB32(), 0xFF0E0E10);
       expect(OColors.dark.surface.toARGB32(), 0xFF16161A);
       expect(OColors.dark.hairline.toARGB32(), 0xFF26262C);
-      expect(OColors.dark.accentFill.toARGB32(), 0xFF7C5CFF);
+      expect(OColors.dark.accentFill.toARGB32(), 0xFF7857FA);
       expect(OColors.dark.text.toARGB32(), 0xFFFFFFFF);
     });
 
@@ -38,7 +38,7 @@ void main() {
 
     test('primary button label stays readable on the accent fill', () {
       for (final c in [OColors.light, OColors.dark]) {
-        expect(_contrast(c.onAccent, c.accentFill), greaterThanOrEqualTo(4.3));
+        expect(_contrast(c.onAccent, c.accentFill), greaterThanOrEqualTo(4.5));
       }
     });
 
@@ -106,6 +106,23 @@ void main() {
     test('touch target is at least 48dp', () {
       expect(OSpace.touch, greaterThanOrEqualTo(48));
       expect(OSpace.listRow, greaterThanOrEqualTo(48));
+    });
+
+    test('component metrics that screens used to hard-code are tokens', () {
+      // The literal each one replaced, so a regression is obvious.
+      expect(OSpace.xxs, 2); // title -> subtitle stack (was `2`, 107 uses)
+      expect(OSpace.iconGap, 6); // icon -> label (was `6`, 27 uses)
+      expect(OSpace.pillPad, 10); // pill inset (was `10`, 20 uses)
+      expect(OSpace.controlPad, 14); // chip/field inset (was `14`)
+      expect(OSpace.buttonPad, 20); // button inset (was `20`)
+      expect(OSpace.iconTile, 36); // list-row icon tile (was `36`)
+      expect(ORadius.xs, 4); // mini bars and thumbnails (was `2`/`3`)
+    });
+
+    test('the type scale has a semibold 14 sp rung', () {
+      expect(OType.bodySmStrong.fontSize, OType.bodySm.fontSize);
+      expect(OType.bodySmStrong.fontWeight, FontWeight.w600);
+      expect(OType.all, contains(OType.bodySmStrong));
     });
   });
 }

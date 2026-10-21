@@ -1,11 +1,14 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart' show TapGestureRecognizer;
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'transcript_actions.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
 
@@ -145,6 +148,9 @@ const Set<String> _artifactExtensions = {
   'zip',
 };
 
+final _inlinePattern = RegExp(
+  r'\*\*([^*]+)\*\*|`([^`]+)`|\*([^*\n]+)\*|\[([^\]]+)\]\(([^)\s]+)\)',
+);
 final _fencePattern = RegExp(r'^(`{3,}|~{3,})(.*)$');
 final _headingPattern = RegExp(r'^(#{1,6})\s+(.+)$');
 final _bulletPattern = RegExp(r'^([ \t]*)([-*+•]|\d+[.)])[ \t]+(.+)$');
@@ -305,6 +311,34 @@ List<V2MessageBlock> parseV2MessageBlocks(String markdown) {
   }
   flushParagraph();
   return List.unmodifiable(blocks);
+}
+
+/// Bounded memo for [parseV2MessageBlocks].
+///
+/// A transcript row rebuilds on scroll, theme change or when a sibling
+/// streams. Re-parsing an unchanged message is pure waste, so the last few
+/// hundred parses are kept. Streaming messages change their string every
+/// token; the oldest entry is evicted so the cache stays bounded.
+const int _parseCacheLimit = 128;
+final Map<String, List<V2MessageBlock>> _parseCache =
+    <String, List<V2MessageBlock>>{};
+
+/// Test seam: counts cache misses, i.e. real parses. Null in production.
+void Function(String markdown)? v2MessageParseObserver;
+
+List<V2MessageBlock> parseV2MessageBlocksCached(String markdown) {
+  final cached = _parseCache.remove(markdown);
+  if (cached != null) {
+    _parseCache[markdown] = cached; // Re-insert as most recently used.
+    return cached;
+  }
+  v2MessageParseObserver?.call(markdown);
+  final parsed = parseV2MessageBlocks(markdown);
+  _parseCache[markdown] = parsed;
+  if (_parseCache.length > _parseCacheLimit) {
+    _parseCache.remove(_parseCache.keys.first);
+  }
+  return parsed;
 }
 
 String _diagramTitle(String source) {
@@ -479,114 +513,198 @@ class V2MessageBlocks extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final blocks = parseV2MessageBlocks(markdown);
+    final blocks = parseV2MessageBlocksCached(markdown);
     if (blocks.isEmpty) return const SizedBox.shrink();
+    // A host that does not inject a handler still gets a working control: the
+    // defaults open the real URL and save a real file.
+    void open(String href) {
+      final handler = onOpenLink;
+      if (handler != null) {
+        handler(href);
+      } else {
+        unawaited(v2OpenTranscriptLink(context, href));
+      }
+    }
+
+    void download(String href, {String? suggestedName}) {
+      final handler = onDownload;
+      if (handler != null) {
+        handler(href);
+      } else {
+        unawaited(
+          v2SaveTranscriptLink(context, href, suggestedName: suggestedName),
+        );
+      }
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         for (var i = 0; i < blocks.length; i++) ...[
           if (i > 0) const SizedBox(height: OSpace.m),
-          _buildBlock(context, blocks[i]),
+          _buildBlock(context, blocks[i], open, download),
         ],
       ],
     );
   }
 
-  Widget _buildBlock(BuildContext context, V2MessageBlock block) {
+  Widget _buildBlock(
+    BuildContext context,
+    V2MessageBlock block,
+    ValueChanged<String> open,
+    void Function(String href, {String? suggestedName}) download,
+  ) {
     final c = OColors.of(context);
     return switch (block) {
-      V2HeadingBlock heading => _HeadingView(block: heading),
-      V2ParagraphBlock paragraph => _paragraph(context, paragraph.text),
-      V2BulletListBlock list => _BulletListView(block: list),
+      V2HeadingBlock heading => _HeadingView(block: heading, onOpenLink: open),
+      V2ParagraphBlock paragraph => _paragraph(
+        context,
+        paragraph.text,
+        open,
+      ),
+      V2BulletListBlock list => _BulletListView(
+        block: list,
+        onOpenLink: open,
+      ),
       V2CodeBlock code => _CodeBlockCard(block: code, onCopy: onCopyCode),
       V2DiagramBlock diagram => _DiagramCard(block: diagram),
       V2ImageBlock image => _ImageCard(
         block: image,
-        onOpen: onOpenLink,
-        onDownload: onDownload,
+        onOpen: open,
+        onDownload: (href) => download(href),
       ),
-      V2FileBlock file => _FileCard(block: file, onDownload: onDownload),
+      V2FileBlock file => _FileCard(
+        block: file,
+        onOpen: open,
+        onDownload: (href) => download(href, suggestedName: file.fileName),
+      ),
       V2DownloadLinksBlock links => _DownloadLinksCard(
         block: links,
-        onOpenLink: onOpenLink,
-        onDownload: onDownload,
+        onOpenLink: open,
+        onDownload: (link) => download(
+          link.href,
+          suggestedName: link.isDownload ? link.label : null,
+        ),
       ),
       V2DividerBlock _ => Divider(height: OSpace.l, color: c.hairline),
     };
   }
 
-  Widget _paragraph(BuildContext context, String text) {
+  Widget _paragraph(
+    BuildContext context,
+    String text,
+    ValueChanged<String> onOpenLink,
+  ) {
     final c = OColors.of(context);
     final style = OType.body.copyWith(color: c.text);
-    return Text.rich(
-      TextSpan(style: style, children: _inlineSpans(context, text, style)),
-    );
+    return _InlineText(text: text, style: style, onOpenLink: onOpenLink);
   }
 }
 
-List<InlineSpan> _inlineSpans(
-  BuildContext context,
-  String text,
-  TextStyle base,
-) {
-  final c = OColors.of(context);
-  final pattern = RegExp(
-    r'\*\*([^*]+)\*\*|`([^`]+)`|\*([^*\n]+)\*|\[([^\]]+)\]\(([^)\s]+)\)',
-  );
-  final spans = <InlineSpan>[];
-  var index = 0;
-  for (final match in pattern.allMatches(text)) {
-    if (match.start > index) {
-      spans.add(TextSpan(text: text.substring(index, match.start)));
+/// Paragraph, heading and bullet text with inline bold, code, italic and
+/// links. Inline links are real controls: they call [onOpenLink] instead of
+/// only looking tappable.
+class _InlineText extends StatefulWidget {
+  const _InlineText({
+    required this.text,
+    required this.style,
+    required this.onOpenLink,
+  });
+
+  final String text;
+  final TextStyle style;
+  final ValueChanged<String> onOpenLink;
+
+  @override
+  State<_InlineText> createState() => _InlineTextState();
+}
+
+class _InlineTextState extends State<_InlineText> {
+  final Map<String, TapGestureRecognizer> _recognizers =
+      <String, TapGestureRecognizer>{};
+
+  @override
+  void dispose() {
+    for (final recognizer in _recognizers.values) {
+      recognizer.dispose();
     }
-    if (match.group(1) != null) {
-      spans.add(
-        TextSpan(
-          text: match.group(1),
-          style: base.copyWith(fontWeight: FontWeight.w600),
-        ),
-      );
-    } else if (match.group(2) != null) {
-      spans.add(
-        TextSpan(
-          text: match.group(2),
-          style: OType.mono.copyWith(
-            color: c.accent,
-            backgroundColor: c.codeBg,
-          ),
-        ),
-      );
-    } else if (match.group(3) != null) {
-      spans.add(
-        TextSpan(
-          text: match.group(3),
-          style: base.copyWith(fontStyle: FontStyle.italic),
-        ),
-      );
-    } else {
-      spans.add(
-        TextSpan(
-          text: match.group(4),
-          style: base.copyWith(
-            color: c.accent,
-            decoration: TextDecoration.underline,
-            decorationColor: c.accent,
-          ),
-        ),
-      );
+    super.dispose();
+  }
+
+  TapGestureRecognizer _recognizerFor(String href) {
+    final existing = _recognizers[href];
+    if (existing != null) {
+      existing.onTap = () => widget.onOpenLink(href);
+      return existing;
     }
-    index = match.end;
+    final created = TapGestureRecognizer()
+      ..onTap = () => widget.onOpenLink(href);
+    _recognizers[href] = created;
+    return created;
   }
-  if (index < text.length) {
-    spans.add(TextSpan(text: text.substring(index)));
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final style = widget.style;
+    final spans = <InlineSpan>[];
+    var index = 0;
+    for (final match in _inlinePattern.allMatches(widget.text)) {
+      if (match.start > index) {
+        spans.add(TextSpan(text: widget.text.substring(index, match.start)));
+      }
+      if (match.group(1) != null) {
+        spans.add(
+          TextSpan(
+            text: match.group(1),
+            style: style.copyWith(fontWeight: FontWeight.w600),
+          ),
+        );
+      } else if (match.group(2) != null) {
+        spans.add(
+          TextSpan(
+            text: match.group(2),
+            style: OType.mono.copyWith(
+              color: c.accent,
+              backgroundColor: c.codeBg,
+            ),
+          ),
+        );
+      } else if (match.group(3) != null) {
+        spans.add(
+          TextSpan(
+            text: match.group(3),
+            style: style.copyWith(fontStyle: FontStyle.italic),
+          ),
+        );
+      } else {
+        final href = match.group(5)!;
+        spans.add(
+          TextSpan(
+            text: match.group(4),
+            recognizer: _recognizerFor(href),
+            style: style.copyWith(
+              color: c.accent,
+              decoration: TextDecoration.underline,
+              decorationColor: c.accent,
+            ),
+          ),
+        );
+      }
+      index = match.end;
+    }
+    if (index < widget.text.length) {
+      spans.add(TextSpan(text: widget.text.substring(index)));
+    }
+    return Text.rich(TextSpan(style: style, children: spans));
   }
-  return spans;
 }
 
 class _HeadingView extends StatelessWidget {
-  const _HeadingView({required this.block});
+  const _HeadingView({required this.block, required this.onOpenLink});
 
   final V2HeadingBlock block;
+  final ValueChanged<String> onOpenLink;
 
   @override
   Widget build(BuildContext context) {
@@ -598,20 +716,20 @@ class _HeadingView extends StatelessWidget {
     }.copyWith(color: c.text);
     return Semantics(
       header: true,
-      child: Text.rich(
-        TextSpan(
-          style: style,
-          children: _inlineSpans(context, block.text, style),
-        ),
+      child: _InlineText(
+        text: block.text,
+        style: style,
+        onOpenLink: onOpenLink,
       ),
     );
   }
 }
 
 class _BulletListView extends StatelessWidget {
-  const _BulletListView({required this.block});
+  const _BulletListView({required this.block, required this.onOpenLink});
 
   final V2BulletListBlock block;
+  final ValueChanged<String> onOpenLink;
 
   @override
   Widget build(BuildContext context) {
@@ -643,15 +761,10 @@ class _BulletListView extends StatelessWidget {
                   ),
                 const SizedBox(width: OSpace.s),
                 Expanded(
-                  child: Text.rich(
-                    TextSpan(
-                      style: style,
-                      children: _inlineSpans(
-                        context,
-                        block.items[i].text,
-                        style,
-                      ),
-                    ),
+                  child: _InlineText(
+                    text: block.items[i].text,
+                    style: style,
+                    onOpenLink: onOpenLink,
                   ),
                 ),
               ],
@@ -690,10 +803,23 @@ class _CodeBlockCardState extends State<_CodeBlockCard> {
         await Clipboard.setData(ClipboardData(text: widget.block.code));
       }
     } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('Could not copy the code.')),
+        );
       return;
     }
     if (!mounted) return;
     setState(() => _copied = true);
+    unawaited(
+      SemanticsService.sendAnnouncement(
+        View.of(context),
+        'Code copied',
+        Directionality.of(context),
+      ),
+    );
     _reset?.cancel();
     _reset = Timer(const Duration(seconds: 2), () {
       if (mounted) setState(() => _copied = false);
@@ -729,6 +855,16 @@ class _CodeBlockCardState extends State<_CodeBlockCard> {
                     style: OType.overline.copyWith(color: c.textFaint),
                   ),
                 ),
+                if (_copied)
+                  Text(
+                    'Copied',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: OType.caption.copyWith(
+                      color: c.success,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 OIconButton(
                   icon: _copied
                       ? Icons.check_rounded
@@ -867,11 +1003,15 @@ class _DiagramGlyph extends StatelessWidget {
 }
 
 class _ImageCard extends StatelessWidget {
-  const _ImageCard({required this.block, this.onOpen, this.onDownload});
+  const _ImageCard({
+    required this.block,
+    required this.onOpen,
+    required this.onDownload,
+  });
 
   final V2ImageBlock block;
-  final ValueChanged<String>? onOpen;
-  final ValueChanged<String>? onDownload;
+  final ValueChanged<String> onOpen;
+  final ValueChanged<String> onDownload;
 
   @override
   Widget build(BuildContext context) {
@@ -910,16 +1050,6 @@ class _ImageCard extends StatelessWidget {
                   left: OSpace.s,
                   child: OPill(label: 'Image', tone: OPillTone.accent),
                 ),
-                if (onDownload != null)
-                  Positioned(
-                    top: 0,
-                    right: 0,
-                    child: OIconButton(
-                      icon: Icons.download_rounded,
-                      semanticLabel: 'Download image',
-                      onPressed: () => onDownload!(url),
-                    ),
-                  ),
               ],
             ),
           ),
@@ -952,20 +1082,37 @@ class _ImageCard extends StatelessWidget {
         ],
       ),
     );
-    if (onOpen == null) return card;
-    return OPressable(
-      onTap: () => onOpen!(url),
-      semanticLabel: 'Open image: $alt',
-      child: card,
+    return Stack(
+      children: [
+        OPressable(
+          onTap: () => onOpen(url),
+          semanticLabel: 'Open image: $alt',
+          child: card,
+        ),
+        Positioned(
+          top: 0,
+          right: 0,
+          child: OIconButton(
+            icon: Icons.download_rounded,
+            semanticLabel: 'Download image',
+            onPressed: () => onDownload(url),
+          ),
+        ),
+      ],
     );
   }
 }
 
 class _FileCard extends StatelessWidget {
-  const _FileCard({required this.block, this.onDownload});
+  const _FileCard({
+    required this.block,
+    required this.onOpen,
+    required this.onDownload,
+  });
 
   final V2FileBlock block;
-  final ValueChanged<String>? onDownload;
+  final ValueChanged<String> onOpen;
+  final ValueChanged<String> onDownload;
 
   @override
   Widget build(BuildContext context) {
@@ -985,45 +1132,58 @@ class _FileCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.all(OSpace.m),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: c.accentSoft,
-                    borderRadius: BorderRadius.circular(ORadius.s),
+          OPressable(
+            onTap: () => onOpen(block.href),
+            semanticLabel: 'Open ${block.fileName}',
+            child: Padding(
+              padding: const EdgeInsets.all(OSpace.m),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: c.accentSoft,
+                      borderRadius: BorderRadius.circular(ORadius.s),
+                    ),
+                    child: Icon(
+                      _fileIcon(extension),
+                      size: 20,
+                      color: c.accent,
+                    ),
                   ),
-                  child: Icon(_fileIcon(extension), size: 20, color: c.accent),
-                ),
-                const SizedBox(width: OSpace.m),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        block.fileName,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.bodySm.copyWith(
-                          color: c.text,
-                          fontWeight: FontWeight.w600,
+                  const SizedBox(width: OSpace.m),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          block.fileName,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.bodySm.copyWith(
+                            color: c.text,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        meta,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
+                        const SizedBox(height: 2),
+                        Text(
+                          meta,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.caption.copyWith(color: c.textMuted),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                  Icon(
+                    Icons.open_in_new_rounded,
+                    size: 18,
+                    color: c.textFaint,
+                  ),
+                ],
+              ),
             ),
           ),
           Divider(height: 1, color: c.hairline),
@@ -1035,9 +1195,7 @@ class _FileCard extends StatelessWidget {
               variant: OButtonVariant.secondary,
               expand: true,
               semanticLabel: 'Download ${block.fileName}',
-              onPressed: onDownload == null
-                  ? null
-                  : () => onDownload!(block.href),
+              onPressed: () => onDownload(block.href),
             ),
           ),
         ],
@@ -1084,13 +1242,13 @@ class _FileCard extends StatelessWidget {
 class _DownloadLinksCard extends StatelessWidget {
   const _DownloadLinksCard({
     required this.block,
-    this.onOpenLink,
-    this.onDownload,
+    required this.onOpenLink,
+    required this.onDownload,
   });
 
   final V2DownloadLinksBlock block;
-  final ValueChanged<String>? onOpenLink;
-  final ValueChanged<String>? onDownload;
+  final ValueChanged<String> onOpenLink;
+  final ValueChanged<V2DownloadLink> onDownload;
 
   @override
   Widget build(BuildContext context) {
@@ -1122,32 +1280,31 @@ class _DownloadLinksCard extends StatelessWidget {
 class _DownloadLinkRow extends StatelessWidget {
   const _DownloadLinkRow({
     required this.link,
-    this.onOpenLink,
-    this.onDownload,
+    required this.onOpenLink,
+    required this.onDownload,
   });
 
   final V2DownloadLink link;
-  final ValueChanged<String>? onOpenLink;
-  final ValueChanged<String>? onDownload;
+  final ValueChanged<String> onOpenLink;
+  final ValueChanged<V2DownloadLink> onDownload;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final action = link.isDownload
-        ? (onDownload ?? onOpenLink)
-        : (onOpenLink ?? onDownload);
-    final enabled = action != null;
     final lower = link.label.trim().toLowerCase();
     final label = link.isDownload
         ? (lower.startsWith('download') ? link.label : 'Download ${link.label}')
         : (lower.startsWith('open') ? link.label : 'Open ${link.label}');
+    final onTap = link.isDownload
+        ? () => onDownload(link)
+        : () => onOpenLink(link.href);
     return Semantics(
       label: label,
-      button: enabled,
-      enabled: enabled,
+      button: true,
+      enabled: true,
       excludeSemantics: true,
       child: OPressable(
-        onTap: enabled ? () => action(link.href) : null,
+        onTap: onTap,
         child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: OSpace.touch),
           child: Padding(
@@ -1162,7 +1319,7 @@ class _DownloadLinkRow extends StatelessWidget {
                       ? Icons.download_rounded
                       : Icons.open_in_new_rounded,
                   size: 20,
-                  color: enabled ? c.accent : c.textFaint,
+                  color: c.accent,
                 ),
                 const SizedBox(width: OSpace.s),
                 Expanded(
@@ -1171,7 +1328,7 @@ class _DownloadLinkRow extends StatelessWidget {
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: OType.bodySm.copyWith(
-                      color: enabled ? c.text : c.textMuted,
+                      color: c.text,
                       fontWeight: FontWeight.w500,
                     ),
                   ),

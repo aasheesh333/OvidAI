@@ -392,4 +392,199 @@ void main() {
     await tester.tap(find.text('Try again'));
     expect(retried, isTrue);
   });
+
+  testWidgets('scope chips are real filters over the memory list', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(MemoryPage(data: _data()), theme: OTheme.light()),
+    );
+    await tester.pumpAndSettle();
+
+    // All: every scope is on screen.
+    expect(find.text('Prefers plain English.'), findsOneWidget);
+    expect(find.text('Mobile App Redesign'), findsOneWidget);
+    expect(find.text('architecture-spec.md'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('memory-scope-project')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Prefers plain English.'), findsNothing);
+    expect(find.text('Mobile App Redesign'), findsOneWidget);
+    expect(find.text('architecture-spec.md'), findsNothing);
+    expect(find.text('1 project memory'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('memory-scope-session')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Mobile App Redesign'), findsNothing);
+    expect(find.text('architecture-spec.md'), findsOneWidget);
+    expect(find.text('1 session memory'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('memory-scope-global')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Prefers plain English.'), findsOneWidget);
+    expect(find.text('architecture-spec.md'), findsNothing);
+    expect(find.text('2 global memories'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey<String>('memory-scope-all')));
+    await tester.pumpAndSettle();
+    expect(find.text('Mobile App Redesign'), findsOneWidget);
+    expect(find.text('architecture-spec.md'), findsOneWidget);
+  });
+
+  testWidgets('forget removes a global entry from the list and reports it', (
+    tester,
+  ) async {
+    final forgotten = <String>[];
+    await tester.pumpWidget(
+      _app(
+        MemoryPage(
+          data: V2MemoryPageData(
+            globalEntries: const [
+              V2MemoryEntry(id: 'g1', text: 'Prefers plain English.'),
+              V2MemoryEntry(id: 'g2', text: 'Works as a product designer.'),
+            ],
+            onForgetMemory: (scope, id) =>
+                forgotten.add('${scope.name}:$id'),
+          ),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final forget = find.byKey(
+      const ValueKey<String>('memory-forget-global-g1'),
+    );
+    await tester.ensureVisible(forget);
+    await tester.tap(forget);
+    await tester.pumpAndSettle();
+
+    expect(forgotten, ['global:g1']);
+    expect(find.text('Prefers plain English.'), findsNothing);
+    expect(find.text('Works as a product designer.'), findsOneWidget);
+  });
+
+  testWidgets('forget removes project and session rows and reports them', (
+    tester,
+  ) async {
+    final forgotten = <String>[];
+    await tester.pumpWidget(
+      _app(
+        MemoryPage(
+          data: V2MemoryPageData(
+            projects: const [
+              V2MemoryProject(
+                id: 'p1',
+                name: 'Mobile App Redesign',
+                detail: '4 rules',
+              ),
+            ],
+            sessionFiles: const [
+              V2MemoryFile(
+                id: 'f1',
+                name: 'architecture-spec.md',
+                detail: '42 KB',
+              ),
+            ],
+            onForgetMemory: (scope, id) =>
+                forgotten.add('${scope.name}:$id'),
+          ),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final project = find.byKey(
+      const ValueKey<String>('memory-forget-project-p1'),
+    );
+    await tester.ensureVisible(project);
+    await tester.tap(project);
+    await tester.pumpAndSettle();
+    expect(find.text('Mobile App Redesign'), findsNothing);
+
+    final file = find.byKey(
+      const ValueKey<String>('memory-forget-file-f1'),
+    );
+    await tester.ensureVisible(file);
+    await tester.tap(file);
+    await tester.pumpAndSettle();
+    expect(find.text('architecture-spec.md'), findsNothing);
+
+    expect(forgotten, ['project:p1', 'session:f1']);
+  });
+
+  for (final dark in <bool>[false, true]) {
+    testWidgets(
+      'scope filters and forget controls fit 320 dp at 200 % '
+      '(${dark ? 'dark' : 'light'})',
+      (tester) async {
+        tester.view.physicalSize = const Size(320, 640);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: dark ? OTheme.dark() : OTheme.light(),
+            home: MediaQuery(
+              data: const MediaQueryData(
+                size: Size(320, 640),
+                textScaler: TextScaler.linear(2),
+              ),
+              child: MemoryPage(
+                data: V2MemoryPageData(
+                  globalMemory: const ['Prefers plain English.'],
+                  projects: const [
+                    V2MemoryProject(
+                      id: 'p1',
+                      name: 'Mobile App Redesign',
+                      detail: '4 rules',
+                    ),
+                  ],
+                  sessionFiles: const [
+                    V2MemoryFile(
+                      id: 'f1',
+                      name: 'architecture-spec.md',
+                      detail: '42 KB',
+                    ),
+                  ],
+                  onForgetMemory: (_, _) {},
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 600));
+
+        expect(tester.takeException(), isNull);
+        for (final key in const [
+          'memory-scope-all',
+          'memory-scope-global',
+          'memory-scope-project',
+          'memory-scope-session',
+        ]) {
+          expect(find.byKey(ValueKey<String>(key)), findsOneWidget);
+        }
+        for (final paragraph in tester
+            .allRenderObjects
+            .whereType<RenderParagraph>()) {
+          final left = paragraph.localToGlobal(Offset.zero).dx;
+          expect(left, greaterThanOrEqualTo(-0.5), reason: '$dark');
+          expect(
+            left + paragraph.size.width,
+            lessThanOrEqualTo(320.5),
+            reason: '$dark',
+          );
+        }
+      },
+    );
+  }
 }

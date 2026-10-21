@@ -315,6 +315,37 @@ void main() {
     expect(find.text(_data.title), findsNothing);
   });
 
+  testWidgets('falls back to DELETE copy and locks until it is typed', (
+    tester,
+  ) async {
+    const noContact = V2ConfirmTypedSheetData(contact: '');
+    var confirmed = 0;
+    await tester.pumpWidget(
+      _app(V2ConfirmTypedSheet(data: noContact, onConfirm: () => confirmed++)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Type DELETE to confirm'), findsOneWidget);
+    expect(find.text('Confirmation word'), findsOneWidget);
+    expect(
+      find.text('The button below stays locked until you type DELETE.'),
+      findsOneWidget,
+    );
+    expect(find.text('Type your email or phone to confirm'), findsNothing);
+
+    await tester.enterText(_field, 'delete me');
+    await tester.pump();
+    expect(_filled(tester).onPressed, isNull);
+    expect(confirmed, 0);
+
+    await tester.enterText(_field, 'delete');
+    await tester.pump();
+    expect(_filled(tester).onPressed, isNotNull);
+
+    await _tapConfirm(tester);
+    expect(confirmed, 1);
+  });
+
   testWidgets('fits 320 dp at 200% text in light and dark', (tester) async {
     _phoneSize(tester);
     for (final dark in <bool>[false, true]) {

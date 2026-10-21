@@ -108,9 +108,9 @@ class V2StateTileCopy {
     icon: Icons.delete_sweep_rounded,
     title: 'Account deletion pending',
     message:
-        'Your account is kept for a 24-hour grace period. Sign in again to '
-        'cancel the deletion and restore it; after that, your chats, files and '
-        'memory are deleted.',
+        'Your account is kept for a 24-hour grace period. Sign in again and '
+        'choose Restore to cancel the deletion; after that, your chats, files '
+        'and memory are deleted.',
     actionLabel: 'Restore',
     tone: V2StateTileTone.warn,
   );
@@ -255,6 +255,10 @@ class V2StateTile extends StatelessWidget {
 
     return Semantics(
       container: true,
+      explicitChildNodes: true,
+      // A state tile replaces another state in place; announce the change
+      // instead of waiting for the user to explore the screen again.
+      liveRegion: true,
       child: Container(
         padding: const EdgeInsets.all(OSpace.l),
         decoration: BoxDecoration(

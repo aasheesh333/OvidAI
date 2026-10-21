@@ -3,7 +3,11 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'add_connector_page.dart';
+import 'catalog_data.dart';
 import 'connector_permissions.dart' as permissions;
+import 'connector_probe.dart';
+import 'connector_store.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
 
@@ -122,7 +126,10 @@ class V2ConnectorDetailData {
     required this.name,
     required this.description,
     this.icon = Icons.extension_outlined,
-    this.connected = true,
+    this.connected = false,
+    this.enabled = true,
+    this.endpoint = '',
+    this.target = V2ConnectorTarget.url,
     this.accountLabel = '',
     this.syncedLabel = '',
     this.accessLabel = '',
@@ -139,6 +146,7 @@ class V2ConnectorDetailData {
     this.status = V2ConnectorDetailStatus.content,
     this.errorMessage = 'This connector did not load.',
     this.disconnectNote = '',
+    this.disabledTools = const <String>{},
   });
 
   final String id;
@@ -146,6 +154,17 @@ class V2ConnectorDetailData {
   final String description;
   final IconData icon;
   final bool connected;
+
+  /// The connector switch. A connected but paused connector stays saved and
+  /// keeps its grants; Ovid just does not call it.
+  final bool enabled;
+
+  /// The server URL or command behind this connection. Empty for a catalog
+  /// row that has never been set up — the detail page then says there is
+  /// nothing to test instead of offering a test that cannot work.
+  final String endpoint;
+  final V2ConnectorTarget target;
+
   final String accountLabel;
   final String syncedLabel;
   final String accessLabel;
@@ -168,6 +187,9 @@ class V2ConnectorDetailData {
   final V2ConnectorDetailStatus status;
   final String errorMessage;
   final String disconnectNote;
+
+  /// Tools the person turned off on the permissions screen.
+  final Set<String> disabledTools;
 }
 
 /// One connector: what it can do, who can use it, and how to disconnect it.
@@ -178,17 +200,26 @@ class ConnectorDetailPage extends StatefulWidget {
     this.onBack,
     this.onConnect,
     this.onDisconnect,
+    this.onEnabledChanged,
     this.onPermissionChanged,
     this.onAutoSyncChanged,
     this.onOpenPermissions,
     this.onMenu,
     this.onRetry,
+    this.store,
+    this.secrets,
+    this.probe,
+    this.plan,
   });
 
   final V2ConnectorDetailData data;
   final VoidCallback? onBack;
   final VoidCallback? onConnect;
   final VoidCallback? onDisconnect;
+
+  /// Reports the new connector switch value.
+  final ValueChanged<bool>? onEnabledChanged;
+
   final void Function(String permissionId, bool granted)? onPermissionChanged;
   final ValueChanged<bool>? onAutoSyncChanged;
 
@@ -198,6 +229,13 @@ class ConnectorDetailPage extends StatefulWidget {
   final VoidCallback? onMenu;
   final VoidCallback? onRetry;
 
+  final V2ConnectorStore? store;
+  final V2ConnectorSecrets? secrets;
+  final V2ConnectorProbe? probe;
+
+  /// Plan used when the not-connected state opens the add flow.
+  final V2ConnectorPlan? plan;
+
   @override
   State<ConnectorDetailPage> createState() => _ConnectorDetailPageState();
 }
@@ -205,6 +243,14 @@ class ConnectorDetailPage extends StatefulWidget {
 class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
   late Map<String, bool> _granted = _initialGrants();
   late bool _autoSync = widget.data.autoSync;
+  late bool _enabled = widget.data.enabled;
+  V2ConnectorTestReport? _report;
+  bool _testing = false;
+  String? _actionError;
+
+  V2ConnectorStore get _store => widget.store ?? v2ConnectorStore;
+  V2ConnectorSecrets get _secrets => widget.secrets ?? v2ConnectorSecrets;
+  V2ConnectorProbe get _probe => widget.probe ?? V2HttpConnectorProbe();
 
   Map<String, bool> _initialGrants() {
     return <String, bool>{
@@ -219,17 +265,112 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
     if (oldWidget.data != widget.data) {
       _granted = _initialGrants();
       _autoSync = widget.data.autoSync;
+      _enabled = widget.data.enabled;
     }
   }
 
   void _togglePermission(V2ConnectorPermission permission, bool value) {
     setState(() => _granted[permission.id] = value);
-    widget.onPermissionChanged?.call(permission.id, value);
+    final external = widget.onPermissionChanged;
+    if (external != null) {
+      external(permission.id, value);
+      return;
+    }
+    _persistPermission(permission.id, value);
+  }
+
+  Future<void> _persistPermission(String permissionId, bool value) async {
+    final kind = V2ConnectorPermissionKind.values
+        .where((item) => item.name == permissionId)
+        .firstOrNull;
+    if (kind == null) return;
+    try {
+      await _store.setPermission(widget.data.id, kind, value);
+    } catch (_) {
+      if (!mounted) return;
+      setState(
+        () => _actionError =
+            'Could not save that permission. Check your connection and try '
+            'again.',
+      );
+    }
+  }
+
+  void _toggleEnabled(bool value) {
+    setState(() {
+      _enabled = value;
+      _actionError = null;
+    });
+    final external = widget.onEnabledChanged;
+    if (external != null) {
+      external(value);
+      return;
+    }
+    _persistEnabled(value);
+  }
+
+  Future<void> _persistEnabled(bool value) async {
+    try {
+      await _store.setEnabled(widget.data.id, value);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _enabled = !value;
+        _actionError =
+            'Could not save that change. Check your connection and try again.';
+      });
+    }
   }
 
   void _toggleAutoSync(bool value) {
     setState(() => _autoSync = value);
-    widget.onAutoSyncChanged?.call(value);
+    final external = widget.onAutoSyncChanged;
+    if (external != null) {
+      external(value);
+      return;
+    }
+    _store.setAutoSync(widget.data.id, value).catchError((Object _) {
+      if (!mounted) return;
+      setState(
+        () => _actionError =
+            'Could not save automatic sync. Check your connection and try '
+            'again.',
+      );
+    });
+  }
+
+  /// Runs the real test. Never reports success without a server answer.
+  Future<void> _testConnection() async {
+    if (_testing) return;
+    setState(() {
+      _testing = true;
+      _report = null;
+      _actionError = null;
+    });
+    String? key;
+    if (widget.data.authLabel.toLowerCase().contains('key') ||
+        widget.data.authLabel.toLowerCase().contains('token')) {
+      try {
+        key = await _secrets.read(widget.data.id);
+      } catch (_) {
+        key = null;
+      }
+    }
+    final connection = V2ConnectorConnection(
+      id: widget.data.id,
+      name: widget.data.name,
+      endpoint: widget.data.endpoint,
+      target: widget.data.target,
+      auth: key == null || key.isEmpty
+          ? V2ConnectorAuth.none
+          : V2ConnectorAuth.apiKey,
+    );
+    final report = await _probe.test(connection, apiKey: key);
+    if (!mounted) return;
+    setState(() {
+      _testing = false;
+      _report = report;
+    });
   }
 
   bool _isGranted(V2ConnectorPermission permission) =>
@@ -312,6 +453,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
                 : permissions.V2ConnectorPermissionScope.read,
             description: tool.description,
             permissionId: _permissionIdFor(tool),
+            enabled: !data.disabledTools.contains(tool.id),
           ),
       ],
       canDo: [
@@ -344,6 +486,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
           data: _permissionsScreenData(),
           onRevokePermission: _revokePermission,
           onRevokeAll: _revokeAll,
+          onToolChanged: _setToolEnabled,
         ),
       ),
     );
@@ -354,7 +497,12 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
       return;
     }
     setState(() => _granted[permissionId] = false);
-    widget.onPermissionChanged?.call(permissionId, false);
+    final external = widget.onPermissionChanged;
+    if (external != null) {
+      external(permissionId, false);
+      return;
+    }
+    _persistPermission(permissionId, false);
   }
 
   void _revokeAll() {
@@ -364,7 +512,24 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
       }
     });
     for (final permission in widget.data.permissions) {
-      widget.onPermissionChanged?.call(permission.id, false);
+      final external = widget.onPermissionChanged;
+      if (external != null) {
+        external(permission.id, false);
+      } else {
+        _persistPermission(permission.id, false);
+      }
+    }
+  }
+
+  Future<void> _setToolEnabled(String toolId, bool enabled) async {
+    try {
+      await _store.setToolEnabled(widget.data.id, toolId, enabled);
+    } catch (_) {
+      if (!mounted) return;
+      setState(
+        () => _actionError =
+            'Could not save that tool. Check your connection and try again.',
+      );
     }
   }
 
@@ -408,7 +573,103 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
         ),
       ),
     );
-    if (confirmed == true) widget.onDisconnect?.call();
+    if (confirmed != true || !mounted) return;
+    final external = widget.onDisconnect;
+    if (external != null) {
+      external();
+      return;
+    }
+    try {
+      await _store.remove(widget.data.id);
+      await _secrets.delete(widget.data.id);
+    } catch (_) {
+      if (!mounted) return;
+      setState(
+        () => _actionError =
+            'Could not disconnect. Check your connection and try again.',
+      );
+      return;
+    }
+    if (!mounted) return;
+    showOSnack(context, '${widget.data.name} disconnected.');
+    Navigator.of(context).maybePop();
+  }
+
+  /// The overflow menu, with the actions this screen can really perform.
+  Future<void> _openMenu() async {
+    final external = widget.onMenu;
+    if (external != null) {
+      external();
+      return;
+    }
+    final action = await showOSheet<String>(
+      context,
+      title: widget.data.name,
+      builder: (sheetContext) => Padding(
+        padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.l),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            OButton(
+              label: 'Review permissions',
+              icon: Icons.verified_user_outlined,
+              variant: OButtonVariant.secondary,
+              expand: true,
+              onPressed: () => Navigator.of(sheetContext).pop('permissions'),
+            ),
+            if (widget.data.connected) ...[
+              const SizedBox(height: OSpace.s),
+              OButton(
+                label: 'Disconnect ${widget.data.name}',
+                icon: Icons.link_off_rounded,
+                variant: OButtonVariant.danger,
+                expand: true,
+                onPressed: () => Navigator.of(sheetContext).pop('disconnect'),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'permissions') {
+      await _openPermissions();
+    } else if (action == 'disconnect') {
+      await _confirmDisconnect();
+    }
+  }
+
+  /// Opens the real setup form for a connector that is not connected yet.
+  Future<void> _connect() async {
+    final external = widget.onConnect;
+    if (external != null) {
+      external();
+      return;
+    }
+    final plan = widget.plan ?? await v2LoadConnectorPlan();
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => AddConnectorPage(
+          data: V2AddConnectorData(
+            plan: plan,
+            presetId: widget.data.id,
+            presetName: widget.data.name,
+            presetDescription: widget.data.description,
+            presetKind: 'app',
+          ),
+          store: _store,
+          secrets: _secrets,
+          probe: widget.probe,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    final saved = await _store.find(widget.data.id);
+    if (!mounted || saved == null) return;
+    showOSnack(context, '${saved.name} connected.');
+    Navigator.of(context).maybePop();
   }
 
   @override
@@ -426,7 +687,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
           OIconButton(
             icon: Icons.more_vert_rounded,
             semanticLabel: 'Connector menu',
-            onPressed: widget.onMenu,
+            onPressed: _openMenu,
           ),
         ],
       ),
@@ -456,7 +717,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
       action: OButton(
         label: 'Connect ${widget.data.name}',
         icon: Icons.link_rounded,
-        onPressed: widget.onConnect,
+        onPressed: _connect,
       ),
     );
   }
@@ -493,10 +754,10 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
                 style: OType.h1.copyWith(color: c.text),
               ),
               const SizedBox(height: OSpace.s),
-              const OPill(
-                label: 'Connected',
-                tone: OPillTone.success,
-                dot: true,
+              OPill(
+                label: _enabled ? 'Connected' : 'Connected · paused',
+                tone: _enabled ? OPillTone.success : OPillTone.neutral,
+                dot: _enabled,
               ),
               const SizedBox(height: OSpace.m),
               ConstrainedBox(
@@ -556,6 +817,28 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
             ],
           ),
         ),
+        const SizedBox(height: OSpace.m),
+        _ConnectorSwitchCard(
+          enabled: _enabled,
+          name: data.name,
+          onChanged: _toggleEnabled,
+        ),
+        const SizedBox(height: OSpace.m),
+        _ConnectionTestCard(
+          endpoint: data.endpoint,
+          target: data.target,
+          testing: _testing,
+          report: _report,
+          onTest: data.endpoint.isEmpty ? null : _testConnection,
+        ),
+        if (_actionError != null) ...[
+          const SizedBox(height: OSpace.s),
+          Text(
+            _actionError!,
+            key: const Key('connector-action-error'),
+            style: OType.caption.copyWith(color: c.danger),
+          ),
+        ],
         const SizedBox(height: OSpace.m),
         _SafetyNote(note: data.safetyNote, builtIn: data.builtIn),
         const SizedBox(height: OSpace.m),
@@ -704,7 +987,11 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
                 label: 'Automatic sync',
                 child: SizedBox(
                   height: OSpace.touch,
-                  child: Switch(value: _autoSync, onChanged: _toggleAutoSync),
+                  child: Switch(
+                    key: const Key('connector-autosync-switch'),
+                    value: _autoSync,
+                    onChanged: _toggleAutoSync,
+                  ),
                 ),
               ),
             ],
@@ -716,7 +1003,7 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
           icon: Icons.link_off_rounded,
           variant: OButtonVariant.danger,
           expand: true,
-          onPressed: widget.onDisconnect == null ? null : _confirmDisconnect,
+          onPressed: _confirmDisconnect,
         ),
         const SizedBox(height: OSpace.s),
         Text(
@@ -1175,7 +1462,11 @@ class _PermissionRow extends StatelessWidget {
             label: '${permission.name} permission',
             child: SizedBox(
               height: OSpace.touch,
-              child: Switch(value: granted, onChanged: onChanged),
+              child: Switch(
+                key: ValueKey('connector-permission-switch-${permission.id}'),
+                value: granted,
+                onChanged: onChanged,
+              ),
             ),
           ),
         ],
@@ -1238,4 +1529,226 @@ class _AgentRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The connector switch, separate from the permission switches: pausing keeps
+/// the grants but stops Ovid from calling the connector at all.
+class _ConnectorSwitchCard extends StatelessWidget {
+  const _ConnectorSwitchCard({
+    required this.enabled,
+    required this.name,
+    required this.onChanged,
+  });
+
+  final bool enabled;
+  final String name;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return OCard(
+      key: const Key('connector-enabled-card'),
+      padding: const EdgeInsets.symmetric(
+        horizontal: OSpace.m,
+        vertical: OSpace.s,
+      ),
+      child: MergeSemantics(
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: c.surfaceAlt,
+                borderRadius: BorderRadius.circular(ORadius.m),
+              ),
+              child: Icon(
+                enabled ? Icons.power_settings_new_rounded : Icons.pause_rounded,
+                size: 19,
+                color: enabled ? c.success : c.textMuted,
+              ),
+            ),
+            const SizedBox(width: OSpace.m),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Enabled',
+                    style: OType.bodyStrong.copyWith(color: c.text),
+                  ),
+                  Text(
+                    enabled
+                        ? 'Ovid can call $name in chats and projects.'
+                        : 'Saved, but Ovid will not call $name until you turn '
+                              'it back on.',
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: OSpace.s),
+            SizedBox(
+              height: OSpace.touch,
+              child: Switch(value: enabled, onChanged: onChanged),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Real connection test: the button runs an HTTP probe and the card shows what
+/// came back, including the reason when it failed.
+class _ConnectionTestCard extends StatelessWidget {
+  const _ConnectionTestCard({
+    required this.endpoint,
+    required this.target,
+    required this.testing,
+    required this.report,
+    required this.onTest,
+  });
+
+  final String endpoint;
+  final V2ConnectorTarget target;
+  final bool testing;
+  final V2ConnectorTestReport? report;
+  final VoidCallback? onTest;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final report = this.report;
+    final color = report == null
+        ? c.textMuted
+        : report.unsupported
+        ? c.textMuted
+        : report.ok
+        ? c.success
+        : c.danger;
+    return OCard(
+      key: const Key('connector-test-card'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // A Wrap, not a Row: at 200 % text the pill no longer fits beside
+          // the title on a 320 dp phone and moves to its own line.
+          Wrap(
+            spacing: OSpace.s,
+            runSpacing: OSpace.xs,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text('Connection', style: OType.h3.copyWith(color: c.text)),
+              if (target == V2ConnectorTarget.command)
+                const OPill(label: 'Command', tone: OPillTone.neutral)
+              else if (endpoint.isNotEmpty)
+                const OPill(label: 'Server URL', tone: OPillTone.neutral),
+            ],
+          ),
+          const SizedBox(height: OSpace.s),
+          Text(
+            endpoint.isEmpty
+                ? 'No server address is saved for this connector, so there is '
+                      'nothing to test yet.'
+                : endpoint,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: OType.mono.copyWith(color: c.textMuted),
+          ),
+          const SizedBox(height: OSpace.m),
+          OButton(
+            label: 'Test connection',
+            icon: Icons.sync_rounded,
+            variant: OButtonVariant.secondary,
+            expand: true,
+            loading: testing,
+            onPressed: testing ? null : onTest,
+          ),
+          if (report != null) ...[
+            const SizedBox(height: OSpace.m),
+            Semantics(
+              liveRegion: true,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    report.unsupported
+                        ? Icons.info_outline_rounded
+                        : report.ok
+                        ? Icons.check_circle_outline_rounded
+                        : Icons.error_outline_rounded,
+                    size: 18,
+                    color: color,
+                  ),
+                  const SizedBox(width: OSpace.s),
+                  Expanded(
+                    child: Text(
+                      report.message,
+                      style: OType.caption.copyWith(color: color),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Builds the detail model for a catalog row plus the connection behind it.
+///
+/// A row with no saved connection is *not* connected: the page then offers the
+/// real setup form instead of a "Connected" badge with nothing behind it.
+/// Permissions only exist once a connection was saved, and their copy comes
+/// from [V2ConnectorPermissionKind] so it matches what the connector does.
+V2ConnectorDetailData v2ConnectorDetailForRow(
+  V2Connector row, {
+  V2ConnectorConnection? connection,
+}) {
+  final saved = connection;
+  final risk = saved != null && saved.custom
+      ? V2ConnectorPermissionRisk.high
+      : switch (row.risk) {
+          V2CatalogRisk.high => V2ConnectorPermissionRisk.high,
+          V2CatalogRisk.medium => V2ConnectorPermissionRisk.medium,
+          V2CatalogRisk.low => V2ConnectorPermissionRisk.low,
+        };
+  return V2ConnectorDetailData(
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    icon: row.icon,
+    connected: saved != null,
+    enabled: saved?.enabled ?? false,
+    endpoint: saved?.endpoint ?? '',
+    target: saved?.target ?? V2ConnectorTarget.url,
+    builtIn: row.builtIn,
+    authLabel: saved?.auth.label ?? row.auth.label,
+    risk: risk,
+    autoSync: saved?.autoSync ?? false,
+    disabledTools: saved?.disabledTools ?? const <String>{},
+    permissions: saved == null
+        ? const <V2ConnectorPermission>[]
+        : [
+            for (final kind in V2ConnectorPermissionKind.values)
+              V2ConnectorPermission(
+                id: kind.name,
+                name: kind.title,
+                description: kind.description,
+                granted: saved.permissionGranted(kind),
+                scope: switch (kind) {
+                  V2ConnectorPermissionKind.read =>
+                    V2ConnectorPermissionScope.read,
+                  V2ConnectorPermissionKind.write ||
+                  V2ConnectorPermissionKind.execute =>
+                    V2ConnectorPermissionScope.write,
+                },
+                risk: risk,
+              ),
+          ],
+  );
 }

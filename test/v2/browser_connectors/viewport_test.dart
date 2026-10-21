@@ -94,18 +94,25 @@ void main() {
     expect(find.byType(PlatformViewLink), findsNothing);
   });
 
-  testWidgets('a missing frame shows the neutral placeholder, not a page', (
+  testWidgets('live without a frame is an honest waiting state, not a page', (
     tester,
   ) async {
     await _pump(tester, const BrowserViewport());
 
-    expect(find.text('The live page shows here'), findsOneWidget);
+    // It must not claim to be live while it has no picture, and it must not
+    // paint a surface that looks loaded.
+    expect(find.text('Live · 3–5 fps'), findsNothing);
+    expect(find.text('No picture yet'), findsWidgets);
     expect(
-      find.text('Ovid draws the page it is reading in this space.'),
-      findsOneWidget,
+      find.text(
+        'The live view refreshes 3–5 times a second, not as video.',
+      ),
+      findsWidgets,
     );
     expect(find.byType(Image), findsNothing);
     expect(find.byKey(BrowserViewport.takeControlKey), findsNothing);
+    // Nothing is invented as a page either.
+    expect(find.text('The live page shows here'), findsNothing);
 
     // Nothing that looks like a credential may ship in the empty state.
     final texts = tester
@@ -168,20 +175,102 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('a retry with no callback is announced as disabled', (
-    tester,
-  ) async {
-    final handle = tester.ensureSemantics();
+  testWidgets('a retry with no callback is not rendered', (tester) async {
     await _pump(
       tester,
       const BrowserViewport(status: V2ViewportStatus.streamLost),
     );
 
-    expect(
-      tester.getSemantics(find.text('Reconnect')),
-      isSemantics(isButton: true, isEnabled: false),
+    // No handler means no Reconnect button at all.
+    expect(find.text('Reconnect'), findsNothing);
+    expect(find.byKey(BrowserViewport.retryKey), findsNothing);
+    expect(find.text('Stream lost'), findsWidgets);
+  });
+
+  testWidgets('the waiting state offers a real retry and stops spinning', (
+    tester,
+  ) async {
+    var retries = 0;
+    await _pump(
+      tester,
+      BrowserViewport(
+        status: V2ViewportStatus.waiting,
+        onRetry: () => retries++,
+      ),
     );
-    handle.dispose();
+
+    expect(find.text('No picture yet'), findsWidgets);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+
+    final retry = find.byKey(BrowserViewport.waitingRetryKey);
+    await tester.ensureVisible(retry);
+    await tester.pump();
+    await tester.tap(retry);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(retries, 1);
+  });
+
+  testWidgets('a tap while controlling becomes a normalized page tap', (
+    tester,
+  ) async {
+    final taps = <Offset>[];
+    await _pump(
+      tester,
+      BrowserViewport(
+        frame: MemoryImage(_frameBytes),
+        controlling: true,
+        frameAspectRatio: 2,
+        onPageTap: (x, y) => taps.add(Offset(x, y)),
+      ),
+      size: const Size(400, 200),
+    );
+
+    final surface = find.byKey(BrowserViewport.pageTapKey);
+    expect(surface, findsOneWidget);
+    // The 2:1 frame fills a 400 × 200 box exactly; the centre is page centre.
+    await tester.tapAt(tester.getCenter(surface));
+    await tester.pump();
+    expect(taps, hasLength(1));
+    expect(taps.single.dx, closeTo(0.5, 0.01));
+    expect(taps.single.dy, closeTo(0.5, 0.01));
+  });
+
+  testWidgets('a tap in the letterbox is ignored, not sent to the page', (
+    tester,
+  ) async {
+    final taps = <Offset>[];
+    await _pump(
+      tester,
+      BrowserViewport(
+        frame: MemoryImage(_frameBytes),
+        controlling: true,
+        frameAspectRatio: 1,
+        onPageTap: (x, y) => taps.add(Offset(x, y)),
+      ),
+      size: const Size(400, 200),
+    );
+
+    final surface = find.byKey(BrowserViewport.pageTapKey);
+    // A 1:1 frame inside 400 × 200 is 200 wide and centred: x = 10 is bars.
+    await tester.tapAt(tester.getTopLeft(surface) + const Offset(10, 100));
+    await tester.pump();
+    expect(taps, isEmpty);
+  });
+
+  testWidgets('taps do nothing while Ovid is driving', (tester) async {
+    final taps = <Offset>[];
+    await _pump(
+      tester,
+      BrowserViewport(
+        frame: MemoryImage(_frameBytes),
+        onPageTap: (x, y) => taps.add(Offset(x, y)),
+      ),
+    );
+
+    expect(find.byKey(BrowserViewport.pageTapKey), findsNothing);
+    await tester.tap(find.byType(BrowserViewport));
+    await tester.pump();
+    expect(taps, isEmpty);
   });
 
   testWidgets('tap-to-control is a labelled 48 dp target and fires once', (
@@ -243,8 +332,9 @@ void main() {
     final handle = tester.ensureSemantics();
     await _pump(
       tester,
-      const BrowserViewport(
-        cursor: V2ViewportCursor(x: 2, y: -1, label: 'Reading'),
+      BrowserViewport(
+        frame: MemoryImage(_frameBytes),
+        cursor: const V2ViewportCursor(x: 2, y: -1, label: 'Reading'),
       ),
     );
 
@@ -263,7 +353,13 @@ void main() {
   testWidgets('the fps hint can be omitted without dropping the live state', (
     tester,
   ) async {
-    await _pump(tester, const BrowserViewport(showFpsHint: false));
+    await _pump(
+      tester,
+      BrowserViewport(
+        frame: MemoryImage(_frameBytes),
+        showFpsHint: false,
+      ),
+    );
 
     expect(find.text('Live'), findsOneWidget);
     expect(find.textContaining('3–5 fps'), findsNothing);

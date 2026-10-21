@@ -9,6 +9,53 @@ import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/app/app_lock_gate.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// Lock stub for rendering states that are expensive to reach through the real
+/// rate limiter (recovery, re-auth, a long cooldown).
+class _StubLock extends AppLock {
+  _StubLock({
+    this.recovery = false,
+    this.reauth = false,
+    this.cooldownSeconds = 0,
+  });
+
+  final bool recovery;
+  final bool reauth;
+  final int cooldownSeconds;
+
+  @override
+  bool get loaded => true;
+
+  @override
+  bool get locked => true;
+
+  @override
+  bool get enabled => true;
+
+  @override
+  bool get recoveryRequired => recovery;
+
+  @override
+  bool get reauthRequired => reauth;
+
+  @override
+  bool get inCooldown => cooldownSeconds > 0;
+
+  @override
+  Duration get cooldownRemaining => Duration(seconds: cooldownSeconds);
+
+  @override
+  int get cooldownSecondsRemaining => cooldownSeconds;
+
+  @override
+  Future<void> load() async {}
+
+  @override
+  Future<bool> unlock(String pin) async => false;
+
+  @override
+  Future<bool> unlockWithBiometrics([BiometricCheck? hook]) async => false;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -22,7 +69,7 @@ void main() {
 
   AppLock newLock() => AppLock(now: () => now, random: Random(5));
 
-  Future<AppLock> lockedLock({String pin = '1234'}) async {
+  Future<AppLock> lockedLock({String pin = '123456'}) async {
     final lock = newLock();
     await lock.load();
     await lock.setPin(pin);
@@ -52,6 +99,24 @@ void main() {
     );
   }
 
+  /// The production shape: the gate wraps the Navigator through
+  /// `MaterialApp.builder`, so every route is underneath it.
+  Widget appWithBuilder({required AppLock lock, VoidCallback? onSignOut}) {
+    return MaterialApp(
+      theme: OTheme.light(),
+      builder: (context, child) => AppLockGate(
+        lock: lock,
+        onSignOut: onSignOut,
+        child: child ?? const SizedBox.shrink(),
+      ),
+      home: const Scaffold(body: Center(child: Text('Secret chat'))),
+      routes: <String, WidgetBuilder>{
+        '/pushed': (_) =>
+            const Scaffold(body: Center(child: Text('Pushed page'))),
+      },
+    );
+  }
+
   Future<void> enterPin(WidgetTester tester, String pin) async {
     for (final digit in pin.split('')) {
       await tester.tap(find.text(digit));
@@ -64,7 +129,7 @@ void main() {
   ) async {
     final lock = newLock();
     await lock.load();
-    await lock.setPin('1234');
+    await lock.setPin('123456');
 
     await tester.pumpWidget(app(lock: lock));
     await tester.pump();
@@ -84,7 +149,7 @@ void main() {
     expect(find.text('App locked'), findsOneWidget);
     expect(find.text('Secret chat'), findsNothing);
 
-    await enterPin(tester, '1234');
+    await enterPin(tester, '123456');
     await tester.tap(find.text('Unlock'));
     await tester.pump();
     await tester.pump();
@@ -94,6 +159,87 @@ void main() {
     expect(find.text('App locked'), findsNothing);
   });
 
+  testWidgets('a pushed route is covered by the lock', (tester) async {
+    final lock = newLock();
+    await lock.load();
+    await lock.setPin('123456');
+
+    await tester.pumpWidget(appWithBuilder(lock: lock));
+    await tester.pump();
+
+    // Navigate away from the shell, like opening Settings/Artifacts.
+    tester.state<NavigatorState>(find.byType(Navigator)).pushNamed('/pushed');
+    await tester.pumpAndSettle();
+    expect(find.text('Pushed page'), findsOneWidget);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    now = now.add(const Duration(minutes: 3));
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump();
+
+    expect(lock.locked, isTrue);
+    expect(find.text('App locked'), findsOneWidget);
+    expect(
+      find.text('Pushed page'),
+      findsNothing,
+      reason: 'the pushed route must be behind the lock, not above it',
+    );
+
+    await enterPin(tester, '123456');
+    await tester.tap(find.text('Unlock'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(lock.locked, isFalse);
+    expect(
+      find.text('Pushed page'),
+      findsOneWidget,
+      reason: 'unlocking restores the pushed route exactly where it was',
+    );
+  });
+
+  testWidgets('an unreadable PIN secret shows the reset notice, no keypad', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      app(lock: _StubLock(recovery: true), onSignOut: () {}),
+    );
+    await tester.pump();
+
+    expect(find.textContaining('could not be read'), findsOneWidget);
+    expect(find.text('App locked'), findsOneWidget);
+    expect(find.text('Unlock'), findsNothing, reason: 'no PIN can verify');
+    expect(find.text('Sign in again'), findsOneWidget);
+    expect(find.text('Sign out instead'), findsNothing);
+  });
+
+  testWidgets('the cumulative cap asks for a sign-in and hides the PIN', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      app(lock: _StubLock(reauth: true), onSignOut: () {}),
+    );
+    await tester.pump();
+
+    expect(find.textContaining('Too many wrong attempts'), findsOneWidget);
+    expect(find.text('App locked'), findsOneWidget);
+    expect(find.text('Unlock'), findsNothing);
+    expect(find.text('Sign in again'), findsOneWidget);
+  });
+
+  testWidgets('an escalated cooldown is shown in minutes', (tester) async {
+    await tester.pumpWidget(app(lock: _StubLock(cooldownSeconds: 900)));
+    await tester.pump();
+
+    expect(find.textContaining('Too many attempts'), findsOneWidget);
+    expect(find.textContaining('15m'), findsOneWidget);
+
+    // Dispose the gate so its countdown timer is cancelled.
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('a wrong PIN shows an error and clears the entry', (
     tester,
   ) async {
@@ -101,7 +247,7 @@ void main() {
     await tester.pumpWidget(app(lock: lock));
     await tester.pump();
 
-    await enterPin(tester, '0000');
+    await enterPin(tester, '000000');
     await tester.tap(find.text('Unlock'));
     await tester.pump();
     await tester.pump();
@@ -110,8 +256,8 @@ void main() {
     expect(find.text('App locked'), findsOneWidget);
     expect(lock.locked, isTrue);
 
-    // The entry was cleared: four correct digits still unlock.
-    await enterPin(tester, '1234');
+    // The entry was cleared: the correct digits still unlock.
+    await enterPin(tester, '123456');
     await tester.tap(find.text('Unlock'));
     await tester.pump();
     await tester.pump();
@@ -123,7 +269,7 @@ void main() {
   ) async {
     final lock = await lockedLock();
     for (var i = 0; i < AppLock.maxAttempts; i++) {
-      expect(await lock.unlock('0000'), isFalse);
+      expect(await lock.unlock('000000'), isFalse);
     }
     expect(lock.inCooldown, isTrue);
 
@@ -194,6 +340,25 @@ void main() {
     expect(find.text('Biometrics did not match.'), findsOneWidget);
   });
 
+  testWidgets('biometrics stay available when the PIN secret is unreadable', (
+    tester,
+  ) async {
+    final lock = await lockedLock();
+    // Sanity: the real lock is not in recovery.
+    expect(lock.recoveryRequired, isFalse);
+    await tester.pumpWidget(const SizedBox());
+
+    await tester.pumpWidget(
+      app(
+        lock: _StubLock(recovery: true),
+        biometric: () async => true,
+        onSignOut: () {},
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Use biometrics'), findsOneWidget);
+  });
+
   testWidgets('sign out instead invokes the host callback', (tester) async {
     final lock = await lockedLock();
     var signedOut = false;
@@ -221,7 +386,7 @@ void main() {
   ) async {
     final lock = newLock();
     await lock.load();
-    await lock.setPin('1234');
+    await lock.setPin('123456');
     await tester.pumpWidget(app(lock: lock));
     await tester.pump();
     expect(find.text('Secret chat'), findsOneWidget);
@@ -279,7 +444,7 @@ void main() {
         expect(tester.takeException(), isNull);
         expect(find.text('App locked'), findsOneWidget);
 
-        for (final digit in ['1', '2', '3', '4']) {
+        for (final digit in ['1', '2', '3', '4', '5', '6']) {
           await tester.ensureVisible(find.text(digit));
           await tester.tap(find.text(digit));
           await tester.pump();

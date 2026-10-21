@@ -21,6 +21,7 @@ class V2CollabMember {
     this.role = V2CollabRole.canChat,
     this.isYou = false,
     this.isCreator = false,
+    this.canRemove = false,
     this.online = false,
     this.initials,
   });
@@ -34,6 +35,10 @@ class V2CollabMember {
   /// True for the person whose account and storage own this room. The creator
   /// badge is shown even when the owner has transferred the Owner role.
   final bool isCreator;
+
+  /// True only when this device may remove the member (the owner, looking at
+  /// somebody else). The overflow menu is hidden otherwise.
+  final bool canRemove;
 
   final bool online;
   final String? initials;
@@ -150,11 +155,12 @@ class _CollabMembersPageState extends State<CollabMembersPage> {
         title: widget.data.title,
         subtitle: widget.data.chatName.isEmpty ? null : widget.data.chatName,
         actions: [
-          OIconButton(
-            icon: Icons.person_add_alt_1_rounded,
-            semanticLabel: 'Invite someone',
-            onPressed: widget.onInvite,
-          ),
+          if (widget.onInvite != null)
+            OIconButton(
+              icon: Icons.person_add_alt_1_rounded,
+              semanticLabel: 'Invite someone',
+              onPressed: widget.onInvite,
+            ),
         ],
       ),
       body: Center(
@@ -180,11 +186,13 @@ class _CollabMembersPageState extends State<CollabMembersPage> {
       icon: Icons.group_outlined,
       title: 'No members yet',
       message: 'Invite someone to this chat. They can watch or take a turn.',
-      action: OButton(
-        label: 'Invite someone',
-        icon: Icons.person_add_alt_1_rounded,
-        onPressed: widget.onInvite,
-      ),
+      action: widget.onInvite == null
+          ? null
+          : OButton(
+              label: 'Invite someone',
+              icon: Icons.person_add_alt_1_rounded,
+              onPressed: widget.onInvite,
+            ),
     );
   }
 
@@ -239,7 +247,7 @@ class _CollabMembersPageState extends State<CollabMembersPage> {
                 for (final member in visible) ...[
                   _MemberRow(
                     member: member,
-                    onMenu: widget.onMemberMenu == null
+                    onMenu: widget.onMemberMenu == null || !member.canRemove
                         ? null
                         : () => widget.onMemberMenu!(member),
                   ),
@@ -247,20 +255,22 @@ class _CollabMembersPageState extends State<CollabMembersPage> {
                 ],
               const SizedBox(height: OSpace.m),
               _StorageCard(data: widget.data, c: c),
-              const SizedBox(height: OSpace.l),
-              OButton(
-                label: 'Leave chat',
-                icon: Icons.logout_rounded,
-                variant: OButtonVariant.danger,
-                expand: true,
-                onPressed: widget.onLeave,
-              ),
-              const SizedBox(height: OSpace.s),
-              Text(
-                'Leaving removes this shared chat from your list. The creator keeps the storage.',
-                textAlign: TextAlign.center,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
+              if (widget.onLeave != null) ...[
+                const SizedBox(height: OSpace.l),
+                OButton(
+                  label: 'Leave chat',
+                  icon: Icons.logout_rounded,
+                  variant: OButtonVariant.danger,
+                  expand: true,
+                  onPressed: widget.onLeave,
+                ),
+                const SizedBox(height: OSpace.s),
+                Text(
+                  'Leaving removes this shared chat from your list. The creator keeps the storage.',
+                  textAlign: TextAlign.center,
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ],
             ],
           ),
         ),
@@ -375,11 +385,12 @@ class _MemberRow extends StatelessWidget {
                 children: [
                   Expanded(child: _identity(context, c)),
                   if (!stacked) ...[const SizedBox(width: OSpace.s), tag],
-                  OIconButton(
-                    icon: Icons.more_vert_rounded,
-                    semanticLabel: 'Member options for ${member.name}',
-                    onPressed: onMenu,
-                  ),
+                  if (onMenu != null)
+                    OIconButton(
+                      icon: Icons.more_vert_rounded,
+                      semanticLabel: 'Member options for ${member.name}',
+                      onPressed: onMenu,
+                    ),
                 ],
               ),
               if (stacked) ...[

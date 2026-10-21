@@ -238,6 +238,103 @@ void main() {
     );
   });
 
+  testWidgets('a folder with no children shows no expander and cannot open', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    var opened = 0;
+    await tester.pumpWidget(
+      _app(
+        V2FileTree(
+          data: const V2FileTreeData(
+            nodes: <V2FileTreeEntry>[
+              V2FileTreeEntry(
+                name: 'empty',
+                path: 'empty',
+                isFolder: true,
+              ),
+              V2FileTreeEntry(
+                name: 'src',
+                path: 'src',
+                isFolder: true,
+                children: <V2FileTreeEntry>[
+                  V2FileTreeEntry(name: 'main.dart', path: 'src/main.dart'),
+                ],
+              ),
+            ],
+          ),
+          onSelectFile: (_) => opened++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The real folder keeps its chevron; the empty one never gets one.
+    expect(
+      find.byKey(const Key('v2-file-tree-expander-src')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const Key('v2-file-tree-expander-empty')),
+      findsNothing,
+    );
+    expect(
+      tester.getSemantics(_row('empty')),
+      isSemantics(label: 'Folder empty, empty', hasExpandedState: false),
+    );
+
+    await tester.tap(_row('empty'));
+    await tester.pumpAndSettle();
+    expect(opened, 0);
+    expect(find.text('main.dart'), findsNothing);
+
+    handle.dispose();
+  });
+
+  testWidgets('an empty folder fits 320 dp at 200 % text in both themes', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    for (final dark in <bool>[false, true]) {
+      await tester.pumpWidget(
+        MediaQuery(
+          data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+          child: _app(
+            const V2FileTree(
+              data: V2FileTreeData(
+                nodes: <V2FileTreeEntry>[
+                  V2FileTreeEntry(
+                    name: 'an-empty-folder-with-a-long-name',
+                    path: 'empty',
+                    isFolder: true,
+                  ),
+                  V2FileTreeEntry(
+                    name: 'src',
+                    path: 'src',
+                    isFolder: true,
+                    children: <V2FileTreeEntry>[
+                      V2FileTreeEntry(name: 'main.dart', path: 'src/main.dart'),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            dark: dark,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: 'empty folder overflowed (${dark ? 'dark' : 'light'})',
+      );
+    }
+  });
+
   testWidgets('a selected file reveals its ancestors and is announced', (
     tester,
   ) async {

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/cloud/schedule_client.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
@@ -9,33 +10,170 @@ import 'run_timeline.dart';
 
 enum V2ScheduleRunsStatus { loading, content, empty, error }
 
-enum V2RunStatus { succeeded, failed }
+/// The wire status of one scheduled occurrence, plus [unknown] for a value this
+/// build does not recognise (which must never be shown as a success).
+enum V2RunStatus { succeeded, failed, running, retryScheduled, skipped, unknown }
 
 enum V2RunsFilter { all, succeeded, failed }
+
+/// "1m 12s", "18s", "2h 3m". Negative or zero spans read as "<1s".
+String formatRunDuration(Duration duration) {
+  final total = duration.inSeconds;
+  if (total <= 0) return '<1s';
+  final hours = total ~/ 3600;
+  final minutes = (total % 3600) ~/ 60;
+  final seconds = total % 60;
+  if (hours > 0) return minutes == 0 ? '${hours}h' : '${hours}h ${minutes}m';
+  if (minutes > 0) return seconds == 0 ? '${minutes}m' : '${minutes}m ${seconds}s';
+  return '${seconds}s';
+}
+
+/// The plain day heading a run belongs to, relative to [now].
+String runDayLabel(DateTime at, DateTime now) {
+  final local = at.toLocal();
+  final today = DateTime(now.year, now.month, now.day);
+  final day = DateTime(local.year, local.month, local.day);
+  final offset = day.difference(today).inDays;
+  final month = _monthShort[local.month - 1];
+  if (offset == 0) return 'Today — $month ${local.day}';
+  if (offset == -1) return 'Yesterday — $month ${local.day}';
+  return '$month ${local.day}';
+}
+
+const _monthShort = <String>[
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
 
 @immutable
 class V2ScheduleRun {
   const V2ScheduleRun({
     required this.id,
     required this.timeLabel,
-    required this.durationLabel,
+    this.durationLabel,
     required this.status,
     required this.summary,
+    this.startedAt,
+    this.finishedAt,
+    this.scheduledFor,
+    this.error,
+    this.attempt = 1,
+    this.ranLate = false,
     this.failureTitle,
     this.failureDetail,
     this.resultPreview,
     this.artifactName,
   });
 
+  /// Maps one `GET /schedules/:id/runs` row onto the view model. Status and
+  /// duration come from the server's own fields — nothing is assumed.
+  factory V2ScheduleRun.fromDto(
+    ScheduleRunDto dto, {
+    DateTime? now,
+  }) {
+    final started = dto.startedAt?.toLocal();
+    final finished = dto.finishedAt?.toLocal();
+    final at = started ?? dto.scheduledFor?.toLocal();
+    final status = switch (dto.status) {
+      'succeeded' => V2RunStatus.succeeded,
+      'failed' => V2RunStatus.failed,
+      'running' => V2RunStatus.running,
+      'retry_scheduled' => V2RunStatus.retryScheduled,
+      'skipped' => V2RunStatus.skipped,
+      _ => V2RunStatus.unknown,
+    };
+    final duration = started != null && finished != null
+        ? formatRunDuration(finished.difference(started))
+        : started != null && status == V2RunStatus.running
+        ? formatRunDuration((now ?? DateTime.now()).difference(started))
+        : null;
+    final error = dto.error?.trim();
+    return V2ScheduleRun(
+      id: dto.id,
+      timeLabel: at == null ? 'Not scheduled' : _clockLabel(at),
+      durationLabel: duration,
+      status: status,
+      summary: status == V2RunStatus.succeeded
+          ? 'Run finished.'
+          : error != null && error.isNotEmpty
+          ? error
+          : '',
+      startedAt: started,
+      finishedAt: finished,
+      scheduledFor: dto.scheduledFor?.toLocal(),
+      error: error,
+      attempt: dto.attempt,
+      ranLate: dto.ranLate,
+      failureTitle: status == V2RunStatus.failed && error != null
+          ? 'Run failed · $error'
+          : null,
+      failureDetail: status == V2RunStatus.failed ? error : null,
+    );
+  }
+
   final String id;
   final String timeLabel;
-  final String durationLabel;
+
+  /// "1m 12s" when the server recorded a start and finish, otherwise null.
+  final String? durationLabel;
   final V2RunStatus status;
   final String summary;
+  final DateTime? startedAt;
+  final DateTime? finishedAt;
+  final DateTime? scheduledFor;
+  final String? error;
+  final int attempt;
+  final bool ranLate;
   final String? failureTitle;
   final String? failureDetail;
   final String? resultPreview;
   final String? artifactName;
+
+  bool get failed => status == V2RunStatus.failed;
+
+  /// The real duration, or null when the server did not record one.
+  String? durationText(DateTime now) {
+    final label = durationLabel?.trim();
+    if (label != null && label.isNotEmpty) return label;
+    final started = startedAt;
+    final finished = finishedAt;
+    if (started != null && finished != null) {
+      return formatRunDuration(finished.difference(started));
+    }
+    if (started != null && status == V2RunStatus.running) {
+      return formatRunDuration(now.difference(started));
+    }
+    return null;
+  }
+
+  /// An honest line when the run has no result yet.
+  String get summaryText {
+    final text = summary.trim();
+    if (text.isNotEmpty) return text;
+    return switch (status) {
+      V2RunStatus.running => 'Still running.',
+      V2RunStatus.retryScheduled => 'Waiting to retry.',
+      V2RunStatus.skipped => 'Skipped before it produced a result.',
+      V2RunStatus.unknown => 'No result was recorded for this run.',
+      _ => 'No result was recorded for this run.',
+    };
+  }
+}
+
+String _clockLabel(DateTime at) {
+  final hour = at.hour % 12 == 0 ? 12 : at.hour % 12;
+  final minute = at.minute.toString().padLeft(2, '0');
+  return '$hour:$minute ${at.hour < 12 ? 'AM' : 'PM'}';
 }
 
 @immutable
@@ -58,9 +196,65 @@ class V2ScheduleRunsData {
     this.failed = 0,
     this.avgRuntimeLabel = '—',
     this.groups = const <V2RunGroup>[],
+    this.now,
     this.errorMessage =
         'We could not load the run history. Check your connection and try again.',
   });
+
+  /// Builds the page state from the wire rows: newest first, grouped by day,
+  /// with counts and the average runtime derived from the rows themselves.
+  factory V2ScheduleRunsData.fromRuns(
+    List<ScheduleRunDto> rows, {
+    String? scheduleTitle,
+    String? sessionTitle,
+    DateTime? now,
+  }) {
+    final clock = now ?? DateTime.now();
+    final runs = [
+      for (final row in rows) V2ScheduleRun.fromDto(row, now: clock),
+    ];
+    final groups = <V2RunGroup>[];
+    for (final run in runs) {
+      final at = run.startedAt ?? run.scheduledFor;
+      final label = at == null ? 'Earlier' : runDayLabel(at, clock);
+      if (groups.isNotEmpty && groups.last.label == label) {
+        final last = groups.removeLast();
+        groups.add(
+          V2RunGroup(label: label, runs: <V2ScheduleRun>[...last.runs, run]),
+        );
+      } else {
+        groups.add(V2RunGroup(label: label, runs: <V2ScheduleRun>[run]));
+      }
+    }
+    final finished = [
+      for (final run in runs)
+        if (run.startedAt != null && run.finishedAt != null)
+          run.finishedAt!.difference(run.startedAt!),
+    ];
+    final average = finished.isEmpty
+        ? null
+        : Duration(
+            milliseconds:
+                finished.fold<int>(
+                  0,
+                  (sum, value) => sum + value.inMilliseconds,
+                ) ~/
+                finished.length,
+          );
+    return V2ScheduleRunsData(
+      status: runs.isEmpty
+          ? V2ScheduleRunsStatus.empty
+          : V2ScheduleRunsStatus.content,
+      scheduleTitle: scheduleTitle,
+      sessionTitle: sessionTitle,
+      total: runs.length,
+      succeeded: runs.where((run) => run.status == V2RunStatus.succeeded).length,
+      failed: runs.where((run) => run.failed).length,
+      avgRuntimeLabel: average == null ? '—' : formatRunDuration(average),
+      groups: groups,
+      now: clock,
+    );
+  }
 
   final V2ScheduleRunsStatus status;
 
@@ -74,6 +268,10 @@ class V2ScheduleRunsData {
   final int failed;
   final String avgRuntimeLabel;
   final List<V2RunGroup> groups;
+
+  /// Clock used to age a running run's duration. Injected for deterministic
+  /// tests; defaults to now.
+  final DateTime? now;
   final String errorMessage;
 }
 
@@ -145,11 +343,12 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
             ? 'Source session: $session'
             : null,
         actions: [
-          OIconButton(
-            icon: Icons.more_vert_rounded,
-            semanticLabel: 'More options',
-            onPressed: widget.onMore,
-          ),
+          if (widget.onMore != null)
+            OIconButton(
+              icon: Icons.more_vert_rounded,
+              semanticLabel: 'More options',
+              onPressed: widget.onMore,
+            ),
         ],
       ),
       body: OFadeSlide(
@@ -289,22 +488,35 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
 
   List<V2TimelineRun> _timelineRuns(List<V2ScheduleRun> runs) {
     final labels = _dayLabels;
+    final now = widget.data.now ?? DateTime.now();
     return [
       for (final run in runs)
         V2TimelineRun(
           id: run.id,
           dayLabel: labels[run.id] ?? '',
           timeLabel: run.timeLabel,
-          durationLabel: run.durationLabel,
-          outcome: run.status == V2RunStatus.succeeded
-              ? V2RunOutcome.succeeded
-              : V2RunOutcome.failed,
-          summary: run.summary,
+          durationLabel: run.durationText(now),
+          outcome: _outcomeOf(run.status),
+          summary: run.summaryText,
+          statusLabel: run.status == V2RunStatus.retryScheduled
+              ? 'Retry scheduled'
+              : null,
           artifactName: run.artifactName,
-          failureDetail: run.failureDetail ?? run.failureTitle,
+          failureDetail: run.failed
+              ? run.failureDetail ?? run.failureTitle
+              : null,
         ),
     ];
   }
+
+  V2RunOutcome _outcomeOf(V2RunStatus status) => switch (status) {
+    V2RunStatus.succeeded => V2RunOutcome.succeeded,
+    V2RunStatus.failed => V2RunOutcome.failed,
+    V2RunStatus.running => V2RunOutcome.running,
+    V2RunStatus.retryScheduled => V2RunOutcome.running,
+    V2RunStatus.skipped => V2RunOutcome.skipped,
+    V2RunStatus.unknown => V2RunOutcome.unknown,
+  };
 
   Widget _summary(OColors c) {
     final data = widget.data;

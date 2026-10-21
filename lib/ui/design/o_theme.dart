@@ -128,9 +128,12 @@ abstract final class OTheme {
         isDense: false,
         contentPadding: const EdgeInsets.symmetric(
           horizontal: OSpace.l,
-          vertical: 14,
+          vertical: OSpace.controlPad,
         ),
-        hintStyle: OType.body.copyWith(color: c.textFaint),
+        // Hints are 16 sp body copy, so they must clear the 4.5:1 body gate.
+        // textFaint is the large-text/graphic token (3.73:1 on dark surface)
+        // and is not allowed to carry body-size text.
+        hintStyle: OType.body.copyWith(color: c.textMuted),
         labelStyle: OType.bodySm.copyWith(color: c.textMuted),
         helperStyle: OType.caption.copyWith(color: c.textFaint),
         errorStyle: OType.caption.copyWith(color: c.danger),
@@ -242,7 +245,9 @@ abstract final class OTheme {
       popupMenuTheme: PopupMenuThemeData(
         color: c.surface,
         surfaceTintColor: Colors.transparent,
-        elevation: 8,
+        // Flat system: menus separate from the page with a hairline and the
+        // scrim, never with a drop shadow (the Stitch reference uses one).
+        elevation: 0,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(ORadius.m),
           side: BorderSide(color: c.hairline),

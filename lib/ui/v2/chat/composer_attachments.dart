@@ -41,13 +41,12 @@ String formatV2AttachmentSize(int bytes) {
 /// Picker seam. Returns null when the user cancelled.
 typedef V2AttachmentPicker = Future<List<V2ComposerAttachment>?> Function();
 
-/// Production picker: any file, multiple selection, no bytes loaded.
-///
-/// The rules below decide what is accepted so the composer can explain a
-/// rejection instead of silently dropping the file.
-Future<List<V2ComposerAttachment>?> pickV2AttachmentFiles() async {
+/// Image-only picker seam for the composer's Photo row.
+typedef V2ImagePicker = Future<List<V2ComposerAttachment>?> Function();
+
+Future<List<V2ComposerAttachment>?> _pick({required FileType type}) async {
   final result = await FilePicker.platform.pickFiles(
-    type: FileType.any,
+    type: type,
     allowMultiple: true,
     withData: false,
   );
@@ -61,6 +60,18 @@ Future<List<V2ComposerAttachment>?> pickV2AttachmentFiles() async {
       ),
   ];
 }
+
+/// Production picker: any file, multiple selection, no bytes loaded.
+///
+/// The rules below decide what is accepted so the composer can explain a
+/// rejection instead of silently dropping the file.
+Future<List<V2ComposerAttachment>?> pickV2AttachmentFiles() =>
+    _pick(type: FileType.any);
+
+/// Production image picker used by the composer's Photo action. The system
+/// photo picker owns the library permission, so no extra prompt is needed.
+Future<List<V2ComposerAttachment>?> pickV2ImageFiles() =>
+    _pick(type: FileType.image);
 
 /// Limits for one message.
 abstract final class V2AttachmentRules {

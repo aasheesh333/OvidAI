@@ -129,6 +129,22 @@ void main() {
     handle.dispose();
   });
 
+  testWidgets('defaults to General', (tester) async {
+    const data = V2PermissionSheetData();
+    expect(data.selectedId, 'auto');
+    expect(data.selectedMode?.label, 'General');
+
+    await tester.pumpWidget(_app(_sheet(data: data)));
+    await tester.pumpAndSettle();
+
+    final handle = tester.ensureSemantics();
+    expect(
+      tester.getSemantics(find.text('General')).flagsCollection.isSelected,
+      Tristate.isTrue,
+    );
+    handle.dispose();
+  });
+
   testWidgets('tapping a mode reports its id', (tester) async {
     final picks = <String>[];
     await tester.pumpWidget(_app(_sheet(onSelect: picks.add)));
@@ -242,6 +258,49 @@ void main() {
       }
       expect(find.text('Ovid asks before pushing'), findsOneWidget);
     }
+  });
+
+  testWidgets('a host applies the pick to its own state', (tester) async {
+    var selected = 'auto';
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: StatefulBuilder(
+          builder: (context, setState) => Scaffold(
+            body: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    V2PermissionSheetData(
+                      selectedId: selected,
+                    ).selectedMode!.label,
+                  ),
+                  TextButton(
+                    onPressed: () => showV2PermissionSheet(
+                      context,
+                      data: V2PermissionSheetData(selectedId: selected),
+                      onSelect: (id) => setState(() => selected = id),
+                    ),
+                    child: const Text('Open permissions'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('General'), findsOneWidget);
+    await tester.tap(find.text('Open permissions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Read-Only'));
+    await tester.pumpAndSettle();
+
+    expect(selected, 'safe');
+    expect(find.text('Read-Only'), findsOneWidget);
+    expect(find.text('Permissions'), findsNothing);
   });
 
   testWidgets('sheet helper closes after the pick', (tester) async {

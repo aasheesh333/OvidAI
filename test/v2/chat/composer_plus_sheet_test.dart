@@ -255,6 +255,49 @@ void main() {
     expect(find.bySemanticsLabel('Close add menu'), findsOneWidget);
   });
 
+  testWidgets('camera reason is caller-supplied and connectors can be hidden', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        const V2ComposerPlusData(
+          cameraAvailable: false,
+          cameraUnavailableReason: V2ComposerPlusSheet.cameraBuildReason,
+          showConnectors: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text(V2ComposerPlusSheet.cameraBuildReason),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('composer-plus-connectors')),
+      findsNothing,
+      reason: 'a row with no route must not be shown dead',
+    );
+  });
+
+  testWidgets('320 dp at 100 % text stacks trailing pills instead of '
+      'overflowing', (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final errors = <FlutterErrorDetails>[];
+    final previous = FlutterError.onError;
+    FlutterError.onError = errors.add;
+    addTearDown(() => FlutterError.onError = previous);
+
+    await tester.pumpWidget(_app(const V2ComposerPlusData()));
+    await tester.pumpAndSettle();
+
+    expect(errors, isEmpty);
+    expect(find.text('Folder needed'), findsOneWidget);
+  });
+
   for (final dark in [false, true]) {
     testWidgets('fits 320 dp at 200 % text and keeps 48 dp rows '
         '(${dark ? 'dark' : 'light'})', (tester) async {

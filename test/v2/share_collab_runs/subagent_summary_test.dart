@@ -390,4 +390,29 @@ void main() {
     await _revealRaw(tester);
     expect(find.textContaining('"files_modified"'), findsOneWidget);
   });
+
+  testWidgets('absent contract fields read as not reported', (tester) async {
+    await _pump(
+      tester,
+      const SubagentSummaryCard(
+        summary: V2SubagentSummaryData(
+          status: 'completed',
+          reported: {'status'},
+        ),
+      ),
+      OTheme.light(),
+    );
+
+    expect(find.text('Completed'), findsOneWidget);
+    expect(find.textContaining('Not reported'), findsNWidgets(7));
+    expect(find.text('No files modified.'), findsNothing);
+    expect(find.text('No error reported.'), findsNothing);
+
+    await tester.ensureVisible(find.text('Show raw JSON'));
+    await tester.pump();
+    await tester.tap(find.text('Show raw JSON'));
+    await tester.pump();
+    expect(find.textContaining('"files_modified"'), findsNothing);
+    expect(find.textContaining('"status"'), findsOneWidget);
+  });
 }

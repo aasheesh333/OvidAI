@@ -8,10 +8,12 @@ import '../../design/o_tokens.dart';
 
 /// One open tab in Ovid's browser.
 ///
-/// Ovid opens every tab. The person can switch between tabs and close one, but
-/// there is deliberately no way to create one by hand. A tab whose live view
-/// was left closed long enough is [headless]: Ovid still owns the page and can
-/// keep working on it, but there is no picture until it is opened again.
+/// Ovid opens every tab. The person can switch between tabs, and can close one
+/// only when the wiring layer supplies a close handler (the gateway has no
+/// close op today). There is deliberately no way to create a tab by hand. A
+/// tab whose live view was left closed long enough is [headless]: Ovid still
+/// owns the page and can keep working on it, but there is no picture until it
+/// is opened again.
 @immutable
 class V2BrowserTabItem {
   const V2BrowserTabItem({
@@ -48,7 +50,9 @@ class V2BrowserTabItem {
     final name = title.trim();
     if (name.isNotEmpty) return name;
     final address = host.trim();
-    return address.isEmpty ? 'New tab' : address;
+    // Never "New tab": the person cannot open one, so a blank tab is an
+    // untitled page Ovid opened, not an invitation to create.
+    return address.isEmpty ? 'Untitled page' : address;
   }
 }
 
@@ -245,7 +249,7 @@ class _Tab extends StatelessWidget {
             Padding(
               padding: EdgeInsets.only(
                 left: OSpace.m,
-                right: tab.closable ? 0 : OSpace.s,
+                right: tab.closable && onClose != null ? 0 : OSpace.s,
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -276,15 +280,16 @@ class _Tab extends StatelessWidget {
                       ],
                     ),
                   ),
-                  if (tab.closable)
+                  // Only a wired close control is shown. Tabs are agent-owned
+                  // and there is no server close op, so an un-wired page must
+                  // not show an X that cannot do anything.
+                  if (tab.closable && onClose != null)
                     OIconButton(
                       key: ValueKey('v2-browser-tab-close-${tab.id}'),
                       icon: Icons.close_rounded,
                       semanticLabel: 'Close ${tab.label}',
                       size: 16,
-                      onPressed: onClose == null
-                          ? null
-                          : () => onClose!(tab.id),
+                      onPressed: () => onClose!(tab.id),
                     )
                   else
                     const SizedBox(width: OSpace.xs),

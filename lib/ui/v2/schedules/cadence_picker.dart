@@ -21,6 +21,7 @@ class V2CadenceDraft {
     this.customRule = '',
     this.timezoneLabel = 'Asia/Kolkata (GMT +5:30)',
     this.timezoneShort = 'IST',
+    this.timezoneId = 'Asia/Kolkata',
   });
 
   final V2CadenceFrequency frequency;
@@ -32,55 +33,141 @@ class V2CadenceDraft {
   /// 1 = Monday … 7 = Sunday. Only used by [V2CadenceFrequency.weekly].
   final Set<int> days;
 
-  /// Plain-language rule for [V2CadenceFrequency.custom].
+  /// A cron expression (`0 9 * * 1-5`) or an RRULE
+  /// (`FREQ=WEEKLY;BYDAY=MO;BYHOUR=9`) for [V2CadenceFrequency.custom].
   final String customRule;
   final String timezoneLabel;
   final String timezoneShort;
+
+  /// The IANA zone the trigger is saved with, e.g. `Asia/Kolkata`.
+  final String timezoneId;
 
   /// e.g. "9:00 AM".
   String get timeLabel => formatCadenceTime(hour, minute);
 
   /// The first thing the user must fix, or null when the cadence is complete.
   String? get validationError {
-    if (frequency == V2CadenceFrequency.weekly && days.isEmpty) {
-      return 'Pick at least one day for this to run.';
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      return 'Pick a run time between 12:00 AM and 11:59 PM.';
+    }
+    if (frequency == V2CadenceFrequency.weekly) {
+      if (days.isEmpty) return 'Pick at least one day for this to run.';
+      if (days.any((day) => day < 1 || day > 7)) {
+        return 'Days must be between Monday and Sunday.';
+      }
     }
     if (frequency == V2CadenceFrequency.custom) {
       final rule = customRule.trim();
       if (rule.isEmpty) return 'Describe when this should run.';
       if (rule.length < 3) return 'Add a little more detail to the rule.';
-      if (rule.length > 120) return 'Keep the rule under 120 characters.';
+      if (!_looksLikeScheduleExpression(rule) && rule.length > 120) {
+        return 'Keep the rule under 120 characters.';
+      }
+      if (!_looksLikeScheduleExpression(rule)) {
+        return 'Use a cron expression or RRULE, for example 0 9 * * 1-5.';
+      }
+      if (rule.length > 200) return 'Keep the rule under 200 characters.';
+      final cron = normalizedCustomExpression(rule);
+      final rrule = normalizedCustomRrule(rule);
+      if (cron == null && rrule == null) {
+        return 'That is not a valid cron or RRULE. Check the fields.';
+      }
+      if (cron == null && rruleToCron(rrule!) == null) {
+        return 'This RRULE cannot be saved yet. Use a cron expression or a '
+            'daily/weekly rule.';
+      }
     }
     return null;
   }
 
   bool get isValid => validationError == null;
 
+  /// The cron expression this cadence saves (`0 9 * * 1,2,3,4,5`), or an empty
+  /// string for a custom rule that is not a cron expression.
+  String get cronExpression => switch (frequency) {
+    V2CadenceFrequency.daily => '$minute $hour * * *',
+    V2CadenceFrequency.weekly => '$minute $hour * * ${_sortedDays.join(',')}',
+    V2CadenceFrequency.custom => normalizedCustomExpression(customRule) ?? '',
+  };
+
+  List<int> get _sortedDays {
+    final sorted = days.where((day) => day >= 1 && day <= 7).toList()..sort();
+    return sorted;
+  }
+
+  /// The RRULE this cadence saves, or an empty string when the custom rule is a
+  /// cron expression rather than an RRULE.
+  String get rrule => switch (frequency) {
+    V2CadenceFrequency.daily => 'FREQ=DAILY;BYHOUR=$hour;BYMINUTE=$minute',
+    V2CadenceFrequency.weekly =>
+      'FREQ=WEEKLY;BYDAY=${_sortedDays.map(rruleDayCode).join(',')};'
+          'BYHOUR=$hour;BYMINUTE=$minute',
+    V2CadenceFrequency.custom => normalizedCustomRrule(customRule) ?? '',
+  };
+
+  /// What the editor sends to the server: a cron expression or an RRULE.
+  String get scheduleExpression {
+    final custom = frequency == V2CadenceFrequency.custom;
+    if (!custom) return 'cron $cronExpression';
+    final rrule = normalizedCustomRrule(customRule);
+    if (rrule != null) return 'RRULE:$rrule';
+    final cron = normalizedCustomExpression(customRule);
+    return cron == null ? '' : 'cron $cron';
+  }
+
   /// The next local date-time this cadence fires after [from], or null when the
-  /// cadence is incomplete or custom (the server owns custom rules).
+  /// cadence is incomplete or cannot be expanded locally.
   DateTime? nextRunAfter(DateTime from) {
-    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
-    if (frequency == V2CadenceFrequency.custom) return null;
+    if (!isValid) return null;
+    final rule = _rule;
+    if (rule == null) return null;
 
-    final activeDays = days.where((day) => day >= 1 && day <= 7).toSet();
-    if (frequency == V2CadenceFrequency.weekly && activeDays.isEmpty) {
-      return null;
-    }
-
-    // Eight candidates cover every weekday once, including today.
-    for (var offset = 0; offset <= 7; offset++) {
+    // 400 days covers a weekly rule with any interval up to a year plus the
+    // day-of-week offset; it is a hard bound, never an infinite loop.
+    for (var offset = 0; offset <= 400; offset++) {
       final candidate = DateTime(
         from.year,
         from.month,
         from.day + offset,
-        hour,
-        minute,
+        rule.hour,
+        rule.minute,
       );
-      final matches = frequency == V2CadenceFrequency.daily ||
-          activeDays.contains(candidate.weekday);
-      if (matches && candidate.isAfter(from)) return candidate;
+      if (candidate.isAfter(from) && rule.matches(candidate)) return candidate;
     }
     return null;
+  }
+
+  /// Rejects an end date that lands before the first run of this cadence.
+  String? endValidationError(DateTime? endsAt, DateTime now) {
+    if (endsAt == null) return null;
+    final firstRun = nextRunAfter(now);
+    if (firstRun == null) return null;
+    if (endsAt.isBefore(firstRun)) {
+      final label = describeNextRun(this, now) ?? formatCadenceTime(hour, minute);
+      return 'The end date must be after the first run ($label).';
+    }
+    return null;
+  }
+
+  _CadenceRule? get _rule {
+    switch (frequency) {
+      case V2CadenceFrequency.daily:
+        return _CadenceRule(
+          hour: hour,
+          minute: minute,
+          interval: 1,
+          days: const <int>{},
+        );
+      case V2CadenceFrequency.weekly:
+        return _CadenceRule(
+          hour: hour,
+          minute: minute,
+          interval: 1,
+          days: days.where((day) => day >= 1 && day <= 7).toSet(),
+        );
+      case V2CadenceFrequency.custom:
+        return _customRuleSchedule(customRule);
+    }
   }
 
   V2CadenceDraft copyWith({
@@ -91,6 +178,7 @@ class V2CadenceDraft {
     String? customRule,
     String? timezoneLabel,
     String? timezoneShort,
+    String? timezoneId,
   }) {
     return V2CadenceDraft(
       frequency: frequency ?? this.frequency,
@@ -100,6 +188,7 @@ class V2CadenceDraft {
       customRule: customRule ?? this.customRule,
       timezoneLabel: timezoneLabel ?? this.timezoneLabel,
       timezoneShort: timezoneShort ?? this.timezoneShort,
+      timezoneId: timezoneId ?? this.timezoneId,
     );
   }
 
@@ -112,7 +201,8 @@ class V2CadenceDraft {
         _sameDays(other.days, days) &&
         other.customRule == customRule &&
         other.timezoneLabel == timezoneLabel &&
-        other.timezoneShort == timezoneShort;
+        other.timezoneShort == timezoneShort &&
+        other.timezoneId == timezoneId;
   }
 
   @override
@@ -126,6 +216,7 @@ class V2CadenceDraft {
       customRule,
       timezoneLabel,
       timezoneShort,
+      timezoneId,
     );
   }
 }
@@ -139,6 +230,488 @@ String formatCadenceTime(int hour, int minute) {
   final displayMinute = safeMinute.toString().padLeft(2, '0');
   return '$displayHour:$displayMinute $suffix';
 }
+
+// ── Cron / RRULE ────────────────────────────────────────────────────────────
+//
+// A cadence is only real when it can be sent as a trigger the scheduler
+// understands. The structured options always produce a five-field cron
+// expression; a custom rule must be a cron expression or an RRULE, and both
+// are validated here instead of at the server.
+
+const _cronFieldBounds = <(int, int)>[
+  (0, 59), // minute
+  (0, 23), // hour
+  (1, 31), // day of month
+  (1, 12), // month
+  (0, 7), // day of week (0 and 7 are Sunday)
+];
+
+/// True when [expression] is a five-field cron expression in range.
+bool isValidCron(String expression) => _parseCron(expression) != null;
+
+Set<int>? _cronFieldValues(String token, int min, int max) {
+  if (token.isEmpty) return null;
+  final values = <int>{};
+  for (final raw in token.split(',')) {
+    if (raw.isEmpty) return null;
+    var body = raw;
+    var step = 1;
+    final slash = body.indexOf('/');
+    if (slash >= 0) {
+      step = int.tryParse(body.substring(slash + 1)) ?? 0;
+      if (step < 1) return null;
+      body = body.substring(0, slash);
+    }
+    var start = min;
+    var end = max;
+    if (body != '*') {
+      final dash = body.indexOf('-');
+      if (dash > 0) {
+        start = int.tryParse(body.substring(0, dash)) ?? (1 << 30);
+        end = int.tryParse(body.substring(dash + 1)) ?? -(1 << 30);
+      } else {
+        start = int.tryParse(body) ?? (1 << 30);
+        end = start;
+      }
+    }
+    if (start < min || end > max || start > end) return null;
+    for (var value = start; value <= end; value += step) {
+      values.add(value);
+    }
+  }
+  return values.isEmpty ? null : values;
+}
+
+class _CronSpec {
+  const _CronSpec({
+    required this.minutes,
+    required this.hours,
+    required this.daysOfMonth,
+    required this.months,
+    required this.daysOfWeek,
+  });
+
+  final Set<int> minutes;
+  final Set<int> hours;
+  final Set<int> daysOfMonth;
+  final Set<int> months;
+  final Set<int> daysOfWeek;
+}
+
+_CronSpec? _parseCron(String expression) {
+  final text = expression.trim();
+  if (text.isEmpty) return null;
+  final parts = text.split(RegExp(r'\s+'));
+  if (parts.length != 5) return null;
+  final fields = <Set<int>>[];
+  for (var index = 0; index < 5; index++) {
+    final bounds = _cronFieldBounds[index];
+    final values = _cronFieldValues(parts[index], bounds.$1, bounds.$2);
+    if (values == null) return null;
+    fields.add(values);
+  }
+  return _CronSpec(
+    minutes: fields[0],
+    hours: fields[1],
+    daysOfMonth: fields[2],
+    months: fields[3],
+    daysOfWeek: fields[4],
+  );
+}
+
+const _rruleKeys = <String>{
+  'FREQ',
+  'INTERVAL',
+  'COUNT',
+  'UNTIL',
+  'BYDAY',
+  'BYMONTHDAY',
+  'BYMONTH',
+  'BYHOUR',
+  'BYMINUTE',
+  'BYSECOND',
+  'WKST',
+  'BYSETPOS',
+  'BYWEEKNO',
+  'BYYEARDAY',
+};
+
+const _rruleFrequencies = <String>{
+  'SECONDLY',
+  'MINUTELY',
+  'HOURLY',
+  'DAILY',
+  'WEEKLY',
+  'MONTHLY',
+  'YEARLY',
+};
+
+const _rruleDayCodes = <String>['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
+
+/// The RRULE weekday code for 1 = Monday … 7 = Sunday.
+String rruleDayCode(int day) =>
+    day >= 1 && day <= 7 ? _rruleDayCodes[day - 1] : '';
+
+bool _rruleDay(String value) =>
+    RegExp(r'^([+-]?\d{1,2})?(MO|TU|WE|TH|FR|SA|SU)$').hasMatch(value);
+
+bool _intListInRange(String value, int min, int max) {
+  for (final part in value.split(',')) {
+    final parsed = int.tryParse(part);
+    if (parsed == null || parsed < min || parsed > max) return false;
+  }
+  return true;
+}
+
+Map<String, String>? _parseRrule(String input) {
+  var text = input.trim();
+  if (text.isEmpty) return null;
+  if (text.toUpperCase().startsWith('RRULE:')) text = text.substring(6);
+  final fields = <String, String>{};
+  for (final part in text.split(';')) {
+    final equals = part.indexOf('=');
+    if (equals <= 0) return null;
+    final key = part.substring(0, equals).trim().toUpperCase();
+    final value = part.substring(equals + 1).trim();
+    if (value.isEmpty || !_rruleKeys.contains(key)) return null;
+    if (fields.containsKey(key)) return null;
+    fields[key] = value;
+  }
+  final frequency = fields['FREQ']?.toUpperCase();
+  if (frequency == null || !_rruleFrequencies.contains(frequency)) return null;
+  fields['FREQ'] = frequency;
+
+  final interval = fields['INTERVAL'];
+  if (interval != null) {
+    final parsed = int.tryParse(interval);
+    if (parsed == null || parsed < 1 || parsed > 99) return null;
+  }
+  final count = fields['COUNT'];
+  if (count != null) {
+    final parsed = int.tryParse(count);
+    if (parsed == null || parsed < 1) return null;
+  }
+  final until = fields['UNTIL'];
+  if (until != null) {
+    final compact = RegExp(r'^\d{8}$').hasMatch(until);
+    if (!compact && DateTime.tryParse(until) == null) return null;
+  }
+  final byHour = fields['BYHOUR'];
+  if (byHour != null && !_intListInRange(byHour, 0, 23)) return null;
+  final byMinute = fields['BYMINUTE'];
+  if (byMinute != null && !_intListInRange(byMinute, 0, 59)) return null;
+  final bySecond = fields['BYSECOND'];
+  if (bySecond != null && !_intListInRange(bySecond, 0, 59)) return null;
+  final byMonth = fields['BYMONTH'];
+  if (byMonth != null && !_intListInRange(byMonth, 1, 12)) return null;
+  final byMonthDay = fields['BYMONTHDAY'];
+  if (byMonthDay != null) {
+    for (final part in byMonthDay.split(',')) {
+      final parsed = int.tryParse(part);
+      if (parsed == null || parsed == 0 || parsed < -31 || parsed > 31) {
+        return null;
+      }
+    }
+  }
+  final byDay = fields['BYDAY'];
+  if (byDay != null) {
+    for (final part in byDay.split(',')) {
+      if (!_rruleDay(part.toUpperCase())) return null;
+    }
+    fields['BYDAY'] = byDay.toUpperCase();
+  }
+  final weekStart = fields['WKST'];
+  if (weekStart != null && !_rruleDayCodes.contains(weekStart.toUpperCase())) {
+    return null;
+  }
+  final bySetPos = fields['BYSETPOS'];
+  if (bySetPos != null) {
+    for (final part in bySetPos.split(',')) {
+      final parsed = int.tryParse(part);
+      if (parsed == null || parsed == 0 || parsed < -366 || parsed > 366) {
+        return null;
+      }
+    }
+  }
+  return fields;
+}
+
+/// The canonical RRULE for [input] (`FREQ=...`), or null when it is not one.
+String? normalizedCustomRrule(String input) {
+  final fields = _parseRrule(input);
+  if (fields == null) return null;
+  const order = <String>[
+    'FREQ',
+    'INTERVAL',
+    'BYDAY',
+    'BYMONTHDAY',
+    'BYMONTH',
+    'BYHOUR',
+    'BYMINUTE',
+    'BYSECOND',
+    'COUNT',
+    'UNTIL',
+    'WKST',
+    'BYSETPOS',
+    'BYWEEKNO',
+    'BYYEARDAY',
+  ];
+  final out = <String>[];
+  for (final key in order) {
+    final value = fields[key];
+    if (value != null) out.add('$key=$value');
+  }
+  return out.isEmpty ? null : out.join(';');
+}
+
+/// The trimmed cron expression for [input], or null when it is not a cron.
+String? normalizedCustomExpression(String input) {
+  final text = input.trim();
+  if (_parseCron(text) == null) return null;
+  return text.split(RegExp(r'\s+')).join(' ');
+}
+
+bool _looksLikeScheduleExpression(String rule) {
+  final upper = rule.toUpperCase();
+  if (upper.startsWith('RRULE:') || upper.contains('FREQ=')) return true;
+  final cronLike = RegExp(r'^[\d*/,\- ]+$').hasMatch(rule);
+  return cronLike && rule.split(RegExp(r'\s+')).length == 5;
+}
+
+/// The cron expression for [rrule] when the two can express the same schedule,
+/// or null (cron cannot carry an interval or a monthly position).
+String? rruleToCron(String rrule) {
+  final fields = _parseRrule(rrule);
+  if (fields == null) return null;
+  final hour = _singleInt(fields['BYHOUR']);
+  final minute = _singleInt(fields['BYMINUTE']) ?? 0;
+  final interval = int.tryParse(fields['INTERVAL'] ?? '1') ?? 1;
+  if (hour == null || interval != 1) return null;
+  if (fields['FREQ'] == 'DAILY') return '$minute $hour * * *';
+  if (fields['FREQ'] == 'WEEKLY') {
+    final days = _rruleDays(fields['BYDAY']);
+    if (days == null || days.isEmpty) return null;
+    final sorted = days.toList()..sort();
+    return '$minute $hour * * ${sorted.join(',')}';
+  }
+  return null;
+}
+
+/// Rebuilds the cadence a saved cron expression represents. Every valid cron
+/// becomes a draft: the simple shapes become the Daily/Weekly segments, the
+/// rest stay custom so the expression is visible and editable.
+V2CadenceDraft? cadenceFromCron(
+  String expression, {
+  String timezoneId = 'UTC',
+  String? timezoneLabel,
+  String? timezoneShort,
+}) {
+  final text = expression.trim();
+  final cron = _parseCron(text);
+  if (cron == null) return null;
+  final zone = timezoneId.isEmpty ? 'UTC' : timezoneId;
+  final label = timezoneLabel ?? zone;
+  final short = timezoneShort ?? _shortZone(zone);
+  if (cron.minutes.length == 1 &&
+      cron.hours.length == 1 &&
+      cron.months.length == 12) {
+    final hour = cron.hours.single;
+    final minute = cron.minutes.single;
+    if (cron.daysOfMonth.length == 31) {
+      if (cron.daysOfWeek.length == 8) {
+        return V2CadenceDraft(
+          frequency: V2CadenceFrequency.daily,
+          hour: hour,
+          minute: minute,
+          timezoneId: zone,
+          timezoneLabel: label,
+          timezoneShort: short,
+        );
+      }
+      return V2CadenceDraft(
+        frequency: V2CadenceFrequency.weekly,
+        hour: hour,
+        minute: minute,
+        days: cron.daysOfWeek.map((day) => day == 0 ? 7 : day).toSet(),
+        timezoneId: zone,
+        timezoneLabel: label,
+        timezoneShort: short,
+      );
+    }
+  }
+  return V2CadenceDraft(
+    frequency: V2CadenceFrequency.custom,
+    customRule: text.split(RegExp(r'\s+')).join(' '),
+    timezoneId: zone,
+    timezoneLabel: label,
+    timezoneShort: short,
+  );
+}
+
+/// Rebuilds the cadence a saved RRULE represents, or null when it is invalid.
+V2CadenceDraft? cadenceFromRrule(
+  String rrule, {
+  String timezoneId = 'UTC',
+  String? timezoneLabel,
+  String? timezoneShort,
+}) {
+  final normalized = normalizedCustomRrule(rrule);
+  if (normalized == null) return null;
+  final fields = _parseRrule(normalized)!;
+  final zone = timezoneId.isEmpty ? 'UTC' : timezoneId;
+  final label = timezoneLabel ?? zone;
+  final short = timezoneShort ?? _shortZone(zone);
+  final hour = _singleInt(fields['BYHOUR']);
+  final minute = _singleInt(fields['BYMINUTE']) ?? 0;
+  final interval = int.tryParse(fields['INTERVAL'] ?? '1') ?? 1;
+  if (hour != null && interval == 1) {
+    if (fields['FREQ'] == 'DAILY') {
+      return V2CadenceDraft(
+        frequency: V2CadenceFrequency.daily,
+        hour: hour,
+        minute: minute,
+        timezoneId: zone,
+        timezoneLabel: label,
+        timezoneShort: short,
+      );
+    }
+    if (fields['FREQ'] == 'WEEKLY') {
+      final days = _rruleDays(fields['BYDAY']);
+      if (days != null && days.isNotEmpty) {
+        return V2CadenceDraft(
+          frequency: V2CadenceFrequency.weekly,
+          hour: hour,
+          minute: minute,
+          days: days,
+          timezoneId: zone,
+          timezoneLabel: label,
+          timezoneShort: short,
+        );
+      }
+    }
+  }
+  return V2CadenceDraft(
+    frequency: V2CadenceFrequency.custom,
+    customRule: normalized,
+    timezoneId: zone,
+    timezoneLabel: label,
+    timezoneShort: short,
+  );
+}
+
+String _shortZone(String zone) {
+  final slash = zone.lastIndexOf('/');
+  return slash < 0 ? zone : zone.substring(slash + 1);
+}
+
+int? _singleInt(String? value) {
+  if (value == null) return null;
+  final parts = value.split(',');
+  if (parts.length != 1) return null;
+  return int.tryParse(parts.single);
+}
+
+Set<int>? _rruleDays(String? value) {
+  if (value == null || value.isEmpty) return null;
+  final days = <int>{};
+  for (final part in value.toUpperCase().split(',')) {
+    final code = part.length <= 2 ? part : part.substring(part.length - 2);
+    final index = _rruleDayCodes.indexOf(code);
+    if (index < 0) return null;
+    days.add(index + 1);
+  }
+  return days;
+}
+
+/// The expandable shape of a cadence, used for the next-run preview.
+@immutable
+class _CadenceRule {
+  const _CadenceRule({
+    required this.hour,
+    required this.minute,
+    required this.interval,
+    required this.days,
+  });
+
+  final int hour;
+  final int minute;
+  final int interval;
+
+  /// 1 = Monday … 7 = Sunday. Empty means "every day".
+  final Set<int> days;
+
+  static final DateTime _dailyAnchor = DateTime.utc(1970, 1, 1);
+  static final DateTime _weeklyAnchor = DateTime.utc(1970, 1, 5); // Monday.
+
+  bool get isDaily => days.isEmpty;
+
+  bool matches(DateTime value) {
+    final day = DateTime.utc(value.year, value.month, value.day);
+    if (isDaily) {
+      return day.difference(_dailyAnchor).inDays % interval == 0;
+    }
+    if (!days.contains(day.weekday)) return false;
+    final weeks = day.difference(_weeklyAnchor).inDays ~/ 7;
+    return weeks % interval == 0;
+  }
+}
+
+_CadenceRule? _customRuleSchedule(String rule) {
+  final fields = _parseRrule(rule);
+  if (fields != null) {
+    final frequency = fields['FREQ'];
+    final interval = int.tryParse(fields['INTERVAL'] ?? '1') ?? 1;
+    final hour = _singleInt(fields['BYHOUR']);
+    final minute = _singleInt(fields['BYMINUTE']) ?? 0;
+    if (hour == null) return null;
+    if (frequency == 'DAILY') {
+      return _CadenceRule(
+        hour: hour,
+        minute: minute,
+        interval: interval,
+        days: const <int>{},
+      );
+    }
+    if (frequency == 'WEEKLY') {
+      final days = _rruleDays(fields['BYDAY']);
+      if (days == null || days.isEmpty) return null;
+      return _CadenceRule(
+        hour: hour,
+        minute: minute,
+        interval: interval,
+        days: days,
+      );
+    }
+    return null;
+  }
+
+  final cron = _parseCron(rule);
+  if (cron == null) return null;
+  if (cron.minutes.length != 1 || cron.hours.length != 1) return null;
+  if (cron.months.length != 12) return null;
+  final hour = cron.hours.single;
+  final minute = cron.minutes.single;
+  final everyDayOfMonth = cron.daysOfMonth.length == 31;
+  final everyDayOfWeek = cron.daysOfWeek.length == 8;
+  if (everyDayOfMonth && everyDayOfWeek) {
+    return _CadenceRule(
+      hour: hour,
+      minute: minute,
+      interval: 1,
+      days: const <int>{},
+    );
+  }
+  if (everyDayOfMonth && !everyDayOfWeek) {
+    return _CadenceRule(
+      hour: hour,
+      minute: minute,
+      interval: 1,
+      days: cron.daysOfWeek.map((day) => day == 0 ? 7 : day).toSet(),
+    );
+  }
+  return null;
+}
+
 
 /// 1 = Monday … 7 = Sunday.
 String cadenceDayName(int day) => switch (day) {
@@ -166,20 +739,27 @@ String describeCadence(V2CadenceDraft draft) {
 }
 
 /// The next run in plain English: "Today at 9:00 AM", "Tomorrow at 9:00 AM",
-/// "Saturday, 24 Oct at 9:00 AM". Null when there is no predictable next run.
+/// "Saturday, 24 Oct at 9:00 AM". Null when there is no predictable next run
+/// (for example a cron rule with several hours in one field).
 String? describeNextRun(V2CadenceDraft draft, DateTime now) {
   if (!draft.isValid) return null;
   final next = draft.nextRunAfter(now);
   if (next == null) return null;
+  return describeNextRunAt(next, now);
+}
 
-  final today = DateTime.utc(now.year, now.month, now.day);
-  final target = DateTime.utc(next.year, next.month, next.day);
+/// The same plain-English label for a concrete date-time, e.g. a server-supplied
+/// `nextRunAt`.
+String describeNextRunAt(DateTime at, DateTime now) {
+  final local = at.toLocal();
+  final today = DateTime(now.year, now.month, now.day);
+  final target = DateTime(local.year, local.month, local.day);
   final dayOffset = target.difference(today).inDays;
-  final time = draft.timeLabel;
-  if (dayOffset == 0) return 'Today at $time';
-  if (dayOffset == 1) return 'Tomorrow at $time';
-  final month = _monthShort[next.month - 1];
-  return '${cadenceDayName(next.weekday)}, ${next.day} $month at $time';
+  final label = formatCadenceTime(local.hour, local.minute);
+  if (dayOffset == 0) return 'Today at $label';
+  if (dayOffset == 1) return 'Tomorrow at $label';
+  final month = _monthShort[local.month - 1];
+  return '${cadenceDayName(local.weekday)}, ${local.day} $month at $label';
 }
 
 const _monthShort = <String>[
@@ -721,7 +1301,8 @@ class _CadencePickerState extends State<CadencePicker> {
           ),
           const SizedBox(height: OSpace.xs),
           Text(
-            'Say in your own words when this should run.',
+            'Paste a five-field cron expression or an RRULE. Ovid checks it '
+            'before saving.',
             style: OType.caption.copyWith(color: c.textMuted),
           ),
           const SizedBox(height: OSpace.s),
@@ -740,7 +1321,7 @@ class _CadencePickerState extends State<CadencePicker> {
               style: OType.bodySm.copyWith(color: c.text),
               cursorColor: c.accent,
               decoration: InputDecoration(
-                hintText: 'e.g. Every other Monday at 6 PM',
+                hintText: '0 9 * * 1-5',
                 hintStyle: OType.bodySm.copyWith(color: c.textFaint),
                 counterText: '',
                 filled: false,
@@ -763,16 +1344,12 @@ class _CadencePickerState extends State<CadencePicker> {
             runSpacing: OSpace.s,
             children: [
               OChip(
-                label: 'Every other Monday',
-                onTap: widget.enabled
-                    ? () => _applyRule('Every other Monday at 6 PM')
-                    : null,
+                label: 'Every Monday',
+                onTap: widget.enabled ? () => _applyRule('0 18 * * 1') : null,
               ),
               OChip(
                 label: '1st of the month',
-                onTap: widget.enabled
-                    ? () => _applyRule('The first day of each month at 8 AM')
-                    : null,
+                onTap: widget.enabled ? () => _applyRule('0 8 1 * *') : null,
               ),
             ],
           ),
@@ -895,6 +1472,14 @@ class _CadencePickerState extends State<CadencePicker> {
                   Text(
                     detail,
                     style: OType.caption.copyWith(color: c.textMuted),
+                  ),
+                ],
+                if (draft.scheduleExpression.isNotEmpty) ...[
+                  const SizedBox(height: OSpace.xs),
+                  Text(
+                    'Sends ${draft.scheduleExpression}',
+                    key: const ValueKey('cadence-expression'),
+                    style: OType.mono.copyWith(color: c.textMuted),
                   ),
                 ],
                 const SizedBox(height: OSpace.s),

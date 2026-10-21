@@ -15,6 +15,7 @@ const _summary = V2ArtifactSizeSummary(totalBytes: 2481561, totalCount: 4);
 
 const _sourceKey = ValueKey<String>('artifact-filter-source');
 const _sessionKey = ValueKey<String>('artifact-filter-session');
+const _dateKey = ValueKey<String>('artifact-filter-date');
 const _sortKey = ValueKey<String>('artifact-filter-sort');
 const _clearKey = ValueKey<String>('artifact-filter-clear');
 
@@ -134,6 +135,7 @@ void main() {
       expect(find.byKey(_sourceKey), findsOneWidget);
       expect(find.text('Any source'), findsOneWidget);
       expect(find.text('All sessions'), findsOneWidget);
+      expect(find.text('Any time'), findsOneWidget);
       expect(find.text('Newest first'), findsOneWidget);
       expect(find.text('4 files · 2.4 MB'), findsOneWidget);
 
@@ -158,7 +160,7 @@ void main() {
         expect(size.height, greaterThanOrEqualTo(48), reason: type.name);
         expect(size.width, greaterThanOrEqualTo(48), reason: type.name);
       }
-      for (final key in [_sourceKey, _sessionKey, _sortKey]) {
+      for (final key in [_sourceKey, _sessionKey, _dateKey, _sortKey]) {
         final size = tester.getSize(find.byKey(key));
         expect(size.height, greaterThanOrEqualTo(48), reason: '$key');
       }
@@ -291,6 +293,43 @@ void main() {
     });
   });
 
+  group('date', () {
+    testWidgets('sheet lists every range and applies Today', (tester) async {
+      final key = await _pump(tester);
+
+      await tester.tap(find.byKey(_dateKey));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Added'), findsOneWidget);
+      for (final date in V2ArtifactDateFilter.values) {
+        expect(find.text(date.label), findsWidgets);
+      }
+      expect(find.text('Added since midnight'), findsOneWidget);
+
+      await tester.tap(find.text('Today'));
+      await tester.pumpAndSettle();
+
+      expect(key.currentState!.last?.date, V2ArtifactDateFilter.today);
+      expect(find.text('Today'), findsOneWidget);
+      expect(find.byKey(_clearKey), findsOneWidget);
+    });
+
+    testWidgets('Any time clears the date filter', (tester) async {
+      final key = await _pump(
+        tester,
+        initial: const V2ArtifactFilters(date: V2ArtifactDateFilter.week),
+      );
+
+      await tester.tap(find.byKey(_dateKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Any time').last);
+      await tester.pumpAndSettle();
+
+      expect(key.currentState!.filters.date, V2ArtifactDateFilter.all);
+      expect(find.text('Any time'), findsOneWidget);
+    });
+  });
+
   group('sort', () {
     testWidgets('sheet lists all orders and applies Largest first', (
       tester,
@@ -378,7 +417,7 @@ void main() {
   });
 
   group('clear', () {
-    testWidgets('clears type, source, session and sort together', (
+    testWidgets('clears type, source, date, session and sort together', (
       tester,
     ) async {
       final key = await _pump(
@@ -386,6 +425,7 @@ void main() {
         initial: const V2ArtifactFilters(
           type: V2ArtifactTypeFilter.image,
           source: V2ArtifactSourceFilter.uploaded,
+          date: V2ArtifactDateFilter.month,
           sessionId: 's1',
           sort: V2ArtifactSort.oldest,
         ),
@@ -401,6 +441,7 @@ void main() {
       expect(find.byKey(_clearKey), findsNothing);
       expect(find.text('Any source'), findsOneWidget);
       expect(find.text('All sessions'), findsOneWidget);
+      expect(find.text('Any time'), findsOneWidget);
       expect(find.text('Newest first'), findsOneWidget);
     });
 
@@ -537,6 +578,10 @@ void main() {
       );
       expect(const V2ArtifactFilters(sessionId: 's1').isActive, isTrue);
       expect(
+        const V2ArtifactFilters(date: V2ArtifactDateFilter.today).isActive,
+        isTrue,
+      );
+      expect(
         const V2ArtifactFilters(sort: V2ArtifactSort.oldest).isActive,
         isTrue,
       );
@@ -546,6 +591,7 @@ void main() {
       const base = V2ArtifactFilters(
         type: V2ArtifactTypeFilter.code,
         source: V2ArtifactSourceFilter.generated,
+        date: V2ArtifactDateFilter.week,
         sessionId: 's1',
         sort: V2ArtifactSort.name,
       );
@@ -556,14 +602,17 @@ void main() {
       final cleared = base.copyWith(sessionId: null);
       expect(cleared.sessionId, isNull);
       expect(cleared.type, V2ArtifactTypeFilter.code);
+      expect(cleared.date, V2ArtifactDateFilter.week);
       expect(cleared.sort, V2ArtifactSort.name);
 
       final next = base.copyWith(
         type: V2ArtifactTypeFilter.doc,
+        date: V2ArtifactDateFilter.month,
         sessionId: 's2',
       );
       expect(next, isNot(base));
       expect(next.type, V2ArtifactTypeFilter.doc);
+      expect(next.date, V2ArtifactDateFilter.month);
       expect(next.sessionId, 's2');
     });
 

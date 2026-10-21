@@ -4,18 +4,23 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/chat_integration_ports.dart';
 import '../../../core/chat_pins.dart';
 import '../../../core/cloud/cloud_agent_facade.dart';
+import '../../../core/cloud/cloud_session_store.dart';
 import '../../../core/cloud/models.dart';
 import '../../../core/cloud/projects.dart';
 import '../../../core/cloud_usage_store.dart';
 import '../../../core/composer_drafts.dart';
 import '../../../core/conversation_share_service.dart';
 import '../../../core/connection_service.dart';
+import '../../../core/diag.dart';
 import '../../../core/firebase_service.dart';
 import '../../../core/format.dart';
+import '../../../core/native_share.dart';
 import '../../../core/ovid_cloud_service.dart';
 import '../../../core/state.dart';
+import '../../../core/voice_reply_service.dart';
 import '../../design/o_tokens.dart';
 import '../chat/composer_mentions.dart';
 import '../chat/composer_voice.dart';
@@ -24,12 +29,16 @@ import '../chat/composer_attachments.dart';
 import '../chat/live_chat_page.dart';
 import '../chat/model_picker_sheet.dart';
 import '../chat/permission_sheet.dart';
+import '../chat/transcript_actions.dart';
+import '../chat/transcript_tiles.dart';
 import '../../design/o_components.dart';
 import '../settings/settings_hub.dart';
+import '../sidebar/project_detail_page.dart';
 import '../sidebar/projects_page.dart';
 import '../share/share_sheet.dart';
 import '../sidebar/session_actions_sheet.dart';
 import '../sidebar/sidebar.dart';
+import 'bottom_nav.dart';
 import 'mention_source_live.dart';
 import 'v2_settings_actions.dart';
 import 'v2_work_routes.dart';
@@ -51,10 +60,17 @@ class V2AppShell extends StatefulWidget {
 
 class _V2AppShellState extends State<V2AppShell> {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
+  final _navKey = GlobalKey<NavigatorState>();
+  final _tabObserver = _V2TabObserver();
   late final CloudUsageStore _usage;
   late final V2SettingsActions _settings;
   late final Listenable _listenable;
   final Map<String, ConversationShare> _activeShares = {};
+
+  /// The build context of the home route inside [_navKey]. Route pushes go
+  /// through this context so the bottom bar stays mounted above every
+  /// destination.
+  BuildContext? _routeContext;
 
   @override
   void initState() {
@@ -70,6 +86,10 @@ class _V2AppShellState extends State<V2AppShell> {
       _usage,
     ]);
     v2DefaultMentionSource = const V2AppMentionSource();
+    // `@` refs travel to the gateway as server session ids; local ids are not
+    // valid there.
+    v2SessionRefResolver = (localId) =>
+        CloudSessionStore.I.knownServerIdFor(localId) ?? localId;
     v2SavedVoiceLanguage = AppState.I.voiceLanguage;
     unawaited(ChatPinsStore.I.bindCurrentAccount());
     unawaited(
@@ -82,6 +102,7 @@ class _V2AppShellState extends State<V2AppShell> {
 
   @override
   void dispose() {
+    _tabObserver.current.dispose();
     _usage.dispose();
     super.dispose();
   }
@@ -92,8 +113,6 @@ class _V2AppShellState extends State<V2AppShell> {
       listenable: _listenable,
       builder: (context, _) {
         final app = AppState.I;
-        final session = app.activeSession;
-        final hasMessages = session != null && session.messages.isNotEmpty;
         return Scaffold(
           key: _scaffoldKey,
           backgroundColor: OColors.of(context).bg,
@@ -102,65 +121,194 @@ class _V2AppShellState extends State<V2AppShell> {
             backgroundColor: OColors.of(context).surface,
             child: Sidebar(
               data: _sidebarData(app),
-              onProfile: () => _openSettings(context),
+              onProfile: _openSettings,
               onNewChat: () => _newChat(),
               onNewProject: () => _openProjects(context),
-              onProjectTap: (project) => _openProject(context, project),
+              onProjectTap: _openProject,
+              onProjectMemory: _openProject,
               onSessionTap: (row) => _selectSession(row.id),
               onSessionActions: (row) => _showSessionActions(context, row.id),
               onSessionLongPress: (row) => _showSessionActions(context, row.id),
-              onSchedule: () => V2WorkRoutes.openSchedules(context, _settings),
-              onArtifacts: () => V2WorkRoutes.openArtifacts(context, _settings),
-              onSettings: () => _openSettings(context),
-              onRetry: () => setState(() {}),
+              onSchedule: () => _withTab(
+                V2NavTab.chat,
+                () => V2WorkRoutes.openSchedules(context, _settings),
+              ),
+              onArtifacts: () => _withTab(
+                V2NavTab.library,
+                () => V2WorkRoutes.openArtifacts(context, _settings),
+              ),
+              onSettings: _openSettings,
+              onRetry: _reloadSidebar,
             ),
           ),
-          body: hasMessages
-              ? V2LiveChatPage(
-                  key: ValueKey('live-${session.id}'),
-                  data: _liveData(app, session),
-                  onMenu: _openDrawer,
-                  onModelChipTap: () => _openModelPicker(context),
-                  onStudio: () => V2WorkRoutes.openStudio(context, _settings),
-                  onBrowser: () => V2WorkRoutes.openBrowser(context, _settings),
-                  onMore: () => _chatMenu(context, session.id),
-                  onSubmit: _submit,
-                  onStop: _stop,
-                  onSendQueuedNow: _sendQueuedNow,
-                  onDismissQueued: () => _dismissQueued(session.id),
-                  onDownload: (name) => _download(context, name),
-                  onStartChat: _newChat,
-                  onRetry: _retry,
-                  onDraftChanged: (text) =>
-                      ComposerDraftStore.I.put(session.id, text),
-                )
-              : V2ChatPage(
-                  key: ValueKey('empty-${session?.id ?? 'new'}'),
-                  data: _chatData(app),
-                  onMenu: _openDrawer,
-                  onModelChipTap: () => _openModelPicker(context),
-                  onStudio: () => V2WorkRoutes.openStudio(context, _settings),
-                  onBrowser: () => V2WorkRoutes.openBrowser(context, _settings),
-                  onMore: session == null
-                      ? null
-                      : () => _chatMenu(context, session.id),
-                  onSubmit: _submit,
-                  onStop: _stop,
-                  onSendQueuedNow: _sendQueuedNow,
-                  onDismissQueued: () => _dismissQueued(app.activeSessionId),
-                  onPermissionTap: () =>
-                      unawaited(_openPermissionSheet(context)),
-                  onRetry: _retry,
-                  onSeePlans: () =>
-                      V2SettingsRoutes.open(context, 'plan_billing', _settings),
-                  onDraftChanged: (text) {
-                    final id = AppState.I.activeSessionId;
-                    if (id != null) ComposerDraftStore.I.put(id, text);
-                  },
-                ),
+          // The tabs push onto this nested navigator so the bar stays
+          // mounted; the handler gives the system back gesture to the nested
+          // stack first, and only exits the app from the home route.
+          body: NavigatorPopHandler(
+            onPopWithResult: (_) => _navKey.currentState?.maybePop(),
+            child: Navigator(
+              key: _navKey,
+              observers: [_tabObserver],
+              onGenerateRoute: (settings) => MaterialPageRoute<void>(
+                settings: settings,
+                builder: (routeContext) {
+                  _routeContext = routeContext;
+                  return _homeBody(routeContext);
+                },
+              ),
+            ),
+          ),
+          bottomNavigationBar: ValueListenableBuilder<V2NavTab>(
+            valueListenable: _tabObserver.current,
+            builder: (context, tab, _) => V2BottomNav(
+              current: tab,
+              items: v2WorkNavItems,
+              onSelect: _selectTab,
+            ),
+          ),
         );
       },
     );
+  }
+
+  // ── Navigation ──────────────────────────────────────────────────────────
+
+  /// The chat surface, rebuilt on its own so a route created before the first
+  /// message still switches to the live transcript once a run starts.
+  Widget _homeBody(BuildContext routeContext) {
+    return ListenableBuilder(
+      listenable: _listenable,
+      builder: (context, _) {
+        final app = AppState.I;
+        final session = app.activeSession;
+        final hasMessages = session != null && session.messages.isNotEmpty;
+        if (!hasMessages) {
+          return V2ChatPage(
+            key: ValueKey('empty-${session?.id ?? 'new'}'),
+            data: _chatData(app),
+            onMenu: _openDrawer,
+            onModelChipTap: () => _openModelPicker(routeContext),
+            onStudio: () => V2WorkRoutes.openStudio(_navContext, _settings),
+            onBrowser: () => V2WorkRoutes.openBrowser(_navContext, _settings),
+            onMore: session == null
+                ? null
+                : () => _chatMenu(routeContext, session.id),
+            onSubmit: _submit,
+            onStop: _stop,
+            onSendQueuedNow: _sendQueuedNow,
+            onDismissQueued: () => _dismissQueued(app.activeSessionId),
+            onPermissionTap: () =>
+                unawaited(_openPermissionSheet(routeContext)),
+            onRetry: _retry,
+            onSeePlans: () =>
+                V2SettingsRoutes.open(_navContext, 'plan_billing', _settings),
+            onDraftChanged: (text) {
+              final id = AppState.I.activeSessionId;
+              if (id != null) ComposerDraftStore.I.put(id, text);
+            },
+          );
+        }
+        return V2LiveChatPage(
+          key: ValueKey('live-${session.id}'),
+          data: _liveData(app, session),
+          onMenu: _openDrawer,
+          onModelChipTap: () => _openModelPicker(routeContext),
+          onStudio: () => V2WorkRoutes.openStudio(_navContext, _settings),
+          onBrowser: () => V2WorkRoutes.openBrowser(_navContext, _settings),
+          onMore: () => _chatMenu(routeContext, session.id),
+          onSubmit: _submit,
+          onStop: _stop,
+          onSendQueuedNow: _sendQueuedNow,
+          onDismissQueued: () => _dismissQueued(session.id),
+          onDownload: (id) => _download(routeContext, id),
+          onArtifactTap: (id) => _openArtifact(routeContext, id),
+          onOpenLink: (url) =>
+              unawaited(v2OpenTranscriptLink(routeContext, url)),
+          onDownloadLink: (url) =>
+              unawaited(v2SaveTranscriptLink(routeContext, url)),
+          onStartChat: _newChat,
+          onRetry: _retry,
+          onPermissionTap: () =>
+              unawaited(_openPermissionSheet(routeContext)),
+          permissionLabel: CloudAgentFacade.I.mode.label,
+          voiceService: const V2PlatformVoiceService(),
+          voiceLanguage: app.voiceLanguage,
+          onVoicePlay: _playVoiceReply,
+          onDraftChanged: (text) =>
+              ComposerDraftStore.I.put(session.id, text),
+        );
+      },
+    );
+  }
+
+  BuildContext get _navContext => _routeContext ?? context;
+
+  /// The one place every tab goes. Chat returns to the transcript; the other
+  /// four open their real destination on the shell's navigator so the bar
+  /// stays mounted and the selected tab follows the route.
+  void _selectTab(V2NavTab tab) {
+    if (!mounted) return;
+    if (tab != V2NavTab.chat) {
+      // Re-tapping a tab replaces its destination instead of stacking a second
+      // copy of it.
+      _navKey.currentState?.popUntil((route) => route.isFirst);
+    }
+    switch (tab) {
+      case V2NavTab.chat:
+        _navKey.currentState?.popUntil((route) => route.isFirst);
+      case V2NavTab.studio:
+        unawaited(
+          _withTab(
+            V2NavTab.studio,
+            () => V2WorkRoutes.openStudio(_navContext, _settings),
+          ),
+        );
+      case V2NavTab.browser:
+        unawaited(
+          _withTab(
+            V2NavTab.browser,
+            () => V2WorkRoutes.openBrowser(_navContext, _settings),
+          ),
+        );
+      case V2NavTab.library:
+        unawaited(
+          _withTab(
+            V2NavTab.library,
+            () => V2WorkRoutes.openArtifacts(_navContext, _settings),
+          ),
+        );
+      case V2NavTab.settings:
+        unawaited(_withTab(V2NavTab.settings, _openSettings));
+    }
+  }
+
+  Future<void> _withTab(V2NavTab tab, Future<void> Function() open) async {
+    _tabObserver.expect(tab);
+    try {
+      await open();
+    } finally {
+      _tabObserver.clearExpectation();
+    }
+  }
+
+  Future<void> _reloadSidebar() async {
+    try {
+      await ProjectsController.I.refresh();
+    } catch (e) {
+      // The sidebar shows its own error state; a retry never throws.
+      Diag.swallow('v2.sidebar.projects', e);
+    }
+    try {
+      await ChatPinsStore.I.bindCurrentAccount();
+    } catch (e) {
+      Diag.swallow('v2.sidebar.pins', e);
+    }
+    try {
+      await CloudSessionStore.I.refreshSessions();
+    } catch (e) {
+      Diag.swallow('v2.sidebar.sessions', e);
+    }
+    if (mounted) setState(() {});
   }
 
   // ── Data mapping ────────────────────────────────────────────────────────
@@ -184,6 +332,7 @@ class _V2AppShellState extends State<V2AppShell> {
             modelLabel: row.modelLabel,
             timeLabel: row.timeLabel,
             pinned: true,
+            projectName: row.projectName,
           ),
         );
         continue;
@@ -207,6 +356,10 @@ class _V2AppShellState extends State<V2AppShell> {
       today: today,
       yesterday: yesterday,
       earlier: earlier,
+      status: app.sessions.isEmpty && ProjectsController.I.error != null
+          ? V2SidebarStatus.error
+          : V2SidebarStatus.content,
+      errorMessage: ProjectsController.I.error,
     );
   }
 
@@ -218,6 +371,7 @@ class _V2AppShellState extends State<V2AppShell> {
           id: project.id,
           name: project.name,
           chatCount: project.sessionCount,
+          memoryFileCount: project.fileBreakdown.memory,
         ),
     ];
   }
@@ -227,6 +381,9 @@ class _V2AppShellState extends State<V2AppShell> {
     title: session.title,
     modelLabel: _modelLabel(session),
     timeLabel: _timeLabel(session.lastActivityAt),
+    projectName: session.projectId == null
+        ? null
+        : ProjectsController.I.byId(session.projectId!)?.name,
   );
 
   V2ChatPageData _chatData(AppState app) {
@@ -263,6 +420,11 @@ class _V2AppShellState extends State<V2AppShell> {
     final agent = CloudAgentFacade.I;
     final running = agent.busyFor(session.id);
     final queued = agent.queuedMessagesFor(session.id);
+    // Response-wait watchdog: the same source the legacy transcript reads, so
+    // the Settings limit has a visible effect here too.
+    final stalled = agent.stalledFor(session.id);
+    final status = agent.statusFor(session.id);
+    final activity = agent.activityFor(session.id);
     return V2LiveChatData(
       title: 'Ovid Si',
       sessionTitle: session.title,
@@ -270,10 +432,13 @@ class _V2AppShellState extends State<V2AppShell> {
       items: _items(session),
       running: running,
       loading: false,
-      statusLabel:
-          agent.activityFor(session.id) ??
-          agent.statusFor(session.id) ??
-          'Ovid is working...',
+      statusLabel: stalled
+          ? 'Still working…'
+          : status != null && status.trim().isNotEmpty
+          ? status.trim()
+          : activity != null
+          ? '$activity…'
+          : 'Ovid is working...',
       draft: _draftFor(session.id),
       composerHint: 'Ask Ovid to do anything...',
       queuedCount: agent.queuedCountFor(session.id),
@@ -315,8 +480,9 @@ class _V2AppShellState extends State<V2AppShell> {
               id: message.privateSyncId,
               fileName: _artifactName(message),
               meta: message.kind == MsgKind.imageGen ? 'Image' : 'Web page',
-              statusLabel: 'Ready',
+              statusLabel: _artifactStatus(message),
               previewLabel: 'Tap to open',
+              href: _artifactHref(message),
               icon: message.kind == MsgKind.imageGen
                   ? Icons.image_outlined
                   : Icons.code_rounded,
@@ -420,7 +586,7 @@ class _V2AppShellState extends State<V2AppShell> {
           },
           onManageModels: () {
             Navigator.of(context).pop();
-            _openSettings(context);
+            _openSettings();
           },
         ),
       ),
@@ -505,8 +671,13 @@ class _V2AppShellState extends State<V2AppShell> {
   }
 
   Future<void> _chatMenu(BuildContext context, String id) async {
+    final navContext = _navContext;
     final session = AppState.I.sessionById(id);
     if (session == null) return;
+    final bound = StudioBindingPort.instance?.bindingFor(id);
+    final studioRepo = (session.repo?.trim().isNotEmpty ?? false)
+        ? session.repo!
+        : (bound?.ready == true ? bound!.repo : null);
     final action = await showOSheet<String>(
       context,
       builder: (sheetContext) => SafeArea(
@@ -527,10 +698,10 @@ class _V2AppShellState extends State<V2AppShell> {
               showChevron: false,
               onTap: () => Navigator.pop(sheetContext, 'run'),
             ),
-            if (session.repo != null && session.repo!.isNotEmpty)
+            if (studioRepo != null)
               OListRow(
                 title: 'Open Studio',
-                subtitle: session.repo,
+                subtitle: studioRepo,
                 icon: Icons.code_rounded,
                 showChevron: false,
                 onTap: () => Navigator.pop(sheetContext, 'studio'),
@@ -553,12 +724,19 @@ class _V2AppShellState extends State<V2AppShell> {
       case 'run':
         await V2RunRoutes.openTrajectory(context, id);
       case 'studio':
-        await V2StudioRoutes.openWorkspace(
-          context,
-          session.repo!,
-          session.branch ?? 'main',
-          sessionId: id,
-        );
+        // The port owns the real repo/branch binding; without one there is no
+        // workspace to open, so the picker is the honest destination.
+        final binding = StudioBindingPort.instance?.bindingFor(id);
+        if (binding == null || !binding.ready) {
+          await V2WorkRoutes.openStudio(navContext, _settings);
+        } else {
+          await V2StudioRoutes.openWorkspace(
+            navContext,
+            binding.repo,
+            binding.branch,
+            sessionId: id,
+          );
+        }
       case 'share':
         await _shareChat(context, id);
     }
@@ -592,7 +770,7 @@ class _V2AppShellState extends State<V2AppShell> {
   Future<void> _moveToProject(BuildContext context, String id) async {
     final projects = ProjectsController.I.projects;
     if (projects.isEmpty) {
-      _notWired(context, 'Projects');
+      _snack(context, 'Create a project first, then move this chat into it.');
       return;
     }
     final session = AppState.I.sessionById(id);
@@ -640,7 +818,10 @@ class _V2AppShellState extends State<V2AppShell> {
     if (session == null) return;
     final snapshot = ConversationSnapshot.fromSession(session);
     if (!snapshot.withinLimits) {
-      _notWired(context, 'Sharing this chat');
+      _snack(
+        context,
+        'This chat is too large to share. Share a shorter conversation.',
+      );
       return;
     }
     String? link;
@@ -724,18 +905,100 @@ class _V2AppShellState extends State<V2AppShell> {
     if (context.mounted) _snack(context, 'Markdown copied.');
   }
 
-  Future<void> _download(BuildContext context, String name) async {
-    for (final message in AppState.I.activeSession?.messages ?? const []) {
-      final url = message.imageUrl;
-      if (url != null && url.isNotEmpty) {
-        final ok = await launchUrl(
-          Uri.parse(url),
-          mode: LaunchMode.externalApplication,
-        );
-        if (ok) return;
+  /// Opens an artifact from the transcript by its message id.
+  Future<void> _openArtifact(BuildContext context, String id) async {
+    final message = _messageById(id);
+    if (message == null) return;
+    final url = _artifactHref(message);
+    if (url != null) {
+      await v2OpenTranscriptLink(context, url);
+      return;
+    }
+    if (!context.mounted) return;
+    await openV2ArtifactDetail(
+      context,
+      fileName: _artifactName(message),
+      meta: message.kind == MsgKind.imageGen ? 'Image' : 'Web page',
+      statusLabel: _artifactStatus(message),
+      previewLabel: 'Tap to open',
+      icon: message.kind == MsgKind.imageGen
+          ? Icons.image_outlined
+          : Icons.code_rounded,
+    );
+  }
+
+  /// Downloads the artifact whose message id was tapped.
+  Future<void> _download(BuildContext context, String id) async {
+    final message = _messageById(id);
+    if (message == null) {
+      if (context.mounted) _snack(context, 'Nothing to download yet.');
+      return;
+    }
+    final url = message.imageUrl;
+    if (url != null && url.isNotEmpty) {
+      startV2ArtifactDownload(
+        context,
+        url,
+        suggestedName: _artifactName(message),
+      );
+      return;
+    }
+    final path = message.imagePath;
+    if (path != null && path.isNotEmpty) {
+      try {
+        await NativeShare.file(path);
+        return;
+      } catch (_) {
+        // Fall through to the honest empty result below.
       }
     }
     if (context.mounted) _snack(context, 'Nothing to download yet.');
+  }
+
+  Message? _messageById(String id) {
+    for (final message in AppState.I.activeSession?.messages ?? const []) {
+      if (message.privateSyncId == id) return message;
+    }
+    return null;
+  }
+
+  /// The artifact's real location, or null when it has no downloadable URL.
+  String? _artifactHref(Message message) {
+    final url = message.imageUrl;
+    if (url != null && url.trim().isNotEmpty) return url.trim();
+    return null;
+  }
+
+  /// The state the artifact actually carries, never an assumed success.
+  String _artifactStatus(Message message) {
+    final hasContent =
+        (message.imageUrl?.isNotEmpty ?? false) ||
+        (message.imagePath?.isNotEmpty ?? false) ||
+        message.htmlArtifact != null;
+    return switch (message.toolState) {
+      'error' => 'Failed',
+      'stopped' => 'Stopped',
+      'running' => hasContent ? 'Ready' : 'Generating',
+      _ => hasContent ? 'Ready' : 'Unavailable',
+    };
+  }
+
+  /// Speaks a voice reply with the on-device TTS engine.
+  void _playVoiceReply(String id) {
+    final session = AppState.I.activeSession;
+    if (session == null) return;
+    for (final item in _items(session)) {
+      if (item is! V2LiveVoiceReply || item.id != id) continue;
+      final transcript = item.reply.transcript;
+      if (transcript == null || transcript.trim().isEmpty) return;
+      unawaited(
+        VoiceReplyService.I.speak(
+          transcript,
+          localeId: VoiceReplyService.localeFor(AppState.I.voiceLanguage),
+        ),
+      );
+      return;
+    }
   }
 
   void _snack(BuildContext context, String message) {
@@ -806,7 +1069,7 @@ class _V2AppShellState extends State<V2AppShell> {
     _scaffoldKey.currentState?.closeDrawer();
     final controller = ProjectsController.I;
     unawaited(controller.refresh());
-    Navigator.of(context).push(
+    Navigator.of(_navContext).push(
       MaterialPageRoute<void>(
         builder: (_) => ProjectsPage(
           data: V2ProjectsData(
@@ -826,12 +1089,19 @@ class _V2AppShellState extends State<V2AppShell> {
             await controller.refresh();
           },
           onProjectTap: (project) {
-            final session = AppState.I.rootSessionsByRecency
-                .where((s) => s.projectId == project.id)
-                .firstOrNull;
-            if (session == null) return;
-            Navigator.of(context).pop();
-            _selectSession(session.id);
+            // The project row opens its detail sheet, not an arbitrary chat.
+            Navigator.of(_navContext).pop();
+            unawaited(
+              _openProject(
+                V2SidebarProject(
+                  id: project.id,
+                  name: project.name,
+                  chatCount: project.chatCount,
+                  memoryFileCount:
+                      controller.byId(project.id)?.fileBreakdown.memory ?? 0,
+                ),
+              ),
+            );
           },
           onProjectActions: (project) => _projectActions(context, project),
         ),
@@ -919,20 +1189,74 @@ class _V2AppShellState extends State<V2AppShell> {
     await controller.refresh();
   }
 
-  void _openProject(BuildContext context, V2SidebarProject project) {
-    final session = AppState.I.rootSessionsByRecency
-        .where((s) => s.projectId == project.id)
-        .firstOrNull;
-    if (session == null) {
-      _openProjects(context);
-      return;
-    }
-    _selectSession(session.id);
+  Future<void> _openProject(V2SidebarProject project) async {
+    _scaffoldKey.currentState?.closeDrawer();
+    final controller = ProjectsController.I;
+    final dto = controller.byId(project.id);
+    final sessions = AppState.I.rootSessionsByRecency
+        .where((session) => session.projectId == project.id)
+        .toList();
+    final quotaGb = _storageGb(AppState.I.ovidCloudTier);
+    final quotaBytes = quotaGb * 1024 * 1024 * 1024;
+    final usedBytes = dto?.fileBytes ?? 0;
+    await showProjectDetailSheet(
+      _navContext,
+      data: V2ProjectDetailData(
+        projectName: project.name,
+        chatCount: sessions.length,
+        chats: [
+          for (final session in sessions)
+            V2ProjectChat(
+              id: session.id,
+              title: session.title,
+              modelLabel: _modelLabel(session),
+              timeLabel: _timeLabel(session.lastActivityAt),
+            ),
+        ],
+        // No project-memory read endpoint exists; the sheet says so by
+        // showing its empty section instead of inventing files.
+        memoryFiles: const [],
+        storageLabel: usedBytes <= 0
+            ? ''
+            : '${_bytes(usedBytes)} of $quotaGb GB',
+        storageFraction: quotaBytes <= 0
+            ? 0
+            : (usedBytes / quotaBytes).clamp(0.0, 1.0),
+        status: sessions.isEmpty && usedBytes <= 0
+            ? V2ProjectDetailStatus.empty
+            : V2ProjectDetailStatus.content,
+      ),
+      onChatTap: (chat) {
+        Navigator.of(_navContext).pop();
+        _selectSession(chat.id);
+      },
+      onRetry: () async {
+        Navigator.of(_navContext).pop();
+        await controller.refresh();
+        if (mounted) {
+          await _openProject(
+            V2SidebarProject(
+              id: project.id,
+              name: project.name,
+              chatCount: project.chatCount,
+              memoryFileCount: project.memoryFileCount,
+            ),
+          );
+        }
+      },
+    );
   }
 
-  void _openSettings(BuildContext context) {
+  int _storageGb(String tier) => switch (tier) {
+    '3x' => 5,
+    '7x' => 15,
+    '15x' => 75,
+    _ => 3,
+  };
+
+  Future<void> _openSettings() async {
     _scaffoldKey.currentState?.closeDrawer();
-    Navigator.of(context).push(
+    await Navigator.of(_navContext).push(
       MaterialPageRoute<void>(
         builder: (pageContext) => SettingsHubPage(
           data: V2SettingsHubData(
@@ -946,28 +1270,25 @@ class _V2AppShellState extends State<V2AppShell> {
               title: 'Account',
               items: [
                 _settingsRow(
-                  context,
                   'account',
                   'Account',
                   Icons.manage_accounts_rounded,
                   'Profile, email and region',
                 ),
                 _settingsRow(
-                  context,
                   'plan_billing',
                   'Plan & billing',
                   Icons.credit_card_rounded,
-                  '${_planLabel(AppState.I.ovidCloudTier)} · 3 GB storage',
+                  '${_planLabel(AppState.I.ovidCloudTier)} · '
+                      '${_storageGb(AppState.I.ovidCloudTier)} GB storage',
                 ),
                 _settingsRow(
-                  context,
                   'usage',
                   'Usage',
                   Icons.data_usage_rounded,
                   'Tokens, requests and storage',
                 ),
                 _settingsRow(
-                  context,
                   'credentials',
                   'Credentials',
                   Icons.key_rounded,
@@ -979,28 +1300,24 @@ class _V2AppShellState extends State<V2AppShell> {
               title: 'Chat',
               items: [
                 _settingsRow(
-                  context,
                   'appearance',
                   'Appearance',
                   Icons.palette_outlined,
                   'Theme, text size and motion',
                 ),
                 _settingsRow(
-                  context,
                   'memory',
                   'Memory',
                   Icons.psychology_outlined,
                   'Global and project memory',
                 ),
                 _settingsRow(
-                  context,
                   'shared_memory',
                   'Shared memory',
                   Icons.hub_outlined,
                   'Share memory with your project',
                 ),
                 _settingsRow(
-                  context,
                   'memory_files',
                   'Memory files',
                   Icons.folder_outlined,
@@ -1012,21 +1329,18 @@ class _V2AppShellState extends State<V2AppShell> {
               title: 'Models',
               items: [
                 _settingsRow(
-                  context,
                   'connectors',
                   'Connectors',
                   Icons.extension_rounded,
                   'Apps Ovid can use',
                 ),
                 _settingsRow(
-                  context,
                   'presets',
                   'Agent presets',
                   Icons.tune_rounded,
                   'How Ovid approaches a task',
                 ),
                 _settingsRow(
-                  context,
                   'response_wait',
                   'Response wait limit',
                   Icons.timer_outlined,
@@ -1038,35 +1352,30 @@ class _V2AppShellState extends State<V2AppShell> {
               title: 'Data control',
               items: [
                 _settingsRow(
-                  context,
                   'export',
                   'Export or import',
                   Icons.swap_vert_rounded,
                   'Move your data in or out',
                 ),
                 _settingsRow(
-                  context,
                   'permissions',
                   'Permissions',
                   Icons.verified_user_outlined,
                   'Camera, microphone and files',
                 ),
                 _settingsRow(
-                  context,
                   'crash',
                   'Crash reports',
                   Icons.bug_report_outlined,
                   'Anonymous and optional',
                 ),
                 _settingsRow(
-                  context,
                   'storage',
                   'Storage',
                   Icons.storage_rounded,
                   'What is using your space',
                 ),
                 _settingsRow(
-                  context,
                   'delete',
                   'Delete data',
                   Icons.delete_outline_rounded,
@@ -1074,7 +1383,6 @@ class _V2AppShellState extends State<V2AppShell> {
                   danger: true,
                 ),
                 _settingsRow(
-                  context,
                   'reset_memory',
                   'Reset memory',
                   Icons.restart_alt_rounded,
@@ -1087,28 +1395,24 @@ class _V2AppShellState extends State<V2AppShell> {
               title: 'Advanced',
               items: [
                 _settingsRow(
-                  context,
                   'notifications',
                   'Notifications',
                   Icons.notifications_outlined,
                   'Runs, schedules and security',
                 ),
                 _settingsRow(
-                  context,
                   'app_lock',
                   'App lock',
                   Icons.lock_outline_rounded,
                   'Require a PIN when Ovid returns',
                 ),
                 _settingsRow(
-                  context,
                   'account_health',
                   'Account health',
                   Icons.health_and_safety_outlined,
                   'Security and devices',
                 ),
                 _settingsRow(
-                  context,
                   'about',
                   'About',
                   Icons.info_outline_rounded,
@@ -1120,11 +1424,11 @@ class _V2AppShellState extends State<V2AppShell> {
             onReasoningChanged: (value) =>
                 unawaited(AppState.I.setShowReasoning(value)),
             onAddConnector: () =>
-                V2WorkRoutes.openConnectors(context, _settings),
+                V2WorkRoutes.openConnectors(_navContext, _settings),
             onProfileTap: () =>
-                V2SettingsRoutes.open(context, 'account', _settings),
-            onSignOut: () => _settings.signOut(context),
-            onRetry: () {},
+                V2SettingsRoutes.open(_navContext, 'account', _settings),
+            onSignOut: () => _settings.signOut(pageContext),
+            onRetry: _settings.refreshUsage,
           ),
         ),
       ),
@@ -1132,7 +1436,6 @@ class _V2AppShellState extends State<V2AppShell> {
   }
 
   V2SettingsItem _settingsRow(
-    BuildContext context,
     String id,
     String label,
     IconData icon,
@@ -1145,7 +1448,7 @@ class _V2AppShellState extends State<V2AppShell> {
       icon: icon,
       subtitle: subtitle,
       danger: danger,
-      onTap: () => V2SettingsRoutes.open(context, id, _settings),
+      onTap: () => V2SettingsRoutes.open(_navContext, id, _settings),
     );
   }
 
@@ -1261,12 +1564,54 @@ class _V2AppShellState extends State<V2AppShell> {
     if (path != null && path.isNotEmpty) return path.split('/').last;
     return message.htmlArtifact != null ? 'preview.html' : 'Artifact';
   }
+}
 
-  void _notWired(BuildContext context, String label) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(content: Text('$label is coming in the wiring pass.')),
-      );
+/// Tracks which bottom tab owns the current route.
+///
+/// The shell registers the tab it is about to open with [expect]; [didPush]
+/// consumes that expectation and records the tab, and [didPop]/[didRemove]
+/// restore the tab of the route underneath. Routes pushed from inside a tab
+/// (for example artifact detail) inherit the tab they were opened from.
+class _V2TabObserver extends NavigatorObserver {
+  final ValueNotifier<V2NavTab> current = ValueNotifier<V2NavTab>(
+    V2NavTab.chat,
+  );
+  final List<V2NavTab> _stack = <V2NavTab>[];
+  V2NavTab? _next;
+
+  void expect(V2NavTab tab) => _next = tab;
+  void clearExpectation() => _next = null;
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    final tab = _next ?? (route.isFirst ? V2NavTab.chat : current.value);
+    _next = null;
+    _stack.add(tab);
+    current.value = tab;
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (_stack.isNotEmpty) _stack.removeLast();
+    current.value = _stack.isEmpty ? V2NavTab.chat : _stack.last;
+  }
+
+  @override
+  void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (_stack.isNotEmpty) _stack.removeLast();
+    current.value = _stack.isEmpty ? V2NavTab.chat : _stack.last;
+  }
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    if (newRoute == null) return;
+    final tab = _next ?? current.value;
+    _next = null;
+    if (_stack.isNotEmpty) {
+      _stack[_stack.length - 1] = tab;
+    } else {
+      _stack.add(tab);
+    }
+    current.value = tab;
   }
 }

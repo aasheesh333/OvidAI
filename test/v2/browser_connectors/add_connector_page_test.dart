@@ -96,6 +96,7 @@ Future<void> _enterCustom(
   required String name,
   required String endpoint,
   bool command = false,
+  String key = 'sk-test-key',
 }) async {
   if (command) {
     final choice = find.byKey(const Key('target-command'));
@@ -116,6 +117,12 @@ Future<void> _enterCustom(
     endpoint,
   );
   await tester.pump(const Duration(milliseconds: 200));
+  final keyField = find.byKey(const Key('add-connector-key'));
+  if (key.isNotEmpty && keyField.evaluate().isNotEmpty) {
+    await tester.ensureVisible(keyField);
+    await tester.enterText(keyField, key);
+    await tester.pump(const Duration(milliseconds: 200));
+  }
 }
 
 void main() {
@@ -187,9 +194,9 @@ void main() {
     expect(find.text('Plan limit reached'), findsOneWidget);
     expect(
       find.textContaining('not available on the Free plan'),
-      findsOneWidget,
+      findsWidgets,
     );
-    expect(find.textContaining('Upgrade to Go to add up to 5'), findsOneWidget);
+    expect(find.textContaining('Upgrade to Go to add up to 5'), findsWidgets);
 
     await _enterCustom(
       tester,
@@ -200,6 +207,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expect(saved, isNull, reason: 'Free has no custom-connector slots');
 
+    // Scroll back to the top: the form helper moved the banner off-screen and
+    // a ListView disposes children that are far out of view.
+    await tester.drag(find.byType(Scrollable).first, const Offset(0, 3000));
+    await tester.pump(const Duration(milliseconds: 400));
     final bannerUpgrade = find.descendant(
       of: find.byKey(const Key('connector-plan-banner')),
       matching: find.text('Upgrade'),
@@ -247,8 +258,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('Plan limit reached'), findsOneWidget);
     expect(
-      find.text('You have used all 5 custom connectors on the Go plan.'),
-      findsOneWidget,
+      find.textContaining('You have used all 5 custom connectors on the Go plan.'),
+      findsWidgets,
     );
   });
 
@@ -268,8 +279,8 @@ void main() {
     );
     expect(find.text('Plan limit reached'), findsOneWidget);
     expect(
-      find.text('You have used all 20 custom connectors on your plan.'),
-      findsOneWidget,
+      find.textContaining('You have used all 20 custom connectors on Pro.'),
+      findsWidgets,
     );
   });
 
@@ -466,7 +477,7 @@ void main() {
       AddConnectorPage(data: _data(), onAddSuggested: (id) => added = id),
     );
 
-    await tester.tap(find.text('Add').first);
+    await tester.tap(find.text('Set up').first);
     await tester.pump(const Duration(milliseconds: 300));
     expect(added, 'supabase');
   });
@@ -477,7 +488,7 @@ void main() {
       AddConnectorPage(data: _data(), onAddSuggested: (_) {}),
     );
 
-    await tester.tap(find.text('Add').first);
+    await tester.tap(find.text('Set up').first);
     await tester.pump(const Duration(milliseconds: 300));
 
     final field = tester.widget<TextField>(
@@ -639,6 +650,19 @@ void main() {
     await tester.enterText(
       find.byKey(const Key('add-connector-url')),
       'https://api.internal.test/v1',
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('Save'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+      saved,
+      isNull,
+      reason: 'API-key auth needs a key before the connector can be saved',
+    );
+
+    await tester.enterText(
+      find.byKey(const Key('add-connector-key')),
+      'sk-test-key',
     );
     await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(find.text('Save'));

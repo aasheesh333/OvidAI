@@ -18,6 +18,7 @@ const _members = [
     name: 'Priya Patel',
     subtitle: 'Design Systems · In queue (#1)',
     role: V2CollabRole.canChat,
+    canRemove: true,
     online: true,
   ),
   V2CollabMember(
@@ -64,7 +65,11 @@ Future<void> _pump(WidgetTester tester, Widget child, ThemeData theme) async {
 void main() {
   testWidgets('renders the roster and roles in light and dark', (tester) async {
     for (final theme in [OTheme.light(), OTheme.dark()]) {
-      await _pump(tester, CollabMembersPage(data: _data()), theme);
+      await _pump(
+        tester,
+        CollabMembersPage(data: _data(), onLeave: () {}),
+        theme,
+      );
 
       expect(find.text('50 of 50 members'), findsOneWidget);
       expect(find.text('Members'), findsWidgets);
@@ -157,7 +162,10 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
 
-    await _pumpNarrow(tester, CollabMembersPage(data: _data()));
+    await _pumpNarrow(
+      tester,
+      CollabMembersPage(data: _data(), onLeave: () {}),
+    );
 
     expect(tester.takeException(), isNull);
     expect(find.text('Leave chat'), findsOneWidget);
@@ -178,7 +186,7 @@ void main() {
             size: Size(390, 844),
             disableAnimations: true,
           ),
-          child: CollabMembersPage(data: _data()),
+          child: CollabMembersPage(data: _data(), onLeave: () {}),
         ),
       ),
     );
@@ -247,6 +255,32 @@ void main() {
     );
     expect(find.text('12.4 GB of 15 GB used'), findsOneWidget);
   });
+
+  testWidgets('owner-only actions are hidden when unwired', (tester) async {
+    await _pump(
+      tester,
+      const CollabMembersPage(
+        data: V2CollabMembersPageData(memberCount: 1),
+      ),
+      OTheme.light(),
+    );
+
+    expect(find.text('Invite someone'), findsNothing);
+    expect(find.text('Leave chat'), findsNothing);
+  });
+
+  testWidgets('a member who cannot be removed has no overflow menu', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      CollabMembersPage(data: _data(), onMemberMenu: (_) {}),
+      OTheme.light(),
+    );
+
+    // Only Priya is removable in this fixture.
+    expect(find.byIcon(Icons.more_vert_rounded), findsOneWidget);
+  });
 }
 
 Future<void> _pumpNarrow(WidgetTester tester, Widget child) async {
@@ -264,4 +298,5 @@ Future<void> _pumpNarrow(WidgetTester tester, Widget child) async {
   );
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 900));
+
 }

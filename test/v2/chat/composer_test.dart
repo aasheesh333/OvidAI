@@ -109,6 +109,18 @@ class _FakeVoice implements V2VoiceService {
   }
 }
 
+
+/// Opens the composer's "+" menu and taps the File row.
+Future<void> _pickFile(WidgetTester tester) async {
+  await tester.tap(find.bySemanticsLabel('Add attachment or action'));
+  await tester.pumpAndSettle();
+  final row = find.byKey(const ValueKey('composer-plus-file'));
+  await tester.ensureVisible(row);
+  await tester.pumpAndSettle();
+  await tester.tap(row);
+  await tester.pumpAndSettle();
+}
+
 V2ComposerAttachment _file(String name, {int size = 14540, String? path}) =>
     V2ComposerAttachment(name: name, path: path ?? '/tmp/$name', size: size);
 
@@ -169,6 +181,43 @@ void main() {
       expect(typed.sessionRefs, ['s3', 's2']);
       expect(typed.projectRefs, ['p1']);
     });
+
+    test('inserted tokens round-trip through the host parser', () {
+      const chat = V2MentionCandidate.session(
+        id: 's2',
+        title: 'Fix login bug',
+        subtitle: 'Auto',
+      );
+      const project = V2MentionCandidate.project(
+        id: 'p1',
+        title: 'Website refresh',
+      );
+
+      // The source deliberately cannot resolve titles: only the token text and
+      // the picker's own id map are available, exactly like a rename after the
+      // menu inserted the token.
+      final refs = v2MentionRefsIn(
+        '${chat.token}compare with ${project.token}',
+        source: const V2EmptyMentionSource(),
+        pickedSessionIds: const {'fix login bug': 's2'},
+      );
+      expect(chat.token, '@[Fix login bug] ');
+      expect(project.token, '@project:p1 ');
+      expect(refs.sessionRefs, ['s2']);
+      expect(refs.projectRefs, ['p1']);
+    });
+
+    test('the host resolver maps local ids to the ids the gateway takes', () {
+      v2SessionRefResolver = (id) => id == 'local-1' ? 'srv-1' : id;
+      addTearDown(() => v2SessionRefResolver = null);
+
+      final refs = v2MentionRefsIn(
+        '@[Portfolio redesign]',
+        source: const V2EmptyMentionSource(),
+        pickedSessionIds: const {'portfolio redesign': 'local-1'},
+      );
+      expect(refs.sessionRefs, ['srv-1']);
+    });
   });
 
   group('attachment rules', () {
@@ -206,6 +255,21 @@ void main() {
       expect(batch.accepted, hasLength(4));
       expect(batch.rejected, contains('one.txt is already attached.'));
       expect(batch.rejected, contains('You can attach up to 5 files.'));
+    });
+
+    test('8 MB is the inclusive ceiling', () {
+      expect(
+        V2AttachmentRules.rejectionFor(
+          _file('exact.pdf', size: V2AttachmentRules.maxBytes),
+        ),
+        isNull,
+      );
+      expect(
+        V2AttachmentRules.rejectionFor(
+          _file('over.pdf', size: V2AttachmentRules.maxBytes + 1),
+        ),
+        contains('larger than 8 MB'),
+      );
     });
   });
 
@@ -357,8 +421,7 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    await tester.tap(find.bySemanticsLabel('Attach a file'));
-    await tester.pumpAndSettle();
+    await _pickFile(tester);
 
     expect(find.text('report.pdf'), findsOneWidget);
     expect(find.text('14.2 KB'), findsOneWidget);
@@ -392,8 +455,7 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    await tester.tap(find.bySemanticsLabel('Attach a file'));
-    await tester.pumpAndSettle();
+    await _pickFile(tester);
     expect(find.text('You can attach up to 5 files.'), findsOneWidget);
     expect(
       find.byWidgetPredicate(
@@ -418,16 +480,43 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    await tester.tap(find.bySemanticsLabel('Attach a file'));
-    await tester.pumpAndSettle();
+    await _pickFile(tester);
     expect(
       find.text('setup.exe: that file type is not supported.'),
       findsOneWidget,
     );
 
-    await tester.tap(find.bySemanticsLabel('Attach a file'));
-    await tester.pumpAndSettle();
+    await _pickFile(tester);
     expect(find.text('huge.pdf is larger than 8 MB.'), findsOneWidget);
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Tooltip && (widget.message ?? '').startsWith('Remove '),
+      ),
+      findsNothing,
+      reason: 'the rejected file is never staged',
+    );
+  });
+
+  testWidgets('a picker failure shows an error instead of dropping silently', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(
+          data: const V2ChatPageData(),
+          attachmentPicker: () async => throw StateError('permission denied'),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await _pickFile(tester);
+
+    expect(
+      find.text('Could not open the file picker. Try again.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('send carries staged attachments and mention refs', (
@@ -449,8 +538,7 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    await tester.tap(find.bySemanticsLabel('Attach a file'));
-    await tester.pumpAndSettle();
+    await _pickFile(tester);
     await tester.enterText(find.byType(TextField), '@por');
     await tester.pump();
     await tester.tap(find.text('Portfolio redesign'));
@@ -693,8 +781,7 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    await tester.tap(find.bySemanticsLabel('Attach a file'));
-    await tester.pumpAndSettle();
+    await _pickFile(tester);
     await tester.enterText(find.byType(TextField), '@');
     await tester.pump();
 

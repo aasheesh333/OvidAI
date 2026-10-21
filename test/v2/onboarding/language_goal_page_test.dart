@@ -15,6 +15,7 @@ Future<void> _pump(
   VoidCallback? onRetry,
   VoidCallback? onSeeAllLanguages,
   VoidCallback? onClose,
+  VoidCallback? onBack,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -27,6 +28,7 @@ Future<void> _pump(
         onRetry: onRetry,
         onSeeAllLanguages: onSeeAllLanguages,
         onClose: onClose,
+        onBack: onBack,
       ),
     ),
   );
@@ -137,6 +139,46 @@ void main() {
     await tester.tap(find.text('Research'));
     await tester.pump();
     expect(events, ['research:true', 'research:false']);
+  });
+
+  testWidgets('Continue is blocked until a goal is selected', (tester) async {
+    var continues = 0;
+    await _pump(tester, onContinue: (_, _) => continues++);
+
+    // The default data starts with one goal selected.
+    final button = tester.widget<OButton>(
+      find.byKey(const Key('language-goal-continue')),
+    );
+    expect(button.onPressed, isNotNull);
+
+    await tester.ensureVisible(find.text('Build something'));
+    await tester.tap(find.text('Build something'));
+    await tester.pumpAndSettle();
+
+    final blocked = tester.widget<OButton>(
+      find.byKey(const Key('language-goal-continue')),
+    );
+    expect(blocked.onPressed, isNull);
+    expect(find.text('Pick at least one goal to continue.'), findsOneWidget);
+
+    // Tapping the disabled action must not continue.
+    await tester.tap(
+      find.byKey(const Key('language-goal-continue')),
+      warnIfMissed: false,
+    );
+    await tester.pump();
+    expect(continues, 0);
+  });
+
+  testWidgets('back is only shown when wired and fires once', (tester) async {
+    await _pump(tester);
+    expect(find.byKey(const Key('language-goal-back')), findsNothing);
+
+    var backs = 0;
+    await _pump(tester, onBack: () => backs++);
+    await tester.tap(find.byKey(const Key('language-goal-back')));
+    await tester.pump();
+    expect(backs, 1);
   });
 
   testWidgets('see all languages is shown when wired', (tester) async {

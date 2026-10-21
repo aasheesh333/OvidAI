@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/v2/chat/composer_attachments.dart';
 import 'package:ovid_ai/ui/v2/chat/live_chat_page.dart';
 import 'package:ovid_ai/ui/v2/chat/model_chip.dart';
 import 'package:ovid_ai/ui/v2/chat/queue_dock.dart';
+import 'package:ovid_ai/ui/v2/chat/transcript_actions.dart';
 import 'package:ovid_ai/ui/v2/chat/voice_reply_card.dart';
+import 'package:ovid_ai/ui/v2/library/artifact_detail_page.dart';
 
 void _noop() {}
 
@@ -58,6 +62,7 @@ const _items = <V2LiveChatItem>[
     meta: '14.2 KB · Just generated',
     statusLabel: 'Ready',
     previewLabel: 'Interactive HTML5 canvas',
+    href: 'https://files.example.com/portfolio-index.html',
   ),
   _voiceReply,
 ];
@@ -103,6 +108,13 @@ void main() {
     );
     expect(find.text('portfolio-index.html'), findsOneWidget);
     expect(find.text('Download'), findsOneWidget);
+
+    // The transcript is lazy, so the last row mounts once it scrolls in.
+    await tester.drag(
+      find.byKey(const ValueKey<String>('v2-live-transcript')),
+      const Offset(0, -3000),
+    );
+    await tester.pump();
     expect(find.text('Your portfolio is ready'), findsOneWidget);
   });
 
@@ -362,7 +374,7 @@ void main() {
     expect(find.bySemanticsLabel('More options'), findsOneWidget);
     expect(find.bySemanticsLabel(RegExp('Change model')), findsOneWidget);
     expect(find.bySemanticsLabel('Voice input'), findsOneWidget);
-    expect(find.bySemanticsLabel('Attach a file'), findsOneWidget);
+    expect(find.bySemanticsLabel('Add attachment or action'), findsOneWidget);
 
     await tester.ensureVisible(find.text('Download'));
     await tester.pump(const Duration(milliseconds: 300));
@@ -488,7 +500,7 @@ void main() {
     expect(attaches, 0);
   });
 
-  testWidgets('composer keeps the picker when no plus callback is given', (
+  testWidgets('composer opens its plus menu and File reaches the host seam', (
     tester,
   ) async {
     var attaches = 0;
@@ -498,12 +510,19 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
 
-    expect(find.bySemanticsLabel('Attach a file'), findsOneWidget);
-    expect(find.byIcon(Icons.attach_file_rounded), findsOneWidget);
-    expect(find.bySemanticsLabel('Add attachment or action'), findsNothing);
+    expect(find.bySemanticsLabel('Add attachment or action'), findsOneWidget);
+    expect(find.byIcon(Icons.add_rounded), findsOneWidget);
+    expect(find.bySemanticsLabel('Attach a file'), findsNothing);
 
-    await tester.tap(find.bySemanticsLabel('Attach a file'));
-    await tester.pump();
+    await tester.tap(find.bySemanticsLabel('Add attachment or action'));
+    await tester.pumpAndSettle();
+    expect(find.text('Add to chat'), findsOneWidget);
+
+    final fileRow = find.byKey(const ValueKey('composer-plus-file'));
+    await tester.ensureVisible(fileRow);
+    await tester.pumpAndSettle();
+    await tester.tap(fileRow);
+    await tester.pumpAndSettle();
 
     expect(attaches, 1);
   });
@@ -534,5 +553,252 @@ void main() {
       tester.getTopLeft(find.byType(V2QueueDock)).dy,
       lessThan(tester.getTopLeft(find.byType(TextField)).dy),
     );
+  });
+
+  testWidgets('a finished tool has no running progress and expands on tap', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        const V2LiveChatPage(
+          data: V2LiveChatData(
+            items: [
+              V2LiveTool(
+                id: 'tool-done',
+                title: 'GitHub · list repos',
+                status: 'ok',
+                progress: 1,
+                details: ['Found 12 repositories.'],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('GitHub · list repos'), findsOneWidget);
+    expect(find.text('Done'), findsOneWidget);
+    expect(
+      find.byType(LinearProgressIndicator),
+      findsNothing,
+      reason: 'a finished tool must not keep a progress animation',
+    );
+    expect(find.text('Found 12 repositories.'), findsNothing);
+
+    await tester.tap(find.text('GitHub · list repos'));
+    await tester.pump();
+
+    expect(find.text('Found 12 repositories.'), findsOneWidget);
+    expect(find.text('Status: Done'), findsOneWidget);
+
+    await tester.tap(find.text('GitHub · list repos'));
+    await tester.pump();
+    expect(find.text('Found 12 repositories.'), findsNothing);
+  });
+
+  testWidgets('a running tool shows its real progress', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        const V2LiveChatPage(
+          data: V2LiveChatData(
+            items: [
+              V2LiveTool(
+                id: 'tool-running',
+                title: 'Browsing',
+                status: 'running',
+                progress: 0.4,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('Running'), findsOneWidget);
+    final bar = tester.widget<LinearProgressIndicator>(
+      find.byType(LinearProgressIndicator),
+    );
+    expect(bar.value, closeTo(0.4, 0.001));
+  });
+
+  testWidgets('tapping an artifact opens the artifact detail route', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        const V2LiveChatPage(
+          data: V2LiveChatData(
+            items: [
+              V2LiveArtifact(
+                id: 'art-route',
+                fileName: 'portfolio-index.html',
+                meta: '14.2 KB',
+                statusLabel: 'Ready',
+                previewLabel: 'Interactive HTML5 canvas',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    await tester.tap(find.text('portfolio-index.html'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.byType(ArtifactDetailPage), findsOneWidget);
+  });
+
+  testWidgets('artifact tap prefers the host route when provided', (
+    tester,
+  ) async {
+    String? opened;
+    await tester.pumpWidget(
+      _app(
+        V2LiveChatPage(
+          data: const V2LiveChatData(
+            items: [
+              V2LiveArtifact(
+                id: 'art-host',
+                fileName: 'report.pdf',
+                meta: '2.1 MB',
+                statusLabel: 'Ready',
+                previewLabel: 'PDF document',
+              ),
+            ],
+          ),
+          onArtifactTap: (id) => opened = id,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    await tester.tap(find.text('report.pdf'));
+    expect(opened, 'art-host');
+    expect(find.byType(ArtifactDetailPage), findsNothing);
+  });
+
+  testWidgets('live permission chip appears only with a host handler', (
+    tester,
+  ) async {
+    var changes = 0;
+    final chip = find.byWidgetPredicate(
+      (widget) =>
+          widget is Semantics &&
+          widget.properties.label == 'Permission: Studio. Change' &&
+          widget.properties.button == true,
+    );
+
+    await tester.pumpWidget(
+      _app(
+        V2LiveChatPage(
+          data: const V2LiveChatData(items: _items),
+          onPermissionTap: () => changes++,
+          permissionLabel: 'Studio',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(chip, findsOneWidget);
+    await tester.tap(chip);
+    await tester.pump();
+    expect(changes, 1);
+
+    // Without a handler the chip is absent instead of dead.
+    await tester.pumpWidget(
+      _app(const V2LiveChatPage(data: V2LiveChatData(items: _items))),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            (widget.properties.label ?? '').startsWith('Permission:'),
+      ),
+      findsNothing,
+    );
+  });
+
+  testWidgets('Enter sends the live draft and Shift+Enter does not', (
+    tester,
+  ) async {
+    V2ComposerSubmission? sent;
+    await tester.pumpWidget(
+      _app(
+        V2LiveChatPage(
+          data: const V2LiveChatData(items: _items),
+          onSubmit: (submission) => sent = submission,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    await tester.enterText(find.byType(TextField), 'Continue the build');
+    await tester.pump();
+    await tester.showKeyboard(find.byType(TextField));
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pumpAndSettle();
+    expect(sent, isNull, reason: 'Shift+Enter must not send');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(sent, isNotNull);
+    expect(sent!.text, 'Continue the build');
+  });
+
+  testWidgets('transcript links use the real opener and saver by default', (
+    tester,
+  ) async {
+    addTearDown(V2TranscriptIo.reset);
+    Uri? opened;
+    V2TranscriptIo.debugOpenOverride = (uri) async {
+      opened = uri;
+      return true;
+    };
+
+    await tester.pumpWidget(
+      _app(
+        const V2LiveChatPage(
+          data: V2LiveChatData(
+            items: [
+              V2LiveAssistantMessage(
+                id: 'links',
+                markdown:
+                    '[Open docs](https://docs.example.com)\n\n'
+                    '[report.txt](ftp://example.com/report.txt)',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    await tester.ensureVisible(find.bySemanticsLabel('Open docs'));
+    await tester.pump();
+    await tester.tap(find.bySemanticsLabel('Open docs'));
+    await tester.pump();
+    expect(opened, Uri.parse('https://docs.example.com'));
+
+    final download = find.bySemanticsLabel('Download report.txt');
+    await tester.ensureVisible(download);
+    await tester.pump();
+    await tester.tap(download);
+    await tester.pump();
+    expect(find.text('This file cannot be downloaded.'), findsOneWidget);
   });
 }

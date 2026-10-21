@@ -4,14 +4,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_contrast.dart';
 import 'package:ovid_ai/ui/design/o_tokens.dart';
 
-/// Pairings tracked as known, accepted gaps. The design brief asks us not to
-/// touch the shared palette, so these are pinned here and reported instead of
-/// silently excluded.
+/// Pairings tracked as known, accepted gaps.
 ///
-/// * `dark/accentFill/onAccent` is 4.35:1: white on the dark violet fill is
-///   below the 4.5:1 body gate (it is exactly why `o_theme_test` used 4.3).
-/// Delete this entry once the palette is adjusted.
-const knownGaps = <String, double>{'dark/accentFill/onAccent': 4.35};
+/// This map used to hold `dark/accentFill/onAccent` at 4.35:1 — white on the
+/// old #7C5CFF violet fill, below the 4.5:1 body gate. The token was darkened
+/// to #7857FA (4.62:1) so the gap is closed and the map is empty. Any new
+/// entry here is a palette bug, not a documented exception.
+const knownGaps = <String, double>{};
 
 void main() {
   group('OContrast maths', () {
@@ -226,19 +225,46 @@ void main() {
     });
   }
 
-  group('known palette gaps', () {
-    test('dark primary button label is 4.35:1 - below AA body', () {
+  group('palette contrast', () {
+    test('dark primary button label clears AA body', () {
       final check = OContrast.audit(
         OColors.dark,
       ).firstWhere((check) => check.name == 'accentFill/onAccent');
-      expect(
-        check.ratio,
-        closeTo(knownGaps['dark/accentFill/onAccent']!, 0.05),
-      );
-      expect(check.passes, isFalse);
-      expect(check.grade, 'AA large');
-      // Regression floor: it must not get worse while the palette is shared.
-      expect(check.ratio, greaterThanOrEqualTo(4.3));
+      expect(check.ratio, closeTo(4.62, 0.05));
+      expect(check.passes, isTrue);
+      expect(check.grade, 'AA');
+      // Regression floor: the fill must never drift back under the gate.
+      expect(check.ratio, greaterThanOrEqualTo(4.5));
+    });
+
+    test('accent on the translucent accentSoft fill clears AA body', () {
+      for (final (label, colors) in <(String, OColors)>[
+        ('light', OColors.light),
+        ('dark', OColors.dark),
+      ]) {
+        final check = OContrast.audit(
+          colors,
+        ).firstWhere((check) => check.name == 'accent/accentSoft');
+        expect(check.ratio, greaterThanOrEqualTo(4.5), reason: label);
+      }
+    });
+
+    test('status tints clear AA-large in both themes', () {
+      for (final (label, colors) in <(String, OColors)>[
+        ('light', OColors.light),
+        ('dark', OColors.dark),
+      ]) {
+        for (final name in <String>[
+          'success/successTint',
+          'warn/warnTint',
+          'danger/dangerTint',
+        ]) {
+          final check = OContrast.audit(
+            colors,
+          ).firstWhere((check) => check.name == name);
+          expect(check.ratio, greaterThanOrEqualTo(3.0), reason: '$label/$name');
+        }
+      }
     });
 
     test('no light-theme pairing fails its declared tier', () {
@@ -273,23 +299,22 @@ void main() {
 
         expect(pick(dark, 'text/bg').ratio, closeTo(19.28, 0.05));
         expect(pick(dark, 'textMuted/bg').ratio, closeTo(7.60, 0.05));
-        expect(pick(dark, 'accentFill/onAccent').ratio, closeTo(4.35, 0.05));
+        expect(pick(dark, 'accentFill/onAccent').ratio, closeTo(4.62, 0.05));
         expect(pick(dark, 'danger/onDanger').ratio, closeTo(6.62, 0.05));
       },
     );
   });
 
   group('report', () {
-    test('renders every check and flags failures', () {
+    test('renders every check and reports the new fill', () {
       final report = OContrast.report(OColors.dark, label: 'dark');
       expect(report, contains('dark'));
       expect(report, contains('text/bg'));
       expect(report, contains('textMuted/bg'));
       expect(report, contains('accentFill/onAccent'));
       expect(report, contains('danger/onDanger'));
-      expect(report, contains('FAIL'));
-      expect(report, matches(RegExp(r'\d+ of \d+ pairs fail')));
-      expect(report, contains('4.35:1'));
+      expect(report, contains('4.62:1'));
+      expect(report, isNot(contains('FAIL')));
     });
 
     test('light report is clean', () {
@@ -305,7 +330,7 @@ void main() {
       final report = OContrast.reportAll();
       expect(report, contains('light'));
       expect(report, contains('dark'));
-      expect('FAIL'.allMatches(report), hasLength(1));
+      expect('FAIL'.allMatches(report), isEmpty);
     });
   });
 }

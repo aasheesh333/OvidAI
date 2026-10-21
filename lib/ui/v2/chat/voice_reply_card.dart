@@ -129,6 +129,8 @@ class V2VoiceReplyCard extends StatelessWidget {
     final total = data.duration;
     final position = data.position > total ? total : data.position;
     final seekable = onSeek != null && total > Duration.zero;
+    // A transport row with no play handler and no audio is a dead control.
+    final hasTransport = onPlay != null || total > Duration.zero;
 
     return Container(
       clipBehavior: Clip.antiAlias,
@@ -140,70 +142,74 @@ class V2VoiceReplyCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              OSpace.s,
-              OSpace.s,
-              OSpace.m,
-              OSpace.s,
-            ),
-            child: Row(
-              children: [
-                DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: c.accentSoft,
-                    shape: BoxShape.circle,
-                  ),
-                  child: OIconButton(
-                    icon: data.playing
-                        ? Icons.pause_rounded
-                        : Icons.play_arrow_rounded,
-                    semanticLabel: data.playing
-                        ? 'Pause voice reply'
-                        : 'Play voice reply',
-                    active: data.playing,
-                    onPressed: onPlay,
-                  ),
-                ),
-                const SizedBox(width: OSpace.s),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _VoiceWaveform(
-                        progress: data.progress,
-                        duration: total,
-                        enabled: seekable,
-                        onSeek: onSeek,
+          if (hasTransport)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                OSpace.s,
+                OSpace.s,
+                OSpace.m,
+                OSpace.s,
+              ),
+              child: Row(
+                children: [
+                  if (onPlay != null)
+                    DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: c.accentSoft,
+                        shape: BoxShape.circle,
                       ),
-                      const SizedBox(height: OSpace.xs),
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.graphic_eq_rounded,
-                            size: 14,
-                            color: c.accent,
-                          ),
-                          const SizedBox(width: OSpace.xs),
-                          Expanded(
-                            child: Text(
-                              '${formatVoiceDuration(position)} / '
-                              '${formatVoiceDuration(total)}',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: OType.caption.copyWith(color: c.textMuted),
+                      child: OIconButton(
+                        icon: data.playing
+                            ? Icons.pause_rounded
+                            : Icons.play_arrow_rounded,
+                        semanticLabel: data.playing
+                            ? 'Pause voice reply'
+                            : 'Play voice reply',
+                        active: data.playing,
+                        onPressed: onPlay,
+                      ),
+                    ),
+                  if (onPlay != null) const SizedBox(width: OSpace.s),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _VoiceWaveform(
+                          progress: data.progress,
+                          duration: total,
+                          enabled: seekable,
+                          onSeek: onSeek,
+                        ),
+                        const SizedBox(height: OSpace.xs),
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.graphic_eq_rounded,
+                              size: 14,
+                              color: c.accent,
                             ),
-                          ),
-                        ],
-                      ),
-                    ],
+                            const SizedBox(width: OSpace.xs),
+                            Expanded(
+                              child: Text(
+                                '${formatVoiceDuration(position)} / '
+                                '${formatVoiceDuration(total)}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: OType.caption.copyWith(
+                                  color: c.textMuted,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          Divider(height: 1, color: c.hairline),
+          if (hasTransport) Divider(height: 1, color: c.hairline),
           Padding(
             padding: const EdgeInsets.all(OSpace.l),
             child: Column(
@@ -243,7 +249,7 @@ class V2VoiceReplyCard extends StatelessWidget {
                   const SizedBox(height: OSpace.l),
                   _VoiceMetrics(metrics: data.metrics),
                 ],
-                if (data.actionLabel != null) ...[
+                if (data.actionLabel != null && onOpenAction != null) ...[
                   const SizedBox(height: OSpace.l),
                   OButton(
                     label: data.actionLabel!,
@@ -257,23 +263,24 @@ class V2VoiceReplyCard extends StatelessWidget {
             ),
           ),
           if (data.hasTranscript) ...[
-            Divider(height: 1, color: c.hairline),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: OSpace.s),
-              child: OButton(
-                label: transcriptExpanded
-                    ? 'Hide transcript'
-                    : 'Show transcript',
-                icon: transcriptExpanded
-                    ? Icons.expand_less_rounded
-                    : Icons.expand_more_rounded,
-                variant: OButtonVariant.ghost,
-                expand: true,
-                onPressed: onToggleTranscript == null
-                    ? null
-                    : () => onToggleTranscript!(!transcriptExpanded),
+            if (onToggleTranscript != null) ...[
+              Divider(height: 1, color: c.hairline),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: OSpace.s),
+                child: OButton(
+                  label: transcriptExpanded
+                      ? 'Hide transcript'
+                      : 'Show transcript',
+                  icon: transcriptExpanded
+                      ? Icons.expand_less_rounded
+                      : Icons.expand_more_rounded,
+                  variant: OButtonVariant.ghost,
+                  expand: true,
+                  onPressed: () => onToggleTranscript!(!transcriptExpanded),
+                ),
               ),
-            ),
+            ] else if (transcriptExpanded)
+              Divider(height: 1, color: c.hairline),
             if (transcriptExpanded)
               Padding(
                 padding: const EdgeInsets.fromLTRB(
@@ -363,9 +370,9 @@ class _VoiceWaveform extends StatelessWidget {
     final value =
         '${formatVoiceDuration(Duration(milliseconds: (duration.inMilliseconds * progress).round()))} of ${formatVoiceDuration(duration)}';
     return Semantics(
-      label: 'Seek voice reply',
+      label: enabled ? 'Seek voice reply' : 'Voice reply waveform',
       value: value,
-      slider: true,
+      slider: enabled,
       enabled: enabled,
       child: LayoutBuilder(
         builder: (context, constraints) {

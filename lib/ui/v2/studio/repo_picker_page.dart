@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
@@ -97,6 +99,7 @@ class V2RepoPickerPage extends StatefulWidget {
     required this.data,
     this.onSelectRepo,
     this.onConfirm,
+    this.onLoadBranches,
     this.onConnectGithub,
     this.onOpenToken,
     this.onOpenAdvanced,
@@ -111,8 +114,14 @@ class V2RepoPickerPage extends StatefulWidget {
   final ValueChanged<V2Repo>? onSelectRepo;
 
   /// Fires when the user confirms a repository **and** a branch. This is the
-  /// only callback that should bind the folder for Studio mode.
+  /// only callback that should bind the folder for Studio mode. When null the
+  /// primary action stays disabled: a page that cannot bind must not pretend
+  /// it started a workspace.
   final void Function(V2Repo repo, String branch)? onConfirm;
+
+  /// Loads the real branch list for a repository when the data snapshot did
+  /// not carry one. Returning an empty list is treated as "no branches".
+  final Future<List<V2RepoBranch>> Function(V2Repo repo)? onLoadBranches;
   final VoidCallback? onConnectGithub;
   final VoidCallback? onOpenToken;
   final VoidCallback? onOpenAdvanced;
@@ -128,6 +137,9 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
   String _query = '';
   V2Repo? _selectedRepo;
   String? _selectedBranch;
+  List<V2RepoBranch> _loadedBranches = const <V2RepoBranch>[];
+  bool _loadingBranches = false;
+  String? _branchError;
 
   @override
   void dispose() {
@@ -152,14 +164,70 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
     setState(() {
       _selectedRepo = repo;
       _selectedBranch = hasPreferred ? preferred : null;
+      _loadedBranches = const <V2RepoBranch>[];
+      _loadingBranches = false;
+      _branchError = null;
     });
     widget.onSelectRepo?.call(repo);
+    if (repo.branches.isEmpty && widget.onLoadBranches != null) {
+      unawaited(_loadBranches(repo));
+    }
   }
+
+  /// Fetches the real branch list for [repo] when the snapshot had none.
+  Future<void> _loadBranches(V2Repo repo) async {
+    final loader = widget.onLoadBranches;
+    if (loader == null) return;
+    setState(() {
+      _loadingBranches = true;
+      _branchError = null;
+      _loadedBranches = const <V2RepoBranch>[];
+    });
+    try {
+      final branches = await loader(repo);
+      if (!mounted || _selectedRepo?.id != repo.id) return;
+      setState(() {
+        _loadingBranches = false;
+        _loadedBranches = branches;
+        _selectedBranch ??= _preferredBranchOf(repo, branches);
+      });
+    } catch (_) {
+      if (!mounted || _selectedRepo?.id != repo.id) return;
+      setState(() {
+        _loadingBranches = false;
+        _branchError =
+            'We could not load branches for ${repo.fullName}. Check your '
+            'connection and try again.';
+      });
+    }
+  }
+
+  static String? _preferredBranchOf(
+    V2Repo repo,
+    List<V2RepoBranch> branches,
+  ) {
+    final explicit = repo.defaultBranch?.trim();
+    if (explicit != null &&
+        explicit.isNotEmpty &&
+        branches.any((branch) => branch.name == explicit)) {
+      return explicit;
+    }
+    for (final branch in branches) {
+      if (branch.isDefault) return branch.name;
+    }
+    return null;
+  }
+
+  List<V2RepoBranch> _branchesFor(V2Repo repo) =>
+      repo.branches.isNotEmpty ? repo.branches : _loadedBranches;
 
   void _changeRepo() {
     setState(() {
       _selectedRepo = null;
       _selectedBranch = null;
+      _loadedBranches = const <V2RepoBranch>[];
+      _loadingBranches = false;
+      _branchError = null;
     });
   }
 
@@ -168,18 +236,16 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
   }
 
   bool get _canConfirm =>
-      _selectedRepo != null && _selectedBranch != null;
+      _selectedRepo != null &&
+      _selectedBranch != null &&
+      widget.onConfirm != null;
 
   void _confirm() {
     final repo = _selectedRepo;
     final branch = _selectedBranch;
-    if (repo == null || branch == null) return;
     final confirm = widget.onConfirm;
-    if (confirm != null) {
-      confirm(repo, branch);
-      return;
-    }
-    widget.onSelectRepo?.call(repo);
+    if (repo == null || branch == null || confirm == null) return;
+    confirm(repo, branch);
   }
 
   String get _primaryLabel {
@@ -319,7 +385,9 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
   /// in the dock stays disabled until a branch is selected.
   Widget _buildBranchStep(BuildContext context, V2Repo repo) {
     final c = OColors.of(context);
-    final branches = repo.branches;
+    final branches = _branchesFor(repo);
+    final loading = _loadingBranches;
+    final error = _branchError;
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
         OSpace.screen,
@@ -358,18 +426,58 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
                   style: OType.bodySm.copyWith(color: c.textMuted),
                 ),
                 const SizedBox(height: OSpace.m),
-                if (branches.isEmpty)
+                if (loading)
+                  OCard(
+                    key: const Key('repo-picker-branches-loading'),
+                    child: Row(
+                      children: [
+                        const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        const SizedBox(width: OSpace.m),
+                        Expanded(
+                          child: Text(
+                            'Loading branches for ${repo.fullName}…',
+                            style: OType.bodySm.copyWith(color: c.textMuted),
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                else if (error != null)
+                  OEmptyState(
+                    compact: true,
+                    icon: Icons.cloud_off_rounded,
+                    title: 'Branches did not load',
+                    message: error,
+                    action: OButton(
+                      label: 'Try again',
+                      icon: Icons.refresh_rounded,
+                      variant: OButtonVariant.secondary,
+                      onPressed: () => _loadBranches(repo),
+                    ),
+                  )
+                else if (branches.isEmpty)
                   OEmptyState(
                     compact: true,
                     icon: Icons.account_tree_outlined,
                     title: 'No branches found',
                     message:
                         'We could not load branches for ${repo.fullName}. Go back and choose another repository.',
-                    action: OButton(
-                      label: 'Change repository',
-                      variant: OButtonVariant.secondary,
-                      onPressed: _changeRepo,
-                    ),
+                    action: widget.onLoadBranches == null
+                        ? OButton(
+                            label: 'Change repository',
+                            variant: OButtonVariant.secondary,
+                            onPressed: _changeRepo,
+                          )
+                        : OButton(
+                            label: 'Reload branches',
+                            icon: Icons.refresh_rounded,
+                            variant: OButtonVariant.secondary,
+                            onPressed: () => _loadBranches(repo),
+                          ),
                   )
                 else
                   OStagger(
@@ -419,7 +527,10 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
               Padding(
                 padding: const EdgeInsets.only(bottom: OSpace.s),
                 child: Text(
-                  _selectedRepo == null
+                  widget.onConfirm == null
+                      ? 'Studio setup is not connected yet, so this cannot '
+                            'start a workspace.'
+                      : _selectedRepo == null
                       ? 'Choose a repository to continue.'
                       : 'Choose a branch to continue.',
                   style: OType.caption.copyWith(color: c.textMuted),
@@ -639,12 +750,20 @@ class _ConnectHero extends StatelessWidget {
             style: OType.bodySm.copyWith(color: c.textMuted),
           ),
           const SizedBox(height: OSpace.xl),
-          OButton(
-            label: 'Connect GitHub',
-            icon: Icons.code_rounded,
-            expand: true,
-            onPressed: onConnectGithub,
-          ),
+          if (onConnectGithub != null)
+            OButton(
+              label: 'Connect GitHub',
+              icon: Icons.code_rounded,
+              expand: true,
+              onPressed: onConnectGithub,
+            )
+          else
+            Text(
+              'GitHub sign-in is not available yet. Enter a personal access '
+              'token below.',
+              textAlign: TextAlign.center,
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
         ],
       ),
     );
@@ -854,18 +973,26 @@ class _AdvancedRows extends StatelessWidget {
       child: Column(
         children: [
           OListRow(
+            key: const Key('repo-picker-token'),
             icon: Icons.key_rounded,
             title: 'Enter a personal access token',
-            subtitle: 'Use for private organization setups',
+            subtitle: onOpenToken == null
+                ? 'Token entry is not connected yet'
+                : 'Use for private organization setups',
+            enabled: onOpenToken != null,
+            showChevron: onOpenToken != null,
             onTap: onOpenToken,
           ),
-          Divider(height: 1, color: c.hairline),
-          OListRow(
-            icon: Icons.tune_rounded,
-            title: 'Advanced options',
-            subtitle: 'Self-hosted GitLab, Bitbucket, SSH keys',
-            onTap: onOpenAdvanced,
-          ),
+          if (onOpenAdvanced != null) ...[
+            Divider(height: 1, color: c.hairline),
+            OListRow(
+              key: const Key('repo-picker-advanced'),
+              icon: Icons.tune_rounded,
+              title: 'Advanced options',
+              subtitle: 'Self-hosted GitLab, Bitbucket, SSH keys',
+              onTap: onOpenAdvanced,
+            ),
+          ],
         ],
       ),
     );

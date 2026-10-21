@@ -404,13 +404,24 @@ void main() {
     tester,
   ) async {
     final handle = tester.ensureSemantics();
-    await _pump(tester, _data());
+    await _pump(
+      tester,
+      _data(
+        files: const [
+          V2MemoryFileEntry(
+            id: 'empty-1',
+            name: 'empty.md',
+            group: V2MemoryFileGroup.global,
+            sizeLabel: '0 KB',
+            updatedLabel: '',
+            preview: '',
+          ),
+        ],
+      ),
+    );
 
     final semantics = tester.getSemantics(
-      find.bySemanticsLabel(
-        'global.md, Global · 12 KB · Updated 2 hours ago, '
-        'Prefers short answers and code samples.',
-      ),
+      find.bySemanticsLabel('empty.md, Global · 0 KB'),
     );
 
     expect(semantics.flagsCollection.isButton, isFalse);
@@ -489,6 +500,125 @@ void main() {
           findsOneWidget,
         );
         expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('scope chips filter the file groups', (tester) async {
+    await _pump(tester, _data());
+
+    expect(find.text('GLOBAL FILES'), findsOneWidget);
+    expect(find.text('PROJECT FILES'), findsOneWidget);
+    expect(find.text('SESSION FILES'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('memory-files-filter-project')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('PROJECT FILES'), findsOneWidget);
+    expect(find.text('global.md'), findsNothing);
+    expect(find.text('session-408.md'), findsNothing);
+    expect(find.text('ovid-app.md'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('memory-files-filter-session')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('ovid-app.md'), findsNothing);
+    expect(find.text('session-408.md'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('memory-files-filter-all')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('global.md'), findsOneWidget);
+    expect(find.text('ovid-app.md'), findsOneWidget);
+    expect(find.text('session-408.md'), findsOneWidget);
+  });
+
+  testWidgets('the built-in viewer shows the real file body and deletes', (
+    tester,
+  ) async {
+    String? deleted;
+    await _pump(
+      tester,
+      _data(onDelete: (id) => deleted = id),
+    );
+
+    final file = find.text('global.md');
+    await tester.ensureVisible(file);
+    await tester.tap(file);
+    await tester.pumpAndSettle();
+
+    // The viewer shows the stored content, not the one-line preview.
+    expect(
+      find.byKey(const ValueKey<String>('memory-file-viewer-content')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey<String>('memory-file-viewer-content')),
+        matching: find.text('Prefers short answers and code samples.'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('memory-file-viewer-delete')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Delete this memory file?'), findsOneWidget);
+    await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+    await tester.pumpAndSettle();
+
+    expect(deleted, 'global-1');
+  });
+
+  testWidgets('the viewer has no delete action when the caller did not wire '
+      'one', (tester) async {
+    await _pump(tester, _data());
+
+    final file = find.text('session-408.md');
+    await tester.ensureVisible(file);
+    await tester.tap(file);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('memory-file-viewer-delete')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('memory-file-viewer-close')),
+      findsOneWidget,
+    );
+  });
+
+  for (final dark in <bool>[false, true]) {
+    testWidgets(
+      'viewer and filters fit 320 dp at 200% (${dark ? 'dark' : 'light'})',
+      (tester) async {
+        await _pump(
+          tester,
+          _data(onDelete: (_) {}),
+          dark: dark,
+          size: const Size(320, 640),
+          textScaler: const TextScaler.linear(2),
+        );
+
+        expect(tester.takeException(), isNull);
+
+        final file = find.text('global.md');
+        await tester.ensureVisible(file);
+        await tester.tap(file);
+        await tester.pumpAndSettle();
+
+        expect(tester.takeException(), isNull);
+        expect(
+          find.byKey(const ValueKey<String>('memory-file-viewer-delete')),
+          findsOneWidget,
+        );
       },
     );
   }

@@ -1,6 +1,9 @@
 // TODO(l10n): move the English copy in this screen to the ARB files.
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../../../core/format.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
@@ -76,6 +79,7 @@ class V2UsageData {
     this.dailyFraction = 0,
     this.dailyCapLabel = '',
     this.resetLabel = '',
+    this.resetsAt,
     this.resetsAtLabel = '',
     this.monthlyUsedLabel = '',
     this.monthlyLimitLabel = '',
@@ -84,16 +88,17 @@ class V2UsageData {
     this.monthlyCapLabel = '',
     this.billingNote = '',
     this.days = const [],
+    this.historyLoading = false,
     this.selectedDayId,
     this.selectedDayLabel = '',
     this.models = const [],
     this.range = V2UsageRange.today,
     this.showFreePlanNote = true,
-    this.requestsLabel = '0',
-    this.imagesLabel = '0',
+    this.requestsLabel = '',
+    this.imagesLabel = '',
     this.imagesDetail = 'image generations',
-    this.storageUsedLabel = '0 GB',
-    this.storageLimitLabel = '0 GB',
+    this.storageUsedLabel = '',
+    this.storageLimitLabel = '',
     this.storageFraction = 0,
     this.upgradeTitle = 'Need more room?',
     this.upgradeMessage = 'Upgrade for higher limits and faster models.',
@@ -116,22 +121,54 @@ class V2UsageData {
   final String dailyUsedLabel;
   final String dailyLimitLabel;
 
-  /// Display fallbacks: an unwired screen must never render "of  tokens used".
-  String get usedText => dailyUsedLabel.trim().isEmpty ? '0' : dailyUsedLabel;
+  /// The marker for a value the server has not reported. It is deliberately
+  /// not `0`: a zero looks like real usage and hides a failed load.
+  static const unknownLabel = '—';
 
+  /// True when at least one real number was supplied. The page shows its
+  /// empty state instead of a screen full of zeros when this is false.
+  bool get hasData =>
+      dailyUsedLabel.trim().isNotEmpty ||
+      monthlyUsedLabel.trim().isNotEmpty ||
+      requestsLabel.trim().isNotEmpty ||
+      imagesLabel.trim().isNotEmpty ||
+      days.isNotEmpty ||
+      models.isNotEmpty;
+
+  /// Display fallbacks: an unwired screen must never render "of  tokens used",
+  /// and it must never invent a `0` for a value it does not have.
+  String get usedText =>
+      dailyUsedLabel.trim().isEmpty ? unknownLabel : dailyUsedLabel;
+
+  /// The exact 24 h cap from the authoritative plan table when the caller did
+  /// not supply one.
   String get limitText =>
-      dailyLimitLabel.trim().isEmpty ? '50,000,000' : dailyLimitLabel;
+      dailyLimitLabel.trim().isEmpty ? planLimits.dailyCapLabel : dailyLimitLabel;
 
   String get monthlyUsedText =>
-      monthlyUsedLabel.trim().isEmpty ? '0' : monthlyUsedLabel;
+      monthlyUsedLabel.trim().isEmpty ? unknownLabel : monthlyUsedLabel;
 
-  String get monthlyLimitText =>
-      monthlyLimitLabel.trim().isEmpty ? '1,500,000,000' : monthlyLimitLabel;
+  String get monthlyLimitText => monthlyLimitLabel.trim().isEmpty
+      ? planLimits.monthlyCapLabel
+      : monthlyLimitLabel;
+
+  String get monthlyPercentText => monthlyPercentLabel.trim().isEmpty
+      ? unknownLabel
+      : monthlyPercentLabel;
   final double dailyFraction;
 
   /// Overrides for the exact 24 h cap; empty derives it from [planId].
   final String dailyCapLabel;
+
+  /// Optional pre-formatted countdown. Live data should pass [resetsAt]
+  /// instead, so the countdown keeps ticking instead of freezing at the value
+  /// computed when the route was built.
   final String resetLabel;
+
+  /// When the current allowance window really resets, straight from the
+  /// server's `resets_at`. The page derives and refreshes the countdown from
+  /// this instant.
+  final DateTime? resetsAt;
 
   /// Absolute reset time, e.g. `Oct 22, 2026, 6:12 AM`.
   final String resetsAtLabel;
@@ -144,6 +181,10 @@ class V2UsageData {
   final String monthlyCapLabel;
   final String billingNote;
   final List<V2UsageDay> days;
+
+  /// True while the daily ledger (`/usage/history`) is still loading. The
+  /// charts show a skeleton instead of "no activity" in that window.
+  final bool historyLoading;
   final String? selectedDayId;
   final String selectedDayLabel;
   final List<V2UsageModel> models;
@@ -198,7 +239,9 @@ class UsagePage extends StatelessWidget {
       case V2UsageStatus.empty:
         body = _emptyState(context);
       case V2UsageStatus.ready:
-        body = _content(context);
+        // A ready page with no real numbers would render zeros that look like
+        // usage. Show the honest empty state instead.
+        body = data.hasData ? _content(context) : _emptyState(context);
     }
 
     return OScaffold(
@@ -208,15 +251,29 @@ class UsagePage extends StatelessWidget {
   }
 
   Widget _emptyState(BuildContext context) {
+    // Only offer the action that is actually wired: a "Start a chat" button
+    // that silently retries the fetch is a fake control.
+    final Widget? action;
+    if (data.onStartChat != null) {
+      action = OButton(
+        label: 'Start a chat',
+        icon: Icons.chat_bubble_outline_rounded,
+        onPressed: data.onStartChat,
+      );
+    } else if (data.onRetry != null) {
+      action = OButton(
+        label: 'Try again',
+        icon: Icons.refresh_rounded,
+        onPressed: data.onRetry,
+      );
+    } else {
+      action = null;
+    }
     return OEmptyState(
       icon: Icons.insights_rounded,
       title: 'No usage yet',
       message: 'Chat with Ovid to see your token use here.',
-      action: OButton(
-        label: 'Start a chat',
-        icon: Icons.chat_bubble_outline_rounded,
-        onPressed: data.onStartChat ?? data.onRetry,
-      ),
+      action: action,
     );
   }
 
@@ -311,7 +368,10 @@ class _DailyRingCard extends StatelessWidget {
       child: Column(
         children: [
           Semantics(
-            label: '${data.usedText} of ${data.limitText} tokens used today',
+            label: data.dailyUsedLabel.trim().isEmpty
+                ? 'Today\'s token usage is not available. '
+                      'The limit is ${data.limitText} tokens.'
+                : '${data.usedText} of ${data.limitText} tokens used today',
             child: ConstrainedBox(
               // The ring keeps its 208 dp look but grows with the text scale
               // instead of clipping the labels inside it.
@@ -408,34 +468,102 @@ class _DailyRingCard extends StatelessWidget {
               style: OType.caption.copyWith(color: c.textFaint),
             ),
           ],
-          const SizedBox(height: OSpace.l),
-          Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: OSpace.m,
-              vertical: OSpace.s,
-            ),
-            decoration: BoxDecoration(
-              color: c.surfaceAlt,
-              borderRadius: BorderRadius.circular(ORadius.pill),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.schedule_rounded, size: 16, color: c.accent),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    data.resetLabel,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.caption.copyWith(color: c.textMuted),
+          if (data.resetsAt != null || data.resetLabel.isNotEmpty) ...[
+            const SizedBox(height: OSpace.l),
+            Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: OSpace.m,
+                vertical: OSpace.s,
+              ),
+              decoration: BoxDecoration(
+                color: c.surfaceAlt,
+                borderRadius: BorderRadius.circular(ORadius.pill),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.schedule_rounded, size: 16, color: c.accent),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: _ResetCountdown(
+                      resetsAt: data.resetsAt,
+                      fallback: data.resetLabel,
+                      style: OType.caption.copyWith(color: c.textMuted),
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
+          ],
         ],
       ),
+    );
+  }
+}
+
+/// Live countdown to the allowance reset.
+///
+/// The route passes the server's `resets_at` instant, so the label is derived
+/// from the real window and keeps ticking. A pre-formatted [fallback] is only
+/// used by previews/tests that have no clock source.
+class _ResetCountdown extends StatefulWidget {
+  const _ResetCountdown({
+    required this.resetsAt,
+    required this.fallback,
+    required this.style,
+  });
+
+  final DateTime? resetsAt;
+  final String fallback;
+  final TextStyle style;
+
+  @override
+  State<_ResetCountdown> createState() => _ResetCountdownState();
+}
+
+class _ResetCountdownState extends State<_ResetCountdown> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncTimer();
+  }
+
+  @override
+  void didUpdateWidget(_ResetCountdown oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.resetsAt != widget.resetsAt) _syncTimer();
+  }
+
+  void _syncTimer() {
+    _timer?.cancel();
+    _timer = null;
+    if (widget.resetsAt == null) return;
+    // Minute resolution is all the copy shows, so one tick a minute is enough
+    // and keeps the page from waking the device every second.
+    _timer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final resetsAt = widget.resetsAt;
+    final label = resetsAt == null
+        ? widget.fallback
+        : 'Resets ${formatTimeUntil(resetsAt)}';
+    return Text(
+      label,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: widget.style,
     );
   }
 }
@@ -487,7 +615,7 @@ class _MonthlyCard extends StatelessWidget {
                   ],
                 ),
               ),
-              OPill(label: data.monthlyPercentLabel, tone: OPillTone.accent),
+              OPill(label: data.monthlyPercentText, tone: OPillTone.accent),
             ],
           ),
           const SizedBox(height: OSpace.m),
@@ -555,7 +683,9 @@ class _GlanceCard extends StatelessWidget {
               Expanded(
                 child: _GlanceStat(
                   label: 'Requests',
-                  value: data.requestsLabel,
+                  value: data.requestsLabel.trim().isEmpty
+                      ? V2UsageData.unknownLabel
+                      : data.requestsLabel,
                 ),
               ),
               Container(
@@ -567,7 +697,9 @@ class _GlanceCard extends StatelessWidget {
               Expanded(
                 child: _GlanceStat(
                   label: 'Images',
-                  value: data.imagesLabel,
+                  value: data.imagesLabel.trim().isEmpty
+                      ? V2UsageData.unknownLabel
+                      : data.imagesLabel,
                   detail: data.imagesDetail,
                 ),
               ),
@@ -580,8 +712,12 @@ class _GlanceCard extends StatelessWidget {
               Expanded(
                 child: _GlanceStat(
                   label: 'Storage',
-                  value: data.storageUsedLabel,
-                  detail: 'of ${data.storageLimitLabel}',
+                  value: data.storageUsedLabel.trim().isEmpty
+                      ? V2UsageData.unknownLabel
+                      : data.storageUsedLabel,
+                  detail: data.storageUsedLabel.trim().isEmpty
+                      ? 'Not tracked yet'
+                      : 'of ${data.storageLimitLabel}',
                 ),
               ),
             ],
@@ -704,6 +840,9 @@ class _DailyTokensSection extends StatelessWidget {
       title: 'Activity',
       points: [for (final day in data.days) _tokenPoint(day)],
       range: range,
+      status: data.historyLoading
+          ? V2UsageChartStatus.loading
+          : V2UsageChartStatus.ready,
       onRangeChanged: onRangeChanged == null
           ? null
           : (value) => onRangeChanged(
@@ -742,6 +881,9 @@ class _ModelShareSection extends StatelessWidget {
         V2ModelShareChart(
           key: const ValueKey('usage-model-share-chart'),
           title: 'Usage by model',
+          status: data.historyLoading
+              ? V2UsageChartStatus.loading
+              : V2UsageChartStatus.ready,
           slices: [
             for (final model in data.models)
               V2ModelShareSlice(
@@ -769,9 +911,24 @@ class _ImageUsageSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // `/usage/history` has no per-day image counts. When today's counter is
+    // known but the series is not, say so instead of claiming "No images yet".
+    final hasDailySeries = data.days.any((day) => day.imageCount > 0);
+    final imagesToday = int.tryParse(data.imagesLabel.trim()) ?? 0;
+    final missingSeries = imagesToday > 0 && !hasDailySeries;
     return V2ImageUsageChart(
       key: const ValueKey('usage-image-chart'),
       title: 'Images generated',
+      status: data.historyLoading
+          ? V2UsageChartStatus.loading
+          : V2UsageChartStatus.ready,
+      emptyTitle: missingSeries
+          ? 'Daily image history is not available'
+          : 'No images yet',
+      emptyMessage: missingSeries
+          ? 'Today\'s image count is shown above; the per-day series is not '
+                'reported yet.'
+          : 'Images you generate will show up here.',
       points: [
         for (final day in data.days)
           V2ImageUsagePoint(

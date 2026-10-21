@@ -46,6 +46,8 @@ class SignInPage extends StatefulWidget {
     this.onForgotPassword,
     this.onCreateAccount,
     this.onLanguageTap,
+    this.onTerms,
+    this.onPrivacy,
     this.onRetry,
     this.onBack,
   });
@@ -58,11 +60,11 @@ class SignInPage extends StatefulWidget {
 
   /// Opens [V2PhoneAuthSheet]. Null disables the phone action.
   ///
-  /// The sheet's send / verify / resend actions are forwarded to the
-  /// [onSendPhoneCode], [onVerifyPhoneCode] and [onResendPhoneCode] callbacks.
-  /// When none of those are wired, tapping "Send code" closes the sheet and
-  /// falls back to invoking this callback, which keeps older hosts (that own
-  /// their own OTP dialog) working during the migration.
+  /// The sheet is only used when the host drives it through
+  /// [onSendPhoneCode]; the send / verify / resend actions then forward to
+  /// [onSendPhoneCode], [onVerifyPhoneCode] and [onResendPhoneCode]. A host
+  /// that only supplies [onPhone] owns its own OTP UI, so this button invokes
+  /// it directly instead of asking for the number twice.
   final VoidCallback? onPhone;
 
   /// Host-owned sheet state: which step is showing, loading, errors and the
@@ -88,6 +90,14 @@ class SignInPage extends StatefulWidget {
   final VoidCallback? onForgotPassword;
   final VoidCallback? onCreateAccount;
   final VoidCallback? onLanguageTap;
+
+  /// Opens the legal documents. When null the labels stay plain text instead
+  /// of looking like links that do nothing.
+  final VoidCallback? onTerms;
+  final VoidCallback? onPrivacy;
+
+  /// Re-runs the failed attempt. Only supplied when there is something to
+  /// retry: a generic message with no recovery path shows no "Try again".
   final VoidCallback? onRetry;
 
   /// When supplied, the app bar's back action returns to the previous
@@ -155,6 +165,13 @@ class _SignInPageState extends State<SignInPage> {
 
   Future<void> _openPhoneSheet() async {
     if (widget.onPhone == null || _phoneSheetOpen) return;
+    // A host that does not drive the sheet owns its own OTP flow. Opening a
+    // number sheet here would collect the number and then hand over to a
+    // second flow that asks for it again.
+    if (widget.onSendPhoneCode == null) {
+      widget.onPhone!.call();
+      return;
+    }
     _phoneSheet.value = widget.phoneData ?? const V2PhoneAuthData();
     _phoneSheetOpen = true;
     try {
@@ -167,7 +184,7 @@ class _SignInPageState extends State<SignInPage> {
             showHandle: false,
             onCountryChanged: widget.onPhoneCountryChanged,
             onPhoneChanged: widget.onPhoneChanged,
-            onSendCode: (phone) => _sendPhoneCode(sheetContext, phone),
+            onSendCode: (phone) => widget.onSendPhoneCode?.call(phone),
             onVerify: widget.onVerifyPhoneCode,
             onResend: widget.onResendPhoneCode,
             onChangeNumber: () => _changePhoneNumber(),
@@ -178,18 +195,6 @@ class _SignInPageState extends State<SignInPage> {
     } finally {
       _phoneSheetOpen = false;
     }
-  }
-
-  void _sendPhoneCode(BuildContext sheetContext, String phone) {
-    final send = widget.onSendPhoneCode;
-    if (send != null) {
-      send(phone);
-      return;
-    }
-    // Legacy host: it owns the OTP UI, so hand control back after closing the
-    // sheet rather than leaving a sheet whose primary action does nothing.
-    Navigator.of(sheetContext).pop();
-    widget.onPhone?.call();
   }
 
   void _changePhoneNumber() {
@@ -213,9 +218,13 @@ class _SignInPageState extends State<SignInPage> {
     return OScaffold(
       appBar: OAppBar(
         title: 'Sign in',
+        // The tour supplies its own back handler. Without one the default
+        // arrow would pop the gate's route, which is never what we want.
+        showBack: false,
         leading: widget.onBack == null
             ? null
             : OIconButton(
+                key: const Key('sign-in-back'),
                 icon: Icons.arrow_back_rounded,
                 semanticLabel: 'Back',
                 onPressed: widget.onBack,
@@ -275,7 +284,14 @@ class _SignInPageState extends State<SignInPage> {
                   ],
                 ),
                 const SizedBox(height: OSpace.xl),
-                Text('Welcome back', style: OType.h1.copyWith(color: c.text)),
+                Semantics(
+                  container: true,
+                  header: true,
+                  child: Text(
+                    'Welcome back',
+                    style: OType.h1.copyWith(color: c.text),
+                  ),
+                ),
                 const SizedBox(height: OSpace.s),
                 Text(
                   'Sign in to continue where you left off.',
@@ -301,13 +317,18 @@ class _SignInPageState extends State<SignInPage> {
                       : _openPhoneSheet,
                 ),
                 const SizedBox(height: OSpace.m),
-                OButton(
-                  label: 'Continue with Apple',
-                  variant: OButtonVariant.secondary,
-                  icon: Icons.apple_rounded,
-                  expand: true,
-                  onPressed: data.loading ? null : widget.onApple,
-                ),
+                // Apple is only rendered when a real handler exists. A
+                // provider this build cannot complete is not offered at all.
+                if (widget.onApple != null) ...[
+                  OButton(
+                    label: 'Continue with Apple',
+                    variant: OButtonVariant.secondary,
+                    icon: Icons.apple_rounded,
+                    expand: true,
+                    onPressed: data.loading ? null : widget.onApple,
+                  ),
+                  const SizedBox(height: OSpace.m),
+                ],
                 const SizedBox(height: OSpace.l),
                 const _OrDivider(),
                 const SizedBox(height: OSpace.l),
@@ -381,7 +402,7 @@ class _SignInPageState extends State<SignInPage> {
                   const SizedBox(height: OSpace.l),
                   _InlineError(
                     message: data.error!,
-                    onRetry: widget.onRetry ?? _submit,
+                    onRetry: widget.onRetry,
                   ),
                 ],
                 const SizedBox(height: OSpace.xl),
@@ -410,30 +431,30 @@ class _SignInPageState extends State<SignInPage> {
                   ],
                 ),
                 const SizedBox(height: OSpace.l),
-                Text.rich(
-                  TextSpan(
-                    text: 'By signing in, you agree to our ',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                    children: [
-                      TextSpan(
-                        text: 'Terms',
-                        style: OType.caption.copyWith(
-                          color: c.text,
-                          decoration: TextDecoration.underline,
-                        ),
-                      ),
-                      const TextSpan(text: ' and '),
-                      TextSpan(
-                        text: 'Privacy Policy',
-                        style: OType.caption.copyWith(
-                          color: c.text,
-                          decoration: TextDecoration.underline,
-                        ),
-                      ),
-                      const TextSpan(text: '.'),
-                    ],
-                  ),
-                  textAlign: TextAlign.center,
+                // Underlining is a promise of a tap. Without a handler the
+                // sentence stays plain text instead of faking a link.
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(
+                      'By signing in, you agree to our ',
+                      style: OType.caption.copyWith(color: c.textMuted),
+                    ),
+                    _LegalLink(label: 'Terms', onTap: widget.onTerms),
+                    Text(
+                      ' and ',
+                      style: OType.caption.copyWith(color: c.textMuted),
+                    ),
+                    _LegalLink(
+                      label: 'Privacy Policy',
+                      onTap: widget.onPrivacy,
+                    ),
+                    Text(
+                      '.',
+                      style: OType.caption.copyWith(color: c.textMuted),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -557,10 +578,10 @@ class _LanguagePill extends StatelessWidget {
 }
 
 class _InlineError extends StatelessWidget {
-  const _InlineError({required this.message, required this.onRetry});
+  const _InlineError({required this.message, this.onRetry});
 
   final String message;
-  final VoidCallback onRetry;
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -596,16 +617,57 @@ class _InlineError extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(message, style: OType.bodySm.copyWith(color: c.danger)),
-                  const SizedBox(height: OSpace.xs),
-                  OButton(
-                    label: 'Try again',
-                    variant: OButtonVariant.ghost,
-                    onPressed: onRetry,
-                  ),
+                  if (onRetry != null) ...[
+                    const SizedBox(height: OSpace.xs),
+                    OButton(
+                      label: 'Try again',
+                      variant: OButtonVariant.ghost,
+                      onPressed: onRetry,
+                    ),
+                  ],
                 ],
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Inline legal link with a 48 dp tap target. Without [onTap] it degrades to
+/// plain text, never a dead underline.
+class _LegalLink extends StatelessWidget {
+  const _LegalLink({required this.label, this.onTap});
+
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final text = Text(
+      label,
+      style: OType.caption.copyWith(
+        color: onTap == null ? c.textMuted : c.text,
+        decoration: onTap == null ? null : TextDecoration.underline,
+        decorationColor: c.textMuted,
+      ),
+    );
+    if (onTap == null) return text;
+    return Semantics(
+      container: true,
+      label: label,
+      button: true,
+      onTap: onTap,
+      child: ExcludeSemantics(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: OSpace.touch),
+            child: Center(widthFactor: 1, heightFactor: 1, child: text),
+          ),
         ),
       ),
     );

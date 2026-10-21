@@ -14,7 +14,9 @@ enum V2TakeControlStatus { ready, loading, ended, error }
 class V2TakeControlData {
   const V2TakeControlData({
     this.status = V2TakeControlStatus.ready,
-    this.countdownLabel = 'Ovid paused · 4:59',
+    // No countdown by default: the server does not put a timer on human
+    // control, so showing "4:59" would be invented.
+    this.countdownLabel = '',
     this.keyboard = false,
     this.trackpad = false,
     this.errorMessage = 'Ovid could not pause the page. Try again.',
@@ -23,7 +25,7 @@ class V2TakeControlData {
       'Typing and form entries',
       'Opening new pages',
     ],
-    this.startWindowLabel = 'Start within 45 s or Ovid keeps driving.',
+    this.startWindowLabel = 'Ovid stays paused until you hand control back.',
   });
 
   final V2TakeControlStatus status;
@@ -73,7 +75,8 @@ class TakeControlSheet extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (data.status != V2TakeControlStatus.ended) ...[
+          if (data.status != V2TakeControlStatus.ended &&
+              data.countdownLabel.isNotEmpty) ...[
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: OSpace.l),
               child: _CountdownPill(label: data.countdownLabel),
@@ -228,7 +231,12 @@ class _PanelBody extends StatelessWidget {
         message:
             'Ovid is back to watching this tab. You can ask to take over '
             'again at any time.',
-        action: OButton(label: 'Back to browser', onPressed: onStayWatching),
+        action: onStayWatching == null
+            ? null
+            : OButton(
+                label: 'Back to browser',
+                onPressed: onStayWatching,
+              ),
       ),
       V2TakeControlStatus.error => OErrorState(
         title: 'Could not pause',
@@ -249,10 +257,14 @@ class _PanelBody extends StatelessWidget {
               child: Icon(Icons.front_hand_outlined, size: 28, color: c.accent),
             ),
             const SizedBox(height: OSpace.m),
-            Text(
-              'Take control',
-              textAlign: TextAlign.center,
-              style: OType.h1.copyWith(color: c.text),
+            Semantics(
+              container: true,
+              header: true,
+              child: Text(
+                'Take control',
+                textAlign: TextAlign.center,
+                style: OType.h1.copyWith(color: c.text),
+              ),
             ),
             const SizedBox(height: OSpace.s),
             ConstrainedBox(
@@ -303,48 +315,61 @@ class _PanelBody extends StatelessWidget {
                 ),
               ),
             ],
-            const SizedBox(height: OSpace.m),
-            Row(
-              children: [
-                Expanded(
-                  child: _ToolChip(
-                    icon: Icons.keyboard_outlined,
-                    label: 'Show keyboard',
-                    selected: data.keyboard,
-                    onTap: onToggleKeyboard,
-                  ),
-                ),
-                const SizedBox(width: OSpace.m),
-                Expanded(
-                  child: _ToolChip(
-                    icon: Icons.mouse_outlined,
-                    label: 'Trackpad',
-                    selected: data.trackpad,
-                    onTap: onToggleTrackpad,
-                  ),
+            // Only tools this build can actually drive are offered. A chip
+            // with no handler would toggle nothing.
+            if (onToggleKeyboard != null || onToggleTrackpad != null) ...[
+              const SizedBox(height: OSpace.m),
+              Row(
+                children: [
+                  if (onToggleKeyboard != null)
+                    Expanded(
+                      child: _ToolChip(
+                        icon: Icons.keyboard_outlined,
+                        label: 'Show keyboard',
+                        selected: data.keyboard,
+                        onTap: onToggleKeyboard,
+                      ),
+                    ),
+                  if (onToggleKeyboard != null && onToggleTrackpad != null)
+                    const SizedBox(width: OSpace.m),
+                  if (onToggleTrackpad != null)
+                    Expanded(
+                      child: _ToolChip(
+                        icon: Icons.mouse_outlined,
+                        label: 'Trackpad',
+                        selected: data.trackpad,
+                        onTap: onToggleTrackpad,
+                      ),
+                    ),
+                ],
+              ),
+            ],
+            if (onStart != null) ...[
+              const SizedBox(height: OSpace.m),
+              OButton(
+                label: 'Start controlling',
+                icon: Icons.front_hand_outlined,
+                expand: true,
+                onPressed: onStart,
+              ),
+              if (data.startWindowLabel.isNotEmpty) ...[
+                const SizedBox(height: OSpace.s),
+                Text(
+                  data.startWindowLabel,
+                  textAlign: TextAlign.center,
+                  style: OType.caption.copyWith(color: c.warn),
                 ),
               ],
-            ),
-            const SizedBox(height: OSpace.m),
-            OButton(
-              label: 'Start controlling',
-              icon: Icons.front_hand_outlined,
-              expand: true,
-              onPressed: onStart,
-            ),
-            const SizedBox(height: OSpace.s),
-            Text(
-              data.startWindowLabel,
-              textAlign: TextAlign.center,
-              style: OType.caption.copyWith(color: c.warn),
-            ),
-            const SizedBox(height: OSpace.s),
-            OButton(
-              label: 'Stay watching',
-              variant: OButtonVariant.secondary,
-              expand: true,
-              onPressed: onStayWatching,
-            ),
+            ],
+            if (onStayWatching != null) ...[
+              const SizedBox(height: OSpace.s),
+              OButton(
+                label: 'Stay watching',
+                variant: OButtonVariant.secondary,
+                expand: true,
+                onPressed: onStayWatching,
+              ),
+            ],
             const SizedBox(height: OSpace.m),
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -353,8 +378,8 @@ class _PanelBody extends StatelessWidget {
                 const SizedBox(width: OSpace.s),
                 Expanded(
                   child: Text(
-                    'Ovid resumes when the timer ends, or when you hand back '
-                    'control.',
+                    'Ovid resumes when you hand control back, or when this '
+                    'viewer closes.',
                     style: OType.caption.copyWith(color: c.textFaint),
                   ),
                 ),

@@ -38,7 +38,17 @@ const _data = V2VoiceReplyData(
 
 void main() {
   testWidgets('renders the voice note and its visual card', (tester) async {
-    await tester.pumpWidget(_app(const V2VoiceReplyCard(data: _data)));
+    await tester.pumpWidget(
+      _app(
+        V2VoiceReplyCard(
+          data: _data,
+          onPlay: () {},
+          onSeek: (_) {},
+          onOpenAction: () {},
+          onToggleTranscript: (_) {},
+        ),
+      ),
+    );
 
     expect(find.text('Your portfolio is ready'), findsOneWidget);
     expect(
@@ -156,6 +166,21 @@ void main() {
     expect(formatVoiceDuration(const Duration(seconds: 61)), '1:01');
     expect(formatVoiceDuration(const Duration(seconds: 3661)), '1:01:01');
     expect(formatVoiceDuration(const Duration(seconds: -4)), '0:00');
+  });
+
+  testWidgets('hides transport, action and toggle when the host wires none', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(const V2VoiceReplyCard(data: _data)));
+
+    expect(find.bySemanticsLabel('Play voice reply'), findsNothing);
+    expect(find.bySemanticsLabel('Pause voice reply'), findsNothing);
+    expect(find.text('Open preview'), findsNothing);
+    expect(find.text('Show transcript'), findsNothing);
+    expect(find.text('Hide transcript'), findsNothing);
+    // The waveform is still readable, but it is not announced as a slider.
+    expect(find.bySemanticsLabel('Seek voice reply'), findsNothing);
+    expect(find.text('0:03 / 0:12'), findsOneWidget);
   });
 
   testWidgets('lays out at 320 dp with 200 % text in light and dark', (

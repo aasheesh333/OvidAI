@@ -425,6 +425,19 @@ void main() {
     expect(copies, 1);
   });
 
+  testWidgets('unwired chrome renders no dead icons', (tester) async {
+    await tester.pumpWidget(_app(const V2StudioWorkspacePage(data: _data)));
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Workspace options'), findsNothing);
+    expect(find.byKey(const Key('studio-copy-file')), findsNothing);
+    expect(find.text('Cloud workspace connected'), findsOneWidget);
+    expect(
+      find.text('Edits save to your branch as you type.'),
+      findsNothing,
+    );
+  });
+
   testWidgets(
     'an unbound workspace shows the studio gate instead of the editor',
     (tester) async {
@@ -449,6 +462,7 @@ void main() {
       expect(find.byKey(const Key('studio-gate')), findsOneWidget);
       expect(find.text('Pick a folder to start coding'), findsOneWidget);
       expect(find.text('No file open'), findsNothing);
+      expect(find.text('Cloud workspace connected'), findsNothing);
 
       await tester.ensureVisible(find.text('Pick a folder'));
       await tester.pumpAndSettle();

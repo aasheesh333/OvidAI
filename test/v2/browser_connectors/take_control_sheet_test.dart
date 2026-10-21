@@ -49,10 +49,19 @@ void main() {
   testWidgets('take control sheet shows the countdown and both choices', (
     tester,
   ) async {
-    await _pump(tester, TakeControlSheet(data: const V2TakeControlData()));
+    await _pump(
+      tester,
+      TakeControlSheet(
+        data: const V2TakeControlData(countdownLabel: 'Ovid is driving this page'),
+        onStart: () {},
+        onStayWatching: () {},
+        onToggleKeyboard: () {},
+        onToggleTrackpad: () {},
+      ),
+    );
 
     expect(find.text('Take control'), findsOneWidget);
-    expect(find.text('Ovid paused · 4:59'), findsOneWidget);
+    expect(find.text('Ovid is driving this page'), findsOneWidget);
     expect(find.text('Start controlling'), findsOneWidget);
     expect(find.text('Stay watching'), findsOneWidget);
     expect(find.text('Show keyboard'), findsOneWidget);
@@ -62,12 +71,16 @@ void main() {
   testWidgets('take control sheet renders in dark theme', (tester) async {
     await _pump(
       tester,
-      TakeControlSheet(data: const V2TakeControlData()),
+      TakeControlSheet(
+        data: const V2TakeControlData(countdownLabel: 'Ovid is driving this page'),
+        onStart: () {},
+        onStayWatching: () {},
+      ),
       theme: OTheme.dark(),
     );
 
     expect(find.text('Take control'), findsOneWidget);
-    expect(find.text('Ovid paused · 4:59'), findsOneWidget);
+    expect(find.text('Ovid is driving this page'), findsOneWidget);
   });
 
   testWidgets('ended session shows an empty state and a way back', (
@@ -137,8 +150,17 @@ void main() {
     expect(stays, 1);
   });
 
-  testWidgets('sheet explains what pauses and the 45 s window', (tester) async {
-    await _pump(tester, TakeControlSheet(data: const V2TakeControlData()));
+  testWidgets('sheet explains what pauses and when Ovid resumes', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      TakeControlSheet(
+        data: const V2TakeControlData(),
+        onStart: () {},
+        onStayWatching: () {},
+      ),
+    );
 
     expect(find.text('What pauses'), findsOneWidget);
     expect(
@@ -148,9 +170,14 @@ void main() {
       ),
       findsOneWidget,
     );
+    // No invented 45 s deadline: the server puts no timer on human control.
     expect(
-      find.text('Start within 45 s or Ovid keeps driving.'),
+      find.text('Ovid stays paused until you hand control back.'),
       findsOneWidget,
+    );
+    expect(
+      find.textContaining('45 s'),
+      findsNothing,
     );
   });
 
@@ -247,10 +274,16 @@ void main() {
   testWidgets('countdown pill is not clipped at 200 % text', (tester) async {
     await _pumpNarrow(
       tester,
-      TakeControlSheet(data: const V2TakeControlData()),
+      TakeControlSheet(
+        data: const V2TakeControlData(
+          countdownLabel: 'Ovid is driving this page',
+        ),
+        onStart: () {},
+        onStayWatching: () {},
+      ),
     );
 
-    final pill = find.text('Ovid paused · 4:59');
+    final pill = find.text('Ovid is driving this page');
     expect(pill, findsOneWidget);
     final textHeight = tester.getSize(pill).height;
     // A 12 pt caption at 200 % needs ~33.6 dp of line box; anything less means
@@ -283,22 +316,14 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('a chip with no callback is announced as disabled', (
-    tester,
-  ) async {
-    final handle = tester.ensureSemantics();
+  testWidgets('a chip with no callback is not rendered', (tester) async {
     await _pump(tester, TakeControlSheet(data: const V2TakeControlData()));
 
-    expect(
-      tester.getSemantics(find.text('Trackpad')),
-      matchesSemantics(
-        label: 'Trackpad',
-        isButton: true,
-        hasSelectedState: true,
-        hasEnabledState: true,
-      ),
-    );
-    handle.dispose();
+    // A tool that cannot drive the page is not offered at all.
+    expect(find.text('Trackpad'), findsNothing);
+    expect(find.text('Show keyboard'), findsNothing);
+    expect(find.text('Start controlling'), findsNothing);
+    expect(find.text('Stay watching'), findsNothing);
   });
 
   testWidgets('tapping the scrim stays watching', (tester) async {
@@ -348,11 +373,14 @@ void main() {
     await _pump(
       tester,
       TakeControlSheet(
-        data: const V2TakeControlData(status: V2TakeControlStatus.ended),
+        data: const V2TakeControlData(
+          status: V2TakeControlStatus.ended,
+          countdownLabel: 'Ovid is driving this page',
+        ),
       ),
     );
 
-    expect(find.text('Ovid paused · 4:59'), findsNothing);
+    expect(find.text('Ovid is driving this page'), findsNothing);
     expect(find.text('Session ended'), findsOneWidget);
   });
 }

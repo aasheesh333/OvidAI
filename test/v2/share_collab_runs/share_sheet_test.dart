@@ -62,12 +62,22 @@ void main() {
     'renders the link, permissions and privacy note in light and dark',
     (tester) async {
       for (final theme in [OTheme.light(), OTheme.dark()]) {
-        await _pump(tester, ShareSheet(data: _data()), theme);
+        await _pump(
+          tester,
+          ShareSheet(
+            data: _data(),
+            onToggleAnyoneCanView: (_) {},
+            onToggleShowName: (_) {},
+            onShareTarget: (_) {},
+            onStopSharing: () {},
+          ),
+          theme,
+        );
 
         expect(find.text('Share this chat'), findsOneWidget);
         expect(find.text('ovidsi.com/c/79f9b4c0e'), findsOneWidget);
         expect(find.text('Copy link'), findsOneWidget);
-        expect(find.text('Anyone with the link can view'), findsOneWidget);
+        expect(find.text('Anyone with the link can read this chat'), findsOneWidget);
         expect(find.text('Show my name'), findsOneWidget);
         expect(find.text('Displays Aarav Sharma as creator'), findsOneWidget);
         expect(find.text('WhatsApp'), findsOneWidget);
@@ -87,7 +97,11 @@ void main() {
     var created = 0;
     await _pump(
       tester,
-      ShareSheet(data: _data(active: false), onCreateLink: () => created++),
+      ShareSheet(
+        data: _data(active: false),
+        onCreateLink: () => created++,
+        onModeChanged: (_) {},
+      ),
       OTheme.light(),
     );
 
@@ -122,7 +136,11 @@ void main() {
     await tester.ensureVisible(find.text('Stop sharing'));
     await tester.pump();
     await tester.tap(find.text('Stop sharing'));
-    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text('Revoke this link?'), findsOneWidget);
+    expect(stops, 0);
+    await tester.tap(find.text('Revoke'));
+    await tester.pumpAndSettle();
     expect(stops, 1);
   });
 
@@ -200,21 +218,13 @@ void main() {
     expect(closes, 1);
   });
 
-  testWidgets('share targets are announced, disabled when unwired', (
+  testWidgets('share targets are hidden when the host cannot share', (
     tester,
   ) async {
     final handle = tester.ensureSemantics();
 
     await _pump(tester, ShareSheet(data: _data()), OTheme.light());
-    expect(
-      tester.getSemantics(find.bySemanticsLabel('Share on Slack')),
-      isSemantics(
-        label: 'Share on Slack',
-        isButton: true,
-        hasEnabledState: true,
-        isEnabled: false,
-      ),
-    );
+    expect(find.bySemanticsLabel('Share on Slack'), findsNothing);
 
     await _pump(
       tester,
@@ -282,6 +292,8 @@ void main() {
           memberCount: 3,
         ),
         onModeChanged: (mode) => picked = mode,
+        onToggleAnyoneCanView: (_) {},
+        onToggleShowName: (_) {},
       ),
       OTheme.light(),
     );
@@ -289,7 +301,7 @@ void main() {
     expect(find.text('SHARE MODE'), findsOneWidget);
     expect(find.text('Collab'), findsOneWidget);
     expect(find.text('Read only'), findsOneWidget);
-    expect(find.text('Anyone with the link can view'), findsOneWidget);
+    expect(find.text('Anyone with the link can read this chat'), findsOneWidget);
     expect(find.textContaining('Up to 50 people can join'), findsNothing);
 
     await tester.tap(find.text('Collab'));
@@ -318,7 +330,7 @@ void main() {
       find.textContaining('Up to 50 people can join'),
       findsOneWidget,
     );
-    expect(find.text('Anyone with the link can view'), findsNothing);
+    expect(find.text('Anyone with the link can read this chat'), findsNothing);
     expect(find.text('Read only'), findsOneWidget);
   });
 
@@ -366,7 +378,7 @@ void main() {
     await tester.ensureVisible(find.text('Fork into my account'));
     await tester.pump();
     expect(find.text('Stop sharing'), findsNothing);
-    expect(find.text('Anyone with the link can view'), findsNothing);
+    expect(find.text('Anyone with the link can read this chat'), findsNothing);
     await tester.tap(find.text('Fork into my account'));
     await tester.pump();
     expect(forks, 1);
@@ -526,5 +538,90 @@ void main() {
     await tester.tap(find.text('Fork into my account'));
     await tester.pump();
     expect(forks, 1);
+  });
+
+  testWidgets('an empty link is not copyable and shows no fake Copied', (
+    tester,
+  ) async {
+    var copies = 0;
+    await _pump(
+      tester,
+      ShareSheet(
+        data: const V2ShareSheetData(link: '', creatorName: 'Aarav'),
+        onCopyLink: () => copies++,
+      ),
+      OTheme.light(),
+    );
+
+    expect(find.text('No link yet'), findsOneWidget);
+    await tester.tap(find.text('Copy link'), warnIfMissed: false);
+    await tester.pump();
+    expect(copies, 0);
+  });
+
+  testWidgets('an unwired mode offers no dead switch', (tester) async {
+    await _pump(
+      tester,
+      ShareSheet(data: _data()),
+      OTheme.light(),
+    );
+
+    expect(find.text('SHARE MODE'), findsNothing);
+    expect(find.text('Switch'), findsNothing);
+    // The link card still states the real mode.
+    expect(find.text('Read only'), findsOneWidget);
+  });
+
+  testWidgets('revoking the card link asks before it calls the host', (
+    tester,
+  ) async {
+    var stops = 0;
+    await _pump(
+      tester,
+      ShareSheet(data: _data(), onStopSharing: () => stops++),
+      OTheme.light(),
+    );
+
+    await tester.ensureVisible(find.text('Revoke link'));
+    await tester.pump();
+    await tester.tap(find.text('Revoke link'));
+    await tester.pumpAndSettle();
+    expect(find.text('Revoke this link?'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(stops, 0);
+
+    await tester.tap(find.text('Revoke link'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Revoke'));
+    await tester.pumpAndSettle();
+    expect(stops, 1);
+  });
+
+  testWidgets('production wiring fits 320 dp at 200 % text in both themes', (
+    tester,
+  ) async {
+    for (final theme in [OTheme.light(), OTheme.dark()]) {
+      await _pumpNarrow(
+        tester,
+        ShareSheet(
+          data: V2ShareSheetData(
+            link: 'https://ovidsi.com/s/79f9b4c0e',
+            creatorName: 'Aarav Sharma',
+          ),
+          onCopyLink: () {},
+          onShareTarget: (_) {},
+          onStopSharing: () {},
+          onClose: () {},
+        ),
+        theme,
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Copy link'), findsOneWidget);
+      expect(find.text('Stop sharing'), findsOneWidget);
+      // No mode switch is shown because the host did not wire one.
+      expect(find.text('SHARE MODE'), findsNothing);
+    }
   });
 }

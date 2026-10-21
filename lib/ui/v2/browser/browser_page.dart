@@ -98,6 +98,7 @@ class V2BrowserData {
     this.trackpad = false,
     this.canGoBack = false,
     this.canGoForward = false,
+    this.viewportAspectRatio,
     this.fpsLabel = '3–5 fps',
     this.emptyTitle = 'No page open',
     this.emptyMessage = 'Ask Ovid to open a page and it will show up here.',
@@ -140,6 +141,10 @@ class V2BrowserData {
   final bool canGoBack;
   final bool canGoForward;
 
+  /// The live page's aspect ratio (`width / height`) from the server, used to
+  /// map a tap on a letterboxed frame to the right page pixel.
+  final double? viewportAspectRatio;
+
   /// Product hint for the screencast cadence, e.g. `3–5 fps`.
   final String fpsLabel;
 
@@ -164,8 +169,13 @@ class V2BrowserData {
   bool get isLive => connection == V2BrowserConnection.live;
 }
 
-/// The live browser view. Ovid opens and closes tabs, so the plus is disabled
-/// and explains who is in charge.
+/// The live browser view. Ovid owns the tabs, so the plus is disabled and
+/// explains who is in charge.
+///
+/// This widget is presentational and deliberately has no fallback handlers:
+/// a control whose callback is null is not rendered, so an un-wired build
+/// shows fewer buttons instead of dead ones. The live wiring lives in
+/// `BrowserLivePage`.
 class BrowserPage extends StatelessWidget {
   const BrowserPage({
     super.key,
@@ -179,14 +189,13 @@ class BrowserPage extends StatelessWidget {
     this.onRetry,
     this.onMenu,
     this.onStop,
-    this.onDownload,
-    this.onUpload,
     this.onShowActionLog,
     this.onReleaseControl,
     this.onToggleKeyboard,
     this.onToggleTrackpad,
     this.onBack,
     this.onForward,
+    this.onPageTap,
   });
 
   final V2BrowserData data;
@@ -203,14 +212,17 @@ class BrowserPage extends StatelessWidget {
   final VoidCallback? onRetry;
   final VoidCallback? onMenu;
   final VoidCallback? onStop;
-  final VoidCallback? onDownload;
-  final VoidCallback? onUpload;
   final VoidCallback? onShowActionLog;
   final VoidCallback? onReleaseControl;
   final VoidCallback? onToggleKeyboard;
   final VoidCallback? onToggleTrackpad;
   final VoidCallback? onBack;
   final VoidCallback? onForward;
+
+  /// A tap on the live picture while the person controls it, normalized to
+  /// the frame. The page passes it to the viewport, which maps the painted
+  /// image rect; the wiring layer sends the server's CSS-pixel input.
+  final void Function(double x, double y)? onPageTap;
 
   @override
   Widget build(BuildContext context) {
@@ -221,13 +233,16 @@ class BrowserPage extends StatelessWidget {
         title: 'Browser',
         subtitle: data.tabs.isEmpty
             ? null
+            : data.controlling
+            ? '${data.tabs.length} tabs · you are in control'
             : '${data.tabs.length} tabs · read-only view',
         actions: [
-          OIconButton(
-            icon: Icons.more_vert_rounded,
-            semanticLabel: 'Browser menu',
-            onPressed: onMenu,
-          ),
+          if (onMenu != null)
+            OIconButton(
+              icon: Icons.more_vert_rounded,
+              semanticLabel: 'Browser menu',
+              onPressed: onMenu,
+            ),
         ],
       ),
       body: OFadeSlide(
@@ -264,11 +279,25 @@ class BrowserPage extends StatelessWidget {
         icon: Icons.travel_explore_rounded,
         title: data.emptyTitle,
         message: data.emptyMessage,
-        action: OButton(
-          label: 'Ask Ovid to open a page',
-          icon: Icons.add_rounded,
-          onPressed: onOpenRequested,
-        ),
+        // The agent opens pages. Only show the request button when this build
+        // has a real way to ask it.
+        action: onOpenRequested == null
+            ? null
+            : OButton(
+                label: 'Ask Ovid to open a page',
+                icon: Icons.add_rounded,
+                onPressed: onOpenRequested,
+              ),
+        // An empty screen can still be re-attached: that is a real action,
+        // not a promise.
+        secondaryAction: onRetry == null
+            ? null
+            : OButton(
+                label: 'Try again',
+                icon: Icons.refresh_rounded,
+                variant: OButtonVariant.secondary,
+                onPressed: onRetry,
+              ),
       ),
       V2BrowserStatus.error => OErrorState(
         title: 'Live view paused',
@@ -300,8 +329,11 @@ class BrowserPage extends StatelessWidget {
     // Only the log scrolls with the picture. The driving row and the control
     // bar stay pinned to the bottom so Stop, take control, upload and download
     // are always one tap away, even on a short window or at 200 % text.
+    // No log source, no log panel: an empty "Action log" header with a
+    // chevron would promise a screen that does not exist.
     final activity = <Widget>[
-      _ActionLog(actions: data.actions, onShowAll: onShowActionLog),
+      if (data.actions.isNotEmpty || onShowActionLog != null)
+        _ActionLog(actions: data.actions, onShowAll: onShowActionLog),
     ];
     final viewport = Padding(
       padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, 0),
@@ -322,6 +354,8 @@ class BrowserPage extends StatelessWidget {
               controlling: data.controlling,
               onTakeControl: onTakeControl,
               onRetry: onRetry,
+              onPageTap: onPageTap,
+              frameAspectRatio: data.viewportAspectRatio,
               fpsLabel: data.fpsLabel,
             ),
     );
@@ -369,13 +403,17 @@ class BrowserPage extends StatelessWidget {
               detail: data.drivingDetail,
             ),
           ),
-          const SizedBox(width: OSpace.s),
-          OButton(
-            label: 'Stop',
-            icon: Icons.stop_circle_outlined,
-            variant: OButtonVariant.secondary,
-            onPressed: onStop,
-          ),
+          // There is no server op that stops the agent's browser turn, so a
+          // Stop button only appears when the wiring layer really has one.
+          if (onStop != null) ...[
+            const SizedBox(width: OSpace.s),
+            OButton(
+              label: 'Stop',
+              icon: Icons.stop_circle_outlined,
+              variant: OButtonVariant.secondary,
+              onPressed: onStop,
+            ),
+          ],
         ],
       ),
     );
@@ -389,18 +427,14 @@ class BrowserPage extends StatelessWidget {
       countdownLabel: data.headlessLabel,
       // The built-in viewport carries its own tap-to-control overlay. A
       // custom viewport cannot, so the bar keeps the labelled primary
-      // action there instead of showing a second hidden one. With no
-      // callback at all the bar still shows the disabled label so the
-      // action is explained, not silently missing.
-      showTakeControlLabel: viewportChild != null || onTakeControl == null,
+      // action there instead of showing a second hidden one.
+      showTakeControlLabel: viewportChild != null,
       onTakeControl: onTakeControl,
       onReleaseControl: onReleaseControl,
       onToggleKeyboard: onToggleKeyboard,
       onToggleTrackpad: onToggleTrackpad,
       onBack: onBack,
       onForward: onForward,
-      onUpload: onUpload,
-      onDownload: onDownload,
     );
     return LayoutBuilder(
       builder: (context, page) {
@@ -543,12 +577,13 @@ class _ConnectionBanner extends StatelessWidget {
                 children: [
                   messageRow,
                   const SizedBox(height: OSpace.s),
-                  OButton(
-                    label: 'Reconnect',
-                    variant: OButtonVariant.ghost,
-                    expand: true,
-                    onPressed: onRetry,
-                  ),
+                  if (onRetry != null)
+                    OButton(
+                      label: 'Reconnect',
+                      variant: OButtonVariant.ghost,
+                      expand: true,
+                      onPressed: onRetry,
+                    ),
                 ],
               );
             }
@@ -562,11 +597,12 @@ class _ConnectionBanner extends StatelessWidget {
                     style: OType.caption.copyWith(color: c.textMuted),
                   ),
                 ),
-                OButton(
-                  label: 'Reconnect',
-                  variant: OButtonVariant.ghost,
-                  onPressed: onRetry,
-                ),
+                if (onRetry != null)
+                  OButton(
+                    label: 'Reconnect',
+                    variant: OButtonVariant.ghost,
+                    onPressed: onRetry,
+                  ),
               ],
             );
           },
@@ -632,12 +668,14 @@ class _ActionLog extends StatelessWidget {
                             ],
                           ),
                         ),
-                        const SizedBox(width: OSpace.xs),
-                        Icon(
-                          Icons.chevron_right_rounded,
-                          size: 18,
-                          color: c.textFaint,
-                        ),
+                        if (onShowAll != null) ...[
+                          const SizedBox(width: OSpace.xs),
+                          Icon(
+                            Icons.chevron_right_rounded,
+                            size: 18,
+                            color: c.textFaint,
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -808,12 +846,13 @@ class _AddressBlock extends StatelessWidget {
                   ),
                   const SizedBox(width: OSpace.s),
                   if (!badgeOnOwnLine) badge,
-                  OIconButton(
-                    icon: Icons.content_copy_rounded,
-                    semanticLabel: 'Copy address',
-                    size: 18,
-                    onPressed: address.isEmpty ? null : onCopyAddress,
-                  ),
+                  if (onCopyAddress != null && address.isNotEmpty)
+                    OIconButton(
+                      icon: Icons.content_copy_rounded,
+                      semanticLabel: 'Copy address',
+                      size: 18,
+                      onPressed: onCopyAddress,
+                    ),
                 ],
               ),
             ),

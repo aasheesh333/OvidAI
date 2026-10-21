@@ -160,13 +160,45 @@ class ShareSheet extends StatelessWidget {
     );
   }
 
+  /// Revoking is irreversible for everyone holding the link, so the sheet owns
+  /// the confirmation even when the host's callback is a bare service call.
+  Future<void> _confirmRevoke(BuildContext context) async {
+    final revoke = onStopSharing;
+    if (revoke == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Revoke this link?'),
+        content: const Text(
+          'Anyone with the link loses access immediately. This cannot be '
+          'undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: OColors.of(dialogContext).danger,
+              foregroundColor: OColors.of(dialogContext).onAccent,
+            ),
+            child: const Text('Revoke'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) revoke();
+  }
+
   Widget _empty(BuildContext context) {
     final c = OColors.of(context);
     final message = data.isCollab
         ? 'Create a live room for up to ${data.capacity} people. One person '
               'sends at a time and you pay for storage.'
-        : 'Create a link anyone can view. Your files and connectors stay '
-              'private.';
+        : 'Create a read-only link anyone can open and fork. Your files and '
+              'connectors stay private.';
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
         OSpace.l,
@@ -178,7 +210,9 @@ class ShareSheet extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _header(context, c),
-          if (data.canChangeMode && !data.viewerCanFork) ...[
+          if (data.canChangeMode &&
+              !data.viewerCanFork &&
+              onModeChanged != null) ...[
             const SizedBox(height: OSpace.l),
             _modeSelector(context, c, showCurrent: false),
           ],
@@ -215,12 +249,19 @@ class ShareSheet extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: OSpace.l),
-                OButton(
-                  label: 'Create link',
-                  icon: Icons.link_rounded,
-                  expand: true,
-                  onPressed: onCreateLink,
-                ),
+                if (onCreateLink != null)
+                  OButton(
+                    label: 'Create link',
+                    icon: Icons.link_rounded,
+                    expand: true,
+                    onPressed: onCreateLink,
+                  )
+                else
+                  Text(
+                    'A link can only be created from a signed-in account.',
+                    textAlign: TextAlign.center,
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  ),
               ],
             ),
           ),
@@ -244,7 +285,9 @@ class ShareSheet extends StatelessWidget {
             _header(context, c),
             const SizedBox(height: OSpace.l),
             _linkBlock(context),
-            if (data.canChangeMode && !data.viewerCanFork) ...[
+            if (data.canChangeMode &&
+                !data.viewerCanFork &&
+                onModeChanged != null) ...[
               const SizedBox(height: OSpace.m),
               _modeSelector(context, c, showCurrent: true),
             ],
@@ -256,20 +299,22 @@ class ShareSheet extends StatelessWidget {
               const SizedBox(height: OSpace.m),
               _forkNoteCard(c),
             ],
-            const SizedBox(height: OSpace.l),
-            OSectionHeader(
-              label: 'Share directly',
-              padding: const EdgeInsets.only(bottom: OSpace.s),
-            ),
-            _targets(context, c),
-            if (!data.viewerCanFork) ...[
+            if (onShareTarget != null) ...[
+              const SizedBox(height: OSpace.l),
+              OSectionHeader(
+                label: 'Share directly',
+                padding: const EdgeInsets.only(bottom: OSpace.s),
+              ),
+              _targets(context, c),
+            ],
+            if (!data.viewerCanFork && onStopSharing != null) ...[
               const SizedBox(height: OSpace.l),
               OButton(
                 label: 'Stop sharing',
                 icon: Icons.link_off_rounded,
                 variant: OButtonVariant.danger,
                 expand: true,
-                onPressed: onStopSharing,
+                onPressed: () => _confirmRevoke(context),
               ),
             ],
             const SizedBox(height: OSpace.l),
@@ -289,7 +334,14 @@ class ShareSheet extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(title, style: OType.h2.copyWith(color: c.text)),
+              Semantics(
+                container: true,
+                header: true,
+                child: Text(
+                  title,
+                  style: OType.h2.copyWith(color: c.text),
+                ),
+              ),
               if (explanation != null) ...[
                 const SizedBox(height: OSpace.xs),
                 Text(
@@ -361,63 +413,64 @@ class ShareSheet extends StatelessWidget {
     final icon = data.isCollab
         ? Icons.visibility_rounded
         : Icons.groups_rounded;
-    return OPressable(
-      onTap: onModeChanged == null ? null : () => onModeChanged!(target),
-      semanticLabel: 'Share mode. Switch to $title. $body',
-      child: ExcludeSemantics(
-        child: Container(
-          constraints: const BoxConstraints(minHeight: OSpace.touch),
-          padding: const EdgeInsets.all(OSpace.m),
-          decoration: BoxDecoration(
-            color: c.surface,
-            borderRadius: BorderRadius.circular(ORadius.m),
-            border: Border.all(color: c.hairline),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: c.accentSoft,
-                  borderRadius: BorderRadius.circular(ORadius.s),
-                ),
-                child: Icon(icon, size: 19, color: c.accent),
+    final card = ExcludeSemantics(
+      child: Container(
+        constraints: const BoxConstraints(minHeight: OSpace.touch),
+        padding: const EdgeInsets.all(OSpace.m),
+        decoration: BoxDecoration(
+          color: c.surface,
+          borderRadius: BorderRadius.circular(ORadius.m),
+          border: Border.all(color: c.hairline),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: c.accentSoft,
+                borderRadius: BorderRadius.circular(ORadius.s),
               ),
-              const SizedBox(width: OSpace.m),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      'SHARE MODE',
-                      style: OType.overline.copyWith(color: c.textMuted),
+              child: Icon(icon, size: 19, color: c.accent),
+            ),
+            const SizedBox(width: OSpace.m),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'SHARE MODE',
+                    style: OType.overline.copyWith(color: c.textMuted),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    title,
+                    style: OType.bodySm.copyWith(
+                      color: c.text,
+                      fontWeight: FontWeight.w600,
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      title,
-                      style: OType.bodySm.copyWith(
-                        color: c.text,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-              const SizedBox(width: OSpace.s),
-              Text(
-                'Switch',
-                style: OType.caption.copyWith(
-                  color: c.accent,
-                  fontWeight: FontWeight.w600,
-                ),
+            ),
+            const SizedBox(width: OSpace.s),
+            Text(
+              'Switch',
+              style: OType.caption.copyWith(
+                color: c.accent,
+                fontWeight: FontWeight.w600,
               ),
-              Icon(Icons.swap_horiz_rounded, size: 16, color: c.accent),
-            ],
-          ),
+            ),
+            Icon(Icons.swap_horiz_rounded, size: 16, color: c.accent),
+          ],
         ),
       ),
+    );
+    return OPressable(
+      onTap: () => onModeChanged!(target),
+      semanticLabel: 'Share mode. Switch to $title. $body',
+      child: card,
     );
   }
 
@@ -454,10 +507,12 @@ class ShareSheet extends StatelessWidget {
           copied: data.copied,
           viewer: data.viewerCanFork,
         ),
-        onCopy: onCopyLink,
+        onCopy: data.link.trim().isEmpty ? null : onCopyLink,
         // A viewer can never revoke someone else's link; the card shows the
         // fork action for them instead.
-        onRevoke: data.viewerCanFork ? null : onStopSharing,
+        onRevoke: data.viewerCanFork || onStopSharing == null
+            ? null
+            : () => _confirmRevoke(context),
         onFork: onFork,
       ),
     );
@@ -465,28 +520,37 @@ class ShareSheet extends StatelessWidget {
 
   Widget _permissions(BuildContext context, OColors c) {
     if (data.isCollab) return _collabRules(context, c);
+    final rows = <Widget>[
+      if (onToggleAnyoneCanView != null)
+        _ToggleRow(
+          title: 'Anyone with the link can read this chat',
+          subtitle: 'Read-only. They can fork a copy into their own account.',
+          value: data.anyoneCanView,
+          onChanged: onToggleAnyoneCanView,
+        ),
+      if (onToggleShowName != null)
+        _ToggleRow(
+          title: 'Show my name',
+          subtitle: 'Displays ${data.creatorName} as creator',
+          value: data.showName,
+          onChanged: onToggleShowName,
+        ),
+    ];
+    if (rows.isEmpty) return const SizedBox.shrink();
     return OCard(
       padding: EdgeInsets.zero,
       child: Column(
         children: [
-          _ToggleRow(
-            title: 'Anyone with the link can view',
-            subtitle: 'Read-only. They can fork it into their own account.',
-            value: data.anyoneCanView,
-            onChanged: onToggleAnyoneCanView,
-          ),
-          Divider(
-            height: 1,
-            color: c.hairline,
-            indent: OSpace.l,
-            endIndent: OSpace.l,
-          ),
-          _ToggleRow(
-            title: 'Show my name',
-            subtitle: 'Displays ${data.creatorName} as creator',
-            value: data.showName,
-            onChanged: onToggleShowName,
-          ),
+          for (var i = 0; i < rows.length; i++) ...[
+            rows[i],
+            if (i < rows.length - 1)
+              Divider(
+                height: 1,
+                color: c.hairline,
+                indent: OSpace.l,
+                endIndent: OSpace.l,
+              ),
+          ],
         ],
       ),
     );
@@ -526,18 +590,20 @@ class ShareSheet extends StatelessWidget {
               ],
             ),
           ),
-          Divider(
-            height: 1,
-            color: c.hairline,
-            indent: OSpace.l,
-            endIndent: OSpace.l,
-          ),
-          _ToggleRow(
-            title: 'Show my name',
-            subtitle: 'Displays ${data.creatorName} as creator',
-            value: data.showName,
-            onChanged: onToggleShowName,
-          ),
+          if (onToggleShowName != null) ...[
+            Divider(
+              height: 1,
+              color: c.hairline,
+              indent: OSpace.l,
+              endIndent: OSpace.l,
+            ),
+            _ToggleRow(
+              title: 'Show my name',
+              subtitle: 'Displays ${data.creatorName} as creator',
+              value: data.showName,
+              onChanged: onToggleShowName,
+            ),
+          ],
         ],
       ),
     );

@@ -130,9 +130,13 @@ class _V2BranchPickerSheetState extends State<V2BranchPickerSheet> {
                   Row(
                     children: [
                       Expanded(
-                        child: Text(
-                          'Switch branch',
-                          style: OType.h2.copyWith(color: c.text),
+                        child: Semantics(
+                          container: true,
+                          header: true,
+                          child: Text(
+                            'Switch branch',
+                            style: OType.h2.copyWith(color: c.text),
+                          ),
                         ),
                       ),
                       Icon(Icons.alt_route_rounded, size: 22, color: c.accent),

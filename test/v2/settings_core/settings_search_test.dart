@@ -10,6 +10,7 @@ V2SettingsSearchData _data({
   String initialQuery = '',
   String? errorMessage,
   List<V2SettingsSection>? sections,
+  bool Function(V2SettingsItem item)? canActivate,
 }) {
   V2SettingsItem row(
     String id,
@@ -31,6 +32,7 @@ V2SettingsSearchData _data({
     status: status,
     initialQuery: initialQuery,
     errorMessage: errorMessage,
+    canActivate: canActivate,
     sections:
         sections ??
         <V2SettingsSection>[
@@ -234,6 +236,56 @@ void main() {
       expect(data.errorMessage, 'Offline');
       expect(data.search('account').single.item.id, 'account');
     });
+    test('fromHub only offers rows with a real destination', () {
+      final data = V2SettingsSearchData.fromHub(
+        V2SettingsHubData(
+          account: V2SettingsSection(
+            title: 'Account',
+            items: [
+              V2SettingsItem(
+                id: 'account',
+                label: 'Account',
+                icon: Icons.manage_accounts_rounded,
+                onTap: () {},
+              ),
+              const V2SettingsItem(
+                id: 'ghost',
+                label: 'Ghost',
+                icon: Icons.help_outline_rounded,
+              ),
+            ],
+          ),
+          chat: const V2SettingsSection(
+            title: 'Chat',
+            items: [
+              V2SettingsItem(
+                id: 'show_reasoning',
+                label: 'Show reasoning',
+                icon: Icons.lightbulb_outline_rounded,
+              ),
+            ],
+          ),
+          onReasoningChanged: (_) {},
+        ),
+      );
+
+      final account = data.sections.first.items;
+      expect(
+        data.isActionable(account.first, hasHostHandler: true),
+        isTrue,
+      );
+      expect(
+        data.isActionable(account.last, hasHostHandler: true),
+        isFalse,
+      );
+      expect(
+        data.isActionable(
+          data.sections[1].items.first,
+          hasHostHandler: true,
+        ),
+        isTrue,
+      );
+    });
   });
 
   testWidgets('browse state offers tappable section chips', (tester) async {
@@ -414,6 +466,36 @@ void main() {
         )
         .getSemanticsData();
     expect(semantics.flagsCollection.isEnabled.toBoolOrNull(), isFalse);
+    handle.dispose();
+  });
+
+  testWidgets('a row the host cannot activate is not a tap target', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    _phoneSize(tester);
+    final opened = <V2SettingsSearchResult>[];
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        // The hub knows this row has nowhere to go.
+        _data(canActivate: (item) => item.id != 'storage'),
+        onResultTap: opened.add,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'storage');
+    await tester.pumpAndSettle();
+
+    final node = tester.getSemantics(
+      find.bySemanticsLabel(RegExp('Storage, Data control, disabled')),
+    );
+    expect(node, isSemantics(hasEnabledState: true, isEnabled: false));
+
+    await tester.tap(find.text('Storage'));
+    await tester.pumpAndSettle();
+    expect(opened, isEmpty);
     handle.dispose();
   });
 

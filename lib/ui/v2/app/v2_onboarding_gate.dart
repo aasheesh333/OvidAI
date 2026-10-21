@@ -1,21 +1,30 @@
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/auth_identity.dart';
 import '../../../core/auth_phone_flow.dart';
 import '../../../core/auth_providers.dart';
 import '../../../core/diag.dart';
 import '../../../core/firebase_service.dart';
+import '../../../core/legal_links.dart';
 import '../../../core/revenuecat_billing.dart';
 import '../../../core/state.dart';
 import '../../auth_methods.dart' show AuthPhoneDialog;
 import '../../design/o_components.dart';
 import '../../design/o_tokens.dart';
 import '../onboarding/language_goal_page.dart';
+import '../onboarding/onboarding_prefs.dart';
 import '../onboarding/onboarding_welcome.dart';
 import '../onboarding/paywall_page.dart';
 import '../onboarding/sign_in_page.dart';
 import '../onboarding/splash_page.dart';
+
+export '../onboarding/onboarding_prefs.dart'
+    show
+        V2OnboardingSnapshot,
+        V2OnboardingStore,
+        kV2OnboardingWelcomeVersion,
+        kV2WelcomeSeenPref;
 
 // TODO(l10n): move the gate's status and error copy to the ARB files.
 
@@ -95,18 +104,11 @@ class _FirebaseOnboardingAuth implements V2OnboardingAuth {
       _service.removeListener(listener);
 }
 
-/// SharedPreferences key for the v2 onboarding welcome marker. It is separate
-/// from `AppState`'s in-app welcome notice (`ovid_welcome`) so finishing the
-/// onboarding tour never suppresses that unrelated notice, and vice versa.
-const String kV2WelcomeSeenPref = 'ovid_welcome_version_v2';
-
-/// Default onboarding welcome version. Bump to show the tour again.
-const String kV2OnboardingWelcomeVersion = '1';
-
-const String _kLocalePref = 'ovid_locale';
-const String _kFirstGoalPref = 'ovid_first_goal';
-
-const List<String> _languageIds = ['en', 'hi', 'pa', 'ta'];
+/// SharedPreferences key for the v2 onboarding welcome marker. It now lives in
+/// `onboarding_prefs.dart` (next to the other durable choice keys) and is
+/// re-exported above so existing imports of this file keep working. It stays
+/// separate from `AppState`'s in-app welcome notice (`ovid_welcome`) so
+/// finishing the onboarding tour never suppresses that unrelated notice.
 
 const Map<String, String> _languageNames = {
   'en': 'English',
@@ -136,6 +138,9 @@ class V2OnboardingGate extends StatefulWidget {
     required this.child,
     this.auth,
     this.purchase,
+    this.store,
+    this.testStore,
+    this.openUrl,
     this.welcomeVersion = kV2OnboardingWelcomeVersion,
   });
 
@@ -150,6 +155,19 @@ class V2OnboardingGate extends StatefulWidget {
   /// continues without granting anything.
   final Future<bool> Function(String planId)? purchase;
 
+  /// Durable store for the welcome marker and the first-run choices. The
+  /// default reads and writes SharedPreferences.
+  final V2OnboardingStore? store;
+
+  /// Whether this build talks to the RevenueCat Test Store. Defaults to the
+  /// compile-time [kRevenueCatTestStore]; overridable so tests can prove the
+  /// note appears only in a Test Store build.
+  final bool? testStore;
+
+  /// Opens a legal document. Defaults to the platform browser; overridable so
+  /// tests can prove the links reach a real destination.
+  final Future<bool> Function(Uri uri)? openUrl;
+
   /// Marker value written to [kV2WelcomeSeenPref]. Overridable for tests.
   final String welcomeVersion;
 
@@ -162,14 +180,31 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       widget.auth ?? _FirebaseOnboardingAuth(FirebaseService.I);
   late final Future<bool> Function(String planId) _purchase =
       widget.purchase ?? _declinePurchase;
+  late final V2OnboardingStore _store =
+      widget.store ?? const V2OnboardingStore();
+  late final Future<bool> Function(Uri uri) _openUrl =
+      widget.openUrl ?? _launchExternal;
+  late final bool _testStore = widget.testStore ?? kRevenueCatTestStore;
 
   static Future<bool> _declinePurchase(String planId) async => false;
+
+  static Future<bool> _launchExternal(Uri uri) =>
+      launchUrl(uri, mode: LaunchMode.externalApplication);
 
   bool _booting = true;
   bool _booted = false;
   String? _startupError;
 
+  /// Startup progress reflects the work actually left to do. It is never a
+  /// timer: each step moves it once, and it stays put while a step blocks.
+  double _startupProgress = 0;
+  String _startupLabel = 'Starting your agent';
+
   _Step _step = _Step.welcome;
+
+  /// Which step opened the language screen, so Back returns there instead of
+  /// always restarting the tour.
+  _Step _languageReturn = _Step.welcome;
 
   bool _welcomeBusy = false;
   String? _welcomeError;
@@ -209,6 +244,8 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       setState(() {
         _booting = true;
         _startupError = null;
+        _startupProgress = 0;
+        _startupLabel = 'Starting your agent';
       });
     }
 
@@ -219,22 +256,23 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       failure = error;
     }
 
-    SharedPreferences? prefs;
+    if (!mounted) return;
+    setState(() {
+      _startupProgress = 0.5;
+      _startupLabel = 'Restoring your choices';
+    });
+
+    V2OnboardingSnapshot? snapshot;
     try {
-      prefs = await SharedPreferences.getInstance();
+      snapshot = await _store.load(welcomeVersion: widget.welcomeVersion);
     } catch (_) {
       // Preferences are an enhancement here: without them the tour starts
       // from the top instead of blocking the app.
     }
     if (!mounted) return;
 
-    final welcomeSeen =
-        prefs?.getString(kV2WelcomeSeenPref) == widget.welcomeVersion;
-    final locale = prefs?.getString(_kLocalePref) ?? '';
-    final goals = (prefs?.getString(_kFirstGoalPref) ?? '')
-        .split(',')
-        .where((id) => id.isNotEmpty)
-        .toSet();
+    final language = snapshot?.languageId;
+    final goals = snapshot?.goalIds ?? const <String>{};
 
     setState(() {
       _booting = false;
@@ -242,13 +280,13 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       _startupError = failure == null
           ? null
           : 'Ovid could not start. Check your connection and try again.';
-      _languageId = _languageIds.contains(locale) ? locale : 'en';
-      if (goals.isNotEmpty) _goalIds = goals;
+      _languageId = language ?? 'en';
+      _goalIds = goals.isEmpty ? {'build'} : goals;
       if (_auth.isSignedIn) {
         _step = _Step.done;
-      } else if (!welcomeSeen) {
+      } else if (snapshot == null || !snapshot.welcomeSeen) {
         _step = _Step.welcome;
-      } else if (locale.isEmpty) {
+      } else if (language == null) {
         _step = _Step.language;
       } else {
         _step = _Step.signIn;
@@ -301,8 +339,8 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
   Widget _splash({String? error}) {
     return SplashPage(
       data: V2SplashData(
-        progress: 0,
-        statusLabel: 'Starting Ovid',
+        progress: _startupProgress,
+        statusLabel: _startupLabel,
         errorLabel: error,
       ),
       onRetry: _boot,
@@ -419,7 +457,7 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       onSignIn: _welcomeBusy ? null : () => _leaveWelcome(toLanguage: false),
       onLanguageTap: _welcomeBusy
           ? null
-          : () => setState(() => _step = _Step.language),
+          : () => _openLanguage(from: _Step.welcome),
     );
   }
 
@@ -430,8 +468,7 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       _welcomeError = null;
     });
     try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(kV2WelcomeSeenPref, widget.welcomeVersion);
+      await _store.markWelcomeSeen(widget.welcomeVersion);
       // Keep the app-wide first-run notice in step with this tour. It uses its
       // own key/version and must never block onboarding if it fails.
       try {
@@ -450,11 +487,24 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
     if (!mounted) return;
     setState(() {
       _welcomeBusy = false;
-      _step = toLanguage ? _Step.language : _Step.signIn;
+      if (toLanguage) {
+        _languageReturn = _Step.welcome;
+        _step = _Step.language;
+      } else {
+        _step = _Step.signIn;
+      }
     });
   }
 
   // ── Language & goal ──────────────────────────────────────────────────────
+
+  /// Opens the language step and remembers where Back should return to.
+  void _openLanguage({required _Step from}) {
+    setState(() {
+      _languageReturn = from;
+      _step = _Step.language;
+    });
+  }
 
   Widget _language() {
     return LanguageGoalPage(
@@ -476,6 +526,9 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       onRetry: _choicesError == null
           ? null
           : () => _continueFromLanguage(_languageId, _goalIds),
+      onBack: _savingChoices
+          ? null
+          : () => setState(() => _step = _languageReturn),
     );
   }
 
@@ -489,10 +542,7 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       _choicesError = null;
     });
     try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_kLocalePref, languageId);
-      final sorted = goalIds.toList()..sort();
-      await prefs.setString(_kFirstGoalPref, sorted.join(','));
+      await _store.saveChoices(languageId: languageId, goalIds: goalIds);
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -526,10 +576,39 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       onCreateAccount: _signInBusy ? null : _showEmailUnavailable,
       onLanguageTap: _signInBusy
           ? null
-          : () => setState(() => _step = _Step.language),
-      onRetry: _signInBusy ? null : _retrySignIn,
-      onBack: _signInBusy ? null : () => setState(() => _step = _Step.language),
+          : () => _openLanguage(from: _Step.signIn),
+      // Retry only exists when there is an attempt to repeat.
+      onRetry: _signInBusy || _lastSignInAction == null ? null : _retrySignIn,
+      onTerms: () => _openLegal(LegalLinks.terms),
+      onPrivacy: () => _openLegal(LegalLinks.privacyPolicy),
+      onBack: _signInBusy ? null : () => _setLanguageBackToSignIn(),
     );
+  }
+
+  /// Back from sign-in goes to the language step, which then returns here.
+  void _setLanguageBackToSignIn() {
+    setState(() {
+      _languageReturn = _Step.signIn;
+      _step = _Step.language;
+    });
+  }
+
+  Future<void> _openLegal(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    try {
+      final opened = await _openUrl(uri);
+      if (!opened && mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text('Could not open the link.')),
+        );
+      }
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('Could not open the link.')),
+      );
+    }
   }
 
   /// Email/password has no backend. Never fake a session: say what works.
@@ -537,7 +616,8 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
     if (_signInBusy) return;
     setState(() {
       _signInError = _emailUnavailableMessage;
-      _lastSignInAction = _clearSignInError;
+      // Nothing to retry: the next step is Google or phone, not this form.
+      _lastSignInAction = null;
     });
   }
 
@@ -545,13 +625,9 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
     if (_signInBusy) return;
     setState(() {
       _signInError = _emailUnavailableMessage;
-      _lastSignInAction = _clearSignInError;
+      // Nothing to retry: the next step is Google or phone, not this form.
+      _lastSignInAction = null;
     });
-  }
-
-  Future<void> _clearSignInError() async {
-    if (!mounted) return;
-    setState(() => _signInError = null);
   }
 
   Future<void> _retrySignIn() async {
@@ -633,7 +709,7 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
         selectedPlanId: _selectedPlanId,
         purchasing: _purchasing,
         error: _paywallError,
-        testModeNote: kRevenueCatTestStore
+        testModeNote: _testStore
             ? 'Test mode: purchases are simulated and never charge you.'
             : null,
       ),
@@ -641,6 +717,7 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
           ? null
           : (id) => setState(() => _selectedPlanId = id),
       onStartTrial: _purchasing ? null : _startTrial,
+      onContinueFree: _purchasing ? null : _finishPaywall,
       onRetry: _purchasing || _paywallError == null
           ? null
           : () => _startTrial(_selectedPlanId),
@@ -650,6 +727,11 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
 
   Future<void> _startTrial(String planId) async {
     if (_purchasing) return;
+    // The Free tier is not a purchase; it just continues into the app.
+    if (planId == 'free') {
+      _finishPaywall();
+      return;
+    }
     setState(() {
       _purchasing = true;
       _paywallError = null;

@@ -47,7 +47,9 @@ V2PermissionsPageData _data({
   List<V2PermissionItem> permissions = _permissions,
   ValueChanged<String>? onRequest,
   VoidCallback? onOpenSettings,
+  ValueChanged<String>? onOpenSettingsFor,
   VoidCallback? onResetAll,
+  VoidCallback? onRefresh,
   VoidCallback? onRetry,
 }) {
   return V2PermissionsPageData(
@@ -55,7 +57,9 @@ V2PermissionsPageData _data({
     permissions: permissions,
     onRequest: onRequest,
     onOpenSettings: onOpenSettings,
+    onOpenSettingsFor: onOpenSettingsFor,
     onResetAll: onResetAll,
+    onRefresh: onRefresh,
     onRetry: onRetry,
   );
 }
@@ -164,11 +168,12 @@ void main() {
   ) async {
     await _pumpClean(
       tester,
-      _data(onRequest: (_) {}, onOpenSettings: () {}),
+      _data(onRequest: (_) {}, onOpenSettings: () {}, onRefresh: () {}),
       dark: true,
     );
 
     expect(find.text('Permissions'), findsOneWidget);
+    expect(find.byKey(const ValueKey('permissions-refresh')), findsOneWidget);
   });
 
   testWidgets('shows a loading skeleton', (tester) async {
@@ -377,5 +382,73 @@ void main() {
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
     }
+  });
+
+  testWidgets('each row opens its own Android settings page', (tester) async {
+    String? opened;
+    await _pump(tester, _data(onOpenSettingsFor: (id) => opened = id));
+
+    final open = find.text('Open settings').first;
+    await tester.ensureVisible(open);
+    await tester.tap(open);
+    await tester.pumpAndSettle();
+
+    expect(opened, 'microphone');
+  });
+
+  testWidgets('falls back to the app settings page when no per-row target', (
+    tester,
+  ) async {
+    var opens = 0;
+    await _pump(tester, _data(onOpenSettings: () => opens++));
+
+    final open = find.text('Open settings').first;
+    await tester.ensureVisible(open);
+    await tester.tap(open);
+    await tester.pumpAndSettle();
+
+    expect(opens, 1);
+  });
+
+  testWidgets('requesting a permission reloads the real state', (tester) async {
+    String? requested;
+    var refreshes = 0;
+    await _pump(
+      tester,
+      _data(onRequest: (id) => requested = id, onRefresh: () => refreshes++),
+    );
+
+    final request = find.text('Request').first;
+    await tester.ensureVisible(request);
+    await tester.tap(request);
+    await tester.pumpAndSettle();
+
+    expect(requested, 'camera');
+    expect(refreshes, 1);
+  });
+
+  testWidgets('returning from Android settings reloads the real state', (
+    tester,
+  ) async {
+    var refreshes = 0;
+    await _pump(tester, _data(onRefresh: () => refreshes++));
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+
+    expect(refreshes, 1);
+  });
+
+  testWidgets('the refresh button reloads the real state', (tester) async {
+    var refreshes = 0;
+    await _pump(tester, _data(onRefresh: () => refreshes++));
+
+    final refresh = find.byKey(const ValueKey('permissions-refresh'));
+    await tester.ensureVisible(refresh);
+    await tester.tap(refresh);
+    await tester.pumpAndSettle();
+
+    expect(refreshes, 1);
   });
 }

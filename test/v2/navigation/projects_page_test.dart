@@ -23,9 +23,8 @@ const _brandProject = V2Project(
   updatedLabel: 'Yesterday',
 );
 
-V2ProjectsData _contentData() => const V2ProjectsData(
-  projects: <V2Project>[_project, _brandProject],
-);
+V2ProjectsData _contentData() =>
+    const V2ProjectsData(projects: <V2Project>[_project, _brandProject]);
 
 Widget _app(Widget child, {ThemeData? theme}) =>
     MaterialApp(theme: theme ?? OTheme.light(), home: child);
@@ -36,9 +35,9 @@ Widget _narrow(Widget child, {ThemeData? theme, double textScale = 2}) {
     theme: theme ?? OTheme.light(),
     home: Builder(
       builder: (context) => MediaQuery(
-        data: MediaQuery.of(context).copyWith(
-          textScaler: TextScaler.linear(textScale),
-        ),
+        data: MediaQuery.of(
+          context,
+        ).copyWith(textScaler: TextScaler.linear(textScale)),
         child: child,
       ),
     ),
@@ -84,7 +83,9 @@ void main() {
   });
 
   testWidgets('empty state opens the New project sheet', (tester) async {
-    await tester.pumpWidget(_app(const ProjectsPage(data: V2ProjectsData())));
+    await tester.pumpWidget(
+      _app(ProjectsPage(data: const V2ProjectsData(), onCreateProject: (_) {})),
+    );
     await tester.pumpAndSettle();
 
     expect(find.text('No projects yet'), findsOneWidget);
@@ -93,6 +94,24 @@ void main() {
 
     expect(find.text('Project name'), findsOneWidget);
     expect(find.text('Create project'), findsOneWidget);
+  });
+
+  testWidgets('no create affordance when the caller cannot persist', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(const ProjectsPage(data: V2ProjectsData())));
+    await tester.pumpAndSettle();
+
+    expect(find.text('New'), findsNothing);
+    expect(find.text('New project'), findsNothing);
+    expect(find.text('No projects yet'), findsOneWidget);
+  });
+
+  testWidgets('project options only render when wired', (tester) async {
+    await tester.pumpWidget(_app(ProjectsPage(data: _contentData())));
+    await tester.pumpAndSettle();
+
+    expect(find.byIcon(Icons.more_vert_rounded), findsNothing);
   });
 
   testWidgets('tapping a project reports it to the caller', (tester) async {
@@ -139,10 +158,7 @@ void main() {
     await tester.pumpWidget(_app(ProjectsPage(data: _contentData())));
     await tester.pumpAndSettle();
 
-    await tester.enterText(
-      find.byKey(const Key('v2-project-filter')),
-      'brand',
-    );
+    await tester.enterText(find.byKey(const Key('v2-project-filter')), 'brand');
     await tester.pumpAndSettle();
 
     expect(find.text('Brand Voice Guidelines'), findsOneWidget);
@@ -191,10 +207,7 @@ void main() {
     await tester.pump();
     await tester.tap(find.byKey(const Key('v2-project-color-emerald')));
     await tester.pump();
-    expect(
-      find.bySemanticsLabel('Emerald colour, selected'),
-      findsOneWidget,
-    );
+    expect(find.bySemanticsLabel('Emerald colour, selected'), findsOneWidget);
     await tester.tap(find.byKey(const Key('v2-create-project')));
     await tester.pumpAndSettle();
 
@@ -252,7 +265,9 @@ void main() {
 
   testWidgets('empty state fits a 320 dp screen at 200 % text', (tester) async {
     _useNarrowScreen(tester);
-    await tester.pumpWidget(_narrow(const ProjectsPage(data: V2ProjectsData())));
+    await tester.pumpWidget(
+      _narrow(const ProjectsPage(data: V2ProjectsData())),
+    );
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
@@ -263,7 +278,11 @@ void main() {
     tester,
   ) async {
     _useNarrowScreen(tester);
-    await tester.pumpWidget(_narrow(const ProjectsPage(data: V2ProjectsData())));
+    await tester.pumpWidget(
+      _narrow(
+        ProjectsPage(data: const V2ProjectsData(), onCreateProject: (_) {}),
+      ),
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('New'));

@@ -89,10 +89,24 @@ class V2MemoryFilesPageData {
 }
 
 /// Memory files grouped by scope, with open, delete and export actions.
-class MemoryFilesPage extends StatelessWidget {
+class MemoryFilesPage extends StatefulWidget {
   const MemoryFilesPage({super.key, required this.data});
 
   final V2MemoryFilesPageData data;
+
+  @override
+  State<MemoryFilesPage> createState() => _MemoryFilesPageState();
+}
+
+class _MemoryFilesPageState extends State<MemoryFilesPage> {
+  /// null means "All". Selecting a group really filters the sections below.
+  V2MemoryFileGroup? _filter;
+
+  V2MemoryFilesPageData get data => widget.data;
+
+  List<V2MemoryFileEntry> get _visibleFiles => _filter == null
+      ? data.files
+      : data.files.where((file) => file.group == _filter).toList();
 
   @override
   Widget build(BuildContext context) {
@@ -137,11 +151,62 @@ class MemoryFilesPage extends StatelessWidget {
         child: OStagger(
           children: [
             _explainer(context),
+            _scopeFilter(context),
             for (final group in V2MemoryFileGroup.values)
-              if (data.files.any((file) => file.group == group))
+              if (_visibleFiles.any((file) => file.group == group))
                 _groupSection(context, group),
+            if (_visibleFiles.isEmpty) _filteredEmpty(context),
             _export(context),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// Filter chips for the three scopes. `All` clears the filter. The chips
+  /// operate on the same list the sections render, so a scope with no files
+  /// shows an honest empty card instead of the other scopes' rows.
+  Widget _scopeFilter(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.l),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('SHOW', style: OType.overline.copyWith(color: c.textMuted)),
+          const SizedBox(height: OSpace.s),
+          Wrap(
+            spacing: OSpace.s,
+            runSpacing: OSpace.s,
+            children: [
+              OChip(
+                key: const ValueKey<String>('memory-files-filter-all'),
+                label: 'All',
+                selected: _filter == null,
+                onTap: () => setState(() => _filter = null),
+              ),
+              for (final group in V2MemoryFileGroup.values)
+                OChip(
+                  key: ValueKey<String>('memory-files-filter-${group.name}'),
+                  label: group.label,
+                  selected: _filter == group,
+                  onTap: () => setState(() => _filter = group),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _filteredEmpty(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.xl),
+      child: OCard(
+        child: Text(
+          'No ${_filter?.label.toLowerCase() ?? ''} memory files yet.',
+          style: OType.bodySm.copyWith(color: c.textMuted),
         ),
       ),
     );
@@ -213,7 +278,7 @@ class MemoryFilesPage extends StatelessWidget {
 
   Widget _groupSection(BuildContext context, V2MemoryFileGroup group) {
     final c = OColors.of(context);
-    final files = data.files.where((file) => file.group == group).toList();
+    final files = _visibleFiles.where((file) => file.group == group).toList();
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.xl),
       child: Column(
@@ -245,7 +310,8 @@ class MemoryFilesPage extends StatelessWidget {
 
   Widget _fileRow(BuildContext context, V2MemoryFileEntry file) {
     final c = OColors.of(context);
-    final canActivate = data.onSave != null || data.onOpen != null;
+    final canActivate =
+        data.onSave != null || data.onOpen != null || _hasContent(file);
     return Semantics(
       label: file.semanticsLabel,
       button: canActivate,
@@ -327,7 +393,33 @@ class MemoryFilesPage extends StatelessWidget {
       _openEditor(context, file);
       return;
     }
-    data.onOpen?.call(file.id);
+    if (data.onOpen != null) {
+      data.onOpen!.call(file.id);
+      return;
+    }
+    _openViewer(context, file);
+  }
+
+  bool _hasContent(V2MemoryFileEntry file) =>
+      file.content.trim().isNotEmpty || file.preview.trim().isNotEmpty;
+
+  /// Read-only viewer for a file the caller did not route elsewhere. It shows
+  /// the file body, not just the one-line preview, and offers Delete so a
+  /// memory can be removed without leaving the screen.
+  Future<void> _openViewer(BuildContext context, V2MemoryFileEntry file) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: OColors.of(context).surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(ORadius.xl)),
+      ),
+      builder: (_) =>
+          _MemoryFileViewer(file: file, canDelete: data.onDelete != null),
+    );
+    if (action == 'delete' && context.mounted) {
+      await _confirmDelete(context, file);
+    }
   }
 
   Future<void> _openEditor(BuildContext context, V2MemoryFileEntry file) async {
@@ -348,8 +440,8 @@ class MemoryFilesPage extends StatelessWidget {
   Widget _fileMenu(BuildContext context, V2MemoryFileEntry file) {
     final c = OColors.of(context);
     final canEdit = data.onSave != null;
-    final canOpen = data.onOpen != null;
-    final canActivate = canEdit || canOpen;
+    final canView = data.onOpen != null || _hasContent(file);
+    final canActivate = canEdit || canView;
     final canDelete = data.onDelete != null;
     return SizedBox(
       width: OSpace.touch,
@@ -372,13 +464,13 @@ class MemoryFilesPage extends StatelessWidget {
             child: Row(
               children: [
                 Icon(
-                  canEdit ? Icons.edit_rounded : Icons.open_in_new_rounded,
+                  canEdit ? Icons.edit_rounded : Icons.visibility_outlined,
                   size: 18,
                   color: c.textMuted,
                 ),
                 const SizedBox(width: OSpace.m),
                 Text(
-                  canEdit ? 'Edit' : 'Open',
+                  canEdit ? 'Edit' : (data.onOpen != null ? 'Open' : 'View'),
                   style: OType.bodySm.copyWith(color: c.text),
                 ),
               ],
@@ -490,6 +582,87 @@ class MemoryFilesPage extends StatelessWidget {
       V2MemoryFileGroup.project => Icons.folder_outlined,
       V2MemoryFileGroup.session => Icons.forum_outlined,
     };
+  }
+}
+
+/// Read-only sheet for one memory file. Shows the stored body and, when the
+/// caller wired it, a Delete action that pops `'delete'`.
+class _MemoryFileViewer extends StatelessWidget {
+  const _MemoryFileViewer({required this.file, required this.canDelete});
+
+  final V2MemoryFileEntry file;
+  final bool canDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final body = file.content.trim().isEmpty ? file.preview : file.content;
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      child: SafeArea(
+        top: false,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+          ),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(OSpace.l),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  file.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.h2.copyWith(color: c.text),
+                ),
+                const SizedBox(height: OSpace.xs),
+                Text(
+                  file.metaLabel,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+                const SizedBox(height: OSpace.m),
+                Container(
+                  key: const ValueKey<String>('memory-file-viewer-content'),
+                  padding: const EdgeInsets.all(OSpace.m),
+                  decoration: BoxDecoration(
+                    color: c.surfaceAlt,
+                    borderRadius: BorderRadius.circular(ORadius.m),
+                    border: Border.all(color: c.hairline),
+                  ),
+                  child: SelectableText(
+                    body.isEmpty ? 'This file is empty.' : body,
+                    style: OType.bodySm.copyWith(color: c.text),
+                  ),
+                ),
+                const SizedBox(height: OSpace.m),
+                OButton(
+                  key: const ValueKey<String>('memory-file-viewer-close'),
+                  label: 'Close',
+                  variant: OButtonVariant.secondary,
+                  expand: true,
+                  onPressed: () => Navigator.pop(context),
+                ),
+                if (canDelete) ...[
+                  const SizedBox(height: OSpace.s),
+                  OButton(
+                    key: const ValueKey<String>('memory-file-viewer-delete'),
+                    label: 'Delete',
+                    icon: Icons.delete_outline_rounded,
+                    variant: OButtonVariant.danger,
+                    expand: true,
+                    onPressed: () => Navigator.pop(context, 'delete'),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

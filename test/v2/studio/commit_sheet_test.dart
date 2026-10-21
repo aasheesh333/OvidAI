@@ -107,7 +107,9 @@ void main() {
   });
 
   testWidgets('a message past 72 characters blocks the commit', (tester) async {
-    await tester.pumpWidget(_app(const V2CommitSheet(data: _data)));
+    await tester.pumpWidget(
+      _app(V2CommitSheet(data: _data, onCommit: (_) {})),
+    );
     await tester.pumpAndSettle();
 
     await tester.enterText(find.byKey(_messageKey), 'a' * 73);
@@ -291,6 +293,49 @@ void main() {
     );
     expect(find.bySemanticsLabel('39 of 72 characters'), findsOneWidget);
     handle.dispose();
+  });
+
+  testWidgets('an unwired commit action stays disabled with a message', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        const V2CommitSheet(
+          data: V2CommitSheetData(
+            files: _files,
+            initialMessage: 'feat: tune hero',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(_submit(tester).onPressed, isNull);
+    expect(
+      _submit(tester).semanticLabel,
+      'Commit & push, committing is not available yet',
+    );
+    handle.dispose();
+  });
+
+  testWidgets('an unwired sync is explained instead of shown as a dead button', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        const V2CommitSheet(
+          data: V2CommitSheetData(files: _files, behindCount: 2),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(_syncKey), findsNothing);
+    expect(
+      find.byKey(const ValueKey('v2-commit-sync-unavailable')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('fits 320 dp at 200% text and scrolls to the push note', (

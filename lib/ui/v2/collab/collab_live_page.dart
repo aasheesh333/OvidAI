@@ -76,6 +76,7 @@ class V2CollabLivePageData {
     this.turnQueue = const [],
     this.messages = const [],
     required this.creatorPaysStorage,
+    this.capacity = 50,
     this.isMyTurn = false,
     this.turnRequested = false,
     this.status = V2CollabLiveStatus.ready,
@@ -106,6 +107,9 @@ class V2CollabLivePageData {
   final List<V2CollabMessage> messages;
   final bool creatorPaysStorage;
 
+  /// Hard cap on active members, including the creator.
+  final int capacity;
+
   /// True when this device holds the turn, so sending is allowed. While
   /// another member's output runs every other send stays disabled.
   final bool isMyTurn;
@@ -131,8 +135,9 @@ class CollabLivePage extends StatelessWidget {
   final VoidCallback? onOpenMembers;
   final VoidCallback? onRequestTurn;
 
-  /// Sends the draft. Only offered while [V2CollabLivePageData.isMyTurn].
-  final VoidCallback? onSend;
+  /// Sends the typed draft. Only offered while
+  /// [V2CollabLivePageData.isMyTurn].
+  final ValueChanged<String>? onSend;
   final ValueChanged<String>? onOpenArtifact;
   final VoidCallback? onRetry;
 
@@ -164,11 +169,13 @@ class CollabLivePage extends StatelessWidget {
       title: 'No messages yet',
       message:
           'When someone sends a message it shows here. Only one person can send at a time.',
-      action: OButton(
-        label: 'Request turn',
-        icon: Icons.pan_tool_alt_rounded,
-        onPressed: onRequestTurn,
-      ),
+      action: onRequestTurn == null
+          ? null
+          : OButton(
+              label: 'Request turn',
+              icon: Icons.pan_tool_alt_rounded,
+              onPressed: onRequestTurn,
+            ),
     );
   }
 
@@ -290,7 +297,7 @@ class _MembersCard extends StatelessWidget {
         ),
         const SizedBox(height: OSpace.xs),
         Text(
-          '${data.totalMembers} members in this room',
+          '${data.totalMembers} of ${data.capacity} members in this room',
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
           style: OType.bodySm.copyWith(
@@ -654,57 +661,22 @@ class _AgentMessage extends StatelessWidget {
                     ),
                     if (message.artifactName != null) ...[
                       const SizedBox(height: OSpace.s),
-                      OPressable(
-                        onTap: onOpenArtifact == null
-                            ? null
-                            : () => onOpenArtifact!(message.artifactName!),
-                        semanticLabel: 'Open ${message.artifactName}',
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(
-                            minHeight: OSpace.touch,
-                          ),
-                          child: Container(
-                            padding: const EdgeInsets.all(OSpace.s),
-                            decoration: BoxDecoration(
-                              color: c.surfaceAlt,
-                              borderRadius: BorderRadius.circular(ORadius.s),
-                              border: Border.all(color: c.hairline),
+                      if (onOpenArtifact == null)
+                        _ArtifactLabel(name: message.artifactName!)
+                      else
+                        OPressable(
+                          onTap: () => onOpenArtifact!(message.artifactName!),
+                          semanticLabel: 'Open ${message.artifactName}',
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(
+                              minHeight: OSpace.touch,
                             ),
-                            child: Row(
-                              children: [
-                                Icon(
-                                  Icons.data_object_rounded,
-                                  size: 16,
-                                  color: c.textMuted,
-                                ),
-                                const SizedBox(width: OSpace.s),
-                                Expanded(
-                                  child: Text(
-                                    message.artifactName!,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: OType.mono.copyWith(
-                                      color: c.textMuted,
-                                    ),
-                                  ),
-                                ),
-                                Text(
-                                  'Open',
-                                  style: OType.caption.copyWith(
-                                    color: c.accent,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                Icon(
-                                  Icons.arrow_forward_rounded,
-                                  size: 14,
-                                  color: c.accent,
-                                ),
-                              ],
+                            child: _ArtifactLabel(
+                              name: message.artifactName!,
+                              open: true,
                             ),
                           ),
                         ),
-                      ),
                     ],
                   ],
                 ),
@@ -713,6 +685,52 @@ class _AgentMessage extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// The artifact row inside an agent message. It only advertises "Open" when a
+/// real handler exists.
+class _ArtifactLabel extends StatelessWidget {
+  const _ArtifactLabel({required this.name, this.open = false});
+
+  final String name;
+  final bool open;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      padding: const EdgeInsets.all(OSpace.s),
+      decoration: BoxDecoration(
+        color: c.surfaceAlt,
+        borderRadius: BorderRadius.circular(ORadius.s),
+        border: Border.all(color: c.hairline),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.data_object_rounded, size: 16, color: c.textMuted),
+          const SizedBox(width: OSpace.s),
+          Expanded(
+            child: Text(
+              name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: OType.mono.copyWith(color: c.textMuted),
+            ),
+          ),
+          if (open) ...[
+            Text(
+              'Open',
+              style: OType.caption.copyWith(
+                color: c.accent,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            Icon(Icons.arrow_forward_rounded, size: 14, color: c.accent),
+          ],
+        ],
+      ),
     );
   }
 }
@@ -760,16 +778,40 @@ class _StoragePill extends StatelessWidget {
   }
 }
 
-class _ComposerDock extends StatelessWidget {
+class _ComposerDock extends StatefulWidget {
   const _ComposerDock({required this.data, this.onSend});
 
   final V2CollabLivePageData data;
-  final VoidCallback? onSend;
+  final ValueChanged<String>? onSend;
+
+  @override
+  State<_ComposerDock> createState() => _ComposerDockState();
+}
+
+class _ComposerDockState extends State<_ComposerDock> {
+  final TextEditingController _controller = TextEditingController();
+  bool _hasText = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  bool get _canSend =>
+      widget.data.isMyTurn && widget.onSend != null && _hasText;
+
+  void _send() {
+    final text = _controller.text.trim();
+    if (text.isEmpty || !widget.data.isMyTurn) return;
+    widget.onSend?.call(text);
+    _controller.clear();
+    setState(() => _hasText = false);
+  }
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final canSend = data.isMyTurn && onSend != null;
     return Container(
       padding: const EdgeInsets.fromLTRB(
         OSpace.l,
@@ -791,25 +833,46 @@ class _ComposerDock extends StatelessWidget {
         child: Row(
           children: [
             OAvatar(
-              initials: data.selfName.isEmpty ? 'You' : data.selfName,
+              initials: widget.data.selfName.isEmpty
+                  ? 'You'
+                  : widget.data.selfName,
               size: 36,
               semanticLabel: 'You',
             ),
             const SizedBox(width: OSpace.s),
             Expanded(
-              child: Text(
-                data.isMyTurn ? 'Write a message' : 'Wait for the turn',
+              child: TextField(
+                controller: _controller,
+                enabled: widget.data.isMyTurn,
+                minLines: 1,
+                maxLines: 4,
+                textInputAction: TextInputAction.send,
+                onChanged: (value) {
+                  final hasText = value.trim().isNotEmpty;
+                  if (hasText != _hasText) setState(() => _hasText = hasText);
+                },
+                onSubmitted: (_) => _canSend ? _send() : null,
                 style: OType.bodySm.copyWith(
-                  color: data.isMyTurn ? c.textMuted : c.textFaint,
+                  color: widget.data.isMyTurn ? c.text : c.textFaint,
+                ),
+                decoration: InputDecoration(
+                  isDense: true,
+                  border: InputBorder.none,
+                  hintText: widget.data.isMyTurn
+                      ? 'Write a message'
+                      : 'Wait for the turn',
+                  hintStyle: OType.bodySm.copyWith(
+                    color: widget.data.isMyTurn ? c.textMuted : c.textFaint,
+                  ),
                 ),
               ),
             ),
             OIconButton(
               icon: Icons.send_rounded,
-              semanticLabel: data.isMyTurn
+              semanticLabel: widget.data.isMyTurn
                   ? 'Send message'
                   : 'Send, wait for the turn',
-              onPressed: canSend ? onSend : null,
+              onPressed: _canSend ? _send : null,
             ),
           ],
         ),

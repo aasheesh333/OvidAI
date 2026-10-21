@@ -148,7 +148,11 @@ void main() {
     tester,
   ) async {
     for (final theme in [OTheme.light(), OTheme.dark()]) {
-      await _pump(tester, RunTrajectoryPage(data: _data()), theme);
+      await _pump(
+        tester,
+        RunTrajectoryPage(data: _data(), onShareRun: () {}),
+        theme,
+      );
 
       expect(find.text('Run trajectory'), findsOneWidget);
       expect(find.text('Landing page redesign & build'), findsOneWidget);
@@ -289,7 +293,14 @@ void main() {
   testWidgets('lays out at 320 dp with 200 % text without clipping', (
     tester,
   ) async {
-    await _pumpNarrow(tester, RunTrajectoryPage(data: _data()));
+    await _pumpNarrow(
+      tester,
+      RunTrajectoryPage(
+        data: _data(),
+        onShareRun: () {},
+        onOpenPreview: () {},
+      ),
+    );
 
     final ctx = tester.element(find.text('Landing page redesign & build'));
     expect(MediaQuery.textScalerOf(ctx).scale(12), 24);
@@ -435,7 +446,11 @@ void main() {
         const FakeAccessibilityFeatures(disableAnimations: true);
     addTearDown(tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
 
-    await _pump(tester, RunTrajectoryPage(data: _data()), OTheme.light());
+    await _pump(
+      tester,
+      RunTrajectoryPage(data: _data(), onShareRun: () {}),
+      OTheme.light(),
+    );
 
     expect(find.text('Read your message'), findsOneWidget);
     expect(find.text('Share run'), findsOneWidget);

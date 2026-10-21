@@ -8,6 +8,12 @@ import '../../design/o_tokens.dart';
 
 const List<int> _waitPresets = <int>[30, 60, 120, 300, 600];
 
+/// The slider steps in 30-second increments between 30 s and 10 min.
+int _snapWait(double value) {
+  final steps = ((value - 30) / 30).round();
+  return (30 + steps * 30).clamp(30, 600);
+}
+
 String _waitLabel(int seconds) {
   if (seconds < 60) return '$seconds s';
   final minutes = seconds ~/ 60;
@@ -47,10 +53,79 @@ class V2ResponseWaitPageData {
 }
 
 /// How long Ovid waits for a reply before it asks the user what to do.
-class ResponseWaitPage extends StatelessWidget {
+///
+/// The page keeps the chosen wait locally so the slider and the chips move
+/// with the finger. The value still goes through [V2ResponseWaitPageData]'s
+/// callbacks, which write `AppState.responseTimeoutSec` — the same field the
+/// chat's "Still working…" watchdog reads (persisted as
+/// `ovid_response_timeout_sec`).
+class ResponseWaitPage extends StatefulWidget {
   const ResponseWaitPage({super.key, required this.data});
 
   final V2ResponseWaitPageData data;
+
+  @override
+  State<ResponseWaitPage> createState() => _ResponseWaitPageState();
+}
+
+class _ResponseWaitPageState extends State<ResponseWaitPage> {
+  late int _seconds;
+  late bool _autoExtend;
+  late bool _notify;
+
+  /// The in-flight drag value. Committing only on drag end keeps one
+  /// SharedPreferences write per gesture instead of one per frame.
+  int? _dragging;
+
+  V2ResponseWaitPageData get data => widget.data;
+
+  @override
+  void initState() {
+    super.initState();
+    _adopt(data, null);
+  }
+
+  @override
+  void didUpdateWidget(covariant ResponseWaitPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.data, widget.data)) {
+      _adopt(widget.data, oldWidget.data);
+    }
+  }
+
+  void _adopt(V2ResponseWaitPageData next, V2ResponseWaitPageData? prev) {
+    if (prev == null || next.seconds != prev.seconds) {
+      _seconds = next.seconds.clamp(30, 600).toInt();
+    }
+    if (prev == null || next.autoExtend != prev.autoExtend) {
+      _autoExtend = next.autoExtend;
+    }
+    if (prev == null || next.notifyAtLimit != prev.notifyAtLimit) {
+      _notify = next.notifyAtLimit;
+    }
+  }
+
+  int get _shown => _dragging ?? _seconds;
+
+  void _commit(int seconds) {
+    final handler = data.onChanged;
+    if (handler == null) return;
+    setState(() {
+      _dragging = null;
+      _seconds = seconds;
+    });
+    handler(seconds);
+  }
+
+  void _pickPreset(int seconds) {
+    final handler = data.onPreset;
+    if (handler == null) return;
+    setState(() {
+      _dragging = null;
+      _seconds = seconds;
+    });
+    handler(seconds);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -67,7 +142,7 @@ class ResponseWaitPage extends StatelessWidget {
     if (data.errorMessage != null) {
       return OErrorState(message: data.errorMessage!, onRetry: data.onRetry);
     }
-    final seconds = data.seconds.clamp(30, 600).toInt();
+    final seconds = _shown.clamp(30, 600).toInt();
     return OFadeSlide(
       child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(
@@ -103,6 +178,7 @@ class ResponseWaitPage extends StatelessWidget {
             const SizedBox(height: OSpace.m),
             Text(
               _waitLabel(seconds),
+              key: const ValueKey<String>('response-wait-current'),
               textAlign: TextAlign.center,
               style: OType.display.copyWith(color: c.text),
             ),
@@ -126,13 +202,16 @@ class ResponseWaitPage extends StatelessWidget {
                   divisions: 19,
                   label: _waitLabel(seconds),
                   semanticFormatterCallback: (value) =>
-                      _waitLabel(value.round()),
+                      _waitLabel(_snapWait(value)),
                   activeColor: c.accentFill,
                   inactiveColor: c.surfaceRaised,
                   thumbColor: c.accentFill,
                   onChanged: data.onChanged == null
                       ? null
-                      : (value) => data.onChanged!(value.round()),
+                      : (value) => setState(() => _dragging = _snapWait(value)),
+                  onChangeEnd: data.onChanged == null
+                      ? null
+                      : (value) => _commit(_snapWait(value)),
                 ),
               ),
             ),
@@ -180,7 +259,7 @@ class ResponseWaitPage extends StatelessWidget {
     return Semantics(
       selected: selected,
       child: OPressable(
-        onTap: data.onPreset == null ? null : () => data.onPreset!(preset),
+        onTap: data.onPreset == null ? null : () => _pickPreset(preset),
         semanticLabel: '$label wait time',
         child: ExcludeSemantics(
           child: OChip(label: label, selected: selected),
@@ -208,16 +287,26 @@ class ResponseWaitPage extends StatelessWidget {
                   context,
                   title: 'Auto-extend',
                   description: 'Give Ovid more time when a reply is close.',
-                  value: data.autoExtend,
-                  onChanged: data.onAutoExtend,
+                  value: _autoExtend,
+                  onChanged: data.onAutoExtend == null
+                      ? null
+                      : (value) {
+                          setState(() => _autoExtend = value);
+                          data.onAutoExtend!(value);
+                        },
                 ),
                 Divider(color: c.hairline, height: 1),
                 _toggleRow(
                   context,
                   title: 'Notify me',
                   description: 'Send a notification when time runs out.',
-                  value: data.notifyAtLimit,
-                  onChanged: data.onNotify,
+                  value: _notify,
+                  onChanged: data.onNotify == null
+                      ? null
+                      : (value) {
+                          setState(() => _notify = value);
+                          data.onNotify!(value);
+                        },
                 ),
               ],
             ),

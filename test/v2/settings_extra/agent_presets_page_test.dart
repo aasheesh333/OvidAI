@@ -189,10 +189,7 @@ void main() {
     var retries = 0;
     await _pump(
       tester,
-      _data(
-        status: V2AgentPresetsStatus.error,
-        onRetry: () => retries++,
-      ),
+      _data(status: V2AgentPresetsStatus.error, onRetry: () => retries++),
     );
 
     expect(find.text('We could not load your presets.'), findsOneWidget);
@@ -205,12 +202,7 @@ void main() {
   testWidgets('renders at 320 dp with 200% text without overflow', (
     tester,
   ) async {
-    await _pump(
-      tester,
-      _data(),
-      size: const Size(320, 1400),
-      textScale: 2,
-    );
+    await _pump(tester, _data(), size: const Size(320, 1400), textScale: 2);
 
     expect(find.text('General'), findsOneWidget);
     expect(find.text('New preset'), findsOneWidget);
@@ -235,10 +227,7 @@ void main() {
 
     await _pump(
       tester,
-      _data(
-        status: V2AgentPresetsStatus.error,
-        onRetry: () {},
-      ),
+      _data(status: V2AgentPresetsStatus.error, onRetry: () {}),
       size: const Size(320, 800),
       textScale: 2,
     );
@@ -283,6 +272,50 @@ void main() {
 
     // No onEdit / onDelete: a custom preset has no menu at all.
     expect(find.byTooltip('Preset options'), findsNothing);
+  });
+
+  testWidgets('selecting a preset shows the new selection at once', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await _pump(tester, _data(onSelect: (_) {}));
+
+    expect(
+      find.bySemanticsLabel(RegExp(r'^General preset, selected\.')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Coder'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.bySemanticsLabel(RegExp(r'^Coder preset, selected\.')),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(RegExp(r'^General preset, selected\.')),
+      findsNothing,
+    );
+    handle.dispose();
+  });
+
+  testWidgets('deleting a preset removes it at once', (tester) async {
+    var deleted = 0;
+    await _pump(tester, _data(onDelete: (_) => deleted++));
+
+    final menu = find.byTooltip('Preset options');
+    await tester.ensureVisible(menu);
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+    await tester.pumpAndSettle();
+
+    expect(deleted, 1);
+    expect(find.text('Code reviewer'), findsNothing);
+    expect(find.text('YOUR PRESETS'), findsNothing);
+    expect(find.text('General'), findsOneWidget);
   });
 
   testWidgets('long copy fits 320 dp at 200% text, menu and dialog', (
@@ -335,7 +368,10 @@ void main() {
 
     await tester.tap(find.text('Delete'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('My very long custom preset name'), findsWidgets);
+    expect(
+      find.textContaining('My very long custom preset name'),
+      findsWidgets,
+    );
     expect(tester.takeException(), isNull);
 
     await tester.tap(find.widgetWithText(TextButton, 'Delete'));

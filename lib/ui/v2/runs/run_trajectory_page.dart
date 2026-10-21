@@ -311,11 +311,12 @@ class _OverviewCard extends StatelessWidget {
                   ],
                 ),
               ),
-              OIconButton(
-                icon: Icons.refresh_rounded,
-                semanticLabel: 'Run again',
-                onPressed: onRerun,
-              ),
+              if (onRerun != null)
+                OIconButton(
+                  icon: Icons.refresh_rounded,
+                  semanticLabel: 'Run again',
+                  onPressed: onRerun,
+                ),
             ],
           ),
           const SizedBox(height: OSpace.m),
@@ -593,7 +594,9 @@ class _RunStepTileState extends State<_RunStepTile> {
                       onTap: widget.onOpenFile == null
                           ? null
                           : () => widget.onOpenFile!(step.fileName!),
-                      semanticLabel: 'Open ${step.fileName}',
+                      semanticLabel: widget.onOpenFile == null
+                          ? step.fileName!
+                          : 'Open ${step.fileName}',
                       child: Row(
                         children: [
                           Container(
@@ -635,11 +638,12 @@ class _RunStepTileState extends State<_RunStepTile> {
                               ],
                             ),
                           ),
-                          Icon(
-                            Icons.chevron_right_rounded,
-                            size: 20,
-                            color: c.textFaint,
-                          ),
+                          if (widget.onOpenFile != null)
+                            Icon(
+                              Icons.chevron_right_rounded,
+                              size: 20,
+                              color: c.textFaint,
+                            ),
                         ],
                       ),
                     ),
@@ -824,7 +828,7 @@ class _PreviewCard extends StatelessWidget {
     return OCard(
       padding: EdgeInsets.zero,
       onTap: onOpen,
-      semanticLabel: 'Open preview',
+      semanticLabel: onOpen == null ? null : 'Open preview',
       child: Column(
         children: [
           Padding(
@@ -886,39 +890,40 @@ class _PreviewCard extends StatelessWidget {
                     ),
                   ),
                 ),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: OSpace.s,
-                      vertical: OSpace.xs,
-                    ),
-                    decoration: BoxDecoration(
-                      color: c.surfaceRaised,
-                      borderRadius: BorderRadius.circular(ORadius.pill),
-                      border: Border.all(color: c.hairline),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.open_in_new_rounded,
-                          size: 14,
-                          color: c.accent,
-                        ),
-                        const SizedBox(width: OSpace.xs),
-                        Flexible(
-                          child: Text(
-                            'Open preview',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: OType.caption.copyWith(color: c.text),
+                if (onOpen != null)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: OSpace.s,
+                        vertical: OSpace.xs,
+                      ),
+                      decoration: BoxDecoration(
+                        color: c.surfaceRaised,
+                        borderRadius: BorderRadius.circular(ORadius.pill),
+                        border: Border.all(color: c.hairline),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.open_in_new_rounded,
+                            size: 14,
+                            color: c.accent,
                           ),
-                        ),
-                      ],
+                          const SizedBox(width: OSpace.xs),
+                          Flexible(
+                            child: Text(
+                              'Open preview',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: OType.caption.copyWith(color: c.text),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
               ],
             ),
           ),
@@ -935,6 +940,7 @@ class _FooterCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (onShareRun == null) return const SizedBox.shrink();
     return OCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

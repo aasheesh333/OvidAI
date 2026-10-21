@@ -39,7 +39,8 @@ class SplashPage extends StatelessWidget {
   final V2SplashData data;
 
   /// Called by the retry action that appears when [V2SplashData.errorLabel] is
-  /// set. The splash never navigates on its own.
+  /// set. When null there is nothing that can retry, so no retry control is
+  /// rendered. The splash never navigates on its own.
   final VoidCallback? onRetry;
 
   @override
@@ -129,10 +130,14 @@ class _SplashIdentity extends StatelessWidget {
       children: [
         const _SplashMark(),
         const SizedBox(height: OSpace.xl),
-        Text(
-          'Ovid Si',
-          textAlign: TextAlign.center,
-          style: OType.display.copyWith(color: c.text),
+        Semantics(
+          container: true,
+          header: true,
+          child: Text(
+            'Ovid Si',
+            textAlign: TextAlign.center,
+            style: OType.display.copyWith(color: c.text),
+          ),
         ),
         const SizedBox(height: OSpace.xs),
         Text(
@@ -210,13 +215,18 @@ class _SplashError extends StatelessWidget {
             ),
           ),
         ),
-        const SizedBox(height: OSpace.m),
-        OButton(
-          label: 'Try again',
-          icon: Icons.refresh_rounded,
-          variant: OButtonVariant.secondary,
-          onPressed: onRetry,
-        ),
+        // Only offer the action that can actually fix the failure. A visible
+        // "Try again" with no handler is a dead control, not a recovery path.
+        if (onRetry != null) ...[
+          const SizedBox(height: OSpace.m),
+          OButton(
+            key: const Key('splash-retry'),
+            label: 'Try again',
+            icon: Icons.refresh_rounded,
+            variant: OButtonVariant.secondary,
+            onPressed: onRetry,
+          ),
+        ],
       ],
     );
   }

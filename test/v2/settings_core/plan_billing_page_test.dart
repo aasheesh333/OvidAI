@@ -2,6 +2,7 @@ import 'dart:ui' show Tristate;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_motion.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/settings/plan_billing_page.dart';
@@ -87,8 +88,7 @@ V2PlanBillingData _billingData({
   List<V2BillingHistoryEntry> history = const [],
   ValueChanged<V2Currency>? onCurrencyChanged,
   ValueChanged<V2BillingPeriod>? onPeriodChanged,
-  ValueChanged<V2Plan>? onSelectPlan,
-  VoidCallback? onUpgrade,
+  ValueChanged<V2PlanPurchase>? onPurchase,
   VoidCallback? onRestorePurchases,
   ValueChanged<V2BillingHistoryEntry>? onHistoryTap,
   VoidCallback? onRetry,
@@ -102,8 +102,7 @@ V2PlanBillingData _billingData({
     history: history,
     onCurrencyChanged: onCurrencyChanged,
     onPeriodChanged: onPeriodChanged,
-    onSelectPlan: onSelectPlan,
-    onUpgrade: onUpgrade,
+    onPurchase: onPurchase,
     onRestorePurchases: onRestorePurchases,
     onHistoryTap: onHistoryTap,
     onRetry: onRetry,
@@ -135,6 +134,21 @@ void _phoneSize(WidgetTester tester) {
 }
 
 void main() {
+  test('model access matches the real Auto-only gate (free/go vs plus/pro)', () {
+    // The shell gate is `autoOnly = tier == 'free' || tier == '3x'`
+    // (v2_app_shell.dart). Server tier ids must resolve the same way here.
+    for (final tier in ['free', '3x']) {
+      final limits = V2PlanLimits.forIdOrFree(tier);
+      expect(limits.manualModels, isFalse, reason: '$tier is Auto only');
+      expect(limits.modelAccessLabel, 'Auto only');
+    }
+    for (final tier in ['7x', '15x']) {
+      final limits = V2PlanLimits.forIdOrFree(tier);
+      expect(limits.manualModels, isTrue, reason: '$tier allows manual');
+      expect(limits.modelAccessLabel, 'Auto + manual models');
+    }
+  });
+
   testWidgets('renders all four plans in light', (tester) async {
     _phoneSize(tester);
     await tester.pumpWidget(_app(OTheme.light(), _billingData()));
@@ -142,7 +156,8 @@ void main() {
 
     expect(find.text('Plan & billing'), findsOneWidget);
     expect(find.text('ACCOUNT TIER'), findsOneWidget);
-    expect(find.text('Current plan'), findsOneWidget);
+    // The badge and the disabled CTA both say "Current plan" on the Free card.
+    expect(find.text('Current plan'), findsNWidgets(2));
     expect(_inCard('free', 'Free'), findsOneWidget);
     expect(_inCard('free', r'$0'), findsOneWidget);
     expect(_inCard('go', 'Go'), findsOneWidget);
@@ -289,10 +304,19 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Current plan'), findsOneWidget);
-    expect(_inCard('plus', 'Current plan'), findsOneWidget);
+    expect(find.text('Current plan'), findsNWidgets(2));
+    expect(_inCard('plus', 'Current plan'), findsNWidgets(2));
     expect(_inCard('plus', '15 GB'), findsOneWidget);
     expect(find.text('Select Plus'), findsNothing);
+    expect(
+      tester
+          .widget<OButton>(
+            find.byKey(const ValueKey<String>('plan-cta-plus')),
+          )
+          .onPressed,
+      isNull,
+      reason: 'the current plan cannot be purchased again',
+    );
   });
 
   testWidgets('renders correctly in dark', (tester) async {
@@ -327,22 +351,195 @@ void main() {
     expect(retried, 1);
   });
 
-  testWidgets('selecting Go calls the injected callback', (tester) async {
-    V2Plan? selected;
+  testWidgets('each plan CTA buys that plan with its own store product', (
+    tester,
+  ) async {
+    final purchases = <V2PlanPurchase>[];
+    await tester.pumpWidget(
+      _app(OTheme.light(), _billingData(onPurchase: purchases.add)),
+    );
+    await tester.pumpAndSettle();
+
+    for (final entry in const {
+      'go': ('3x', 'ovid_plus_monthly'),
+      'plus': ('7x', 'ovid_pro_monthly'),
+      'pro': ('15x', 'ovid_max_monthly'),
+    }.entries) {
+      await tester.ensureVisible(
+        find.byKey(ValueKey<String>('plan-cta-${entry.key}')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(ValueKey<String>('plan-cta-${entry.key}')),
+      );
+      await tester.pump();
+
+      final purchase = purchases.last;
+      expect(purchase.planId, entry.key);
+      expect(purchase.tier, entry.value.$1, reason: '${entry.key} tier');
+      expect(
+        purchase.productId,
+        entry.value.$2,
+        reason: '${entry.key} product',
+      );
+      expect(purchase.period, V2BillingPeriod.monthly);
+    }
+    expect(purchases, hasLength(3));
+  });
+
+  testWidgets('the Free card is a Play management action, not a purchase', (
+    tester,
+  ) async {
+    final purchases = <V2PlanPurchase>[];
     await tester.pumpWidget(
       _app(
         OTheme.light(),
-        _billingData(onSelectPlan: (plan) => selected = plan),
+        _billingData(currentPlanId: 'go', onPurchase: purchases.add),
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Select Go'));
+    final cta = tester.widget<OButton>(
+      find.byKey(const ValueKey<String>('plan-cta-free')),
+    );
+    expect(cta.label, 'Manage in Google Play');
+    await tester.ensureVisible(
+      find.byKey(const ValueKey<String>('plan-cta-free')),
+    );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Select Go'));
+    await tester.tap(find.byKey(const ValueKey<String>('plan-cta-free')));
     await tester.pump();
 
-    expect(selected?.id, 'go');
+    expect(purchases.single.planId, 'free');
+    expect(purchases.single.tier, 'free');
+    expect(purchases.single.productId, isNull);
+  });
+
+  testWidgets('the yearly toggle changes both the price and the product', (
+    tester,
+  ) async {
+    final purchases = <V2PlanPurchase>[];
+    var period = V2BillingPeriod.monthly;
+    late StateSetter setState;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: OTheme.light(),
+        home: StatefulBuilder(
+          builder: (context, setter) {
+            setState = setter;
+            return PlanBillingPage(
+              data: _billingData(
+                period: period,
+                onPurchase: purchases.add,
+                onPeriodChanged: (value) =>
+                    setState(() => period = value),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Yearly'));
+    await tester.pumpAndSettle();
+
+    expect(_inCard('go', r'$50'), findsOneWidget);
+    await tester.ensureVisible(
+      find.byKey(const ValueKey<String>('plan-cta-go')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey<String>('plan-cta-go')));
+    await tester.pump();
+
+    expect(purchases.single.period, V2BillingPeriod.yearly);
+    expect(purchases.single.productId, 'ovid_plus_yearly');
+  });
+
+  testWidgets('the current plan is marked and its CTA is disabled', (
+    tester,
+  ) async {
+    final purchases = <V2PlanPurchase>[];
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _billingData(currentPlanId: 'go', onPurchase: purchases.add),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('plan-current-go')),
+      findsOneWidget,
+    );
+    final cta = tester.widget<OButton>(
+      find.byKey(const ValueKey<String>('plan-cta-go')),
+    );
+    expect(cta.onPressed, isNull);
+    expect(cta.label, 'Current plan');
+    expect(purchases, isEmpty);
+  });
+
+  testWidgets('server tier ids resolve to the same card and product', (
+    tester,
+  ) async {
+    final purchases = <V2PlanPurchase>[];
+    final serverPlans = [
+      for (final plan in _plans)
+        V2Plan(
+          id: plan.id == 'go'
+              ? '3x'
+              : plan.id == 'plus'
+              ? '7x'
+              : plan.id == 'pro'
+              ? '15x'
+              : plan.id,
+          name: plan.name,
+          tagline: plan.tagline,
+          priceUsd: plan.priceUsd,
+          priceInr: plan.priceInr,
+          storageGb: plan.storageGb,
+        ),
+    ];
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _billingData(
+          currentPlanId: 'free',
+          plans: serverPlans,
+          onPurchase: purchases.add,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('plan-compare-header-go')),
+      findsOneWidget,
+    );
+    await tester.ensureVisible(
+      find.byKey(const ValueKey<String>('plan-cta-3x')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey<String>('plan-cta-3x')));
+    await tester.pump();
+
+    expect(purchases.single.planId, 'go');
+    expect(purchases.single.tier, '3x');
+    expect(purchases.single.productId, 'ovid_plus_monthly');
+
+    // A server tier id also marks the right card as current.
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _billingData(currentPlanId: '3x', plans: serverPlans),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey<String>('plan-current-3x')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('currency toggle updates the prices', (tester) async {
@@ -498,19 +695,20 @@ void main() {
     expect(retried, 1);
   });
 
-  testWidgets('empty history offers a next action that fires', (tester) async {
-    var upgrades = 0;
-    await tester.pumpWidget(
-      _app(OTheme.light(), _billingData(onUpgrade: () => upgrades++)),
-    );
+  testWidgets('empty history "See plans" scrolls back to the real plan list', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(_app(OTheme.light(), _billingData()));
     await tester.pumpAndSettle();
 
     await tester.ensureVisible(find.text('See plans'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('See plans'));
-    await tester.pump();
+    await tester.pumpAndSettle();
 
-    expect(upgrades, 1);
+    expect(tester.takeException(), isNull);
+    expect(find.text('PLANS'), findsOneWidget);
   });
 
   testWidgets('toggles are 48 dp and announce selection', (tester) async {
@@ -616,8 +814,7 @@ void main() {
                     : const [],
                 onCurrencyChanged: (_) {},
                 onPeriodChanged: (_) {},
-                onSelectPlan: (_) {},
-                onUpgrade: () {},
+                onPurchase: (_) {},
                 onRestorePurchases: () {},
                 onHistoryTap: (_) {},
                 onRetry: () {},
@@ -654,8 +851,7 @@ void main() {
               history: _history,
               onCurrencyChanged: (_) {},
               onPeriodChanged: (_) {},
-              onSelectPlan: (_) {},
-              onUpgrade: () {},
+              onPurchase: (_) {},
               onRestorePurchases: () {},
               onHistoryTap: (_) {},
             ),
@@ -667,7 +863,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 600));
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Current plan'), findsOneWidget);
+    expect(find.text('Current plan'), findsNWidgets(2));
     expect(find.text('Restore purchases'), findsOneWidget);
   });
 }

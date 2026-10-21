@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
@@ -8,6 +11,30 @@ import 'storage_breakdown.dart';
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
 
 const int _bytesPerGb = 1024 * 1024 * 1024;
+
+/// Cloud storage included with each plan, in GB. The single source the screen
+/// uses, so Free/Go/Plus/Pro can never drift from 3 / 5 / 15 / 75 GB.
+const Map<String, double> v2PlanStorageGb = <String, double>{
+  'free': 3,
+  'go': 5,
+  'plus': 15,
+  'pro': 75,
+  // Server tier ids used by the plan catalogue.
+  '3x': 5,
+  '7x': 15,
+  '15x': 75,
+};
+
+/// Quota for a plan name or tier id, or null when the caller's plan is not one
+/// of the four known plans.
+double? v2PlanStorageQuotaGb(String plan) {
+  final key = plan.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+  if (key.isEmpty) return null;
+  for (final entry in v2PlanStorageGb.entries) {
+    if (key == entry.key || key.startsWith(entry.key)) return entry.value;
+  }
+  return null;
+}
 
 /// One coloured part of the storage donut and its legend row.
 @immutable
@@ -70,6 +97,7 @@ class V2StoragePageData {
     this.errorMessage,
     this.onClearPreviews,
     this.onClearCache,
+    this.onClearCacheAndReport,
     this.onDeleteOldChats,
     this.onEmptyTrash,
     this.onLargestItemTap,
@@ -111,6 +139,11 @@ class V2StoragePageData {
 
   final VoidCallback? onClearPreviews;
   final VoidCallback? onClearCache;
+
+  /// Clears the on-device cache and returns the bytes actually freed. When
+  /// null the page measures and clears the temporary directory itself, so the
+  /// row still works on a screen whose owner only supplied display data.
+  final Future<int> Function()? onClearCacheAndReport;
   final VoidCallback? onDeleteOldChats;
   final VoidCallback? onEmptyTrash;
   final ValueChanged<String>? onLargestItemTap;
@@ -118,8 +151,10 @@ class V2StoragePageData {
   final VoidCallback? onRetry;
 
   bool get isEmpty =>
-      usedGb <= 0 ||
-      (slices.isEmpty && artifactsGb + sessionsGb + cacheGb <= 0);
+      usedGb <= 0 &&
+      totalGb <= 0 &&
+      slices.isEmpty &&
+      artifactsGb + sessionsGb + cacheGb <= 0;
 }
 
 /// Storage overview with a plan quota bar, a category breakdown, ways to free
@@ -128,6 +163,22 @@ class StoragePage extends StatelessWidget {
   const StoragePage({super.key, required this.data});
 
   final V2StoragePageData data;
+
+  /// The plan's canonical quota. A recognised plan name always wins over a
+  /// caller-supplied total so Free/Go/Plus/Pro show 3/5/15/75 GB even when a
+  /// stale screen state carries an older number.
+  double get _totalGb => v2PlanStorageQuotaGb(data.planName) ?? data.totalGb;
+
+  /// Used space as one number for the whole page. When the category detail
+  /// accounts for more than the caller's total, the detail wins: the heading
+  /// and the breakdown must never disagree about the same bytes.
+  int get _entryBytes =>
+      _breakdownEntries().fold<int>(0, (sum, entry) => sum + entry.safeBytes);
+
+  int get _usedBytes =>
+      _entryBytes > _toBytes(data.usedGb) ? _entryBytes : _toBytes(data.usedGb);
+
+  double get _usedGb => _usedBytes / _bytesPerGb;
 
   @override
   Widget build(BuildContext context) {
@@ -181,21 +232,20 @@ class StoragePage extends StatelessWidget {
   }
 
   Widget _storageBreakdown(BuildContext context) {
-    final ratio = data.totalGb <= 0
-        ? 0.0
-        : (data.usedGb / data.totalGb).clamp(0, 1).toDouble();
-    final percent = (ratio * 100).round();
+    final reconciled = reconcileStorageBreakdown(
+      _breakdownEntries(),
+      _usedBytes,
+    );
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.l),
       child: StorageBreakdown(
         key: const ValueKey('storage-breakdown'),
         data: V2StorageBreakdownData(
           title: 'What uses space',
-          usedBytes: _toBytes(data.usedGb),
-          totalBytes: _toBytes(data.totalGb),
-          amountLabel: '$percent%',
-          totalLabel: data.totalGb > 0 ? '${_gb(data.totalGb)} GB' : '',
-          entries: _breakdownEntries(),
+          usedBytes: reconciled.usedBytes,
+          totalBytes: _toBytes(_totalGb),
+          totalLabel: _totalGb > 0 ? '${_gb(_totalGb)} GB' : '',
+          entries: reconciled.entries,
           onRetry: data.onRetry,
         ),
       ),
@@ -278,20 +328,18 @@ class StoragePage extends StatelessWidget {
 
   Widget _overview(BuildContext context) {
     final c = OColors.of(context);
-    final ratio = data.totalGb <= 0
+    final ratio = _totalGb <= 0
         ? 0.0
-        : (data.usedGb / data.totalGb).clamp(0, 1).toDouble();
+        : (_usedGb / _totalGb).clamp(0, 1).toDouble();
     final percent = (ratio * 100).round();
-    final freeGb = (data.totalGb - data.usedGb)
-        .clamp(0, data.totalGb)
-        .toDouble();
+    final freeGb = (_totalGb - _usedGb).clamp(0, _totalGb).toDouble();
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.l),
       child: OCard(
         child: Column(
           children: [
             Text(
-              '${_gb(data.usedGb)} GB of ${_gb(data.totalGb)} GB cloud storage used · ${_gb(freeGb)} GB free',
+              '${_gb(_usedGb)} GB of ${_gb(_totalGb)} GB cloud storage used · ${_gb(freeGb)} GB free',
               textAlign: TextAlign.center,
               style: OType.bodySm.copyWith(color: c.textMuted),
             ),
@@ -377,7 +425,7 @@ class StoragePage extends StatelessWidget {
                   action: OButton(
                     label: 'Clear',
                     variant: OButtonVariant.secondary,
-                    onPressed: data.onClearPreviews,
+                    onPressed: () => _clearPreviews(context),
                   ),
                 ),
                 if (data.showCache) ...[
@@ -389,7 +437,7 @@ class StoragePage extends StatelessWidget {
                     subtitle:
                         '${data.cacheSizeLabel} · Temporary files on this phone you can rebuild',
                     showChevron: false,
-                    onTap: data.onClearCache,
+                    onTap: () => _clearCache(context),
                     trailing: _stacksActions(context)
                         ? null
                         : OPill(label: data.cacheSizeLabel),
@@ -423,6 +471,82 @@ class StoragePage extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// Clears the render cache. When the owner supplies a callback it owns the
+  /// real work; otherwise the in-memory image cache is dropped here, which is
+  /// the preview data this build actually keeps.
+  void _clearPreviews(BuildContext context) {
+    final callback = data.onClearPreviews;
+    if (callback != null) {
+      callback();
+      return;
+    }
+    PaintingBinding.instance.imageCache.clear();
+    PaintingBinding.instance.imageCache.clearLiveImages();
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          key: ValueKey('clear-previews-result'),
+          content: Text('Previews cleared.'),
+        ),
+      );
+  }
+
+  /// Clears the on-device cache and reports the bytes that were actually
+  /// freed. The page measures the temporary directory before and after, so the
+  /// confirmation is a real number rather than the size label the caller
+  /// supplied earlier.
+  Future<void> _clearCache(BuildContext context) async {
+    final reporter = data.onClearCacheAndReport;
+    if (reporter != null) {
+      final freed = await reporter();
+      if (!context.mounted) return;
+      _snackFreed(context, freed);
+      return;
+    }
+    if (data.onClearCache != null) {
+      data.onClearCache!();
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            key: ValueKey('clear-cache-result'),
+            content: Text('Cache cleared.'),
+          ),
+        );
+      return;
+    }
+    try {
+      final freed = await clearTemporaryCache();
+      if (!context.mounted) return;
+      _snackFreed(context, freed);
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('Could not clear the cache. Try again.'),
+          ),
+        );
+    }
+  }
+
+  void _snackFreed(BuildContext context, int freed) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          key: const ValueKey('clear-cache-result'),
+          content: Text(
+            freed > 0
+                ? 'Freed ${formatStorageBytes(freed)} of cache.'
+                : 'Cache is already empty.',
+          ),
+        ),
+      );
   }
 
   /// A row whose action button sits beside the text normally and under it when
@@ -574,7 +698,8 @@ class StoragePage extends StatelessWidget {
                       ),
                       const SizedBox(height: OSpace.xs),
                       Text(
-                        'Upgrade for 5 GB with Ovid Go or expand to 50 GB with Ovid Plus.',
+                        'Upgrade for 5 GB with Ovid Go, 15 GB with Plus or 75 GB '
+                        'with Pro.',
                         style: OType.bodySm.copyWith(color: c.textMuted),
                       ),
                     ],
@@ -650,6 +775,49 @@ class _CategorySize {
 String _gb(double value) => value.toStringAsFixed(1);
 
 int _toBytes(double gb) => (gb <= 0 ? 0 : gb * _bytesPerGb).round();
+
+/// Deletes everything inside the app's temporary directory and returns the
+/// bytes actually freed. Visible so the clear-cache row can be tested without
+/// a platform plugin.
+@visibleForTesting
+Future<int> clearTemporaryCache() async {
+  final dir = await getTemporaryDirectory();
+  if (!await dir.exists()) return 0;
+  final before = await _dirBytes(dir);
+  await for (final entity in dir.list(followLinks: false)) {
+    try {
+      await entity.delete(recursive: true);
+    } catch (_) {
+      // A file in use is skipped; the byte difference reports what went.
+    }
+  }
+  final after = await _dirBytes(dir);
+  return (before - after).clamp(0, before);
+}
+
+Future<int> _dirBytes(Directory dir) async {
+  var bytes = 0;
+  final stack = <Directory>[dir];
+  while (stack.isNotEmpty) {
+    final current = stack.removeLast();
+    try {
+      await for (final entity in current.list(followLinks: false)) {
+        if (entity is File) {
+          try {
+            bytes += await entity.length();
+          } catch (_) {
+            // Skip unreadable entries; they are not part of the report.
+          }
+        } else if (entity is Directory) {
+          stack.add(entity);
+        }
+      }
+    } catch (_) {
+      // Skip unreadable directories.
+    }
+  }
+  return bytes;
+}
 
 /// True when the text scale is large enough that a row's action must move to
 /// its own line. 1.5× is the point where a trailing 48 dp button leaves less

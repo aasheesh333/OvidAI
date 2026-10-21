@@ -415,6 +415,20 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Delete'));
     await tester.pumpAndSettle();
+
+    // Deleting is destructive: the dialog must come first.
+    expect(deleted, isNull);
+    expect(find.text('Delete “Morning AI news briefing”?'), findsOneWidget);
+    await tester.tap(find.widgetWithText(TextButton, 'Keep'));
+    await tester.pumpAndSettle();
+    expect(deleted, isNull, reason: 'Keep must not delete');
+
+    await tester.tap(_menuButton('Morning AI news briefing'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+    await tester.pumpAndSettle();
     expect(deleted?.id, 's1');
   });
 

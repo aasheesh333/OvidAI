@@ -85,6 +85,10 @@ void main() {
       expect(find.text('Ovid'), findsOneWidget);
       expect(find.text('Wait for the turn'), findsOneWidget);
       expect(find.text('50 members · Creator pays storage'), findsOneWidget);
+      expect(
+        find.text('50 of 50 members in this room'),
+        findsOneWidget,
+      );
     }
   });
 
@@ -223,6 +227,7 @@ void main() {
       tester,
       CollabLivePage(
         data: _data(turnQueue: const ['Priya Patel', 'Elena Chen']),
+        onRequestTurn: () {},
       ),
       OTheme.light(),
     );
@@ -248,7 +253,7 @@ void main() {
     try {
       await _pump(
         tester,
-        CollabLivePage(data: _data(), onSend: () => sends++),
+        CollabLivePage(data: _data(), onSend: (_) => sends++),
         OTheme.light(),
       );
 
@@ -283,7 +288,7 @@ void main() {
         tester,
         CollabLivePage(
           data: _data(isMyTurn: true),
-          onSend: () => sends++,
+          onSend: (_) => sends++,
           onRequestTurn: () => requests++,
         ),
         OTheme.light(),
@@ -292,6 +297,9 @@ void main() {
       expect(find.text('Your turn'), findsOneWidget);
       expect(find.text('Write a message'), findsOneWidget);
       expect(find.text('You have the turn'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), 'Hello team');
+      await tester.pump();
       expect(
         tester.getSemantics(find.bySemanticsLabel('Send message')),
         isSemantics(label: 'Send message', isButton: true, isEnabled: true),
@@ -331,7 +339,7 @@ void main() {
               isMyTurn: true,
               turnQueue: const ['Priya Patel', 'Elena Chen', 'Marcus Vance'],
             ),
-            onSend: () {},
+            onSend: (_) {},
           ),
         ),
       );
@@ -351,6 +359,7 @@ void main() {
       tester,
       CollabLivePage(
         data: _data(turnQueue: const ['Priya Patel', 'Elena Chen']),
+        onRequestTurn: () {},
       ),
       OTheme.light(),
     );
@@ -379,5 +388,24 @@ void main() {
     expect(mine.data.isMyTurn, isTrue);
     expect(mine.data.turnRequested, isTrue);
     expect(find.text('You have the turn'), findsOneWidget);
+  });
+
+  testWidgets('the composer sends the text the member typed', (tester) async {
+    String? sent;
+    await _pump(
+      tester,
+      CollabLivePage(
+        data: _data(isMyTurn: true),
+        onSend: (text) => sent = text,
+      ),
+      OTheme.light(),
+    );
+
+    await tester.enterText(find.byType(TextField), 'Ship it');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.send_rounded));
+    await tester.pump();
+    expect(sent, 'Ship it');
+    expect(find.text('Ship it'), findsNothing);
   });
 }

@@ -136,6 +136,15 @@ abstract class V2MentionSource {
 /// web. When null, typing `@` simply shows no suggestions.
 V2MentionSource? v2DefaultMentionSource;
 
+/// Maps a chat's local id to the id the gateway accepts.
+///
+/// Root chats are keyed locally (`ChatSession.id`), but `runTask` forwards
+/// `sessionRefs` to the server, which only knows the cloud session id. The host
+/// installs this alongside [v2DefaultMentionSource] (for example
+/// `CloudSessionStore.I.knownServerIdFor`). Null keeps ids unchanged so
+/// previews and widget tests stay deterministic.
+String Function(String localSessionId)? v2SessionRefResolver;
+
 /// Used when no source is installed: no suggestions, no typed-title lookup.
 class V2EmptyMentionSource implements V2MentionSource {
   const V2EmptyMentionSource();
@@ -414,9 +423,11 @@ V2MentionRefs v2MentionRefsIn(
   void addSession(String? id) {
     if (id == null || id.isEmpty) return;
     if (id == currentSessionId) return;
-    if (sessions.contains(id)) return;
+    final resolved = v2SessionRefResolver?.call(id) ?? id;
+    if (resolved.isEmpty || resolved == currentSessionId) return;
+    if (sessions.contains(resolved)) return;
     if (sessions.length >= V2MentionRefs.maxRefs) return;
-    sessions.add(id);
+    sessions.add(resolved);
   }
 
   for (final match in V2MentionTokens.sessionIdTag.allMatches(text)) {

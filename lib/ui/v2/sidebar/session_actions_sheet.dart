@@ -44,7 +44,11 @@ class V2SessionActionsData {
 
 /// The chat actions sheet: pin, rename, move, share, duplicate, export and
 /// delete, followed by the consequence footnote.
-class SessionActionsSheet extends StatelessWidget {
+///
+/// The pin switch is optimistic: it flips as soon as the user taps and then
+/// reports through [onTogglePin], so the control reflects the change instead of
+/// snapping back to the injected snapshot while the write lands.
+class SessionActionsSheet extends StatefulWidget {
   const SessionActionsSheet({
     super.key,
     required this.data,
@@ -71,14 +75,35 @@ class SessionActionsSheet extends StatelessWidget {
   final VoidCallback? onRetry;
 
   @override
+  State<SessionActionsSheet> createState() => _SessionActionsSheetState();
+}
+
+class _SessionActionsSheetState extends State<SessionActionsSheet> {
+  late bool _pinned = widget.data.pinned;
+
+  @override
+  void didUpdateWidget(SessionActionsSheet oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Follow the caller when it hands over fresh data (for example after a
+    // retry), but leave an optimistic flip alone while the write is in flight.
+    if (widget.data.pinned != oldWidget.data.pinned) {
+      _pinned = widget.data.pinned;
+    }
+  }
+
+  void _setPinned(bool value) {
+    if (_pinned != value) setState(() => _pinned = value);
+    widget.onTogglePin?.call(value);
+  }
+
+  @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final data = widget.data;
+    final onClose = widget.onClose;
     switch (data.status) {
       case V2SessionActionsStatus.loading:
-        return const SizedBox(
-          height: 320,
-          child: OSkeletonList(rows: 5),
-        );
+        return const SizedBox(height: 320, child: OSkeletonList(rows: 5));
       case V2SessionActionsStatus.error:
         return SizedBox(
           height: 320,
@@ -86,7 +111,7 @@ class SessionActionsSheet extends StatelessWidget {
             title: 'Chat actions did not load',
             message:
                 data.errorMessage ?? 'Check your connection and try again.',
-            onRetry: onRetry,
+            onRetry: widget.onRetry,
           ),
         );
       case V2SessionActionsStatus.empty:
@@ -124,22 +149,24 @@ class SessionActionsSheet extends StatelessWidget {
                       OListRow(
                         title: 'Pin to top of drawer',
                         subtitle: 'Keep this chat handy',
-                        icon: data.pinned
+                        icon: _pinned
                             ? Icons.push_pin_rounded
                             : Icons.push_pin_outlined,
                         trailing: Switch.adaptive(
-                          value: data.pinned,
-                          onChanged: onTogglePin,
+                          value: _pinned,
+                          onChanged: widget.onTogglePin == null
+                              ? null
+                              : _setPinned,
                         ),
-                        onTap: onTogglePin == null
+                        onTap: widget.onTogglePin == null
                             ? null
-                            : () => onTogglePin!(!data.pinned),
+                            : () => _setPinned(!_pinned),
                         showChevron: false,
                       ),
                       OListRow(
                         title: 'Rename chat',
                         icon: Icons.edit_outlined,
-                        onTap: onRename,
+                        onTap: widget.onRename,
                       ),
                       OListRow(
                         title: 'Move to project',
@@ -149,7 +176,7 @@ class SessionActionsSheet extends StatelessWidget {
                         trailing: Flexible(
                           child: _MoveTrailing(projectName: data.projectName),
                         ),
-                        onTap: onMoveToProject,
+                        onTap: widget.onMoveToProject,
                         showChevron: false,
                       ),
                       OListRow(
@@ -161,7 +188,7 @@ class SessionActionsSheet extends StatelessWidget {
                           size: 18,
                           color: c.textFaint,
                         ),
-                        onTap: onShare,
+                        onTap: widget.onShare,
                         showChevron: false,
                       ),
                       OListRow(
@@ -170,7 +197,7 @@ class SessionActionsSheet extends StatelessWidget {
                         trailing: const Flexible(
                           child: _TrailingPill(label: 'Branch'),
                         ),
-                        onTap: onDuplicate,
+                        onTap: widget.onDuplicate,
                         showChevron: false,
                       ),
                       OListRow(
@@ -182,7 +209,7 @@ class SessionActionsSheet extends StatelessWidget {
                           size: 18,
                           color: c.textFaint,
                         ),
-                        onTap: onExportMarkdown,
+                        onTap: widget.onExportMarkdown,
                         showChevron: false,
                       ),
                     ],
@@ -198,7 +225,7 @@ class SessionActionsSheet extends StatelessWidget {
                       size: 18,
                       color: c.danger,
                     ),
-                    onTap: onDelete,
+                    onTap: widget.onDelete,
                     showChevron: false,
                   ),
                   const SizedBox(height: OSpace.m),
@@ -263,11 +290,15 @@ class _Header extends StatelessWidget {
               Row(
                 children: [
                   Flexible(
-                    child: Text(
-                      data.title.isEmpty ? 'Chat' : data.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.h2.copyWith(color: c.text),
+                    child: Semantics(
+                      container: true,
+                      header: true,
+                      child: Text(
+                        data.title.isEmpty ? 'Chat' : data.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.h2.copyWith(color: c.text),
+                      ),
                     ),
                   ),
                   const SizedBox(width: OSpace.s),

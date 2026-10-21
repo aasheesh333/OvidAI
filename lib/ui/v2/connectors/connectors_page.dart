@@ -3,143 +3,22 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'add_connector_page.dart';
 import 'catalog_data.dart';
+import 'connector_detail_page.dart';
+import 'connector_probe.dart';
+import 'connector_store.dart';
+import 'connector_upgrade.dart';
+
+export 'connector_models.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
 
 enum V2ConnectorsStatus { loading, content, error }
 
-/// A hosted connector, a plugin, and an MCP server share one row model,
-/// because the person sees one catalog. Plugins and MCP servers share the
-/// "Plugins & MCP" section but stay separate kinds so the filter can tell
-/// them apart.
-enum V2ConnectorKind { app, plugin, mcp }
-
-/// One connector in the catalog. Matches the shared connector contract
-/// (`id, name, description, connected, category`) plus display hints.
-@immutable
-class V2Connector {
-  const V2Connector({
-    required this.id,
-    required this.name,
-    required this.description,
-    required this.connected,
-    required this.category,
-    this.kind = V2ConnectorKind.app,
-    this.icon = Icons.extension_outlined,
-    this.enabled = true,
-    this.popular = false,
-    this.builtIn = false,
-    this.tools = const <String>[],
-    this.auth = V2CatalogAuth.none,
-    this.risk = V2CatalogRisk.low,
-  });
-
-  final String id;
-  final String name;
-  final String description;
-  final bool connected;
-  final String category;
-  final V2ConnectorKind kind;
-  final IconData icon;
-  final bool enabled;
-  final bool popular;
-  final bool builtIn;
-  final List<String> tools;
-
-  /// Primary credential the setup flow collects, when the row came from the
-  /// shared catalog. Detail screens use it to explain what a grant needs.
-  final V2CatalogAuth auth;
-
-  /// Blast radius of the integration. The detail page carries this into the
-  /// permissions screen so risk badges stay honest.
-  final V2CatalogRisk risk;
-
-  bool get isMcp => kind == V2ConnectorKind.mcp;
-
-  String get sectionTitle =>
-      kind == V2ConnectorKind.app ? 'Connectors' : 'Plugins & MCP';
-}
-
-/// Maps a catalog category to the icon a row shows. Categories are shared
-/// across connectors, plugins, and MCP servers, so one map keeps the visual
-/// language consistent while [V2CatalogEntry] stays free of Flutter imports.
-IconData v2ConnectorIconFor(V2CatalogEntry entry) {
-  return switch (entry.category.toLowerCase()) {
-    'code' || 'developer' => Icons.code_rounded,
-    'quality' => Icons.rule_rounded,
-    'mail' => Icons.mail_outline_rounded,
-    'calendar' => Icons.calendar_month_outlined,
-    'files' || 'documents' => Icons.folder_outlined,
-    'chat' => Icons.forum_outlined,
-    'notes' => Icons.edit_note_rounded,
-    'project' => Icons.view_kanban_outlined,
-    'design' => Icons.draw_outlined,
-    'payments' || 'finance' => Icons.credit_card_rounded,
-    'commerce' => Icons.storefront_outlined,
-    'crm' || 'sales' => Icons.support_agent_rounded,
-    'marketing' => Icons.campaign_outlined,
-    'analytics' => Icons.insights_rounded,
-    'data' || 'database' => Icons.storage_rounded,
-    'search' || 'research' => Icons.search_rounded,
-    'media' => Icons.image_outlined,
-    'automation' => Icons.bolt_rounded,
-    'observability' => Icons.monitor_heart_outlined,
-    'infrastructure' || 'cloud' => Icons.cloud_outlined,
-    'productivity' => Icons.task_alt_rounded,
-    'content' => Icons.article_outlined,
-    'security' => Icons.security_rounded,
-    'browser' || 'web' => Icons.public_rounded,
-    'local' => Icons.computer_rounded,
-    'ai' => Icons.psychology_outlined,
-    'utilities' => Icons.schedule_rounded,
-    _ => switch (entry.kind) {
-      V2CatalogKind.connector => Icons.extension_outlined,
-      V2CatalogKind.plugin => Icons.widgets_outlined,
-      V2CatalogKind.mcp => Icons.dns_outlined,
-    },
-  };
-}
-
-/// Maps a catalog entry to the row model this screen renders.
-///
-/// Connection state is owned by the wiring layer; the built-in list is
-/// therefore all-disconnected and display truth only.
-V2Connector v2ConnectorFromCatalogEntry(
-  V2CatalogEntry entry, {
-  bool connected = false,
-  bool enabled = true,
-}) {
-  return V2Connector(
-    id: entry.id,
-    name: entry.name,
-    description: entry.description,
-    connected: connected,
-    category: entry.category,
-    kind: switch (entry.kind) {
-      V2CatalogKind.connector => V2ConnectorKind.app,
-      V2CatalogKind.plugin => V2ConnectorKind.plugin,
-      V2CatalogKind.mcp => V2ConnectorKind.mcp,
-    },
-    icon: v2ConnectorIconFor(entry),
-    enabled: enabled,
-    builtIn: entry.builtIn,
-    auth: entry.auth,
-    risk: entry.risk,
-  );
-}
-
-/// The full 168-entry catalog as row models.
-///
-/// This replaces the old hand-maintained `v2BuiltInApps` / `v2BuiltInPlugins`
-/// lists: the catalog data file is the single source of truth, and every
-/// connector, plugin, and MCP server comes through the same mapping.
-final List<V2Connector> v2BuiltInCatalog = List<V2Connector>.unmodifiable(
-  v2Catalog.map(v2ConnectorFromCatalogEntry),
-);
-
 /// Everything the connectors screen needs. The page filters and groups rows
 /// locally; the wiring layer supplies the catalog and persists changes.
+
 @immutable
 class V2ConnectorsData {
   const V2ConnectorsData({
@@ -232,6 +111,10 @@ class ConnectorsPage extends StatefulWidget {
     this.onSearchChanged,
     this.onCategoryChanged,
     this.onMenu,
+    this.store,
+    this.secrets,
+    this.probe,
+    this.plan,
   });
 
   final V2ConnectorsData data;
@@ -245,6 +128,18 @@ class ConnectorsPage extends StatefulWidget {
   final ValueChanged<String>? onSearchChanged;
   final ValueChanged<String>? onCategoryChanged;
   final VoidCallback? onMenu;
+
+  /// Persisted connector state. Defaults to the app-wide store.
+  final V2ConnectorStore? store;
+  final V2ConnectorSecrets? secrets;
+
+  /// Runs the real connection test from the detail screen. Defaults to the
+  /// HTTP probe; tests inject a deterministic one.
+  final V2ConnectorProbe? probe;
+
+  /// Server-confirmed allowance. Null reads the cached tier, which is the best
+  /// answer this screen can get without the billing stack.
+  final V2ConnectorPlan? plan;
 
   @override
   State<ConnectorsPage> createState() => _ConnectorsPageState();
@@ -260,6 +155,227 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
   late _CatalogFilter _kind = _CatalogFilter.all;
   final TextEditingController _search = TextEditingController();
   String _query = '';
+
+  /// Saved connections, keyed by id. Empty until the store answers, and empty
+  /// when the platform has no preferences (previews).
+  Map<String, V2ConnectorConnection> _connections = const {};
+
+  /// The plan the add flow will enforce. Resolved once, from the injected
+  /// value or the cached tier.
+  V2ConnectorPlan? _plan;
+
+  V2ConnectorStore get _store => widget.store ?? v2ConnectorStore;
+  V2ConnectorSecrets get _secrets => widget.secrets ?? v2ConnectorSecrets;
+
+  @override
+  void initState() {
+    super.initState();
+    _plan = widget.plan;
+    _reload();
+  }
+
+  Future<void> _reload() async {
+    try {
+      final saved = await _store.load();
+      if (!mounted) return;
+      setState(() {
+        _connections = {for (final connection in saved) connection.id: connection};
+      });
+    } catch (_) {
+      // No readable store: the built-in catalog is still shown, all
+      // disconnected, which is the truth when nothing can be loaded.
+      if (!mounted) return;
+      setState(() => _connections = const {});
+    }
+    if (_plan != null) return;
+    final plan = await v2LoadConnectorPlan();
+    if (!mounted) return;
+    setState(() => _plan = plan);
+  }
+
+  int get _customUsed => _connections.values
+      .where((connection) => connection.custom)
+      .length;
+
+  bool get _customCapReached {
+    final plan = _plan;
+    return plan != null && _customUsed >= plan.connectorLimit;
+  }
+
+  /// The catalog with saved connections overlaid, plus the custom connectors
+  /// the person added. Rows only claim "connected" when a saved connection
+  /// exists.
+  List<V2Connector> get _catalog {
+    final base = widget.data.catalog;
+    final rows = <V2Connector>[];
+    for (final row in base) {
+      final saved = _connections[row.id];
+      rows.add(
+        saved == null
+            ? row
+            : row.copyWith(
+                connected: true,
+                enabled: saved.enabled,
+                endpoint: saved.endpoint,
+                description: row.description,
+              ),
+      );
+    }
+    final baseIds = {for (final row in base) row.id};
+    for (final saved in _connections.values) {
+      if (!saved.custom || baseIds.contains(saved.id)) continue;
+      rows.insert(0, saved.toRow());
+    }
+    return rows;
+  }
+
+  List<String> get _categories {
+    final seen = <String>{};
+    final result = <String>[];
+    for (final connector in _catalog) {
+      if (connector.category.trim().isEmpty) continue;
+      if (seen.add(connector.category)) result.add(connector.category);
+    }
+    return result;
+  }
+
+  // ── Wiring ───────────────────────────────────────────────────────────────
+
+  V2Connector? _rowFor(String id) =>
+      _catalog.where((row) => row.id == id).firstOrNull;
+
+  Future<V2ConnectorPlan> _resolvePlan() async {
+    final plan = _plan ?? await v2LoadConnectorPlan();
+    if (mounted && _plan != plan) setState(() => _plan = plan);
+    return plan;
+  }
+
+  Future<void> _openUpgrade(BuildContext context) async {
+    final plan = await _resolvePlan();
+    if (!context.mounted) return;
+    await v2ShowConnectorUpgrade(context, plan);
+  }
+
+  Future<void> _openConnector(String id) async {
+    final external = widget.onOpen;
+    if (external != null) {
+      external(id);
+      return;
+    }
+    final row = _rowFor(id);
+    if (row == null) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ConnectorDetailPage(
+          data: v2ConnectorDetailForRow(row, connection: _connections[id]),
+          store: _store,
+          secrets: _secrets,
+          probe: widget.probe,
+          plan: _plan,
+        ),
+      ),
+    );
+    await _reload();
+  }
+
+  Future<void> _toggle(String id, bool enabled) async {
+    final external = widget.onToggle;
+    if (external != null) {
+      external(id, enabled);
+      return;
+    }
+    final current = _connections[id];
+    if (current == null) return;
+    setState(() {
+      _connections = {
+        ..._connections,
+        id: current.copyWith(enabled: enabled),
+      };
+    });
+    try {
+      await _store.setEnabled(id, enabled);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _connections = {..._connections, id: current};
+      });
+      showOSnack(context, 'Could not save that change. Try again.');
+    }
+  }
+
+  V2AddConnectorData _setupDataFor(V2Connector row, V2ConnectorPlan plan) {
+    return V2AddConnectorData(
+      plan: plan,
+      customConnectorsUsed: _customUsed,
+      presetId: row.id,
+      presetName: row.name,
+      presetDescription: row.description,
+      presetCategory: row.category,
+      presetKind: switch (row.kind) {
+        V2ConnectorKind.app => 'app',
+        V2ConnectorKind.plugin => 'plugin',
+        V2ConnectorKind.mcp => 'mcp',
+      },
+      target: row.kind == V2ConnectorKind.plugin
+          ? V2ConnectorTarget.command
+          : V2ConnectorTarget.url,
+      auth: switch (row.auth) {
+        V2CatalogAuth.none => V2ConnectorAuth.none,
+        V2CatalogAuth.oauth => V2ConnectorAuth.oauth,
+        _ => V2ConnectorAuth.apiKey,
+      },
+      authRequiredMessage:
+          'This connector uses ${row.auth.label}. Enter the server Ovid '
+          'should reach and the credential you use for it.',
+    );
+  }
+
+  Future<void> _connect(String id) async {
+    final external = widget.onConnect;
+    if (external != null) {
+      external(id);
+      return;
+    }
+    final row = _rowFor(id);
+    if (row == null) return;
+    final plan = await _resolvePlan();
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => AddConnectorPage(
+          data: _setupDataFor(row, plan),
+          store: _store,
+          secrets: _secrets,
+          probe: widget.probe,
+        ),
+      ),
+    );
+    await _reload();
+  }
+
+  Future<void> _openAddCustom() async {
+    final external = widget.onAddCustom;
+    if (external != null) {
+      external();
+      return;
+    }
+    final plan = await _resolvePlan();
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => AddConnectorPage(
+          data: V2AddConnectorData(
+            plan: plan,
+            customConnectorsUsed: _customUsed,
+          ),
+          store: _store,
+          secrets: _secrets,
+          probe: widget.probe,
+        ),
+      ),
+    );
+    await _reload();
+  }
 
   @override
   void didUpdateWidget(covariant ConnectorsPage oldWidget) {
@@ -341,15 +457,17 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
           if (_compactAppBar(context))
             OIconButton(
               icon: Icons.add_rounded,
-              semanticLabel: 'Add custom connector',
-              onPressed: widget.onAddCustom,
+              semanticLabel: _customCapReached
+                  ? 'Add custom connector, plan limit reached'
+                  : 'Add custom connector',
+              onPressed: _customCapReached ? null : _openAddCustom,
             )
           else
             OButton(
               label: 'Add custom',
               icon: Icons.add_rounded,
               variant: OButtonVariant.ghost,
-              onPressed: widget.onAddCustom,
+              onPressed: _customCapReached ? null : _openAddCustom,
             ),
         ],
       ),
@@ -368,7 +486,8 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
       V2ConnectorsStatus.loading => const OSkeletonList(rows: 6),
       V2ConnectorsStatus.error => OErrorState(
         message: widget.data.errorMessage,
-        onRetry: widget.onRetry,
+        // The screen owns a reload, so a retry is never a dead button.
+        onRetry: widget.onRetry ?? _reload,
       ),
       V2ConnectorsStatus.content => _content(context),
     };
@@ -376,7 +495,8 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
 
   Widget _content(BuildContext context) {
     final c = OColors.of(context);
-    final filtered = widget.data.catalog.where(_matches).toList();
+    final catalog = _catalog;
+    final filtered = catalog.where(_matches).toList();
     // Connected rows first inside each section, so the things the person
     // already uses are not buried under the rest of the catalog.
     final apps = _connectedFirst(
@@ -388,7 +508,10 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
     final plugins = _connectedFirst(
       filtered.where((connector) => connector.kind != V2ConnectorKind.app),
     );
-    final total = widget.data.catalogTotal;
+    final total = widget.data.availableTotal ?? catalog.length;
+    final installed = catalog.where((connector) => connector.connected);
+    final active = installed.where((connector) => connector.enabled);
+    final categories = _categories;
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(
@@ -412,20 +535,28 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
                   onPressed: _clearSearch,
                 ),
         ),
-        if (widget.data.catalog.isNotEmpty) ...[
+        if (_customCapReached) ...[
+          const SizedBox(height: OSpace.m),
+          _CapBanner(
+            plan: _plan!,
+            used: _customUsed,
+            onUpgrade: () => _openUpgrade(context),
+          ),
+        ],
+        if (catalog.isNotEmpty) ...[
           const SizedBox(height: OSpace.m),
           _KindStrip(selected: _kind, onSelected: _setKind),
-          if (widget.data.categories.length > 1) ...[
+          if (categories.length > 1) ...[
             const SizedBox(height: OSpace.m),
             _CategoryStrip(
-              categories: widget.data.categories,
+              categories: categories,
               selected: _category,
               onSelected: _setCategory,
             ),
           ],
         ],
         const SizedBox(height: OSpace.l),
-        if (widget.data.catalog.isEmpty)
+        if (catalog.isEmpty)
           _catalogEmpty()
         else if (filtered.isEmpty)
           _searchEmpty()
@@ -467,13 +598,15 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
           ],
           const SizedBox(height: OSpace.s),
           Text(
-            '${widget.data.installed.length} installed · '
-            '${widget.data.activeCount} on',
+            '${installed.length} installed · ${active.length} on',
             style: OType.caption.copyWith(color: c.textMuted),
           ),
         ],
         const SizedBox(height: OSpace.l),
-        _PlanNote(note: widget.data.planNote, onUpgrade: widget.onUpgrade),
+        _PlanNote(
+          note: widget.data.planNote,
+          onUpgrade: widget.onUpgrade,
+        ),
       ],
     );
   }
@@ -492,7 +625,7 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
       action: OButton(
         label: 'Add custom',
         icon: Icons.add_rounded,
-        onPressed: widget.onAddCustom,
+        onPressed: _customCapReached ? null : _openAddCustom,
       ),
     );
   }
@@ -518,15 +651,9 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
           padding: const EdgeInsets.only(bottom: OSpace.s),
           child: _CatalogRow(
             connector: connector,
-            onTap: widget.onOpen == null
-                ? null
-                : () => widget.onOpen!(connector.id),
-            onToggle: widget.onToggle == null
-                ? null
-                : (value) => widget.onToggle!(connector.id, value),
-            onConnect: widget.onConnect == null
-                ? null
-                : () => widget.onConnect!(connector.id),
+            onTap: () => _openConnector(connector.id),
+            onToggle: (value) => _toggle(connector.id, value),
+            onConnect: () => _connect(connector.id),
           ),
         ),
     ];
@@ -734,7 +861,7 @@ class _CatalogRow extends StatelessWidget {
                               ? OPillTone.success
                               : OPillTone.neutral,
                           dot: connector.enabled,
-                        ),
+                        )
                     ],
                   ),
                   const SizedBox(height: 2),
@@ -876,6 +1003,74 @@ class _PlanNote extends StatelessWidget {
           : Row(
               children: [
                 Expanded(child: label),
+                const SizedBox(width: OSpace.s),
+                upgrade,
+              ],
+            ),
+    );
+  }
+}
+
+/// The plan cap, explained on the list with the real upgrade path next to it.
+class _CapBanner extends StatelessWidget {
+  const _CapBanner({
+    required this.plan,
+    required this.used,
+    required this.onUpgrade,
+  });
+
+  final V2ConnectorPlan plan;
+  final int used;
+  final VoidCallback onUpgrade;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final message = plan.connectorLimit == 0
+        ? 'The ${plan.label} plan includes no custom connectors. Built-in '
+              'apps still connect without a slot.'
+        : 'You have used all ${plan.connectorLimit} custom connector slots on '
+              '${plan.label} ($used in use). Built-in apps still connect '
+              'without a slot.';
+    final upgrade = OButton(
+      key: const Key('connector-cap-upgrade'),
+      label: 'See plans',
+      variant: OButtonVariant.ghost,
+      onPressed: onUpgrade,
+    );
+    final copy = Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(Icons.lock_outline_rounded, size: 18, color: c.warn),
+        const SizedBox(width: OSpace.s),
+        Expanded(
+          child: Text(
+            message,
+            style: OType.caption.copyWith(color: c.text),
+          ),
+        ),
+      ],
+    );
+    return Container(
+      key: const Key('connector-cap-banner'),
+      padding: const EdgeInsets.all(OSpace.m),
+      decoration: BoxDecoration(
+        color: c.warn.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(ORadius.l),
+        border: Border.all(color: c.warn.withValues(alpha: 0.35)),
+      ),
+      child: _stacksActions(context)
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                copy,
+                const SizedBox(height: OSpace.s),
+                Align(alignment: Alignment.centerRight, child: upgrade),
+              ],
+            )
+          : Row(
+              children: [
+                Expanded(child: copy),
                 const SizedBox(width: OSpace.s),
                 upgrade,
               ],

@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/app_info.dart';
+import '../../../core/legal_links.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
@@ -514,8 +518,8 @@ class V2AboutLegalDocuments {
 @immutable
 class V2AboutPageData {
   const V2AboutPageData({
-    this.version = '',
-    this.build = '',
+    this.version = kAppVersion,
+    this.build = kAppBuildNumber,
     this.tagline = 'Chat. Code. Create.',
     this.systemStatus = V2SystemStatus.unknown,
     this.onCopyVersion,
@@ -527,8 +531,12 @@ class V2AboutPageData {
     this.onRetrySystemStatus,
     this.onDeleteAccount,
     this.legalDocuments,
+    this.openExternal,
   });
 
+  /// The build's real version and build number. They default to
+  /// `kAppVersion`/`kAppBuildNumber` (`core/app_info.dart`), so a caller that
+  /// does not inject them still shows the shipped build, never a demo string.
   final String version;
   final String build;
   final String tagline;
@@ -554,7 +562,12 @@ class V2AboutPageData {
   /// row only names the consequence.
   final VoidCallback? onDeleteAccount;
 
-  /// Nothing is shown until the wiring knows a real version.
+  /// Opens an external destination. Defaults to the real platform launcher;
+  /// injectable so a test can assert the exact URL without a plugin.
+  final Future<bool> Function(Uri uri)? openExternal;
+
+  /// The build's real version, from `--dart-define` or the pubspec defaults.
+  /// Callers can override it, but the default is never a demo string.
   bool get hasVersion => version.trim().isNotEmpty;
 
   String get versionLabel =>
@@ -613,7 +626,11 @@ class AboutPage extends StatelessWidget {
             child: Icon(Icons.bolt_rounded, size: 46, color: c.onAccent),
           ),
           const SizedBox(height: OSpace.l),
-          Text('Ovid Si', style: OType.h1.copyWith(color: c.text)),
+          Semantics(
+            container: true,
+            header: true,
+            child: Text('Ovid Si', style: OType.h1.copyWith(color: c.text)),
+          ),
           const SizedBox(height: OSpace.s),
           if (data.hasVersion) ...[
             _pill(
@@ -639,50 +656,125 @@ class AboutPage extends StatelessWidget {
       context,
       docs?.privacyPolicy,
       data.onPrivacyPolicy,
+      // Published policy: the same URL Play reviewers open.
+      fallback: () => _openUrl(context, LegalLinks.privacyPolicy),
     );
-    final termsTap = _legalTap(context, docs?.terms, data.onTerms);
-    final licencesTap = _legalTap(context, docs?.licences, data.onLicences);
+    final termsTap = _legalTap(
+      context,
+      docs?.terms,
+      data.onTerms,
+      fallback: () => _openUrl(context, LegalLinks.terms),
+    );
+    final licencesTap = _legalTap(
+      context,
+      docs?.licences,
+      data.onLicences,
+      // Real licence registry from the packages in this build.
+      fallback: () => showLicensePage(
+        context: context,
+        applicationName: 'Ovid Si',
+        applicationVersion: data.buildLabel,
+      ),
+    );
     return _section(
       context,
       title: 'Legal',
       rows: [
-        OListRow(
+        _legalRow(
           icon: Icons.shield_outlined,
           title: 'Privacy policy',
           onTap: privacyTap,
-          enabled: privacyTap != null,
         ),
-        OListRow(
+        _legalRow(
           icon: Icons.description_outlined,
           title: 'Terms of service',
           onTap: termsTap,
-          enabled: termsTap != null,
         ),
-        OListRow(
+        _legalRow(
           icon: Icons.code_rounded,
           title: 'Open-source licences',
           onTap: licencesTap,
-          enabled: licencesTap != null,
         ),
       ],
     );
   }
 
-  /// An injected callback still wins when no in-app document is supplied, so
-  /// existing adapters keep opening the published URLs.
-  VoidCallback? _legalTap(
+  /// A legal row is always actionable now, so it announces its enabled state
+  /// explicitly (`OListRow` only sets it for disabled rows).
+  Widget _legalRow({
+    required IconData icon,
+    required String title,
+    required VoidCallback onTap,
+  }) {
+    return Semantics(
+      container: true,
+      enabled: true,
+      child: OListRow(icon: icon, title: title, onTap: onTap),
+    );
+  }
+
+  /// An injected document opens in-app; otherwise the injected callback wins
+  /// and a real URL (or the licence registry) is the default, so no legal row
+  /// is ever a disabled placeholder.
+  VoidCallback _legalTap(
     BuildContext context,
     V2LegalPageData? document,
-    VoidCallback? callback,
-  ) {
-    if (document == null) return callback;
-    return () => _openLegal(context, document);
+    VoidCallback? callback, {
+    required VoidCallback fallback,
+  }) {
+    if (document != null) return () => _openLegal(context, document);
+    return callback ?? fallback;
   }
 
   void _openLegal(BuildContext context, V2LegalPageData document) {
     Navigator.of(
       context,
     ).push(MaterialPageRoute<void>(builder: (_) => LegalPage(data: document)));
+  }
+
+  Future<void> _openUrl(BuildContext context, String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    var opened = false;
+    try {
+      opened = await (data.openExternal?.call(uri) ??
+          launchUrl(uri, mode: LaunchMode.externalApplication));
+    } catch (_) {
+      opened = false;
+    }
+    if (!opened && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open the link.')),
+      );
+    }
+  }
+
+  /// Copies the real build label. The injected callback (if any) still runs,
+  /// so a host can add its own confirmation. A clipboard failure is reported
+  /// instead of claiming the copy happened.
+  Future<void> _copyVersion(BuildContext context) async {
+    var copied = false;
+    try {
+      await Clipboard.setData(ClipboardData(text: data.buildLabel));
+      copied = true;
+    } catch (_) {
+      copied = false;
+    }
+    if (!context.mounted) return;
+    if (!copied) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(content: Text('Could not copy.')));
+      return;
+    }
+    final callback = data.onCopyVersion;
+    if (callback != null) {
+      callback();
+      return;
+    }
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(content: Text('Version copied.')));
   }
 
   Widget _support(BuildContext context) {
@@ -717,6 +809,9 @@ class AboutPage extends StatelessWidget {
       V2SystemStatus.degraded || V2SystemStatus.error => V2StateTileTone.warn,
       _ => V2StateTileTone.neutral,
     };
+    // Unknown status with no way to check it is not a control: hide the tile
+    // rather than show a card that cannot do anything.
+    final showStatus = status != V2SystemStatus.unknown || statusTap != null;
     final tile = V2StateTile(
       // The copy is fully custom; the kind only supplies the shared card.
       kind: V2StateTileKind.offline,
@@ -745,25 +840,26 @@ class AboutPage extends StatelessWidget {
             ),
           ],
         ),
-        Padding(
-          padding: const EdgeInsets.only(bottom: OSpace.xl),
-          child: Semantics(
-            container: true,
-            label: statusLabel.isEmpty
-                ? 'System status, $baseSubtitle'
-                : 'System status, $statusLabel, $baseSubtitle',
-            button: statusTap != null,
-            enabled: statusTap != null,
-            onTap: statusTap,
-            child: ExcludeSemantics(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: statusTap,
-                child: tile,
+        if (showStatus)
+          Padding(
+            padding: const EdgeInsets.only(bottom: OSpace.xl),
+            child: Semantics(
+              container: true,
+              label: statusLabel.isEmpty
+                  ? 'System status, $baseSubtitle'
+                  : 'System status, $statusLabel, $baseSubtitle',
+              button: statusTap != null,
+              enabled: statusTap != null,
+              onTap: statusTap,
+              child: ExcludeSemantics(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: statusTap,
+                  child: tile,
+                ),
               ),
             ),
           ),
-        ),
       ],
     );
   }
@@ -783,7 +879,7 @@ class AboutPage extends StatelessWidget {
             icon: Icons.copy_rounded,
             semanticLabel: 'Copy version info',
             tooltip: 'Copy version info',
-            onPressed: data.onCopyVersion,
+            onPressed: () => _copyVersion(context),
           ),
         ),
       ],
@@ -800,8 +896,8 @@ class AboutPage extends StatelessWidget {
           icon: Icons.delete_forever_outlined,
           title: 'Delete account',
           subtitle:
-              'Permanently remove your account, chats, files and memory. '
-              'This cannot be undone.',
+              'Scheduled after a 24-hour grace period, then permanent. You can '
+              'restore it before the deadline.',
           danger: true,
           onTap: data.onDeleteAccount,
           enabled: data.onDeleteAccount != null,

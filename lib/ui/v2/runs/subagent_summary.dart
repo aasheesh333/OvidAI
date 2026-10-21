@@ -11,11 +11,24 @@ import '../../design/o_tokens.dart';
 /// Load state for [SubagentSummaryCard].
 enum V2SubagentSummaryStatus { loading, empty, error, ready }
 
+/// Every key in the subagent's strict five-key contract.
+const Set<String> v2SubagentSummaryKeys = {
+  'status',
+  'files_modified',
+  'artifacts_created',
+  'key_findings',
+  'error_if_any',
+};
+
 /// The strict five-key JSON object a subagent returns to the main agent.
 ///
 /// The keys match the runtime contract exactly:
 /// `{status, files_modified, artifacts_created, key_findings, error_if_any}`.
 /// Nothing is added or renamed, so [json] is what the main agent received.
+///
+/// [reported] lists the keys the run actually supplied. A key that was absent
+/// is rendered as "Not reported" rather than as an empty value, so the screen
+/// never claims a subagent reported "no files" when it said nothing at all.
 @immutable
 class V2SubagentSummaryData {
   const V2SubagentSummaryData({
@@ -24,6 +37,7 @@ class V2SubagentSummaryData {
     this.artifactsCreated = const [],
     this.keyFindings = const [],
     this.errorIfAny,
+    this.reported = v2SubagentSummaryKeys,
   });
 
   /// One of the runtime terminal states: `completed`, `failed`, `cancelled`
@@ -37,16 +51,25 @@ class V2SubagentSummaryData {
   /// The failure message, or null when the run reported no error.
   final String? errorIfAny;
 
+  /// Contract keys the run supplied. Missing keys are never filled in.
+  final Set<String> reported;
+
+  bool hasField(String key) => reported.contains(key);
+
+  bool get hasStatus => hasField('status') && status.trim().isNotEmpty;
+
   /// True when [errorIfAny] carries something worth showing.
   bool get hasError => (errorIfAny ?? '').trim().isNotEmpty;
 
   /// The exact JSON the subagent returned, pretty-printed for display.
+  ///
+  /// Only reported keys are emitted, so the raw view cannot invent a field.
   String get json => const JsonEncoder.withIndent('  ').convert({
-    'status': status,
-    'files_modified': filesModified,
-    'artifacts_created': artifactsCreated,
-    'key_findings': keyFindings,
-    'error_if_any': errorIfAny,
+    if (hasField('status')) 'status': status,
+    if (hasField('files_modified')) 'files_modified': filesModified,
+    if (hasField('artifacts_created')) 'artifacts_created': artifactsCreated,
+    if (hasField('key_findings')) 'key_findings': keyFindings,
+    if (hasField('error_if_any')) 'error_if_any': errorIfAny,
   });
 }
 
@@ -104,7 +127,7 @@ class _SubagentSummaryCardState extends State<SubagentSummaryCard> {
         children: [
           _Header(
             status: widget.status == V2SubagentSummaryStatus.ready
-                ? summary?.status
+                ? (summary?.hasStatus == true ? summary!.status : null)
                 : null,
           ),
           const SizedBox(height: OSpace.m),
@@ -127,13 +150,15 @@ class _SubagentSummaryCardState extends State<SubagentSummaryCard> {
               icon: Icons.inbox_outlined,
               title: 'No summary yet',
               message: 'A subagent sends its JSON summary when it finishes.',
-              action: OButton(
-                label: 'Check again',
-                icon: Icons.refresh_rounded,
-                variant: OButtonVariant.secondary,
-                expand: true,
-                onPressed: widget.onRetry,
-              ),
+              action: widget.onRetry == null
+                  ? null
+                  : OButton(
+                      label: 'Check again',
+                      icon: Icons.refresh_rounded,
+                      variant: OButtonVariant.secondary,
+                      expand: true,
+                      onPressed: widget.onRetry,
+                    ),
             ),
             V2SubagentSummaryStatus.ready => _content(
               context,
@@ -157,10 +182,14 @@ class _SubagentSummaryCardState extends State<SubagentSummaryCard> {
         const SizedBox(height: OSpace.m),
         _Section(
           title: 'Files modified',
-          meta: summary.filesModified.length == 1
+          meta: !summary.hasField('files_modified')
+              ? 'Not reported'
+              : summary.filesModified.length == 1
               ? '1 file'
               : '${summary.filesModified.length} files',
-          child: summary.filesModified.isEmpty
+          child: !summary.hasField('files_modified')
+              ? const _None(message: 'Not reported.')
+              : summary.filesModified.isEmpty
               ? _None(message: 'No files modified.')
               : Wrap(
                   spacing: OSpace.s,
@@ -181,10 +210,14 @@ class _SubagentSummaryCardState extends State<SubagentSummaryCard> {
         const SizedBox(height: OSpace.m),
         _Section(
           title: 'Artifacts created',
-          meta: summary.artifactsCreated.length == 1
+          meta: !summary.hasField('artifacts_created')
+              ? 'Not reported'
+              : summary.artifactsCreated.length == 1
               ? '1 artifact'
               : '${summary.artifactsCreated.length} artifacts',
-          child: summary.artifactsCreated.isEmpty
+          child: !summary.hasField('artifacts_created')
+              ? const _None(message: 'Not reported.')
+              : summary.artifactsCreated.isEmpty
               ? _None(message: 'No artifacts created.')
               : Wrap(
                   spacing: OSpace.s,
@@ -205,15 +238,21 @@ class _SubagentSummaryCardState extends State<SubagentSummaryCard> {
         const SizedBox(height: OSpace.m),
         _Section(
           title: 'Key findings',
-          meta: summary.keyFindings.length == 1
+          meta: !summary.hasField('key_findings')
+              ? 'Not reported'
+              : summary.keyFindings.length == 1
               ? '1 finding'
               : '${summary.keyFindings.length} findings',
-          child: _Findings(findings: summary.keyFindings),
+          child: !summary.hasField('key_findings')
+              ? const _None(message: 'Not reported.')
+              : _Findings(findings: summary.keyFindings),
         ),
         const SizedBox(height: OSpace.m),
         _Section(
           title: 'Error if any',
-          child: summary.hasError
+          child: !summary.hasField('error_if_any')
+              ? const _None(message: 'Not reported.')
+              : summary.hasError
               ? _ErrorBox(message: summary.errorIfAny!.trim())
               : _None(message: 'No error reported.'),
         ),

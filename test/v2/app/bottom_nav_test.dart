@@ -46,20 +46,62 @@ void main() {
     V2NavTab? picked;
     await tester.pumpWidget(
       _app(
-        V2BottomNav(
-          current: V2NavTab.chat,
-          onSelect: (tab) => picked = tab,
-        ),
+        V2BottomNav(current: V2NavTab.chat, onSelect: (tab) => picked = tab),
       ),
     );
     await tester.tap(find.text('Browser'));
     expect(picked, V2NavTab.browser);
   });
 
-  testWidgets('unwired tabs are announced disabled', (tester) async {
-    await tester.pumpWidget(_app(const V2BottomNav(current: V2NavTab.chat)));
-    final node = tester.getSemantics(find.text('Chat'));
-    expect(node.flagsCollection.isEnabled, Tristate.isFalse);
+  testWidgets('every tab reports its own destination', (tester) async {
+    for (final items in <List<V2NavItem>>[v2ChatNavItems, v2WorkNavItems]) {
+      for (final item in items) {
+        final picked = <V2NavTab>[];
+        await tester.pumpWidget(
+          _app(
+            V2BottomNav(
+              current: V2NavTab.chat,
+              items: items,
+              onSelect: picked.add,
+            ),
+          ),
+        );
+
+        await tester.tap(find.text(item.label));
+        expect(picked, <V2NavTab>[item.tab], reason: item.label);
+      }
+    }
+  });
+
+  testWidgets('the selected tab always follows current', (tester) async {
+    for (final tab in V2NavTab.values) {
+      await tester.pumpWidget(
+        _app(
+          V2BottomNav(current: tab, items: v2WorkNavItems, onSelect: (_) {}),
+        ),
+      );
+
+      for (final item in v2WorkNavItems) {
+        final node = tester.getSemantics(find.text(item.label));
+        expect(
+          node.flagsCollection.isSelected,
+          item.tab == tab ? Tristate.isTrue : Tristate.isFalse,
+          reason: '${item.label} with current=${tab.name}',
+        );
+      }
+    }
+  });
+
+  testWidgets('tapping the current tab still reports it', (tester) async {
+    V2NavTab? picked;
+    await tester.pumpWidget(
+      _app(
+        V2BottomNav(current: V2NavTab.chat, onSelect: (tab) => picked = tab),
+      ),
+    );
+
+    await tester.tap(find.byKey(const ValueKey<String>('v2-nav-chat')));
+    expect(picked, V2NavTab.chat);
   });
 
   testWidgets('every tab meets the 48 dp target at 200% text', (tester) async {

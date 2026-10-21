@@ -581,4 +581,66 @@ void main() {
     expect(data.onRetry, isNull);
     expect(data.onCategoryTap, isNull);
   });
+
+  group('reconcileStorageBreakdown', () {
+    test('adds an Other bucket when categories under-report the total', () {
+      const used = 4 * 1024 * 1024 * 1024;
+      final result = reconcileStorageBreakdown(_entries, used);
+
+      expect(result.usedBytes, used);
+      expect(result.addsUp, isTrue);
+      expect(result.entries.last.category, V2StorageCategory.other);
+      expect(result.entries.last.safeBytes, used - 3221225472);
+    });
+
+    test('keeps a category list that already adds up unchanged', () {
+      final sum = _entries.fold<int>(0, (total, entry) => total + entry.bytes);
+      final result = reconcileStorageBreakdown(_entries, sum);
+
+      expect(result.entries.length, _entries.length);
+      expect(result.usedBytes, sum);
+      expect(result.addsUp, isTrue);
+    });
+
+    test('never lets the heading hide bytes the categories do report', () {
+      final sum = _entries.fold<int>(0, (total, entry) => total + entry.bytes);
+      final result = reconcileStorageBreakdown(_entries, sum - 1);
+
+      expect(result.usedBytes, sum);
+      expect(result.entries.any((entry) => entry.category == V2StorageCategory.other),
+          isFalse);
+      expect(result.addsUp, isTrue);
+    });
+  });
+
+  testWidgets('an under-reported breakdown renders Other and still sums to '
+      '100 %', (tester) async {
+    await _pump(
+      tester,
+      StorageBreakdown(
+        data: _data(
+          usedBytes: 4 * 1024 * 1024 * 1024,
+          totalBytes: 5 * 1024 * 1024 * 1024,
+        ),
+      ),
+    );
+
+    expect(find.text('Other'), findsOneWidget);
+    expect(find.text('4 GB'), findsOneWidget);
+
+    // The shares are computed from the reconciled buckets, so they always add
+    // up to 100 including the Other remainder.
+    final breakdown = tester.widget<StorageBreakdown>(
+      find.byType(StorageBreakdown),
+    );
+    final entries = reconcileStorageBreakdown(
+      breakdown.data.entries,
+      breakdown.data.usedBytes,
+    ).entries;
+    final shares = storagePercentageSplit([
+      for (final entry in entries) entry.safeBytes,
+    ]);
+    expect(shares.fold<int>(0, (sum, share) => sum + share), 100);
+    expect(shares.length, entries.length);
+  });
 }

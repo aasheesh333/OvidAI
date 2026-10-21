@@ -424,4 +424,25 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Project did not load'), findsOneWidget);
   });
+
+  testWidgets('memory add and delete only render when wired', (tester) async {
+    await tester.pumpWidget(_app(ProjectDetailPage(data: _contentData())));
+    await tester.pumpAndSettle();
+
+    // No callbacks: the rows stay readable, but nothing offers a write.
+    expect(find.text('brand.md'), findsOneWidget);
+    expect(find.byIcon(Icons.add_rounded), findsNothing);
+    expect(find.byIcon(Icons.delete_outline_rounded), findsNothing);
+
+    await tester.pumpWidget(
+      _app(
+        const ProjectDetailPage(
+          data: V2ProjectDetailData(projectName: 'Empty project'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Nothing here yet'), findsOneWidget);
+    expect(find.text('Add memory'), findsNothing);
+  });
 }

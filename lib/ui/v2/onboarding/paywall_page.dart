@@ -35,6 +35,15 @@ class V2PlanOption {
 
   String priceFor(V2Currency currency) =>
       currency == V2Currency.inr ? '₹${_groupInr(priceInr)}' : '\$$priceUsd';
+
+  /// The Free tier is the only plan that is not billed monthly.
+  bool get isFree => id == 'free';
+
+  String get pricePeriod => isFree ? 'forever' : '/ month';
+
+  /// The canonical product table: Free and Go only run the Auto model, Plus
+  /// and Pro unlock manual model choice.
+  String get modelAccessLabel => autoOnly ? 'Auto only' : 'Auto + manual';
 }
 
 @immutable
@@ -42,18 +51,24 @@ class V2PaywallData {
   const V2PaywallData({
     this.plans = const [
       V2PlanOption(
+        id: 'free',
+        name: 'Ovid Free',
+        subtitle: 'No card needed',
+        priceUsd: 0,
+        priceInr: 0,
+        storageGb: 3,
+        autoOnly: true,
+        features: ['Auto model', '3 GB storage', '50M tokens a day'],
+      ),
+      V2PlanOption(
         id: 'go',
         name: 'Ovid Go',
         subtitle: 'Essential agent toolkit',
         priceUsd: 5,
         priceInr: 499,
-        storageGb: 10,
-        features: [
-          '10 GB persistent storage',
-          'Ovid Flash unlimited',
-          'Fast queue',
-          '2 active agents',
-        ],
+        storageGb: 5,
+        autoOnly: true,
+        features: ['Auto model only', '5 GB storage', 'Schedules'],
       ),
       V2PlanOption(
         id: 'plus',
@@ -61,29 +76,18 @@ class V2PaywallData {
         subtitle: 'Ideal for creative builders',
         priceUsd: 18,
         priceInr: 1799,
-        storageGb: 50,
+        storageGb: 15,
         popular: true,
-        features: [
-          '50 GB cloud memory',
-          'All Pro models',
-          '200M daily reasoning tokens',
-          'Unlimited subagents',
-          '24h background runs',
-        ],
+        features: ['All models', '15 GB storage', 'Collaboration'],
       ),
       V2PlanOption(
         id: 'pro',
         name: 'Ovid Pro',
-        subtitle: 'Dedicated production node',
+        subtitle: 'For teams and heavy use',
         priceUsd: 99,
         priceInr: 9999,
-        storageGb: 500,
-        features: [
-          '500 GB dedicated volume',
-          'All advanced reasoning engines',
-          'Dedicated isolated cloud VM',
-          'Priority 24/7 dedicated compute',
-        ],
+        storageGb: 75,
+        features: ['All models', '75 GB storage', 'Priority support'],
       ),
     ],
     this.selectedPlanId = 'plus',
@@ -125,6 +129,7 @@ class PaywallPage extends StatefulWidget {
     this.onPlanSelected,
     this.onCurrencyChanged,
     this.onStartTrial,
+    this.onContinueFree,
     this.onComparePlans,
     this.onRetry,
     this.onManageSubscription,
@@ -135,6 +140,11 @@ class PaywallPage extends StatefulWidget {
   final ValueChanged<String>? onPlanSelected;
   final ValueChanged<V2Currency>? onCurrencyChanged;
   final ValueChanged<String>? onStartTrial;
+
+  /// Declines the upgrade and enters the app on the Free plan. This is the
+  /// only handler used by the Free card's call to action.
+  final VoidCallback? onContinueFree;
+
   final VoidCallback? onComparePlans;
   final VoidCallback? onRetry;
 
@@ -203,6 +213,9 @@ class _PaywallPageState extends State<PaywallPage> {
     return OScaffold(
       appBar: OAppBar(
         title: 'Upgrade',
+        // Paywall is a tour step, not a pushed route: the default arrow would
+        // try to pop the gate itself.
+        showBack: false,
         actions: [
           if (widget.onClose != null)
             OIconButton(
@@ -312,16 +325,20 @@ class _PaywallPageState extends State<PaywallPage> {
                   ],
                 ),
                 const SizedBox(height: OSpace.xl),
-                const Center(child: _HeroPill(label: 'OVID PLUS UNLIMITED')),
+                const Center(child: _HeroPill(label: 'OVID PLUS')),
                 const SizedBox(height: OSpace.m),
-                Text(
-                  'Do more with Ovid Plus',
-                  textAlign: TextAlign.center,
-                  style: OType.display.copyWith(color: c.text),
+                Semantics(
+                  container: true,
+                  header: true,
+                  child: Text(
+                    'Do more with Ovid Plus',
+                    textAlign: TextAlign.center,
+                    style: OType.display.copyWith(color: c.text),
+                  ),
                 ),
                 const SizedBox(height: OSpace.s),
                 Text(
-                  'More models, more storage, and background runs that keep going.',
+                  'More models, more storage and background runs up to 8 hours.',
                   textAlign: TextAlign.center,
                   style: OType.bodySm.copyWith(color: c.textMuted),
                 ),
@@ -352,7 +369,8 @@ class _PaywallPageState extends State<PaywallPage> {
                     const SizedBox(width: 6),
                     Flexible(
                       child: Text(
-                        'Instant activation · Pause or switch plans anytime',
+                        'Activates after Google Play confirms · Switch or cancel '
+                        'anytime',
                         style: OType.caption.copyWith(color: c.textMuted),
                       ),
                     ),
@@ -369,13 +387,25 @@ class _PaywallPageState extends State<PaywallPage> {
                 const SizedBox(height: OSpace.l),
                 OButton(
                   key: const Key('paywall-trial'),
-                  label: 'Start 7-day free trial',
+                  label: selectedPlan.isFree
+                      ? 'Continue with Free'
+                      : 'Start 7-day free trial',
                   icon: Icons.arrow_forward_rounded,
                   expand: true,
                   loading: data.purchasing,
-                  onPressed: data.purchasing || widget.onStartTrial == null
+                  onPressed:
+                      data.purchasing ||
+                          (selectedPlan.isFree
+                              ? widget.onContinueFree == null
+                              : widget.onStartTrial == null)
                       ? null
-                      : () => widget.onStartTrial!(selectedPlan.id),
+                      : () {
+                          if (selectedPlan.isFree) {
+                            widget.onContinueFree!();
+                          } else {
+                            widget.onStartTrial!(selectedPlan.id);
+                          }
+                        },
                 ),
                 const SizedBox(height: OSpace.m),
                 Row(
@@ -392,12 +422,26 @@ class _PaywallPageState extends State<PaywallPage> {
                     ),
                   ],
                 ),
-                const SizedBox(height: OSpace.s),
-                OButton(
-                  label: 'Compare all plans',
-                  variant: OButtonVariant.ghost,
-                  onPressed: widget.onComparePlans,
-                ),
+                // A visible way out that does not depend on finding the close
+                // icon: declining is a real, supported outcome.
+                if (!selectedPlan.isFree && widget.onContinueFree != null) ...[
+                  const SizedBox(height: OSpace.s),
+                  OButton(
+                    key: const Key('paywall-continue-free'),
+                    label: 'Continue with Free',
+                    variant: OButtonVariant.ghost,
+                    onPressed: data.purchasing ? null : widget.onContinueFree,
+                  ),
+                ],
+                // Only shown when a real comparison destination is wired.
+                if (widget.onComparePlans != null) ...[
+                  const SizedBox(height: OSpace.s),
+                  OButton(
+                    label: 'Compare all plans',
+                    variant: OButtonVariant.ghost,
+                    onPressed: widget.onComparePlans,
+                  ),
+                ],
                 const SizedBox(height: OSpace.l),
               ],
             ),
@@ -561,7 +605,8 @@ class _PlanCard extends StatelessWidget {
       label: [
         plan.name,
         if (plan.popular) 'Most popular',
-        '${plan.priceFor(currency)} per month',
+        plan.modelAccessLabel,
+        '${plan.priceFor(currency)} ${plan.pricePeriod}',
       ].join(', '),
       selected: selected,
       button: true,
@@ -624,6 +669,8 @@ class _PlanCard extends StatelessWidget {
                                 color: selected ? c.accent : c.textMuted,
                               ),
                             ),
+                            const SizedBox(height: 4),
+                            _AccessPill(plan: plan, colors: c),
                           ],
                         ),
                         Column(
@@ -637,7 +684,7 @@ class _PlanCard extends StatelessWidget {
                               ),
                             ),
                             Text(
-                              '/ month',
+                              plan.pricePeriod,
                               style: OType.caption.copyWith(color: c.textMuted),
                             ),
                           ],
@@ -703,6 +750,54 @@ class _PlanCard extends StatelessWidget {
         ),
         card,
       ],
+    );
+  }
+}
+
+/// States the model access a tier actually has. Free and Go are Auto-only;
+/// saying so on the card is part of the product, not decoration.
+class _AccessPill extends StatelessWidget {
+  const _AccessPill({required this.plan, required this.colors});
+
+  final V2PlanOption plan;
+  final OColors colors;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = colors;
+    final autoOnly = plan.autoOnly;
+    return Container(
+      key: Key('plan-access-${plan.id}'),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: autoOnly
+            ? c.surfaceAlt
+            : c.success.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(ORadius.s),
+        border: Border.all(
+          color: autoOnly ? c.hairline : c.success.withValues(alpha: 0.32),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            autoOnly ? Icons.lock_outline_rounded : Icons.tune_rounded,
+            size: 12,
+            color: autoOnly ? c.textMuted : c.success,
+          ),
+          const SizedBox(width: 4),
+          Flexible(
+            child: Text(
+              plan.modelAccessLabel,
+              style: OType.caption.copyWith(
+                color: autoOnly ? c.textMuted : c.success,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

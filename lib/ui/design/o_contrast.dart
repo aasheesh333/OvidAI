@@ -106,8 +106,13 @@ abstract final class OContrast {
   /// The four pairings called out by the design brief are
   /// `text/bg`, `textMuted/bg`, `accentFill/onAccent` and `danger/onDanger`.
   /// The other entries cover the surfaces those colours are actually drawn on
-  /// (cards, sheets, code blocks) and the secondary roles of the accent,
-  /// danger, success and warning tokens.
+  /// (cards, sheets, code blocks), the translucent `accentSoft` pill and tag
+  /// fills (composited over the surface before measuring, because that is what
+  /// the eye sees) and the secondary roles of the accent, danger, success and
+  /// warning tokens.
+  ///
+  /// Tiers follow the size the token is actually painted at: body copy is
+  /// gated at 4.5:1, pill/caption copy and status colours at 3:1.
   static List<OContrastCheck> audit(OColors colors) {
     OContrastCheck body(String name, Color fg, Color bg) =>
         OContrastCheck(name, fg, bg, tier: OContrastTier.body);
@@ -115,6 +120,16 @@ abstract final class OContrast {
         OContrastCheck(name, fg, bg, tier: OContrastTier.caption);
     OContrastCheck graphic(String name, Color fg, Color bg) =>
         OContrastCheck(name, fg, bg, tier: OContrastTier.graphic);
+
+    /// A 12 % status tint, flattened onto [over] first so the measurement
+    /// matches the paint.
+    Color tint(Color base, Color over, {double alpha = 0.12}) =>
+        OContrast.compositeOver(base.withValues(alpha: alpha), over);
+
+    final accentSoftOnSurface = OContrast.compositeOver(
+      colors.accentSoft,
+      colors.surface,
+    );
 
     return <OContrastCheck>[
       // Primary copy on every surface.
@@ -127,6 +142,11 @@ abstract final class OContrast {
       body('accent/bg', colors.accent, colors.bg),
       body('accent/surface', colors.accent, colors.surface),
       body('accentFill/onAccent', colors.onAccent, colors.accentFill),
+      // Accent on the translucent accentSoft pill fill (OPill.accent, OChip
+      // selected, OAvatar initials). This is the pairing that used to be
+      // unmeasured because accentSoft is translucent.
+      body('accent/accentSoft', colors.accent, accentSoftOnSurface),
+      body('textMuted/accentSoft', colors.textMuted, accentSoftOnSurface),
       // Danger roles: inline errors and the destructive button.
       body('danger/bg', colors.danger, colors.bg),
       body('danger/surface', colors.danger, colors.surface),
@@ -148,9 +168,34 @@ abstract final class OContrast {
         colors.textFaint,
         colors.surfaceRaised,
       ),
-      // Status colours are used for dots, rings and short status labels.
+      // Status colours are used for dots, rings, icons and short status
+      // labels on all three card surfaces, not just the page background.
       graphic('success/bg', colors.success, colors.bg),
+      graphic('success/surface', colors.success, colors.surface),
+      graphic('success/surfaceAlt', colors.success, colors.surfaceAlt),
+      graphic('success/surfaceRaised', colors.success, colors.surfaceRaised),
       graphic('warn/bg', colors.warn, colors.bg),
+      graphic('warn/surface', colors.warn, colors.surface),
+      graphic('warn/surfaceAlt', colors.warn, colors.surfaceAlt),
+      graphic('warn/surfaceRaised', colors.warn, colors.surfaceRaised),
+      graphic('danger/surfaceAlt', colors.danger, colors.surfaceAlt),
+      graphic('danger/surfaceRaised', colors.danger, colors.surfaceRaised),
+      // OPill's tinted tones: 12 % of the status colour under its own label.
+      caption(
+        'success/successTint',
+        colors.success,
+        tint(colors.success, colors.surface),
+      ),
+      caption(
+        'warn/warnTint',
+        colors.warn,
+        tint(colors.warn, colors.surface),
+      ),
+      caption(
+        'danger/dangerTint',
+        colors.danger,
+        tint(colors.danger, colors.surface),
+      ),
     ];
   }
 

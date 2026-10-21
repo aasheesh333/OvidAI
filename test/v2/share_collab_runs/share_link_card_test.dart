@@ -290,4 +290,39 @@ void main() {
     expect(formatShareLinkDate(DateTime(2026, 1, 5)), '5 Jan 2026');
     expect(formatShareLinkDate(DateTime(2026, 10, 12)), '12 Oct 2026');
   });
+
+  testWidgets('an empty URL cannot be copied and says so', (tester) async {
+    var copies = 0;
+    await _pump(
+      tester,
+      V2ShareLinkCard(
+        data: const V2ShareLinkCardData(
+          url: '',
+          mode: V2ShareMode.readOnly,
+          copied: true,
+        ),
+        onCopy: () => copies++,
+        onRevoke: () {},
+      ),
+      OTheme.light(),
+    );
+
+    expect(find.text('No link yet'), findsOneWidget);
+    expect(find.text('Copied'), findsNothing);
+    await tester.tap(find.text('Copy link'), warnIfMissed: false);
+    await tester.pump();
+    expect(copies, 0);
+  });
+
+  testWidgets('revoke is hidden when the host has no revoke action', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      V2ShareLinkCard(data: _data(), onCopy: () {}),
+      OTheme.light(),
+    );
+
+    expect(find.text('Revoke link'), findsNothing);
+  });
 }

@@ -1,5 +1,3 @@
-import 'dart:ui' show Tristate;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
@@ -122,32 +120,20 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('splash retry is announced as disabled with no handler', (
-    tester,
-  ) async {
+  testWidgets('splash hides retry when no handler can retry', (tester) async {
     final handle = tester.ensureSemantics();
     await _pump(
       tester,
       data: const V2SplashData(errorLabel: 'We could not reach Ovid Si.'),
     );
 
-    // The failure is announced, and the retry reports a disabled state.
+    // The failure is announced, but no dead "Try again" is offered.
     expect(
       find.bySemanticsLabel('We could not reach Ovid Si.'),
       findsOneWidget,
     );
-    final node = tester.getSemantics(
-      find.bySemanticsLabel('Try again').first,
-    );
-    expect(node.getSemanticsData().flagsCollection.isEnabled, Tristate.isFalse);
-
-    final button = tester.widget<OButton>(find.byType(OButton));
-    expect(button.onPressed, isNull);
-
-    // A disabled retry must not fire.
-    await tester.tap(find.text('Try again'));
-    await tester.pump();
-    expect(tester.takeException(), isNull);
+    expect(find.text('Try again'), findsNothing);
+    expect(find.byType(OButton), findsNothing);
 
     handle.dispose();
   });

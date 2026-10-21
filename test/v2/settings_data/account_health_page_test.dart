@@ -75,6 +75,7 @@ V2AccountHealthPageData _data({
   return V2AccountHealthPageData(
     statusTitle: 'All systems normal',
     statusMessage: 'No suspicious activity detected.',
+    healthy: true,
     score: 92,
     lastCheckLabel: '2 hours ago',
     lastCheckDetail: 'Automated audit passed.',
@@ -132,11 +133,11 @@ V2AccountHealthPageData _data({
         current: true,
       ),
     ],
-    onReviewDevices: onReviewDevices,
+    onReviewDevices: onReviewDevices ?? () {},
     onDeviceTap: onDeviceTap,
-    onRevokeDevice: onRevokeDevice,
-    onEnableTwoFactor: onEnableTwoFactor,
-    onContactSupport: onContactSupport,
+    onRevokeDevice: onRevokeDevice ?? (_) {},
+    onEnableTwoFactor: onEnableTwoFactor ?? () {},
+    onContactSupport: onContactSupport ?? () {},
     onRunCheck: onRunCheck,
     onCancelDeletion: onCancelDeletion,
   );
@@ -156,7 +157,6 @@ void main() {
     expect(find.text('All systems normal'), findsWidgets);
     expect(find.text('Last security check'), findsOneWidget);
     expect(find.text('Pixel 9 Pro'), findsWidgets);
-    expect(find.text('Review'), findsOneWidget);
     expect(find.text('92/100'), findsOneWidget);
     expect(find.text('Two-step sign-in'), findsOneWidget);
     expect(find.text('Chat and sync'), findsOneWidget);
@@ -337,19 +337,20 @@ void main() {
     expect(checked, isTrue);
   });
 
-  testWidgets('review devices fires the primary callback', (tester) async {
-    var reviewed = false;
+  testWidgets('active sign-ins are listed without a redundant Review button', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       _app(
-        AccountHealthPage(data: _data(onReviewDevices: () => reviewed = true)),
+        AccountHealthPage(data: _data(onReviewDevices: () {})),
         theme: OTheme.light(),
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Review'));
-    await tester.tap(find.text('Review'));
-    expect(reviewed, isTrue);
+    expect(find.text('ACTIVE SIGN-INS'), findsOneWidget);
+    expect(find.text('Pixel 9 Pro'), findsWidgets);
+    expect(find.text('Review'), findsNothing);
   });
 
   testWidgets('tapping a device reports its id', (tester) async {
@@ -465,6 +466,8 @@ void main() {
             healthy: false,
             statusTitle: 'One thing needs your attention',
             statusMessage: 'A new sign-in could not be verified.',
+            lastCheckLabel: '2 hours ago',
+            lastCheckDetail: 'A new sign-in could not be verified.',
             services: const [
               V2ServiceStatus(
                 name: 'Sign-in',
@@ -501,6 +504,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('92/100'), findsNothing);
+    expect(find.text('Active'), findsNothing);
+    expect(find.text('Not checked'), findsOneWidget);
+    expect(find.text('No account status has been reported yet.'), findsOneWidget);
     expect(find.text('aarav@gmail.com'), findsNothing);
     expect(find.text('Mumbai, India'), findsNothing);
     expect(find.text('Region'), findsNothing);
@@ -510,10 +516,109 @@ void main() {
     expect(find.text('Status is not available right now.'), findsOneWidget);
   });
 
-  testWidgets('disabled actions are announced to accessibility', (
+  testWidgets('no check result never claims a healthy account', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        AccountHealthPage(
+          data: V2AccountHealthPageData(
+            // A stale caller flag must not turn into a green tick: no check
+            // has run, so there is no result to report.
+            healthy: true,
+            statusTitle: 'Your account is protected',
+            statusMessage: 'Email verified.',
+          ),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Healthy'), findsNothing);
+    expect(find.text('Not checked yet'), findsOneWidget);
+    expect(find.text('Health check not run yet'), findsOneWidget);
+    expect(find.text('No check has run yet.'), findsOneWidget);
+    expect(find.byIcon(Icons.check_circle_outline_rounded), findsNothing);
+    expect(find.text('Continuous scan'), findsNothing);
+  });
+
+  testWidgets('an unknown second factor is not rendered as On', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        const AccountHealthPage(
+          data: V2AccountHealthPageData(lastCheckLabel: '2 hours ago'),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Two-step sign-in'), findsNothing);
+    expect(find.text('On'), findsNothing);
+  });
+
+  testWidgets('run check calls the real check handler', (tester) async {
+    var checks = 0;
+    await tester.pumpWidget(
+      _app(
+        AccountHealthPage(
+          data: V2AccountHealthPageData(
+            lastCheckLabel: '2 hours ago',
+            onRunCheck: () => checks++,
+          ),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final run = find.byKey(
+      const ValueKey<String>('account-health-run-check'),
+    );
+    expect(run, findsOneWidget);
+    await tester.ensureVisible(run);
+    await tester.tap(run);
+    expect(checks, 1);
+  });
+
+  testWidgets('a passed check shows the healthy state', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        AccountHealthPage(
+          data: V2AccountHealthPageData(
+            healthy: true,
+            lastCheckLabel: '2 hours ago',
+            lastCheckDetail: 'Automated audit passed.',
+          ),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Healthy'), findsOneWidget);
+    expect(find.text('2 hours ago · Automated audit passed.'), findsOneWidget);
+  });
+
+  testWidgets('a check without a verdict is not turned into Healthy', (
     tester,
   ) async {
-    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        const AccountHealthPage(
+          data: V2AccountHealthPageData(lastCheckLabel: '2 hours ago'),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Not verified'), findsOneWidget);
+    expect(find.text('Healthy'), findsNothing);
+    expect(find.byIcon(Icons.help_outline_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.check_circle_outline_rounded), findsNothing);
+  });
+
+  testWidgets('controls without a handler are not rendered', (tester) async {
     await tester.pumpWidget(
       _app(
         const AccountHealthPage(data: V2AccountHealthPageData()),
@@ -522,20 +627,12 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(
-      tester.getSemantics(find.text('Review')),
-      isSemantics(
-        label: 'Review',
-        isButton: true,
-        hasEnabledState: true,
-        isEnabled: false,
-      ),
-    );
-    expect(
-      tester.getSemantics(find.text('Contact support')).label,
-      contains('Contact support, Get help with your account or sign-in'),
-    );
-    handle.dispose();
+    // No dead buttons: an action is only drawn when it can reach a handler.
+    expect(find.text('Review'), findsNothing);
+    expect(find.text('Contact support'), findsNothing);
+    expect(find.text('Revoke'), findsNothing);
+    expect(find.text('Turn on'), findsNothing);
+    expect(find.text('Run a check'), findsNothing);
   });
 
   testWidgets('fits 320 dp at 200 % text in both themes', (tester) async {

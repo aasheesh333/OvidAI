@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -175,6 +177,31 @@ void main() {
       expect(data.durationLabel, '3s');
     });
 
+    test('child sessions appear as real subagent launches in order', () {
+      final root = _rootSession();
+      final child = _subagentSession();
+      final later = ChatSession(
+        id: 'sub-2',
+        title: 'Second child',
+        model: 'deepseek-chat',
+        parentId: root.id,
+        agentLabel: 'QA runner',
+        agentState: 'failed',
+        createdAt: DateTime(2026, 10, 21, 11),
+      );
+
+      final data = V2RunRoutes.trajectoryDataFor(
+        root,
+        allSessions: [later, root, child],
+      );
+
+      expect(data.subagents, hasLength(2));
+      expect(data.subagents.first.id, 'sub-1');
+      expect(data.subagents.first.agentName, 'Pricing research');
+      expect(data.subagents.first.status, V2SubagentLaunchStatus.running);
+      expect(data.subagents.last.status, V2SubagentLaunchStatus.failed);
+    });
+
     test('a session without analytics reports nothing instead of numbers', () {
       final session = _rootSession();
 
@@ -213,11 +240,59 @@ void main() {
       expect(data.stepLabel, 'Working');
       expect(data.elapsedLabel, '5m');
       expect(data.progress, 0);
+      expect(data.progressKnown, isFalse);
       expect(data.files, ['notes.md']);
       expect(data.logLines, hasLength(1));
       expect(data.logLines.single.text, 'notes.md');
       expect(data.totalLogLines, 1);
       expect(data.timeLimitLabel, V2RunRoutes.notReported);
+    });
+
+    test('the strict JSON contract is parsed from the final answer', () {
+      final session = _subagentSession()
+        ..agentState = 'finished'
+        ..agentResult = jsonEncode({
+          'status': 'completed',
+          'files_modified': ['notes.md'],
+          'artifacts_created': ['report.pdf'],
+          'key_findings': ['Pricing is stable.'],
+          'error_if_any': null,
+        });
+
+      final data = V2RunRoutes.subagentDataFor(session);
+
+      expect(data.summary, isNotNull);
+      expect(data.summary!.status, 'completed');
+      expect(data.summary!.filesModified, ['notes.md']);
+      expect(data.summary!.artifactsCreated, ['report.pdf']);
+      expect(data.summary!.keyFindings, ['Pricing is stable.']);
+      expect(data.summary!.hasField('error_if_any'), isTrue);
+      expect(data.summary!.hasError, isFalse);
+      expect(data.totalLogLines, 1);
+    });
+
+    test('absent contract fields stay unreported', () {
+      final session = _subagentSession()
+        ..agentState = 'finished'
+        ..agentResult = jsonEncode({'status': 'completed'});
+
+      final data = V2RunRoutes.subagentDataFor(session);
+
+      expect(data.summary, isNotNull);
+      expect(data.summary!.hasField('status'), isTrue);
+      expect(data.summary!.hasField('files_modified'), isFalse);
+      expect(data.summary!.hasField('error_if_any'), isFalse);
+      expect(data.summary!.json, isNot(contains('files_modified')));
+    });
+
+    test('a non-JSON final answer is an honest empty summary', () {
+      final session = _subagentSession()
+        ..agentState = 'finished'
+        ..agentResult = 'All done, nothing to report.';
+
+      final data = V2RunRoutes.subagentDataFor(session);
+
+      expect(data.summary, isNull);
     });
 
     test('a root chat is not a subagent', () {
@@ -257,6 +332,44 @@ void main() {
       expect(live.participants, hasLength(2));
       expect(live.selfName, 'Rahul Verma');
       expect(live.messages, isEmpty);
+      // Nobody holds an empty room's turn, so this device can send.
+      expect(live.turnHolderName, isEmpty);
+      expect(live.isMyTurn, isTrue);
+    });
+
+    test('the turn belongs to the last unanswered author, not a placeholder', () {
+      final state = _collabState(local: 'p2');
+      final message = CollaborationEvent.fromWire({
+        'schemaVersion': 1,
+        'eventId': 'm1',
+        'sessionId': 'collab-1',
+        'eventSequence': 1,
+        'senderParticipantId': 'p1',
+        'kind': 'message',
+        'createdAt': DateTime.utc(2026, 10, 21, 10).toIso8601String(),
+        'payload': MessagePayload('Hello team').toWire(),
+      });
+      final withMessage = const CollaborationReducer().apply(state, message);
+
+      expect(V2CollabRoutes.turnHolderId(withMessage), 'p1');
+      final live = V2CollabRoutes.liveDataFor(withMessage);
+      expect(live.turnHolderName, 'Priya Patel');
+      expect(live.isMyTurn, isFalse);
+      expect(live.capacity, maxActiveMembers);
+      expect(live.creatorPaysStorage, isTrue);
+
+      final mine = CollaborationEvent.fromWire({
+        'schemaVersion': 1,
+        'eventId': 'm2',
+        'sessionId': 'collab-1',
+        'eventSequence': 2,
+        'senderParticipantId': 'p2',
+        'kind': 'message',
+        'createdAt': DateTime.utc(2026, 10, 21, 10, 1).toIso8601String(),
+        'payload': MessagePayload('My turn now').toWire(),
+      });
+      final mineState = const CollaborationReducer().apply(withMessage, mine);
+      expect(V2CollabRoutes.liveDataFor(mineState).isMyTurn, isTrue);
     });
 
     test('the roster maps roles, identity and capacity', () {
@@ -271,8 +384,13 @@ void main() {
       expect(data.members.first.role, V2CollabRole.owner);
       expect(data.members.first.name, 'Priya Patel');
       expect(data.members[1].isYou, isTrue);
+      expect(data.members[1].canRemove, isFalse);
+      expect(data.members.first.canRemove, isFalse);
       expect(data.creatorName, 'Priya Patel');
       expect(data.hasStorageInfo, isFalse);
+
+      final owner = V2CollabRoutes.membersDataFor(_collabState(local: 'p1'));
+      expect(owner.members[1].canRemove, isTrue);
     });
   });
 

@@ -125,7 +125,7 @@ void main() {
         build(
           _draft.copyWith(
             frequency: V2CadenceFrequency.custom,
-            customRule: 'Every Friday at 5 PM',
+            customRule: '0 17 * * 5',
           ),
         ),
       );
@@ -134,8 +134,8 @@ void main() {
       final field = tester.widget<TextField>(
         find.byKey(const ValueKey('cadence-custom-rule')),
       );
-      expect(field.controller?.text, 'Every Friday at 5 PM');
-      expect(find.text('Set by your custom rule'), findsOneWidget);
+      expect(field.controller?.text, '0 17 * * 5');
+      expect(find.text('Friday, 23 Oct at 5:00 PM'), findsOneWidget);
       expect(find.text('REPEAT DAYS'), findsNothing);
     });
   });
@@ -252,16 +252,85 @@ void main() {
 
       await tester.enterText(
         find.byKey(const ValueKey('cadence-custom-rule')),
-        'Every other Monday at 6 PM',
+        '0 18 * * 1',
       );
       await tester.pumpAndSettle();
 
       expect(find.text('Describe when this should run.'), findsNothing);
-      expect(changes.last.customRule, 'Every other Monday at 6 PM');
-      expect(find.text('Set by your custom rule'), findsOneWidget);
-      expect(find.text('Every other Monday at 6 PM'), findsWidgets);
+      expect(changes.last.customRule, '0 18 * * 1');
+      expect(find.text('Monday, 26 Oct at 6:00 PM'), findsOneWidget);
+      expect(find.text('Sends cron 0 18 * * 1'), findsOneWidget);
 
       semantics.dispose();
+    });
+
+    testWidgets('plain English is rejected with a cron example', (
+      tester,
+    ) async {
+      _phone(tester);
+      await tester.pumpWidget(
+        _app(
+          CadencePicker(
+            draft: _draft.copyWith(
+              frequency: V2CadenceFrequency.custom,
+              customRule: 'Every other Monday at 6 PM',
+            ),
+            now: _now,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Use a cron expression or RRULE, for example 0 9 * * 1-5.'),
+        findsOneWidget,
+      );
+      expect(find.text('Add the missing details'), findsOneWidget);
+    });
+
+    testWidgets('an out-of-range cron field is rejected', (tester) async {
+      _phone(tester);
+      await tester.pumpWidget(
+        _app(
+          CadencePicker(
+            draft: _draft.copyWith(
+              frequency: V2CadenceFrequency.custom,
+              customRule: '0 25 * * 1',
+            ),
+            now: _now,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('That is not a valid cron or RRULE. Check the fields.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a valid RRULE produces its cron equivalent', (tester) async {
+      _phone(tester);
+      await tester.pumpWidget(
+        _app(
+          CadencePicker(
+            draft: _draft.copyWith(
+              frequency: V2CadenceFrequency.custom,
+              customRule: 'FREQ=WEEKLY;BYDAY=MO,WE;BYHOUR=7;BYMINUTE=30',
+            ),
+            now: _now,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(
+          'Sends RRULE:FREQ=WEEKLY;BYDAY=MO,WE;BYHOUR=7;BYMINUTE=30',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Add the missing details'), findsNothing);
     });
 
     testWidgets('a too-short custom rule is rejected', (tester) async {
@@ -296,14 +365,14 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Every other Monday'));
+      await tester.tap(find.text('Every Monday'));
       await tester.pumpAndSettle();
 
-      expect(changes.last.customRule, 'Every other Monday at 6 PM');
+      expect(changes.last.customRule, '0 18 * * 1');
       final field = tester.widget<TextField>(
         find.byKey(const ValueKey('cadence-custom-rule')),
       );
-      expect(field.controller?.text, 'Every other Monday at 6 PM');
+      expect(field.controller?.text, '0 18 * * 1');
     });
   });
 
@@ -482,7 +551,7 @@ void main() {
         expect(tester.takeException(), isNull);
         expect(find.text('CUSTOM CADENCE'), findsOneWidget);
         final sample = find.byWidgetPredicate(
-          (widget) => widget is OChip && widget.label == 'Every other Monday',
+          (widget) => widget is OChip && widget.label == 'Every Monday',
         );
         expect(tester.getSize(sample).height, greaterThanOrEqualTo(48));
       },

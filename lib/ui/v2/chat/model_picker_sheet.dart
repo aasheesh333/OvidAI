@@ -179,9 +179,13 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        'Select model',
-                        style: OType.h2.copyWith(color: c.text),
+                      Semantics(
+                        container: true,
+                        header: true,
+                        child: Text(
+                          'Select model',
+                          style: OType.h2.copyWith(color: c.text),
+                        ),
                       ),
                       const SizedBox(height: 2),
                       Text(

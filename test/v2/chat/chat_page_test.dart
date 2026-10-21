@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/chat/chat_page.dart';
+import 'package:ovid_ai/ui/v2/chat/composer_attachments.dart';
 import 'package:ovid_ai/ui/v2/chat/model_chip.dart';
 import 'package:ovid_ai/ui/v2/chat/queue_dock.dart';
 
@@ -278,6 +280,7 @@ void main() {
       _app(
         V2ChatPage(
           data: const V2ChatPageData(),
+          onMore: () {},
           onAttach: () => attaches++,
           onMic: () => mics++,
           onPermissionTap: () => permissions++,
@@ -291,7 +294,7 @@ void main() {
       'Open Studio',
       'Open Browser',
       'More options',
-      'Attach a file',
+      'Add attachment or action',
       'Voice input',
     ]) {
       expect(find.bySemanticsLabel(label), findsOneWidget, reason: label);
@@ -309,7 +312,15 @@ void main() {
     expect(permission, findsOneWidget);
     expect(tester.getSize(permission).height, greaterThanOrEqualTo(48));
 
-    await tester.tap(find.bySemanticsLabel('Attach a file'));
+    // The "+" opens the composer's own menu; its File row reaches the host's
+    // legacy attach seam.
+    await tester.tap(find.bySemanticsLabel('Add attachment or action'));
+    await tester.pumpAndSettle();
+    final fileRow = find.byKey(const ValueKey('composer-plus-file'));
+    await tester.ensureVisible(fileRow);
+    await tester.pumpAndSettle();
+    await tester.tap(fileRow);
+    await tester.pumpAndSettle();
     await tester.tap(find.bySemanticsLabel('Voice input'));
     await tester.tap(permission);
     await tester.pump();
@@ -448,7 +459,7 @@ void main() {
     expect(attaches, 0);
   });
 
-  testWidgets('composer keeps the picker when no plus callback is given', (
+  testWidgets('composer opens its plus menu and File reaches the host seam', (
     tester,
   ) async {
     var attaches = 0;
@@ -459,13 +470,21 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.bySemanticsLabel('Attach a file'), findsOneWidget);
-    expect(find.bySemanticsLabel('Add attachment or action'), findsNothing);
+    expect(find.bySemanticsLabel('Add attachment or action'), findsOneWidget);
+    expect(find.bySemanticsLabel('Attach a file'), findsNothing);
 
-    await tester.tap(find.bySemanticsLabel('Attach a file'));
-    await tester.pump();
+    await tester.tap(find.bySemanticsLabel('Add attachment or action'));
+    await tester.pumpAndSettle();
+    expect(find.text('Add to chat'), findsOneWidget);
+
+    final fileRow = find.byKey(const ValueKey('composer-plus-file'));
+    await tester.ensureVisible(fileRow);
+    await tester.pumpAndSettle();
+    await tester.tap(fileRow);
+    await tester.pumpAndSettle();
 
     expect(attaches, 1);
+    expect(find.text('Add to chat'), findsNothing);
   });
 
   testWidgets('queued messages surface in the dock above the composer', (
@@ -491,6 +510,166 @@ void main() {
       tester.getTopLeft(find.byType(V2QueueDock)).dy,
       lessThan(tester.getTopLeft(find.byType(TextField)).dy),
     );
+  });
+
+  testWidgets('plus menu File and Photo stage through their own pickers', (
+    tester,
+  ) async {
+    final files = <String>[];
+    final images = <String>[];
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(
+          data: const V2ChatPageData(),
+          attachmentPicker: () async {
+            files.add('file');
+            return const [
+              V2ComposerAttachment(
+                name: 'brief.md',
+                path: '/tmp/brief.md',
+                size: 2048,
+              ),
+            ];
+          },
+          imagePicker: () async {
+            images.add('image');
+            return const [
+              V2ComposerAttachment(
+                name: 'shot.png',
+                path: '/tmp/shot.png',
+                size: 4096,
+              ),
+            ];
+          },
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.tap(find.bySemanticsLabel('Add attachment or action'));
+    await tester.pumpAndSettle();
+    expect(find.text('Add to chat'), findsOneWidget);
+    expect(find.byKey(const ValueKey('composer-plus-file')), findsOneWidget);
+    expect(find.byKey(const ValueKey('composer-plus-photo')), findsOneWidget);
+    // Connectors has no route in the composer, so it is not offered dead.
+    expect(find.byKey(const ValueKey('composer-plus-connectors')), findsNothing);
+
+    final photo = find.byKey(const ValueKey('composer-plus-photo'));
+    await tester.ensureVisible(photo);
+    await tester.pumpAndSettle();
+    await tester.tap(photo);
+    await tester.pumpAndSettle();
+
+    expect(images, ['image']);
+    expect(files, isEmpty);
+    expect(find.text('shot.png'), findsOneWidget);
+
+    await tester.tap(find.bySemanticsLabel('Add attachment or action'));
+    await tester.pumpAndSettle();
+    final file = find.byKey(const ValueKey('composer-plus-file'));
+    await tester.ensureVisible(file);
+    await tester.pumpAndSettle();
+    await tester.tap(file);
+    await tester.pumpAndSettle();
+
+    expect(files, ['file']);
+    expect(find.text('brief.md'), findsOneWidget);
+  });
+
+  testWidgets('send stays disabled for whitespace and Enter sends the draft', (
+    tester,
+  ) async {
+    String? sent;
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(
+          data: const V2ChatPageData(),
+          onSend: (text) => sent = text,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.enterText(find.byType(TextField), '   ');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.pump();
+    expect(sent, isNull, reason: 'whitespace is not a message');
+
+    await tester.enterText(find.byType(TextField), 'Build the header');
+    await tester.pump();
+    await tester.showKeyboard(find.byType(TextField));
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    expect(sent, 'Build the header');
+  });
+
+  testWidgets('Shift+Enter inserts a newline instead of sending', (
+    tester,
+  ) async {
+    String? sent;
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(
+          data: const V2ChatPageData(),
+          onSend: (text) => sent = text,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.enterText(find.byType(TextField), 'line one');
+    await tester.pump();
+    await tester.showKeyboard(find.byType(TextField));
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pumpAndSettle();
+
+    expect(sent, isNull, reason: 'Shift+Enter must not send');
+    final field = tester.widget<TextField>(find.byType(TextField));
+    // The field keeps its multiline action, so the newline is inserted by the
+    // text input itself rather than by a key handler.
+    expect(field.controller!.text, 'line one');
+    expect(field.textInputAction, TextInputAction.newline);
+  });
+
+  testWidgets('Stop dispatches the queued message and dismiss removes it', (
+    tester,
+  ) async {
+    var stops = 0;
+    var dismisses = 0;
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(
+          data: const V2ChatPageData(
+            state: V2ChatState.running,
+            queuedCount: 1,
+            queuedPreview: 'Queued prompt',
+          ),
+          onStop: () => stops++,
+          onDismissQueued: () => dismisses++,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('1 queued message'), findsOneWidget);
+    expect(find.text('Queued prompt'), findsOneWidget);
+
+    await tester.tap(find.text('Send now'));
+    await tester.pump();
+    expect(stops, 1, reason: 'Send now dispatches through the host stop path');
+
+    await tester.tap(
+      find.descendant(
+        of: find.byType(V2QueueDock),
+        matching: find.byIcon(Icons.close_rounded),
+      ),
+    );
+    await tester.pump();
+    expect(dismisses, 1);
   });
 }
 

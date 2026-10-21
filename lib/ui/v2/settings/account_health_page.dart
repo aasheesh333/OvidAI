@@ -90,17 +90,18 @@ class V2SignInEvent {
 @immutable
 class V2AccountHealthPageData {
   const V2AccountHealthPageData({
-    this.statusTitle = 'All systems normal',
-    this.statusMessage = 'No suspicious activity detected.',
-    this.healthy = true,
+    this.statusTitle = 'Health check not run yet',
+    this.statusMessage =
+        'Run a check to verify your account, devices and sign-ins.',
+    this.healthy,
     this.score,
     this.lastCheckLabel = '',
     this.lastCheckDetail = '',
-    this.twoFactorEnabled = true,
+    this.twoFactorEnabled,
     this.emailVerified = true,
     this.emailLabel = '',
     this.regionLabel = '',
-    this.accountStatus = V2AccountStatus.active,
+    this.accountStatus,
     this.usage = const <V2AccountUsageMetric>[
       V2AccountUsageMetric(id: 'storage', title: 'Storage left'),
       V2AccountUsageMetric(id: 'daily_usage', title: 'Daily usage left'),
@@ -128,23 +129,28 @@ class V2AccountHealthPageData {
   final String statusTitle;
   final String statusMessage;
 
-  /// Whether the account currently passes every check. Drives the hero pill and
-  /// the scan dot; the wiring pass must feed the real result.
-  final bool healthy;
+  /// Whether the account currently passes every check. Null means "not
+  /// measured"; the page never turns that into a healthy claim. The hero only
+  /// shows a healthy state when a check has actually run
+  /// ([hasCheckResult]) and this is true.
+  final bool? healthy;
 
   /// Security score out of 100, or null when it has not been measured yet. The
   /// score block is hidden rather than showing a made-up number.
   final int? score;
   final String lastCheckLabel;
   final String lastCheckDetail;
-  final bool twoFactorEnabled;
+
+  /// Null when the account has no second factor or the state is unknown. A
+  /// missing value is never rendered as "On".
+  final bool? twoFactorEnabled;
   final bool emailVerified;
   final String emailLabel;
   final String regionLabel;
 
-  /// Where the account stands right now. Suspended and deletion-pending
-  /// accounts keep their data but change what the page can promise.
-  final V2AccountStatus accountStatus;
+  /// Where the account stands right now, or null when no status has been
+  /// reported. A missing status is never rendered as the green "Active" pill.
+  final V2AccountStatus? accountStatus;
 
   /// Storage and allowance lines. The page never invents a number: a metric
   /// with an empty [V2AccountUsageMetric.value] reads "Not measured yet".
@@ -163,6 +169,9 @@ class V2AccountHealthPageData {
   final bool loading;
   final String? errorMessage;
 
+  /// Legacy review action. The devices are listed inline with per-device
+  /// actions, so the page no longer renders a separate "Review" button. Kept
+  /// so existing call sites keep compiling.
   final VoidCallback? onReviewDevices;
   final ValueChanged<String>? onDeviceTap;
   final ValueChanged<String>? onRevokeDevice;
@@ -183,6 +192,7 @@ class V2AccountHealthPageData {
     V2AccountStatus.active => 'Active',
     V2AccountStatus.deletionPending => 'Deletion pending',
     V2AccountStatus.suspendedForAbuse => 'Suspended',
+    null => 'Not checked',
   };
 
   String get accountStatusDetail => switch (accountStatus) {
@@ -191,6 +201,7 @@ class V2AccountHealthPageData {
       'Your account is scheduled for deletion.',
     V2AccountStatus.suspendedForAbuse =>
       'Suspended for abuse. Contact support to appeal.',
+    null => 'No account status has been reported yet.',
   };
 
   /// `Requested 21 Oct 2026 · Deletes on 20 Nov 2026` with empty parts
@@ -210,6 +221,18 @@ class V2AccountHealthPageData {
     lastCheckLabel,
     lastCheckDetail,
   ].where((part) => part.isNotEmpty).join(' · ');
+
+  /// A green state is only honest once a check has run and passed.
+  bool get effectiveHealthy => hasCheckResult && healthy == true;
+
+  String get healthPillLabel {
+    if (!hasCheckResult) return 'Not checked yet';
+    return switch (healthy) {
+      true => 'Healthy',
+      false => 'Needs attention',
+      null => 'Not verified',
+    };
+  }
 }
 
 /// Account health: status, last security check and signed-in devices.
@@ -238,11 +261,13 @@ class AccountHealthPage extends StatelessWidget {
         icon: Icons.health_and_safety_outlined,
         title: 'No health data yet',
         message: 'Run a check to see how your account and devices are doing.',
-        action: OButton(
-          label: 'Run a check',
-          icon: Icons.refresh_rounded,
-          onPressed: data.onRunCheck,
-        ),
+        action: data.onRunCheck == null
+            ? null
+            : OButton(
+                label: 'Run a check',
+                icon: Icons.refresh_rounded,
+                onPressed: data.onRunCheck,
+              ),
       );
     }
     return OFadeSlide(
@@ -264,7 +289,8 @@ class AccountHealthPage extends StatelessWidget {
             _devices(context),
             _recentSignIns(context),
             _serviceStatus(context),
-            _regionSupport(context),
+            if (data.regionLabel.isNotEmpty || data.onContactSupport != null)
+              _regionSupport(context),
             _isolationNote(context),
           ],
         ),
@@ -275,7 +301,14 @@ class AccountHealthPage extends StatelessWidget {
   Widget _hero(BuildContext context) {
     final c = OColors.of(context);
     final score = data.resolvedScore;
-    final tone = data.healthy ? c.success : c.warn;
+    final checked = data.hasCheckResult;
+    final healthy = data.effectiveHealthy;
+    final unknown = !checked || data.healthy == null;
+    final tone = unknown ? c.textMuted : (healthy ? c.success : c.warn);
+    final title = checked ? data.statusTitle : 'Health check not run yet';
+    final message = checked
+        ? data.statusMessage
+        : 'Run a check to verify your account, devices and sign-ins.';
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.l),
       child: OCard(
@@ -293,7 +326,9 @@ class AccountHealthPage extends StatelessWidget {
                     borderRadius: BorderRadius.circular(ORadius.m),
                   ),
                   child: Icon(
-                    data.healthy
+                    unknown
+                        ? Icons.health_and_safety_outlined
+                        : healthy
                         ? Icons.health_and_safety_outlined
                         : Icons.gpp_maybe_outlined,
                     size: 24,
@@ -305,19 +340,20 @@ class AccountHealthPage extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        data.statusTitle,
-                        style: OType.h2.copyWith(color: c.text),
-                      ),
+                      Text(title, style: OType.h2.copyWith(color: c.text)),
                       const SizedBox(height: OSpace.xs),
                       OPill(
-                        label: data.healthy ? 'Healthy' : 'Needs attention',
-                        tone: data.healthy ? OPillTone.success : OPillTone.warn,
+                        label: data.healthPillLabel,
+                        tone: unknown
+                            ? OPillTone.neutral
+                            : healthy
+                            ? OPillTone.success
+                            : OPillTone.warn,
                         dot: true,
                       ),
                       const SizedBox(height: OSpace.xs),
                       Text(
-                        data.statusMessage,
+                        message,
                         style: OType.bodySm.copyWith(color: c.textMuted),
                       ),
                     ],
@@ -402,6 +438,7 @@ class AccountHealthPage extends StatelessWidget {
                       V2AccountStatus.active => OPillTone.success,
                       V2AccountStatus.deletionPending => OPillTone.warn,
                       V2AccountStatus.suspendedForAbuse => OPillTone.danger,
+                      null => OPillTone.neutral,
                     },
                     dot: true,
                   ),
@@ -470,15 +507,17 @@ class AccountHealthPage extends StatelessWidget {
               'Your data is kept. Contact support to appeal this decision.',
               style: OType.bodySm.copyWith(color: c.textMuted),
             ),
-            const SizedBox(height: OSpace.m),
-            OButton(
-              key: const ValueKey<String>('account-health-suspended-support'),
-              label: 'Contact support',
-              icon: Icons.support_agent_rounded,
-              variant: OButtonVariant.secondary,
-              expand: true,
-              onPressed: data.onContactSupport,
-            ),
+            if (data.onContactSupport != null) ...[
+              const SizedBox(height: OSpace.m),
+              OButton(
+                key: const ValueKey<String>('account-health-suspended-support'),
+                label: 'Contact support',
+                icon: Icons.support_agent_rounded,
+                variant: OButtonVariant.secondary,
+                expand: true,
+                onPressed: data.onContactSupport,
+              ),
+            ],
           ],
         ),
       ),
@@ -541,16 +580,18 @@ class AccountHealthPage extends StatelessWidget {
                   '$when. Until then, you can cancel.',
                   style: OType.bodySm.copyWith(color: c.textMuted),
                 ),
-                const SizedBox(height: OSpace.m),
-                OButton(
-                  key: const ValueKey<String>('account-health-cancel-deletion'),
-                  label: 'Cancel deletion',
-                  variant: OButtonVariant.secondary,
-                  expand: true,
-                  onPressed: data.onCancelDeletion == null
-                      ? null
-                      : () => _confirmCancelDeletion(context),
-                ),
+                if (data.onCancelDeletion != null) ...[
+                  const SizedBox(height: OSpace.m),
+                  OButton(
+                    key: const ValueKey<String>(
+                      'account-health-cancel-deletion',
+                    ),
+                    label: 'Cancel deletion',
+                    variant: OButtonVariant.secondary,
+                    expand: true,
+                    onPressed: () => _confirmCancelDeletion(context),
+                  ),
+                ],
               ],
             ),
           ),
@@ -602,6 +643,22 @@ class AccountHealthPage extends StatelessWidget {
 
   Widget _healthCard(BuildContext context) {
     final c = OColors.of(context);
+    final checked = data.hasCheckResult;
+    final checkTone = !checked
+        ? c.textMuted
+        : data.healthy == true
+        ? c.success
+        : data.healthy == false
+        ? c.warn
+        : c.textMuted;
+    final checkIcon = !checked
+        ? Icons.schedule_rounded
+        : data.healthy == true
+        ? Icons.check_circle_outline_rounded
+        : data.healthy == false
+        ? Icons.error_outline_rounded
+        : Icons.help_outline_rounded;
+    final twoFactor = data.twoFactorEnabled;
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.l),
       child: Column(
@@ -610,70 +667,24 @@ class AccountHealthPage extends StatelessWidget {
           OSectionHeader(
             label: 'Account health',
             padding: const EdgeInsets.only(bottom: OSpace.s),
-            trailing: Text(
-              'Continuous scan',
-              style: OType.caption.copyWith(
-                color: data.healthy ? c.success : c.textMuted,
-              ),
-            ),
+            trailing: data.onRunCheck == null
+                ? Text(
+                    checked ? 'Checked' : 'Not run yet',
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  )
+                : OButton(
+                    key: const ValueKey<String>('account-health-run-check'),
+                    label: checked ? 'Run again' : 'Run check',
+                    variant: OButtonVariant.ghost,
+                    size: OButtonSize.compact,
+                    onPressed: data.onRunCheck,
+                  ),
           ),
           OCard(
             padding: EdgeInsets.zero,
             child: Column(
               children: [
-                _HealthRow(
-                  leading: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: (data.healthy ? c.success : c.warn).withValues(
-                        alpha: 0.12,
-                      ),
-                      borderRadius: BorderRadius.circular(ORadius.m),
-                    ),
-                    child: Icon(
-                      data.healthy
-                          ? Icons.check_circle_outline_rounded
-                          : Icons.error_outline_rounded,
-                      size: 19,
-                      color: data.healthy ? c.success : c.warn,
-                    ),
-                  ),
-                  title: 'Security scan',
-                  subtitle: data.statusMessage,
-                  showChevron: false,
-                  stackTrailing: false,
-                  trailing: Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: data.healthy ? c.success : c.warn,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                ),
-                Divider(color: c.hairline, height: 1),
-                _HealthRow(
-                  icon: Icons.password_rounded,
-                  title: 'Two-step sign-in',
-                  subtitle: data.twoFactorEnabled
-                      ? 'On. A code is required when you sign in.'
-                      : 'Off. Add a second step to protect your account.',
-                  showChevron: false,
-                  onTap: data.twoFactorEnabled ? null : data.onEnableTwoFactor,
-                  trailing: data.twoFactorEnabled
-                      ? const OPill(
-                          label: 'On',
-                          tone: OPillTone.success,
-                          dot: true,
-                        )
-                      : OButton(
-                          label: 'Turn on',
-                          variant: OButtonVariant.ghost,
-                          onPressed: data.onEnableTwoFactor,
-                        ),
-                ),
-                Divider(color: c.hairline, height: 1),
+                // Real Firebase state: never a green tick without it.
                 _HealthRow(
                   icon: Icons.alternate_email_rounded,
                   title: 'Email verification',
@@ -686,27 +697,58 @@ class AccountHealthPage extends StatelessWidget {
                           tone: OPillTone.success,
                           dot: true,
                         )
-                      : OButton(
+                      : data.onVerifyEmail != null
+                      ? OButton(
                           label: 'Verify',
                           variant: OButtonVariant.ghost,
                           onPressed: data.onVerifyEmail,
+                        )
+                      : const OPill(
+                          label: 'Not verified',
+                          tone: OPillTone.warn,
+                          dot: true,
                         ),
                 ),
+                if (twoFactor != null) ...[
+                  Divider(color: c.hairline, height: 1),
+                  _HealthRow(
+                    icon: Icons.password_rounded,
+                    title: 'Two-step sign-in',
+                    subtitle: twoFactor
+                        ? 'On. A code is required when you sign in.'
+                        : 'Off. Add a second step to protect your account.',
+                    showChevron: false,
+                    onTap: twoFactor ? null : data.onEnableTwoFactor,
+                    trailing: twoFactor
+                        ? const OPill(
+                            label: 'On',
+                            tone: OPillTone.success,
+                            dot: true,
+                          )
+                        : data.onEnableTwoFactor != null
+                        ? OButton(
+                            label: 'Turn on',
+                            variant: OButtonVariant.ghost,
+                            onPressed: data.onEnableTwoFactor,
+                          )
+                        : const OPill(
+                            label: 'Off',
+                            tone: OPillTone.warn,
+                            dot: true,
+                          ),
+                  ),
+                ],
                 Divider(color: c.hairline, height: 1),
                 _HealthRow(
                   icon: Icons.schedule_rounded,
                   title: 'Last security check',
-                  subtitle: data.hasCheckResult
+                  subtitle: checked
                       ? data.lastCheckSummary
                       : 'No check has run yet.',
                   showChevron: false,
                   stackTrailing: false,
-                  trailing: data.hasCheckResult
-                      ? Icon(
-                          Icons.verified_outlined,
-                          size: 20,
-                          color: data.healthy ? c.success : c.textFaint,
-                        )
+                  trailing: checked
+                      ? Icon(checkIcon, size: 20, color: checkTone)
                       : null,
                 ),
               ],
@@ -727,11 +769,6 @@ class AccountHealthPage extends StatelessWidget {
           OSectionHeader(
             label: 'Active sign-ins',
             padding: const EdgeInsets.only(bottom: OSpace.s),
-            trailing: OButton(
-              label: 'Review',
-              variant: OButtonVariant.ghost,
-              onPressed: data.onReviewDevices,
-            ),
           ),
           if (data.devices.isEmpty)
             OCard(
@@ -756,15 +793,15 @@ class AccountHealthPage extends StatelessWidget {
                               label: 'This device',
                               tone: OPillTone.accent,
                             )
+                          : data.onRevokeDevice == null
+                          ? null
                           : OButton(
                               label: 'Revoke',
                               variant: OButtonVariant.danger,
-                              onPressed: data.onRevokeDevice == null
-                                  ? null
-                                  : () => _confirmRevokeDevice(
-                                      context,
-                                      data.devices[i],
-                                    ),
+                              onPressed: () => _confirmRevokeDevice(
+                                context,
+                                data.devices[i],
+                              ),
                             ),
                       onTap: data.onDeviceTap == null
                           ? null
@@ -843,7 +880,10 @@ class AccountHealthPage extends StatelessWidget {
             padding: const EdgeInsets.only(bottom: OSpace.s),
             trailing: data.services.isEmpty
                 ? null
-                : Text('Live', style: OType.caption.copyWith(color: c.success)),
+                : Text(
+                    'Reported',
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  ),
           ),
           if (data.services.isEmpty)
             OCard(
@@ -904,14 +944,16 @@ class AccountHealthPage extends StatelessWidget {
                     subtitle: data.regionLabel,
                     showChevron: false,
                   ),
-                  Divider(color: c.hairline, height: 1),
+                  if (data.onContactSupport != null)
+                    Divider(color: c.hairline, height: 1),
                 ],
-                _HealthRow(
-                  icon: Icons.support_agent_rounded,
-                  title: 'Contact support',
-                  subtitle: 'Get help with your account or sign-in',
-                  onTap: data.onContactSupport,
-                ),
+                if (data.onContactSupport != null)
+                  _HealthRow(
+                    icon: Icons.support_agent_rounded,
+                    title: 'Contact support',
+                    subtitle: 'Get help with your account or sign-in',
+                    onTap: data.onContactSupport,
+                  ),
               ],
             ),
           ),
@@ -994,7 +1036,6 @@ class _HealthRow extends StatelessWidget {
     required this.title,
     this.subtitle,
     this.icon,
-    this.leading,
     this.trailing,
     this.onTap,
     this.showChevron = true,
@@ -1004,7 +1045,6 @@ class _HealthRow extends StatelessWidget {
   final String title;
   final String? subtitle;
   final IconData? icon;
-  final Widget? leading;
   final Widget? trailing;
   final VoidCallback? onTap;
   final bool showChevron;
@@ -1028,7 +1068,6 @@ class _HealthRow extends StatelessWidget {
         title: title,
         subtitle: subtitle,
         icon: icon,
-        leading: leading,
         showChevron: showChevron,
         onTap: onTap,
         trailing: trailingWidget == null
@@ -1041,19 +1080,17 @@ class _HealthRow extends StatelessWidget {
     }
 
     final c = OColors.of(context);
-    final leadingWidget =
-        leading ??
-        (icon == null
-            ? null
-            : Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(ORadius.m),
-                ),
-                child: Icon(icon, size: 19, color: c.textMuted),
-              ));
+    final leadingWidget = icon == null
+        ? null
+        : Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: c.surfaceAlt,
+              borderRadius: BorderRadius.circular(ORadius.m),
+            ),
+            child: Icon(icon, size: 19, color: c.textMuted),
+          );
     final label = subtitle == null ? title : '$title, $subtitle';
     final content = Padding(
       padding: const EdgeInsets.symmetric(
@@ -1071,20 +1108,29 @@ class _HealthRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  title,
-                  style: OType.body.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w500,
+                // The row label already carries the title and subtitle; the
+                // visible copies are decoration and would be read twice.
+                ExcludeSemantics(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: OType.body.copyWith(
+                          color: c.text,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      if (subtitle != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          subtitle!,
+                          style: OType.caption.copyWith(color: c.textMuted),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
-                if (subtitle != null) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    subtitle!,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
                 const SizedBox(height: OSpace.s),
                 trailingWidget,
               ],

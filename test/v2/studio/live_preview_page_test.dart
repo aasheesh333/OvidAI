@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
@@ -242,6 +244,104 @@ void main() {
       expect(find.text('Open in browser'), findsOneWidget);
       expect(find.text('+30 min'), findsOneWidget);
       expect(_offScreenText(tester), isEmpty);
+    }
+  });
+
+  testWidgets('an empty preview never claims to be live', (tester) async {
+    var retries = 0;
+    await tester.pumpWidget(
+      _app(
+        V2LivePreviewPage(
+          data: const V2LivePreviewData(siteName: 'Acme Cloud'),
+          onRetry: () => retries++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('preview-waiting-frame')), findsOneWidget);
+    expect(find.text('Online'), findsNothing);
+    expect(find.text('Live · Preview from your workspace'), findsNothing);
+    expect(find.text('Waiting for the first frame'), findsWidgets);
+    expect(find.text('Waiting for preview URL'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('Check again'));
+    await tester.tap(find.text('Check again'));
+    expect(retries, 1);
+  });
+
+  testWidgets('a broken frame shows an honest error, not a blank box', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        V2LivePreviewPage(
+          data: V2LivePreviewData(
+            siteName: 'Acme Cloud',
+            url: 'acme-cloud.ovid.app',
+            frame: MemoryImage(Uint8List.fromList(<int>[1, 2, 3, 4])),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('preview-frame-error')), findsOneWidget);
+    expect(find.text('The preview frame could not load'), findsOneWidget);
+  });
+
+  testWidgets('empty state hides the start action when it is not wired', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        const V2LivePreviewPage(
+          data: V2LivePreviewData(status: V2PreviewStatus.empty),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('No preview running'), findsOneWidget);
+    expect(find.text('Start preview'), findsNothing);
+    expect(
+      find.text('A preview cannot be started from here yet.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('waiting and error states fit 320 dp at 200 % text', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final scenarios = <String, V2LivePreviewData>{
+      'waiting': const V2LivePreviewData(siteName: 'Acme Cloud'),
+      'error': const V2LivePreviewData(
+        status: V2PreviewStatus.error,
+        errorMessage: 'The preview server did not answer.',
+      ),
+    };
+    for (final dark in <bool>[false, true]) {
+      for (final entry in scenarios.entries) {
+        await tester.pumpWidget(
+          _app(
+            V2LivePreviewPage(data: entry.value, onRetry: () {}),
+            dark: dark,
+            textScale: 2,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          tester.takeException(),
+          isNull,
+          reason:
+              '${entry.key} overflowed at 320 dp / 200% text '
+              '(${dark ? 'dark' : 'light'})',
+        );
+      }
     }
   });
 

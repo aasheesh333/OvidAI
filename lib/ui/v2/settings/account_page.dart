@@ -1,12 +1,16 @@
 // TODO(l10n): move the English copy in this screen to the ARB files.
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/account_service.dart';
 import '../../../core/format.dart';
 import '../../../core/play_billing.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'confirm_typed_sheet.dart';
 
 enum V2AccountStatus { loading, ready, empty, error }
 
@@ -86,6 +90,8 @@ class V2AccountData {
     this.onRestoreAccount,
     this.onSignIn,
     this.onRetry,
+    this.requestDeletion,
+    this.restoreDeletion,
     this.signOutLoading = false,
     this.deletionPending = false,
     this.deletionDeadline,
@@ -119,6 +125,17 @@ class V2AccountData {
 
   /// Cancels a pending deletion inside the grace period.
   final VoidCallback? onRestoreAccount;
+
+  /// Submits the deletion request to the account service. When supplied the
+  /// screen shows the server's receipt (state and deadline) instead of
+  /// assuming the request succeeded. [onDeleteAccount] is the legacy hook used
+  /// only when this is null.
+  final Future<AccountDeletion> Function(String requestId)? requestDeletion;
+
+  /// Cancels a pending deletion on the server (the account owner's restore).
+  /// Falls back to [onRestoreAccount].
+  final Future<AccountDeletion?> Function()? restoreDeletion;
+
   final VoidCallback? onSignIn;
   final VoidCallback? onRetry;
   final bool signOutLoading;
@@ -140,10 +157,32 @@ class V2AccountData {
   final bool syncOk;
 }
 
-class AccountPage extends StatelessWidget {
+class AccountPage extends StatefulWidget {
   const AccountPage({super.key, required this.data});
 
   final V2AccountData data;
+
+  @override
+  State<AccountPage> createState() => _AccountPageState();
+}
+
+class _AccountPageState extends State<AccountPage> {
+  V2AccountData get data => widget.data;
+
+  /// The server's answer after a deletion request in this session. It wins
+  /// over injected data so the banner reflects what the service returned.
+  AccountDeletion? _receipt;
+  bool _deleting = false;
+  String? _deletionError;
+  bool _restored = false;
+
+  bool get _deletionPending =>
+      !_restored && (data.deletionPending || _receipt?.isPending == true);
+
+  DateTime? get _deletionDeadline =>
+      _receipt?.deleteAfter ?? data.deletionDeadline;
+
+  bool get _deletionLoading => data.deletionLoading || _deleting;
 
   @override
   Widget build(BuildContext context) {
@@ -208,13 +247,15 @@ class AccountPage extends StatelessWidget {
                     Positioned(
                       right: -8,
                       bottom: -8,
-                      child: OIconButton(
-                        icon: Icons.photo_camera_rounded,
-                        semanticLabel: 'Change photo',
-                        tooltip: 'Change photo',
-                        active: true,
-                        onPressed: data.onChangePhoto,
-                      ),
+                      child: data.onChangePhoto == null
+                          ? const SizedBox.shrink()
+                          : OIconButton(
+                              icon: Icons.photo_camera_rounded,
+                              semanticLabel: 'Change photo',
+                              tooltip: 'Change photo',
+                              active: true,
+                              onPressed: data.onChangePhoto,
+                            ),
                     ),
                   ],
                 ),
@@ -239,12 +280,13 @@ class AccountPage extends StatelessWidget {
                   ),
                 ],
                 const SizedBox(height: OSpace.m),
-                OButton(
-                  label: 'Change photo',
-                  icon: Icons.edit_rounded,
-                  variant: OButtonVariant.secondary,
-                  onPressed: data.onChangePhoto,
-                ),
+                if (data.onChangePhoto != null)
+                  OButton(
+                    label: 'Change photo',
+                    icon: Icons.edit_rounded,
+                    variant: OButtonVariant.secondary,
+                    onPressed: data.onChangePhoto,
+                  ),
               ],
             ),
           ),
@@ -285,11 +327,13 @@ class AccountPage extends StatelessWidget {
               icon: Icons.badge_outlined,
               title: 'No profile details',
               message: 'Add your name, phone and region so Ovid can help you.',
-              action: OButton(
-                label: 'Add details',
-                icon: Icons.add_rounded,
-                onPressed: data.onEditProfile ?? data.onRetry,
-              ),
+              action: (data.onEditProfile ?? data.onRetry) == null
+                  ? null
+                  : OButton(
+                      label: 'Add details',
+                      icon: Icons.add_rounded,
+                      onPressed: data.onEditProfile ?? data.onRetry,
+                    ),
             )
           else
             _DetailsCard(data: data),
@@ -320,11 +364,13 @@ class AccountPage extends StatelessWidget {
               title: 'No linked accounts',
               message:
                   'Link Google or Apple to sign in faster and keep your account safe.',
-              action: OButton(
-                label: 'Link account',
-                icon: Icons.add_link_rounded,
-                onPressed: data.onLinkAccount,
-              ),
+              action: data.onLinkAccount == null
+                  ? null
+                  : OButton(
+                      label: 'Link account',
+                      icon: Icons.add_link_rounded,
+                      onPressed: data.onLinkAccount,
+                    ),
             )
           else
             _ConnectedCard(data: data),
@@ -337,6 +383,7 @@ class AccountPage extends StatelessWidget {
                   icon: Icons.password_rounded,
                   title: 'Credentials',
                   subtitle: 'Browser logins, GitHub and personal tokens',
+                  enabled: data.onOpenCredentials != null,
                   showChevron: data.onOpenCredentials != null,
                   onTap: data.onOpenCredentials,
                 ),
@@ -345,18 +392,25 @@ class AccountPage extends StatelessWidget {
                   icon: Icons.groups_outlined,
                   title: 'Team & support',
                   subtitle: 'Shared sessions, help and contact',
+                  enabled: data.onTeamSupport != null,
                   showChevron: data.onTeamSupport != null,
                   onTap: data.onTeamSupport,
                 ),
               ],
             ),
           ),
-          if (data.deletionPending) ...[
+          if (_deletionError != null) ...[
+            const SizedBox(height: OSpace.l),
+            _DeletionError(message: _deletionError!),
+          ],
+          if (_deletionPending) ...[
             const SizedBox(height: OSpace.xl),
             _DeletionBanner(
-              deadline: data.deletionDeadline,
-              loading: data.deletionLoading,
-              onRestore: data.onRestoreAccount,
+              deadline: _deletionDeadline,
+              loading: _deletionLoading,
+              onRestore: data.onRestoreAccount == null && data.restoreDeletion == null
+                  ? null
+                  : _restoreAccount,
             ),
           ],
           const SizedBox(height: OSpace.xl),
@@ -368,21 +422,20 @@ class AccountPage extends StatelessWidget {
             loading: data.signOutLoading,
             onPressed: data.onSignOut,
           ),
-          if (!data.deletionPending) ...[
+          if (!_deletionPending) ...[
             const SizedBox(height: OSpace.l),
             OButton(
               label: 'Delete account',
               icon: Icons.warning_amber_rounded,
               variant: OButtonVariant.danger,
               expand: true,
-              onPressed: data.onDeleteAccount == null
-                  ? null
-                  : () => _confirmDelete(context, data),
+              loading: _deleting,
+              onPressed: _canDelete ? () => _confirmDelete(context) : null,
             ),
             const SizedBox(height: OSpace.s),
             Text(
-              'Deletion starts a 24-hour grace period. You can restore your '
-              'account before the deadline.',
+              'Deletion starts a 24-hour grace period. Sign in again and choose '
+              'Restore account before the deadline to keep your account.',
               textAlign: TextAlign.center,
               style: OType.caption.copyWith(color: c.textMuted),
             ),
@@ -391,87 +444,141 @@ class AccountPage extends StatelessWidget {
       ),
     );
   }
+
+  bool get _canDelete =>
+      data.requestDeletion != null || data.onDeleteAccount != null;
+
+  /// The value the person must type. Only a real email or phone is offered;
+  /// a placeholder like "Signed in" falls back to the `DELETE` target so the
+  /// confirmation never asks for a string that is not theirs.
+  String get _confirmationContact {
+    final value = data.profile?.email.trim() ?? '';
+    if (value.isEmpty) return '';
+    if (value.contains('@')) return value;
+    if (RegExp(r'^\+?[0-9][0-9 ()\-]{4,}$').hasMatch(value)) return value;
+    return '';
+  }
+
+  /// Stable for one confirmation: the server deduplicates retries of the same
+  /// request instead of creating a second deletion.
+  String _newRequestId() => List.generate(
+    24,
+    (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0'),
+  ).join();
+
+  /// Typed confirmation first, then the real deletion service. The copy never
+  /// promises immediate deletion: the server keeps a 24-hour grace period and
+  /// reports the deadline back in the receipt.
+  Future<void> _confirmDelete(BuildContext context) async {
+    final confirmed = await showConfirmTypedSheet(
+      context,
+      data: V2ConfirmTypedSheetData(
+        contact: _confirmationContact,
+        graceNote:
+            'Signing in during the 24-hour grace period lets you choose '
+            'Restore account. Nothing is deleted before the deadline.',
+      ),
+      onManageSubscription: data.onManageSubscription ?? _openPlaySubscriptions,
+    );
+    if (!confirmed || !mounted) return;
+
+    final request = data.requestDeletion;
+    if (request == null) {
+      // Legacy adapter: its action owns the confirmation and the request.
+      data.onDeleteAccount?.call();
+      return;
+    }
+
+    setState(() {
+      _deleting = true;
+      _deletionError = null;
+    });
+    try {
+      final receipt = await request(_newRequestId());
+      if (!mounted) return;
+      setState(() {
+        _deleting = false;
+        _receipt = receipt.isPending ? receipt : null;
+        _deletionError = receipt.isPending
+            ? null
+            : 'The server did not schedule a deletion. Your account is still '
+                  'active.';
+      });
+      if (receipt.isPending) {
+        final deadline = receipt.deleteAfter;
+        _snack(
+          deadline == null
+              ? 'Deletion scheduled. You can restore your account during the '
+                    '24-hour grace period.'
+              : 'Deletion scheduled for ${formatDeadline(deadline)}. You can '
+                    'restore your account until then.',
+        );
+      }
+    } on AccountException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _deleting = false;
+        _deletionError = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _deleting = false;
+        _deletionError =
+            'We could not request deletion. Check your connection and try '
+            'again.';
+      });
+    }
+  }
+
+  Future<void> _restoreAccount() async {
+    final restore = data.restoreDeletion;
+    if (restore == null) {
+      data.onRestoreAccount?.call();
+      return;
+    }
+    setState(() {
+      _deleting = true;
+      _deletionError = null;
+    });
+    try {
+      final receipt = await restore();
+      if (!mounted) return;
+      final stillPending = receipt != null && receipt.isPending;
+      setState(() {
+        _deleting = false;
+        _receipt = stillPending ? receipt : null;
+        if (!stillPending) _restored = true;
+      });
+      _snack('Your account was restored.');
+    } on AccountException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _deleting = false;
+        _deletionError = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _deleting = false;
+        _deletionError =
+            'We could not restore your account. Check your connection and try '
+            'again.';
+      });
+    }
+  }
+
+  void _snack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
 }
 
 /// Current plan, or the legacy `role` value used as a plan by older adapters.
 String _planLabel(V2AccountProfile profile) =>
     profile.planName.isNotEmpty ? profile.planName : profile.role;
-
-/// Confirm the 24-hour deletion grace period, point at Play billing, then let
-/// the injected callback start the server request.
-Future<void> _confirmDelete(BuildContext context, V2AccountData data) async {
-  final confirmed = await showOSheet<bool>(
-    context,
-    title: 'Delete your account?',
-    builder: (sheetContext) {
-      final c = OColors.of(sheetContext);
-      return SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.l),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'Your account is kept for a 24-hour grace period before it is '
-              'deleted.',
-              style: OType.body.copyWith(color: c.text),
-            ),
-            const SizedBox(height: OSpace.s),
-            Text(
-              'Signing in during the 24-hour grace period cancels the deletion '
-              'and offers Restore account. After the deadline, your profile, '
-              'chats, files, memory and saved cloud keys are permanently '
-              'deleted. This cannot be undone.',
-              style: OType.bodySm.copyWith(color: c.textMuted),
-            ),
-            const SizedBox(height: OSpace.m),
-            Container(
-              padding: const EdgeInsets.all(OSpace.m),
-              decoration: BoxDecoration(
-                color: c.warn.withValues(alpha: 0.10),
-                borderRadius: BorderRadius.circular(ORadius.m),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Your Google Play subscription is not cancelled '
-                    'automatically. Manage it before deleting, or it keeps '
-                    'renewing.',
-                    style: OType.bodySm.copyWith(color: c.text),
-                  ),
-                  const SizedBox(height: OSpace.s),
-                  OButton(
-                    label: 'Manage Play subscription',
-                    icon: Icons.open_in_new_rounded,
-                    variant: OButtonVariant.ghost,
-                    onPressed:
-                        data.onManageSubscription ?? _openPlaySubscriptions,
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: OSpace.l),
-            OButton(
-              label: 'Keep account',
-              variant: OButtonVariant.secondary,
-              expand: true,
-              onPressed: () => Navigator.of(sheetContext).pop(false),
-            ),
-            const SizedBox(height: OSpace.s),
-            OButton(
-              label: 'Delete after 24 hours',
-              variant: OButtonVariant.dangerFill,
-              expand: true,
-              onPressed: () => Navigator.of(sheetContext).pop(true),
-            ),
-          ],
-        ),
-      );
-    },
-  );
-  if (confirmed == true) data.onDeleteAccount?.call();
-}
 
 Future<void> _openPlaySubscriptions() async {
   try {
@@ -535,17 +642,52 @@ class _DeletionBanner extends StatelessWidget {
           ),
           const SizedBox(height: OSpace.xs),
           Text(
-            'Signing in during the 24-hour grace period cancels the deletion '
-            'and offers Restore account.',
+            'Signing in lets you choose Restore account until the deadline. '
+            'Nothing is deleted before then.',
             style: OType.caption.copyWith(color: c.textMuted),
           ),
           const SizedBox(height: OSpace.m),
-          OButton(
-            label: 'Restore account',
-            icon: Icons.restore_rounded,
-            variant: OButtonVariant.secondary,
-            loading: loading,
-            onPressed: onRestore,
+          if (onRestore != null)
+            OButton(
+              label: 'Restore account',
+              icon: Icons.restore_rounded,
+              variant: OButtonVariant.secondary,
+              loading: loading,
+              onPressed: onRestore,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Plain-language failure from the deletion service, shown next to the
+/// destructive actions instead of a raw exception.
+class _DeletionError extends StatelessWidget {
+  const _DeletionError({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      padding: const EdgeInsets.all(OSpace.m),
+      decoration: BoxDecoration(
+        color: c.danger.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(ORadius.m),
+        border: Border.all(color: c.danger.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.error_outline_rounded, size: 18, color: c.danger),
+          const SizedBox(width: OSpace.s),
+          Expanded(
+            child: Text(
+              message,
+              style: OType.bodySm.copyWith(color: c.text),
+            ),
           ),
         ],
       ),
@@ -622,6 +764,7 @@ class _DetailRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final canTap = field.editable && onTap != null;
     final row = ConstrainedBox(
       constraints: const BoxConstraints(minHeight: 56),
       child: Padding(
@@ -657,19 +800,13 @@ class _DetailRow extends StatelessWidget {
                 constraints: const BoxConstraints(maxWidth: 140),
                 child: const OPill(label: 'Verified', tone: OPillTone.success),
               )
-            else if (onTap != null)
-              Icon(
-                field.editable
-                    ? Icons.edit_rounded
-                    : Icons.chevron_right_rounded,
-                size: field.editable ? 18 : 20,
-                color: field.editable ? c.textMuted : c.textFaint,
-              ),
+            else if (canTap)
+              Icon(Icons.edit_rounded, size: 18, color: c.textMuted),
           ],
         ),
       ),
     );
-    if (onTap == null) {
+    if (!canTap) {
       return Semantics(label: '${field.label}, ${field.value}', child: row);
     }
     return OPressable(

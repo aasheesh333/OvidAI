@@ -1,8 +1,14 @@
+import 'dart:io';
+
+import 'package:flutter/gestures.dart' show TapGestureRecognizer;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/chat/live_chat_page.dart';
 import 'package:ovid_ai/ui/v2/chat/message_blocks.dart';
+import 'package:ovid_ai/ui/v2/chat/transcript_actions.dart';
 
 Widget _app(Widget home, {bool dark = false, double textScale = 1}) =>
     MaterialApp(
@@ -414,5 +420,234 @@ void main() {
 
       await tester.pump(const Duration(seconds: 2));
     });
+  });
+
+  group('real transcript actions', () {
+    setUp(V2TranscriptIo.reset);
+    tearDown(V2TranscriptIo.reset);
+
+    testWidgets('copy puts the exact code on the clipboard, without fences', (
+      tester,
+    ) async {
+      const code =
+          'final greeting = "hello";\n'
+          'print(greeting); // `tick` and \$5\n'
+          'void main() {}';
+      final calls = <MethodCall>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          calls.add(call);
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+
+      await tester.pumpWidget(_blocksApp('```dart\n$code\n```'));
+      await tester.pump();
+
+      await tester.tap(find.bySemanticsLabel('Copy code'));
+      await tester.pump();
+
+      final data = calls
+          .firstWhere((call) => call.method == 'Clipboard.setData')
+          .arguments as Map;
+      expect(data['text'], code);
+      expect(find.text('Copied'), findsOneWidget);
+
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('Copied'), findsNothing);
+    });
+
+    testWidgets('inline links are tappable and open the real URL', (
+      tester,
+    ) async {
+      Uri? opened;
+      V2TranscriptIo.debugOpenOverride = (uri) async {
+        opened = uri;
+        return true;
+      };
+
+      await tester.pumpWidget(
+        _blocksApp('Read [the docs](https://example.com/docs) before you run.'),
+      );
+      await tester.pump();
+
+      final rich = tester.widget<RichText>(find.byType(RichText).first);
+      TapGestureRecognizer? recognizer;
+      (rich.text as TextSpan).visitChildren((span) {
+        if (span is TextSpan && span.text == 'the docs') {
+          recognizer = span.recognizer as TapGestureRecognizer?;
+        }
+        return true;
+      });
+      expect(recognizer, isNotNull, reason: 'the link must carry a handler');
+      recognizer!.onTap!();
+      await tester.pump();
+
+      expect(opened, Uri.parse('https://example.com/docs'));
+    });
+
+    testWidgets('a host callback still wins over the default opener', (
+      tester,
+    ) async {
+      String? hostOpened;
+      await tester.pumpWidget(
+        _blocksApp(
+          'Read [the docs](https://example.com/docs).',
+          onOpenLink: (href) => hostOpened = href,
+        ),
+      );
+      await tester.pump();
+
+      final rich = tester.widget<RichText>(find.byType(RichText).first);
+      TapGestureRecognizer? recognizer;
+      (rich.text as TextSpan).visitChildren((span) {
+        if (span is TextSpan && span.text == 'the docs') {
+          recognizer = span.recognizer as TapGestureRecognizer?;
+        }
+        return true;
+      });
+      recognizer!.onTap!();
+      expect(hostOpened, 'https://example.com/docs');
+    });
+
+    testWidgets('an Open row works without a host callback', (tester) async {
+      Uri? opened;
+      V2TranscriptIo.debugOpenOverride = (uri) async {
+        opened = uri;
+        return true;
+      };
+
+      await tester.pumpWidget(_blocksApp('[Open docs](https://docs.example.com)'));
+      await tester.pump();
+
+      await tester.tap(find.bySemanticsLabel('Open docs'));
+      await tester.pump();
+
+      expect(opened, Uri.parse('https://docs.example.com'));
+    });
+
+    test('the default downloader writes real bytes to a real file', () async {
+      final temp = await Directory.systemTemp.createTemp('ovid-download');
+      addTearDown(() => temp.delete(recursive: true));
+      V2TranscriptIo.setDownloadDirectoryOverride(temp.path);
+
+      final path = await v2SaveTranscriptBytes(
+        Uint8List.fromList([104, 105]),
+        'report.txt',
+      );
+
+      expect(path, isNotNull);
+      expect(File(path!).existsSync(), isTrue);
+      expect(File(path).readAsBytesSync(), [104, 105]);
+      expect(path, endsWith('Ovid/report.txt'));
+    });
+
+    test('download names come from the file, URL or label, never a fence', () {
+      expect(
+        v2DownloadFileName(
+          'https://files.example.com/a/report.pdf',
+          suggestedName: 'Download report.pdf',
+        ),
+        'Download report.pdf',
+      );
+      expect(
+        v2DownloadFileName('https://files.example.com/a/report.pdf'),
+        'report.pdf',
+      );
+      expect(
+        v2DownloadFileName('https://files.example.com/download?id=7'),
+        'download',
+      );
+      expect(
+        v2DownloadFileName(
+          'https://files.example.com/download?id=7',
+          suggestedName: 'Download the brand kit',
+        ),
+        'Download the brand kit',
+      );
+      expect(v2DownloadFileName('https://files.example.com/'), 'download');
+      expect(
+        v2TranscriptLinkUri('javascript:alert(1)'),
+        isNull,
+        reason: 'only http, https and file links may open',
+      );
+    });
+
+    testWidgets('Download stays wired without a host callback', (tester) async {
+      await tester.pumpWidget(
+        _blocksApp('[report.txt](ftp://example.com/report.txt)'),
+      );
+      await tester.pump();
+
+      final button = find.bySemanticsLabel('Download report.txt');
+      expect(button, findsOneWidget);
+      await tester.tap(button);
+      await tester.pump();
+
+      expect(find.text('This file cannot be downloaded.'), findsOneWidget);
+    });
+
+    testWidgets('the image download control is always wired', (tester) async {
+      await tester.pumpWidget(
+        _blocksApp('![Hero](https://images.example.com/hero.png)'),
+      );
+      await tester.pump();
+
+      expect(find.bySemanticsLabel('Download image'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel(RegExp('Open image: Hero')),
+        findsOneWidget,
+      );
+    });
+  });
+
+  testWidgets('long unbroken markdown fits 320 dp at 200 % in both themes', (
+    tester,
+  ) async {
+    _narrowPhone(tester);
+    final hash = 'a' * 140;
+    final markdown =
+        '# $hash\n\n'
+        'A hash $hash and a URL https://example.com/$hash.\n\n'
+        '`$hash`\n\n'
+        '- $hash\n\n'
+        '**$hash** and *$hash*\n\n'
+        '[Open $hash](https://example.com/$hash)';
+
+    for (final dark in [false, true]) {
+      await tester.pumpWidget(
+        _blocksApp(markdown, dark: dark, textScale: 2),
+      );
+      await tester.pump();
+
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: 'long tokens overflow (${dark ? 'dark' : 'light'})',
+      );
+      for (final flex in tester.allRenderObjects.whereType<RenderFlex>()) {
+        if (flex.direction != Axis.horizontal) continue;
+        var right = 0.0;
+        RenderBox? child = flex.firstChild;
+        while (child != null) {
+          final data = child.parentData! as FlexParentData;
+          final edge = data.offset.dx + child.size.width;
+          if (edge > right) right = edge;
+          child = flex.childAfter(child);
+        }
+        expect(
+          right,
+          lessThanOrEqualTo(flex.size.width + 0.5),
+          reason: 'a row paints past its box (${dark ? 'dark' : 'light'})',
+        );
+      }
+    }
   });
 }

@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_tokens.dart';
+import '../../widgets/code_highlight.dart';
+import '../chat/transcript_actions.dart';
 
 /// How an artifact is previewed. Documents and pages are never rendered in the
 /// app: they show metadata or a static thumbnail and an "Open externally"
@@ -12,6 +14,9 @@ enum V2ArtifactPreviewType { image, code, document, page }
 /// Code previews draw at most this many lines. The cap is fixed, so opening a
 /// very large file can never stall the UI; the rest stays one tap away.
 const int v2ArtifactPreviewCodeLineCap = 120;
+
+/// Document previews draw at most this many lines of the file's text.
+const int v2ArtifactPreviewDocumentLineCap = 120;
 
 /// Metadata rows shown for documents and data files. Keeps the card compact
 /// even when the detailed view knows more facts than fit here.
@@ -34,11 +39,14 @@ class V2ArtifactPreviewData {
     this.sizeLabel = '',
     this.metadata = const <V2ArtifactPreviewMeta>[],
     this.image,
+    this.imageUrl = '',
     this.code = '',
     this.codeFile = '',
     this.codeTotalLines,
+    this.documentText = '',
     this.pageThumbnail,
     this.pageUrl = '',
+    this.openUrl = '',
     this.note = '',
     this.heavy = false,
   });
@@ -54,16 +62,28 @@ class V2ArtifactPreviewData {
   /// Thumbnail for image artifacts. Decoded with [Image], never a WebView.
   final ImageProvider? image;
 
+  /// A remote image source (a minted artifact URL). Used when [image] is null,
+  /// so an image artifact renders its real pixels instead of a placeholder.
+  final String imageUrl;
+
   /// The head of a code artifact, plus the full file name and line count when
   /// the wiring layer only sent a snippet.
   final String code;
   final String codeFile;
   final int? codeTotalLines;
 
+  /// The document's real text, when the wiring layer could read it. The
+  /// document stage renders it; without it the stage falls back to metadata.
+  final String documentText;
+
   /// Optional *static* page screenshot. When null the preview draws a
   /// placeholder frame. A page is never loaded or executed in the app.
   final ImageProvider? pageThumbnail;
   final String pageUrl;
+
+  /// Where "Open externally" goes when the host did not inject a handler.
+  /// Without either, the action is not rendered at all.
+  final String openUrl;
 
   /// Overrides the preview note under the stage.
   final String note;
@@ -84,9 +104,11 @@ class V2ArtifactPreviewData {
 
 /// A deliberately cheap artifact preview.
 ///
-/// - images use [Image];
-/// - code is capped at [v2ArtifactPreviewCodeLineCap] lines;
-/// - documents render metadata only;
+/// - images use [Image] (inline provider or [V2ArtifactPreviewData.imageUrl]);
+/// - code is capped at [v2ArtifactPreviewCodeLineCap] lines and syntax
+///   coloured;
+/// - documents render their real text when the wiring layer supplies it, and
+///   otherwise show metadata only;
 /// - pages render a supplied static thumbnail or a drawn placeholder;
 /// - heavy files skip the body entirely.
 ///
@@ -119,9 +141,9 @@ class V2ArtifactPreview extends StatelessWidget {
         children: [
           _header(c),
           const SizedBox(height: OSpace.m),
-          if (data.heavy) _heavyStage(c) else _stage(c),
+          if (data.heavy) _heavyStage(c) else _stage(context, c),
           const SizedBox(height: OSpace.m),
-          _footer(c),
+          _footer(context, c),
         ],
       ),
     );
@@ -193,17 +215,25 @@ class V2ArtifactPreview extends StatelessWidget {
   // Stage — one cheap representation per type.
   // ---------------------------------------------------------------------------
 
-  Widget _stage(OColors c) {
+  Widget _stage(BuildContext context, OColors c) {
     return switch (data.type) {
-      V2ArtifactPreviewType.image => _imageStage(c),
+      V2ArtifactPreviewType.image => _imageStage(context, c),
       V2ArtifactPreviewType.code => _codeStage(c),
       V2ArtifactPreviewType.document => _documentStage(c),
-      V2ArtifactPreviewType.page => _pageStage(c),
+      V2ArtifactPreviewType.page => _pageStage(context, c),
     };
   }
 
-  Widget _imageStage(OColors c) {
-    final image = data.image;
+  /// Decode images at the width the preview draws them, not the camera's
+  /// full resolution.
+  int _cacheWidth(BuildContext context) =>
+      (MediaQuery.sizeOf(context).width * MediaQuery.devicePixelRatioOf(context))
+          .round();
+
+  Widget _imageStage(BuildContext context, OColors c) {
+    final image =
+        data.image ??
+        (data.imageUrl.isEmpty ? null : NetworkImage(data.imageUrl));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -216,7 +246,11 @@ class V2ArtifactPreview extends StatelessWidget {
               child: image == null
                   ? _imagePlaceholder(c)
                   : Image(
-                      image: image,
+                      image: ResizeImage.resizeIfNeeded(
+                        _cacheWidth(context),
+                        null,
+                        image,
+                      ),
                       fit: BoxFit.contain,
                       semanticLabel: 'Preview of ${data.name}',
                       errorBuilder: (_, _, _) => _imagePlaceholder(c),
@@ -338,18 +372,59 @@ class V2ArtifactPreview extends StatelessWidget {
     );
   }
 
+  /// Syntax-coloured code with a line-number gutter.
+  ///
+  /// Each line is highlighted on its own so the gutter stays aligned; a
+  /// multi-line block comment therefore loses its colour after the first line,
+  /// which is a deliberate trade for a preview this cheap. Lines wrap, so a
+  /// long line never paints past the screen edge at 200 % text.
   Widget _codeText(OColors c, String code, int maxLines) {
     final lines = code.split('\n').take(maxLines).toList();
     final digits = '${lines.length}'.length;
-    final numbered = <String>[
-      for (var i = 0; i < lines.length; i++)
-        '${(i + 1).toString().padLeft(digits)}  ${lines[i]}',
-    ].join('\n');
-    return Text(numbered, style: OType.mono.copyWith(color: c.textMuted));
+    final lang = _codeLang(data.codeFile);
+    final base = OType.mono.copyWith(color: c.textMuted, height: 1.5);
+    final palette = CodePalette(
+      keyword: c.accent,
+      string: c.success,
+      comment: c.textFaint,
+      number: c.warn,
+      type: c.accent.withValues(alpha: 0.85),
+      annotation: c.warn,
+    );
+    final spans = <InlineSpan>[];
+    for (var i = 0; i < lines.length; i++) {
+      spans.add(
+        TextSpan(
+          text: '${(i + 1).toString().padLeft(digits)}  ',
+          style: base.copyWith(color: c.textFaint),
+        ),
+      );
+      spans.add(
+        highlightCode(lines[i], lang: lang, style: base, palette: palette),
+      );
+      if (i != lines.length - 1) spans.add(const TextSpan(text: '\n'));
+    }
+    return Text.rich(
+      TextSpan(children: spans),
+      key: const ValueKey<String>('artifact-preview-code'),
+      style: base,
+    );
+  }
+
+  /// The raw extension, which is what [highlightCode] keys its tokenizer on.
+  String _codeLang(String file) {
+    final dot = file.lastIndexOf('.');
+    if (dot < 0 || dot == file.length - 1) return '';
+    return file.substring(dot + 1).toLowerCase();
   }
 
   Widget _documentStage(OColors c) {
     final rows = data.metadata.take(_metadataRowLimit).toList();
+    final body = data.documentText.trim();
+    final lines = body.isEmpty ? const <String>[] : body.split('\n');
+    final shown = lines.length > v2ArtifactPreviewDocumentLineCap
+        ? lines.take(v2ArtifactPreviewDocumentLineCap).toList()
+        : lines;
     return Container(
       padding: const EdgeInsets.all(OSpace.l),
       decoration: BoxDecoration(
@@ -370,13 +445,16 @@ class V2ArtifactPreview extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Metadata only',
+                      body.isEmpty ? 'Metadata only' : 'Document preview',
                       style: OType.bodyStrong.copyWith(color: c.text),
                     ),
                     const SizedBox(height: OSpace.xs),
                     Text(
-                      'Documents are not rendered in the app, so large files '
-                      'stay fast. Open it externally to read the full file.',
+                      body.isEmpty
+                          ? 'The file text was not available for preview. '
+                                'Open it externally to read the full file.'
+                          : 'The text of the file, read-only. Open it '
+                                'externally for the original layout.',
                       style: OType.bodySm.copyWith(color: c.textMuted),
                     ),
                   ],
@@ -384,6 +462,31 @@ class V2ArtifactPreview extends StatelessWidget {
               ),
             ],
           ),
+          if (body.isNotEmpty) ...[
+            const SizedBox(height: OSpace.m),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(OSpace.m),
+              decoration: BoxDecoration(
+                color: c.surface,
+                borderRadius: BorderRadius.circular(ORadius.s),
+                border: Border.all(color: c.hairline),
+              ),
+              child: Text(
+                shown.join('\n'),
+                key: const ValueKey<String>('artifact-preview-document'),
+                style: OType.bodySm.copyWith(color: c.text, height: 1.5),
+              ),
+            ),
+            if (lines.length > shown.length) ...[
+              const SizedBox(height: OSpace.s),
+              Text(
+                'Showing first ${shown.length} of ${lines.length} lines. Open '
+                'the file externally for the rest.',
+                style: OType.caption.copyWith(color: c.textMuted),
+              ),
+            ],
+          ],
           if (rows.isNotEmpty) ...[
             const SizedBox(height: OSpace.m),
             Divider(height: 1, color: c.hairline),
@@ -419,7 +522,7 @@ class V2ArtifactPreview extends StatelessWidget {
     );
   }
 
-  Widget _pageStage(OColors c) {
+  Widget _pageStage(BuildContext context, OColors c) {
     final thumbnail = data.pageThumbnail;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -444,7 +547,11 @@ class V2ArtifactPreview extends StatelessWidget {
                 child: thumbnail == null
                     ? _pagePlaceholder(c)
                     : Image(
-                        image: thumbnail,
+                        image: ResizeImage.resizeIfNeeded(
+                          _cacheWidth(context),
+                          null,
+                          thumbnail,
+                        ),
                         fit: BoxFit.contain,
                         excludeFromSemantics: true,
                         errorBuilder: (_, _, _) => _pagePlaceholder(c),
@@ -599,7 +706,8 @@ class V2ArtifactPreview extends StatelessWidget {
   // Footer
   // ---------------------------------------------------------------------------
 
-  Widget _footer(OColors c) {
+  Widget _footer(BuildContext context, OColors c) {
+    final canOpen = onOpenExternally != null || data.openUrl.isNotEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -616,17 +724,30 @@ class V2ArtifactPreview extends StatelessWidget {
             ),
           ],
         ),
-        const SizedBox(height: OSpace.m),
-        OButton(
-          label: 'Open externally',
-          icon: Icons.open_in_new_rounded,
-          variant: OButtonVariant.secondary,
-          expand: true,
-          semanticLabel: 'Open ${data.name} externally',
-          onPressed: onOpenExternally,
-        ),
+        if (canOpen) ...[
+          const SizedBox(height: OSpace.m),
+          OButton(
+            label: 'Open externally',
+            icon: Icons.open_in_new_rounded,
+            variant: OButtonVariant.secondary,
+            expand: true,
+            semanticLabel: 'Open ${data.name} externally',
+            onPressed: () => _openExternally(context),
+          ),
+        ],
       ],
     );
+  }
+
+  /// Host handler first; otherwise open the real URL. Never a no-op button:
+  /// when neither exists the footer does not render the action.
+  Future<void> _openExternally(BuildContext context) async {
+    final handler = onOpenExternally;
+    if (handler != null) {
+      handler();
+      return;
+    }
+    await v2OpenTranscriptLink(context, data.openUrl);
   }
 
   String _note() {
@@ -640,8 +761,10 @@ class V2ArtifactPreview extends StatelessWidget {
         'Read-only preview. Open the image externally for the full resolution.',
       V2ArtifactPreviewType.code =>
         'Read-only preview. Open the file externally to edit it.',
-      V2ArtifactPreviewType.document =>
-        'Preview only. Download or open the document externally to read it.',
+      V2ArtifactPreviewType.document => data.documentText.trim().isEmpty
+          ? 'Preview only. Download or open the document externally to read it.'
+          : 'Read-only preview of the document text. Download or open it to '
+                'read the original.',
       V2ArtifactPreviewType.page =>
         'This thumbnail is static. Open the page externally to interact with '
             'it.',

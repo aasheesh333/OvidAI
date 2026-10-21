@@ -11,8 +11,10 @@ import 'o_tokens.dart';
 /// - every helper honours the platform "remove animations" setting;
 /// - list stagger is capped so a long list never feels slow.
 abstract final class OMove {
+  // Reads only the accessibility flag, so a keyboard opening or a rotation
+  // (viewInsets / size changes) does not rebuild every animated widget.
   static bool reduced(BuildContext context) =>
-      MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+      MediaQuery.maybeDisableAnimationsOf(context) ?? false;
 
   static Duration duration(BuildContext context, Duration value) =>
       reduced(context) ? Duration.zero : value;
@@ -313,6 +315,17 @@ class _OPulseState extends State<OPulse> with SingleTickerProviderStateMixin {
   void initState() {
     super.initState();
     _controller.repeat(reverse: true);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Do not keep a ticker running when the platform asks for no motion.
+    if (OMove.reduced(context)) {
+      _controller.stop();
+    } else if (!_controller.isAnimating) {
+      _controller.repeat(reverse: true);
+    }
   }
 
   @override

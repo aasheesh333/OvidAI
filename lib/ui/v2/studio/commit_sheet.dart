@@ -142,9 +142,15 @@ class _V2CommitSheetState extends State<V2CommitSheet> {
   bool get _tooLong => _length > v2CommitMessageLimit;
 
   bool get _canCommit =>
-      widget.data.hasChanges && _trimmed.isNotEmpty && !_tooLong;
+      widget.onCommit != null &&
+      widget.data.hasChanges &&
+      _trimmed.isNotEmpty &&
+      !_tooLong;
 
   String get _commitSemanticLabel {
+    if (widget.onCommit == null) {
+      return 'Commit & push, committing is not available yet';
+    }
     if (!widget.data.hasChanges) return 'Commit & push, no changes to commit';
     if (_trimmed.isEmpty) return 'Commit & push, write a message first';
     if (_tooLong) {
@@ -219,11 +225,13 @@ class _V2CommitSheetState extends State<V2CommitSheet> {
         icon: Icons.check_circle_outline_rounded,
         title: 'No changes to commit',
         message: 'Edits you make in Studio will show up here.',
-        action: OButton(
-          label: 'Back to workspace',
-          variant: OButtonVariant.secondary,
-          onPressed: widget.onClose,
-        ),
+        action: widget.onClose == null
+            ? null
+            : OButton(
+                label: 'Back to workspace',
+                variant: OButtonVariant.secondary,
+                onPressed: widget.onClose,
+              ),
       ),
     );
   }
@@ -673,15 +681,23 @@ class _SyncFirstCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: OSpace.s),
-          OButton(
-            key: const ValueKey('v2-commit-sync'),
-            label: 'Sync latest changes',
-            icon: Icons.sync_rounded,
-            variant: OButtonVariant.secondary,
-            expand: true,
-            semanticLabel: 'Sync latest changes, $count behind',
-            onPressed: onSync,
-          ),
+          if (onSync != null)
+            OButton(
+              key: const ValueKey('v2-commit-sync'),
+              label: 'Sync latest changes',
+              icon: Icons.sync_rounded,
+              variant: OButtonVariant.secondary,
+              expand: true,
+              semanticLabel: 'Sync latest changes, $count behind',
+              onPressed: onSync,
+            )
+          else
+            Text(
+              key: const ValueKey('v2-commit-sync-unavailable'),
+              'Syncing is not available yet. Pull the latest changes from '
+              'Studio before you commit.',
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
         ],
       ),
     );

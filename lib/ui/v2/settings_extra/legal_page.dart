@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
@@ -100,12 +101,41 @@ class LegalPage extends StatelessWidget {
             icon: Icons.copy_rounded,
             semanticLabel: 'Copy document',
             tooltip: 'Copy document',
-            onPressed: data.hasContent ? data.onCopy : null,
+            onPressed: data.hasContent
+                ? (data.onCopy ?? () => _copy(context))
+                : null,
           ),
         ],
       ),
       body: _body(context),
     );
+  }
+
+  /// Real clipboard copy of the whole document, so the action is never a
+  /// disabled button. A caller that needs different behaviour can still pass
+  /// [V2LegalPageData.onCopy].
+  Future<void> _copy(BuildContext context) async {
+    final text = StringBuffer()..writeln(data.title);
+    if (data.updatedLabel.isNotEmpty) text.writeln(data.updatedLabel);
+    if (data.summary.trim().isNotEmpty) {
+      text
+        ..writeln()
+        ..writeln(data.summary.trim());
+    }
+    for (final section in data.sections) {
+      text
+        ..writeln()
+        ..writeln(section.heading);
+      if (section.hasBody) text.writeln(section.body.trim());
+      for (final bullet in section.bullets) {
+        text.writeln('• $bullet');
+      }
+    }
+    await Clipboard.setData(ClipboardData(text: text.toString().trim()));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(content: Text('Document copied.')));
   }
 
   Widget _body(BuildContext context) {

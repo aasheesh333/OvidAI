@@ -57,6 +57,10 @@ class V2ChangedFile {
   final List<V2DiffHunk> hunks;
   final bool initiallyExpanded;
 
+  /// A file is only expandable when the wiring layer supplied real hunks.
+  /// Otherwise the row must not offer a chevron that reveals an empty box.
+  bool get canExpand => hunks.isNotEmpty;
+
   String get name => path.split('/').last;
 
   String get fileType {
@@ -160,7 +164,12 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
         onSync: widget.onSync,
         onRetry: widget.onRetry,
         onClose: () => Navigator.of(sheetContext).pop(),
-        onCommit: (value) => Navigator.of(sheetContext).pop(value),
+        // The sheet disables its commit action when no real commit path is
+        // wired. The page only supplies the pop-and-report handler when its
+        // own [onCommit] exists, so an unwired page cannot fake a commit.
+        onCommit: widget.onCommit == null
+            ? null
+            : (value) => Navigator.of(sheetContext).pop(value),
       ),
     );
     if (message != null) widget.onCommit?.call(message);
@@ -189,7 +198,7 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
             ? branch
             : 'Review and commit',
         actions: [
-          if (hasContent)
+          if (hasContent && widget.onMenu != null)
             OIconButton(
               icon: Icons.more_vert_rounded,
               semanticLabel: 'More change options',
@@ -219,11 +228,13 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
       icon: Icons.check_circle_outline_rounded,
       title: 'No changes to review',
       message: 'Edits you make in Studio will show up here.',
-      action: OButton(
-        label: 'Back to workspace',
-        variant: OButtonVariant.secondary,
-        onPressed: widget.onBack,
-      ),
+      action: widget.onBack == null
+          ? null
+          : OButton(
+              label: 'Back to workspace',
+              variant: OButtonVariant.secondary,
+              onPressed: widget.onBack,
+            ),
     );
   }
 
@@ -468,6 +479,87 @@ class _DiffFileCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final row = ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: OSpace.listRow),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: OSpace.l,
+          vertical: OSpace.s,
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: c.surfaceAlt,
+                borderRadius: BorderRadius.circular(ORadius.s),
+              ),
+              child: Icon(_icon, size: 19, color: c.accent),
+            ),
+            const SizedBox(width: OSpace.m),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    file.name,
+                    style: OType.bodySm.copyWith(
+                      color: c.text,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (file.directory.isNotEmpty)
+                    Text(
+                      file.directory,
+                      style: OType.caption.copyWith(color: c.textMuted),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  if (!file.canExpand)
+                    Text(
+                      'No diff available',
+                      key: ValueKey<String>('v2-diff-unavailable-${file.path}'),
+                      style: OType.caption.copyWith(color: c.textFaint),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: OSpace.s),
+            Text(
+              '+${file.additions}',
+              style: OType.caption.copyWith(
+                color: c.success,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: OSpace.xs),
+            Text(
+              '−${file.deletions}',
+              style: OType.caption.copyWith(
+                color: c.danger,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: OSpace.xs),
+            if (file.canExpand)
+              AnimatedRotation(
+                turns: expanded ? 0.5 : 0,
+                duration: OMove.duration(context, OMotion.fast),
+                child: Icon(
+                  Icons.expand_more_rounded,
+                  size: 20,
+                  color: c.textFaint,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
     return Container(
       decoration: BoxDecoration(
         color: c.surface,
@@ -480,90 +572,25 @@ class _DiffFileCard extends StatelessWidget {
         children: [
           Material(
             color: Colors.transparent,
-            child: InkWell(
-              onTap: onToggle,
-              child: Semantics(
-                label: '${file.name}, +${file.additions} −${file.deletions}',
-                button: true,
-                expanded: expanded,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(minHeight: OSpace.listRow),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: OSpace.l,
-                      vertical: OSpace.s,
+            child: file.canExpand
+                ? InkWell(
+                    onTap: onToggle,
+                    child: Semantics(
+                      label:
+                          '${file.name}, +${file.additions} −${file.deletions}',
+                      button: true,
+                      expanded: expanded,
+                      child: row,
                     ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 36,
-                          height: 36,
-                          decoration: BoxDecoration(
-                            color: c.surfaceAlt,
-                            borderRadius: BorderRadius.circular(ORadius.s),
-                          ),
-                          child: Icon(_icon, size: 19, color: c.accent),
-                        ),
-                        const SizedBox(width: OSpace.m),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                file.name,
-                                style: OType.bodySm.copyWith(
-                                  color: c.text,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              if (file.directory.isNotEmpty)
-                                Text(
-                                  file.directory,
-                                  style: OType.caption.copyWith(
-                                    color: c.textMuted,
-                                  ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: OSpace.s),
-                        Text(
-                          '+${file.additions}',
-                          style: OType.caption.copyWith(
-                            color: c.success,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(width: OSpace.xs),
-                        Text(
-                          '−${file.deletions}',
-                          style: OType.caption.copyWith(
-                            color: c.danger,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(width: OSpace.xs),
-                        AnimatedRotation(
-                          turns: expanded ? 0.5 : 0,
-                          duration: OMove.duration(context, OMotion.fast),
-                          child: Icon(
-                            Icons.expand_more_rounded,
-                            size: 20,
-                            color: c.textFaint,
-                          ),
-                        ),
-                      ],
-                    ),
+                  )
+                : Semantics(
+                    label:
+                        '${file.name}, +${file.additions} −${file.deletions}, '
+                        'no diff available',
+                    child: row,
                   ),
-                ),
-              ),
-            ),
           ),
-          if (expanded && file.hunks.isNotEmpty) ...[
+          if (file.canExpand && expanded) ...[
             Divider(height: 1, color: c.hairline),
             _DiffBody(file: file, onCopyDiff: onCopyDiff),
           ],
@@ -601,13 +628,14 @@ class _DiffBody extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  OIconButton(
-                    icon: Icons.copy_rounded,
-                    semanticLabel: 'Copy diff for ${file.name}',
-                    tooltip: 'Copy',
-                    size: 18,
-                    onPressed: onCopyDiff,
-                  ),
+                  if (onCopyDiff != null)
+                    OIconButton(
+                      icon: Icons.copy_rounded,
+                      semanticLabel: 'Copy diff for ${file.name}',
+                      tooltip: 'Copy',
+                      size: 18,
+                      onPressed: onCopyDiff,
+                    ),
                 ],
               ),
             ),
@@ -696,9 +724,12 @@ class _SyncRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final wired = onSync != null;
     return OCard(
       onTap: onSync,
-      semanticLabel: 'Sync latest first, $count behind',
+      semanticLabel: wired
+          ? 'Sync latest first, $count behind'
+          : 'Behind remote by $count, syncing is not available yet',
       child: Row(
         children: [
           Container(
@@ -717,14 +748,16 @@ class _SyncRow extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Sync latest first',
+                  wired ? 'Sync latest first' : 'Behind remote',
                   style: OType.bodySm.copyWith(
                     color: c.text,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
                 Text(
-                  'Pulls $count upstream ${count == 1 ? 'commit' : 'commits'} safely',
+                  wired
+                      ? 'Pulls $count upstream ${count == 1 ? 'commit' : 'commits'} safely'
+                      : '$count upstream ${count == 1 ? 'commit' : 'commits'} to pull before pushing',
                   style: OType.caption.copyWith(color: c.textMuted),
                 ),
               ],
@@ -733,7 +766,10 @@ class _SyncRow extends StatelessWidget {
           const SizedBox(width: OSpace.s),
           Flexible(
             flex: 2,
-            child: _MetaPill(label: '$count behind', tone: OPillTone.accent),
+            child: _MetaPill(
+              label: wired ? '$count behind' : 'Sync unavailable',
+              tone: wired ? OPillTone.accent : OPillTone.warn,
+            ),
           ),
         ],
       ),

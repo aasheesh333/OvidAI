@@ -11,8 +11,13 @@ import '../../design/o_tokens.dart';
 /// from the page status: a tab can be open while the picture is still
 /// connecting, and a lost picture never closes the page.
 enum V2ViewportStatus {
-  /// Waiting for the first frame from the cloud browser.
+  /// Connecting: the viewer is attached and the first frame is on its way.
   loading,
+
+  /// Attached but still no picture after the connect window. This is a
+  /// separate state from [loading] so the screen can stop spinning and say
+  /// what is actually happening instead of waiting forever.
+  waiting,
 
   /// Frames are arriving and the page is being drawn.
   live,
@@ -67,6 +72,8 @@ class BrowserViewport extends StatelessWidget {
     this.controlling = false,
     this.onTakeControl,
     this.onRetry,
+    this.onPageTap,
+    this.frameAspectRatio,
     this.fit = BoxFit.contain,
     this.showFpsHint = true,
     this.borderRadius = ORadius.l,
@@ -74,15 +81,22 @@ class BrowserViewport extends StatelessWidget {
     this.fpsLabel = '3–5 fps',
     this.connectingLabel = 'Connecting…',
     this.loadingLabel = 'Waiting for the first frame…',
+    this.waitingLabel = 'No picture yet',
+    this.waitingTitle = 'No picture yet',
+    this.waitingMessage =
+        'The page is open. Ovid is waiting for the browser to draw its first '
+        'frame.',
+    this.waitingRetryLabel = 'Try again',
+    this.fpsNote = 'The live view refreshes 3–5 times a second, not as video.',
     this.streamLostTitle = 'Stream lost',
     this.streamLostMessage =
         'Ovid keeps working. The picture returns on its own, or reconnect now.',
     this.retryLabel = 'Reconnect',
     this.takeControlLabel = 'Take control',
     this.controllingLabel = 'You are controlling',
-    this.placeholderTitle = 'The live page shows here',
+    this.placeholderTitle = 'This frame could not be drawn',
     this.placeholderMessage =
-        'Ovid draws the page it is reading in this space.',
+        'Ovid keeps streaming. The next frame may draw normally.',
     this.viewSemanticLabel = 'Browser view',
     this.frameSemanticLabel = 'Live page',
   });
@@ -97,6 +111,12 @@ class BrowserViewport extends StatelessWidget {
 
   /// Key for the stream-lost retry button.
   static const retryKey = ValueKey<String>('browser-viewport-retry');
+
+  /// Key for the "no picture yet" retry button.
+  static const waitingRetryKey = ValueKey<String>('browser-viewport-waiting');
+
+  /// Key for the surface that turns a tap into page input while controlling.
+  static const pageTapKey = ValueKey<String>('browser-viewport-page-tap');
 
   /// The latest decoded screencast frame. Null means "no picture yet", which
   /// shows the neutral placeholder instead of inventing page content.
@@ -114,6 +134,16 @@ class BrowserViewport extends StatelessWidget {
   final VoidCallback? onTakeControl;
   final VoidCallback? onRetry;
 
+  /// A tap on the live page while [controlling], in coordinates normalized
+  /// to the FRAME (`0..1`), not to the widget box. The page maps them to the
+  /// server's CSS-pixel viewport. Null keeps the picture read-only.
+  final void Function(double x, double y)? onPageTap;
+
+  /// The page viewport's aspect ratio (`width / height`) from the server, so
+  /// a tap on a letterboxed picture lands on the pixel under the finger.
+  /// Null falls back to the widget's own aspect ratio.
+  final double? frameAspectRatio;
+
   /// How the frame is fitted. `contain` is the default so a screencast is
   /// never cropped, even when the phone's aspect ratio differs.
   final BoxFit fit;
@@ -125,6 +155,14 @@ class BrowserViewport extends StatelessWidget {
   final String fpsLabel;
   final String connectingLabel;
   final String loadingLabel;
+  final String waitingLabel;
+  final String waitingTitle;
+  final String waitingMessage;
+  final String waitingRetryLabel;
+
+  /// Says plainly that this is a slow live view, not video.
+  final String fpsNote;
+
   final String streamLostTitle;
   final String streamLostMessage;
   final String retryLabel;
@@ -145,10 +183,11 @@ class BrowserViewport extends StatelessWidget {
         child: Column(
           children: [
             _StatusStrip(
-              status: status,
+              status: _effectiveStatus,
               liveLabel: liveLabel,
               fpsLabel: fpsLabel,
               connectingLabel: connectingLabel,
+              waitingLabel: waitingLabel,
               streamLostTitle: streamLostTitle,
               showFpsHint: showFpsHint,
             ),
@@ -175,28 +214,51 @@ class BrowserViewport extends StatelessWidget {
     );
   }
 
+  /// `live` without a frame is not a live picture: it is still waiting. The
+  /// screen must never paint "Live · 3–5 fps" over an empty surface.
+  V2ViewportStatus get _effectiveStatus {
+    if (status == V2ViewportStatus.live && frame == null) {
+      return V2ViewportStatus.waiting;
+    }
+    return status;
+  }
+
   Widget _frameArea(BuildContext context, OColors c) {
+    final effective = _effectiveStatus;
+    final surface = switch (effective) {
+      V2ViewportStatus.loading => _LoadingBody(
+        label: loadingLabel,
+        note: fpsNote,
+      ),
+      V2ViewportStatus.waiting => _WaitingBody(
+        title: waitingTitle,
+        message: waitingMessage,
+        note: fpsNote,
+        retryLabel: waitingRetryLabel,
+        onRetry: onRetry,
+      ),
+      V2ViewportStatus.live || V2ViewportStatus.streamLost => _FrameSurface(
+        frame: frame,
+        fit: fit,
+        frameSemanticLabel: frameSemanticLabel,
+        placeholderTitle: placeholderTitle,
+        placeholderMessage: placeholderMessage,
+      ),
+    };
     return Stack(
       fit: StackFit.expand,
       children: [
-        switch (status) {
-          V2ViewportStatus.loading => _LoadingBody(label: loadingLabel),
-          V2ViewportStatus.live => _FrameSurface(
-            frame: frame,
-            fit: fit,
-            frameSemanticLabel: frameSemanticLabel,
-            placeholderTitle: placeholderTitle,
-            placeholderMessage: placeholderMessage,
-          ),
-          V2ViewportStatus.streamLost => _FrameSurface(
-            frame: frame,
-            fit: fit,
-            frameSemanticLabel: frameSemanticLabel,
-            placeholderTitle: placeholderTitle,
-            placeholderMessage: placeholderMessage,
-          ),
-        },
-        if (status == V2ViewportStatus.streamLost) ...[
+        if (effective == V2ViewportStatus.live &&
+            controlling &&
+            onPageTap != null)
+          _PageTapSurface(
+            aspectRatio: frameAspectRatio,
+            onTap: onPageTap!,
+            child: surface,
+          )
+        else
+          surface,
+        if (effective == V2ViewportStatus.streamLost) ...[
           ColoredBox(color: c.scrim.withValues(alpha: 0.55)),
           _StreamLostPanel(
             title: streamLostTitle,
@@ -205,11 +267,11 @@ class BrowserViewport extends StatelessWidget {
             onRetry: onRetry,
           ),
         ],
-        if (status == V2ViewportStatus.live && cursor != null)
+        if (effective == V2ViewportStatus.live && cursor != null)
           _AgentCursor(cursor: cursor!),
-        if (status == V2ViewportStatus.live && controlling)
+        if (effective == V2ViewportStatus.live && controlling)
           _ControllingBadge(label: controllingLabel),
-        if (status == V2ViewportStatus.live &&
+        if (effective == V2ViewportStatus.live &&
             !controlling &&
             onTakeControl != null)
           _TakeControlOverlay(
@@ -229,6 +291,7 @@ class _StatusStrip extends StatelessWidget {
     required this.liveLabel,
     required this.fpsLabel,
     required this.connectingLabel,
+    required this.waitingLabel,
     required this.streamLostTitle,
     required this.showFpsHint,
   });
@@ -237,6 +300,7 @@ class _StatusStrip extends StatelessWidget {
   final String liveLabel;
   final String fpsLabel;
   final String connectingLabel;
+  final String waitingLabel;
   final String streamLostTitle;
   final bool showFpsHint;
 
@@ -247,6 +311,7 @@ class _StatusStrip extends StatelessWidget {
         status == V2ViewportStatus.live && showFpsHint && fpsLabel.isNotEmpty;
     final (color, text) = switch (status) {
       V2ViewportStatus.loading => (c.warn, connectingLabel),
+      V2ViewportStatus.waiting => (c.warn, waitingLabel),
       V2ViewportStatus.live => (
         c.success,
         showFps ? '$liveLabel · $fpsLabel' : liveLabel,
@@ -333,21 +398,179 @@ class _FrameSurface extends StatelessWidget {
 }
 
 class _LoadingBody extends StatelessWidget {
-  const _LoadingBody({required this.label});
+  const _LoadingBody({required this.label, required this.note});
 
   final String label;
+  final String note;
 
   @override
   Widget build(BuildContext context) {
+    final c = OColors.of(context);
     return ColoredBox(
-      color: OColors.of(context).surfaceAlt,
+      color: c.surfaceAlt,
       child: Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(OSpace.l),
-          child: OLoadingState(label: label),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              OLoadingState(label: label),
+              const SizedBox(height: OSpace.s),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 300),
+                child: Text(
+                  note,
+                  textAlign: TextAlign.center,
+                  style: OType.caption.copyWith(color: c.textFaint),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
+  }
+}
+
+/// The honest "attached, but no picture yet" surface. It is not a spinner:
+/// the connect window has passed, so the screen says what is happening and
+/// offers a real retry instead of spinning forever.
+class _WaitingBody extends StatelessWidget {
+  const _WaitingBody({
+    required this.title,
+    required this.message,
+    required this.note,
+    required this.retryLabel,
+    this.onRetry,
+  });
+
+  final String title;
+  final String message;
+  final String note;
+  final String retryLabel;
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return ColoredBox(
+      color: c.surfaceAlt,
+      child: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(OSpace.l),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: c.warn.withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  Icons.image_not_supported_outlined,
+                  size: 24,
+                  color: c.warn,
+                ),
+              ),
+              const SizedBox(height: OSpace.m),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: OType.bodySm.copyWith(
+                  color: c.text,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: OSpace.xs),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 300),
+                child: Text(
+                  message,
+                  textAlign: TextAlign.center,
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ),
+              const SizedBox(height: OSpace.s),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 300),
+                child: Text(
+                  note,
+                  textAlign: TextAlign.center,
+                  style: OType.caption.copyWith(color: c.textFaint),
+                ),
+              ),
+              if (onRetry != null) ...[
+                const SizedBox(height: OSpace.m),
+                OButton(
+                  key: BrowserViewport.waitingRetryKey,
+                  label: retryLabel,
+                  icon: Icons.refresh_rounded,
+                  variant: OButtonVariant.secondary,
+                  onPressed: onRetry,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Turns a tap into page input. The picture is painted with `contain`, so the
+/// tap is mapped through the painted image rect — a tap in the letterbox is
+/// ignored rather than clicking an arbitrary page pixel.
+class _PageTapSurface extends StatelessWidget {
+  const _PageTapSurface({
+    required this.aspectRatio,
+    required this.onTap,
+    required this.child,
+  });
+
+  final double? aspectRatio;
+  final void Function(double x, double y) onTap;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      key: BrowserViewport.pageTapKey,
+      builder: (context, constraints) {
+        final size = constraints.biggest;
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapUp: (details) {
+            if (!size.width.isFinite || !size.height.isFinite) return;
+            final rect = _imageRect(size, aspectRatio);
+            final local = details.localPosition;
+            if (!rect.contains(local)) return;
+            final x = ((local.dx - rect.left) / rect.width).clamp(0.0, 1.0);
+            final y = ((local.dy - rect.top) / rect.height).clamp(0.0, 1.0);
+            onTap(x, y);
+          },
+          child: child,
+        );
+      },
+    );
+  }
+
+  static Rect _imageRect(Size box, double? aspectRatio) {
+    if (box.width <= 0 || box.height <= 0) {
+      return Rect.fromLTWH(0, 0, box.width, box.height);
+    }
+    final ratio = (aspectRatio != null && aspectRatio.isFinite &&
+            aspectRatio > 0)
+        ? aspectRatio
+        : box.width / box.height;
+    final boxRatio = box.width / box.height;
+    if (boxRatio > ratio) {
+      final width = box.height * ratio;
+      return Rect.fromLTWH((box.width - width) / 2, 0, width, box.height);
+    }
+    final height = box.width / ratio;
+    return Rect.fromLTWH(0, (box.height - height) / 2, box.width, height);
   }
 }
 
@@ -455,15 +678,19 @@ class _StreamLostPanel extends StatelessWidget {
                   message,
                   style: OType.caption.copyWith(color: c.textMuted),
                 ),
-                const SizedBox(height: OSpace.m),
-                OButton(
-                  key: BrowserViewport.retryKey,
-                  label: retryLabel,
-                  icon: Icons.refresh_rounded,
-                  variant: OButtonVariant.secondary,
-                  expand: true,
-                  onPressed: onRetry,
-                ),
+                // No handler, no button: a visible "Reconnect" that cannot
+                // reconnect is a dead control.
+                if (onRetry != null) ...[
+                  const SizedBox(height: OSpace.m),
+                  OButton(
+                    key: BrowserViewport.retryKey,
+                    label: retryLabel,
+                    icon: Icons.refresh_rounded,
+                    variant: OButtonVariant.secondary,
+                    expand: true,
+                    onPressed: onRetry,
+                  ),
+                ],
               ],
             ),
           ),

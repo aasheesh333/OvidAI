@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_motion.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/settings_extra/response_wait_page.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 Future<void> _pump(
   WidgetTester tester,
@@ -275,5 +277,99 @@ void main() {
           .first,
     );
     expect(toggleSemantics.properties.enabled, isTrue);
+  });
+
+  testWidgets('the slider keeps its new value (no silent revert)', (
+    tester,
+  ) async {
+    final changes = <int>[];
+    await _pump(tester, V2ResponseWaitPageData(onChanged: changes.add));
+
+    await tester.tapAt(tester.getCenter(find.byType(Slider)));
+    await tester.pumpAndSettle();
+
+    expect(changes, isNotEmpty);
+    final seconds = changes.last;
+    final expected = seconds < 60
+        ? '$seconds s'
+        : seconds % 60 == 0
+        ? '${seconds ~/ 60} min'
+        : '${seconds ~/ 60} min ${seconds % 60} s';
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(const ValueKey<String>('response-wait-current')),
+          )
+          .data,
+      expected,
+    );
+  });
+
+  testWidgets('choosing a preset updates the display at once', (tester) async {
+    await _pump(tester, V2ResponseWaitPageData(onPreset: (_) {}));
+
+    expect(find.text('2 min'), findsNWidgets(2));
+
+    await tester.ensureVisible(find.text('5 min').last);
+    await tester.tap(find.text('5 min').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('5 min'), findsNWidgets(2));
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(const ValueKey<String>('response-wait-current')),
+          )
+          .data,
+      '5 min',
+    );
+  });
+
+  testWidgets('the option switches keep their new value', (tester) async {
+    await _pump(
+      tester,
+      V2ResponseWaitPageData(onAutoExtend: (_) {}, onNotify: (_) {}),
+    );
+
+    final autoExtend = find.byType(Switch).first;
+    await tester.ensureVisible(autoExtend);
+    expect(tester.widget<Switch>(autoExtend).value, isFalse);
+    await tester.tap(autoExtend);
+    await tester.pumpAndSettle();
+    expect(tester.widget<Switch>(autoExtend).value, isTrue);
+
+    final notify = find.byType(Switch).last;
+    expect(tester.widget<Switch>(notify).value, isTrue);
+    await tester.tap(notify);
+    await tester.pumpAndSettle();
+    expect(tester.widget<Switch>(notify).value, isFalse);
+  });
+
+  testWidgets('the chosen wait persists where the chat reads it', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    AppState.resetTestInstance();
+    AppState.createForTest();
+    addTearDown(AppState.resetTestInstance);
+
+    await _pump(
+      tester,
+      V2ResponseWaitPageData(
+        seconds: AppState.I.responseTimeoutSec,
+        onPreset: AppState.I.setResponseTimeout,
+      ),
+    );
+
+    await tester.ensureVisible(find.text('5 min').last);
+    await tester.tap(find.text('5 min').last);
+    await tester.pumpAndSettle();
+
+    // `CloudAgentFacade._responseTimeoutStallWindow` reads this field; the
+    // chat's "Still working…" label is driven by it.
+    expect(AppState.I.responseTimeoutSec, 300);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getInt('ovid_response_timeout_sec'), 300);
+    expect(find.text('5 min'), findsNWidgets(2));
   });
 }

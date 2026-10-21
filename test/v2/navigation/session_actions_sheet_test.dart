@@ -37,9 +37,7 @@ Future<void> _pumpNarrow(
         ).copyWith(textScaler: TextScaler.linear(scale)),
         child: widget!,
       ),
-      home: Scaffold(
-        body: SingleChildScrollView(child: child),
-      ),
+      home: Scaffold(body: SingleChildScrollView(child: child)),
     ),
   );
   await tester.pumpAndSettle();
@@ -165,9 +163,7 @@ void main() {
     await tester.pumpWidget(
       _app(
         const SessionActionsSheet(
-          data: V2SessionActionsData(
-            status: V2SessionActionsStatus.loading,
-          ),
+          data: V2SessionActionsData(status: V2SessionActionsStatus.loading),
         ),
       ),
     );
@@ -210,11 +206,7 @@ void main() {
   });
 
   testWidgets('320 dp at 200% text does not overflow', (tester) async {
-    await _pumpNarrow(
-      tester,
-      const SessionActionsSheet(data: _data),
-      scale: 2,
-    );
+    await _pumpNarrow(tester, const SessionActionsSheet(data: _data), scale: 2);
 
     expect(tester.takeException(), isNull);
     expect(find.text('Move to project'), findsOneWidget);
@@ -272,5 +264,56 @@ void main() {
     );
     expect(moveRow.height, lessThan(160));
     expect(tester.getSize(find.text('Move to project')).width, greaterThan(90));
+  });
+
+  testWidgets('pin switch keeps the new state while the write lands', (
+    tester,
+  ) async {
+    final toggles = <bool>[];
+    await tester.pumpWidget(
+      _app(SessionActionsSheet(data: _data, onTogglePin: toggles.add)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+
+    await tester.tap(find.byType(Switch));
+    await tester.pumpAndSettle();
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+    expect(toggles, <bool>[true]);
+
+    // The row itself flips the same optimistic state back.
+    await tester.tap(find.text('Pin to top of drawer'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+    expect(toggles, <bool>[true, false]);
+  });
+
+  testWidgets('a fresh pinned value from the caller is adopted', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(SessionActionsSheet(data: _data, onTogglePin: (_) {})),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+
+    await tester.pumpWidget(
+      _app(
+        SessionActionsSheet(
+          data: V2SessionActionsData(
+            title: _data.title,
+            modelLabel: _data.modelLabel,
+            timeLabel: _data.timeLabel,
+            messageCount: _data.messageCount,
+            projectName: _data.projectName,
+            pinned: true,
+          ),
+          onTogglePin: (_) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
   });
 }

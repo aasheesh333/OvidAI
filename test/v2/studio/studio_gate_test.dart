@@ -46,6 +46,10 @@ void main() {
       find.byKey(const Key('studio-gate-pick-folder')),
     );
     expect(button.onPressed, isNull);
+    expect(
+      find.text('Repository setup is not available yet.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('onPickRepo is accepted as an alias', (tester) async {

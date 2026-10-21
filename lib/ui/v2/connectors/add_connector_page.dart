@@ -3,31 +3,16 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'connector_models.dart';
+import 'connector_probe.dart';
+import 'connector_store.dart';
+import 'connector_upgrade.dart';
+
+export 'connector_models.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
 
-enum V2ConnectorAuth { oauth, apiKey, none }
-
-enum V2ConnectorPermissionKind { read, write, execute }
-
 enum V2AddConnectorStatus { loading, content, error, blocked }
-
-/// A custom connector can point at a server URL or run a command. The command
-/// form is still checked against the safe-install policy below.
-enum V2ConnectorTarget { url, command }
-
-/// The custom-connector allowance that comes with each plan.
-enum V2ConnectorPlan {
-  free('Free', 0),
-  go('Go', 5),
-  plus('Plus', 20),
-  pro('Pro', 20);
-
-  const V2ConnectorPlan(this.label, this.customConnectorLimit);
-
-  final String label;
-  final int customConnectorLimit;
-}
 
 /// True when text is large enough that a trailing action has to move to its
 /// own line on a narrow phone.
@@ -129,6 +114,10 @@ class V2CustomConnectorDraft {
     required this.execute,
     this.target = V2ConnectorTarget.url,
     this.command = '',
+    this.catalogId,
+    this.category = 'Custom',
+    this.description = '',
+    this.kind = 'app',
   });
 
   final String name;
@@ -141,8 +130,40 @@ class V2CustomConnectorDraft {
   final bool write;
   final bool execute;
 
+  /// Set when the person is setting up a catalog connector; null for a custom
+  /// server they defined. A catalog connector does not use a plan slot.
+  final String? catalogId;
+  final String category;
+  final String description;
+  final String kind;
+
   String get endpoint =>
       target == V2ConnectorTarget.command ? command : url;
+
+  bool get isCustom => catalogId == null;
+
+  /// The record this draft becomes once it is saved.
+  V2ConnectorConnection toConnection({DateTime? connectedAt}) {
+    return V2ConnectorConnection(
+      id: catalogId ?? 'custom-${(connectedAt ?? DateTime.now()).microsecondsSinceEpoch}',
+      name: name,
+      description: description.isNotEmpty
+          ? description
+          : '${target == V2ConnectorTarget.command ? 'Command' : 'Server'} '
+                'connector at $endpoint',
+      category: category,
+      kind: kind,
+      endpoint: endpoint,
+      target: target,
+      auth: auth,
+      enabled: true,
+      read: read,
+      write: write,
+      execute: execute,
+      custom: isCustom,
+      connectedAt: connectedAt ?? DateTime.now(),
+    );
+  }
 }
 
 /// Injected state for the add-connector screen.
@@ -157,6 +178,7 @@ class V2AddConnectorData {
     this.status = V2AddConnectorStatus.content,
     this.testing = false,
     this.testResult,
+    this.testDetail = '',
     this.plan = V2ConnectorPlan.free,
     this.customConnectorsUsed = 0,
     this.target = V2ConnectorTarget.url,
@@ -169,6 +191,11 @@ class V2AddConnectorData {
     this.chatBlockMessage =
         'Ovid never installs plugins or connectors from a chat message. '
         'You add them here, and only you can turn them on.',
+    this.presetId,
+    this.presetName = '',
+    this.presetDescription = '',
+    this.presetCategory = 'Custom',
+    this.presetKind = 'app',
     // ignore: prefer_initializing_formals
   }) : _planLimitReached = planLimitReached;
 
@@ -182,6 +209,9 @@ class V2AddConnectorData {
 
   /// Null until the person tests the connection; true when it worked.
   final bool? testResult;
+
+  /// Why the test failed (or what it found). Shown under [testResult].
+  final String testDetail;
 
   /// Plan hint from the billing layer. Empty hides the extra note row.
   final String planNote;
@@ -202,21 +232,42 @@ class V2AddConnectorData {
   final String errorMessage;
   final String chatBlockMessage;
 
-  int get customLimit => plan.customConnectorLimit;
+  /// Catalog connector being set up, when the screen was opened from a row.
+  /// The form still collects a real endpoint and credential; only the slot
+  /// accounting differs (built-in apps do not count).
+  final String? presetId;
+  final String presetName;
+  final String presetDescription;
+  final String presetCategory;
+  final String presetKind;
+
+  bool get isCatalogSetup => presetId != null;
+
+  int get customLimit => plan.connectorLimit;
+
+  /// Whether the plan allowance applies to this form. Setting up a catalog
+  /// connector does not consume a custom slot.
+  bool get capApplies => !isCatalogSetup;
 
   bool get planLimitReached =>
-      _planLimitReached ?? customConnectorsUsed >= customLimit;
+      capApplies && (_planLimitReached ?? customConnectorsUsed >= customLimit);
 
-  String get planSummary => switch (plan) {
-    V2ConnectorPlan.free =>
-      'Custom connectors are not available on the Free plan.',
-    V2ConnectorPlan.go =>
-      '$customConnectorsUsed of 5 custom connectors used on Go.',
-    V2ConnectorPlan.plus =>
-      '$customConnectorsUsed of 20 custom connectors used on Plus.',
-    V2ConnectorPlan.pro =>
-      '$customConnectorsUsed of 20 custom connectors used on Pro.',
-  };
+  String get planSummary {
+    if (isCatalogSetup) {
+      return 'Setting up $presetName. Built-in connectors do not use one of '
+          'your $customLimit custom connector slots.';
+    }
+    return switch (plan) {
+      V2ConnectorPlan.free =>
+        'Custom connectors are not available on the Free plan.',
+      V2ConnectorPlan.go =>
+        '$customConnectorsUsed of 5 custom connectors used on Go.',
+      V2ConnectorPlan.plus =>
+        '$customConnectorsUsed of 20 custom connectors used on Plus.',
+      V2ConnectorPlan.pro =>
+        '$customConnectorsUsed of 20 custom connectors used on Pro.',
+    };
+  }
 
   String get resolvedPlanLimitMessage {
     if (planLimitMessage.isNotEmpty) return planLimitMessage;
@@ -225,9 +276,13 @@ class V2AddConnectorData {
         'Custom connectors are not available on the Free plan. '
             'Upgrade to Go to add up to 5.',
       V2ConnectorPlan.go =>
-        'You have used all 5 custom connectors on the Go plan.',
-      V2ConnectorPlan.plus || V2ConnectorPlan.pro =>
-        'You have used all 20 custom connectors on your plan.',
+        'You have used all 5 custom connectors on the Go plan. Upgrade to '
+            'Plus for 20.',
+      V2ConnectorPlan.plus =>
+        'You have used all 20 custom connectors on Plus. Pro has the same '
+            '20 slots.',
+      V2ConnectorPlan.pro =>
+        'You have used all 20 custom connectors on Pro.',
     };
   }
 }
@@ -247,6 +302,9 @@ class AddConnectorPage extends StatefulWidget {
     this.onSearchChanged,
     this.onMenu,
     this.onBack,
+    this.store,
+    this.secrets,
+    this.probe,
   });
 
   final V2AddConnectorData data;
@@ -261,6 +319,13 @@ class AddConnectorPage extends StatefulWidget {
   final ValueChanged<String>? onSearchChanged;
   final VoidCallback? onMenu;
   final VoidCallback? onBack;
+
+  /// Persisted connector state. Defaults to the app-wide store.
+  final V2ConnectorStore? store;
+  final V2ConnectorSecrets? secrets;
+
+  /// Runs the real connection test. Defaults to the HTTP probe.
+  final V2ConnectorProbe? probe;
 
   @override
   State<AddConnectorPage> createState() => _AddConnectorPageState();
@@ -282,9 +347,23 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
   bool _submitted = false;
   String _query = '';
 
+  /// Result of the last real connection test run from this screen.
+  V2ConnectorTestReport? _report;
+  bool _testing = false;
+  bool _saving = false;
+  String? _saveError;
+  final GlobalKey _formKey = GlobalKey();
+
   String get _endpoint => _target == V2ConnectorTarget.command
       ? _command.text.trim()
       : _url.text.trim();
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.data.presetName.isNotEmpty) _name.text = widget.data.presetName;
+    if (widget.data.presetId != null) _target = V2ConnectorTarget.url;
+  }
 
   String? get _endpointError => V2ConnectorSafety.validateEndpoint(
     value: _endpoint,
@@ -294,12 +373,36 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
   bool get _showEndpointError =>
       (_submitted || _endpoint.isNotEmpty) && _endpointError != null;
 
-  bool get _canSave =>
-      !widget.data.planLimitReached &&
-      _name.text.trim().isNotEmpty &&
-      _endpointError == null;
+  String? get _nameError =>
+      _name.text.trim().isEmpty ? 'Give this connector a name.' : null;
 
-  bool get _canTest => !widget.data.planLimitReached && _endpointError == null;
+  String? get _keyError {
+    if (_auth != V2ConnectorAuth.apiKey) return null;
+    return _key.text.trim().isEmpty
+        ? 'Paste the API key this server expects.'
+        : null;
+  }
+
+  /// The Save control is only disabled when nothing can be saved: the plan
+  /// cap, or a save already in flight. Missing fields are explained inline by
+  /// [_save] instead of leaving a dead button with no reason.
+  bool get _saveEnabled => !widget.data.planLimitReached && !_saving;
+
+  bool get _canTest =>
+      !widget.data.planLimitReached && _endpointError == null && !_testing;
+
+  V2ConnectorStore get _store => widget.store ?? v2ConnectorStore;
+  V2ConnectorSecrets get _secrets => widget.secrets ?? v2ConnectorSecrets;
+  V2ConnectorProbe get _probe => widget.probe ?? V2HttpConnectorProbe();
+
+  void _openUpgrade() {
+    final external = widget.onUpgrade;
+    if (external != null) {
+      external();
+      return;
+    }
+    v2ShowConnectorUpgrade(context, widget.data.plan);
+  }
 
   /// True when the app bar cannot hold the labelled "Save" pill next to the
   /// title: narrow phones, or text at 1.3× or more.
@@ -348,26 +451,92 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
       read: _read,
       write: _write,
       execute: _execute,
+      catalogId: widget.data.presetId,
+      category: widget.data.presetCategory,
+      description: widget.data.presetDescription,
+      kind: widget.data.presetKind,
     );
   }
 
-  void _save() {
-    setState(() => _submitted = true);
-    if (!_canSave) return;
-    widget.onSave?.call(_draft());
+  Future<void> _save() async {
+    setState(() {
+      _submitted = true;
+      _saveError = null;
+    });
+    if (!_saveEnabled) return;
+    if (_nameError != null || _endpointError != null || _keyError != null) {
+      return;
+    }
+    final draft = _draft();
+    final external = widget.onSave;
+    if (external != null) {
+      external(draft);
+      return;
+    }
+    setState(() => _saving = true);
+    final connection = draft.toConnection();
+    try {
+      await _secrets.write(connection.id, draft.apiKey);
+      await _store.save(connection);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _saveError =
+            'Could not save this connector. Check your connection and try '
+            'again.';
+      });
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _saving = false);
+    showOSnack(context, '${connection.name} saved.');
+    Navigator.of(context).maybePop();
   }
 
-  void _test() {
-    setState(() => _submitted = true);
+  Future<void> _test() async {
+    setState(() {
+      _submitted = true;
+      _report = null;
+    });
     if (!_canTest) return;
-    widget.onTestConnection?.call(_draft());
+    final draft = _draft();
+    final external = widget.onTestConnection;
+    if (external != null) {
+      external(draft);
+      return;
+    }
+    setState(() => _testing = true);
+    final report = await _probe.test(
+      draft.toConnection(),
+      apiKey: draft.apiKey,
+    );
+    if (!mounted) return;
+    setState(() {
+      _testing = false;
+      _report = report;
+    });
   }
 
   void _addSuggestion(V2ConnectorSuggestion suggestion) {
-    if (_name.text.trim().isEmpty) {
-      setState(() => _name.text = suggestion.name);
-    }
+    setState(() {
+      if (_name.text.trim().isEmpty) _name.text = suggestion.name;
+    });
     widget.onAddSuggested?.call(suggestion.id);
+    final formContext = _formKey.currentContext;
+    if (formContext != null) {
+      Scrollable.ensureVisible(
+        formContext,
+        duration: const Duration(milliseconds: 240),
+        alignment: 0.1,
+      );
+    }
+  }
+
+  /// A test result only describes the values that were tested, so editing any
+  /// of them clears it instead of leaving a stale green line on screen.
+  void _fieldChanged() {
+    setState(() => _report = null);
   }
 
   void _setQuery(String value) {
@@ -396,7 +565,10 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
 
   void _setTarget(V2ConnectorTarget target) {
     if (_target == target) return;
-    setState(() => _target = target);
+    setState(() {
+      _target = target;
+      _report = null;
+    });
   }
 
   @override
@@ -413,13 +585,15 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
             OIconButton(
               icon: Icons.check_rounded,
               semanticLabel: 'Save',
-              onPressed: _canSave ? _save : null,
+              onPressed: _saveEnabled ? _save : null,
             )
           else
             OButton(
+              key: const Key('connector-save'),
               label: 'Save',
               variant: OButtonVariant.ghost,
-              onPressed: _canSave ? _save : null,
+              loading: _saving,
+              onPressed: _saveEnabled ? _save : null,
             ),
         ],
       ),
@@ -463,12 +637,20 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
         OSpace.xl,
       ),
       children: [
-        _PlanBanner(data: widget.data, onUpgrade: widget.onUpgrade),
+        _PlanBanner(data: widget.data, onUpgrade: _openUpgrade),
         const SizedBox(height: OSpace.m),
         _ChatInstallBlocked(message: widget.data.chatBlockMessage),
         const SizedBox(height: OSpace.xl),
-        _catalogSection(context),
-        const SizedBox(height: OSpace.xl),
+        if (widget.data.isCatalogSetup) ...[
+          _CatalogSetupNote(
+            name: widget.data.presetName,
+            description: widget.data.presetDescription,
+          ),
+          const SizedBox(height: OSpace.xl),
+        ] else ...[
+          _catalogSection(context),
+          const SizedBox(height: OSpace.xl),
+        ],
         _customForm(context),
         const SizedBox(height: OSpace.xl),
         _permissions(context),
@@ -574,6 +756,7 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
           padding: const EdgeInsets.only(bottom: OSpace.s),
         ),
         OCard(
+          key: _formKey,
           padding: const EdgeInsets.all(OSpace.l),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -589,11 +772,12 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
                 key: const Key('add-connector-name'),
                 controller: _name,
                 textInputAction: TextInputAction.next,
-                onChanged: (_) => setState(() {}),
+                onChanged: (_) => _fieldChanged(),
                 style: OType.bodySm.copyWith(color: c.text),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Name',
                   hintText: 'e.g. Internal Analytics API',
+                  errorText: _submitted ? _nameError : null,
                 ),
               ),
               const SizedBox(height: OSpace.m),
@@ -606,7 +790,7 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
                     ? TextInputType.text
                     : TextInputType.url,
                 textInputAction: TextInputAction.next,
-                onChanged: (_) => setState(() {}),
+                onChanged: (_) => _fieldChanged(),
                 style: OType.bodySm.copyWith(color: c.text),
                 decoration: InputDecoration(
                   labelText: isCommand ? 'Command' : 'Server URL',
@@ -638,7 +822,10 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
               _AuthSelector(
                 selected: _auth,
                 onChanged: (auth) {
-                  setState(() => _auth = auth);
+                  setState(() {
+                    _auth = auth;
+                    _report = null;
+                  });
                   widget.onAuthChanged?.call(auth);
                 },
               ),
@@ -651,10 +838,12 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
                         key: const Key('add-connector-key'),
                         controller: _key,
                         obscureText: !_showKey,
+                        onChanged: (_) => _fieldChanged(),
                         style: OType.bodySm.copyWith(color: c.text),
-                        decoration: const InputDecoration(
+                        decoration: InputDecoration(
                           labelText: 'API key',
                           hintText: 'Paste the key from that app',
+                          errorText: _submitted ? _keyError : null,
                         ),
                       ),
                     ),
@@ -676,8 +865,9 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
                     const SizedBox(width: OSpace.s),
                     Expanded(
                       child: Text(
-                        'This connector needs an API key before it can '
-                        'connect.',
+                        'Kept in the device keystore. Sent as '
+                        'Authorization: Bearer when Ovid tests the '
+                        'connection.',
                         style: OType.caption.copyWith(color: c.textMuted),
                       ),
                     ),
@@ -710,12 +900,36 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
                 icon: Icons.sync_rounded,
                 variant: OButtonVariant.secondary,
                 expand: true,
-                loading: widget.data.testing,
+                loading: widget.data.testing || _testing,
                 onPressed: blocked || !_canTest ? null : _test,
               ),
-              if (widget.data.testResult != null) ...[
+              if (_report != null) ...[
                 const SizedBox(height: OSpace.m),
-                _TestResult(ok: widget.data.testResult!),
+                _TestResult(
+                  ok: _report!.ok,
+                  message: _report!.message,
+                  neutral: _report!.unsupported,
+                ),
+              ] else if (widget.data.testResult != null) ...[
+                const SizedBox(height: OSpace.m),
+                _TestResult(
+                  ok: widget.data.testResult!,
+                  message: widget.data.testDetail,
+                ),
+              ],
+              if (blocked) ...[
+                const SizedBox(height: OSpace.m),
+                _CapNotice(
+                  message: widget.data.resolvedPlanLimitMessage,
+                  onUpgrade: _openUpgrade,
+                ),
+              ],
+              if (_saveError != null) ...[
+                const SizedBox(height: OSpace.m),
+                _FieldError(
+                  key: const Key('connector-save-error'),
+                  message: _saveError!,
+                ),
               ],
             ],
           ),
@@ -736,29 +950,21 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
         OCard(
           child: Column(
             children: [
-              _PermissionSwitchRow(
-                title: 'Read data',
-                description: 'Query schemas, view records, inspect tables',
-                value: _read,
-                onChanged: (value) =>
-                    _setPermission(V2ConnectorPermissionKind.read, value),
-              ),
-              Divider(color: c.hairline, height: 1),
-              _PermissionSwitchRow(
-                title: 'Write & update',
-                description: 'Insert objects and update existing records',
-                value: _write,
-                onChanged: (value) =>
-                    _setPermission(V2ConnectorPermissionKind.write, value),
-              ),
-              Divider(color: c.hairline, height: 1),
-              _PermissionSwitchRow(
-                title: 'Execute actions',
-                description: 'Trigger webhooks and run batch jobs',
-                value: _execute,
-                onChanged: (value) =>
-                    _setPermission(V2ConnectorPermissionKind.execute, value),
-              ),
+              for (final kind in V2ConnectorPermissionKind.values) ...[
+                if (kind != V2ConnectorPermissionKind.read)
+                  Divider(color: c.hairline, height: 1),
+                _PermissionSwitchRow(
+                  key: Key('connector-permission-${kind.name}'),
+                  title: kind.title,
+                  description: kind.description,
+                  value: switch (kind) {
+                    V2ConnectorPermissionKind.read => _read,
+                    V2ConnectorPermissionKind.write => _write,
+                    V2ConnectorPermissionKind.execute => _execute,
+                  },
+                  onChanged: (value) => _setPermission(kind, value),
+                ),
+              ],
             ],
           ),
         ),
@@ -839,7 +1045,7 @@ class _AddConnectorPageState extends State<AddConnectorPage> {
           OButton(
             label: 'Upgrade',
             variant: OButtonVariant.ghost,
-            onPressed: widget.onUpgrade,
+            onPressed: _openUpgrade,
           ),
         ],
       ),
@@ -868,12 +1074,18 @@ class _PlanBanner extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          blocked ? 'Plan limit reached' : 'Custom connectors',
+          blocked
+              ? 'Plan limit reached'
+              : data.isCatalogSetup
+              ? 'Built-in connector'
+              : 'Custom connectors',
           style: OType.label.copyWith(color: c.text),
         ),
         const SizedBox(height: 2),
         Text(message, style: OType.caption.copyWith(color: c.textMuted)),
-        if (!blocked && data.plan != V2ConnectorPlan.free) ...[
+        if (!blocked &&
+            !data.isCatalogSetup &&
+            data.plan != V2ConnectorPlan.free) ...[
           const SizedBox(height: 2),
           Text(
             '${data.customLimit - data.customConnectorsUsed} slots left.',
@@ -1130,52 +1342,71 @@ class _SuggestionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final details = Row(
+      children: [
+        Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: c.surfaceAlt,
+            borderRadius: BorderRadius.circular(ORadius.m),
+            border: Border.all(color: c.hairline),
+          ),
+          child: Icon(suggestion.icon, size: 18, color: c.textMuted),
+        ),
+        const SizedBox(width: OSpace.m),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                suggestion.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: OType.bodyStrong.copyWith(color: c.text),
+              ),
+              Text(
+                suggestion.description,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: OType.caption.copyWith(color: c.textMuted),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+    final action = OButton(
+      label: 'Set up',
+      icon: Icons.add_rounded,
+      variant: OButtonVariant.secondary,
+      semanticLabel: 'Set up ${suggestion.name}',
+      expand: _stacksActions(context),
+      onPressed: onAdd,
+    );
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: OSpace.m,
         vertical: OSpace.s,
       ),
-      child: Row(
-        children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: c.surfaceAlt,
-              borderRadius: BorderRadius.circular(ORadius.m),
-              border: Border.all(color: c.hairline),
-            ),
-            child: Icon(suggestion.icon, size: 18, color: c.textMuted),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      // At large text the button cannot share the line with the description,
+      // so it takes its own full-width row instead of squeezing the text.
+      child: _stacksActions(context)
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(
-                  suggestion.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.bodyStrong.copyWith(color: c.text),
-                ),
-                Text(
-                  suggestion.description,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
+                details,
+                const SizedBox(height: OSpace.s),
+                action,
+              ],
+            )
+          : Row(
+              children: [
+                Expanded(child: details),
+                const SizedBox(width: OSpace.s),
+                action,
               ],
             ),
-          ),
-          const SizedBox(width: OSpace.s),
-          OButton(
-            label: 'Add',
-            icon: Icons.add_rounded,
-            variant: OButtonVariant.secondary,
-            onPressed: onAdd,
-          ),
-        ],
-      ),
     );
   }
 }
@@ -1277,6 +1508,7 @@ class _AuthChoice extends StatelessWidget {
 
 class _PermissionSwitchRow extends StatelessWidget {
   const _PermissionSwitchRow({
+    super.key,
     required this.title,
     required this.description,
     required this.value,
@@ -1291,30 +1523,74 @@ class _PermissionSwitchRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: OSpace.s),
+    return MergeSemantics(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: OSpace.s),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: OType.bodyStrong.copyWith(color: c.text)),
+                  const SizedBox(height: 2),
+                  Text(
+                    description,
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: OSpace.m),
+            SizedBox(
+              height: OSpace.touch,
+              child: Switch(value: value, onChanged: onChanged),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TestResult extends StatelessWidget {
+  const _TestResult({
+    required this.ok,
+    required this.message,
+    this.neutral = false,
+  });
+
+  final bool ok;
+  final String message;
+
+  /// A truthful "we cannot test this from here" result, shown in muted text
+  /// instead of red or green.
+  final bool neutral;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final color = neutral ? c.textMuted : (ok ? c.success : c.danger);
+    final icon = neutral
+        ? Icons.info_outline_rounded
+        : (ok ? Icons.check_circle_outline_rounded : Icons.error_outline_rounded);
+    final text = message.isNotEmpty
+        ? message
+        : ok
+        ? 'Connection works. You can save this connector.'
+        : 'Could not reach that server. Check the URL and try again.';
+    return Semantics(
+      liveRegion: true,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          Icon(icon, size: 18, color: color),
+          const SizedBox(width: OSpace.s),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title, style: OType.bodyStrong.copyWith(color: c.text)),
-                const SizedBox(height: 2),
-                Text(
-                  description,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: OSpace.m),
-          Semantics(
-            label: title,
-            child: SizedBox(
-              height: OSpace.touch,
-              child: Switch(value: value, onChanged: onChanged),
+            child: Text(
+              text,
+              style: OType.caption.copyWith(color: color),
             ),
           ),
         ],
@@ -1323,32 +1599,101 @@ class _PermissionSwitchRow extends StatelessWidget {
   }
 }
 
-class _TestResult extends StatelessWidget {
-  const _TestResult({required this.ok});
+/// The plan cap, explained where the person is trying to save.
+class _CapNotice extends StatelessWidget {
+  const _CapNotice({required this.message, required this.onUpgrade});
 
-  final bool ok;
+  final String message;
+  final VoidCallback onUpgrade;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Icon(
-          ok ? Icons.check_circle_outline_rounded : Icons.error_outline_rounded,
-          size: 18,
-          color: ok ? c.success : c.danger,
-        ),
-        const SizedBox(width: OSpace.s),
-        Expanded(
-          child: Text(
-            ok
-                ? 'Connection works. You can save this connector.'
-                : 'Could not reach that server. Check the URL and try again.',
-            style: OType.caption.copyWith(color: ok ? c.success : c.danger),
+    return Container(
+      key: const Key('connector-cap-notice'),
+      padding: const EdgeInsets.all(OSpace.m),
+      decoration: BoxDecoration(
+        color: c.warn.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(ORadius.m),
+        border: Border.all(color: c.warn.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.lock_outline_rounded, size: 17, color: c.warn),
+              const SizedBox(width: OSpace.s),
+              Expanded(
+                child: Text(
+                  'Saving is off. $message',
+                  style: OType.caption.copyWith(color: c.text),
+                ),
+              ),
+            ],
           ),
-        ),
-      ],
+          const SizedBox(height: OSpace.s),
+          Align(
+            alignment: AlignmentDirectional.centerEnd,
+            child: OButton(
+              key: const Key('connector-cap-upgrade'),
+              label: 'See plans',
+              variant: OButtonVariant.ghost,
+              onPressed: onUpgrade,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Header for setting up a catalog connector instead of a custom server.
+class _CatalogSetupNote extends StatelessWidget {
+  const _CatalogSetupNote({required this.name, required this.description});
+
+  final String name;
+  final String description;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      key: const Key('catalog-setup-note'),
+      padding: const EdgeInsets.all(OSpace.m),
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(ORadius.l),
+        border: Border.all(color: c.hairline),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.extension_outlined, size: 18, color: c.accent),
+          const SizedBox(width: OSpace.s),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Setting up $name',
+                  style: OType.label.copyWith(color: c.text),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  description.isEmpty
+                      ? 'Enter the server Ovid should reach and the credential '
+                            'it needs.'
+                      : '$description Enter the server Ovid should reach and '
+                            'the credential it needs.',
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

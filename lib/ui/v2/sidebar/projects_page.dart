@@ -95,13 +95,18 @@ class _ProjectsPageState extends State<ProjectsPage> {
         .toList(growable: false);
   }
 
+  /// Creation is only offered when the caller can persist the draft; otherwise
+  /// the sheet would close as if a project had been made.
+  bool get _canCreate => widget.onCreateProject != null;
+
   void _openNewProject() {
+    final create = widget.onCreateProject;
+    if (create == null) return;
     showOSheet<void>(
       context,
       title: 'New project',
-      builder: (sheetContext) => _NewProjectSheet(
-        onCreate: (draft) => widget.onCreateProject?.call(draft),
-      ),
+      builder: (sheetContext) =>
+          _NewProjectSheet(onCreate: (draft) => create(draft)),
     );
   }
 
@@ -147,11 +152,12 @@ class _ProjectsPageState extends State<ProjectsPage> {
               ),
             ),
             const SizedBox(width: OSpace.s),
-            OButton(
-              label: 'New',
-              icon: Icons.add_rounded,
-              onPressed: _openNewProject,
-            ),
+            if (_canCreate)
+              OButton(
+                label: 'New',
+                icon: Icons.add_rounded,
+                onPressed: _openNewProject,
+              ),
           ],
         ),
         const SizedBox(height: OSpace.l),
@@ -228,11 +234,13 @@ class _ProjectsPageState extends State<ProjectsPage> {
                 icon: Icons.create_new_folder_outlined,
                 title: 'No projects yet',
                 message: 'Group chats that share files and memory.',
-                action: OButton(
-                  label: 'New project',
-                  icon: Icons.add_rounded,
-                  onPressed: _openNewProject,
-                ),
+                action: _canCreate
+                    ? OButton(
+                        label: 'New project',
+                        icon: Icons.add_rounded,
+                        onPressed: _openNewProject,
+                      )
+                    : null,
               ),
             ),
           ];
@@ -258,8 +266,6 @@ class _ProjectsPageState extends State<ProjectsPage> {
 
   Widget _buildListSliver(List<V2Project> visible) {
     const staggeredRows = 8;
-    final head = visible.take(staggeredRows).toList(growable: false);
-    final tail = visible.skip(staggeredRows).toList(growable: false);
     Widget row(V2Project project) => Padding(
       padding: const EdgeInsets.only(bottom: OSpace.m),
       child: _ProjectCard(
@@ -271,19 +277,36 @@ class _ProjectsPageState extends State<ProjectsPage> {
     return SliverPadding(
       padding: const EdgeInsets.symmetric(horizontal: OSpace.screen),
       sliver: SliverList(
-        delegate: SliverChildListDelegate([
-          OSectionHeader(
-            label: 'Projects',
-            trailing: OPill(
-              label: '${visible.length}',
-              tone: OPillTone.accent,
-            ),
-            padding: const EdgeInsets.fromLTRB(0, OSpace.s, 0, OSpace.s),
-          ),
-          OStagger(children: [for (final project in head) row(project)]),
-          for (final project in tail) row(project),
-          const SizedBox(height: OSpace.xl),
-        ]),
+        delegate: SliverChildBuilderDelegate(
+          (context, index) {
+            if (index == 0) {
+              return OSectionHeader(
+                label: 'Projects',
+                trailing: OPill(
+                  label: '${visible.length}',
+                  tone: OPillTone.accent,
+                ),
+                padding: const EdgeInsets.fromLTRB(0, OSpace.s, 0, OSpace.s),
+              );
+            }
+            final rowIndex = index - 1;
+            if (rowIndex >= visible.length) {
+              return const SizedBox(height: OSpace.xl);
+            }
+            final project = visible[rowIndex];
+            // Only the first screenful animates; later rows are built lazily
+            // as they scroll in, so they must not each start a timer.
+            if (rowIndex >= staggeredRows) return row(project);
+            final delay = OMotion.stagger * rowIndex;
+            return OFadeSlide(
+              delay: delay > const Duration(milliseconds: 400)
+                  ? const Duration(milliseconds: 400)
+                  : delay,
+              child: row(project),
+            );
+          },
+          childCount: visible.length + 2,
+        ),
       ),
     );
   }
@@ -357,12 +380,13 @@ class _ProjectCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: OSpace.xs),
-              OIconButton(
-                icon: Icons.more_vert_rounded,
-                semanticLabel: 'Project options for ${project.name}',
-                size: 18,
-                onPressed: onActions == null ? null : () => onActions!(project),
-              ),
+              if (onActions != null)
+                OIconButton(
+                  icon: Icons.more_vert_rounded,
+                  semanticLabel: 'Project options for ${project.name}',
+                  size: 18,
+                  onPressed: () => onActions!(project),
+                ),
             ],
           ),
           const SizedBox(height: OSpace.m),

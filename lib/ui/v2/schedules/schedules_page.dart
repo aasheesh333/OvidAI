@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'cadence_picker.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
 
@@ -16,6 +17,9 @@ class V2ScheduleItem {
     required this.description,
     required this.rule,
     this.nextRun,
+    this.nextRunAt,
+    this.cadence,
+    this.endsAt,
     this.enabled = true,
     this.lastRunFailed = false,
     this.failureMessage,
@@ -32,8 +36,19 @@ class V2ScheduleItem {
   /// Plain-English rule, e.g. "Every weekday at 9:00 AM".
   final String rule;
 
-  /// Plain-English next run, e.g. "Tomorrow, 9:00 AM".
+  /// Plain-English next run, e.g. "Tomorrow, 9:00 AM". Used only when neither
+  /// [cadence] nor [nextRunAt] is available.
   final String? nextRun;
+
+  /// The server's next occurrence, used when the cadence cannot be expanded.
+  final DateTime? nextRunAt;
+
+  /// The real cadence, so the next run is computed from it rather than trusted
+  /// from a stale label.
+  final V2CadenceDraft? cadence;
+
+  /// The last day this schedule may run, when it has an end date.
+  final DateTime? endsAt;
   final bool enabled;
   final bool lastRunFailed;
   final String? failureMessage;
@@ -58,6 +73,56 @@ class V2ScheduleItem {
     }
     return null;
   }
+
+  /// The rule to show: the cadence is the source of truth when present.
+  String get ruleLabel {
+    final cadence = this.cadence;
+    if (cadence != null && cadence.isValid) return describeCadence(cadence);
+    return rule;
+  }
+
+  /// The next run computed from the real cadence, never a hardcoded label.
+  ///
+  /// A paused schedule has no next run, and a server timestamp that has already
+  /// passed is not shown as if it were still ahead.
+  String? nextRunLabel(DateTime now) {
+    if (!enabled) return null;
+    final cadence = this.cadence;
+    if (cadence != null) {
+      final computed = describeNextRun(cadence, now);
+      if (computed != null) return computed;
+    }
+    final at = nextRunAt?.toLocal();
+    if (at != null) {
+      if (!at.isAfter(now)) return null;
+      return describeNextRunAt(at, now);
+    }
+    return nextRun;
+  }
+
+  V2ScheduleItem copyWith({
+    bool? enabled,
+    bool? lastRunFailed,
+    String? failureMessage,
+  }) {
+    return V2ScheduleItem(
+      id: id,
+      title: title,
+      description: description,
+      rule: rule,
+      nextRun: nextRun,
+      nextRunAt: nextRunAt,
+      cadence: cadence,
+      endsAt: endsAt,
+      enabled: enabled ?? this.enabled,
+      lastRunFailed: lastRunFailed ?? this.lastRunFailed,
+      failureMessage: failureMessage ?? this.failureMessage,
+      sessionTitle: sessionTitle,
+      createdLabel: createdLabel,
+      completedRuns: completedRuns,
+      totalRuns: totalRuns,
+    );
+  }
 }
 
 @immutable
@@ -65,12 +130,17 @@ class V2SchedulesData {
   const V2SchedulesData({
     this.status = V2SchedulesStatus.content,
     this.schedules = const <V2ScheduleItem>[],
+    this.now,
     this.errorMessage =
         'We could not load your schedules. Check your connection and try again.',
   });
 
   final V2SchedulesStatus status;
   final List<V2ScheduleItem> schedules;
+
+  /// Clock used for the computed next-run labels. Injected for deterministic
+  /// tests; defaults to now.
+  final DateTime? now;
   final String errorMessage;
 }
 
@@ -112,11 +182,12 @@ class SchedulesPage extends StatelessWidget {
       appBar: OAppBar(
         title: 'Schedules',
         actions: [
-          OIconButton(
-            icon: Icons.more_vert_rounded,
-            semanticLabel: 'More options',
-            onPressed: onMore,
-          ),
+          if (onMore != null || onRetry != null || onCreate != null)
+            OIconButton(
+              icon: Icons.more_vert_rounded,
+              semanticLabel: 'More options',
+              onPressed: onMore ?? () => _openMore(context),
+            ),
         ],
       ),
       body: OFadeSlide(
@@ -171,33 +242,51 @@ class SchedulesPage extends StatelessWidget {
       for (final schedule in data.schedules)
         if (!schedule.enabled) schedule,
     ];
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.screen,
-        OSpace.s,
-        OSpace.screen,
-        OSpace.xxl,
-      ),
-      children: [
-        _explainer(c),
-        const SizedBox(height: OSpace.m),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: OPill(
-            label: data.schedules.length == 1
-                ? '1 total rule'
-                : '${data.schedules.length} total rules',
-          ),
+    final items = <Widget>[
+      _explainer(c),
+      const SizedBox(height: OSpace.m),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: OPill(
+          label: data.schedules.length == 1
+              ? '1 total rule'
+              : '${data.schedules.length} total rules',
         ),
-        if (active.isNotEmpty) ...[
-          const SizedBox(height: OSpace.l),
-          _group(context, c, 'Active schedules (${active.length})', active),
-        ],
-        if (paused.isNotEmpty) ...[
-          const SizedBox(height: OSpace.l),
-          _group(context, c, 'Paused (${paused.length})', paused),
-        ],
-        const SizedBox(height: OSpace.l),
+      ),
+    ];
+
+    void addGroup(String label, List<V2ScheduleItem> schedules) {
+      if (schedules.isEmpty) return;
+      items
+        ..add(const SizedBox(height: OSpace.l))
+        ..add(OSectionHeader(label: label, padding: EdgeInsets.zero))
+        ..add(const SizedBox(height: OSpace.m));
+      for (var i = 0; i < schedules.length; i++) {
+        final card = _card(context, c, schedules[i]);
+        if (i >= 8) {
+          items.add(card);
+          continue;
+        }
+        // Only the first screenful animates; a long rule list must not start
+        // an entrance timer for every off-screen card.
+        final delay = OMotion.stagger * i;
+        items.add(
+          OFadeSlide(
+            delay: delay > const Duration(milliseconds: 400)
+                ? const Duration(milliseconds: 400)
+                : delay,
+            child: card,
+          ),
+        );
+      }
+    }
+
+    addGroup('Active schedules (${active.length})', active);
+    addGroup('Paused (${paused.length})', paused);
+
+    items
+      ..add(const SizedBox(height: OSpace.l))
+      ..add(
         OCard(
           padding: const EdgeInsets.all(OSpace.m),
           child: Column(
@@ -229,28 +318,20 @@ class SchedulesPage extends StatelessWidget {
             ],
           ),
         ),
-        const SizedBox(height: OSpace.s),
-      ],
-    );
-  }
+      )
+      ..add(const SizedBox(height: OSpace.s));
 
-  Widget _group(
-    BuildContext context,
-    OColors c,
-    String label,
-    List<V2ScheduleItem> schedules,
-  ) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        OSectionHeader(label: label, padding: EdgeInsets.zero),
-        const SizedBox(height: OSpace.m),
-        OStagger(
-          children: [
-            for (final schedule in schedules) _card(context, c, schedule),
-          ],
-        ),
-      ],
+    // Lazy: the card widgets are cheap to construct, but only the visible
+    // ones are mounted and laid out.
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(
+        OSpace.screen,
+        OSpace.s,
+        OSpace.screen,
+        OSpace.xxl,
+      ),
+      itemCount: items.length,
+      itemBuilder: (context, index) => items[index],
     );
   }
 
@@ -316,15 +397,23 @@ class SchedulesPage extends StatelessWidget {
       meta.add(_metaRow(c, icon, text, color: color, strong: strong));
     }
 
-    if (schedule.rule.isNotEmpty) {
-      addMeta(Icons.schedule_rounded, schedule.rule, color: c.accent);
+    if (schedule.ruleLabel.isNotEmpty) {
+      addMeta(Icons.schedule_rounded, schedule.ruleLabel, color: c.accent);
     }
-    if (schedule.enabled && schedule.nextRun != null) {
+    final nextRun = schedule.nextRunLabel(data.now ?? DateTime.now());
+    if (nextRun != null) {
       addMeta(
         Icons.update_rounded,
-        'Next: ${schedule.nextRun}',
+        'Next: $nextRun',
         color: c.success,
         strong: true,
+      );
+    }
+    if (schedule.endsAt != null) {
+      addMeta(
+        Icons.event_busy_rounded,
+        'Ends ${MaterialLocalizations.of(context).formatMediumDate(schedule.endsAt!)}',
+        color: c.textFaint,
       );
     }
     if (runCount != null) {
@@ -411,15 +500,13 @@ class SchedulesPage extends StatelessWidget {
                         ),
                       ),
                     ),
-                    OIconButton(
-                      icon: Icons.more_vert_rounded,
-                      semanticLabel: 'More options for ${schedule.title}',
-                      size: 18,
-                      onPressed: menuEnabled
-                          ? () => _openMenu(context, schedule)
-                          : null,
-                    ),
-                  ],
+                    if (menuEnabled)
+                      OIconButton(
+                        icon: Icons.more_vert_rounded,
+                        semanticLabel: 'More options for ${schedule.title}',
+                        size: 18,
+                        onPressed: () => _openMenu(context, schedule),
+                      ),                  ],
                 ),
               ],
             ),
@@ -591,7 +678,74 @@ class SchedulesPage extends StatelessWidget {
       case 'run':
         onRunNow?.call(schedule);
       case 'delete':
-        onDelete?.call(schedule);
+        await _confirmDelete(context, schedule);
+    }
+  }
+
+  /// Deleting is irreversible for future runs, so it is always confirmed. The
+  /// row disappears only after the wiring layer's delete succeeds.
+  Future<void> _confirmDelete(
+    BuildContext context,
+    V2ScheduleItem schedule,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Delete “${schedule.title}”?'),
+        content: const Text(
+          'Future runs stop immediately. Past runs stay in the run history. '
+          'This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Keep'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (!context.mounted || confirmed != true) return;
+    onDelete?.call(schedule);
+  }
+
+  /// The app-bar menu, so the screen always has a real action even when the
+  /// host does not inject one.
+  Future<void> _openMore(BuildContext context) async {
+    final action = await showOSheet<String>(
+      context,
+      title: 'Schedules',
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (onCreate != null)
+              OListRow(
+                icon: Icons.add_alarm_rounded,
+                title: 'New schedule',
+                showChevron: false,
+                onTap: () => Navigator.of(sheetContext).pop('new'),
+              ),
+            if (onRetry != null)
+              OListRow(
+                icon: Icons.refresh_rounded,
+                title: 'Refresh',
+                showChevron: false,
+                onTap: () => Navigator.of(sheetContext).pop('refresh'),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (!context.mounted) return;
+    switch (action) {
+      case 'new':
+        onCreate?.call();
+      case 'refresh':
+        onRetry?.call();
     }
   }
 

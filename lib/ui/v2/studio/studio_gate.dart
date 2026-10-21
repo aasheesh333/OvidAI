@@ -95,6 +95,14 @@ class V2StudioGate extends StatelessWidget {
               expand: true,
               onPressed: _onPick,
             ),
+            if (_onPick == null) ...[
+              const SizedBox(height: OSpace.xs),
+              Text(
+                'Repository setup is not available yet.',
+                textAlign: TextAlign.center,
+                style: OType.caption.copyWith(color: c.textMuted),
+              ),
+            ],
           ],
         ),
       ),

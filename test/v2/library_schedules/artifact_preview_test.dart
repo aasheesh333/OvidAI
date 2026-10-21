@@ -1,11 +1,11 @@
 import 'dart:typed_data';
-import 'dart:ui' show Tristate;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/v2/chat/transcript_actions.dart';
 import 'package:ovid_ai/ui/v2/library/artifact_preview.dart';
 
 /// A valid 1×1 transparent PNG, so image previews decode without a network.
@@ -247,12 +247,13 @@ void main() {
     _phone(tester);
     await tester.pumpWidget(
       _app(
-        const V2ArtifactPreview(
-          data: V2ArtifactPreviewData(
+        V2ArtifactPreview(
+          data: const V2ArtifactPreviewData(
             name: 'empty.ts',
             type: V2ArtifactPreviewType.code,
             codeFile: 'empty.ts',
           ),
+          onOpenExternally: () {},
         ),
       ),
     );
@@ -281,7 +282,7 @@ void main() {
     expect(find.text('market-analysis-q2.pdf'), findsOneWidget);
     expect(find.text('Metadata only'), findsOneWidget);
     expect(
-      find.textContaining('Documents are not rendered in the app'),
+      find.textContaining('was not available for preview'),
       findsOneWidget,
     );
     expect(find.text('Pages'), findsOneWidget);
@@ -384,27 +385,121 @@ void main() {
     expect(opens, 1);
   });
 
-  testWidgets('the external action announces disabled without a handler', (
+  testWidgets('no external action is drawn without a handler or URL', (
     tester,
   ) async {
-    final handle = tester.ensureSemantics();
     _phone(tester);
     await tester.pumpWidget(_app(const V2ArtifactPreview(data: _documentData)));
     await tester.pumpAndSettle();
 
-    final button = tester.widget<OButton>(
-      find.widgetWithText(OButton, 'Open externally'),
+    // A disabled "Open externally" would be a dead control.
+    expect(find.text('Open externally'), findsNothing);
+    expect(find.byType(OButton), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the external action opens the real URL without a handler', (
+    tester,
+  ) async {
+    Uri? opened;
+    V2TranscriptIo.debugOpenOverride = (uri) async {
+      opened = uri;
+      return true;
+    };
+    addTearDown(V2TranscriptIo.reset);
+
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        const V2ArtifactPreview(
+          data: V2ArtifactPreviewData(
+            name: 'report.pdf',
+            type: V2ArtifactPreviewType.document,
+            openUrl: 'https://r2.test/report.pdf',
+          ),
+        ),
+      ),
     );
-    expect(button.onPressed, isNull);
-    final node = tester.getSemantics(
-      find.widgetWithText(OButton, 'Open externally'),
-    );
-    expect(node.flagsCollection.isEnabled, Tristate.isFalse);
+    await tester.pumpAndSettle();
 
     await tester.tap(find.text('Open externally'));
-    await tester.pump();
-    expect(tester.takeException(), isNull);
-    handle.dispose();
+    await tester.pumpAndSettle();
+    expect(opened, Uri.parse('https://r2.test/report.pdf'));
+  });
+
+  testWidgets('code previews are syntax coloured', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        const V2ArtifactPreview(
+          data: V2ArtifactPreviewData(
+            name: 'sample.ts',
+            type: V2ArtifactPreviewType.code,
+            codeFile: 'sample.ts',
+            code: "const answer = 42;\nfinal label = 'done';\n// note",
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final text = tester.widget<Text>(
+      find.byKey(const ValueKey<String>('artifact-preview-code')),
+    );
+    final colors = <Color>{};
+    text.textSpan!.visitChildren((span) {
+      if (span is TextSpan && span.style?.color != null) {
+        colors.add(span.style!.color!);
+      }
+      return true;
+    });
+    // Keywords, numbers, strings and comments each get their own colour.
+    expect(colors.length, greaterThanOrEqualTo(4));
+  });
+
+  testWidgets('document previews render the real text', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        const V2ArtifactPreview(
+          data: V2ArtifactPreviewData(
+            name: 'notes.txt',
+            type: V2ArtifactPreviewType.document,
+            documentText: 'First real line.\nSecond real line.',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Document preview'), findsOneWidget);
+    expect(find.textContaining('First real line.'), findsOneWidget);
+    expect(find.textContaining('Second real line.'), findsOneWidget);
+    expect(find.text('Metadata only'), findsNothing);
+  });
+
+  testWidgets('long document text stops at the line cap', (tester) async {
+    _phone(tester);
+    final body = List.generate(
+      400,
+      (i) => 'DOC_LINE_${i + 1}',
+    ).join('\n');
+    await tester.pumpWidget(
+      _app(
+        V2ArtifactPreview(
+          data: V2ArtifactPreviewData(
+            name: 'long.txt',
+            type: V2ArtifactPreviewType.document,
+            documentText: body,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('DOC_LINE_120'), findsOneWidget);
+    expect(find.textContaining('DOC_LINE_121'), findsNothing);
+    expect(find.textContaining('Showing first 120 of 400 lines'), findsOneWidget);
   });
 
   testWidgets('all preview types fit 320 dp at 200 % text in both themes', (
@@ -429,7 +524,14 @@ void main() {
       for (final data in samples) {
         _narrowPhone(tester);
         await tester.pumpWidget(
-          _app(V2ArtifactPreview(data: data), dark: dark, textScale: 2),
+          _app(
+            V2ArtifactPreview(
+              data: data,
+              onOpenExternally: () {},
+            ),
+            dark: dark,
+            textScale: 2,
+          ),
         );
         await tester.pumpAndSettle();
 

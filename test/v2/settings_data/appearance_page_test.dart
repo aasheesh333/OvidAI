@@ -60,19 +60,22 @@ V2AppearancePageData _data({
     shareSessionMemory: shareSessionMemory,
     showReasoning: showReasoning,
     preview: _preview,
-    onThemeModeChanged: onThemeModeChanged,
-    onAccentChanged: onAccentChanged,
-    onTextScaleChanged: onTextScaleChanged,
-    onReduceMotionChanged: onReduceMotionChanged,
-    onReduceMotionFollowsSystemChanged: onReduceMotionFollowsSystemChanged,
-    onDensityChanged: onDensityChanged,
-    onCodeFontChanged: onCodeFontChanged,
-    onVoiceLanguageChanged: onVoiceLanguageChanged,
-    onMemoryEnabledChanged: onMemoryEnabledChanged,
-    onShareSessionMemoryChanged: onShareSessionMemoryChanged,
-    onShowReasoningChanged: onShowReasoningChanged,
-    onMemoryFilesTap: onMemoryFilesTap,
-    onRefreshPreview: onRefreshPreview,
+    // Every control is wired by default so the render/layout tests exercise
+    // the full screen. Tests that assert "no handler" use raw data instead.
+    onThemeModeChanged: onThemeModeChanged ?? (_) {},
+    onAccentChanged: onAccentChanged ?? (_) {},
+    onTextScaleChanged: onTextScaleChanged ?? (_) {},
+    onReduceMotionChanged: onReduceMotionChanged ?? (_) {},
+    onReduceMotionFollowsSystemChanged:
+        onReduceMotionFollowsSystemChanged ?? (_) {},
+    onDensityChanged: onDensityChanged ?? (_) {},
+    onCodeFontChanged: onCodeFontChanged ?? (_) {},
+    onVoiceLanguageChanged: onVoiceLanguageChanged ?? (_) {},
+    onMemoryEnabledChanged: onMemoryEnabledChanged ?? (_) {},
+    onShareSessionMemoryChanged: onShareSessionMemoryChanged ?? (_) {},
+    onShowReasoningChanged: onShowReasoningChanged ?? (_) {},
+    onMemoryFilesTap: onMemoryFilesTap ?? () {},
+    onRefreshPreview: onRefreshPreview ?? () {},
   );
 }
 
@@ -235,7 +238,9 @@ void main() {
     expect(opened, 1);
   });
 
-  testWidgets('empty preview offers a refresh action', (tester) async {
+  testWidgets('no preview section is drawn without a preview', (
+    tester,
+  ) async {
     var refreshed = false;
     await tester.pumpWidget(
       _app(
@@ -247,10 +252,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('No preview yet'), findsOneWidget);
-    await tester.ensureVisible(find.text('Show preview'));
-    await tester.tap(find.text('Show preview'));
-    expect(refreshed, isTrue);
+    // The old "Show preview" action re-opened this same screen (a fake). With
+    // no preview data there is no section and no dead button.
+    expect(find.text('LIVE PREVIEW'), findsNothing);
+    expect(find.text('Show preview'), findsNothing);
+    expect(refreshed, isFalse);
   });
 
   testWidgets('choosing dark reports the new theme mode', (tester) async {
@@ -419,23 +425,31 @@ void main() {
     }
   });
 
-  testWidgets('disabled controls are announced as disabled', (tester) async {
+  testWidgets('controls without a handler are not rendered', (tester) async {
     final handle = tester.ensureSemantics();
     await tester.pumpWidget(
-      _app(AppearancePage(data: _data()), theme: OTheme.light()),
+      _app(
+        const AppearancePage(data: V2AppearancePageData()),
+        theme: OTheme.light(),
+      ),
     );
     await tester.pumpAndSettle();
 
-    // No callbacks are injected, so every control is read-only.
+    // No callbacks are injected: the page omits the sections it cannot wire
+    // instead of drawing dead controls.
+    expect(find.text('Accent color'), findsNothing);
+    expect(find.text('Global memory'), findsNothing);
+    expect(find.text('Show reasoning'), findsNothing);
+    expect(find.text('Chat layout'), findsNothing);
+    expect(find.text('High contrast'), findsNothing);
+    expect(find.text('Reduce motion'), findsNothing);
+    expect(
+      find.textContaining('reduce-motion setting'),
+      findsOneWidget,
+    );
     expect(
       tester.getSemantics(find.bySemanticsLabel('Dark theme')),
       isSemantics(label: 'Dark theme', isButton: true, isEnabled: false),
-    );
-    expect(
-      tester.getSemantics(
-        find.byKey(const ValueKey<String>('density-compact')),
-      ),
-      isSemantics(label: 'Compact', isButton: true, isEnabled: false),
     );
     handle.dispose();
   });
@@ -505,6 +519,73 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(find.text('Voice language'), findsOneWidget);
     }
+  });
+
+  testWidgets('choosing a theme applies on the same frame', (tester) async {
+    ThemeMode? next;
+    await tester.pumpWidget(
+      _app(
+        AppearancePage(data: _data(onThemeModeChanged: (mode) => next = mode)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final handle = tester.ensureSemantics();
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('System theme')),
+      isSemantics(label: 'System theme', isSelected: true),
+    );
+
+    await tester.tap(find.text('Dark'));
+    await tester.pump();
+
+    expect(next, ThemeMode.dark);
+    // No parent rebuild supplied new data: the page itself must move the
+    // selection so the choice is visible immediately.
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Dark theme')),
+      isSemantics(label: 'Dark theme', isSelected: true),
+    );
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('System theme')),
+      isSemantics(label: 'System theme', isSelected: false),
+    );
+    handle.dispose();
+  });
+
+  testWidgets('choosing a voice language applies on the same frame', (
+    tester,
+  ) async {
+    String? picked;
+    await tester.pumpWidget(
+      _app(
+        AppearancePage(
+          data: _data(onVoiceLanguageChanged: (id) => picked = id),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final punjabi = find.byKey(const ValueKey<String>('voice-language-pa'));
+    await tester.ensureVisible(punjabi);
+    await tester.tap(punjabi);
+    await tester.pump();
+
+    expect(picked, 'pa');
+    final handle = tester.ensureSemantics();
+    expect(
+      tester.getSemantics(punjabi),
+      isSemantics(label: 'Punjabi', isSelected: true, isButton: true),
+    );
+    expect(
+      tester.getSemantics(
+        find.byKey(const ValueKey<String>('voice-language-en')),
+      ),
+      isSemantics(label: 'English', isSelected: false, isButton: true),
+    );
+    handle.dispose();
   });
 
   testWidgets('reduced motion keeps every section visible', (tester) async {

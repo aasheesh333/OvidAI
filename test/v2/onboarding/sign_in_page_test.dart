@@ -26,6 +26,8 @@ Future<void> _pump(
   VoidCallback? onForgotPassword,
   VoidCallback? onCreateAccount,
   VoidCallback? onLanguageTap,
+  VoidCallback? onTerms,
+  VoidCallback? onPrivacy,
   VoidCallback? onRetry,
   double width = 400,
   double textScale = 1,
@@ -61,6 +63,8 @@ Future<void> _pump(
         onForgotPassword: onForgotPassword,
         onCreateAccount: onCreateAccount,
         onLanguageTap: onLanguageTap,
+        onTerms: onTerms,
+        onPrivacy: onPrivacy,
         onRetry: onRetry,
       ),
     ),
@@ -76,7 +80,7 @@ void main() {
   testWidgets('sign in renders all providers and the form in light', (
     tester,
   ) async {
-    await _pump(tester);
+    await _pump(tester, onApple: () {});
 
     expect(find.text('Welcome back'), findsOneWidget);
     expect(find.text('Continue with Google'), findsOneWidget);
@@ -89,8 +93,19 @@ void main() {
     expect(find.byKey(const Key('sign-in-submit')), findsOneWidget);
   });
 
+  testWidgets('an unwired Apple provider is not offered at all', (
+    tester,
+  ) async {
+    await _pump(tester);
+
+    expect(find.text('Continue with Google'), findsOneWidget);
+    expect(find.text('Continue with phone'), findsOneWidget);
+    // No dead button for a provider this build cannot complete.
+    expect(find.text('Continue with Apple'), findsNothing);
+  });
+
   testWidgets('sign in renders correctly in dark', (tester) async {
-    await _pump(tester, dark: true);
+    await _pump(tester, dark: true, onApple: () {});
 
     expect(find.text('Welcome back'), findsOneWidget);
     expect(find.text('Continue with Google'), findsOneWidget);
@@ -195,6 +210,53 @@ void main() {
     await tester.pump();
 
     expect(retries, 1);
+  });
+
+  testWidgets('an error with nothing to retry shows no dead Try again', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      data: const V2SignInData(
+        error: 'Email sign-in is not available yet. Use Google or phone.',
+      ),
+    );
+
+    expect(
+      find.text('Email sign-in is not available yet. Use Google or phone.'),
+      findsOneWidget,
+    );
+    expect(find.text('Try again'), findsNothing);
+  });
+
+  testWidgets('legal links only look like links when they open something', (
+    tester,
+  ) async {
+    var terms = 0;
+    var privacy = 0;
+    await _pump(
+      tester,
+      onTerms: () => terms++,
+      onPrivacy: () => privacy++,
+    );
+
+    await tester.ensureVisible(find.text('Terms'));
+    await tester.tap(find.text('Terms'));
+    await tester.ensureVisible(find.text('Privacy Policy'));
+    await tester.tap(find.text('Privacy Policy'));
+    await tester.pump();
+
+    expect(terms, 1);
+    expect(privacy, 1);
+  });
+
+  testWidgets('unwired legal labels are plain text, not dead links', (
+    tester,
+  ) async {
+    await _pump(tester);
+
+    final terms = tester.widget<Text>(find.text('Terms'));
+    expect(terms.style?.decoration, isNot(TextDecoration.underline));
   });
 
   testWidgets('narrow phone at 200% text does not overflow in light', (
@@ -479,21 +541,16 @@ void main() {
       expect(find.text('Welcome back'), findsOneWidget);
     });
 
-    testWidgets('legacy host with only onPhone still owns its OTP flow', (
-      tester,
-    ) async {
+    testWidgets('a host-owned OTP flow is opened in one tap', (tester) async {
       var legacyTaps = 0;
       await _pump(tester, onPhone: () => legacyTaps++);
 
-      await openSheet(tester);
-      await tester.enterText(
-        find.byKey(const Key('phone-auth-phone')),
-        '98765 43210',
-      );
-      await tester.pump();
-      await tester.tap(find.byKey(const Key('phone-auth-send')));
+      await tester.ensureVisible(find.byKey(const Key('sign-in-phone')));
+      await tester.tap(find.byKey(const Key('sign-in-phone')));
       await tester.pumpAndSettle();
 
+      // The page does not ask for the number and then hand over to a second
+      // flow that asks again.
       expect(legacyTaps, 1);
       expect(find.byType(V2PhoneAuthSheet), findsNothing);
     });

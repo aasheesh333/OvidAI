@@ -67,7 +67,10 @@ class OColors extends ThemeExtension<OColors> {
     accentFill: Color(0xFF6A45E8),
     onAccent: Color(0xFFFFFFFF),
     accentSoft: Color(0x146A45E8),
-    success: Color(0xFF0E9F6E),
+    // Deepened from #0E9F6E: the emerald only reached 2.95:1 as pill text on
+    // its own 12 % tint and 2.83:1 on surfaceRaised, both under the 3:1
+    // non-text/large-text floor. #0B8457 is 4.02:1 / 3.94:1 on the same pairs.
+    success: Color(0xFF0B8457),
     warn: Color(0xFFB45309),
     danger: Color(0xFFD92D20),
     onDanger: Color(0xFFFFFFFF),
@@ -87,9 +90,12 @@ class OColors extends ThemeExtension<OColors> {
     textFaint: Color(0xFF6B7280),
     codeBg: Color(0xFF0B0B0E),
     accent: Color(0xFFCABEFF),
-    accentFill: Color(0xFF7C5CFF),
+    // Deepened from #7C5CFF: white on the dark violet fill measured 4.35:1,
+    // under the 4.5:1 body gate that every primary button label needs.
+    // #7857FA measures 4.62:1 and keeps the Stitch hue.
+    accentFill: Color(0xFF7857FA),
     onAccent: Color(0xFFFFFFFF),
-    accentSoft: Color(0x1F7C5CFF),
+    accentSoft: Color(0x1F7857FA),
     success: Color(0xFF34D399),
     warn: Color(0xFFFBBF24),
     danger: Color(0xFFF87171),
@@ -180,20 +186,42 @@ class OColors extends ThemeExtension<OColors> {
 }
 
 /// Four-point spacing scale. Every gap in the app comes from here.
+///
+/// The four-point values ([xs] and up) are layout gaps. The named component
+/// metrics below them are the few sub-4 dp / odd values that are not gaps but
+/// fixed optical measurements (a title/meta stack, an icon-to-label gap, the
+/// padding inside a pill). They live here so no screen needs a bare literal.
 abstract final class OSpace {
+  /// 2 dp — the hairline stack between a title and its meta line, and between
+  /// a label and its value. A leading nudge, not a gap.
+  static const xxs = 2.0;
   static const xs = 4.0;
+  /// 6 dp — icon-to-label gap inside pills, chips and inline metadata.
+  static const iconGap = 6.0;
   static const s = 8.0;
+  /// 10 dp — horizontal padding inside a pill.
+  static const pillPad = 10.0;
   static const m = 12.0;
+  /// 14 dp — padding inside a compact control: a chip's horizontal inset, a
+  /// text field's vertical inset, a tag's horizontal inset.
+  static const controlPad = 14.0;
   static const l = 16.0;
+  /// 20 dp — horizontal padding inside a button.
+  static const buttonPad = 20.0;
   static const xl = 24.0;
   static const xxl = 32.0;
   static const huge = 48.0;
   static const screen = 24.0;
   static const listRow = 56.0;
   static const touch = 48.0;
+  /// 36 dp — leading icon tile inside a list row.
+  static const iconTile = 36.0;
 }
 
 abstract final class ORadius {
+  /// 4 dp — 8 dp-tall bars, thumbnails and mini fills. A 4-6 dp bar that
+  /// should read as a stadium uses [pill], never a bare `2`.
+  static const xs = 4.0;
   static const s = 8.0;
   static const m = 12.0;
   static const l = 16.0;
@@ -250,6 +278,16 @@ abstract final class OType {
     height: 1.45,
     fontWeight: FontWeight.w400,
   );
+
+  /// The 14 sp semibold rung. Screens had been reaching for
+  /// `bodySm.copyWith(fontWeight: FontWeight.w600)` in 140 places; the scale
+  /// was missing this step, not the call sites.
+  static const bodySmStrong = TextStyle(
+    fontFamily: _family,
+    fontSize: 14,
+    height: 1.45,
+    fontWeight: FontWeight.w600,
+  );
   static const label = TextStyle(
     fontFamily: _family,
     fontSize: 14,
@@ -286,6 +324,7 @@ abstract final class OType {
     body,
     bodyStrong,
     bodySm,
+    bodySmStrong,
     label,
     caption,
     overline,
@@ -312,6 +351,13 @@ abstract final class OMotion {
   static const stagger = Duration(milliseconds: 32);
 }
 
+/// Elevation is reserved for surfaces that genuinely float over the page.
+///
+/// The system is flat: cards, rows and sheets use a hairline border and a
+/// surface step, never a shadow. [floating] and [sheet] are for popovers,
+/// menus and frames that overlap content; [glow] is a decorative violet halo
+/// inherited from the Stitch references and should not be used for new work
+/// (the browser viewport's take-control badge is its only remaining caller).
 abstract final class OShadow {
   static const floating = <BoxShadow>[
     BoxShadow(color: Color(0x73000000), blurRadius: 24, offset: Offset(0, 8)),

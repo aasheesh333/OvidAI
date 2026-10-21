@@ -146,7 +146,7 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('Changes'), findsOneWidget);
-    expect(find.text('Sync latest first'), findsOneWidget);
+    expect(find.text('Behind remote'), findsOneWidget);
   });
 
   testWidgets('loading state shows skeletons', (tester) async {
@@ -199,7 +199,9 @@ void main() {
   testWidgets('commit stays disabled until a message is typed', (tester) async {
     final handle = tester.ensureSemantics();
 
-    await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
+    await tester.pumpWidget(
+      _app(V2ChangesPage(data: _data, onCommit: (_) {})),
+    );
     await tester.pumpAndSettle();
     await _openCommitSheet(tester);
 
@@ -214,6 +216,61 @@ void main() {
     expect(
       tester.getSemantics(find.byKey(_submitKey)),
       isSemantics(isButton: true, isEnabled: true),
+    );
+    handle.dispose();
+  });
+
+  testWidgets('a file without hunks is not expandable and says so', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('v2-diff-unavailable-app.js')),
+      findsOneWidget,
+    );
+    expect(find.text('No diff available'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('app.js'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('app.js'));
+    await tester.pumpAndSettle();
+
+    // No chevron means no empty diff body appears.
+    expect(find.text('No diff available'), findsOneWidget);
+  });
+
+  testWidgets('the diff shows the real before and after lines', (tester) async {
+    await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('<h1 class="hero-title">Old Platform Title</h1>'),
+      findsOneWidget,
+    );
+    expect(find.text('<h1 class="hero-title">Ovid Si</h1>'), findsOneWidget);
+  });
+
+  testWidgets('an unwired commit can be reviewed but never submitted', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+
+    await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
+    await tester.pumpAndSettle();
+    await _openCommitSheet(tester);
+
+    await tester.enterText(find.byKey(_messageKey), 'fix: hero typography');
+    await tester.pump();
+
+    expect(
+      tester.getSemantics(find.byKey(_submitKey)),
+      isSemantics(isButton: true, isEnabled: false),
+    );
+    expect(
+      find.textContaining('committing is not available yet'),
+      findsNothing,
     );
     handle.dispose();
   });

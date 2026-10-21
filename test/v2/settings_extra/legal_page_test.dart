@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
@@ -210,15 +211,30 @@ void main() {
     expect(copies, 1);
   });
 
-  testWidgets('copy action is announced as disabled when unwired', (
-    tester,
-  ) async {
-    final handle = tester.ensureSemantics();
+  testWidgets('copy action copies the document when unwired', (tester) async {
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+          calls.add(call);
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+
     await _pump(tester, _data());
 
-    final node = tester.getSemantics(find.bySemanticsLabel('Copy document'));
-    expect(node, isSemantics(hasEnabledState: true, isEnabled: false));
-    handle.dispose();
+    await tester.tap(find.byTooltip('Copy document'));
+    await tester.pumpAndSettle();
+
+    final setData = calls.firstWhere((c) => c.method == 'Clipboard.setData');
+    final text = (setData.arguments as Map)['text'] as String;
+    expect(text, contains('Privacy policy'));
+    expect(text, contains('Last updated 12 March 2026'));
+    expect(text, contains('What we collect'));
+    expect(text, contains('Session messages and attached files'));
+    expect(find.text('Document copied.'), findsOneWidget);
   });
 
   testWidgets('copy action stays disabled while the document is loading', (

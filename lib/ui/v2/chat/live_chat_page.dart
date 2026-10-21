@@ -1,16 +1,23 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import '../a11y/live_region.dart';
 import 'composer_attachments.dart';
 import 'composer_mentions.dart';
+import 'composer_plus_sheet.dart';
 import 'composer_voice.dart';
 import 'message_blocks.dart';
 import 'model_chip.dart';
+import 'permission_sheet.dart';
 import 'queue_dock.dart';
+import 'transcript_actions.dart';
+import 'transcript_tiles.dart';
 import 'voice_reply_card.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
@@ -57,12 +64,16 @@ class V2LiveTool extends V2LiveChatItem {
     required this.status,
     required this.progress,
     this.icon = Icons.language_rounded,
+    this.details = const <String>[],
   });
 
   final String title;
   final String status;
   final double progress;
   final IconData icon;
+
+  /// Extra lines revealed when the row is expanded.
+  final List<String> details;
 }
 
 class V2LiveArtifact extends V2LiveChatItem {
@@ -73,6 +84,7 @@ class V2LiveArtifact extends V2LiveChatItem {
     required this.statusLabel,
     required this.previewLabel,
     this.icon = Icons.code_rounded,
+    this.href,
   });
 
   final String fileName;
@@ -80,6 +92,10 @@ class V2LiveArtifact extends V2LiveChatItem {
   final String statusLabel;
   final String previewLabel;
   final IconData icon;
+
+  /// Where the artifact lives. Null hides the download action instead of
+  /// showing one that cannot save anything.
+  final String? href;
 }
 
 /// A spoken answer with the visual summary card that backs it up.
@@ -161,11 +177,14 @@ class V2LiveChatPage extends StatefulWidget {
     this.onOpenLink,
     this.onDownloadLink,
     this.onThinkingToggle,
+    this.onArtifactTap,
     this.onStartChat,
     this.onRetry,
     this.onAttach,
     this.onPlus,
     this.onMic,
+    this.onPermissionTap,
+    this.permissionLabel = 'General',
     this.onDraftChanged,
     this.onSendQueuedNow,
     this.onDismissQueued,
@@ -176,6 +195,7 @@ class V2LiveChatPage extends StatefulWidget {
     this.onVoiceTranscriptToggle,
     this.mentionSource,
     this.attachmentPicker,
+    this.imagePicker,
     this.voiceService,
     this.voiceLanguage,
   });
@@ -200,6 +220,11 @@ class V2LiveChatPage extends StatefulWidget {
   final ValueChanged<String>? onDownloadLink;
 
   final void Function(String id, bool expanded)? onThinkingToggle;
+
+  /// Open an artifact's detail. Null falls back to the local detail route with
+  /// the transcript's own metadata.
+  final ValueChanged<String>? onArtifactTap;
+
   final VoidCallback? onStartChat;
   final VoidCallback? onRetry;
   final VoidCallback? onAttach;
@@ -209,6 +234,14 @@ class V2LiveChatPage extends StatefulWidget {
   final VoidCallback? onPlus;
 
   final VoidCallback? onMic;
+
+  /// Opens the permission sheet. When null the live composer hides the chip
+  /// rather than showing one that cannot change anything.
+  final VoidCallback? onPermissionTap;
+
+  /// The mode in force for this chat (`General` by default).
+  final String permissionLabel;
+
   final ValueChanged<String>? onDraftChanged;
 
   /// Send the queued message immediately by cancelling the active run. This
@@ -242,6 +275,9 @@ class V2LiveChatPage extends StatefulWidget {
   /// selection (legacy wiring).
   final V2AttachmentPicker? attachmentPicker;
 
+  /// Image-only picker for the plus menu's Photo row.
+  final V2ImagePicker? imagePicker;
+
   /// Voice seam. When set (or when [onMic] is null) the composer owns
   /// dictation; otherwise [onMic] keeps the host in control.
   final V2VoiceService? voiceService;
@@ -258,6 +294,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   late final TextEditingController _controller;
   late final V2VoiceDictation _voice;
   final Set<String> _expandedThinking = <String>{};
+  final Set<String> _expandedTools = <String>{};
   final Set<String> _expandedTranscripts = <String>{};
 
   final List<V2ComposerAttachment> _attachments = [];
@@ -269,6 +306,11 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   String _lastDraft = '';
   String? _attachmentError;
   bool _syncingDraft = false;
+
+  /// Last asynchronous result, announced through a live region. Cleared after
+  /// two seconds so the same result can be announced again.
+  String _announcement = '';
+  Timer? _announcementTimer;
 
   @override
   void initState() {
@@ -289,6 +331,12 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   @override
   void didUpdateWidget(V2LiveChatPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.data.queuedCount > oldWidget.data.queuedCount) {
+      _announce('Message queued');
+    }
+    if (oldWidget.data.running && !widget.data.running) {
+      _announce('Run finished');
+    }
     if (widget.data.draft != oldWidget.data.draft &&
         widget.data.draft != _controller.text) {
       _syncingDraft = true;
@@ -304,6 +352,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
 
   @override
   void dispose() {
+    _announcementTimer?.cancel();
     if (_voice.listening) unawaited(_voice.cancel());
     _voice
       ..removeListener(_handleVoiceChanged)
@@ -319,13 +368,32 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
 
   void _handleControllerChanged() {
     if (_syncingDraft) return;
-    _refreshMentions();
     final text = _controller.text;
     if (text != _lastDraft) {
       _lastDraft = text;
       widget.onDraftChanged?.call(text);
     }
-    if (mounted) setState(() {});
+    final hadMention = _mention != null;
+    final previous = _mentionCandidates;
+    _refreshMentions();
+    // Typing must not rebuild the transcript. The composer listens to the
+    // controller for its send state, so only the mention overlay (which lives
+    // above the transcript) needs a page build.
+    final mentionChanged =
+        (_mention != null) != hadMention ||
+        !_sameCandidates(previous, _mentionCandidates);
+    if (mounted && mentionChanged) setState(() {});
+  }
+
+  static bool _sameCandidates(
+    List<V2MentionCandidate> a,
+    List<V2MentionCandidate> b,
+  ) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].id != b[i].id) return false;
+    }
+    return true;
   }
 
   void _refreshMentions() {
@@ -384,14 +452,39 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
       widget.onPlus!();
       return;
     }
-    final picker = widget.attachmentPicker;
-    if (picker == null && widget.onAttach != null) {
+    await _openPlusMenu();
+  }
+
+  /// The composer-owned "+" menu. File and Photo stage real files; the Studio
+  /// row opens Studio when the host wired it; Camera is disabled with an
+  /// honest reason; Connectors is omitted because this page has no route.
+  Future<void> _openPlusMenu() async {
+    if (!mounted) return;
+    await showV2ComposerPlusSheet(
+      context,
+      data: const V2ComposerPlusData(
+        cameraAvailable: false,
+        cameraUnavailableReason: V2ComposerPlusSheet.cameraBuildReason,
+        showConnectors: false,
+      ),
+      onPhoto: () => unawaited(_pickAttachments(images: true)),
+      onFile: () => unawaited(_pickAttachments(images: false)),
+      onOpenStudio: widget.onStudio,
+    );
+  }
+
+  Future<void> _pickAttachments({required bool images}) async {
+    if (widget.data.running) return;
+    if (!images && widget.attachmentPicker == null && widget.onAttach != null) {
       widget.onAttach!();
       return;
     }
+    final picker = images
+        ? (widget.imagePicker ?? pickV2ImageFiles)
+        : (widget.attachmentPicker ?? pickV2AttachmentFiles);
     List<V2ComposerAttachment>? picked;
     try {
-      picked = await (picker ?? pickV2AttachmentFiles)();
+      picked = await picker();
     } catch (_) {
       if (mounted) {
         setState(() {
@@ -428,6 +521,15 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     await _voice.toggle(_controller.text);
   }
 
+  void _announce(String message) {
+    if (!mounted) return;
+    _announcementTimer?.cancel();
+    setState(() => _announcement = message);
+    _announcementTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _announcement = '');
+    });
+  }
+
   void _send() {
     final text = _controller.text.trim();
     if (text.isEmpty && _attachments.isEmpty) return;
@@ -452,6 +554,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
       widget.onSend?.call(text);
     }
     _clearComposer();
+    _announce('Message sent');
   }
 
   void _clearComposer() {
@@ -483,6 +586,12 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     widget.onThinkingToggle?.call(item.id, expanded);
   }
 
+  void _toggleTool(V2LiveTool item) {
+    setState(() {
+      if (!_expandedTools.remove(item.id)) _expandedTools.add(item.id);
+    });
+  }
+
   void _toggleTranscript(V2LiveVoiceReply item, bool expanded) {
     setState(() {
       if (expanded) {
@@ -493,6 +602,34 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     });
     widget.onVoiceTranscriptToggle?.call(item.id, expanded);
   }
+
+  /// Opens a link from the transcript. The host callback wins; without one the
+  /// URL opens in the platform browser, so a link row is never a dead tap.
+  Future<void> _openLink(String url) async {
+    final handler = widget.onOpenLink;
+    if (handler != null) {
+      handler(url);
+      return;
+    }
+    // Default: open the real URL with feedback and scheme validation.
+    await v2OpenTranscriptLink(context, url);
+  }
+
+  /// Downloads (or, without a host downloader, saves) a transcript link.
+  Future<void> _downloadLink(String url) async {
+    final handler = widget.onDownloadLink;
+    if (handler != null) {
+      handler(url);
+      return;
+    }
+    // Default: fetch and write a real file, then confirm the saved name.
+    await v2SaveTranscriptLink(context, url);
+  }
+
+  // Method tear-offs: stable callbacks instead of a fresh closure per row on
+  // every build.
+  void _handleOpenLink(String url) => unawaited(_openLink(url));
+  void _handleDownloadLink(String url) => unawaited(_downloadLink(url));
 
   @override
   Widget build(BuildContext context) {
@@ -550,11 +687,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
                     _LiveComposer(
                       data: data,
                       controller: _controller,
-                      canSend:
-                          !data.running &&
-                          (_controller.text.trim().isNotEmpty ||
-                              (widget.onSubmit != null &&
-                                  _attachments.isNotEmpty)),
+                      onSubmitEnabled: widget.onSubmit != null,
                       attachments: _attachments,
                       attachmentError: _attachmentError,
                       voiceError: _voice.error,
@@ -563,9 +696,11 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
                       onSend: _send,
                       onStop: widget.onStop,
                       onAttach: _attach,
-                      onPlus: widget.onPlus,
                       onMic: _toggleVoice,
+                      onPermissionTap: widget.onPermissionTap,
+                      permissionLabel: widget.permissionLabel,
                     ),
+                    OLiveRegion(message: _announcement),
                   ],
                 ),
               ),
@@ -595,33 +730,33 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     }
 
     final items = data.items;
+    // Lazy list: a 5,000-message session builds only the rows in (and just
+    // around) the viewport instead of the whole transcript every frame.
     final firstCount = items.length < 8 ? items.length : 8;
-    return SingleChildScrollView(
+    return ListView.builder(
+      key: const ValueKey<String>('v2-live-transcript'),
       padding: const EdgeInsets.fromLTRB(
         OSpace.l,
         OSpace.m,
         OSpace.l,
         OSpace.l,
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OStagger(
-            children: [
-              for (var i = 0; i < firstCount; i++)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: OSpace.l),
-                  child: _buildItem(context, i, items[i]),
-                ),
-            ],
-          ),
-          for (var i = firstCount; i < items.length; i++)
-            Padding(
-              padding: const EdgeInsets.only(bottom: OSpace.l),
-              child: _buildItem(context, i, items[i]),
-            ),
-        ],
-      ),
+      itemCount: items.length,
+      itemBuilder: (context, index) {
+        final row = Padding(
+          padding: const EdgeInsets.only(bottom: OSpace.l),
+          child: _buildItem(context, index, items[index]),
+        );
+        if (index >= firstCount) return row;
+        // Keep the short entrance stagger for the first screenful only.
+        final delay = OMotion.stagger * index;
+        return OFadeSlide(
+          delay: delay > const Duration(milliseconds: 400)
+              ? const Duration(milliseconds: 400)
+              : delay,
+          child: row,
+        );
+      },
     );
   }
 
@@ -635,25 +770,62 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
         child: _AssistantBubble(
           item: message,
           onCopyCode: widget.onCopyCode,
-          onOpenLink: widget.onOpenLink,
-          onDownloadLink: widget.onDownloadLink,
+          onOpenLink: _handleOpenLink,
+          onDownloadLink: _handleDownloadLink,
         ),
       ),
       V2LiveThinking message => _AssistantFrame(
         showAvatar: showAvatar,
-        child: _ThinkingRow(
-          item: message,
+        child: V2ThinkingTile(
+          key: ValueKey('thinking-${message.id}'),
+          label: message.label,
+          details: message.details,
           expanded: _expandedThinking.contains(message.id),
-          onTap: () => _toggleThinking(message),
+          onToggle: () => _toggleThinking(message),
         ),
       ),
       V2LiveTool message => _AssistantFrame(
         showAvatar: showAvatar,
-        child: _ToolCard(item: message),
+        child: V2ToolTile(
+          key: ValueKey('tool-${message.id}'),
+          title: message.title,
+          status: message.status,
+          progress: message.progress,
+          icon: message.icon,
+          details: message.details,
+          expanded: _expandedTools.contains(message.id),
+          onToggle: () => _toggleTool(message),
+        ),
       ),
       V2LiveArtifact message => _AssistantFrame(
         showAvatar: showAvatar,
-        child: _ArtifactCard(item: message, onDownload: widget.onDownload),
+        child: V2ArtifactTile(
+          key: ValueKey('artifact-${message.id}'),
+          fileName: message.fileName,
+          meta: message.meta,
+          statusLabel: message.statusLabel,
+          previewLabel: message.previewLabel,
+          icon: message.icon,
+          onOpen: widget.onArtifactTap != null
+              ? () => widget.onArtifactTap!(message.id)
+              : () => openV2ArtifactDetail(
+                  context,
+                  fileName: message.fileName,
+                  meta: message.meta,
+                  statusLabel: message.statusLabel,
+                  previewLabel: message.previewLabel,
+                  icon: message.icon,
+                ),
+          onDownload: widget.onDownload != null
+              ? () => widget.onDownload!(message.id)
+              : message.href == null
+              ? null
+              : () => startV2ArtifactDownload(
+                  context,
+                  message.href!,
+                  suggestedName: message.fileName,
+                ),
+        ),
       ),
       V2LiveVoiceReply message => _AssistantFrame(
         showAvatar: showAvatar,
@@ -710,7 +882,11 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return AppBar(
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
+      sortKey: OrdinalSortKey(0),
+      child: AppBar(
       automaticallyImplyLeading: false,
       titleSpacing: 0,
       leadingWidth: OSpace.touch,
@@ -738,11 +914,15 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.h3.copyWith(color: c.text),
+                Semantics(
+                  container: true,
+                  header: true,
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: OType.h3.copyWith(color: c.text),
+                  ),
                 ),
                 Text(
                   subtitle,
@@ -776,6 +956,7 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
       bottom: PreferredSize(
         preferredSize: const Size.fromHeight(1),
         child: Divider(height: 1, color: c.hairline),
+      ),
       ),
     );
   }
@@ -900,266 +1081,11 @@ class _AssistantBubble extends StatelessWidget {
   }
 }
 
-class _ThinkingRow extends StatelessWidget {
-  const _ThinkingRow({
-    required this.item,
-    required this.expanded,
-    required this.onTap,
-  });
-
-  final V2LiveThinking item;
-  final bool expanded;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Material(
-      color: c.surfaceAlt,
-      borderRadius: BorderRadius.circular(ORadius.m),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(ORadius.m),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: OSpace.touch),
-          child: Padding(
-            padding: const EdgeInsets.all(OSpace.m),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.psychology_rounded, size: 18, color: c.accent),
-                    const SizedBox(width: OSpace.s),
-                    Expanded(
-                      child: Text(
-                        item.label,
-                        style: OType.caption.copyWith(
-                          color: c.textMuted,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                    AnimatedRotation(
-                      turns: expanded ? 0.25 : 0,
-                      duration: OMotion.fast,
-                      child: Icon(
-                        Icons.chevron_right_rounded,
-                        size: 18,
-                        color: c.textFaint,
-                      ),
-                    ),
-                  ],
-                ),
-                if (expanded) ...[
-                  const SizedBox(height: OSpace.s),
-                  for (final detail in item.details)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Text(
-                        detail,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ),
-                ],
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ToolCard extends StatelessWidget {
-  const _ToolCard({required this.item});
-
-  final V2LiveTool item;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(ORadius.l),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Column(
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 30,
-                height: 30,
-                decoration: BoxDecoration(
-                  color: c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(ORadius.s),
-                ),
-                child: Icon(item.icon, size: 17, color: c.success),
-              ),
-              const SizedBox(width: OSpace.s),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      item.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.bodySm.copyWith(
-                        color: c.text,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Row(
-                      children: [
-                        OPulse(
-                          child: Container(
-                            width: 6,
-                            height: 6,
-                            decoration: BoxDecoration(
-                              color: c.success,
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            item.status,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: OType.caption.copyWith(color: c.success),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.m),
-          OProgressBar(value: item.progress),
-        ],
-      ),
-    );
-  }
-}
-
-class _ArtifactCard extends StatelessWidget {
-  const _ArtifactCard({required this.item, required this.onDownload});
-
-  final V2LiveArtifact item;
-  final ValueChanged<String>? onDownload;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(ORadius.l),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(OSpace.m),
-            color: c.surfaceAlt,
-            child: Row(
-              children: [
-                Container(
-                  width: 32,
-                  height: 32,
-                  decoration: BoxDecoration(
-                    color: c.accentSoft,
-                    borderRadius: BorderRadius.circular(ORadius.s),
-                  ),
-                  child: Icon(item.icon, size: 17, color: c.accent),
-                ),
-                const SizedBox(width: OSpace.s),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        item.fileName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.bodySm.copyWith(
-                          color: c.text,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      Text(
-                        item.meta,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: OSpace.s),
-                OPill(
-                  label: item.statusLabel,
-                  tone: OPillTone.success,
-                  dot: true,
-                ),
-              ],
-            ),
-          ),
-          Container(
-            height: 148,
-            color: c.codeBg,
-            alignment: Alignment.center,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(item.icon, size: 34, color: c.accent),
-                const SizedBox(height: OSpace.s),
-                Text(
-                  item.previewLabel,
-                  textAlign: TextAlign.center,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(OSpace.m),
-            child: Row(
-              children: [
-                Expanded(
-                  child: OButton(
-                    label: 'Download',
-                    icon: Icons.download_rounded,
-                    onPressed: onDownload == null
-                        ? null
-                        : () => onDownload!(item.id),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _LiveComposer extends StatelessWidget {
   const _LiveComposer({
     required this.data,
     required this.controller,
-    required this.canSend,
+    required this.onSubmitEnabled,
     required this.attachments,
     required this.attachmentError,
     required this.voiceError,
@@ -1168,13 +1094,16 @@ class _LiveComposer extends StatelessWidget {
     required this.onSend,
     required this.onStop,
     required this.onAttach,
-    required this.onPlus,
     required this.onMic,
+    required this.onPermissionTap,
+    required this.permissionLabel,
   });
 
   final V2LiveChatData data;
   final TextEditingController controller;
-  final bool canSend;
+
+  /// Whether an attachment-only send is allowed (a rich submit handler).
+  final bool onSubmitEnabled;
   final List<V2ComposerAttachment> attachments;
   final String? attachmentError;
   final String? voiceError;
@@ -1183,14 +1112,21 @@ class _LiveComposer extends StatelessWidget {
   final VoidCallback onSend;
   final VoidCallback? onStop;
   final VoidCallback? onAttach;
-  final VoidCallback? onPlus;
   final VoidCallback? onMic;
+  final VoidCallback? onPermissionTap;
+  final String permissionLabel;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final running = data.running;
     final enabled = !running;
+    // Read the controller at press time; the field itself listens to it, so
+    // typing never has to rebuild the page (or the transcript).
+    bool canSendNow() =>
+        !running &&
+        (controller.text.trim().isNotEmpty ||
+            (onSubmitEnabled && attachments.isNotEmpty));
     return Padding(
       padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.s),
       child: Column(
@@ -1258,6 +1194,20 @@ class _LiveComposer extends StatelessWidget {
                     message: voiceError!,
                     icon: Icons.mic_off_rounded,
                   ),
+                if (onPermissionTap != null)
+                  Padding(
+                    padding: const EdgeInsets.only(
+                      left: OSpace.xs,
+                      bottom: OSpace.xs,
+                    ),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: V2PermissionChip(
+                        label: permissionLabel,
+                        onTap: onPermissionTap,
+                      ),
+                    ),
+                  ),
                 Row(
                   children: [
                     OIconButton(
@@ -1271,52 +1221,71 @@ class _LiveComposer extends StatelessWidget {
                       onPressed: enabled ? onMic : null,
                     ),
                     Expanded(
-                      child: TextField(
-                        controller: controller,
-                        enabled: enabled,
-                        minLines: 1,
-                        maxLines: 3,
-                        keyboardType: TextInputType.multiline,
-                        style: OType.bodySm.copyWith(color: c.text),
-                        decoration: InputDecoration(
-                          hintText: running
-                              ? 'Generating components...'
-                              : data.composerHint,
-                          hintStyle: OType.bodySm.copyWith(color: c.textFaint),
-                          filled: false,
-                          isDense: true,
-                          border: InputBorder.none,
-                          enabledBorder: InputBorder.none,
-                          focusedBorder: InputBorder.none,
-                          disabledBorder: InputBorder.none,
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: OSpace.xs,
-                            vertical: 12,
+                      child: CallbackShortcuts(
+                        bindings: {
+                          const SingleActivator(LogicalKeyboardKey.enter): () {
+                            if (canSendNow()) onSend();
+                          },
+                          const SingleActivator(
+                            LogicalKeyboardKey.numpadEnter,
+                          ): () {
+                            if (canSendNow()) onSend();
+                          },
+                        },
+                        child: TextField(
+                          controller: controller,
+                          enabled: enabled,
+                          minLines: 1,
+                          maxLines: 3,
+                          keyboardType: TextInputType.multiline,
+                          textInputAction: TextInputAction.newline,
+                          style: OType.bodySm.copyWith(color: c.text),
+                          decoration: InputDecoration(
+                            hintText: running
+                                ? 'Generating components...'
+                                : data.composerHint,
+                            hintStyle: OType.bodySm.copyWith(color: c.textFaint),
+                            filled: false,
+                            isDense: true,
+                            border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            disabledBorder: InputBorder.none,
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: OSpace.xs,
+                              vertical: 12,
+                            ),
                           ),
                         ),
                       ),
                     ),
                     OIconButton(
-                      icon: onPlus != null
-                          ? Icons.add_rounded
-                          : Icons.attach_file_rounded,
-                      semanticLabel: onPlus != null
-                          ? 'Add attachment or action'
-                          : 'Attach a file',
+                      icon: Icons.add_rounded,
+                      semanticLabel: 'Add attachment or action',
                       onPressed: enabled ? onAttach : null,
                     ),
                     const SizedBox(width: OSpace.xs),
-                    _LiveRoundAction(
-                      icon: running
-                          ? Icons.stop_rounded
-                          : Icons.arrow_upward_rounded,
-                      label: running ? 'Stop' : 'Send',
-                      danger: running,
-                      onPressed: running
-                          ? onStop
-                          : canSend
-                          ? onSend
-                          : null,
+                    // Only this button depends on the draft text.
+                    ValueListenableBuilder<TextEditingValue>(
+                      valueListenable: controller,
+                      builder: (context, value, _) {
+                        final canSend =
+                            !running &&
+                            (value.text.trim().isNotEmpty ||
+                                (onSubmitEnabled && attachments.isNotEmpty));
+                        return _LiveRoundAction(
+                          icon: running
+                              ? Icons.stop_rounded
+                              : Icons.arrow_upward_rounded,
+                          label: running ? 'Stop' : 'Send',
+                          danger: running,
+                          onPressed: running
+                              ? onStop
+                              : canSend
+                              ? onSend
+                              : null,
+                        );
+                      },
                     ),
                   ],
                 ),

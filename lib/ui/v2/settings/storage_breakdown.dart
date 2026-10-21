@@ -19,7 +19,11 @@ enum V2StorageCategory {
   uploads('Uploads'),
   memory('Memory'),
   cache('Cache'),
-  previews('Previews');
+  previews('Previews'),
+
+  /// Fills the gap when the caller's buckets do not add up to the used total.
+  /// Without it the legend would sum to less than the number above it.
+  other('Other');
 
   const V2StorageCategory(this.label);
 
@@ -141,6 +145,50 @@ String _entrySizeLabel(V2StorageCategoryBytes entry) =>
     ? entry.sizeLabel
     : formatStorageBytes(entry.safeBytes);
 
+/// Result of making a category list agree with the used total.
+@immutable
+class V2StorageReconciliation {
+  const V2StorageReconciliation({
+    required this.entries,
+    required this.usedBytes,
+  });
+
+  final List<V2StorageCategoryBytes> entries;
+  final int usedBytes;
+
+  int get totalBytes =>
+      entries.fold<int>(0, (sum, entry) => sum + entry.safeBytes);
+
+  bool get addsUp => totalBytes == usedBytes;
+}
+
+/// Makes the breakdown add up to the total shown above it.
+///
+/// A category list is only allowed to under-report: when the caller's buckets
+/// are smaller than [usedBytes] the remainder becomes an explicit "Other"
+/// bucket. When the buckets are larger, the larger sum becomes the used total
+/// so the legend and the heading still describe the same bytes. Either way
+/// [V2StorageReconciliation.addsUp] is true for the returned pair.
+V2StorageReconciliation reconcileStorageBreakdown(
+  List<V2StorageCategoryBytes> entries,
+  int usedBytes,
+) {
+  final sum = entries.fold<int>(0, (total, entry) => total + entry.safeBytes);
+  if (usedBytes <= sum) {
+    return V2StorageReconciliation(entries: entries, usedBytes: sum);
+  }
+  return V2StorageReconciliation(
+    entries: [
+      ...entries,
+      V2StorageCategoryBytes(
+        category: V2StorageCategory.other,
+        bytes: usedBytes - sum,
+      ),
+    ],
+    usedBytes: usedBytes,
+  );
+}
+
 /// Splits bytes into whole percentages that always add up to 100.
 ///
 /// Uses the largest-remainder method so a breakdown never shows 33 / 33 / 33
@@ -216,7 +264,16 @@ class StorageBreakdown extends StatelessWidget {
   int get _entryBytes =>
       data.entries.fold<int>(0, (sum, entry) => sum + entry.safeBytes);
 
-  int get _usedBytes => data.usedBytes > 0 ? data.usedBytes : _entryBytes;
+  /// The category list and used total as one consistent pair. This is what
+  /// keeps the donut, the centre number and the legend adding up.
+  V2StorageReconciliation get _reconciled => reconcileStorageBreakdown(
+    data.entries,
+    data.usedBytes > 0 ? data.usedBytes : _entryBytes,
+  );
+
+  List<V2StorageCategoryBytes> get _entries => _reconciled.entries;
+
+  int get _usedBytes => _reconciled.usedBytes;
 
   Widget _empty() {
     return OEmptyState(
@@ -236,21 +293,23 @@ class StorageBreakdown extends StatelessWidget {
 
   Widget _content(BuildContext context) {
     final c = OColors.of(context);
+    final entries = _entries;
+    final used = _usedBytes;
     final amount = data.amountLabel.isNotEmpty
         ? data.amountLabel
-        : formatStorageBytes(_usedBytes);
+        : formatStorageBytes(used);
     final total = data.totalLabel.isNotEmpty
         ? data.totalLabel
         : (data.totalBytes > 0 ? formatStorageBytes(data.totalBytes) : '');
     final percentages = storagePercentageSplit([
-      for (final entry in data.entries) entry.safeBytes,
+      for (final entry in entries) entry.safeBytes,
     ]);
     final selectedIndex = data.selectedCategory == null
         ? -1
-        : data.entries.indexWhere(
+        : entries.indexWhere(
             (entry) => entry.category == data.selectedCategory,
           );
-    final selected = selectedIndex < 0 ? null : data.entries[selectedIndex];
+    final selected = selectedIndex < 0 ? null : entries[selectedIndex];
     final selectedPercent = selected == null
         ? null
         : percentages[selectedIndex];
@@ -278,9 +337,9 @@ class StorageBreakdown extends StatelessWidget {
                 child: _Donut(
                   fraction: data.totalBytes <= 0
                       ? 1
-                      : (_usedBytes / data.totalBytes).clamp(0, 1).toDouble(),
+                      : (used / data.totalBytes).clamp(0, 1).toDouble(),
                   slices: [
-                    for (final entry in data.entries)
+                    for (final entry in entries)
                       _DonutSlice(
                         value: entry.safeBytes.toDouble(),
                         color: _categoryColor(c, entry.category).withValues(
@@ -295,6 +354,7 @@ class StorageBreakdown extends StatelessWidget {
                   centerLabel: centerLabel,
                   centerCaption: centerCaption,
                   semanticLabel: _chartSemantics(
+                    entries: entries,
                     amount: amount,
                     total: total,
                     percentages: percentages,
@@ -305,7 +365,7 @@ class StorageBreakdown extends StatelessWidget {
               ),
             ),
             Divider(height: 1, color: c.hairline),
-            if (data.entries.isEmpty)
+            if (entries.isEmpty)
               Padding(
                 padding: const EdgeInsets.all(OSpace.l),
                 child: Text(
@@ -314,19 +374,17 @@ class StorageBreakdown extends StatelessWidget {
                 ),
               )
             else
-              for (var i = 0; i < data.entries.length; i++) ...[
+              for (var i = 0; i < entries.length; i++) ...[
                 if (i > 0) Divider(height: 1, color: c.hairline),
                 _LegendRow(
-                  entry: data.entries[i],
+                  entry: entries[i],
                   percentage: percentages[i],
-                  fraction: _usedBytes <= 0
-                      ? 0
-                      : data.entries[i].safeBytes / _usedBytes,
-                  color: _categoryColor(c, data.entries[i].category),
-                  selected: data.entries[i].category == data.selectedCategory,
+                  fraction: used <= 0 ? 0 : entries[i].safeBytes / used,
+                  color: _categoryColor(c, entries[i].category),
+                  selected: entries[i].category == data.selectedCategory,
                   onTap: data.onCategoryTap == null
                       ? null
-                      : () => data.onCategoryTap!(data.entries[i].category),
+                      : () => data.onCategoryTap!(entries[i].category),
                 ),
               ],
           ],
@@ -336,6 +394,7 @@ class StorageBreakdown extends StatelessWidget {
   }
 
   String _chartSemantics({
+    required List<V2StorageCategoryBytes> entries,
     required String amount,
     required String total,
     required List<int> percentages,
@@ -344,8 +403,8 @@ class StorageBreakdown extends StatelessWidget {
   }) {
     final buffer = StringBuffer('Storage: $amount');
     buffer.write(total.isEmpty ? ' used' : ' used of $total');
-    for (var i = 0; i < data.entries.length; i++) {
-      final entry = data.entries[i];
+    for (var i = 0; i < entries.length; i++) {
+      final entry = entries[i];
       buffer.write(
         '. ${entry.category.label} ${_entrySizeLabel(entry)}, '
         '${percentages[i]}%',
@@ -372,6 +431,7 @@ Color _categoryColor(OColors c, V2StorageCategory category) {
     V2StorageCategory.memory => c.success,
     V2StorageCategory.cache => c.textFaint,
     V2StorageCategory.previews => Color.lerp(c.warn, c.danger, 0.45) ?? c.warn,
+    V2StorageCategory.other => c.hairlineStrong,
   };
 }
 

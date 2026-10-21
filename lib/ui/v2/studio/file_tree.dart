@@ -53,6 +53,11 @@ class V2FileTreeEntry {
   /// Stable identity for expansion and test keys.
   String get id => path ?? name;
 
+  /// Only a folder that actually has children can be expanded. An empty folder
+  /// (or a folder whose children have not arrived) must not show a chevron,
+  /// because tapping it would reveal nothing.
+  bool get canExpand => isFolder && children.isNotEmpty;
+
   bool get isChanged => change != null;
 
   /// Lower-case extension without the leading dot, or an empty string.
@@ -224,6 +229,10 @@ class _V2FileTreeState extends State<V2FileTree> {
     FocusManager.instance.primaryFocus?.unfocus();
     if (!entry.isFolder) {
       widget.onSelectFile?.call(entry.path ?? entry.name);
+      return;
+    }
+    if (!entry.canExpand) {
+      // An empty folder has nothing to reveal; the row is not interactive.
       return;
     }
     if (searching) {
@@ -405,7 +414,7 @@ class _V2FileTreeState extends State<V2FileTree> {
     final rows = <_TreeRowData>[];
     void walk(V2FileTreeEntry entry, int depth) {
       final expanded =
-          entry.isFolder && (forceExpanded || _expanded.contains(entry.id));
+          entry.canExpand && (forceExpanded || _expanded.contains(entry.id));
       rows.add(
         _TreeRowData(
           entry: entry,
@@ -439,7 +448,9 @@ class _V2FileTreeState extends State<V2FileTree> {
           fileCount: row.fileCount,
           changedCount: row.changedCount,
           searching: searching,
-          interactive: row.entry.isFolder || widget.onSelectFile != null,
+          interactive:
+              row.entry.canExpand ||
+              (!row.entry.isFolder && widget.onSelectFile != null),
           onTap: () => _activate(row.entry, searching: searching),
         ),
     ];
@@ -507,8 +518,9 @@ class _FileTreeRow extends StatelessWidget {
           children: [
             SizedBox(
               width: 20,
-              child: entry.isFolder
+              child: entry.canExpand
                   ? AnimatedRotation(
+                      key: Key('v2-file-tree-expander-${entry.id}'),
                       turns: expanded ? 0.25 : 0,
                       duration: OMove.duration(context, OMotion.fast),
                       child: Icon(
@@ -552,13 +564,13 @@ class _FileTreeRow extends StatelessWidget {
     return Semantics(
       container: true,
       label: _semanticLabel(language),
-      hint: entry.isFolder && searching
+      hint: entry.canExpand && searching
           ? 'Clears the search and shows this folder in the tree'
           : null,
       button: interactive,
       enabled: interactive ? true : null,
       selected: entry.isFolder ? null : selected,
-      expanded: entry.isFolder ? expanded : null,
+      expanded: entry.canExpand ? expanded : null,
       onTap: interactive ? onTap : null,
       child: ExcludeSemantics(
         child: Material(
@@ -577,6 +589,7 @@ class _FileTreeRow extends StatelessWidget {
     if (entry.isFolder) {
       final files = fileCount == 1 ? '1 file' : '$fileCount files';
       final changed = changedCount > 0 ? ', $changedCount changed' : '';
+      if (!entry.canExpand) return 'Folder ${entry.name}, empty';
       return 'Folder ${entry.name}, $files$changed';
     }
     final change = entry.change;

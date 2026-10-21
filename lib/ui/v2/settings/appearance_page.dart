@@ -159,10 +159,150 @@ class V2AppearancePageData {
 }
 
 /// Theme, memory, reasoning and text settings with a live preview.
-class AppearancePage extends StatelessWidget {
+///
+/// The page owns a local copy of every choice so the control changes on the
+/// same frame it is tapped. The injected callback still performs the real
+/// persistence (`AppState.setThemeMode`, `AppState.setVoiceLanguage`, …); the
+/// local copy is re-synced whenever the parent supplies new data.
+class AppearancePage extends StatefulWidget {
   const AppearancePage({super.key, required this.data});
 
   final V2AppearancePageData data;
+
+  @override
+  State<AppearancePage> createState() => _AppearancePageState();
+}
+
+class _AppearancePageState extends State<AppearancePage> {
+  late ThemeMode _theme = widget.data.themeMode;
+  late String _accentId = widget.data.resolvedAccentId;
+  late double _textScale = widget.data.resolvedTextScale;
+  late bool _reduceMotion = widget.data.reduceMotion;
+  late bool _followsSystem = widget.data.reduceMotionFollowsSystem;
+  late bool _highContrast = widget.data.highContrast;
+  late String _densityId = widget.data.resolvedDensityId;
+  late String _codeFontId = widget.data.resolvedCodeFontId;
+  late String _voiceLanguageId = widget.data.resolvedVoiceLanguageId;
+  late bool _memoryEnabled = widget.data.memoryEnabled;
+  late bool _shareSessionMemory = widget.data.shareSessionMemory;
+  late bool _showReasoning = widget.data.showReasoning;
+
+  V2AppearancePageData get data => widget.data;
+
+  @override
+  void didUpdateWidget(AppearancePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.data == widget.data) return;
+    _theme = widget.data.themeMode;
+    _accentId = widget.data.resolvedAccentId;
+    _textScale = widget.data.resolvedTextScale;
+    _reduceMotion = widget.data.reduceMotion;
+    _followsSystem = widget.data.reduceMotionFollowsSystem;
+    _highContrast = widget.data.highContrast;
+    _densityId = widget.data.resolvedDensityId;
+    _codeFontId = widget.data.resolvedCodeFontId;
+    _voiceLanguageId = widget.data.resolvedVoiceLanguageId;
+    _memoryEnabled = widget.data.memoryEnabled;
+    _shareSessionMemory = widget.data.shareSessionMemory;
+    _showReasoning = widget.data.showReasoning;
+  }
+
+  void _setThemeMode(ThemeMode mode) {
+    final changed = data.onThemeModeChanged;
+    if (changed == null || mode == _theme) return;
+    setState(() => _theme = mode);
+    changed(mode);
+  }
+
+  void _setVoiceLanguage(String id) {
+    final changed = data.onVoiceLanguageChanged;
+    if (changed == null || id == _voiceLanguageId) return;
+    setState(() => _voiceLanguageId = id);
+    changed(id);
+  }
+
+  void _setTextScale(double value) {
+    final changed = data.onTextScaleChanged;
+    if (changed == null) return;
+    setState(() => _textScale = value.clamp(0.75, 1.8).toDouble());
+    changed(value);
+  }
+
+  void _setAccent(String id) {
+    final changed = data.onAccentChanged;
+    if (changed == null || id == _accentId) return;
+    setState(() => _accentId = id);
+    changed(id);
+  }
+
+  void _setDensity(String id) {
+    final changed = data.onDensityChanged;
+    if (changed == null || id == _densityId) return;
+    setState(() => _densityId = id);
+    changed(id);
+  }
+
+  void _setCodeFont(String id) {
+    final changed = data.onCodeFontChanged;
+    if (changed == null || id == _codeFontId) return;
+    setState(() => _codeFontId = id);
+    changed(id);
+  }
+
+  void _setMemoryEnabled(bool value) {
+    final changed = data.onMemoryEnabledChanged;
+    if (changed == null) return;
+    setState(() => _memoryEnabled = value);
+    changed(value);
+  }
+
+  void _setShareSessionMemory(bool value) {
+    final changed = data.onShareSessionMemoryChanged;
+    if (changed == null) return;
+    setState(() => _shareSessionMemory = value);
+    changed(value);
+  }
+
+  void _setShowReasoning(bool value) {
+    final changed = data.onShowReasoningChanged;
+    if (changed == null) return;
+    setState(() => _showReasoning = value);
+    changed(value);
+  }
+
+  void _setFollowsSystem(bool value) {
+    final changed = data.onReduceMotionFollowsSystemChanged;
+    if (changed == null) return;
+    setState(() {
+      _followsSystem = value;
+      if (value) _reduceMotion = true;
+    });
+    changed(value);
+  }
+
+  void _setReduceMotion(bool value) {
+    final changed = data.onReduceMotionChanged;
+    if (changed == null || _followsSystem) return;
+    setState(() => _reduceMotion = value);
+    changed(value);
+  }
+
+  void _setHighContrast(bool value) {
+    final changed = data.onHighContrastChanged;
+    if (changed == null) return;
+    setState(() => _highContrast = value);
+    changed(value);
+  }
+
+  bool get _hasMemoryHandlers =>
+      data.onMemoryEnabledChanged != null ||
+      data.onShareSessionMemoryChanged != null ||
+      data.onMemoryFilesTap != null;
+
+  bool get _hasMotionHandlers =>
+      data.onReduceMotionChanged != null ||
+      data.onReduceMotionFollowsSystemChanged != null ||
+      data.onHighContrastChanged != null;
 
   @override
   Widget build(BuildContext context) {
@@ -190,13 +330,21 @@ class AppearancePage extends StatelessWidget {
         child: OStagger(
           children: [
             _themeMode(context),
-            _accentColor(context),
-            _memory(context),
+            if (data.onAccentChanged != null) _accentColor(context),
+            if (_hasMemoryHandlers) _memory(context),
             _chat(context),
-            _chatLayout(context),
+            if (data.onDensityChanged != null ||
+                data.onCodeFontChanged != null)
+              _chatLayout(context),
             _voiceLanguage(context),
-            _accessibility(context),
-            _livePreview(context),
+            // Motion is platform-driven. Without a persisted user override
+            // there is nothing to toggle, so the page states the real rule
+            // instead of drawing three dead switches.
+            if (_hasMotionHandlers)
+              _accessibility(context)
+            else
+              _motionNote(context),
+            if (data.preview != null) _livePreview(context),
             _deviceNote(context),
           ],
         ),
@@ -239,21 +387,18 @@ class AppearancePage extends StatelessWidget {
 
   Widget _themeCard(BuildContext context, ThemeMode mode, String label) {
     final c = OColors.of(context);
-    final selected = data.themeMode == mode;
+    final selected = _theme == mode;
+    final enabled = data.onThemeModeChanged != null;
     return Expanded(
       child: Semantics(
         label: '$label theme',
         selected: selected,
         button: true,
-        enabled: data.onThemeModeChanged != null,
-        onTap: data.onThemeModeChanged == null
-            ? null
-            : () => data.onThemeModeChanged!(mode),
+        enabled: enabled,
+        onTap: enabled ? () => _setThemeMode(mode) : null,
         child: ExcludeSemantics(
           child: OPressable(
-            onTap: data.onThemeModeChanged == null
-                ? null
-                : () => data.onThemeModeChanged!(mode),
+            onTap: enabled ? () => _setThemeMode(mode) : null,
             child: AnimatedContainer(
               duration: OMotion.fast,
               curve: OMotion.standard,
@@ -379,20 +524,17 @@ class AppearancePage extends StatelessWidget {
     required Color color,
   }) {
     final c = OColors.of(context);
-    final selected = data.resolvedAccentId == id;
+    final selected = _accentId == id;
+    final enabled = data.onAccentChanged != null;
     return Semantics(
       key: ValueKey<String>('accent-$id'),
       label: '$label accent',
       selected: selected,
       button: true,
-      enabled: data.onAccentChanged != null,
-      onTap: data.onAccentChanged == null
-          ? null
-          : () => data.onAccentChanged!(id),
+      enabled: enabled,
+      onTap: enabled ? () => _setAccent(id) : null,
       child: OPressable(
-        onTap: data.onAccentChanged == null
-            ? null
-            : () => data.onAccentChanged!(id),
+        onTap: enabled ? () => _setAccent(id) : null,
         child: Container(
           width: OSpace.touch,
           height: OSpace.touch,
@@ -442,22 +584,26 @@ class AppearancePage extends StatelessWidget {
                 _toggleTile(
                   context,
                   title: 'Global memory',
-                  subtitle: data.memoryEnabled
+                  subtitle: _memoryEnabled
                       ? 'Ovid remembers useful details between chats.'
                       : 'Ovid starts each chat fresh.',
-                  value: data.memoryEnabled,
-                  onChanged: data.onMemoryEnabledChanged,
+                  value: _memoryEnabled,
+                  onChanged: data.onMemoryEnabledChanged == null
+                      ? null
+                      : _setMemoryEnabled,
                   switchKey: const ValueKey<String>('global-memory-switch'),
                 ),
                 Divider(color: c.hairline, height: 1),
                 _toggleTile(
                   context,
                   title: 'Share session memory',
-                  subtitle: data.shareSessionMemory
+                  subtitle: _shareSessionMemory
                       ? 'Projects and shared chats can reuse facts from this chat.'
                       : 'This chat stays private. Its facts are not shared.',
-                  value: data.shareSessionMemory,
-                  onChanged: data.onShareSessionMemoryChanged,
+                  value: _shareSessionMemory,
+                  onChanged: data.onShareSessionMemoryChanged == null
+                      ? null
+                      : _setShareSessionMemory,
                   switchKey: const ValueKey<String>(
                     'share-session-memory-switch',
                   ),
@@ -493,15 +639,19 @@ class AppearancePage extends StatelessWidget {
             padding: EdgeInsets.zero,
             child: Column(
               children: [
-                _toggleTile(
-                  context,
-                  title: 'Show reasoning',
-                  subtitle: 'Show the thinking steps above each answer.',
-                  value: data.showReasoning,
-                  onChanged: data.onShowReasoningChanged,
-                  switchKey: const ValueKey<String>('show-reasoning-switch'),
-                ),
-                Divider(color: c.hairline, height: 1),
+                if (data.onShowReasoningChanged != null) ...[
+                  _toggleTile(
+                    context,
+                    title: 'Show reasoning',
+                    subtitle: 'Show the thinking steps above each answer.',
+                    value: _showReasoning,
+                    onChanged: _setShowReasoning,
+                    switchKey: const ValueKey<String>(
+                      'show-reasoning-switch',
+                    ),
+                  ),
+                  Divider(color: c.hairline, height: 1),
+                ],
                 Padding(
                   padding: const EdgeInsets.all(OSpace.l),
                   child: _textSizeBody(context),
@@ -516,7 +666,7 @@ class AppearancePage extends StatelessWidget {
 
   Widget _textSizeBody(BuildContext context) {
     final c = OColors.of(context);
-    final percent = (data.resolvedTextScale * 100).round();
+    final percent = (_textScale * 100).round();
     final label = percent == 100 ? 'Default (100%)' : '$percent%';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -552,7 +702,7 @@ class AppearancePage extends StatelessWidget {
                 child: SizedBox(
                   height: OSpace.touch,
                   child: Slider(
-                    value: data.resolvedTextScale,
+                    value: _textScale,
                     min: 0.75,
                     max: 1.8,
                     divisions: 21,
@@ -560,7 +710,9 @@ class AppearancePage extends StatelessWidget {
                     activeColor: c.accentFill,
                     inactiveColor: c.surfaceRaised,
                     thumbColor: c.accentFill,
-                    onChanged: data.onTextScaleChanged,
+                    onChanged: data.onTextScaleChanged == null
+                        ? null
+                        : _setTextScale,
                   ),
                 ),
               ),
@@ -611,10 +763,10 @@ class AppearancePage extends StatelessWidget {
                         context,
                         key: ValueKey<String>('density-$id'),
                         label: _densityLabel(id),
-                        selected: data.resolvedDensityId == id,
+                        selected: _densityId == id,
                         onTap: data.onDensityChanged == null
                             ? null
-                            : () => data.onDensityChanged!(id),
+                            : () => _setDensity(id),
                       ),
                   ],
                 ),
@@ -640,10 +792,10 @@ class AppearancePage extends StatelessWidget {
                         context,
                         key: ValueKey<String>('code-font-$id'),
                         label: _codeFontLabel(id),
-                        selected: data.resolvedCodeFontId == id,
+                        selected: _codeFontId == id,
                         onTap: data.onCodeFontChanged == null
                             ? null
-                            : () => data.onCodeFontChanged!(id),
+                            : () => _setCodeFont(id),
                       ),
                   ],
                 ),
@@ -659,7 +811,7 @@ class AppearancePage extends StatelessWidget {
                     'const answer = 42;',
                     style: OType.mono.copyWith(
                       color: c.text,
-                      fontFamily: _codeFontFamily(data.resolvedCodeFontId),
+                      fontFamily: _codeFontFamily(_codeFontId),
                     ),
                   ),
                 ),
@@ -707,14 +859,10 @@ class AppearancePage extends StatelessWidget {
                           'voice-language-${_voiceLanguageIds[i]}',
                         ),
                         label: _voiceLanguageLabels[i],
-                        selected:
-                            data.resolvedVoiceLanguageId ==
-                            _voiceLanguageIds[i],
+                        selected: _voiceLanguageId == _voiceLanguageIds[i],
                         onTap: data.onVoiceLanguageChanged == null
                             ? null
-                            : () => data.onVoiceLanguageChanged!(
-                                _voiceLanguageIds[i],
-                              ),
+                            : () => _setVoiceLanguage(_voiceLanguageIds[i]),
                       ),
                   ],
                 ),
@@ -803,15 +951,15 @@ class AppearancePage extends StatelessWidget {
                 _toggleTile(
                   context,
                   title: 'Reduce motion',
-                  subtitle: data.reduceMotionFollowsSystem
+                  subtitle: _followsSystem
                       ? 'Follows your device setting.'
                       : 'Turns off animations.',
-                  value: data.reduceMotion,
-                  onChanged: data.reduceMotionFollowsSystem
+                  value: _reduceMotion,
+                  onChanged: _followsSystem || data.onReduceMotionChanged == null
                       ? null
-                      : data.onReduceMotionChanged,
+                      : _setReduceMotion,
                   switchKey: const ValueKey<String>('reduce-motion-switch'),
-                  trailing: data.reduceMotionFollowsSystem
+                  trailing: _followsSystem
                       ? const OPill(label: 'Device', tone: OPillTone.accent)
                       : null,
                 ),
@@ -821,8 +969,10 @@ class AppearancePage extends StatelessWidget {
                   title: 'Follow device setting',
                   subtitle:
                       'Use the motion setting from your phone or computer.',
-                  value: data.reduceMotionFollowsSystem,
-                  onChanged: data.onReduceMotionFollowsSystemChanged,
+                  value: _followsSystem,
+                  onChanged: data.onReduceMotionFollowsSystemChanged == null
+                      ? null
+                      : _setFollowsSystem,
                   switchKey: const ValueKey<String>('follow-device-switch'),
                 ),
                 Divider(color: c.hairline, height: 1),
@@ -830,8 +980,10 @@ class AppearancePage extends StatelessWidget {
                   context,
                   title: 'High contrast',
                   subtitle: 'Enhances borders and text contrast.',
-                  value: data.highContrast,
-                  onChanged: data.onHighContrastChanged,
+                  value: _highContrast,
+                  onChanged: data.onHighContrastChanged == null
+                      ? null
+                      : _setHighContrast,
                   switchKey: const ValueKey<String>('high-contrast-switch'),
                 ),
               ],
@@ -909,6 +1061,42 @@ class AppearancePage extends StatelessWidget {
     );
   }
 
+  /// Read-only motion statement for builds without a persisted user override.
+  Widget _motionNote(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.l),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          OSectionHeader(
+            label: 'Accessibility & motion',
+            padding: const EdgeInsets.only(bottom: OSpace.s),
+          ),
+          OCard(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.motion_photos_off_outlined,
+                  size: 20,
+                  color: c.textMuted,
+                ),
+                const SizedBox(width: OSpace.m),
+                Expanded(
+                  child: Text(
+                    'Animations follow your device’s reduce-motion setting.',
+                    style: OType.bodySm.copyWith(color: c.textMuted),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _livePreview(BuildContext context) {
     final c = OColors.of(context);
     final preview = data.preview;
@@ -947,7 +1135,7 @@ class AppearancePage extends StatelessWidget {
             MediaQuery(
               data: MediaQuery.of(
                 context,
-              ).copyWith(textScaler: TextScaler.linear(data.resolvedTextScale)),
+              ).copyWith(textScaler: TextScaler.linear(_textScale)),
               child: OCard(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -987,7 +1175,7 @@ class AppearancePage extends StatelessWidget {
                             bottomLeft: Radius.circular(ORadius.l),
                             bottomRight: Radius.circular(ORadius.s),
                           ),
-                          border: data.highContrast
+                          border: _highContrast
                               ? Border.all(color: c.hairlineStrong)
                               : null,
                         ),
@@ -1005,7 +1193,7 @@ class AppearancePage extends StatelessWidget {
                           width: 30,
                           height: 30,
                           decoration: BoxDecoration(
-                            color: _accentFor(c, data.resolvedAccentId),
+                            color: _accentFor(c, _accentId),
                             shape: BoxShape.circle,
                           ),
                           child: Icon(
@@ -1041,7 +1229,7 @@ class AppearancePage extends StatelessWidget {
                       decoration: BoxDecoration(
                         color: c.surfaceAlt,
                         borderRadius: BorderRadius.circular(ORadius.pill),
-                        border: data.highContrast
+                        border: _highContrast
                             ? Border.all(color: c.hairlineStrong)
                             : null,
                       ),
@@ -1063,7 +1251,7 @@ class AppearancePage extends StatelessWidget {
                             decoration: BoxDecoration(
                               color: _accentFor(
                                 c,
-                                data.resolvedAccentId,
+                                _accentId,
                               ).withValues(alpha: 0.18),
                               shape: BoxShape.circle,
                             ),

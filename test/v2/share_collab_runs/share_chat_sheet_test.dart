@@ -65,7 +65,11 @@ void main() {
     tester,
   ) async {
     for (final theme in [OTheme.light(), OTheme.dark()]) {
-      await _pump(tester, ShareChatSheet(data: _data()), theme);
+      await _pump(
+        tester,
+        ShareChatSheet(data: _data(), onStopSharing: () {}),
+        theme,
+      );
 
       expect(find.text('Share this chat'), findsOneWidget);
       expect(
@@ -171,13 +175,20 @@ void main() {
   });
 
   testWidgets('no placeholder person is shown by default', (tester) async {
-    await _pump(tester, ShareChatSheet(data: _data()), OTheme.light());
+    await _pump(
+      tester,
+      ShareChatSheet(data: _data(), onToggleShowName: (_) {}),
+      OTheme.light(),
+    );
     expect(find.text('Displays you as creator'), findsOneWidget);
     expect(find.textContaining('Aarav'), findsNothing);
 
     await _pump(
       tester,
-      ShareChatSheet(data: _data(creatorName: 'Meera Nair')),
+      ShareChatSheet(
+        data: _data(creatorName: 'Meera Nair'),
+        onToggleShowName: (_) {},
+      ),
       OTheme.light(),
     );
     expect(find.text('Displays Meera Nair as creator'), findsOneWidget);
@@ -297,14 +308,21 @@ void main() {
 
   testWidgets('320 dp and 200% text do not overflow', (tester) async {
     for (final theme in [OTheme.light(), OTheme.dark()]) {
-      await _pumpSmall(tester, ShareChatSheet(data: _data()), theme);
+      await _pumpSmall(
+        tester,
+        ShareChatSheet(data: _data(), onStopSharing: () {}),
+        theme,
+      );
       expect(tester.takeException(), isNull);
       expect(find.text('Copy link'), findsOneWidget);
       expect(find.text('Stop sharing'), findsOneWidget);
 
       await _pumpSmall(
         tester,
-        ShareChatSheet(data: _data(active: false)),
+        ShareChatSheet(
+          data: _data(active: false),
+          onCreateLink: () {},
+        ),
         theme,
       );
       expect(tester.takeException(), isNull);

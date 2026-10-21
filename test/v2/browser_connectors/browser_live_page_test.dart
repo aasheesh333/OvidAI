@@ -1,0 +1,436 @@
+// Wiring tests for the v2 Browser screen.
+//
+// These run the real BrowserStreamClient over fake streams, so they prove the
+// page is wired to the browser channel — not just that the widgets render.
+
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:ovid_ai/core/cloud/browser_stream.dart';
+import 'package:ovid_ai/core/cloud/cloud_ws.dart';
+import 'package:ovid_ai/ui/design/o_components.dart';
+import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/v2/browser/browser_live_page.dart';
+import 'package:ovid_ai/ui/v2/browser/control_bar.dart';
+import 'package:ovid_ai/ui/v2/browser/viewport.dart';
+
+/// A real 2 × 2 PNG. The frame path only needs a decodable provider.
+final Uint8List _frameBytes = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGOoifn/'
+  'H4QZYAwAYdILWapN/cEAAAAASUVORK5CYII=',
+);
+
+WsMultiplexer _ws() => WsMultiplexer(mintTicket: () async => 'ticket');
+
+Map<String, dynamic> _state({
+  bool takeover = false,
+  bool live = true,
+  bool screencast = true,
+  String url = 'https://example.test/page',
+  String title = 'Example page',
+}) {
+  return <String, dynamic>{
+    'sessionId': 's1',
+    'live': live,
+    'url': url,
+    'title': title,
+    'takeover': takeover,
+    'screencast': screencast,
+    'frameFormat': 'webp',
+    'viewport': {'width': 1280, 'height': 800},
+    'tabs': [
+      {'index': 0, 'url': url, 'title': title, 'active': true},
+      {'index': 1, 'url': 'https://docs.test/start', 'title': 'Docs', 'active': false},
+    ],
+    'activeTabIndex': 0,
+  };
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late StreamController<Map<String, dynamic>> raw;
+  late StreamController<Uint8List> binary;
+  late List<Map<String, Object?>> sent;
+  late BrowserStreamClient client;
+
+  setUp(() {
+    raw = StreamController<Map<String, dynamic>>.broadcast();
+    binary = StreamController<Uint8List>.broadcast();
+    sent = <Map<String, Object?>>[];
+  });
+
+  tearDown(() async {
+    client.dispose();
+    await raw.close();
+    await binary.close();
+  });
+
+  Future<void> pumpPage(
+    WidgetTester tester, {
+    Size size = const Size(420, 900),
+    double textScale = 1,
+    ThemeData? theme,
+  }) async {
+    // Built inside the test body on purpose: the client chains frame decodes
+    // on a future created in its constructor zone, and a client built in
+    // setUp would schedule them outside the widget tester's fake clock.
+    client = BrowserStreamClient(
+      ws: _ws(),
+      rawFramesOverride: raw.stream,
+      binaryFramesOverride: binary.stream,
+      sendOverride: (frame) async => sent.add(frame),
+      decodeFrame: (bytes) async =>
+          BrowserFrame(webpBytes: bytes, width: 2, height: 2),
+    );
+    tester.view.physicalSize = size;
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: theme ?? OTheme.light(),
+        builder: textScale == 1
+            ? null
+            : (context, content) => MediaQuery(
+                data: MediaQuery.of(
+                  context,
+                ).copyWith(textScaler: TextScaler.linear(textScale)),
+                child: content!,
+              ),
+        home: BrowserLivePage(client: client, attachId: 's1'),
+      ),
+    );
+    // Let attach() run before the test emits a state.
+    await tester.pump();
+    await tester.pump();
+  }
+
+  Future<void> emitState(
+    WidgetTester tester, [
+    Map<String, dynamic>? state,
+  ]) async {
+    raw.add(<String, dynamic>{
+      'op': 'browser_state',
+      'sessionId': 's1',
+      'state': state ?? _state(),
+    });
+    await tester.pump();
+    await tester.pump();
+  }
+
+  Future<void> emitFrame(WidgetTester tester) async {
+    binary.add(_frameBytes);
+    // Decode runs through the client's arrival-ordered chain, so it takes an
+    // extra pump before the frame reaches the page.
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+  }
+
+  List<Map<String, Object?>> opsOf(String op) => sent
+      .where((frame) => frame['op'] == op)
+      .map((frame) => Map<String, Object?>.from(frame))
+      .toList();
+
+  testWidgets('renders the agent tabs, address and a real frame provider', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await emitState(tester);
+    await emitFrame(tester);
+
+    // Tabs come from browser_state: two agent tabs, the active one first.
+    expect(find.text('Example page'), findsOneWidget);
+    expect(find.text('Docs'), findsOneWidget);
+    expect(find.text('https://example.test/page'), findsOneWidget);
+    expect(find.text('1280×800'), findsOneWidget);
+
+    // The viewport paints the decoded frame through an ImageProvider.
+    final images = tester.widgetList<Image>(find.byType(Image)).toList();
+    expect(images, isNotEmpty);
+    expect(images.first.image, isA<MemoryImage>());
+    expect(find.text('Live · 3–5 fps'), findsOneWidget);
+  });
+
+  testWidgets('the agent owns tabs: no tap, long-press or key can add one', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    await pumpPage(tester);
+    await emitState(tester);
+    await emitFrame(tester);
+
+    final plus = find.byKey(const ValueKey('v2-browser-tab-add'));
+    expect(plus, findsOneWidget);
+    final button = tester.widget<IconButton>(
+      find.descendant(of: plus, matching: find.byType(IconButton)),
+    );
+    expect(button.onPressed, isNull);
+    expect(button.onLongPress, isNull);
+
+    await tester.longPress(plus);
+    await tester.tap(plus, warnIfMissed: false);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // Still exactly the two tabs the agent opened, and no tab was switched.
+    expect(find.byKey(const ValueKey('v2-browser-tab-0')), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-1')), findsOneWidget);
+    expect(find.text('New tab'), findsNothing);
+    expect(opsOf('browser_switch_tab'), isEmpty);
+    expect(opsOf('browser_new_tab'), isEmpty);
+    semantics.dispose();
+  });
+
+  testWidgets('selecting an agent tab asks the server to switch', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await emitState(tester);
+
+    await tester.tap(find.text('Docs'));
+    await tester.pump();
+
+    final switches = opsOf('browser_switch_tab');
+    expect(switches, hasLength(1));
+    expect(switches.single['index'], 1);
+  });
+
+  testWidgets('take control is server-acknowledged and really controls', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await emitState(tester);
+    await emitFrame(tester);
+
+    await tester.tap(find.byKey(BrowserControlBar.takeControlKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    // The sheet is the real hand-over: nothing has been sent yet.
+    expect(find.text('Start controlling'), findsOneWidget);
+    expect(opsOf('browser_takeover'), isEmpty);
+
+    await tester.tap(find.text('Start controlling'));
+    await tester.pump();
+
+    final requests = opsOf('browser_takeover');
+    expect(requests, hasLength(1));
+    expect(requests.single['enabled'], isTrue);
+    // No optimistic flip: the sheet waits for the server.
+    expect(find.text('Pausing Ovid…'), findsOneWidget);
+
+    await emitState(tester, _state(takeover: true));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    // Controlled state: badge in the picture, return control in the bar.
+    expect(find.text('You are controlling'), findsOneWidget);
+    expect(find.byTooltip('Return control'), findsOneWidget);
+    expect(find.text('Can edit'), findsOneWidget);
+    expect(find.text('You are driving'), findsOneWidget);
+
+    // A tap on the picture reaches the page in CSS pixels.
+    await tester.tapAt(
+      tester.getCenter(find.byKey(BrowserViewport.pageTapKey)),
+    );
+    await tester.pump();
+    final inputs = opsOf('browser_input');
+    expect(inputs, hasLength(1));
+    final input = Map<String, Object?>.from(
+      inputs.single['input']! as Map,
+    );
+    expect(input['type'], 'tap');
+    expect(input['x'], closeTo(640, 1));
+    expect(input['y'], closeTo(400, 1));
+
+    // Handing back is a real request too.
+    await tester.tap(find.byKey(BrowserControlBar.takeControlKey));
+    await tester.pump();
+    final releases = opsOf('browser_takeover').last;
+    expect(releases['enabled'], isFalse);
+
+    await emitState(tester);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Ovid is driving'), findsOneWidget);
+  });
+
+  testWidgets('the keyboard tool sends real page input', (tester) async {
+    await pumpPage(tester);
+    await emitState(tester, _state(takeover: true));
+    await emitFrame(tester);
+
+    // Closed until the person asks for it.
+    expect(
+      find.byKey(const ValueKey('v2-browser-keyboard-bridge')),
+      findsNothing,
+    );
+
+    await tester.tap(find.byKey(BrowserControlBar.keyboardKey));
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('v2-browser-keyboard-bridge')),
+      findsOneWidget,
+    );
+
+    Map<String, Object?> lastInput() => Map<String, Object?>.from(
+      opsOf('browser_input').last['input']! as Map,
+    );
+
+    await tester.enterText(find.byType(TextField), 'hi');
+    await tester.pump();
+    expect(lastInput(), <String, Object?>{
+      'type': 'key',
+      'key': 'Insert',
+      'text': 'hi',
+    });
+
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(lastInput(), <String, Object?>{'type': 'key', 'key': 'Enter'});
+
+    await tester.enterText(find.byType(TextField), '');
+    await tester.pump();
+    expect(lastInput(), <String, Object?>{
+      'type': 'key',
+      'key': 'Backspace',
+    });
+
+    await tester.tap(find.byKey(BrowserControlBar.keyboardKey));
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('v2-browser-keyboard-bridge')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('upload and download are absent, not dead', (tester) async {
+    await pumpPage(tester);
+    await emitState(tester);
+    await emitFrame(tester);
+
+    expect(find.byTooltip('Upload file'), findsNothing);
+    expect(find.byTooltip('Download file'), findsNothing);
+    expect(find.byIcon(Icons.upload_rounded), findsNothing);
+    expect(find.byIcon(Icons.download_rounded), findsNothing);
+  });
+
+  testWidgets('no state after the window is an honest empty screen', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+
+    // Still connecting: a skeleton is allowed here, but not forever.
+    expect(find.byType(OSkeletonList), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 6));
+
+    expect(find.text('Ovid has not opened the browser'), findsOneWidget);
+    expect(find.byType(OSkeletonList), findsNothing);
+
+    final attachesBefore = opsOf('browser_attach').length;
+    await tester.tap(find.text('Try again'));
+    await tester.pump();
+    await tester.pump();
+    expect(opsOf('browser_attach').length, greaterThan(attachesBefore));
+  });
+
+  testWidgets('a state without a frame waits honestly, then retries', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await emitState(tester);
+
+    // Attached, no picture: loading first…
+    expect(find.text('Waiting for the first frame…'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 6));
+
+    // …then the honest waiting state, not a spinner forever.
+    expect(find.text('No picture yet'), findsWidgets);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('Live · 3–5 fps'), findsNothing);
+
+    final attachesBefore = opsOf('browser_attach').length;
+    await tester.tap(find.byKey(BrowserViewport.waitingRetryKey));
+    await tester.pump();
+    await tester.pump();
+    expect(opsOf('browser_attach').length, greaterThan(attachesBefore));
+  });
+
+  testWidgets('a picture that stops arriving says the stream is lost', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+    await emitState(tester);
+    await emitFrame(tester);
+    expect(find.text('Live · 3–5 fps'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 8));
+
+    expect(find.text('Stream lost'), findsWidgets);
+    expect(find.byKey(BrowserViewport.retryKey), findsOneWidget);
+  });
+
+  testWidgets('the menu copies the real address', (tester) async {
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        calls.add(call);
+        return null;
+      },
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      );
+    });
+
+    await pumpPage(tester);
+    await emitState(tester);
+
+    await tester.tap(find.byIcon(Icons.more_vert_rounded));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('Copy address'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final copy = calls.where((call) => call.method == 'Clipboard.setData');
+    expect(copy, isNotEmpty);
+    expect(
+      (copy.first.arguments as Map)['text'],
+      'https://example.test/page',
+    );
+    expect(find.text('Address copied'), findsOneWidget);
+  });
+
+  for (final dark in [false, true]) {
+    final name = dark ? 'dark' : 'light';
+
+    testWidgets('320 dp at 200 % text, controlled, lays out ($name)', (
+      tester,
+    ) async {
+      await pumpPage(
+        tester,
+        size: const Size(320, 640),
+        textScale: 2,
+        theme: dark ? OTheme.dark() : OTheme.light(),
+      );
+      await emitState(tester, _state(takeover: true));
+      await emitFrame(tester);
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('You are controlling'), findsOneWidget);
+      expect(find.byTooltip('Return control'), findsOneWidget);
+      expect(find.text('You are driving'), findsOneWidget);
+    });
+  }
+}

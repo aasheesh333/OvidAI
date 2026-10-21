@@ -517,6 +517,142 @@ void main() {
     expect(find.text('image generations'), findsOneWidget);
   });
 
+  testWidgets('the reset countdown is derived from the real window', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    final windowEnd = DateTime.now().add(
+      const Duration(hours: 6, minutes: 12),
+    );
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2UsageData(
+          dailyUsedLabel: '12.4M',
+          dailyLimitLabel: '50M',
+          dailyFraction: 0.248,
+          resetsAt: windowEnd,
+          resetsAtLabel: 'Oct 22, 2026, 6:12 AM',
+          monthlyUsedLabel: '1.02B',
+          monthlyLimitLabel: '1.5B',
+          monthlyPercentLabel: '68%',
+          requestsLabel: '12',
+          imagesLabel: '1',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Derived from the instant, not from a caller-supplied frozen string.
+    expect(find.textContaining('Resets in 6 h'), findsOneWidget);
+    expect(find.text('Resets in 6h 12m'), findsNothing);
+
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2UsageData(
+          dailyUsedLabel: '12.4M',
+          dailyLimitLabel: '50M',
+          dailyFraction: 0.248,
+          resetsAt: DateTime.now().add(
+            const Duration(hours: 2, minutes: 30),
+          ),
+          monthlyUsedLabel: '1.02B',
+          monthlyLimitLabel: '1.5B',
+          monthlyPercentLabel: '68%',
+          requestsLabel: '12',
+          imagesLabel: '1',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Resets in 2 h'), findsOneWidget);
+  });
+
+  testWidgets('missing usage renders an honest empty state, not zeros', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(_app(OTheme.light(), const V2UsageData()));
+    await tester.pumpAndSettle();
+
+    expect(find.text('No usage yet'), findsOneWidget);
+    expect(find.text('TOKENS TODAY'), findsNothing);
+    expect(find.text('0'), findsNothing);
+    expect(find.text('0 GB'), findsNothing);
+    expect(find.text('0 of 50,000,000 tokens used today'), findsNothing);
+  });
+
+  testWidgets('unknown monthly and storage values are shown as unknown', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        const V2UsageData(
+          dailyUsedLabel: '12.4M',
+          dailyLimitLabel: '50M',
+          dailyFraction: 0.2,
+          // The server reported today but not the monthly ledger or storage.
+          monthlyPercentLabel: '',
+          requestsLabel: '',
+          imagesLabel: '',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // One per unknown stat: monthly percentage, requests, images, storage.
+    expect(find.text(V2UsageData.unknownLabel), findsNWidgets(4));
+    expect(find.text('0 GB'), findsNothing);
+    expect(find.text('0%'), findsNothing);
+    expect(find.text('Not tracked yet'), findsOneWidget);
+  });
+
+  testWidgets('the empty state only offers a wired action', (tester) async {
+    _phoneSize(tester);
+    var retried = 0;
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        const V2UsageData(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Start a chat'), findsNothing);
+    expect(find.text('Try again'), findsNothing);
+
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2UsageData(onRetry: () => retried++),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Start a chat'), findsNothing);
+    await tester.tap(find.text('Try again'));
+    await tester.pump();
+    expect(retried, 1);
+  });
+
+  testWidgets('a known image count without a daily series says so', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _usageData(imagesLabel: '3', days: const []),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Daily image history is not available'), findsOneWidget);
+    expect(find.text('No images yet'), findsNothing);
+  });
+
   testWidgets('chart tabs and summaries announce their state', (tester) async {
     final handle = tester.ensureSemantics();
     _phoneSize(tester);

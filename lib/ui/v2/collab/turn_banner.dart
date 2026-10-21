@@ -258,20 +258,22 @@ class CollabTurnBanner extends StatelessWidget {
           style: OType.caption.copyWith(color: c.textMuted),
         ),
         const SizedBox(height: OSpace.m),
-        OButton(
-          label: data.isMyTurn ? 'You have the turn' : 'Take the turn',
-          icon: data.isMyTurn
-              ? Icons.check_rounded
-              : Icons.pan_tool_alt_rounded,
-          variant: data.isMyTurn
-              ? OButtonVariant.secondary
-              : OButtonVariant.primary,
-          onPressed: data.isMyTurn ? null : onRequestTurn,
-          semanticLabel: data.isMyTurn
-              ? 'Your turn. Send your message.'
-              : 'Take the turn to send the next message',
-          expand: true,
-        ),
+        if (data.isMyTurn)
+          _HeldTurnNotice()
+        else if (onRequestTurn != null)
+          OButton(
+            label: 'Take the turn',
+            icon: Icons.pan_tool_alt_rounded,
+            variant: OButtonVariant.primary,
+            onPressed: onRequestTurn,
+            semanticLabel: 'Take the turn to send the next message',
+            expand: true,
+          )
+        else
+          Text(
+            'Nobody is sending. Your composer is ready for the next message.',
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
         if (data.queue.isNotEmpty) ...[
           const SizedBox(height: OSpace.m),
           Divider(color: c.hairline, height: 1),
@@ -351,10 +353,13 @@ class CollabTurnBanner extends StatelessWidget {
       ),
     );
 
-    final time = _TimeLeftPill(
-      label: data.timeLeftLabel,
-      urgent: data.timeLeftFraction != null && data.timeLeftFraction! <= 0.2,
-    );
+    final time = data.timeLeftLabel.trim().isEmpty
+        ? null
+        : _TimeLeftPill(
+            label: data.timeLeftLabel,
+            urgent:
+                data.timeLeftFraction != null && data.timeLeftFraction! <= 0.2,
+          );
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -369,8 +374,10 @@ class CollabTurnBanner extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               identity,
-              const SizedBox(height: OSpace.s),
-              time,
+              if (time != null) ...[
+                const SizedBox(height: OSpace.s),
+                time,
+              ],
             ],
           );
         }
@@ -378,8 +385,10 @@ class CollabTurnBanner extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(child: identity),
-            const SizedBox(width: OSpace.s),
-            time,
+            if (time != null) ...[
+              const SizedBox(width: OSpace.s),
+              time,
+            ],
           ],
         );
       },
@@ -390,34 +399,43 @@ class CollabTurnBanner extends StatelessWidget {
     final c = OColors.of(context);
     final held = data.isMyTurn;
     final waiting = !held && data.turnRequested;
-    final label = held
-        ? 'You have the turn'
-        : waiting
-        ? 'In queue'
-        : 'Request turn';
-    final semanticLabel = held
-        ? 'Your turn. Send your message.'
-        : waiting
-        ? 'In queue. You asked to send next.'
-        : 'Request the turn to send a message';
     final position = held ? null : data.myPositionLabel;
 
-    final button = OButton(
-      label: label,
-      icon: held || waiting ? Icons.check_rounded : Icons.pan_tool_alt_rounded,
-      variant: held || waiting
-          ? OButtonVariant.secondary
-          : OButtonVariant.primary,
-      onPressed: held || waiting ? null : onRequestTurn,
-      semanticLabel: semanticLabel,
-      expand: true,
-    );
+    final Widget control;
+    if (held) {
+      control = _HeldTurnNotice();
+    } else if (waiting) {
+      control = OButton(
+        label: 'In queue',
+        icon: Icons.check_rounded,
+        variant: OButtonVariant.secondary,
+        onPressed: null,
+        semanticLabel: 'In queue. You asked to send next.',
+        expand: true,
+      );
+    } else if (onRequestTurn != null) {
+      control = OButton(
+        label: 'Request turn',
+        icon: Icons.pan_tool_alt_rounded,
+        variant: OButtonVariant.primary,
+        onPressed: onRequestTurn,
+        semanticLabel: 'Request the turn to send a message',
+        expand: true,
+      );
+    } else {
+      // This room does not expose a queue, so there is nothing honest to
+      // request. State the rule instead of showing a dead button.
+      control = Text(
+        'Wait for ${data.holderName} to finish. The turn passes automatically.',
+        style: OType.caption.copyWith(color: c.textMuted),
+      );
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        button,
+        control,
         if (position != null) ...[
           const SizedBox(height: OSpace.s),
           Text(position, style: OType.caption.copyWith(color: c.textMuted)),
@@ -626,6 +644,47 @@ class _QueueRow extends StatelessWidget {
                       style: OType.caption.copyWith(color: c.textFaint),
                     ),
                 ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Passive "you hold the turn" state. A disabled primary button reads as an
+/// unavailable action; this states the fact instead.
+class _HeldTurnNotice extends StatelessWidget {
+  const _HeldTurnNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      label: 'Your turn. Send your message.',
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(
+          horizontal: OSpace.m,
+          vertical: OSpace.s,
+        ),
+        decoration: BoxDecoration(
+          color: c.accentSoft,
+          borderRadius: BorderRadius.circular(ORadius.m),
+          border: Border.all(color: c.accentFill.withValues(alpha: 0.35)),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.check_circle_rounded, size: 18, color: c.accent),
+            const SizedBox(width: OSpace.s),
+            Expanded(
+              child: Text(
+                'You have the turn',
+                style: OType.bodySm.copyWith(
+                  color: c.accent,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ],

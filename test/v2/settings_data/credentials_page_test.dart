@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/settings/credentials_page.dart';
@@ -6,9 +7,30 @@ import 'package:ovid_ai/ui/v2/settings/credentials_page.dart';
 Widget _app(Widget home, {required ThemeData theme}) =>
     MaterialApp(theme: theme, home: home);
 
+class _FakeStore implements V2CredentialKeyStore {
+  _FakeStore([Map<String, String>? seed]) : values = <String, String>{...?seed};
+
+  final Map<String, String> values;
+
+  @override
+  Future<String?> read(String id) async => values[id];
+
+  @override
+  Future<void> write(String id, String value) async => values[id] = value;
+
+  @override
+  Future<void> delete(String id) async => values.remove(id);
+}
+
+CredentialsPage _page(
+  V2CredentialsPageData data, {
+  V2CredentialKeyStore? store,
+}) => CredentialsPage(data: data, keyStore: store ?? _FakeStore());
+
 Future<void> _pump(
   WidgetTester tester, {
   V2CredentialsPageData? data,
+  V2CredentialKeyStore? store,
   bool dark = false,
   double width = 400,
   double textScale = 1,
@@ -27,7 +49,7 @@ Future<void> _pump(
         ),
         child: child!,
       ),
-      home: CredentialsPage(data: data ?? _data()),
+      home: _page(data ?? _data(), store: store),
     ),
   );
   if (settle) {
@@ -106,9 +128,20 @@ V2CredentialsPageData _data({
 }
 
 void main() {
+  test('the production store uses the platform secure storage', () async {
+    FlutterSecureStorage.setMockInitialValues(<String, String>{});
+    final store = V2SecureCredentialKeyStore();
+
+    await store.write('personal', 'sk-live-123456789');
+    expect(await store.read('personal'), 'sk-live-123456789');
+
+    await store.delete('personal');
+    expect(await store.read('personal'), isNull);
+  });
+
   testWidgets('renders connected credentials in light mode', (tester) async {
     await tester.pumpWidget(
-      _app(CredentialsPage(data: _data()), theme: OTheme.light()),
+      _app(_page(_data()), theme: OTheme.light()),
     );
     await tester.pumpAndSettle();
 
@@ -134,7 +167,7 @@ void main() {
 
   testWidgets('renders in dark mode', (tester) async {
     await tester.pumpWidget(
-      _app(CredentialsPage(data: _data()), theme: OTheme.dark()),
+      _app(_page(_data()), theme: OTheme.dark()),
     );
     await tester.pumpAndSettle();
 
@@ -146,8 +179,8 @@ void main() {
     var connected = false;
     await tester.pumpWidget(
       _app(
-        CredentialsPage(
-          data: V2CredentialsPageData(onConnectGoogle: () => connected = true),
+        _page(
+          V2CredentialsPageData(onConnectGoogle: () => connected = true),
         ),
         theme: OTheme.light(),
       ),
@@ -159,19 +192,80 @@ void main() {
     expect(connected, isTrue);
   });
 
-  testWidgets('add token fires the primary callback', (tester) async {
-    var added = false;
-    await tester.pumpWidget(
-      _app(
-        CredentialsPage(data: _data(onAddToken: () => added = true)),
-        theme: OTheme.light(),
-      ),
+  testWidgets('adding a provider key stores it and shows only a mask', (
+    tester,
+  ) async {
+    final store = _FakeStore();
+    await _pump(tester, data: _data(token: null), store: store);
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey<String>('provider-key-add')),
+    );
+    await tester.tap(find.byKey(const ValueKey<String>('provider-key-add')));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('provider-key-field')),
+      'sk-live-123456789',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey<String>('provider-key-save')));
+    await tester.pumpAndSettle();
+
+    // The real store received the key; the page only kept the mask.
+    expect(store.values['personal'], 'sk-live-123456789');
+    expect(find.text('••••••6789'), findsOneWidget);
+    expect(find.textContaining('sk-live'), findsNothing);
+  });
+
+  testWidgets('removing a provider key deletes it from the store', (
+    tester,
+  ) async {
+    final store = _FakeStore(<String, String>{
+      'personal': 'sk-live-123456789',
+    });
+    await _pump(tester, data: _data(token: null), store: store);
+
+    expect(find.text('••••••6789'), findsOneWidget);
+
+    final remove = find.byKey(const ValueKey<String>('provider-key-remove'));
+    await tester.ensureVisible(remove);
+    await tester.pumpAndSettle();
+    await tester.tap(remove);
+    await tester.pumpAndSettle();
+    expect(find.text('Remove provider key?'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('credential-confirm-remove')),
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Add'));
-    await tester.tap(find.text('Add'));
-    expect(added, isTrue);
+    expect(store.values.containsKey('personal'), isFalse);
+    expect(find.text('Not added yet'), findsOneWidget);
+  });
+
+  testWidgets('adding a GitHub token stores it and shows only a mask', (
+    tester,
+  ) async {
+    final store = _FakeStore();
+    await _pump(tester, data: _data(githubPatAdded: false), store: store);
+
+    final add = find.text('Add token');
+    await tester.ensureVisible(add);
+    await tester.tap(add);
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('provider-key-field')),
+      'ghp_1234567890',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey<String>('provider-key-save')));
+    await tester.pumpAndSettle();
+
+    expect(store.values['github'], 'ghp_1234567890');
+    expect(find.text('Added · ••••••7890'), findsOneWidget);
+    expect(find.textContaining('ghp_'), findsNothing);
   });
 
   testWidgets('adds a browser login with the entered values', (tester) async {
@@ -320,11 +414,62 @@ void main() {
     expect(find.text('Save login'), findsOneWidget);
   });
 
+  testWidgets('an unconnected token is not counted as stored', (tester) async {
+    await _pump(
+      tester,
+      data: _data(
+        token: const V2Credential(
+          id: 'token',
+          kind: V2CredentialKind.token,
+          title: 'Access token',
+          subtitle: 'Personal token for custom providers',
+          connected: false,
+        ),
+      ),
+    );
+
+    expect(find.text('2 stored'), findsOneWidget);
+    expect(find.text('Not added yet'), findsOneWidget);
+    expect(find.textContaining('custom providers'), findsNothing);
+  });
+
+  testWidgets('provider key sheet fits 320 dp at 200% text in both themes', (
+    tester,
+  ) async {
+    for (final dark in <bool>[false, true]) {
+      await _pump(
+        tester,
+        width: 320,
+        textScale: 2,
+        dark: dark,
+        data: _data(token: null),
+      );
+
+      final add = find.byKey(const ValueKey<String>('provider-key-add'));
+      await tester.ensureVisible(add);
+      await tester.tap(add);
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(
+        find.byKey(const ValueKey<String>('provider-key-field')),
+        findsOneWidget,
+      );
+      await tester.ensureVisible(
+        find.byKey(const ValueKey<String>('provider-key-save')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Save key'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+    }
+  });
+
   testWidgets('revoke all asks for confirmation first', (tester) async {
     var revoked = false;
     await tester.pumpWidget(
       _app(
-        CredentialsPage(data: _data(onRevokeAll: () => revoked = true)),
+        _page(_data(onRevokeAll: () => revoked = true)),
         theme: OTheme.light(),
       ),
     );
@@ -345,8 +490,8 @@ void main() {
   testWidgets('raw token values are never rendered', (tester) async {
     await tester.pumpWidget(
       _app(
-        CredentialsPage(
-          data: _data(
+        _page(
+          _data(
             token: const V2Credential(
               id: 'token',
               kind: V2CredentialKind.token,
@@ -368,7 +513,7 @@ void main() {
     var managed = false;
     await tester.pumpWidget(
       _app(
-        CredentialsPage(data: _data(onManageCloudKey: () => managed = true)),
+        _page(_data(onManageCloudKey: () => managed = true)),
         theme: OTheme.light(),
       ),
     );
@@ -383,8 +528,8 @@ void main() {
     var retried = false;
     await tester.pumpWidget(
       _app(
-        CredentialsPage(
-          data: V2CredentialsPageData(
+        _page(
+          V2CredentialsPageData(
             errorMessage: 'Credentials could not load.',
             onRetry: () => retried = true,
           ),
@@ -424,30 +569,41 @@ void main() {
     expect(tapped, 'github');
   });
 
-  testWidgets('a missing token still offers Add', (tester) async {
-    var added = false;
-    await _pump(
-      tester,
-      data: _data(token: null, onAddToken: () => added = true),
-    );
+  testWidgets('a missing token opens the real key form', (tester) async {
+    await _pump(tester, data: _data(token: null));
 
     expect(find.text('Personal access token'), findsOneWidget);
     expect(find.text('Not added yet'), findsOneWidget);
 
-    await tester.ensureVisible(find.text('Add'));
-    await tester.tap(find.text('Add'));
-    expect(added, isTrue);
+    final add = find.byKey(const ValueKey<String>('provider-key-add'));
+    await tester.ensureVisible(add);
+    await tester.tap(add);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Add provider key'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('provider-key-field')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('narrow phone at 200% text does not overflow in light', (
     tester,
   ) async {
-    await _pump(tester, width: 320, textScale: 2);
+    await _pump(
+      tester,
+      width: 320,
+      textScale: 2,
+      data: _data(onManageCloudKey: () {}),
+    );
 
     expect(tester.takeException(), isNull);
     expect(find.text('Protected & Encrypted'), findsOneWidget);
     expect(find.text('Manage'), findsOneWidget);
-    expect(find.text('Add'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('provider-key-replace')),
+      findsOneWidget,
+    );
     expect(find.text('Active'), findsNWidgets(3));
     expect(find.text('Revoke all credentials'), findsOneWidget);
   });
@@ -549,7 +705,11 @@ void main() {
   });
 
   testWidgets('reduced motion still shows every control', (tester) async {
-    await _pump(tester, disableAnimations: true);
+    await _pump(
+      tester,
+      disableAnimations: true,
+      data: _data(onManageCloudKey: () {}),
+    );
 
     expect(find.text('Protected & Encrypted'), findsOneWidget);
     expect(find.text('Google'), findsOneWidget);
@@ -571,17 +731,12 @@ void main() {
     expect(find.byIcon(Icons.chevron_right_rounded), findsNWidgets(2));
   });
 
-  testWidgets('a Manage button without a callback is announced as disabled', (
+  testWidgets('a cloud key without a Manage callback has no dead button', (
     tester,
   ) async {
-    final handle = tester.ensureSemantics();
     await _pump(tester);
 
-    expect(
-      tester.getSemantics(find.text('Manage')),
-      isSemantics(hasEnabledState: true, isEnabled: false),
-    );
-
-    handle.dispose();
+    expect(find.text('Cloud key active'), findsOneWidget);
+    expect(find.text('Manage'), findsNothing);
   });
 }

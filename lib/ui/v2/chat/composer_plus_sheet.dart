@@ -49,6 +49,8 @@ class V2ComposerPlusData {
     this.studioFolder,
     this.photoAccessGranted = true,
     this.cameraAvailable = true,
+    this.cameraUnavailableReason = 'This device does not have a camera.',
+    this.showConnectors = true,
   }) : assert(customConnectorsUsed >= 0, 'Usage cannot be negative');
 
   final V2ComposerPlusPlan plan;
@@ -66,6 +68,14 @@ class V2ComposerPlusData {
 
   /// When false the Camera row is disabled with a plain-language reason.
   final bool cameraAvailable;
+
+  /// Why Camera is disabled. The composer passes a build-accurate reason so a
+  /// device that does have a camera is never told otherwise.
+  final String cameraUnavailableReason;
+
+  /// Whether to offer the Connectors row. The composer hides it when it has
+  /// no route to open, so a visible row never has a null handler.
+  final bool showConnectors;
 
   bool get hasStudioFolder => (studioFolder?.trim().isNotEmpty ?? false);
 
@@ -110,6 +120,11 @@ class V2ComposerPlusSheet extends StatelessWidget {
     this.onOpenStudio,
     this.onClose,
   });
+
+  /// The reason the composer's own menu shows for Camera: there is no capture
+  /// implementation in this build, so the row must not claim a missing device.
+  static const String cameraBuildReason =
+      'Camera capture is not available in this build.';
 
   final V2ComposerPlusData data;
   final VoidCallback? onPhoto;
@@ -168,7 +183,7 @@ class V2ComposerPlusSheet extends StatelessWidget {
                       title: 'Camera',
                       subtitle: data.cameraAvailable
                           ? 'Take a photo with the camera.'
-                          : 'This device does not have a camera.',
+                          : data.cameraUnavailableReason,
                       state: data.cameraAvailable
                           ? V2ComposerPlusRowState.available
                           : V2ComposerPlusRowState.blocked,
@@ -197,19 +212,20 @@ class V2ComposerPlusSheet extends StatelessWidget {
                     ),
                     if (!studioReady)
                       _StudioBlockedNote(onOpenStudio: onOpenStudio),
-                    _PlusRow(
-                      key: const ValueKey('composer-plus-connectors'),
-                      icon: Icons.extension_outlined,
-                      title: 'Connectors',
-                      subtitle: data.connectorsSubtitle,
-                      state:
-                          data.plan == V2ComposerPlusPlan.free ||
-                              data.connectorLimitReached
-                          ? V2ComposerPlusRowState.limited
-                          : V2ComposerPlusRowState.available,
-                      stateLabel: data.connectorsStateLabel,
-                      onTap: onConnectors,
-                    ),
+                    if (data.showConnectors)
+                      _PlusRow(
+                        key: const ValueKey('composer-plus-connectors'),
+                        icon: Icons.extension_outlined,
+                        title: 'Connectors',
+                        subtitle: data.connectorsSubtitle,
+                        state:
+                            data.plan == V2ComposerPlusPlan.free ||
+                                data.connectorLimitReached
+                            ? V2ComposerPlusRowState.limited
+                            : V2ComposerPlusRowState.available,
+                        stateLabel: data.connectorsStateLabel,
+                        onTap: onConnectors,
+                      ),
                   ],
                 ),
               ),
@@ -222,6 +238,9 @@ class V2ComposerPlusSheet extends StatelessWidget {
 }
 
 /// Opens [V2ComposerPlusSheet] in the shared bottom-sheet container.
+///
+/// Every action closes the sheet first, so the picker or route it opens is not
+/// stacked behind a menu that looks stuck.
 Future<void> showV2ComposerPlusSheet(
   BuildContext context, {
   required V2ComposerPlusData data,
@@ -234,16 +253,26 @@ Future<void> showV2ComposerPlusSheet(
 }) {
   return showOSheet<void>(
     context,
-    builder: (sheetContext) => V2ComposerPlusSheet(
-      data: data,
-      onPhoto: onPhoto,
-      onCamera: onCamera,
-      onFile: onFile,
-      onStudioFolder: onStudioFolder,
-      onConnectors: onConnectors,
-      onOpenStudio: onOpenStudio,
-      onClose: () => Navigator.maybePop(sheetContext),
-    ),
+    builder: (sheetContext) {
+      VoidCallback? run(VoidCallback? action) {
+        if (action == null) return null;
+        return () {
+          Navigator.maybePop(sheetContext);
+          action();
+        };
+      }
+
+      return V2ComposerPlusSheet(
+        data: data,
+        onPhoto: run(onPhoto),
+        onCamera: run(onCamera),
+        onFile: run(onFile),
+        onStudioFolder: run(onStudioFolder),
+        onConnectors: run(onConnectors),
+        onOpenStudio: run(onOpenStudio),
+        onClose: () => Navigator.maybePop(sheetContext),
+      );
+    },
   );
 }
 
@@ -329,11 +358,14 @@ class _PlusRow extends StatelessWidget {
             },
           );
     // At large text sizes a trailing pill and a chevron leave too little room
-    // for the title, so the pill moves under the subtitle.
+    // for the title, so the pill moves under the subtitle. Narrow screens get
+    // the same treatment: at 320 dp a trailing "Folder needed" pill overflows
+    // the row even at 100 % text.
     final captionSize = OType.caption.fontSize ?? 12;
     final stackState =
         MediaQuery.textScalerOf(context).scale(captionSize) >=
-        captionSize * 1.3;
+            captionSize * 1.3 ||
+        MediaQuery.sizeOf(context).width < 360;
     final spoken = [title, subtitle, ?label].join(', ');
 
     final content = ConstrainedBox(

@@ -439,6 +439,8 @@ void main() {
         isButton: true,
         isSelected: true,
         hasSelectedState: true,
+        hasEnabledState: true,
+        isEnabled: true,
         hasTapAction: true,
       ),
     );
@@ -478,6 +480,8 @@ void main() {
       matchesSemantics(
         label: 'Manage models',
         isButton: true,
+        hasEnabledState: true,
+        isEnabled: true,
         hasTapAction: true,
       ),
     );
@@ -486,6 +490,8 @@ void main() {
       matchesSemantics(
         label: r'Compare plans, From $18/mo',
         isButton: true,
+        hasEnabledState: true,
+        isEnabled: true,
         hasTapAction: true,
       ),
     );

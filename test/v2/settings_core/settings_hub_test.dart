@@ -316,6 +316,86 @@ void main() {
     expect(find.byType(SettingsSearchPage), findsNothing);
   });
 
+  testWidgets('a search result for a hub-local row scrolls it into view', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 500);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final changed = <bool>[];
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _hubData(taps: <String>[], onReasoningChanged: changed.add),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final rowKey = const ValueKey<String>('settings-row-show_reasoning');
+    // The row starts below the fold: a result that only closes search would
+    // leave the person staring at an unchanged screen.
+    expect(tester.getTopLeft(find.byKey(rowKey)).dy, greaterThan(500));
+
+    await tester.tap(find.byKey(const ValueKey('settings-search')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'reasoning');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Show reasoning'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(SettingsSearchPage), findsNothing);
+    expect(changed, <bool>[false]);
+    final rect = tester.getRect(find.byKey(rowKey));
+    expect(rect.top, greaterThanOrEqualTo(0));
+    expect(rect.bottom, lessThanOrEqualTo(500));
+  });
+
+  testWidgets('a row with no handler is not offered as a result', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    _phoneSize(tester);
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2SettingsHubData(
+          advanced: const V2SettingsSection(
+            title: 'Advanced',
+            items: [
+              V2SettingsItem(
+                id: 'ghost',
+                label: 'Ghost row',
+                icon: Icons.help_outline_rounded,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // On the hub the dead row is visibly disabled and carries no chevron.
+    final rowNode = tester.getSemantics(find.text('Ghost row'));
+    expect(rowNode, isSemantics(hasEnabledState: true, isEnabled: false));
+
+    await tester.tap(find.byKey(const ValueKey('settings-search')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'ghost');
+    await tester.pumpAndSettle();
+
+    final result = tester.getSemantics(
+      find.bySemanticsLabel(RegExp('Ghost row, Advanced, disabled')),
+    );
+    expect(result, isSemantics(hasEnabledState: true, isEnabled: false));
+
+    await tester.tap(find.text('Ghost row'));
+    await tester.pumpAndSettle();
+    // It neither closes search nor pretends to navigate.
+    expect(find.byType(SettingsSearchPage), findsOneWidget);
+    handle.dispose();
+  });
+
   testWidgets('keeps the canonical row order', (tester) async {
     await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: <String>[])));
     await tester.pumpAndSettle();
@@ -492,6 +572,21 @@ void main() {
     await tester.pump();
 
     expect(retried, 1);
+  });
+
+  testWidgets('empty state without a retry offers no dead button', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        const V2SettingsHubData(status: V2SettingsHubStatus.empty),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('No settings yet'), findsOneWidget);
+    expect(find.text('Refresh settings'), findsNothing);
   });
 
   testWidgets('row tap calls the injected callback', (tester) async {

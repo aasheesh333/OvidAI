@@ -121,6 +121,7 @@ class LanguageGoalPage extends StatefulWidget {
     this.onRetry,
     this.onSeeAllLanguages,
     this.onClose,
+    this.onBack,
   });
 
   final V2LanguageGoalData data;
@@ -130,6 +131,10 @@ class LanguageGoalPage extends StatefulWidget {
   final VoidCallback? onRetry;
   final VoidCallback? onSeeAllLanguages;
   final VoidCallback? onClose;
+
+  /// Returns to the step the language screen was opened from. Null hides the
+  /// back arrow (a root tour step has nothing to pop).
+  final VoidCallback? onBack;
 
   @override
   State<LanguageGoalPage> createState() => _LanguageGoalPageState();
@@ -174,8 +179,16 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
   void _continue() {
     final languageId = _languageId;
     if (languageId == null) return;
+    if (widget.data.goals.isNotEmpty && _goalIds.isEmpty) return;
     widget.onContinue?.call(languageId, Set.unmodifiable(_goalIds));
   }
+
+  /// A step is only valid when a language is chosen and, if goals are offered,
+  /// at least one is selected. The footer action stays visible but disabled so
+  /// the layout does not jump and the reason is announced.
+  bool get _canContinue =>
+      _languageId != null &&
+      (widget.data.goals.isEmpty || _goalIds.isNotEmpty);
 
   @override
   Widget build(BuildContext context) {
@@ -206,6 +219,17 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
     return OScaffold(
       appBar: OAppBar(
         title: 'Language & goal',
+        // The tour owns the back path explicitly; the default arrow would pop
+        // whatever route happens to be below the gate.
+        showBack: false,
+        leading: widget.onBack == null
+            ? null
+            : OIconButton(
+                key: const Key('language-goal-back'),
+                icon: Icons.arrow_back_rounded,
+                semanticLabel: 'Back',
+                onPressed: widget.onBack,
+              ),
         actions: [
           if (widget.onClose != null)
             OIconButton(
@@ -308,6 +332,10 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
   Widget _continueBar(OColors c, V2LanguageGoalData data) {
     final steps = data.totalSteps < 1 ? 1 : data.totalSteps;
     final active = data.step.clamp(1, steps);
+    final valid = _canContinue;
+    final hint = _languageId == null
+        ? 'Choose a language to continue.'
+        : 'Pick at least one goal to continue.';
     return DecoratedBox(
       decoration: BoxDecoration(
         color: c.bg,
@@ -330,14 +358,21 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
                 label: 'Continue',
                 icon: Icons.arrow_forward_rounded,
                 expand: true,
-                onPressed: _languageId == null ? null : _continue,
+                onPressed: valid ? _continue : null,
               ),
               const SizedBox(height: OSpace.s),
-              Text(
-                'Step $active of $steps · '
-                'You can fine-tune this in settings.',
-                textAlign: TextAlign.center,
-                style: OType.caption.copyWith(color: c.textFaint),
+              Semantics(
+                liveRegion: !valid,
+                child: Text(
+                  valid
+                      ? 'Step $active of $steps · '
+                            'You can fine-tune this in settings.'
+                      : hint,
+                  textAlign: TextAlign.center,
+                  style: OType.caption.copyWith(
+                    color: valid ? c.textFaint : c.danger,
+                  ),
+                ),
               ),
             ],
           ),

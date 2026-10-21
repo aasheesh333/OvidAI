@@ -105,10 +105,62 @@ class V2SharedMemoryPageData {
 }
 
 /// Shared memory: what leaves this chat, who sees it, and how to forget it.
-class SharedMemoryPage extends StatelessWidget {
+class SharedMemoryPage extends StatefulWidget {
   const SharedMemoryPage({super.key, required this.data});
 
   final V2SharedMemoryPageData data;
+
+  @override
+  State<SharedMemoryPage> createState() => _SharedMemoryPageState();
+}
+
+class _SharedMemoryPageState extends State<SharedMemoryPage> {
+  late bool _enabled = widget.data.enabled;
+  late List<V2SharedMemoryScope> _scopeList = widget.data.scopes;
+  late int _factCount = widget.data.factCount;
+
+  V2SharedMemoryPageData get data => widget.data;
+
+  bool get _hasSharedFacts => _factCount > 0;
+
+  int get _sharedScopeCount =>
+      _scopeList.where((scope) => scope.shared).length;
+
+  @override
+  void didUpdateWidget(covariant SharedMemoryPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.data, widget.data)) {
+      _enabled = widget.data.enabled;
+      _scopeList = widget.data.scopes;
+      _factCount = widget.data.factCount;
+    }
+  }
+
+  /// The switch updates immediately and then reports to the owner. Without the
+  /// local copy a screen that is not rebuilt by its parent would look dead.
+  void _setEnabled(bool value) {
+    setState(() => _enabled = value);
+    data.onEnabledChanged?.call(value);
+  }
+
+  void _setScope(String id, bool value) {
+    setState(() {
+      _scopeList = [
+        for (final scope in _scopeList)
+          scope.id == id
+              ? V2SharedMemoryScope(
+                  id: scope.id,
+                  kind: scope.kind,
+                  title: scope.title,
+                  description: scope.description,
+                  audience: scope.audience,
+                  shared: value,
+                )
+              : scope,
+      ];
+    });
+    data.onScopeChanged?.call(id, value);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -155,7 +207,7 @@ class SharedMemoryPage extends StatelessWidget {
   }
 
   Widget _empty(BuildContext context) {
-    final canTurnOn = !data.enabled && data.onEnabledChanged != null;
+    final canTurnOn = !_enabled && data.onEnabledChanged != null;
     return OEmptyState(
       icon: Icons.share_outlined,
       title: 'Nothing is shared yet',
@@ -166,7 +218,7 @@ class SharedMemoryPage extends StatelessWidget {
           ? OButton(
               label: 'Turn on sharing',
               icon: Icons.share_rounded,
-              onPressed: () => data.onEnabledChanged!(true),
+              onPressed: () => _setEnabled(true),
             )
           : OButton(
               label: 'Refresh',
@@ -178,7 +230,7 @@ class SharedMemoryPage extends StatelessWidget {
 
   Widget _explainer(BuildContext context) {
     final c = OColors.of(context);
-    final count = data.factCount;
+    final count = _factCount;
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.l),
       child: OCard(
@@ -222,9 +274,9 @@ class SharedMemoryPage extends StatelessWidget {
                         ),
                       ),
                       Text(
-                        data.enabled ? 'Sharing on' : 'Sharing off',
+                        _enabled ? 'Sharing on' : 'Sharing off',
                         style: OType.caption.copyWith(
-                          color: data.enabled ? c.success : c.textMuted,
+                          color: _enabled ? c.success : c.textMuted,
                           fontWeight: FontWeight.w600,
                         ),
                       ),
@@ -241,7 +293,7 @@ class SharedMemoryPage extends StatelessWidget {
 
   Widget _masterCard(BuildContext context) {
     final c = OColors.of(context);
-    final enabled = data.enabled;
+    final enabled = _enabled;
     final canToggle = data.onEnabledChanged != null;
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.xl),
@@ -288,12 +340,12 @@ class SharedMemoryPage extends StatelessWidget {
               toggled: enabled,
               button: true,
               enabled: canToggle,
-              onTap: canToggle ? () => data.onEnabledChanged!(!enabled) : null,
+              onTap: canToggle ? () => _setEnabled(!enabled) : null,
               child: ExcludeSemantics(
                 child: Switch(
                   key: const ValueKey<String>('shared-memory-master-switch'),
                   value: enabled,
-                  onChanged: data.onEnabledChanged,
+                  onChanged: canToggle ? _setEnabled : null,
                   activeThumbColor: canToggle ? c.onAccent : c.textFaint,
                   activeTrackColor: canToggle ? c.accentFill : c.surfaceRaised,
                   inactiveThumbColor: c.textFaint,
@@ -311,8 +363,8 @@ class SharedMemoryPage extends StatelessWidget {
 
   Widget _scopes(BuildContext context) {
     final c = OColors.of(context);
-    final total = data.scopes.length;
-    final shared = data.sharedScopeCount;
+    final total = _scopeList.length;
+    final shared = _sharedScopeCount;
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.l),
       child: Column(
@@ -330,9 +382,9 @@ class SharedMemoryPage extends StatelessWidget {
             padding: EdgeInsets.zero,
             child: Column(
               children: [
-                for (var i = 0; i < data.scopes.length; i++) ...[
+                for (var i = 0; i < _scopeList.length; i++) ...[
                   if (i > 0) Divider(color: c.hairline, height: 1),
-                  _scopeRow(context, data.scopes[i]),
+                  _scopeRow(context, _scopeList[i]),
                 ],
               ],
             ),
@@ -344,7 +396,7 @@ class SharedMemoryPage extends StatelessWidget {
 
   Widget _scopeRow(BuildContext context, V2SharedMemoryScope scope) {
     final c = OColors.of(context);
-    final canToggle = data.onScopeChanged != null && data.enabled;
+    final canToggle = data.onScopeChanged != null && _enabled;
     return ConstrainedBox(
       constraints: const BoxConstraints(minHeight: OSpace.listRow),
       child: Padding(
@@ -413,7 +465,7 @@ class SharedMemoryPage extends StatelessWidget {
               button: true,
               enabled: canToggle,
               onTap: canToggle
-                  ? () => data.onScopeChanged!(scope.id, !scope.shared)
+                  ? () => _setScope(scope.id, !scope.shared)
                   : null,
               child: ExcludeSemantics(
                 child: Switch(
@@ -422,7 +474,7 @@ class SharedMemoryPage extends StatelessWidget {
                   ),
                   value: scope.shared,
                   onChanged: canToggle
-                      ? (next) => data.onScopeChanged!(scope.id, next)
+                      ? (next) => _setScope(scope.id, next)
                       : null,
                   activeThumbColor: canToggle ? c.onAccent : c.textFaint,
                   activeTrackColor: canToggle ? c.accentFill : c.surfaceRaised,
@@ -464,7 +516,7 @@ class SharedMemoryPage extends StatelessWidget {
 
   Widget _danger(BuildContext context) {
     final c = OColors.of(context);
-    final canForget = data.onForget != null && data.hasSharedFacts;
+    final canForget = data.onForget != null && _hasSharedFacts;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -478,7 +530,7 @@ class SharedMemoryPage extends StatelessWidget {
         ),
         const SizedBox(height: OSpace.s),
         Text(
-          data.hasSharedFacts
+          _hasSharedFacts
               ? 'Removes every shared fact for everyone it was shared with. '
                     'This cannot be undone.'
               : 'There are no shared facts to forget.',
@@ -490,7 +542,7 @@ class SharedMemoryPage extends StatelessWidget {
   }
 
   Future<void> _confirmForget(BuildContext context) async {
-    final count = data.factCount;
+    final count = _factCount;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) {
@@ -521,7 +573,25 @@ class SharedMemoryPage extends StatelessWidget {
         );
       },
     );
-    if (confirmed == true) data.onForget?.call();
+    if (confirmed == true) {
+      // Forget really removes the shared facts: the count drops to zero and
+      // every scope stops sharing, so the screen cannot keep claiming there
+      // are facts that the server just deleted.
+      setState(() {
+        _factCount = 0;
+        _scopeList = [
+          for (final scope in _scopeList)
+            V2SharedMemoryScope(
+              id: scope.id,
+              kind: scope.kind,
+              title: scope.title,
+              description: scope.description,
+              audience: scope.audience,
+            ),
+        ];
+      });
+      data.onForget?.call();
+    }
   }
 
   IconData _scopeIcon(V2SharedMemoryScopeKind kind) {

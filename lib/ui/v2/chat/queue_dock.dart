@@ -42,6 +42,7 @@ class V2QueueDock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (count <= 0) return const SizedBox.shrink();
     final c = OColors.of(context);
     final body = preview.trim();
     return Padding(
@@ -68,11 +69,14 @@ class V2QueueDock extends StatelessWidget {
                   Icon(Icons.queue_rounded, size: 18, color: c.accent),
                   const SizedBox(width: OSpace.s),
                   Expanded(
-                    child: Text(
-                      countLabel(count),
-                      style: OType.label.copyWith(
-                        color: c.text,
-                        fontWeight: FontWeight.w600,
+                    child: Semantics(
+                      liveRegion: true,
+                      child: Text(
+                        countLabel(count),
+                        style: OType.label.copyWith(
+                          color: c.text,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
                   ),

@@ -36,7 +36,9 @@ class V2PermissionsPageData {
     this.permissions = const <V2PermissionItem>[],
     this.onRequest,
     this.onOpenSettings,
+    this.onOpenSettingsFor,
     this.onResetAll,
+    this.onRefresh,
     this.onRetry,
     this.errorMessage = 'We could not load your permissions.',
   });
@@ -44,22 +46,62 @@ class V2PermissionsPageData {
   final V2PermissionsStatus status;
   final List<V2PermissionItem> permissions;
 
-  /// Called with the permission id when the user taps Request.
+  /// Called with the permission id when the user taps Request. The caller
+  /// runs the real OS request dialog.
   final ValueChanged<String>? onRequest;
   final VoidCallback? onOpenSettings;
+
+  /// Opens the Android settings page for one permission (camera, microphone,
+  /// photos, notifications, files) instead of the app's own page. Falls back
+  /// to [onOpenSettings] when a caller cannot target a single permission.
+  final ValueChanged<String>? onOpenSettingsFor;
 
   /// Revokes every device permission Ovid asked for. Android asks again the
   /// next time a task needs one.
   final VoidCallback? onResetAll;
+
+  /// Re-reads the real permission state. Called when the app returns to the
+  /// foreground, because the user may have changed a grant in Android
+  /// settings while this screen was open.
+  final VoidCallback? onRefresh;
   final VoidCallback? onRetry;
   final String errorMessage;
 }
 
 /// Camera, microphone, photos, notifications and files, with plain reasons.
-class PermissionsPage extends StatelessWidget {
+///
+/// Every row must reflect what Android reports. The page itself only renders
+/// the injected status; the route reloads it when the app resumes so a grant
+/// made in system settings shows up without reopening the screen.
+class PermissionsPage extends StatefulWidget {
   const PermissionsPage({super.key, required this.data});
 
   final V2PermissionsPageData data;
+
+  @override
+  State<PermissionsPage> createState() => _PermissionsPageState();
+}
+
+class _PermissionsPageState extends State<PermissionsPage>
+    with WidgetsBindingObserver {
+  V2PermissionsPageData get data => widget.data;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) data.onRefresh?.call();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -192,20 +234,22 @@ class PermissionsPage extends StatelessWidget {
       V2PermissionAccess.notAsked => c.surfaceAlt,
       V2PermissionAccess.blocked => c.danger.withValues(alpha: 0.12),
     };
+    final canOpen =
+        data.onOpenSettingsFor != null || data.onOpenSettings != null;
     final action = item.status == V2PermissionAccess.notAsked
         ? OButton(
+            key: ValueKey<String>('permission-request-${item.id}'),
             label: 'Request',
             semanticLabel: 'Request ${item.name} access',
             variant: OButtonVariant.ghost,
-            onPressed: data.onRequest == null
-                ? null
-                : () => data.onRequest!(item.id),
+            onPressed: data.onRequest == null ? null : () => _request(item.id),
           )
         : OButton(
+            key: ValueKey<String>('permission-settings-${item.id}'),
             label: 'Open settings',
             semanticLabel: 'Open settings for ${item.name}',
             variant: OButtonVariant.ghost,
-            onPressed: data.onOpenSettings,
+            onPressed: canOpen ? () => _openSettings(item.id) : null,
           );
 
     return Padding(
@@ -275,6 +319,22 @@ class PermissionsPage extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// Asks the OS for one permission, then reloads so the row shows the real
+  /// answer instead of the old snapshot.
+  void _request(String id) {
+    data.onRequest?.call(id);
+    data.onRefresh?.call();
+  }
+
+  void _openSettings(String id) {
+    final perPermission = data.onOpenSettingsFor;
+    if (perPermission != null) {
+      perPermission(id);
+      return;
+    }
+    data.onOpenSettings?.call();
   }
 
   Widget _pill(
@@ -428,6 +488,17 @@ class PermissionsPage extends StatelessWidget {
           expand: true,
           onPressed: data.onOpenSettings,
         ),
+        if (data.onRefresh != null) ...[
+          const SizedBox(height: OSpace.s),
+          OButton(
+            key: const ValueKey<String>('permissions-refresh'),
+            label: 'Refresh status',
+            icon: Icons.refresh_rounded,
+            variant: OButtonVariant.ghost,
+            expand: true,
+            onPressed: data.onRefresh,
+          ),
+        ],
         const SizedBox(height: OSpace.m),
         Text(
           'Ovid uses these only while it works on your request. '

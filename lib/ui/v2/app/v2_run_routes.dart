@@ -1,11 +1,15 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/conversation_share_service.dart';
 import '../../../core/format.dart';
 import '../../../core/state.dart';
 import '../runs/run_trajectory_page.dart';
 import '../runs/subagent_page.dart';
+import '../runs/subagent_summary.dart';
 
 /// Routes for the run surfaces (trajectory and subagent detail).
 ///
@@ -23,10 +27,25 @@ class V2RunRoutes {
     BuildContext context,
     String sessionId,
   ) async {
-    final data = trajectoryDataFor(AppState.I.sessionById(sessionId));
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => RunTrajectoryPage(data: data),
+        builder: (routeContext) => AnimatedBuilder(
+          animation: AppState.I,
+          builder: (context, _) {
+            final session = AppState.I.sessionById(sessionId);
+            return RunTrajectoryPage(
+              data: trajectoryDataFor(
+                session,
+                allSessions: AppState.I.sessions,
+              ),
+              onShareRun: session == null
+                  ? null
+                  : () => _shareRun(routeContext, session),
+              onOpenSource: (label) => _openSource(routeContext, label),
+              onOpenSubagent: (id) => openSubagent(routeContext, id),
+            );
+          },
+        ),
       ),
     );
   }
@@ -35,10 +54,25 @@ class V2RunRoutes {
     BuildContext context,
     String sessionId,
   ) async {
-    final data = subagentDataFor(AppState.I.sessionById(sessionId));
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => SubagentPage(data: data),
+        builder: (routeContext) => AnimatedBuilder(
+          animation: AppState.I,
+          builder: (context, _) {
+            final session = AppState.I.sessionById(sessionId);
+            final data = subagentDataFor(session);
+            return SubagentPage(
+              data: data,
+              onStop: data.working && session != null
+                  ? () => _stopSubagent(routeContext, session.id)
+                  : null,
+              onViewLog: session == null
+                  ? null
+                  : () => _showFullLog(routeContext, session),
+              onBackToChat: () => Navigator.of(routeContext).maybePop(),
+            );
+          },
+        ),
       ),
     );
   }
@@ -47,7 +81,10 @@ class V2RunRoutes {
   ///
   /// A missing session is an error; a session with no recorded steps is empty.
   @visibleForTesting
-  static V2RunTrajectoryPageData trajectoryDataFor(ChatSession? session) {
+  static V2RunTrajectoryPageData trajectoryDataFor(
+    ChatSession? session, {
+    List<ChatSession>? allSessions,
+  }) {
     if (session == null) {
       return const V2RunTrajectoryPageData(
         title: 'Run',
@@ -64,6 +101,7 @@ class V2RunRoutes {
     final steps = <V2RunStep>[
       for (final message in session.messages) ?_stepFor(message),
     ];
+    final launches = _subagentLaunches(session, allSessions);
     if (steps.isEmpty) {
       return V2RunTrajectoryPageData(
         title: session.title,
@@ -72,6 +110,7 @@ class V2RunRoutes {
         model: session.model,
         tokensLabel: _tokensLabel(session),
         durationLabel: _durationLabel(session),
+        subagents: launches,
         status: V2RunTrajectoryStatus.empty,
       );
     }
@@ -84,6 +123,7 @@ class V2RunRoutes {
       tokensLabel: _tokensLabel(session),
       durationLabel: _durationLabel(session),
       steps: steps,
+      subagents: launches,
     );
   }
 
@@ -142,6 +182,9 @@ class V2RunRoutes {
       instanceLabel: session.model,
       working: working,
       progress: state == 'finished' ? 1 : 0,
+      // Only a finished run reports a definite 100 %; a running, stopped or
+      // failed run has no measured progress in the session.
+      progressKnown: state == 'finished',
       stepLabel: _agentStateLabel(state),
       paceLabel: '',
       goal: session.title,
@@ -153,13 +196,256 @@ class V2RunRoutes {
       timeLimitLabel: notReported,
       remainingLabel: '',
       logLines: logLines,
-      totalLogLines: logLines.length,
+      totalLogLines: _toolCount(session),
+      summary: _summaryFrom(session.agentResult),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Actions
+  // ---------------------------------------------------------------------------
+
+  static Future<void> _shareRun(
+    BuildContext context,
+    ChatSession session,
+  ) async {
+    final snapshot = ConversationSnapshot.fromSession(session);
+    if (!snapshot.withinLimits) {
+      _snack(context, 'This run has no shareable text yet.');
+      return;
+    }
+    try {
+      final share = await ConversationShareService.production().create(
+        snapshot,
+        requestId: 'v2-run-${DateTime.now().microsecondsSinceEpoch}',
+      );
+      await Clipboard.setData(ClipboardData(text: share.url.toString()));
+      if (context.mounted) _snack(context, 'Share link copied.');
+    } catch (_) {
+      if (context.mounted) _snack(context, 'We could not create a share link.');
+    }
+  }
+
+  static Future<void> _openSource(BuildContext context, String label) async {
+    final raw = label.trim();
+    if (raw.isEmpty) return;
+    final uri = Uri.tryParse(
+      raw.contains('://') ? raw : 'https://$raw',
+    );
+    if (uri == null || uri.host.isEmpty) {
+      _snack(context, 'This source has no openable address.');
+      return;
+    }
+    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!opened && context.mounted) {
+      _snack(context, 'Could not open $raw.');
+    }
+  }
+
+  static Future<void> _stopSubagent(
+    BuildContext context,
+    String sessionId,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Stop this subagent?'),
+        content: const Text(
+          'It stops working and keeps the changes it has already made.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Stop'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) AppState.I.setAgentState(sessionId, 'stopped');
+  }
+
+  /// The full tool log for one subagent, as a scrollable sheet. The page's
+  /// preview only shows the last five rows; this shows every recorded row.
+  static Future<void> _showFullLog(
+    BuildContext context,
+    ChatSession session,
+  ) {
+    final lines = _allLogLines(session);
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.8,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  'Full log · ${lines.length} '
+                  '${lines.length == 1 ? 'line' : 'lines'}',
+                  style: Theme.of(sheetContext).textTheme.titleMedium,
+                ),
+              ),
+              Flexible(
+                child: lines.isEmpty
+                    ? const Padding(
+                        padding: EdgeInsets.all(16),
+                        child: Text('No tool rows were recorded.'),
+                      )
+                    : ListView.builder(
+                        shrinkWrap: true,
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                        itemCount: lines.length,
+                        itemBuilder: (context, index) {
+                          final line = lines[index];
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: Text('[${line.time}] ${line.text}'),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  static void _snack(BuildContext context, String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
     );
   }
 
   // ---------------------------------------------------------------------------
   // Mapping helpers
   // ---------------------------------------------------------------------------
+
+  /// Child sessions dispatched by [session], in the order they started.
+  static List<V2SubagentLaunch> _subagentLaunches(
+    ChatSession session,
+    List<ChatSession>? allSessions,
+  ) {
+    if (allSessions == null) return const [];
+    final children = [
+      for (final child in allSessions)
+        if (child.parentId == session.id) child,
+    ]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    return [
+      for (final child in children)
+        V2SubagentLaunch(
+          id: child.id,
+          agentName: (child.agentLabel ?? '').trim().isEmpty
+              ? child.title
+              : child.agentLabel!.trim(),
+          taskSummary: child.title,
+          timeLabel: _timeOfDay(child.createdAt),
+          durationLabel: _durationFor(child),
+          startedAt: child.createdAt,
+          status: _launchStatus(child.agentState),
+          statusLabel: const {'running', 'finished', 'failed', 'stopped'}
+                  .contains(child.agentState)
+              ? null
+              : 'Not reported',
+        ),
+    ];
+  }
+
+  static V2SubagentLaunchStatus _launchStatus(String? state) =>
+      switch (state) {
+        'running' => V2SubagentLaunchStatus.running,
+        'finished' => V2SubagentLaunchStatus.completed,
+        'failed' => V2SubagentLaunchStatus.failed,
+        'stopped' => V2SubagentLaunchStatus.cancelled,
+        _ => V2SubagentLaunchStatus.cancelled,
+      };
+
+  static String _durationFor(ChatSession session) {
+    final end = session.agentState == 'running'
+        ? DateTime.now()
+        : session.lastActivityAt;
+    final elapsed = end.difference(session.createdAt);
+    return elapsed.isNegative ? '' : formatCompactDuration(elapsed);
+  }
+
+  static int _toolCount(ChatSession session) => session.messages
+      .where((message) => message.kind == MsgKind.tool)
+      .length;
+
+  /// Decodes the subagent's strict JSON contract from its final answer.
+  ///
+  /// A missing or non-contract answer returns null so the card shows its
+  /// honest "No summary yet" state instead of inventing fields.
+  @visibleForTesting
+  static V2SubagentSummaryData? summaryFrom(String? raw) => _summaryFrom(raw);
+
+  static V2SubagentSummaryData? _summaryFrom(String? raw) {
+    final text = (raw ?? '').trim();
+    if (text.isEmpty) return null;
+    final start = text.indexOf('{');
+    final end = text.lastIndexOf('}');
+    if (start < 0 || end <= start) return null;
+    Object? decoded;
+    try {
+      decoded = jsonDecode(text.substring(start, end + 1));
+    } catch (_) {
+      return null;
+    }
+    if (decoded is! Map) return null;
+    final map = decoded;
+
+    final reported = <String>{};
+    String status = '';
+    if (map['status'] is String) {
+      status = (map['status'] as String).trim();
+      reported.add('status');
+    }
+    List<String> strings(String key) {
+      final value = map[key];
+      if (value is! List) return const [];
+      return [
+        for (final item in value)
+          if (item is String && item.trim().isNotEmpty) item.trim(),
+      ];
+    }
+
+    List<String> listField(String key) {
+      if (map[key] is! List) return const [];
+      reported.add(key);
+      return strings(key);
+    }
+
+    final files = listField('files_modified');
+    final artifacts = listField('artifacts_created');
+    final findings = listField('key_findings');
+    String? error;
+    if (map.containsKey('error_if_any')) {
+      final value = map['error_if_any'];
+      if (value == null || value is String) {
+        reported.add('error_if_any');
+        if (value is String && value.trim().isNotEmpty) error = value.trim();
+      }
+    }
+    if (reported.isEmpty) return null;
+    return V2SubagentSummaryData(
+      status: status,
+      filesModified: files,
+      artifactsCreated: artifacts,
+      keyFindings: findings,
+      errorIfAny: error,
+      reported: reported,
+    );
+  }
 
   static V2RunStep? _stepFor(Message message) {
     final id = message.privateSyncId;
@@ -303,16 +589,15 @@ class V2RunRoutes {
 
   /// The most recent tool rows, shown as the log preview.
   static List<V2SubagentLogLine> _logLines(ChatSession session) {
-    final tools = [
-      for (final message in session.messages)
-        if (message.kind == MsgKind.tool) message,
-    ];
+    final all = _allLogLines(session);
     const preview = 5;
-    final tail = tools.length <= preview
-        ? tools
-        : tools.sublist(tools.length - preview);
-    return [
-      for (final message in tail)
+    return all.length <= preview ? all : all.sublist(all.length - preview);
+  }
+
+  /// Every recorded tool row, in transcript order.
+  static List<V2SubagentLogLine> _allLogLines(ChatSession session) => [
+    for (final message in session.messages)
+      if (message.kind == MsgKind.tool)
         V2SubagentLogLine(
           time: _timeOfDaySeconds(message.time),
           text: _toolLogText(message),
@@ -322,8 +607,7 @@ class V2RunRoutes {
             _ => V2SubagentLogTone.normal,
           },
         ),
-    ];
-  }
+  ];
 
   static String _toolLogText(Message message) {
     final summary = (message.toolSummary ?? '').trim();

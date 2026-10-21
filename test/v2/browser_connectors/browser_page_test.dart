@@ -97,6 +97,7 @@ void main() {
       tester,
       BrowserPage(
         data: _data(),
+        onTakeControl: () {},
         viewportChild: const Center(child: Text('Injected live page')),
       ),
     );
@@ -162,7 +163,7 @@ void main() {
       BrowserPage(data: _data(), onTakeControl: () => taps++),
     );
 
-    await tester.tap(find.text('Take control'));
+    await tester.tap(find.byKey(BrowserControlBar.takeControlKey));
     await tester.pump(const Duration(milliseconds: 300));
     expect(taps, 1);
   });
@@ -213,28 +214,31 @@ void main() {
     expect(opened, 1);
   });
 
-  testWidgets('stop, download and upload callbacks are wired', (tester) async {
+  testWidgets('stop is wired and the missing transfer tools are absent', (
+    tester,
+  ) async {
     var stops = 0;
-    var downloads = 0;
-    var uploads = 0;
     await _pump(
       tester,
-      BrowserPage(
-        data: _data(),
-        onStop: () => stops++,
-        onDownload: () => downloads++,
-        onUpload: () => uploads++,
-      ),
+      BrowserPage(data: _data(), onStop: () => stops++),
     );
 
     await tester.tap(find.text('Stop'));
-    await tester.tap(find.byTooltip('Download file'));
-    await tester.tap(find.byTooltip('Upload file'));
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(stops, 1);
-    expect(downloads, 1);
-    expect(uploads, 1);
+    // The gateway has no upload/download op, so those buttons must not exist
+    // rather than sit there dead.
+    expect(find.byTooltip('Download file'), findsNothing);
+    expect(find.byTooltip('Upload file'), findsNothing);
+    expect(find.byIcon(Icons.download_rounded), findsNothing);
+    expect(find.byIcon(Icons.upload_rounded), findsNothing);
+  });
+
+  testWidgets('a stop control with no handler is not rendered', (tester) async {
+    await _pump(tester, BrowserPage(data: _data()));
+
+    expect(find.text('Stop'), findsNothing);
   });
 
   testWidgets('an offline connection shows a reconnect path', (tester) async {
@@ -259,17 +263,18 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('an empty action log still explains what happens next', (
-    tester,
-  ) async {
+  testWidgets('an action log with no source is not rendered', (tester) async {
     await _pump(
       tester,
       BrowserPage(data: _data(actions: const <V2BrowserAction>[])),
     );
 
+    // There is no log source in the browser channel, so the page must not
+    // promise an action-log screen it cannot open.
+    expect(find.text('Action log'), findsNothing);
     expect(
       find.text('No steps yet. Ovid will list what it does here.'),
-      findsOneWidget,
+      findsNothing,
     );
   });
 
@@ -315,22 +320,29 @@ void main() {
 
     await _pump(tester, const BrowserPage(data: data));
 
+    // No log source means no log panel at all; no picture means an honest
+    // waiting state, not a blank surface that looks loaded.
     expect(
       find.text('No steps yet. Ovid will list what it does here.'),
-      findsOneWidget,
+      findsNothing,
     );
-    expect(find.text('The live page shows here'), findsOneWidget);
+    expect(find.text('Action log'), findsNothing);
+    expect(find.text('No picture yet'), findsWidgets);
+    expect(find.text('The live page shows here'), findsNothing);
     expect(find.textContaining('sk_live'), findsNothing);
   });
 
   testWidgets('320 dp at 200 % text lays out without overflow (light)', (
     tester,
   ) async {
-    await _pumpSmall(tester, BrowserPage(data: _data()));
+    await _pumpSmall(
+      tester,
+      BrowserPage(data: _data(), onTakeControl: () {}),
+    );
 
     expect(tester.takeException(), isNull);
     expect(find.text('Browser'), findsOneWidget);
-    expect(find.text('Take control'), findsOneWidget);
+    expect(find.byKey(BrowserControlBar.takeControlKey), findsOneWidget);
     expect(find.text('Ovid is driving'), findsOneWidget);
     expect(find.text('Action log'), findsOneWidget);
     expect(find.text('Read-only'), findsOneWidget);
@@ -339,11 +351,15 @@ void main() {
   testWidgets('320 dp at 200 % text lays out without overflow (dark)', (
     tester,
   ) async {
-    await _pumpSmall(tester, BrowserPage(data: _data()), theme: OTheme.dark());
+    await _pumpSmall(
+      tester,
+      BrowserPage(data: _data(), onTakeControl: () {}),
+      theme: OTheme.dark(),
+    );
 
     expect(tester.takeException(), isNull);
     expect(find.text('Ovid is driving'), findsOneWidget);
-    expect(find.text('Take control'), findsOneWidget);
+    expect(find.byKey(BrowserControlBar.takeControlKey), findsOneWidget);
   });
 
   testWidgets('320 dp at 200 % text, offline, still lays out', (tester) async {
@@ -361,7 +377,11 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Reconnect'), findsOneWidget);
+    expect(find.text('Offline'), findsOneWidget);
+    expect(
+      find.text('Ovid will reconnect on its own. You can also try now.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('a short landscape window scrolls instead of overflowing', (
@@ -470,8 +490,6 @@ void main() {
     var back = 0;
     var keyboard = 0;
     var trackpad = 0;
-    var uploads = 0;
-    var downloads = 0;
     var released = 0;
     await _pump(
       tester,
@@ -487,8 +505,6 @@ void main() {
         onBack: () => back++,
         onToggleKeyboard: () => keyboard++,
         onToggleTrackpad: () => trackpad++,
-        onUpload: () => uploads++,
-        onDownload: () => downloads++,
         onReleaseControl: () => released++,
       ),
     );
@@ -501,17 +517,36 @@ void main() {
     await tester.tap(find.byKey(BrowserControlBar.backKey));
     await tester.tap(find.byKey(BrowserControlBar.keyboardKey));
     await tester.tap(find.byKey(BrowserControlBar.trackpadKey));
-    await tester.tap(find.byKey(BrowserControlBar.uploadKey));
-    await tester.tap(find.byKey(BrowserControlBar.downloadKey));
     await tester.tap(find.byKey(BrowserControlBar.takeControlKey));
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(back, 1);
     expect(keyboard, 1);
     expect(trackpad, 1);
-    expect(uploads, 1);
-    expect(downloads, 1);
     expect(released, 1);
+  });
+
+  testWidgets('tools without a handler are not rendered in the bar', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      BrowserPage(
+        data: const V2BrowserData(
+          tabs: [V2BrowserTab(id: 'docs', title: 'Docs', host: 'ovidsi.com')],
+          activeTabId: 'docs',
+          address: 'ovidsi.com/docs/quickstart',
+        ),
+      ),
+    );
+
+    expect(find.byKey(BrowserControlBar.backKey), findsNothing);
+    expect(find.byKey(BrowserControlBar.forwardKey), findsNothing);
+    expect(find.byKey(BrowserControlBar.keyboardKey), findsNothing);
+    expect(find.byKey(BrowserControlBar.trackpadKey), findsNothing);
+    expect(find.byKey(BrowserControlBar.takeControlKey), findsNothing);
+    // The cadence chip is data, not an action, so it stays.
+    expect(find.byKey(BrowserControlBar.fpsKey), findsOneWidget);
   });
 
   testWidgets('control bar can hand the page over', (tester) async {
@@ -545,8 +580,6 @@ void main() {
         onForward: () {},
         onToggleKeyboard: () {},
         onToggleTrackpad: () {},
-        onUpload: () {},
-        onDownload: () {},
       ),
     );
 

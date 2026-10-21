@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../../../core/diag.dart';
+import '../../../core/secure_store.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
@@ -7,6 +10,38 @@ import '../../design/o_tokens.dart';
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
 
 enum V2CredentialKind { google, github, token }
+
+/// Reads and writes credential secrets in the platform secure store.
+///
+/// The page only ever reads a secret to derive a mask; the plaintext never
+/// leaves this seam and is never put into [V2CredentialsPageData].
+abstract class V2CredentialKeyStore {
+  Future<String?> read(String id);
+  Future<void> write(String id, String value);
+  Future<void> delete(String id);
+}
+
+/// Production store over the same hardened [FlutterSecureStorage] used for
+/// provider keys. Ids are stable (`personal`, `github`) and the prefix keeps
+/// credential rows separate from the provider-key rows in `AppState`.
+class V2SecureCredentialKeyStore implements V2CredentialKeyStore {
+  V2SecureCredentialKeyStore({FlutterSecureStorage? storage})
+    : _storage = storage ?? ovidSecureStorage();
+
+  static const String prefix = 'ovid_credential_key_';
+
+  final FlutterSecureStorage _storage;
+
+  @override
+  Future<String?> read(String id) => _storage.read(key: '$prefix$id');
+
+  @override
+  Future<void> write(String id, String value) =>
+      _storage.write(key: '$prefix$id', value: value);
+
+  @override
+  Future<void> delete(String id) => _storage.delete(key: '$prefix$id');
+}
 
 /// One connected credential.
 @immutable
@@ -79,12 +114,15 @@ class V2CredentialsPageData {
     this.onConnectGoogle,
     this.onConnectGithub,
     this.onAddToken,
+    this.onSaveToken,
+    this.onRemoveToken,
     this.onAddBrowserCredential,
     this.onEditBrowserCredential,
     this.onDeleteBrowserCredential,
     this.onConnectGithubOAuth,
     this.onDisconnectGithubOAuth,
     this.onAddGithubPat,
+    this.onSaveGithubPat,
     this.onRemoveGithubPat,
     this.onRevokeAll,
     this.onManageCloudKey,
@@ -112,13 +150,25 @@ class V2CredentialsPageData {
 
   final VoidCallback? onConnectGoogle;
   final VoidCallback? onConnectGithub;
+
+  /// Legacy host-owned "add token" flow. New hosts use [onSaveToken], which
+  /// receives the entered key and can write it to the provider store.
   final VoidCallback? onAddToken;
+
+  /// Receives the entered provider key. When null the page writes it to
+  /// [V2CredentialKeyStore] itself (secure storage by default).
+  final ValueChanged<String>? onSaveToken;
+  final VoidCallback? onRemoveToken;
   final ValueChanged<V2BrowserCredential>? onAddBrowserCredential;
   final ValueChanged<V2BrowserCredential>? onEditBrowserCredential;
   final ValueChanged<V2BrowserCredential>? onDeleteBrowserCredential;
   final VoidCallback? onConnectGithubOAuth;
   final VoidCallback? onDisconnectGithubOAuth;
+
+  /// Legacy host-owned GitHub PAT flows. When null the page collects the token
+  /// and stores it through [V2CredentialKeyStore].
   final VoidCallback? onAddGithubPat;
+  final ValueChanged<String>? onSaveGithubPat;
   final VoidCallback? onRemoveGithubPat;
   final VoidCallback? onRevokeAll;
   final VoidCallback? onManageCloudKey;
@@ -139,10 +189,244 @@ class V2CredentialsPageData {
 }
 
 /// Connected accounts and personal keys used by Ovid.
-class CredentialsPage extends StatelessWidget {
-  const CredentialsPage({super.key, required this.data});
+///
+/// Secrets are write-only from this screen's point of view: the add/replace
+/// sheet collects a key, hands it to the store, and the page keeps only a
+/// mask for display.
+class CredentialsPage extends StatefulWidget {
+  const CredentialsPage({super.key, required this.data, this.keyStore});
 
   final V2CredentialsPageData data;
+
+  /// Test/host seam. Defaults to the hardened platform secure store.
+  final V2CredentialKeyStore? keyStore;
+
+  @override
+  State<CredentialsPage> createState() => _CredentialsPageState();
+}
+
+class _CredentialsPageState extends State<CredentialsPage> {
+  late final V2CredentialKeyStore _store =
+      widget.keyStore ?? V2SecureCredentialKeyStore();
+
+  /// Masks only. The raw secret is never retained after the save call.
+  String? _tokenMask;
+  String? _githubPatMask;
+
+  V2CredentialsPageData get data => widget.data;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSecrets();
+  }
+
+  Future<void> _loadSecrets() async {
+    String? token;
+    String? pat;
+    // An unreadable keystore must not crash the screen; the row simply reads
+    // "Not added yet" until the platform answers again.
+    try {
+      token = await _store.read('personal');
+    } catch (error, stack) {
+      Diag.swallow('credentials.readPersonal', error, stack);
+    }
+    try {
+      pat = await _store.read('github');
+    } catch (error, stack) {
+      Diag.swallow('credentials.readGithub', error, stack);
+    }
+    if (!mounted) return;
+    setState(() {
+      _tokenMask = _maskSecret(token);
+      _githubPatMask = _maskSecret(pat);
+    });
+  }
+
+  bool get _tokenSaved =>
+      _tokenMask != null || (data.token?.connected ?? false);
+
+  bool get _githubPatSaved =>
+      _githubPatMask != null || data.githubPatAdded;
+
+  String get _tokenSubtitle {
+    if (_tokenMask != null) return _tokenMask!;
+    final token = data.token;
+    if (token != null && token.connected) return _maskedToken(token.subtitle);
+    return 'Not added yet';
+  }
+
+  bool get _hasAnyCredential =>
+      data.credentials.any(
+        (c) => c.kind == V2CredentialKind.token ? _tokenSaved : c.connected,
+      ) ||
+      data.browserCredentials.isNotEmpty ||
+      _githubPatSaved;
+
+  int get _storedCount => data.credentials
+      .where(
+        (c) => c.kind == V2CredentialKind.token ? _tokenSaved : c.connected,
+      )
+      .length;
+
+  Future<void> _saveSecret({
+    required String id,
+    required String value,
+  }) async {
+    await _store.write(id, value);
+    await _loadSecrets();
+  }
+
+  Future<void> _editToken() async {
+    final key = await showOSheet<String>(
+      context,
+      title: _tokenSaved ? 'Replace provider key' : 'Add provider key',
+      builder: (_) => _SecretForm(
+        fieldLabel: 'Provider API key',
+        helper:
+            'Stored in encrypted secure storage on this device. The full key '
+            'is never shown again.',
+        replacing: _tokenSaved,
+      ),
+    );
+    if (key == null || !mounted) return;
+    final host = data.onSaveToken;
+    if (host != null) {
+      host(key);
+    } else {
+      try {
+        await _saveSecret(id: 'personal', value: key);
+        if (mounted) _snack('Provider key saved.');
+      } catch (_) {
+        if (mounted) _snack('Could not save the key. Try again.');
+      }
+    }
+  }
+
+  Future<void> _removeToken() async {
+    final confirmed = await _confirmSecretRemoval(
+      title: 'Remove provider key?',
+      body:
+          'Ovid will stop using this key for custom providers. The saved key '
+          'is deleted from this device.',
+      action: 'Remove key',
+    );
+    if (confirmed != true) return;
+    final host = data.onRemoveToken;
+    if (host != null) {
+      host();
+      return;
+    }
+    try {
+      await _store.delete('personal');
+      await _loadSecrets();
+      if (mounted) _snack('Provider key removed.');
+    } catch (_) {
+      if (mounted) _snack('Could not remove the key. Try again.');
+    }
+  }
+
+  Future<void> _editGithubPat() async {
+    final host = data.onAddGithubPat;
+    if (host != null) {
+      host();
+      return;
+    }
+    final token = await showOSheet<String>(
+      context,
+      title: _githubPatSaved
+          ? 'Replace GitHub token'
+          : 'Add GitHub token',
+      builder: (_) => _SecretForm(
+        fieldLabel: 'GitHub personal access token',
+        helper:
+            'Used for git clone and push. Stored in encrypted secure storage '
+            'and never shown again.',
+        replacing: _githubPatSaved,
+      ),
+    );
+    if (token == null || !mounted) return;
+    final save = data.onSaveGithubPat;
+    if (save != null) {
+      save(token);
+    } else {
+      try {
+        await _saveSecret(id: 'github', value: token);
+        if (mounted) _snack('GitHub token saved.');
+      } catch (_) {
+        if (mounted) _snack('Could not save the token. Try again.');
+      }
+    }
+  }
+
+  Future<void> _removeGithubPat() async {
+    final host = data.onRemoveGithubPat;
+    if (host != null) {
+      host();
+      return;
+    }
+    final confirmed = await _confirmSecretRemoval(
+      title: 'Remove GitHub token?',
+      body:
+          'Studio will no longer be able to clone or push with this token. '
+          'It is deleted from this device.',
+      action: 'Remove token',
+    );
+    if (confirmed != true) return;
+    try {
+      await _store.delete('github');
+      await _loadSecrets();
+      if (mounted) _snack('GitHub token removed.');
+    } catch (_) {
+      if (mounted) _snack('Could not remove the token. Try again.');
+    }
+  }
+
+  Future<bool?> _confirmSecretRemoval({
+    required String title,
+    required String body,
+    required String action,
+  }) {
+    return showOSheet<bool>(
+      context,
+      title: title,
+      builder: (sheetContext) {
+        final c = OColors.of(sheetContext);
+        return SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.l),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(body, style: OType.bodySm.copyWith(color: c.textMuted)),
+              const SizedBox(height: OSpace.l),
+              OButton(
+                label: 'Keep key',
+                variant: OButtonVariant.secondary,
+                expand: true,
+                onPressed: () => Navigator.of(sheetContext).pop(false),
+              ),
+              const SizedBox(height: OSpace.s),
+              OButton(
+                key: const ValueKey<String>('credential-confirm-remove'),
+                label: action,
+                variant: OButtonVariant.dangerFill,
+                expand: true,
+                onPressed: () => Navigator.of(sheetContext).pop(true),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _snack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -164,16 +448,20 @@ class CredentialsPage extends StatelessWidget {
         icon: Icons.key_off_outlined,
         title: 'No credentials yet',
         message: 'Connect Google or GitHub so Ovid can work for you.',
-        action: OButton(
-          label: 'Connect Google',
-          icon: Icons.mail_outline_rounded,
-          onPressed: data.onConnectGoogle,
-        ),
-        secondaryAction: OButton(
-          label: 'Connect GitHub',
-          variant: OButtonVariant.secondary,
-          onPressed: data.onConnectGithub,
-        ),
+        action: data.onConnectGoogle == null
+            ? null
+            : OButton(
+                label: 'Connect Google',
+                icon: Icons.mail_outline_rounded,
+                onPressed: data.onConnectGoogle,
+              ),
+        secondaryAction: data.onConnectGithub == null
+            ? null
+            : OButton(
+                label: 'Connect GitHub',
+                variant: OButtonVariant.secondary,
+                onPressed: data.onConnectGithub,
+              ),
       );
     }
     return OFadeSlide(
@@ -233,8 +521,8 @@ class CredentialsPage extends StatelessWidget {
                       ),
                       const SizedBox(height: OSpace.xs),
                       const OPill(
-                        label: 'Healthy',
-                        tone: OPillTone.success,
+                        label: 'Encrypted',
+                        tone: OPillTone.accent,
                         dot: true,
                       ),
                     ],
@@ -508,7 +796,7 @@ class CredentialsPage extends StatelessWidget {
   Widget _githubAccess(BuildContext context) {
     final c = OColors.of(context);
     final oauth = data.githubOAuthActive;
-    final pat = data.githubPatAdded;
+    final pat = _githubPatSaved;
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.l),
       child: Column(
@@ -546,15 +834,17 @@ class CredentialsPage extends StatelessWidget {
                       context,
                       title: 'GitHub personal access token',
                       detail: pat
-                          ? 'Added · used for git clone and push'
+                          ? (_githubPatMask != null
+                                ? 'Added · $_githubPatMask'
+                                : 'Added · used for git clone and push')
                           : 'Not added',
                       active: pat,
                       activeLabel: 'Added',
                       inactiveLabel: 'Not added',
                       actionLabel: pat ? 'Replace token' : 'Add token',
-                      onAction: data.onAddGithubPat,
+                      onAction: _editGithubPat,
                       secondaryLabel: pat ? 'Remove' : null,
-                      onSecondary: pat ? data.onRemoveGithubPat : null,
+                      onSecondary: pat ? _removeGithubPat : null,
                       stacked: stacked,
                     ),
                   ],
@@ -587,12 +877,13 @@ class CredentialsPage extends StatelessWidget {
       dot: true,
     );
     final buttons = <Widget>[
-      OButton(
-        label: actionLabel,
-        variant: OButtonVariant.ghost,
-        size: OButtonSize.compact,
-        onPressed: onAction,
-      ),
+      if (onAction != null)
+        OButton(
+          label: actionLabel,
+          variant: OButtonVariant.ghost,
+          size: OButtonSize.compact,
+          onPressed: onAction,
+        ),
       if (secondaryLabel != null)
         OButton(
           label: secondaryLabel,
@@ -661,11 +952,13 @@ class CredentialsPage extends StatelessWidget {
       tone: data.cloudKeyActive ? OPillTone.success : OPillTone.neutral,
       dot: true,
     );
-    final button = OButton(
-      label: 'Manage',
-      variant: OButtonVariant.ghost,
-      onPressed: data.onManageCloudKey,
-    );
+    final button = data.onManageCloudKey == null
+        ? null
+        : OButton(
+            label: 'Manage',
+            variant: OButtonVariant.ghost,
+            onPressed: data.onManageCloudKey,
+          );
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.l),
       child: OCard(
@@ -707,8 +1000,10 @@ class CredentialsPage extends StatelessWidget {
                   icon,
                   const SizedBox(width: OSpace.m),
                   Expanded(child: text),
-                  const SizedBox(width: OSpace.s),
-                  button,
+                  if (button != null) ...[
+                    const SizedBox(width: OSpace.s),
+                    button,
+                  ],
                 ],
               );
             }
@@ -723,8 +1018,13 @@ class CredentialsPage extends StatelessWidget {
                     Expanded(child: text),
                   ],
                 ),
-                const SizedBox(height: OSpace.s),
-                Align(alignment: AlignmentDirectional.centerEnd, child: button),
+                if (button != null) ...[
+                  const SizedBox(height: OSpace.s),
+                  Align(
+                    alignment: AlignmentDirectional.centerEnd,
+                    child: button,
+                  ),
+                ],
               ],
             );
           },
@@ -735,7 +1035,7 @@ class CredentialsPage extends StatelessWidget {
 
   Widget _credentialList(BuildContext context) {
     final c = OColors.of(context);
-    final count = data.credentials.length;
+    final count = _storedCount;
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.l),
       child: Column(
@@ -771,16 +1071,16 @@ class CredentialsPage extends StatelessWidget {
                     ],
                     if (data.token == null) ...[
                       Divider(color: c.hairline, height: 1),
-                      OListRow(
-                        icon: Icons.key_rounded,
-                        title: 'Personal access token',
-                        subtitle: 'Not added yet',
-                        showChevron: false,
-                        trailing: OButton(
-                          label: 'Add',
-                          variant: OButtonVariant.ghost,
-                          onPressed: data.onAddToken,
+                      _credentialRow(
+                        context,
+                        const V2Credential(
+                          id: 'token',
+                          kind: V2CredentialKind.token,
+                          title: 'Personal access token',
+                          subtitle: '',
+                          connected: false,
                         ),
+                        stacked: stacked,
                       ),
                     ],
                   ],
@@ -800,9 +1100,8 @@ class CredentialsPage extends StatelessWidget {
   }) {
     final c = OColors.of(context);
     final isToken = credential.kind == V2CredentialKind.token;
-    final subtitle = isToken
-        ? _maskedToken(credential.subtitle)
-        : credential.subtitle;
+    final subtitle = isToken ? _tokenSubtitle : credential.subtitle;
+    final connected = isToken ? _tokenSaved : credential.connected;
     final onTap = data.onCredentialTap == null
         ? null
         : () => data.onCredentialTap!(credential.id);
@@ -816,8 +1115,8 @@ class CredentialsPage extends StatelessWidget {
       child: Icon(_kindIcon(credential.kind), size: 19, color: c.textMuted),
     );
     final pill = OPill(
-      label: credential.connected ? 'Active' : 'Off',
-      tone: credential.connected ? OPillTone.success : OPillTone.neutral,
+      label: connected ? 'Active' : 'Off',
+      tone: connected ? OPillTone.success : OPillTone.neutral,
       dot: true,
     );
     if (!stacked) {
@@ -828,11 +1127,7 @@ class CredentialsPage extends StatelessWidget {
         showChevron: false,
         onTap: onTap,
         trailing: isToken
-            ? OButton(
-                label: 'Add',
-                variant: OButtonVariant.ghost,
-                onPressed: data.onAddToken,
-              )
+            ? _tokenActions(context)
             : Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -876,14 +1171,7 @@ class CredentialsPage extends StatelessWidget {
                   style: OType.caption.copyWith(color: c.textMuted),
                 ),
                 const SizedBox(height: OSpace.xs),
-                if (isToken)
-                  OButton(
-                    label: 'Add',
-                    variant: OButtonVariant.ghost,
-                    onPressed: data.onAddToken,
-                  )
-                else
-                  pill,
+                if (isToken) _tokenActions(context) else pill,
               ],
             ),
           ),
@@ -903,6 +1191,38 @@ class CredentialsPage extends StatelessWidget {
     );
   }
 
+  /// Add/Replace/Remove for the provider key row. Icons keep the trailing
+  /// control narrow enough for a 320 dp phone at 200 % text.
+  Widget _tokenActions(BuildContext context) {
+    if (!_tokenSaved) {
+      return OButton(
+        key: const ValueKey<String>('provider-key-add'),
+        label: 'Add',
+        variant: OButtonVariant.ghost,
+        onPressed: _editToken,
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        OIconButton(
+          key: const ValueKey<String>('provider-key-replace'),
+          icon: Icons.edit_rounded,
+          semanticLabel: 'Replace provider key',
+          tooltip: 'Replace provider key',
+          onPressed: _editToken,
+        ),
+        OIconButton(
+          key: const ValueKey<String>('provider-key-remove'),
+          icon: Icons.delete_outline_rounded,
+          semanticLabel: 'Remove provider key',
+          tooltip: 'Remove provider key',
+          onPressed: _removeToken,
+        ),
+      ],
+    );
+  }
+
   Widget _revoke(BuildContext context) {
     final c = OColors.of(context);
     return Padding(
@@ -915,9 +1235,9 @@ class CredentialsPage extends StatelessWidget {
             icon: Icons.warning_amber_rounded,
             variant: OButtonVariant.danger,
             expand: true,
-            onPressed: data.credentials.isEmpty
-                ? null
-                : () => _confirmRevoke(context),
+            onPressed: _hasAnyCredential
+                ? () => _confirmRevoke(context)
+                : null,
           ),
           const SizedBox(height: OSpace.s),
           Text(
@@ -965,7 +1285,17 @@ class CredentialsPage extends StatelessWidget {
         );
       },
     );
-    if (confirmed == true) data.onRevokeAll?.call();
+    if (confirmed == true) {
+      // Revoking also removes the secrets this screen owns.
+      try {
+        await _store.delete('personal');
+        await _store.delete('github');
+      } catch (error, stack) {
+        Diag.swallow('credentials.revokeAll', error, stack);
+      }
+      await _loadSecrets();
+      data.onRevokeAll?.call();
+    }
   }
 }
 
@@ -1089,6 +1419,96 @@ class _BrowserCredentialFormState extends State<_BrowserCredentialForm> {
 bool _stacksAt(BuildContext context, double width) {
   final scale = MediaQuery.textScalerOf(context).scale(1);
   return width < 190 * scale;
+}
+
+/// A stored secret is only ever represented by its mask. Null means "nothing
+/// saved" so the row can say so instead of showing an empty mask.
+String? _maskSecret(String? value) {
+  final trimmed = value?.trim() ?? '';
+  return trimmed.isEmpty ? null : _maskedToken(trimmed);
+}
+
+/// One-way secret editor. The entered value is handed to the caller and never
+/// pre-filled or rendered again; the field stays obscured.
+class _SecretForm extends StatefulWidget {
+  const _SecretForm({
+    required this.fieldLabel,
+    required this.helper,
+    required this.replacing,
+  });
+
+  final String fieldLabel;
+  final String helper;
+  final bool replacing;
+
+  @override
+  State<_SecretForm> createState() => _SecretFormState();
+}
+
+class _SecretFormState extends State<_SecretForm> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final value = _controller.text.trim();
+    if (value.isEmpty) return;
+    Navigator.of(context).pop(value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.l),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextField(
+            key: const ValueKey<String>('provider-key-field'),
+            controller: _controller,
+            autofocus: true,
+            obscureText: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            textInputAction: TextInputAction.done,
+            onChanged: (_) => setState(() {}),
+            onSubmitted: (_) => _save(),
+            decoration: InputDecoration(
+              labelText: widget.fieldLabel,
+              helperText: widget.helper,
+              helperMaxLines: 3,
+            ),
+          ),
+          const SizedBox(height: OSpace.s),
+          Text(
+            'The key is encrypted on this device. Ovid never shows it again, '
+            'not even here.',
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+          const SizedBox(height: OSpace.l),
+          OButton(
+            key: const ValueKey<String>('provider-key-save'),
+            label: widget.replacing ? 'Replace key' : 'Save key',
+            expand: true,
+            onPressed: _controller.text.trim().isEmpty ? null : _save,
+          ),
+          const SizedBox(height: OSpace.s),
+          OButton(
+            label: 'Cancel',
+            variant: OButtonVariant.secondary,
+            expand: true,
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// Tokens are only ever rendered in a masked form. If a caller passes a raw

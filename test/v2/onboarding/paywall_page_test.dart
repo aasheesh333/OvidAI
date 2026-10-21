@@ -13,6 +13,7 @@ Future<void> _pump(
   ValueChanged<String>? onPlanSelected,
   ValueChanged<V2Currency>? onCurrencyChanged,
   ValueChanged<String>? onStartTrial,
+  VoidCallback? onContinueFree,
   VoidCallback? onComparePlans,
   VoidCallback? onRetry,
   VoidCallback? onManageSubscription,
@@ -37,6 +38,7 @@ Future<void> _pump(
         onPlanSelected: onPlanSelected,
         onCurrencyChanged: onCurrencyChanged,
         onStartTrial: onStartTrial,
+        onContinueFree: onContinueFree,
         onComparePlans: onComparePlans,
         onRetry: onRetry,
         onManageSubscription: onManageSubscription,
@@ -51,14 +53,16 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('paywall renders all three plans in USD in light', (
+  testWidgets('paywall renders every plan in USD in light', (
     tester,
   ) async {
     await _pump(tester);
 
+    expect(find.text('Ovid Free'), findsOneWidget);
     expect(find.text('Ovid Go'), findsOneWidget);
     expect(find.text('Ovid Plus'), findsOneWidget);
     expect(find.text('Ovid Pro'), findsOneWidget);
+    expect(find.text('\$0'), findsOneWidget);
     expect(find.text('\$5'), findsOneWidget);
     expect(find.text('\$18'), findsOneWidget);
     expect(find.text('\$99'), findsOneWidget);
@@ -68,7 +72,61 @@ void main() {
       find.text('Cancel anytime. Billed securely through Google Play.'),
       findsOneWidget,
     );
-    expect(find.text('Compare all plans'), findsOneWidget);
+    expect(find.text('Compare all plans'), findsNothing);
+    // A tour step, not a pushed route: no dead back arrow.
+    expect(find.byIcon(Icons.arrow_back_rounded), findsNothing);
+  });
+
+  testWidgets('Free and Go say they are Auto-only', (tester) async {
+    await _pump(tester);
+
+    // The product rule is stated on the card, not implied.
+    expect(find.text('Auto only'), findsNWidgets(2));
+    expect(find.text('Auto + manual'), findsNWidgets(2));
+    expect(find.byKey(const Key('plan-access-free')), findsOneWidget);
+    expect(find.byKey(const Key('plan-access-go')), findsOneWidget);
+  });
+
+  testWidgets('the Free card continues without buying anything', (
+    tester,
+  ) async {
+    var freeContinues = 0;
+    final purchases = <String>[];
+    await _pump(
+      tester,
+      onContinueFree: () => freeContinues++,
+      onStartTrial: purchases.add,
+    );
+
+    await tester.ensureVisible(find.text('Ovid Free'));
+    await tester.tap(find.text('Ovid Free'));
+    await tester.pumpAndSettle();
+
+    // The CTA becomes the Free action instead of a trial purchase.
+    final cta = find.byKey(const Key('paywall-trial'));
+    expect(find.text('Continue with Free'), findsOneWidget);
+    // The redundant secondary link is hidden while the CTA already says it.
+    expect(find.byKey(const Key('paywall-continue-free')), findsNothing);
+
+    await tester.ensureVisible(cta);
+    await tester.tap(cta);
+    await tester.pump();
+
+    expect(freeContinues, 1);
+    expect(purchases, isEmpty);
+  });
+
+  testWidgets('Continue with Free proceeds from a paid selection', (
+    tester,
+  ) async {
+    var freeContinues = 0;
+    await _pump(tester, onContinueFree: () => freeContinues++);
+
+    await tester.ensureVisible(find.byKey(const Key('paywall-continue-free')));
+    await tester.tap(find.byKey(const Key('paywall-continue-free')));
+    await tester.pump();
+
+    expect(freeContinues, 1);
   });
 
   testWidgets('paywall renders correctly in dark', (tester) async {
@@ -90,7 +148,8 @@ void main() {
     expect(find.text('Ovid Plus'), findsOneWidget);
     expect(find.text('Ovid Pro'), findsOneWidget);
     expect(find.text('Start 7-day free trial'), findsOneWidget);
-    expect(find.text('Compare all plans'), findsOneWidget);
+    // Compare is hidden because no destination is wired.
+    expect(find.text('Compare all plans'), findsNothing);
 
     // Scroll the whole body to force every off-screen section to lay out.
     await tester.drag(
@@ -99,7 +158,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    expect(find.text('Compare all plans'), findsOneWidget);
+    expect(find.byKey(const Key('paywall-trial')), findsOneWidget);
   });
 
   testWidgets('320 dp wide at 200 % text renders in dark too', (tester) async {
@@ -121,7 +180,7 @@ void main() {
 
     expect(find.text('Do more with Ovid Plus'), findsOneWidget);
     expect(find.text('Most popular'), findsOneWidget);
-    expect(find.text('Compare all plans'), findsOneWidget);
+    expect(find.byKey(const Key('paywall-trial')), findsOneWidget);
   });
 
   testWidgets('currency toggle swaps every price to INR', (tester) async {

@@ -201,12 +201,13 @@ class _V2StudioWorkspacePageState extends State<V2StudioWorkspacePage> {
               tooltip: 'Sync changes',
               onPressed: widget.onSync,
             ),
-            OIconButton(
-              icon: Icons.more_vert_rounded,
-              semanticLabel: 'Workspace options',
-              tooltip: 'Workspace options',
-              onPressed: widget.onMenu,
-            ),
+            if (widget.onMenu != null)
+              OIconButton(
+                icon: Icons.more_vert_rounded,
+                semanticLabel: 'Workspace options',
+                tooltip: 'Workspace options',
+                onPressed: widget.onMenu,
+              ),
           ],
         ],
       ),
@@ -298,8 +299,10 @@ class _V2StudioWorkspacePageState extends State<V2StudioWorkspacePage> {
                   )
                 else
                   V2StudioGate(onPickRepo: widget.onPickRepo),
-                const SizedBox(height: OSpace.m),
-                const _LiveNote(),
+                if (_isBound) ...[
+                  const SizedBox(height: OSpace.m),
+                  const _LiveNote(),
+                ],
               ],
             ),
           ),
@@ -663,12 +666,14 @@ class _EditorPanel extends StatelessWidget {
                   tooltip: 'Open in viewer',
                   onPressed: onOpenViewer,
                 ),
-                OIconButton(
-                  icon: Icons.copy_rounded,
-                  semanticLabel: 'Copy file contents',
-                  tooltip: 'Copy',
-                  onPressed: onCopyFile,
-                ),
+                if (onCopyFile != null)
+                  OIconButton(
+                    key: const Key('studio-copy-file'),
+                    icon: Icons.copy_rounded,
+                    semanticLabel: 'Copy file contents',
+                    tooltip: 'Copy',
+                    onPressed: onCopyFile,
+                  ),
               ],
             ),
           ),
@@ -764,14 +769,15 @@ class _LiveNote extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Live workspace active',
+                  'Cloud workspace connected',
                   style: OType.bodySm.copyWith(
                     color: c.text,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
                 Text(
-                  'Edits save to your branch as you type.',
+                  'Files load from your branch. Ovid writes edits in the '
+                  'cloud workspace.',
                   style: OType.caption.copyWith(color: c.textMuted),
                 ),
               ],

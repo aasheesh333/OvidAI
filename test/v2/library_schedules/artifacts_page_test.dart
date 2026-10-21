@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
@@ -106,10 +107,20 @@ Future<void> _pickSource(WidgetTester tester, String label) async {
   await tester.pumpAndSettle();
 }
 
+Future<void> _tapChip(WidgetTester tester, String name) async {
+  final chip = find.byKey(_typeKey(name));
+  await tester.ensureVisible(chip);
+  await tester.pumpAndSettle();
+  await tester.tap(chip);
+  await tester.pumpAndSettle();
+}
+
 void main() {
   testWidgets('renders the lifetime library in light mode', (tester) async {
     _phone(tester);
-    await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
+    await tester.pumpWidget(
+      _app(ArtifactsPage(data: _data(), onNewArtifact: () {})),
+    );
     await tester.pumpAndSettle();
 
     expect(find.text('Artifacts Library'), findsOneWidget);
@@ -124,7 +135,12 @@ void main() {
 
   testWidgets('renders the lifetime library in dark mode', (tester) async {
     _phone(tester);
-    await tester.pumpWidget(_app(ArtifactsPage(data: _data()), dark: true));
+    await tester.pumpWidget(
+      _app(
+        ArtifactsPage(data: _data(), onNewArtifact: () {}),
+        dark: true,
+      ),
+    );
     await tester.pumpAndSettle();
 
     expect(find.text('Artifacts Library'), findsOneWidget);
@@ -161,11 +177,33 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Nothing here yet'), findsOneWidget);
+    expect(find.text('No artifacts yet'), findsOneWidget);
     expect(find.textContaining('Deleting an artifact frees'), findsOneWidget);
     expect(find.textContaining('Studio drafts stay in Studio'), findsOneWidget);
     await tester.tap(find.text('See what Ovid can make'));
     expect(seeIdeas, 1);
+  });
+
+  testWidgets('the empty library offers no dead action without a host', (
+    tester,
+  ) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        ArtifactsPage(
+          data: _data(
+            status: V2ArtifactsStatus.empty,
+            artifacts: const <V2ArtifactItem>[],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('No artifacts yet'), findsOneWidget);
+    // No "See what Ovid can make" button, no FAB: nothing the page cannot do.
+    expect(find.text('See what Ovid can make'), findsNothing);
+    expect(find.text('New artifact'), findsNothing);
   });
 
   testWidgets('New artifact fires the primary callback', (tester) async {
@@ -293,12 +331,14 @@ void main() {
       find.byKey(const ValueKey<String>('artifact-filter-sort')),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Largest first'));
+    await tester.tap(find.text('Name A–Z'));
     await tester.pumpAndSettle();
 
+    // Alphabetically the first row is launch-metrics.csv, market-analysis-q2.pdf.
+    final launch = tester.getTopLeft(find.text('launch-metrics.csv'));
     final market = tester.getTopLeft(find.text('market-analysis-q2.pdf'));
-    final portfolio = tester.getTopLeft(find.text('portfolio-index.html'));
-    expect(market.dy, lessThan(portfolio.dy));
+    expect(launch.dy, closeTo(market.dy, 1));
+    expect(launch.dx, lessThan(market.dx));
   });
 
   testWidgets('the filter bar clear action resets every filter', (
@@ -412,7 +452,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    expect(find.text('Nothing here yet'), findsOneWidget);
+    expect(find.text('No artifacts yet'), findsOneWidget);
 
     await tester.pumpWidget(
       _app(
@@ -454,7 +494,7 @@ void main() {
     await tester.enterText(find.byType(TextField), 'nothing matches this');
     await tester.pumpAndSettle();
     expect(find.text('No matches'), findsOneWidget);
-    expect(find.textContaining('frees its storage'), findsWidgets);
+    expect(find.textContaining('No artifacts match these filters'), findsOneWidget);
 
     await tester.tap(find.text('Clear filters'));
     await tester.pumpAndSettle();
@@ -477,7 +517,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Nothing here yet'), findsOneWidget);
+    expect(find.text('No artifacts yet'), findsOneWidget);
     await tester.tap(find.text('New artifact').last);
     expect(created, 1);
   });
@@ -534,5 +574,257 @@ void main() {
 
     expect(find.text('portfolio-index.html'), findsOneWidget);
     expect(find.text('launch-metrics.csv'), findsOneWidget);
+  });
+
+  group('wiring', () {
+    testWidgets('Page matches HTML artifacts and Doc excludes them', (
+      tester,
+    ) async {
+      _phone(tester);
+      final artifacts = <V2ArtifactItem>[
+        V2ArtifactItem(
+          id: 'html',
+          name: 'portfolio-index.html',
+          kind: V2ArtifactKind.document,
+          createdAt: DateTime(2026, 5, 18),
+          sizeLabel: '14 KB',
+        ),
+        V2ArtifactItem(
+          id: 'pdf',
+          name: 'market-analysis-q2.pdf',
+          kind: V2ArtifactKind.document,
+          createdAt: DateTime(2026, 5, 18),
+          sizeLabel: '1.8 MB',
+        ),
+      ];
+      await tester.pumpWidget(
+        _app(ArtifactsPage(data: _data(artifacts: artifacts))),
+      );
+      await tester.pumpAndSettle();
+
+      await _tapChip(tester, 'page');
+      expect(find.text('portfolio-index.html'), findsOneWidget);
+      expect(find.text('market-analysis-q2.pdf'), findsNothing);
+      expect(find.text('1 item'), findsOneWidget);
+
+      await _tapChip(tester, 'doc');
+      expect(find.text('portfolio-index.html'), findsNothing);
+      expect(find.text('market-analysis-q2.pdf'), findsOneWidget);
+    });
+
+    testWidgets('the date filter really narrows by added date', (tester) async {
+      _phone(tester);
+      final dated = <V2ArtifactItem>[
+        for (final (id, name, days) in <(String, String, int)>[
+          ('d0', 'today.html', 0),
+          ('d1', 'yesterday.pdf', 1),
+          ('d3', 'three-days.png', 3),
+          ('d20', 'twenty-days.csv', 20),
+        ])
+          V2ArtifactItem(
+            id: id,
+            name: name,
+            kind: V2ArtifactKind.data,
+            createdAt: _now.subtract(Duration(days: days)),
+            sizeLabel: '1 KB',
+            sizeBytes: 1024,
+          ),
+      ];
+      await tester.pumpWidget(
+        _app(ArtifactsPage(data: _data(artifacts: dated))),
+      );
+      await tester.pumpAndSettle();
+
+      Future<void> pickDate(String label) async {
+        await tester.tap(
+          find.byKey(const ValueKey<String>('artifact-filter-date')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(label).last);
+        await tester.pumpAndSettle();
+      }
+
+      await pickDate('Today');
+      expect(find.text('1 item'), findsOneWidget);
+      expect(find.text('today.html'), findsOneWidget);
+      expect(find.text('yesterday.pdf'), findsNothing);
+
+      await pickDate('Last 7 days');
+      expect(find.text('3 items'), findsOneWidget);
+      expect(find.text('today.html'), findsOneWidget);
+      expect(find.text('yesterday.pdf'), findsOneWidget);
+
+      await pickDate('Last 30 days');
+      expect(find.text('4 items'), findsOneWidget);
+
+      await pickDate('Any time');
+      expect(find.text('4 items'), findsOneWidget);
+    });
+
+    testWidgets('an unknown session id matches nothing instead of everything', (
+      tester,
+    ) async {
+      _phone(tester);
+      await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey<String>('artifact-filter-session')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Landing page redesign').last);
+      await tester.pumpAndSettle();
+      expect(find.text('1 of 4 files · 2.4 MB'), findsOneWidget);
+
+      // The host replaces the list; the filter id no longer exists.
+      await tester.pumpWidget(
+        _app(
+          ArtifactsPage(
+            data: _data(
+              artifacts: <V2ArtifactItem>[
+                V2ArtifactItem(
+                  id: 'other',
+                  name: 'hero.png',
+                  kind: V2ArtifactKind.image,
+                  createdAt: DateTime(2026, 5, 18),
+                  sizeLabel: '20 KB',
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('hero.png'), findsNothing);
+      expect(find.text('No matches'), findsOneWidget);
+    });
+
+    testWidgets('an empty library and a filtered miss read differently', (
+      tester,
+    ) async {
+      _phone(tester);
+      await tester.pumpWidget(
+        _app(
+          ArtifactsPage(
+            data: _data(artifacts: const <V2ArtifactItem>[]),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('No artifacts yet'), findsOneWidget);
+      expect(find.text('No matches'), findsNothing);
+
+      await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'no such file');
+      await tester.pumpAndSettle();
+      expect(find.text('No matches'), findsOneWidget);
+      expect(find.text('No artifacts yet'), findsNothing);
+    });
+
+    testWidgets('app bar chrome is only drawn when the host handles it', (
+      tester,
+    ) async {
+      _phone(tester);
+      await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.menu_rounded), findsNothing);
+      expect(find.byIcon(Icons.notifications_none_rounded), findsNothing);
+      expect(find.bySemanticsLabel('Search artifacts'), findsNothing);
+      expect(find.text('New artifact'), findsNothing);
+    });
+
+    testWidgets('tapping a card opens the detail route without a host', (
+      tester,
+    ) async {
+      _phone(tester);
+      await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('portfolio-index.html'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Artifact detail'), findsOneWidget);
+      expect(find.text('portfolio-index.html'), findsWidgets);
+      // HTML pages preview as real code, not as an image placeholder.
+      expect(find.text('Image preview unavailable'), findsNothing);
+    });
+
+    testWidgets('the card menu copies the file name without a host', (
+      tester,
+    ) async {
+      _phone(tester);
+      String? copied;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copied = (call.arguments as Map)['text'] as String?;
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _app(ArtifactsPage(data: _data(artifacts: [_artifacts.first]))),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.more_vert_rounded));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy file name'), findsOneWidget);
+      expect(find.text('Download'), findsNothing);
+
+      await tester.tap(find.text('Copy file name'));
+      await tester.pumpAndSettle();
+      expect(copied, 'portfolio-index.html');
+      expect(find.text('File name copied'), findsOneWidget);
+    });
+
+    testWidgets('long file names ellipsize at 320 dp and 200 % text', (
+      tester,
+    ) async {
+      const longName =
+          'quarterly-revenue-and-retention-breakdown-for-every-region-'
+          'final-final-v12-approved.xlsx';
+      for (final dark in <bool>[false, true]) {
+        _smallPhone(tester);
+        await tester.pumpWidget(
+          _app(
+            ArtifactsPage(
+              data: _data(
+                artifacts: <V2ArtifactItem>[
+                  V2ArtifactItem(
+                    id: 'long',
+                    name: longName,
+                    kind: V2ArtifactKind.data,
+                    createdAt: DateTime(2026, 5, 18),
+                    sizeLabel: '2.1 MB',
+                    sessionTitle: 'A very long session title that also has to fit',
+                  ),
+                ],
+              ),
+            ),
+            dark: dark,
+            textScale: 2,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(tester.takeException(), isNull);
+        await _scrollTo(tester, find.text(longName));
+        final name = tester.widget<Text>(find.text(longName));
+        expect(name.maxLines, 1);
+        expect(name.overflow, TextOverflow.ellipsis);
+        expect(tester.takeException(), isNull);
+      }
+    });
   });
 }

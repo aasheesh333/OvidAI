@@ -1,4 +1,6 @@
 // TODO(l10n): move the English copy in this screen to the ARB files.
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
@@ -90,12 +92,69 @@ class V2SettingsHubData {
   final String errorMessage;
 }
 
-/// Settings home. Rows only call the callbacks carried by [data]; this screen
-/// never pushes another page itself.
-class SettingsHubPage extends StatelessWidget {
+/// Settings home. Rows only call the callbacks carried by [data]; the hub
+/// itself never pushes another settings page. It does own two pieces of view
+/// state: which row search should reveal, and the transient highlight that
+/// shows the person where that row landed.
+class SettingsHubPage extends StatefulWidget {
   const SettingsHubPage({super.key, required this.data});
 
   final V2SettingsHubData data;
+
+  @override
+  State<SettingsHubPage> createState() => _SettingsHubPageState();
+}
+
+class _SettingsHubPageState extends State<SettingsHubPage> {
+  final ScrollController _scroll = ScrollController();
+  final Map<String, GlobalKey> _rowKeys = <String, GlobalKey>{};
+  String? _highlightedId;
+  Timer? _highlightTimer;
+
+  V2SettingsHubData get data => widget.data;
+
+  @override
+  void dispose() {
+    _highlightTimer?.cancel();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  GlobalKey _keyFor(String id) => _rowKeys.putIfAbsent(
+    id,
+    () => GlobalKey(debugLabel: 'settings-row-$id'),
+  );
+
+  /// The handler a row really runs. A row without one is rendered disabled
+  /// instead of looking tappable and doing nothing.
+  VoidCallback? _rowTapFor(V2SettingsItem item) {
+    if (!item.enabled) return null;
+    if (item.id == 'show_reasoning') {
+      final changed = data.onReasoningChanged;
+      if (changed == null) return null;
+      return () => changed(!data.showReasoning);
+    }
+    return item.onTap;
+  }
+
+  /// Scrolls the row into view and flashes it, so a search result that lives
+  /// on the hub (rather than on its own page) never "scrolls nowhere".
+  Future<void> _revealRow(String id) async {
+    final target = _rowKeys[id]?.currentContext;
+    if (target == null) return;
+    await Scrollable.ensureVisible(
+      target,
+      duration: OMove.reduced(context) ? Duration.zero : OMotion.medium,
+      curve: OMotion.emphasized,
+      alignment: 0.2,
+    );
+    if (!mounted) return;
+    setState(() => _highlightedId = id);
+    _highlightTimer?.cancel();
+    _highlightTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _highlightedId = null);
+    });
+  }
 
   /// The one order every settings list uses. The Models card sits between Chat
   /// and Data control and always starts with Connectors.
@@ -191,19 +250,19 @@ class SettingsHubPage extends StatelessWidget {
             sections: sections,
             status: status,
             errorMessage: data.errorMessage,
+            // Only rows that really do something are offered as results.
+            canActivate: (item) => _rowTapFor(item) != null,
           ),
-          onResultTap: (result) {
-            // Close search first, then activate the row exactly as the hub
-            // would. The reasoning switch is owned by the hub, not the model,
-            // so it is toggled through the same callback as the row.
-            Navigator.of(routeContext).maybePop();
-            if (!result.item.enabled) return;
-            if (result.item.id == 'show_reasoning') {
-              final changed = data.onReasoningChanged;
-              if (changed != null) changed(!data.showReasoning);
-              return;
-            }
-            result.item.onTap?.call();
+          onResultTap: (result) async {
+            final tap = _rowTapFor(result.item);
+            if (tap == null) return;
+            // Close search first: the row's handler navigates from the hub,
+            // so it would otherwise push on top of the search page.
+            await Navigator.of(routeContext).maybePop();
+            if (!mounted) return;
+            final hubLocal = result.item.id == 'show_reasoning';
+            tap();
+            if (hubLocal) await _revealRow(result.item.id);
           },
           onRetry: data.onRetry,
         ),
@@ -238,17 +297,22 @@ class SettingsHubPage extends StatelessWidget {
       icon: Icons.tune_rounded,
       title: 'No settings yet',
       message: 'Your settings will appear here when your account is ready.',
-      action: OButton(
-        label: 'Refresh settings',
-        icon: Icons.refresh_rounded,
-        onPressed: data.onRetry,
-      ),
+      // No retry callback means there is nothing to retry: do not offer a
+      // button that cannot do anything.
+      action: data.onRetry == null
+          ? null
+          : OButton(
+              label: 'Refresh settings',
+              icon: Icons.refresh_rounded,
+              onPressed: data.onRetry,
+            ),
     );
   }
 
   Widget _content(List<V2SettingsSection> sections) {
     final profile = data.profile;
     return SingleChildScrollView(
+      controller: _scroll,
       padding: const EdgeInsets.fromLTRB(
         OSpace.screen,
         OSpace.s,
@@ -285,6 +349,9 @@ class SettingsHubPage extends StatelessWidget {
                 showReasoning: data.showReasoning,
                 onReasoningChanged: data.onReasoningChanged,
                 onAddConnector: data.onAddConnector,
+                tapFor: _rowTapFor,
+                keyFor: _keyFor,
+                highlightedId: _highlightedId,
               ),
             ],
           if (data.onSignOut != null) ...[
@@ -382,12 +449,18 @@ class _SectionCard extends StatelessWidget {
     required this.showReasoning,
     required this.onReasoningChanged,
     required this.onAddConnector,
+    required this.tapFor,
+    required this.keyFor,
+    required this.highlightedId,
   });
 
   final V2SettingsSection section;
   final bool showReasoning;
   final ValueChanged<bool>? onReasoningChanged;
   final VoidCallback? onAddConnector;
+  final VoidCallback? Function(V2SettingsItem item) tapFor;
+  final GlobalKey Function(String id) keyFor;
+  final String? highlightedId;
 
   @override
   Widget build(BuildContext context) {
@@ -395,19 +468,26 @@ class _SectionCard extends StatelessWidget {
     final rows = <Widget>[];
     for (var index = 0; index < section.items.length; index++) {
       final item = section.items[index];
+      final tap = tapFor(item);
       rows.add(
         Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            OListRow(
-              title: item.label,
-              subtitle: item.subtitle,
-              icon: item.icon,
-              danger: item.danger,
-              enabled: item.enabled,
-              showChevron: true,
-              onTap: _rowTap(item),
-              trailing: _trailing(context, item),
+            AnimatedContainer(
+              key: keyFor(item.id),
+              duration: OMove.reduced(context) ? Duration.zero : OMotion.base,
+              color: highlightedId == item.id ? c.accentSoft : null,
+              child: OListRow(
+                key: ValueKey<String>('settings-row-${item.id}'),
+                title: item.label,
+                subtitle: item.subtitle,
+                icon: item.icon,
+                danger: item.danger,
+                enabled: item.enabled && tap != null,
+                showChevron: tap != null,
+                onTap: tap,
+                trailing: _trailing(context, item),
+              ),
             ),
             if (index != section.items.length - 1)
               Divider(height: 1, thickness: 1, indent: 64, color: c.hairline),
@@ -419,15 +499,6 @@ class _SectionCard extends StatelessWidget {
       padding: EdgeInsets.zero,
       child: OStagger(children: rows),
     );
-  }
-
-  VoidCallback? _rowTap(V2SettingsItem item) {
-    if (!item.enabled) return null;
-    if (item.id == 'show_reasoning') {
-      if (onReasoningChanged == null) return null;
-      return () => onReasoningChanged!(!showReasoning);
-    }
-    return item.onTap;
   }
 
   Widget? _trailing(BuildContext context, V2SettingsItem item) {
@@ -461,6 +532,7 @@ class _ReasoningToggle extends StatelessWidget {
     return Semantics(
       label: 'Show reasoning',
       toggled: value,
+      enabled: onChanged != null,
       child: SizedBox(
         width: 52,
         height: OSpace.touch,

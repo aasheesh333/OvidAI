@@ -54,7 +54,11 @@ void main() {
     'shows the turn holder, time left, queue and rule in both themes',
     (tester) async {
       for (final theme in [OTheme.light(), OTheme.dark()]) {
-        await _pump(tester, CollabTurnBanner(data: _data()), theme);
+        await _pump(
+          tester,
+          CollabTurnBanner(data: _data(), onRequestTurn: () {}),
+          theme,
+        );
 
         expect(find.text('Current turn'), findsOneWidget);
         expect(find.text('Rahul Verma'), findsOneWidget);
@@ -104,17 +108,7 @@ void main() {
       expect(find.text('You have the turn'), findsOneWidget);
       expect(find.text('Waiting'), findsOneWidget);
       expect(find.text('You are #2 in line.'), findsNothing);
-      expect(
-        tester.getSemantics(
-          find.bySemanticsLabel('Your turn. Send your message.'),
-        ),
-        isSemantics(
-          label: 'Your turn. Send your message.',
-          isButton: true,
-          hasEnabledState: true,
-          isEnabled: false,
-        ),
-      );
+      expect(find.text('Request turn'), findsNothing);
 
       await tester.tap(find.text('You have the turn'), warnIfMissed: false);
       await tester.pump();
@@ -282,7 +276,10 @@ void main() {
   ) async {
     await _pump(
       tester,
-      CollabTurnBanner(data: _data(queue: const [])),
+      CollabTurnBanner(
+        data: _data(queue: const []),
+        onRequestTurn: () {},
+      ),
       OTheme.light(),
     );
 
@@ -302,6 +299,7 @@ void main() {
           holderName: '',
           timeLeftFraction: null,
         ),
+        onRequestTurn: () {},
       ),
       OTheme.dark(),
     );
@@ -428,5 +426,37 @@ void main() {
     expect(find.text('Rahul Verma'), findsNothing);
     expect(find.text('Aarav (you)'), findsOneWidget);
     expect(find.text('Request turn'), findsNothing);
+  });
+
+  testWidgets('without a request action it states the wait, not a dead button', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      CollabTurnBanner(data: _data()),
+      OTheme.light(),
+    );
+
+    expect(find.text('Request turn'), findsNothing);
+    expect(
+      find.text(
+        'Wait for Rahul Verma to finish. The turn passes automatically.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('an empty time label hides the countdown pill', (tester) async {
+    await _pump(
+      tester,
+      CollabTurnBanner(
+        data: _data(timeLeftLabel: '', timeLeftFraction: null),
+        onRequestTurn: () {},
+      ),
+      OTheme.light(),
+    );
+
+    expect(find.text('Rahul Verma'), findsOneWidget);
+    expect(find.byIcon(Icons.timer_outlined), findsNothing);
   });
 }

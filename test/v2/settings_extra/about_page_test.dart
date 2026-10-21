@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/app_info.dart';
+import 'package:ovid_ai/core/legal_links.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/settings_extra/about_page.dart';
 import 'package:ovid_ai/ui/v2/settings_extra/legal_page.dart';
@@ -97,13 +100,22 @@ void main() {
     expect(find.text('Operational'), findsOneWidget);
   });
 
-  testWidgets('default data shows no sample version or status', (tester) async {
+  testWidgets('default data shows the real build info, not a demo string', (
+    tester,
+  ) async {
     await _pump(tester, const V2AboutPageData());
 
+    // Version and build come from core/app_info.dart (dart-define or the
+    // pubspec), so the shipped build is always shown.
+    expect(find.text('v$kAppVersion ($kAppBuildNumber)'), findsOneWidget);
+    expect(
+      find.text('$kAppVersion · build $kAppBuildNumber'),
+      findsOneWidget,
+    );
     expect(find.textContaining('v2.4.1'), findsNothing);
     expect(find.text('Operational'), findsNothing);
-    expect(find.text('Version and build'), findsNothing);
-    // Static copy that belongs to the product is still there.
+    // Unknown status with no checker is not a control at all.
+    expect(find.text('System status'), findsNothing);
     expect(find.text('Chat. Code. Create.'), findsOneWidget);
     expect(find.text('Privacy policy'), findsOneWidget);
   });
@@ -124,7 +136,10 @@ void main() {
 
     expect(find.text('ACCOUNT'), findsOneWidget);
     expect(find.text('Delete account'), findsOneWidget);
-    expect(find.textContaining('This cannot be undone.'), findsOneWidget);
+    expect(
+      find.textContaining('Scheduled after a 24-hour grace period'),
+      findsOneWidget,
+    );
 
     final row = find.byKey(const ValueKey<String>('about-delete-account'));
     await tester.ensureVisible(row);
@@ -143,11 +158,61 @@ void main() {
     final node = tester.getSemantics(find.text('Delete account'));
     expect(node, isSemantics(hasEnabledState: true, isEnabled: false));
     expect(node.label, contains('Delete account'));
-    expect(node.label, contains('cannot be undone'));
+    expect(node.label, contains('24-hour grace period'));
     handle.dispose();
   });
 
-  testWidgets('copies the version from the build row', (tester) async {
+  testWidgets('legal rows open a real destination without a callback', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    final opened = <Uri>[];
+    await _pump(
+      tester,
+      V2AboutPageData(
+        openExternal: (uri) async {
+          opened.add(uri);
+          return true;
+        },
+      ),
+    );
+
+    final node = tester.getSemantics(find.text('Privacy policy'));
+    // Enabled rows are buttons with a tap action, not disabled placeholders.
+    expect(node, isSemantics(isButton: true));
+    handle.dispose();
+
+    await tester.tap(find.text('Privacy policy'));
+    await tester.pumpAndSettle();
+
+    expect(opened.single.toString(), LegalLinks.privacyPolicy);
+
+    await tester.tap(find.text('Terms of service'));
+    await tester.pumpAndSettle();
+    expect(opened.last.toString(), LegalLinks.terms);
+
+    // Licences are real data from the packages in this build.
+    await tester.ensureVisible(find.text('Open-source licences'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open-source licences'));
+    await tester.pumpAndSettle();
+    expect(find.byType(LicensePage), findsOneWidget);
+  });
+
+  testWidgets('copy copies the real build label to the clipboard', (
+    tester,
+  ) async {
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+          calls.add(call);
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+
     var copies = 0;
     await _pump(
       tester,
@@ -163,16 +228,12 @@ void main() {
     await tester.tap(copy);
     await tester.pumpAndSettle();
 
+    final setData = calls.firstWhere((c) => c.method == 'Clipboard.setData');
+    expect(
+      (setData.arguments as Map)['text'],
+      '2.4.1 · build 418',
+    );
     expect(copies, 1);
-  });
-
-  testWidgets('announces a row with no callback as disabled', (tester) async {
-    final handle = tester.ensureSemantics();
-    await _pump(tester, const V2AboutPageData());
-
-    final node = tester.getSemantics(find.text('Privacy policy'));
-    expect(node, isSemantics(hasEnabledState: true, isEnabled: false));
-    handle.dispose();
   });
 
   testWidgets('shows the status while it is being checked', (tester) async {

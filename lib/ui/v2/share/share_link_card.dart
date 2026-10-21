@@ -212,13 +212,15 @@ class V2ShareLinkCard extends StatelessWidget {
   }
 
   Widget _linkRow(BuildContext context, OColors c, {required bool expired}) {
-    final label = data.copied ? 'Copied' : 'Copy link';
-    final enabled = !expired && !data.revoked && onCopy != null;
+    final hasLink = data.url.trim().isNotEmpty;
+    final copied = data.copied && hasLink;
+    final label = copied ? 'Copied' : 'Copy link';
+    final enabled = hasLink && !expired && !data.revoked && onCopy != null;
     return LayoutBuilder(
       builder: (context, constraints) {
         final inline = constraints.maxWidth >= _inlineLinkWidth(context, label);
         final link = Semantics(
-          label: 'Share link, ${data.url}',
+          label: hasLink ? 'Share link, ${data.url}' : 'No share link yet',
           child: ExcludeSemantics(
             child: Row(
               children: [
@@ -238,10 +240,12 @@ class V2ShareLinkCard extends StatelessWidget {
                 const SizedBox(width: OSpace.s),
                 Expanded(
                   child: Text(
-                    data.url,
+                    hasLink ? data.url : 'No link yet',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: OType.mono.copyWith(color: c.textMuted),
+                    style: OType.mono.copyWith(
+                      color: hasLink ? c.textMuted : c.textFaint,
+                    ),
                   ),
                 ),
               ],
@@ -250,13 +254,13 @@ class V2ShareLinkCard extends StatelessWidget {
         );
         final button = OButton(
           label: label,
-          icon: data.copied ? Icons.check_rounded : Icons.copy_rounded,
-          variant: data.copied
+          icon: copied ? Icons.check_rounded : Icons.copy_rounded,
+          variant: copied
               ? OButtonVariant.secondary
               : OButtonVariant.primary,
           expand: !inline,
           onPressed: enabled ? onCopy : null,
-          semanticLabel: data.copied ? 'Share link copied' : 'Copy share link',
+          semanticLabel: copied ? 'Share link copied' : 'Copy share link',
         );
         return Container(
           padding: const EdgeInsets.all(OSpace.s),
@@ -401,21 +405,25 @@ class V2ShareLinkCard extends StatelessWidget {
     if (data.revoked || (data.viewer && !data.canFork)) {
       action = null;
     } else if (data.viewer) {
-      action = OButton(
-        label: 'Fork into my account',
-        icon: Icons.account_tree_rounded,
-        variant: OButtonVariant.secondary,
-        expand: true,
-        onPressed: expired ? null : onFork,
-      );
+      action = onFork == null
+          ? null
+          : OButton(
+              label: 'Fork into my account',
+              icon: Icons.account_tree_rounded,
+              variant: OButtonVariant.secondary,
+              expand: true,
+              onPressed: expired ? null : onFork,
+            );
     } else {
-      action = OButton(
-        label: 'Revoke link',
-        icon: Icons.link_off_rounded,
-        variant: OButtonVariant.danger,
-        expand: true,
-        onPressed: onRevoke,
-      );
+      action = onRevoke == null
+          ? null
+          : OButton(
+              label: 'Revoke link',
+              icon: Icons.link_off_rounded,
+              variant: OButtonVariant.danger,
+              expand: true,
+              onPressed: onRevoke,
+            );
     }
     if (action == null) return const SizedBox.shrink();
 

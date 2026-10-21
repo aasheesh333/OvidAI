@@ -427,4 +427,27 @@ void main() {
     expect(find.text('7 days'), findsOneWidget);
     expect(find.text('30 days'), findsOneWidget);
   });
+
+  testWidgets('an empty chart labels the action that is actually wired', (
+    tester,
+  ) async {
+    var retried = 0;
+    await tester.pumpWidget(
+      _app(V2DailyTokensChart(onRetry: () => retried++)),
+    );
+    await tester.pumpAndSettle();
+
+    // No chat callback: the button must say what it does.
+    expect(find.text('Start a chat'), findsNothing);
+    await tester.tap(find.text('Try again'));
+    await tester.pump();
+    expect(retried, 1);
+
+    await tester.pumpWidget(
+      _app(V2DailyTokensChart(onStartChat: () {})),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Try again'), findsNothing);
+    expect(find.text('Start a chat'), findsOneWidget);
+  });
 }

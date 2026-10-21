@@ -457,6 +457,75 @@ class _PushNote extends StatelessWidget {
   }
 }
 
+/// The compact permission chip shared by the chat and live-chat composers.
+///
+/// The host owns the current mode and the sheet; the chip only reports a tap.
+class V2PermissionChip extends StatelessWidget {
+  const V2PermissionChip({
+    super.key,
+    required this.label,
+    required this.onTap,
+  });
+
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      label: 'Permission: $label. Change',
+      button: true,
+      enabled: onTap != null,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(ORadius.pill),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: OSpace.touch),
+            child: Center(
+              child: Container(
+                constraints: const BoxConstraints(minHeight: 32),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: OSpace.s,
+                  vertical: 5,
+                ),
+                decoration: BoxDecoration(
+                  color: c.surfaceAlt,
+                  borderRadius: BorderRadius.circular(ORadius.pill),
+                  border: Border.all(color: c.hairline),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.shield_outlined, size: 16, color: c.accent),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.label.copyWith(color: c.textMuted),
+                      ),
+                    ),
+                    const SizedBox(width: 2),
+                    Icon(
+                      Icons.keyboard_arrow_down_rounded,
+                      size: 16,
+                      color: c.textFaint,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Opens the permission sheet in the shared bottom-sheet container and closes
 /// it after the caller applies the pick.
 Future<void> showV2PermissionSheet(

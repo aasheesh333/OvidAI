@@ -46,6 +46,7 @@ class V2SettingsSearchData {
     this.initialQuery = '',
     this.searchHint = 'Search sections and rows',
     this.errorMessage,
+    this.canActivate,
   });
 
   /// Reuse the hub's sections verbatim. Loading and error states carry over;
@@ -66,6 +67,12 @@ class V2SettingsSearchData {
         V2SettingsHubStatus.empty => V2SettingsSearchStatus.ready,
       },
       errorMessage: hub.errorMessage,
+      canActivate: (item) {
+        if (!item.enabled) return false;
+        // The hub owns the reasoning switch; it has no row `onTap`.
+        if (item.id == 'show_reasoning') return hub.onReasoningChanged != null;
+        return item.onTap != null;
+      },
     );
   }
 
@@ -74,6 +81,21 @@ class V2SettingsSearchData {
   final String initialQuery;
   final String searchHint;
   final String? errorMessage;
+
+  /// Whether tapping [item] really does something. The hub passes its own
+  /// resolver because a row can act without carrying an `onTap` (the reasoning
+  /// switch). A result that cannot act is shown disabled, never as a tap that
+  /// silently goes nowhere.
+  final bool Function(V2SettingsItem item)? canActivate;
+
+  /// True when the page can act on [item]: either the host handles results
+  /// through `onResultTap`, or the row carries its own handler.
+  bool isActionable(V2SettingsItem item, {required bool hasHostHandler}) {
+    if (!item.enabled) return false;
+    final resolver = canActivate;
+    if (resolver != null) return resolver(item);
+    return hasHostHandler || item.onTap != null;
+  }
 
   /// True when the injected index has no rows at all, independent of a query.
   bool get isEmpty => !sections.any((section) => section.items.isNotEmpty);
@@ -172,6 +194,7 @@ class _SettingsSearchPageState extends State<SettingsSearchPage> {
   }
 
   void _open(V2SettingsSearchResult result) {
+    if (!_canActivate(result.item)) return;
     // Results are tap targets; closing the keyboard first means the tap is
     // never eaten by an input connection and the destination starts clean.
     FocusManager.instance.primaryFocus?.unfocus();
@@ -182,6 +205,11 @@ class _SettingsSearchPageState extends State<SettingsSearchPage> {
       result.item.onTap?.call();
     }
   }
+
+  bool _canActivate(V2SettingsItem item) => widget.data.isActionable(
+    item,
+    hasHostHandler: widget.onResultTap != null,
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -330,7 +358,12 @@ class _SettingsSearchPageState extends State<SettingsSearchPage> {
             for (final group in groups)
               Padding(
                 padding: const EdgeInsets.only(bottom: OSpace.m),
-                child: _GroupCard(group: group, query: query, onTap: _open),
+                child: _GroupCard(
+                  group: group,
+                  query: query,
+                  onTap: _open,
+                  canActivate: _canActivate,
+                ),
               ),
           ],
         ),
@@ -344,11 +377,13 @@ class _GroupCard extends StatelessWidget {
     required this.group,
     required this.query,
     required this.onTap,
+    required this.canActivate,
   });
 
   final V2SettingsSearchGroup group;
   final String query;
   final ValueChanged<V2SettingsSearchResult> onTap;
+  final bool Function(V2SettingsItem item) canActivate;
 
   @override
   Widget build(BuildContext context) {
@@ -363,6 +398,7 @@ class _GroupCard extends StatelessWidget {
             _ResultRow(
               result: result,
               query: query,
+              actionable: canActivate(result.item),
               onTap: () => onTap(result),
             ),
             if (index != group.results.length - 1)
@@ -408,11 +444,13 @@ class _ResultRow extends StatelessWidget {
   const _ResultRow({
     required this.result,
     required this.query,
+    required this.actionable,
     required this.onTap,
   });
 
   final V2SettingsSearchResult result;
   final String query;
+  final bool actionable;
   final VoidCallback onTap;
 
   @override
@@ -425,7 +463,7 @@ class _ResultRow extends StatelessWidget {
       fontWeight: FontWeight.w500,
     );
     final baseSubtitle = OType.caption.copyWith(color: c.textMuted);
-    final enabled = item.enabled;
+    final enabled = actionable;
     return OPressable(
       onTap: enabled ? onTap : null,
       semanticLabel: [
