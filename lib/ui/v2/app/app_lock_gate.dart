@@ -13,10 +13,14 @@ import '../../design/o_tokens.dart';
 /// is offstage and non-interactive while locked: no painting, no semantics and
 /// no tickers. Unlocking restores it exactly where it was.
 ///
-/// [AppLockGate] is also the lifecycle adapter: `paused` records the time the
-/// app left the foreground, `resumed` locks when that was longer than
-/// [AppLock.lockAfter]. `inactive` is ignored so system dialogs never trigger
-/// the lock. Mount this inside `MaterialApp` (the theme supplies [OColors]).
+/// Mount this **above the [Navigator]** (via `MaterialApp.builder`) so the
+/// lock covers every pushed route, including dialogs and restored routes after
+/// a cold start; mounting it inside `home` leaves pushed pages on top of it.
+///
+/// [AppLockGate] is also the lifecycle adapter: `paused` (and `hidden` on
+/// desktop/web) records the time the app left the foreground, `resumed` locks
+/// when that was longer than [AppLock.lockAfter]. `inactive` is ignored so
+/// system dialogs never trigger the lock. The theme supplies [OColors].
 class AppLockGate extends StatefulWidget {
   const AppLockGate({
     super.key,
@@ -193,10 +197,18 @@ class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
   }
 
   Widget _buildLockScreen(OColors c) {
-    final cooldown = _lock.inCooldown;
+    final blocked = _lock.recoveryRequired || _lock.reauthRequired;
+    final cooldown = !blocked && _lock.inCooldown;
     final seconds = _lock.cooldownSecondsRemaining;
-    final canSubmit = !cooldown && !_checkingPin && _entry.length >= 4;
+    final canSubmit =
+        !blocked && !cooldown && !_checkingPin && _entry.length >= 4;
     final hasBiometrics = (widget.biometric ?? _lock.biometric) != null;
+    final subtitle = _lock.recoveryRequired
+        ? 'The saved PIN could not be read on this device. '
+              'Sign in again to reset it.'
+        : _lock.reauthRequired
+        ? 'Too many wrong attempts. Sign in again to reset your PIN.'
+        : widget.subtitle;
 
     return PopScope(
       canPop: false,
@@ -232,27 +244,32 @@ class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
                           ),
                           const SizedBox(height: OSpace.s),
                           Text(
-                            widget.subtitle,
+                            subtitle,
                             textAlign: TextAlign.center,
                             style: OType.bodySm.copyWith(color: c.textMuted),
                           ),
                           const SizedBox(height: OSpace.xl),
-                          _PinDots(length: _entry.length, colors: c),
-                          const SizedBox(height: OSpace.m),
-                          _buildFeedback(
-                            c,
-                            cooldown: cooldown,
-                            seconds: seconds,
-                          ),
-                          const SizedBox(height: OSpace.m),
-                          _buildKeypad(c, enabled: !cooldown && !_checkingPin),
-                          const SizedBox(height: OSpace.l),
-                          OButton(
-                            label: 'Unlock',
-                            expand: true,
-                            loading: _checkingPin,
-                            onPressed: canSubmit ? _submit : null,
-                          ),
+                          if (!blocked) ...[
+                            _PinDots(length: _entry.length, colors: c),
+                            const SizedBox(height: OSpace.m),
+                            _buildFeedback(
+                              c,
+                              cooldown: cooldown,
+                              seconds: seconds,
+                            ),
+                            const SizedBox(height: OSpace.m),
+                            _buildKeypad(
+                              c,
+                              enabled: !cooldown && !_checkingPin,
+                            ),
+                            const SizedBox(height: OSpace.l),
+                            OButton(
+                              label: 'Unlock',
+                              expand: true,
+                              loading: _checkingPin,
+                              onPressed: canSubmit ? _submit : null,
+                            ),
+                          ],
                           if (hasBiometrics) ...[
                             const SizedBox(height: OSpace.s),
                             OButton(
@@ -269,7 +286,9 @@ class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
                           if (widget.onSignOut != null) ...[
                             const SizedBox(height: OSpace.s),
                             OButton(
-                              label: 'Sign out instead',
+                              label: blocked
+                                  ? 'Sign in again'
+                                  : 'Sign out instead',
                               variant: OButtonVariant.ghost,
                               expand: true,
                               onPressed: widget.onSignOut,
@@ -297,7 +316,7 @@ class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
       return Semantics(
         liveRegion: true,
         child: Text(
-          'Too many attempts. Try again in ${seconds}s.',
+          'Too many attempts. Try again in ${_formatCooldown(seconds)}.',
           textAlign: TextAlign.center,
           style: OType.bodySm.copyWith(color: c.danger),
         ),
@@ -313,6 +332,13 @@ class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
         style: OType.bodySm.copyWith(color: c.danger),
       ),
     );
+  }
+
+  /// Short, human countdown: `45s`, `5m`, `1h`.
+  static String _formatCooldown(int seconds) {
+    if (seconds >= 3600) return '${(seconds / 3600).ceil()}h';
+    if (seconds >= 60) return '${(seconds / 60).ceil()}m';
+    return '${seconds}s';
   }
 
   Widget _buildKeypad(OColors c, {required bool enabled}) {
@@ -337,10 +363,13 @@ class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
                       padding: const EdgeInsets.all(OSpace.xs),
                       child: SizedBox(
                         height: OSpace.touch,
-                        child: IconButton(
-                          onPressed: enabled ? _backspace : null,
-                          tooltip: 'Delete digit',
-                          icon: const Icon(Icons.backspace_outlined),
+                        child: Semantics(
+                          button: true,
+                          label: 'Delete digit',
+                          child: IconButton(
+                            onPressed: enabled ? _backspace : null,
+                            icon: const Icon(Icons.backspace_outlined),
+                          ),
                         ),
                       ),
                     ),

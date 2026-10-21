@@ -3,9 +3,12 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/account_service.dart';
+import '../../../core/app_info.dart';
 import '../../../core/background_notifications.dart';
 import '../../../core/cloud/account_settings_client.dart';
 import '../../../core/cloud/cloud_backup.dart';
@@ -13,9 +16,11 @@ import '../../../core/cloud/cloud_session_store.dart';
 import '../../../core/cloud_usage_store.dart';
 import '../../../core/commands.dart';
 import '../../../core/firebase_service.dart';
+import '../../../core/format.dart';
 import '../../../core/native_share.dart';
 import '../../../core/ovid_cloud_service.dart';
 import '../../../core/play_billing.dart';
+import '../../../core/presets.dart';
 import '../../../core/revenuecat_billing.dart';
 import '../../../core/settings_backup_service.dart';
 import '../../../core/state.dart';
@@ -25,9 +30,30 @@ import '../settings_extra/notifications_page.dart';
 /// Live actions used by the settings destinations. Kept out of the screens so
 /// every page stays presentational and testable with injected data.
 class V2SettingsActions {
-  V2SettingsActions(this.usage);
+  V2SettingsActions(this.usage) {
+    // Launch hook: reconcile the cached plan with the store's entitlements
+    // (refunds/cancellations) and mirror every server plan answer.
+    usage.addListener(_onUsage);
+    RevenueCatBilling.I.start();
+  }
 
   final CloudUsageStore usage;
+
+  /// Mirrors the server's plan answer into the local state.
+  ///
+  /// The tier restored from SharedPreferences (`state.dart:4789`
+  /// `_loadOvidCloudTier`) is display-only: it survives a refund, a
+  /// cancellation or an account switch. `/usage` is the source of truth, so
+  /// its tier is recorded for [isServerConfirmed] and written to [AppState]
+  /// (`setOvidCloudTier` is a no-op when it already matches).
+  void _onUsage() {
+    final tier = usage.usage?.tier;
+    if (tier == null) return; // no server answer yet: keep the last one
+    confirmPlanTier(tier);
+    if (tier == 'free' || isKnownOvidTier(tier)) {
+      AppState.I.setOvidCloudTier(tier);
+    }
+  }
 
   Future<void> signOut(BuildContext context) async {
     final ok = await _confirm(
@@ -40,21 +66,62 @@ class V2SettingsActions {
     await FirebaseService.I.signOut();
   }
 
+  /// Requests account deletion from the account service.
+  ///
+  /// The server's receipt is the only success signal: the device is signed out
+  /// only after a `pending` answer, and a refused or unconfigured service is
+  /// reported verbatim instead of claiming the account was deleted.
   Future<void> deleteAccount(BuildContext context) async {
     final ok = await _confirm(
       context,
       title: 'Delete your account?',
       body:
-          'This deletes your chats, files, memory and subscription data. '
-          'It cannot be undone.',
+          'This deletes your chats, files, memory and subscription data after '
+          'a 24-hour grace period. It cannot be undone.',
       confirm: 'Delete account',
       danger: true,
     );
     if (!ok) return;
-    await FirebaseService.I.signOut();
-    if (context.mounted) {
-      _snack(context, 'Deletion request started. Check your email.');
+    try {
+      final receipt = await FirebaseService.I.requestAccountDeletion(
+        _newRequestId(),
+      );
+      if (!context.mounted) return;
+      if (!receipt.isPending) {
+        _snack(
+          context,
+          'The account service did not confirm the request. Nothing was '
+          'deleted.',
+        );
+        return;
+      }
+      final deadline = receipt.deleteAfter;
+      _snack(
+        context,
+        deadline == null
+            ? 'Deletion scheduled. Sign in before the deadline to restore it.'
+            : 'Deletion scheduled. Sign in before '
+                  '${formatLocalDateTime(deadline)} to restore it.',
+      );
+    } on AccountException catch (e) {
+      if (context.mounted) _snack(context, e.message);
+    } catch (_) {
+      if (context.mounted) {
+        _snack(context, 'Could not request account deletion. Try again.');
+      }
     }
+  }
+
+  /// Cancels a pending deletion on the server and returns the receipt so the
+  /// account screen can show the restored state.
+  Future<AccountDeletion?> restoreAccount() async {
+    await FirebaseService.I.restoreAccount();
+    return FirebaseService.I.lastDeletionReceipt;
+  }
+
+  static String _newRequestId() {
+    final stamp = DateTime.now().microsecondsSinceEpoch;
+    return 'v2-delete-$stamp';
   }
 
   Future<void> renameAccount(BuildContext context) async {
@@ -91,7 +158,10 @@ class V2SettingsActions {
   }
 
   Future<void> buyPlan(BuildContext context, String tier) async {
-    if (tier == AppState.I.ovidCloudTier) {
+    // Gate on the *server-confirmed* plan only: the tier restored from
+    // SharedPreferences is display-only (state.dart:4789), so a stale cache
+    // must not block a real purchase.
+    if (isServerConfirmed(tier)) {
       _snack(context, 'You are already on this plan.');
       return;
     }
@@ -101,31 +171,73 @@ class V2SettingsActions {
     }
     // RevenueCat is the required purchase layer; the server-verified Play
     // flow remains the fallback for builds without a RevenueCat key.
-    final outcome = RevenueCatBilling.I.available
-        ? await RevenueCatBilling.I.buy(tier)
+    final rc = RevenueCatBilling.I;
+    final viaRevenueCat = rc.available;
+    final outcome = viaRevenueCat
+        ? await rc.buy(tier)
         : await PlayBillingService.I.buy(tier);
     if (!context.mounted) return;
-    if (outcome.ok) {
-      AppState.I.setOvidCloudTier(outcome.tier ?? tier);
-      refreshUsage();
-      _snack(context, 'Plan updated.');
-    } else {
+    if (!outcome.ok) {
       _snack(context, _billingMessage(outcome.result));
+      return;
     }
+    final unlocked = await _applyPurchase(outcome, viaRevenueCat: viaRevenueCat);
+    if (!context.mounted) return;
+    refreshUsage();
+    _snack(
+      context,
+      unlocked
+          ? 'Plan updated.'
+          : 'Payment received. Your plan unlocks as soon as our server '
+                'confirms it.',
+    );
   }
 
   Future<void> restorePurchases(BuildContext context) async {
-    final outcome = RevenueCatBilling.I.available
-        ? await RevenueCatBilling.I.restore()
+    final rc = RevenueCatBilling.I;
+    final viaRevenueCat = rc.available;
+    final outcome = viaRevenueCat
+        ? await rc.restore()
         : await PlayBillingService.I.restore();
     if (!context.mounted) return;
-    if (outcome.ok) {
-      AppState.I.setOvidCloudTier(outcome.tier ?? AppState.I.ovidCloudTier);
-      refreshUsage();
-      _snack(context, 'Purchases restored.');
-    } else {
+    if (!outcome.ok) {
       _snack(context, _billingMessage(outcome.result));
+      return;
     }
+    final unlocked = await _applyPurchase(outcome, viaRevenueCat: viaRevenueCat);
+    if (!context.mounted) return;
+    refreshUsage();
+    _snack(
+      context,
+      unlocked
+          ? 'Purchases restored.'
+          : 'Purchase found. Your plan unlocks as soon as our server confirms '
+                'it.',
+    );
+  }
+
+  /// Applies a successful purchase/restore to the local plan.
+  ///
+  /// A RevenueCat outcome is the store's word, not the server's: the tier is
+  /// written only after `/usage` names the plan (`applyPurchasedPlan`). The
+  /// Google Play outcome is already the `/billing/verify` verdict, so the
+  /// server has confirmed it. Returns true when the plan is unlocked.
+  Future<bool> _applyPurchase(
+    UpgradeOutcome outcome, {
+    required bool viaRevenueCat,
+  }) async {
+    final tier = outcome.tier;
+    if (tier == null) return false;
+    if (!viaRevenueCat) {
+      AppState.I.setOvidCloudTier(tier);
+      return true;
+    }
+    // The local demo path (debug/profile Test Store only) grants without a
+    // server round trip; release builds cannot reach it.
+    return applyPurchasedPlan(
+      tier,
+      demo: RevenueCatBilling.I.lastPurchaseWasDemo,
+    );
   }
 
   Future<void> exportData(BuildContext context) async {
@@ -308,35 +420,108 @@ class V2SettingsActions {
     return Future<void>.value();
   }
 
+  /// Per-channel switch. Channel keys are the only ids this handles; the
+  /// account-wide switch has its own method so its branch can never be
+  /// shadowed by a channel with the same key.
   Future<void> setNotificationChannel(String id, bool value) async {
     for (final channel in OvidChannel.values) {
       if (channel.key != id) continue;
       await BackgroundNotifier.I.setChannelEnabled(channel, value);
       return;
     }
-    if (id == OvidChannel.agentUpdates.key) {
-      await AppState.I.setNotificationsEnabled(value);
-    }
   }
+
+  /// The account-wide push switch. The server is the source of truth: the
+  /// local preference is only written after `/settings` accepts the change,
+  /// so a failed request cannot leave the UI claiming notifications are off.
+  Future<void> setNotificationsMaster(BuildContext context, bool value) async {
+    try {
+      await AccountSettingsClient.I.setNotificationsEnabled(value);
+    } catch (_) {
+      if (context.mounted) {
+        _snack(context, 'Could not update notifications. Check your connection.');
+      }
+      return;
+    }
+    await AppState.I.setNotificationsEnabled(value);
+  }
+
+  /// Opt in or out of anonymous crash reports and analytics.
+  Future<void> setCrashReports(bool value) => FirebaseService.I.setConsent(value);
 
   void selectPreset(String id) {
     unawaited(CommandService.I.execute('/preset $id'));
   }
 
-  Future<void> deletePreset(BuildContext context, String id) async {
-    final ok = await _confirm(
-      context,
-      title: 'Delete preset?',
-      body: 'Runs using this preset keep their current settings.',
-      confirm: 'Delete',
-      danger: true,
+  /// Creates a custom preset and persists it through [AppState].
+  ///
+  /// The screen owns its own confirmation for deletion, so [deletePreset] does
+  /// not ask again.
+  Future<AgentPreset?> createPreset(BuildContext context) async {
+    final controller = TextEditingController();
+    final description = TextEditingController();
+    final created = await showDialog<({String label, String description})>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('New preset'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: controller,
+              autofocus: true,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(hintText: 'Preset name'),
+              onSubmitted: (value) => Navigator.pop(
+                dialogContext,
+                (label: value, description: description.text),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: description,
+              textCapitalization: TextCapitalization.sentences,
+              decoration: const InputDecoration(
+                hintText: 'What is this preset for? (optional)',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(
+              dialogContext,
+              (label: controller.text, description: description.text),
+            ),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
     );
-    if (!ok) return;
+    controller.dispose();
+    description.dispose();
+    final label = created?.label.trim() ?? '';
+    if (label.isEmpty) return null;
+    final preset = AgentPreset(
+      id: PresetRegistry.newCustomId(),
+      label: label,
+      description: created?.description.trim() ?? '',
+    );
+    await AppState.I.saveCustomPreset(preset);
+    return preset;
+  }
+
+  Future<void> deletePreset(String id) async {
     await AppState.I.deleteCustomPreset(id);
   }
 
-  void copyVersion(BuildContext context) {
-    _snack(context, 'Version copied.');
+  Future<void> copyVersion(BuildContext context) async {
+    await Clipboard.setData(ClipboardData(text: kAppVersionLabel));
+    if (context.mounted) _snack(context, 'Version copied.');
   }
 
   Future<void> openUrl(BuildContext context, String url) async {

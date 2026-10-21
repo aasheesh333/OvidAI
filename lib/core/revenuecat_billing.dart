@@ -2,41 +2,47 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:purchases_flutter/purchases_flutter.dart';
 
 import 'diag.dart';
-import 'play_billing.dart';
+import 'firebase_service.dart';
 import 'ovid_cloud_service.dart';
+import 'play_billing.dart';
+import 'state.dart';
 
 /// RevenueCat is the purchase/entitlement layer required by the product spec.
 ///
-/// The Google public SDK key is injected at build time:
-/// `--dart-define=OVID_REVENUECAT_GOOGLE_KEY=goog_...`.
-/// When it is empty the app falls back to the existing server-verified Google
-/// Play flow, so a build without RevenueCat still sells correctly.
+/// The Google public SDK key is **injected at build time**:
+/// `--dart-define=OVID_REVENUECAT_GOOGLE_KEY=goog_...`. There is no baked-in
+/// default: a build without the define disables RevenueCat and falls back to
+/// the existing server-verified Google Play flow ([PlayBillingService]), so a
+/// purchase is still verified by Ovid before a plan unlocks.
 ///
 /// Entitlement ids (RevenueCat dashboard) map 1:1 to Ovid tiers:
 /// `go` → `3x`, `plus` → `7x`, `pro` → `15x`.
 const String kRevenueCatGoogleKey = String.fromEnvironment(
   'OVID_REVENUECAT_GOOGLE_KEY',
-  // Public SDK key for the Ovid Si Play Store app in RevenueCat project
-  // `afe58e73`. Public by design (it ships inside every app); override with
-  // --dart-define for a different project.
-  defaultValue: 'goog_ZicbEfueBOLBmUkaNNziRbddetJ',
 );
 
 /// Public SDK key for the RevenueCat **Test Store** app in the same project.
 /// Test Store purchases never charge a card, so internal-testing builds can
 /// exercise the whole paywall before Play subscriptions exist.
+///
+/// Injected with `--dart-define=OVID_REVENUECAT_TEST_STORE_KEY=test_...`.
+/// There is no baked-in default: a Test Store build without the key still
+/// keeps the local demo path (see [RevenueCatBilling.buy]), so the key is
+/// never shipped in a release binary.
 const String kRevenueCatTestStoreKey = String.fromEnvironment(
   'OVID_REVENUECAT_TEST_STORE_KEY',
-  defaultValue: 'test_emXiVDcEQgNfzAGwNjbihcXxuyY',
 );
 
-/// When true the app configures the RevenueCat Test Store instead of Google
-/// Play. Set with `--dart-define=OVID_REVENUECAT_TEST_STORE=true` for tester
-/// builds only; never for production.
-const bool kRevenueCatTestStore = bool.fromEnvironment(
+/// The raw opt-in: `--dart-define=OVID_REVENUECAT_TEST_STORE=true`.
+///
+/// On its own this is not enough — [resolveRevenueCatConfig] also requires a
+/// non-release build, so a release build can never be switched to the Test
+/// Store (and its local demo grant) by a stray define.
+const bool kRevenueCatTestStoreRequested = bool.fromEnvironment(
   'OVID_REVENUECAT_TEST_STORE',
 );
 
@@ -53,6 +59,191 @@ String? ovidTierForEntitlement(String entitlementId) {
     if (entry.value == entitlementId) return entry.key;
   }
   return null;
+}
+
+/// The RevenueCat configuration a build actually uses.
+@immutable
+class RevenueCatConfig {
+  const RevenueCatConfig({
+    this.apiKey = '',
+    this.testStore = false,
+    this.error,
+  });
+
+  /// The SDK key compiled into this build (`''` when none was injected).
+  final String apiKey;
+
+  /// True only for a non-release build that explicitly opted into the Test
+  /// Store. Never true in a release build.
+  final bool testStore;
+
+  /// Why this build has no usable RevenueCat config, when it does not.
+  final String? error;
+
+  bool get available => apiKey.isNotEmpty;
+}
+
+/// Whether a local demo entitlement may be granted.
+///
+/// Both conditions are required:
+/// * an explicit opt-in (`--dart-define=OVID_REVENUECAT_TEST_STORE=true`), and
+/// * a non-release build. A release build must never take the demo path: one
+///   define would otherwise hand out a free plan.
+bool demoGrantAllowed({required bool releaseMode, required bool testStore}) =>
+    testStore && !releaseMode;
+
+/// Resolves the RevenueCat configuration for a build.
+///
+/// Release builds:
+/// * always refuse the Test Store, even when the define is present;
+/// * require `OVID_REVENUECAT_GOOGLE_KEY`. A release build cannot `assert`
+///   (asserts are stripped), so this is the release-side assertion: without
+///   the key RevenueCat stays off and [RevenueCatConfig.error] records why.
+///
+/// Debug/profile builds may opt into the Test Store. Without a Test Store key
+/// they still get the labelled local demo (no server call, no charge).
+RevenueCatConfig resolveRevenueCatConfig({
+  required bool releaseMode,
+  required bool testStoreRequested,
+  required String googleKey,
+  required String testStoreKey,
+}) {
+  final key = googleKey.trim();
+  final testKey = testStoreKey.trim();
+  if (releaseMode) {
+    if (testStoreRequested) {
+      // A demo path in a release build is a free-plan bug, not a feature.
+      Diag.swallow(
+        'revenuecat.config',
+        'ignoring OVID_REVENUECAT_TEST_STORE in a release build',
+      );
+    }
+    if (key.isEmpty) {
+      Diag.swallow(
+        'revenuecat.config',
+        'OVID_REVENUECAT_GOOGLE_KEY is not set for this release build; '
+            'RevenueCat is disabled and Google Play verification is used',
+      );
+      return const RevenueCatConfig(
+        error:
+            'OVID_REVENUECAT_GOOGLE_KEY is not set for this release build. '
+            'RevenueCat is disabled; purchases go through Google Play '
+            'server verification.',
+      );
+    }
+    return RevenueCatConfig(apiKey: key);
+  }
+  if (testStoreRequested) {
+    return RevenueCatConfig(
+      apiKey: testKey,
+      testStore: true,
+      error: testKey.isEmpty
+          ? 'OVID_REVENUECAT_TEST_STORE_KEY is not set; the Test Store demo '
+                'grants locally.'
+          : null,
+    );
+  }
+  if (key.isEmpty) {
+    return const RevenueCatConfig(
+      error:
+          'OVID_REVENUECAT_GOOGLE_KEY is not set; RevenueCat is disabled and '
+          'purchases go through Google Play server verification.',
+    );
+  }
+  return RevenueCatConfig(apiKey: key);
+}
+
+/// The configuration compiled into this build.
+final RevenueCatConfig kRevenueCatConfig = resolveRevenueCatConfig(
+  releaseMode: kReleaseMode,
+  testStoreRequested: kRevenueCatTestStoreRequested,
+  googleKey: kRevenueCatGoogleKey,
+  testStoreKey: kRevenueCatTestStoreKey,
+);
+
+/// True when this build may talk to the RevenueCat Test Store (debug/profile
+/// plus the explicit define only).
+bool get kRevenueCatTestStore => kRevenueCatConfig.testStore;
+
+// ── Server-confirmed plan tier ───────────────────────────────────────────────
+
+String? _confirmedPlanTier;
+
+/// The plan tier a source of truth named for the signed-in account in this
+/// session, or null when nothing has been confirmed yet.
+String? get confirmedPlanTier => _confirmedPlanTier;
+
+/// Records the tier the server (or the store's entitlement list) named.
+/// Unknown values clear the confirmation instead of guessing.
+void confirmPlanTier(String? tier) {
+  _confirmedPlanTier = tier == 'free' || (tier != null && isKnownOvidTier(tier))
+      ? tier
+      : null;
+}
+
+/// True only when [tier] is exactly the plan a server answer confirmed.
+///
+/// `AppState.ovidCloudTier` is seeded from SharedPreferences before any server
+/// refresh (`state.dart:4789` `_loadOvidCloudTier`), so it is display-only: a
+/// refund, a cancellation or an account switch leaves it stale. Paid UI must
+/// gate on this instead of on the cached field.
+// WIRED-BY: coordinator — lib/core/state.dart:4789 (`_loadOvidCloudTier`)
+// restores `ovidCloudTier` from the cache with no server check. The gates that
+// read `AppState.I.ovidCloudTier` (e.g. `v2_settings_routes.dart:201` CTA and
+// `:209` currentPlanId, `auth_screen.dart:139`, `sidebar.dart:1080`) must call
+// `isServerConfirmed(tier)` / `confirmedPlanTier` from this file once
+// state.dart / those hosts are editable.
+bool isServerConfirmed(String tier) => _confirmedPlanTier == tier;
+
+@visibleForTesting
+void resetConfirmedPlanTierForTest() => _confirmedPlanTier = null;
+
+/// Re-reads the plan tier from the server (`/usage`, which is also the plan
+/// catalog source) and records it.
+///
+/// Returns the server's answer, or null when the server could not be asked.
+/// Null is never a confirmation: callers must not unlock on it.
+Future<String?> refreshServerTier({Future<String?> Function()? fetch}) async {
+  String? tier;
+  try {
+    tier = await (fetch ?? _fetchUsageTier)();
+  } catch (e) {
+    Diag.swallow('billing.refresh_server_tier', e);
+    return null;
+  }
+  if (tier == null) return null;
+  confirmPlanTier(tier);
+  return tier;
+}
+
+Future<String?> _fetchUsageTier() async =>
+    (await OvidCloudService.I.fetchUsage())?.tier;
+
+/// Applies a completed purchase to the local state, server first.
+///
+/// The client's purchase outcome alone never unlocks a plan:
+/// * [demo] is the debug/profile Test Store demo (no server is involved); it
+///   unlocks locally and is refused in release builds.
+/// * otherwise `/usage` must name the account's plan first.
+///
+/// Returns true when the plan is unlocked for this account.
+Future<bool> applyPurchasedPlan(
+  String tier, {
+  bool demo = false,
+  Future<String?> Function()? fetch,
+}) async {
+  if (demo) {
+    if (!demoGrantAllowed(releaseMode: kReleaseMode, testStore: true)) {
+      return false;
+    }
+    confirmPlanTier(tier);
+    AppState.I.setOvidCloudTier(tier);
+    return true;
+  }
+  final server = await refreshServerTier(fetch: fetch);
+  if (server == null || server == 'free') return false;
+  AppState.I.setOvidCloudTier(server);
+  return true;
 }
 
 /// One purchasable RevenueCat package, reduced to what the app needs.
@@ -116,14 +307,26 @@ abstract class RevenueCatPlatform {
 }
 
 /// RevenueCat purchase/entitlement service.
-class RevenueCatBilling {
+class RevenueCatBilling with WidgetsBindingObserver {
   RevenueCatBilling({
     RevenueCatPlatform? platform,
     String? Function()? uid,
+    RevenueCatConfig? config,
     bool? testStore,
+    bool? releaseMode,
+    void Function(String tier)? applyTier,
   }) : _platform = platform ?? PurchasesRevenueCatPlatform(),
-       _uid = uid ?? (() => null),
-       _testStore = testStore ?? kRevenueCatTestStore;
+       _uid = uid ?? (() => FirebaseService.I.uid),
+       _releaseMode = releaseMode ?? kReleaseMode,
+       _applyTier = applyTier ?? _applyTierToAppState,
+       _config =
+           config ??
+           resolveRevenueCatConfig(
+             releaseMode: releaseMode ?? kReleaseMode,
+             testStoreRequested: testStore ?? kRevenueCatTestStoreRequested,
+             googleKey: kRevenueCatGoogleKey,
+             testStoreKey: kRevenueCatTestStoreKey,
+           );
 
   static RevenueCatBilling? _instance;
   static RevenueCatBilling get I => _instance ??= RevenueCatBilling();
@@ -131,30 +334,73 @@ class RevenueCatBilling {
   @visibleForTesting
   static set instanceForTest(RevenueCatBilling? value) => _instance = value;
 
+  static void _applyTierToAppState(String tier) =>
+      AppState.I.setOvidCloudTier(tier);
+
   final RevenueCatPlatform _platform;
   final String? Function() _uid;
-  final bool _testStore;
+  final RevenueCatConfig _config;
+  final bool _releaseMode;
+  final void Function(String tier) _applyTier;
 
   bool _configured = false;
   String? _configuredFor;
+  bool _started = false;
+  bool _observerAttached = false;
 
   /// Set when the last purchase was granted by the local demo fallback rather
   /// than by the store. The UI must label it "Test mode — no charge".
   bool lastPurchaseWasDemo = false;
 
   /// True when this build talks to the RevenueCat Test Store.
-  bool get usingTestStore => _testStore;
+  bool get usingTestStore => _config.testStore && !_releaseMode;
+
+  /// A debug/profile Test Store build with no SDK key: the paywall is exercised
+  /// with the labelled local demo and nothing is ever queried.
+  bool get _demoOnly => usingTestStore && _config.apiKey.isEmpty;
 
   /// The key this build configures.
-  String get apiKey => usingTestStore
-      ? kRevenueCatTestStoreKey.trim()
-      : kRevenueCatGoogleKey.trim();
+  String get apiKey => _config.apiKey;
 
-  /// True when a public SDK key was compiled in.
-  bool get available => apiKey.isNotEmpty;
+  /// True when a purchase can be attempted: a real SDK key or the local demo.
+  bool get available => apiKey.isNotEmpty || _demoOnly;
+
+  /// Why this build has no usable RevenueCat config, when it does not.
+  String? get configError => _config.error;
+
+  /// Call once at launch: reconciles the cached plan with the store now and
+  /// keeps it in step on every app resume.
+  ///
+  /// Safe to call repeatedly and safe when RevenueCat is not configured.
+  void start() {
+    if (!available) return;
+    _attachLifecycle();
+    if (_started) return;
+    _started = true;
+    unawaited(reconcile());
+  }
+
+  void _attachLifecycle() {
+    if (_observerAttached) return;
+    try {
+      WidgetsBinding.instance.addObserver(this);
+      _observerAttached = true;
+    } catch (e) {
+      // No widget binding (unit tests): resume wiring is simply absent.
+      Diag.swallow('revenuecat.lifecycle', e);
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) unawaited(reconcile());
+  }
 
   /// Configure once per signed-in uid. Safe to call repeatedly.
   Future<bool> configure({String? uid}) async {
+    final error = _config.error;
+    if (error != null) Diag.swallow('revenuecat.config', error);
+    if (_demoOnly) return false;
     if (!available) return false;
     final user = uid ?? _uid();
     if (user == null || user.trim().isEmpty) return false;
@@ -163,6 +409,7 @@ class RevenueCatBilling {
       await _platform.configure(apiKey: apiKey, appUserId: user);
       _configured = true;
       _configuredFor = user;
+      _attachLifecycle();
       return true;
     } catch (e) {
       Diag.swallow('revenuecat.configure', e);
@@ -184,12 +431,22 @@ class RevenueCatBilling {
   /// Buys [tier] by matching the Play product id from [kOvidPlayProducts].
   Future<UpgradeOutcome> buy(String tier) async {
     lastPurchaseWasDemo = false;
-    if (!available) return const UpgradeOutcome(UpgradeResult.notAvailable);
-    if (!await configure()) {
-      return const UpgradeOutcome(UpgradeResult.rejected);
-    }
     final productId = kOvidPlayProducts[tier];
     if (productId == null) {
+      return const UpgradeOutcome(UpgradeResult.rejected);
+    }
+    final demoAllowed = demoGrantAllowed(
+      releaseMode: _releaseMode,
+      testStore: usingTestStore,
+    );
+    if (_demoOnly) {
+      // Debug/profile Test Store build with no key: nothing can be queried,
+      // so the documented demo path runs and the UI labels it "Test mode".
+      lastPurchaseWasDemo = true;
+      return UpgradeOutcome(UpgradeResult.ok, tier: tier);
+    }
+    if (!available) return const UpgradeOutcome(UpgradeResult.notAvailable);
+    if (!await configure()) {
       return const UpgradeOutcome(UpgradeResult.rejected);
     }
     try {
@@ -197,8 +454,9 @@ class RevenueCatBilling {
       final match = offered.where((p) => p.productId == productId).firstOrNull;
       if (match == null) {
         // Test Store without an offering yet: grant a clearly-labelled demo
-        // entitlement so the paywall can be exercised end to end.
-        if (usingTestStore) {
+        // entitlement so the paywall can be exercised end to end. Never in a
+        // release build (demoAllowed is false there).
+        if (demoAllowed) {
           lastPurchaseWasDemo = true;
           return UpgradeOutcome(UpgradeResult.ok, tier: tier);
         }
@@ -208,7 +466,7 @@ class RevenueCatBilling {
       return result.toOutcome();
     } catch (e) {
       Diag.swallow('revenuecat.buy', e);
-      if (usingTestStore) {
+      if (demoAllowed) {
         lastPurchaseWasDemo = true;
         return UpgradeOutcome(UpgradeResult.ok, tier: tier);
       }
@@ -217,6 +475,11 @@ class RevenueCatBilling {
   }
 
   Future<UpgradeOutcome> restore() async {
+    lastPurchaseWasDemo = false;
+    if (_demoOnly) {
+      // The demo grants on buy only; there is no store purchase to restore.
+      return const UpgradeOutcome(UpgradeResult.nothingToRestore);
+    }
     if (!available) return const UpgradeOutcome(UpgradeResult.notAvailable);
     if (!await configure()) {
       return const UpgradeOutcome(UpgradeResult.rejected);
@@ -237,6 +500,37 @@ class RevenueCatBilling {
       return info.ok ? info.tier : null;
     } catch (e) {
       Diag.swallow('revenuecat.customer_info', e);
+      return null;
+    }
+  }
+
+  /// Reconciles the local plan with the store's entitlements.
+  ///
+  /// Refunds, cancellations and expiries remove the entitlement, so the cached
+  /// tier would otherwise keep a paid plan unlocked forever. Only a
+  /// *downgrade* is applied here: an active entitlement never unlocks by
+  /// itself — the server still has to name the plan
+  /// ([refreshServerTier] / [applyPurchasedPlan]).
+  ///
+  /// Returns the store's tier (`'free'` when the entitlement is gone), or null
+  /// when the store could not be asked. An unreachable store or an SDK error
+  /// changes nothing: an offline launch must not wipe a paying user's plan.
+  Future<String?> reconcile() async {
+    if (_demoOnly) return null;
+    if (!available) return null;
+    if (!await configure()) return null;
+    try {
+      final info = await _platform.customerInfo();
+      // ok=false with an error means "could not ask", not "no entitlement".
+      if (!info.ok && info.error != null) return null;
+      final tier = info.ok ? (info.tier ?? 'free') : 'free';
+      if (tier == 'free') {
+        confirmPlanTier('free');
+        _applyTier('free');
+      }
+      return tier;
+    } catch (e) {
+      Diag.swallow('revenuecat.reconcile', e);
       return null;
     }
   }

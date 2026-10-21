@@ -4,6 +4,7 @@ import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
+import 'core/app_lock.dart';
 import 'core/cert_pinning.dart';
 import 'core/cloud/cloud_account_binding.dart';
 import 'core/cloud/cloud_agent_facade.dart';
@@ -438,6 +439,17 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     super.dispose();
   }
 
+  /// Gate "Sign out instead" handler.
+  ///
+  /// Signing out is also the account re-auth path for an app lock whose PIN
+  /// secret can no longer be read: clear that unrecoverable secret so a fresh
+  /// sign-in is not locked behind a PIN nobody can enter. A working PIN is
+  /// left untouched.
+  Future<void> _signOutAndResetLock() async {
+    await FirebaseService.I.signOut();
+    await AppLock.I.resetAfterReauth();
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -456,6 +468,14 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
       themeMode: OTheme.modeFor(AppState.I.themeMode),
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
+      // The lock must sit ABOVE the Navigator. `builder` wraps every route, so
+      // a pushed page (Settings, Artifacts, Schedules, dialogs, or a route
+      // restored after a cold start) can never render on top of the lock while
+      // the app is locked. Mounting it inside `home` only covered the shell.
+      builder: (context, child) => AppLockGate(
+        onSignOut: _signOutAndResetLock,
+        child: child ?? const SizedBox.shrink(),
+      ),
       home: kOvidUiGallery
           ? V2GalleryPage(screens: v2Screens)
           : kOvidUiV2
@@ -474,16 +494,16 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
                     ? await rc.buy(tier)
                     : await PlayBillingService.I.buy(tier);
                 if (outcome.ok) {
-                  AppState.I.setOvidCloudTier(outcome.tier ?? tier);
+                  // Unlock only on the server's answer (or the debug/profile
+                  // Test Store demo), never on the client outcome alone.
+                  await applyPurchasedPlan(
+                    outcome.tier ?? tier,
+                    demo: rc.available && rc.lastPurchaseWasDemo,
+                  );
                 }
                 return outcome.ok;
               },
-              child: LoginGate(
-                child: AppLockGate(
-                  onSignOut: () => FirebaseService.I.signOut(),
-                  child: const V2AppShell(),
-                ),
-              ),
+              child: const LoginGate(child: V2AppShell()),
             )
           : const LoginGate(child: OvidShell()),
     );
