@@ -11,13 +11,13 @@ import { DEFAULT_PRODUCTS } from "./billing/products.js";
  */
 
 describe("planCards", () => {
-  it("renders the seeded plan table (Free/Starter/Pro/Max) with tier aliases and Play products", () => {
+  it("renders the seeded plan table (Free/Go/Plus/Pro) with tier aliases and Play products", () => {
     const cards = planCards(seedPlans(), DEFAULT_PRODUCTS);
     expect(cards.map((c) => [c.tier, c.id, c.name, c.price_usd, c.mult, c.window])).toEqual([
       ["free", "free", "Free", 0, 1, "24h"],
-      ["3x", "starter", "Starter", 5, 3, "24h"],
-      ["7x", "pro", "Pro", 25, 23, "24h"],
-      ["15x", "max", "Max", 60, 43, "24h"],
+      ["3x", "starter", "Go", 5, 3, "24h"],
+      ["7x", "pro", "Plus", 18, 23, "24h"],
+      ["15x", "max", "Pro", 99, 43, "24h"],
     ]);
     expect(cards.map((c) => c.product_id)).toEqual([
       null,

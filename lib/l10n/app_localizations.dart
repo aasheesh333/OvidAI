@@ -2149,7 +2149,7 @@ abstract class AppLocalizations {
   /// Subtitle of the Delete account row.
   ///
   /// In en, this message translates to:
-  /// **'Permanently delete your account and cloud data'**
+  /// **'Delete your account after a 24-hour grace period'**
   String get settingsDeleteAccountSubtitle;
 
   /// Settings section heading.

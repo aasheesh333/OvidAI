@@ -72,21 +72,23 @@ void main() {
     // Scroll the whole list; every server plan fact appears on the way
     // (SH-006): names, multipliers and indicative prices.
     for (final marker in [
-      'Free', '×1', 'Starter', '×3', 'US\$5 / month', 'Pro', '×23',
-      'US\$25 / month', 'Max', '×43', 'US\$60 / month',
+      'Free', '×1', 'Go', '×3', 'US\$5 / month', 'Plus', '×23',
+      'US\$18 / month', 'Pro', '×43', 'US\$99 / month',
     ]) {
       await tester.scrollUntilVisible(find.text(marker).first, 140);
       await tester.pump();
       expect(find.text(marker), findsWidgets, reason: marker);
     }
-    expect(find.text('Plus'), findsNothing);
+    // The legacy seed names must not leak alongside the canonical ones.
+    expect(find.text('Starter'), findsNothing);
+    expect(find.text('Max'), findsNothing);
     expect(find.textContaining('₹'), findsNothing);
   });
 
   testWidgets('current plan button is disabled with "Current plan" label', (
     tester,
   ) async {
-    // User is on Plus (3x). The Plus card should show the disabled
+    // User is on Go (3x). The Go card should show the disabled
     // "Current plan" button.
     OvidCloudService.httpClientFactoryForTest = () => MockClient(
       (_) async => http.Response(jsonEncode(_snapshot('3x')), 200),
@@ -127,7 +129,7 @@ void main() {
 
       await _pumpBilling(tester);
 
-      // Scroll the Plus button into view and tap it.
+      // Scroll the Go button into view and tap it.
       await tester.scrollUntilVisible(
         find.byKey(const ValueKey('upgrade-3x')),
         150,

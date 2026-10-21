@@ -1389,9 +1389,9 @@ class OvidPlanCatalog {
 
   static const fallback = <OvidPlan>[
     OvidPlan(tier: 'free', id: 'free', name: 'Free', priceUsd: 0, mult: 1),
-    OvidPlan(tier: '3x', id: 'starter', name: 'Starter', priceUsd: 5, mult: 3),
-    OvidPlan(tier: '7x', id: 'pro', name: 'Pro', priceUsd: 25, mult: 23),
-    OvidPlan(tier: '15x', id: 'max', name: 'Max', priceUsd: 60, mult: 43),
+    OvidPlan(tier: '3x', id: 'starter', name: 'Go', priceUsd: 5, mult: 3),
+    OvidPlan(tier: '7x', id: 'pro', name: 'Plus', priceUsd: 18, mult: 23),
+    OvidPlan(tier: '15x', id: 'max', name: 'Pro', priceUsd: 99, mult: 43),
   ];
 
   static List<OvidPlan>? _server;

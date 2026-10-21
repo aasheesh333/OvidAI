@@ -1290,7 +1290,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsDeleteAccountSubtitle =>
-      'Permanently delete your account and cloud data';
+      'Delete your account after a 24-hour grace period';
 
   @override
   String get settingsHelp => 'Help & about';

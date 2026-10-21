@@ -78,11 +78,11 @@ def seed_plans(paid_window_hours: int = 24) -> list[dict]:
     return [
         {"id": "free", "name": "Free", "price_usd": 0, "enabled": True, "aliases": [],
          "window_hours": 24, "mult": 1, "slow_mode": False, "auto_oss": False},
-        {"id": "starter", "name": "Starter", "price_usd": 5, "enabled": True, "aliases": ["3x"],
+        {"id": "starter", "name": "Go", "price_usd": 5, "enabled": True, "aliases": ["3x"],
          "window_hours": paid_window_hours, "mult": 3, "slow_mode": False, "auto_oss": False},
-        {"id": "pro", "name": "Pro", "price_usd": 25, "enabled": True, "aliases": ["7x"],
+        {"id": "pro", "name": "Plus", "price_usd": 18, "enabled": True, "aliases": ["7x"],
          "window_hours": paid_window_hours, "mult": 23, "slow_mode": False, "auto_oss": True},
-        {"id": "max", "name": "Max", "price_usd": 60, "enabled": True, "aliases": ["15x"],
+        {"id": "max", "name": "Pro", "price_usd": 99, "enabled": True, "aliases": ["15x"],
          "window_hours": paid_window_hours, "mult": 43, "slow_mode": False, "auto_oss": True},
     ]
 

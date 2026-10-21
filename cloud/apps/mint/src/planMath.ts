@@ -200,9 +200,9 @@ export function pyJsonStringify(
 export function seedPlans(paidWindowHours: number = 24): PlanData[] {
   return [
     { id: "free", name: "Free", price_usd: 0, enabled: true, aliases: [], window_hours: 24, mult: 1, slow_mode: false, auto_oss: false },
-    { id: "starter", name: "Starter", price_usd: 5, enabled: true, aliases: ["3x"], window_hours: paidWindowHours, mult: 3, slow_mode: false, auto_oss: false },
-    { id: "pro", name: "Pro", price_usd: 25, enabled: true, aliases: ["7x"], window_hours: paidWindowHours, mult: 23, slow_mode: false, auto_oss: true },
-    { id: "max", name: "Max", price_usd: 60, enabled: true, aliases: ["15x"], window_hours: paidWindowHours, mult: 43, slow_mode: false, auto_oss: true },
+    { id: "starter", name: "Go", price_usd: 5, enabled: true, aliases: ["3x"], window_hours: paidWindowHours, mult: 3, slow_mode: false, auto_oss: false },
+    { id: "pro", name: "Plus", price_usd: 18, enabled: true, aliases: ["7x"], window_hours: paidWindowHours, mult: 23, slow_mode: false, auto_oss: true },
+    { id: "max", name: "Pro", price_usd: 99, enabled: true, aliases: ["15x"], window_hours: paidWindowHours, mult: 43, slow_mode: false, auto_oss: true },
   ];
 }
 

@@ -21,9 +21,9 @@ import {
 
 const SEED_PLANS_JSON =
   '[{"aliases":[],"auto_oss":false,"enabled":true,"id":"free","mult":1.0,"name":"Free","price_usd":0.0,"slow_mode":false,"window_hours":24},' +
-  '{"aliases":["3x"],"auto_oss":false,"enabled":true,"id":"starter","mult":3.0,"name":"Starter","price_usd":5.0,"slow_mode":false,"window_hours":24},' +
-  '{"aliases":["7x"],"auto_oss":true,"enabled":true,"id":"pro","mult":23.0,"name":"Pro","price_usd":25.0,"slow_mode":false,"window_hours":24},' +
-  '{"aliases":["15x"],"auto_oss":true,"enabled":true,"id":"max","mult":43.0,"name":"Max","price_usd":60.0,"slow_mode":false,"window_hours":24}]';
+  '{"aliases":["3x"],"auto_oss":false,"enabled":true,"id":"starter","mult":3.0,"name":"Go","price_usd":5.0,"slow_mode":false,"window_hours":24},' +
+  '{"aliases":["7x"],"auto_oss":true,"enabled":true,"id":"pro","mult":23.0,"name":"Plus","price_usd":18.0,"slow_mode":false,"window_hours":24},' +
+  '{"aliases":["15x"],"auto_oss":true,"enabled":true,"id":"max","mult":43.0,"name":"Pro","price_usd":99.0,"slow_mode":false,"window_hours":24}]';
 
 const SEED_MEMBERS_JSON =
   '[{"model":"glm-5.3-flash","weight":1.0},{"model":"deepseek-v4.1-flash","weight":1.0},{"model":"minimax-m3","weight":1.0}]';

@@ -38,9 +38,9 @@ import {
 
 const SEED_PLANS_JSON =
   '[{"aliases":[],"auto_oss":false,"enabled":true,"id":"free","mult":1.0,"name":"Free","price_usd":0.0,"slow_mode":false,"window_hours":24},' +
-  '{"aliases":["3x"],"auto_oss":false,"enabled":true,"id":"starter","mult":3.0,"name":"Starter","price_usd":5.0,"slow_mode":false,"window_hours":24},' +
-  '{"aliases":["7x"],"auto_oss":true,"enabled":true,"id":"pro","mult":23.0,"name":"Pro","price_usd":25.0,"slow_mode":false,"window_hours":24},' +
-  '{"aliases":["15x"],"auto_oss":true,"enabled":true,"id":"max","mult":43.0,"name":"Max","price_usd":60.0,"slow_mode":false,"window_hours":24}]';
+  '{"aliases":["3x"],"auto_oss":false,"enabled":true,"id":"starter","mult":3.0,"name":"Go","price_usd":5.0,"slow_mode":false,"window_hours":24},' +
+  '{"aliases":["7x"],"auto_oss":true,"enabled":true,"id":"pro","mult":23.0,"name":"Plus","price_usd":18.0,"slow_mode":false,"window_hours":24},' +
+  '{"aliases":["15x"],"auto_oss":true,"enabled":true,"id":"max","mult":43.0,"name":"Pro","price_usd":99.0,"slow_mode":false,"window_hours":24}]';
 
 const SEED_MEMBERS_JSON =
   '[{"model":"glm-5.3-flash","weight":1.0},{"model":"deepseek-v4.1-flash","weight":1.0},{"model":"minimax-m3","weight":1.0}]';
@@ -65,8 +65,8 @@ describe("seedPlans", () => {
     ).toEqual([
       { id: "free", mult: 1, price_usd: 0, auto_oss: false, slow_mode: false, aliases: [], window_hours: 24 },
       { id: "starter", mult: 3, price_usd: 5, auto_oss: false, slow_mode: false, aliases: ["3x"], window_hours: 24 },
-      { id: "pro", mult: 23, price_usd: 25, auto_oss: true, slow_mode: false, aliases: ["7x"], window_hours: 24 },
-      { id: "max", mult: 43, price_usd: 60, auto_oss: true, slow_mode: false, aliases: ["15x"], window_hours: 24 },
+      { id: "pro", mult: 23, price_usd: 18, auto_oss: true, slow_mode: false, aliases: ["7x"], window_hours: 24 },
+      { id: "max", mult: 43, price_usd: 99, auto_oss: true, slow_mode: false, aliases: ["15x"], window_hours: 24 },
     ]);
     expect(seedPlans().every((p) => p.enabled)).toBe(true);
   });
@@ -408,8 +408,8 @@ describe("parseSettings", () => {
     expect(s.plans.map((p) => [p.id, p.mult, p.price_usd, p.auto_oss, p.slow_mode])).toEqual([
       ["free", 1, 0, false, false],
       ["starter", 3, 5, false, false],
-      ["pro", 23, 25, true, false],
-      ["max", 43, 60, true, false],
+      ["pro", 23, 18, true, false],
+      ["max", 43, 99, true, false],
     ]);
   });
 

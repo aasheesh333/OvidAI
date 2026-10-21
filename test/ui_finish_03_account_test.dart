@@ -245,7 +245,8 @@ void main() {
     expect(find.text('FREE'), findsOneWidget);
     AppState.I.setOvidCloudTier('7x');
     await tester.pump();
-    expect(find.text('PRO'), findsOneWidget);
+    // 7x is the Plus tier in the canonical plan table.
+    expect(find.text('PLUS'), findsOneWidget);
     expect(find.text('FREE'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
     service.dispose();

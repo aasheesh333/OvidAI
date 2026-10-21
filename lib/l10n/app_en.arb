@@ -1664,7 +1664,7 @@
   "@settingsDeleteAccount": {
     "description": "Settings row: delete the account and cloud data."
   },
-  "settingsDeleteAccountSubtitle": "Permanently delete your account and cloud data",
+  "settingsDeleteAccountSubtitle": "Delete your account after a 24-hour grace period",
   "@settingsDeleteAccountSubtitle": {
     "description": "Subtitle of the Delete account row."
   },

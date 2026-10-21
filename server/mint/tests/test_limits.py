@@ -31,7 +31,7 @@ def test_new_install_seeds_24h_plans(client):
     assert s["free_daily_usd"] == 0.15
     assert [(p["id"], p["mult"], p["price_usd"], p["auto_oss"], p["slow_mode"]) for p in s["plans"]] == [
         ("free", 1, 0, False, False), ("starter", 3, 5, False, False),
-        ("pro", 23, 25, True, False), ("max", 43, 60, True, False)]
+        ("pro", 23, 18, True, False), ("max", 43, 99, True, False)]
     assert all(p["window_hours"] == 24 for p in s["plans"])
     assert [m["model"] for m in s["auto_oss_members"]] == ["glm-5.3-flash", "deepseek-v4.1-flash", "minimax-m3"]
     assert (s["slow_rpm"], s["slow_parallel"]) == (20, 2)

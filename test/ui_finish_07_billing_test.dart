@@ -122,11 +122,11 @@ void main() {
         expect(find.text('37% remaining'), findsOneWidget);
         expect(tester.takeException(), isNull);
         for (final entry in [
-          // The server seed table (SH-006): Starter ×3, Pro ×23, Max ×43.
+          // The server seed table (SH-006): Go ×3, Plus ×23, Pro ×43.
           ('free', 'Free', '×1'),
-          ('3x', 'Starter', '×3'),
-          ('7x', 'Pro', '×23'),
-          ('15x', 'Max', '×43'),
+          ('3x', 'Go', '×3'),
+          ('7x', 'Plus', '×23'),
+          ('15x', 'Pro', '×43'),
         ]) {
           final card = find.byKey(ValueKey('plan-${entry.$1}'));
           await _reveal(tester, card);
@@ -147,7 +147,7 @@ void main() {
         await _reveal(tester, upgrade);
         await tester.tap(upgrade);
         await _frames(tester);
-        expect(find.text('Upgrade to Max'), findsOneWidget);
+        expect(find.text('Upgrade to Pro'), findsOneWidget);
         _honestCopy(tester);
         expect(find.descendant(
           of: find.byType(BottomSheet),
@@ -159,7 +159,7 @@ void main() {
         await _reveal(tester, find.text('Cancel'));
         await tester.tap(find.text('Cancel'));
         await _frames(tester);
-        expect(find.text('Upgrade to Max'), findsNothing);
+        expect(find.text('Upgrade to Pro'), findsNothing);
         await tester.pumpWidget(const SizedBox.shrink());
       });
     }
@@ -220,7 +220,7 @@ void main() {
       expect(AppState.I.ovidCloudTier, tier);
       if (success) {
         expect(find.byKey(const ValueKey('billing-pay-now')), findsNothing);
-        expect(find.text('You are now on the Starter plan.'), findsOneWidget);
+        expect(find.text('You are now on the Go plan.'), findsOneWidget);
       } else {
         // A rejection keeps the sheet open with specific copy and Retry.
         expect(find.byKey(const ValueKey('billing-sheet-error')), findsOneWidget);
@@ -238,8 +238,9 @@ void main() {
     OvidCloudService.httpClientFactoryForTest = () => MockClient((_) async =>
         http.Response(jsonEncode(_usage('7x')), 200));
     await _mount(tester);
-    expect(find.text('PRO'), findsOneWidget);
-    expect(find.text('Pro'), findsWidgets);
+    // 7x is the Plus tier; the header pill is upper-cased.
+    expect(find.text('PLUS'), findsOneWidget);
+    expect(find.text('Plus'), findsWidgets);
     _honestCopy(tester);
     await _reveal(tester, find.byKey(const ValueKey('plan-free')));
     expect(find.byKey(const ValueKey('upgrade-free')), findsNothing);
@@ -248,7 +249,7 @@ void main() {
     expect(find.descendant(of: change, matching: find.text('Change plan')), findsOneWidget);
     await tester.tap(change);
     await _frames(tester);
-    expect(find.text('Change to Starter'), findsOneWidget);
+    expect(find.text('Change to Go'), findsOneWidget);
     await _reveal(tester, find.text('Cancel'));
     await tester.tap(find.text('Cancel'));
     await _frames(tester);

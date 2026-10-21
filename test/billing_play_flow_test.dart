@@ -135,7 +135,7 @@ void main() {
     expect(store.bought.single.product, kOvidPlayProducts['3x']);
     expect(store.completed, hasLength(1));
     expect(find.byType(BottomSheet), findsNothing);
-    expect(find.text('You are now on the Starter plan.'), findsOneWidget);
+    expect(find.text('You are now on the Go plan.'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 

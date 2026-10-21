@@ -38,7 +38,7 @@ def test_usage_keeps_legacy_fields_and_adds_new(client):
     user_with_keys(mint, fake, "u", tier="3x")
     body = get_usage(c, "u")
     assert LEGACY_FIELDS | NEW_FIELDS <= set(body)
-    assert body["tier"] == "3x" and body["plan"] == "starter" and body["plan_name"] == "Starter"
+    assert body["tier"] == "3x" and body["plan"] == "starter" and body["plan_name"] == "Go"
     assert body["window"] == body["budget_window"] == "24h"
     for m in body["models"]:
         assert LEGACY_MODEL_FIELDS <= set(m)
@@ -268,7 +268,7 @@ def test_public_plans_endpoint(client):
     c, *_ = client
     plans = c.get("/plans").json()["plans"]
     assert [(p["id"], p["price_usd"], p["aliases"]) for p in plans] == [
-        ("free", 0, []), ("starter", 5, ["3x"]), ("pro", 25, ["7x"]), ("max", 60, ["15x"])]
+        ("free", 0, []), ("starter", 5, ["3x"]), ("pro", 18, ["7x"]), ("max", 99, ["15x"])]
 
 
 def _walk(v):
