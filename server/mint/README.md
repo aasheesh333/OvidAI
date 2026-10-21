@@ -125,13 +125,17 @@ changing the allowance.
 | | per user: `user:{uid}:tier`, `:dailyUsd`, `:pools`, `:monthlyCapUsd`, `:banned`, `:email`; `email:{email}` → uid |
 | | window: `pool:{uid}:start` (TTL = window), `pool:{uid}:spend`, `pool:{uid}:auto` (hash), `pools:slow`, `pools:slow_pending`, `config:model_groups` |
 | | `audit:admin` (capped at 5000), `config:reapply_status`, `config:reset_status`, `usagecache:{uid}` (15 s) |
+| | M1: `alerts:pending:user_spend` (queue), `alert:user_spend:queued:<uid>:<day>`, `alert:user_spend:sent:<uid>:<day>`, `alerts:recent` (capped at `M1_ALERTS_MAX`, 200), `config:kill_switch` (runtime flag) |
 | mint volume `/data` | `limits.json` (settings mirror, restored at startup if Redis lost them) and `admin-audit.jsonl` (append-only) |
 
 Startup only **adds** unset fields; it never overwrites a stored value. Unknown stored
 fields are ignored. Env vars (`BASE_DAILY_USD`, `FREE_MONTHLY_CAP_USD`, `KEY_RPM`,
 `KEY_TPM`, `KEY_MAX_PARALLEL`, `EST_*`) are seeds only. Other env vars: `MINT_STATE_DIR`,
 `REAPPLY_SYNC_MAX` (200), `AUDIT_MAX`, `USAGE_CACHE_S` (15), `MINT_SWEEP_S` (30),
-`MINT_SPEND_MONITOR`, `MINT_MOUNT_IMAGES`. Hook: `OVID_POOLS_REDIS_DB` (2),
+`MINT_SPEND_MONITOR`, `MINT_MOUNT_IMAGES`. M1: `M1_ALERT_WEBHOOK_URL` (structured
+per-user alerts; log fallback), `M1_ALERTS_MAX` (200), and
+`OVID_PAID_MODELS_KILL_SWITCH` on mint **and** LiteLLM (hard env override; the runtime
+flag is `config:kill_switch`). Hook: `OVID_POOLS_REDIS_DB` (2),
 `OVID_POOLS_SETTINGS_TTL_S` (5), plus LiteLLM's `REDIS_HOST/PORT/PASSWORD`.
 
 ## Billing product mapping (verified in the repo)
@@ -183,6 +187,8 @@ API (all calls need `Authorization: Bearer <master key>`; 401 if missing, 403 if
 | `POST /admin/reset-usage` | Legacy: window reset plus the monthly backstop |
 | `POST /admin/ban` · `/unban`, `POST /admin/set-base-budget` (legacy) | |
 | `GET /admin/audit`, `GET /admin/reapply-status`, `POST /admin/sweep`, `GET /admin/export` | |
+| `GET /admin/alerts` | Recent M1 alerts (sanitized payloads + delivery), pending queue depth, webhook configured |
+| `GET/POST /admin/kill-switch` | Read env/runtime/effective state; `{"enabled": true|false}` flips the runtime flag (audited). The env flag remains the hard override. |
 
 A **window reset** (one user or all):
 - clears `pool:{uid}:spend`, `pool:{uid}:auto` and slow mode, and sets the window start
@@ -384,8 +390,11 @@ network calls and no services.
 
 1. Back up `verifier/mint.py`, `verifier/Dockerfile`, `docker-compose.yml` and
    `litellm/config.yaml`.
-2. Mint: `cp server/mint/mint.py server/mint/ovid_plans.py /opt/ovid-gateway/verifier/`,
-   then add `COPY ovid_plans.py /app/ovid_plans.py` to `verifier/Dockerfile`.
+2. Mint: `cp server/mint/mint.py server/mint/ovid_plans.py server/mint/m1_alerts.py /opt/ovid-gateway/verifier/`,
+   then add `COPY ovid_plans.py /app/ovid_plans.py` and
+   `COPY m1_alerts.py /app/m1_alerts.py` to `verifier/Dockerfile`. Set
+   `M1_ALERT_WEBHOOK_URL` (and optionally `OVID_PAID_MODELS_KILL_SWITCH`) in the mint
+   service env; see `docs/ops/M1_RUNBOOK.md`.
 3. LiteLLM hook:
    `cp server/mint/ovid_plans.py server/mint/litellm_hook/ovid_pools.py /opt/ovid-gateway/litellm/`.
    Under the `litellm` service `volumes:`, add

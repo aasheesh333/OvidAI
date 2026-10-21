@@ -31,6 +31,7 @@ from psycopg import sql
 from psycopg.rows import dict_row
 
 from . import events as ev
+from .repository import MAX_ACTIVE_MEMBERS
 
 
 SOURCE_COLUMNS = {
@@ -47,6 +48,11 @@ SOURCE_COLUMNS = {
     'collab_requests': ('session_id', 'uid', 'operation', 'request_id', 'fingerprint',
                         'membership_epoch', 'result'),
     'collab_rates': ('session_id', 'operation', 'created_at'),
+    'collab_turns': ('session_id', 'uid', 'participant_id', 'generation',
+                     'acquired_at', 'expires_at'),
+    'collab_storage_files': ('file_id', 'session_id', 'uploader_uid', 'owner_uid',
+                             'size', 'created_at'),
+    'collab_storage_usage': ('owner_uid', 'bytes', 'files', 'updated_at'),
     'deleted_accounts': ('uid',),
     'deleted_sessions': ('session_id', 'token_hash'),
     'collab_secrets': ('name', 'secret'),
@@ -71,6 +77,8 @@ def initialize_schema(*, dsn, schema='public'):
         # Serialize explicit deployments; not the lifecycle UID advisory lock.
         db.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 734128))', (schema,))
         db.execute(Path(__file__).parents[1].joinpath('account/schema_collaboration.sql').read_text())
+        # Turn-lock and creator-paid storage tables live with this module.
+        db.execute(Path(__file__).with_name('schema_extensions.sql').read_text())
 
 
 def authority_identity(*, dsn, schema='public'):
@@ -105,12 +113,13 @@ def _validate_import(db):
                                       WHERE e.session_id=s.session_id),1) OR
           s.next_sequence-1 <> (SELECT count(*) FROM collab_events e
                                WHERE e.session_id=s.session_id) OR
-          (SELECT count(*) FROM collab_memberships m WHERE m.session_id=s.session_id AND m.status='active')>10
+          (SELECT count(*) FROM collab_memberships m WHERE m.session_id=s.session_id AND m.status='active')>%s
         LIMIT 1
-    """).fetchone()
+    """, (MAX_ACTIVE_MEMBERS,)).fetchone()
     if bad:
         raise MigrationError('invalid_source_data')
-    for table in ('collab_memberships', 'collab_invites', 'collab_events'):
+    for table in ('collab_memberships', 'collab_invites', 'collab_events',
+                  'collab_turns', 'collab_storage_files'):
         if db.execute(sql.SQL('SELECT 1 FROM {} c WHERE NOT EXISTS '
                               '(SELECT 1 FROM collab_sessions s WHERE s.session_id=c.session_id) LIMIT 1')
                       .format(sql.Identifier(table))).fetchone():

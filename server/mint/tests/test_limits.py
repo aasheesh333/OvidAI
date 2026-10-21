@@ -15,7 +15,8 @@ def usage(c, uid):
     return r.json()
 
 
-@pytest.mark.parametrize("path", ["mint.py", "ovid_plans.py", "litellm_hook/ovid_pools.py"])
+@pytest.mark.parametrize("path", ["mint.py", "ovid_plans.py", "m1_alerts.py",
+                                  "litellm_hook/ovid_pools.py"])
 def test_source_has_no_secret_literals(path):
     src = (MINT_DIR / path).read_text()
     assert not re.search(r"sk-[A-Za-z0-9_-]{12,}", src)

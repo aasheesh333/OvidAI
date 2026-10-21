@@ -36,6 +36,7 @@ def authority(tmp_path):
         account = Path(__file__).resolve().parents[1]
         db.execute((account / 'schema.sql').read_text())
         db.execute((account / 'schema_collaboration.sql').read_text())
+        db.execute((account.parent / 'collaboration' / 'schema_extensions.sql').read_text())
         identity = db.execute("SELECT secret FROM collab_secrets WHERE name='authority'").fetchone()[0]
     scoped = make_conninfo(dsn, options=f'-c search_path={schema}')
     _, stores = configured(tmp_path)

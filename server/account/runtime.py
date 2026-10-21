@@ -136,6 +136,62 @@ def build_retention():
     return stores, private_sync, collaboration
 
 
+def _email_hook():
+    factory = os.environ.get('IP_HOP_EMAIL_FACTORY', '').strip()
+    if not factory:
+        return None
+    module_name, separator, attribute = factory.partition(':')
+    if not separator or not module_name or not attribute or ':' in attribute:
+        raise ValueError('IP_HOP_EMAIL_FACTORY must be module:attribute')
+    builder = getattr(import_module(module_name), attribute)
+    hook = builder()
+    if not callable(hook):
+        raise ValueError('IP_HOP_EMAIL_FACTORY must return a callable')
+    return hook
+
+
+def _ip_hop():
+    """Build the configured IP-hop guard; absent store configuration disables it."""
+    dsn = os.environ.get('IP_HOP_DATABASE_URL', '').strip()
+    value = os.environ.get('IP_HOP_DATABASE_PATH', '').strip()
+    fail_closed = _activated('IP_HOP_FAIL_CLOSED')
+    if dsn and value:
+        raise ValueError('configure only one of IP_HOP_DATABASE_URL or IP_HOP_DATABASE_PATH')
+    if not dsn and not value:
+        if fail_closed:
+            raise ValueError('IP_HOP_FAIL_CLOSED requires IP_HOP_DATABASE_URL '
+                             'or IP_HOP_DATABASE_PATH')
+        return None
+
+    from server.security.ip_hop import (IpHopGuard, PostgresIpHopStore,
+                                        SqliteIpHopStore, build_geo_resolver)
+    if dsn:
+        ensure_schema = os.environ.get('IP_HOP_POSTGRES_ENSURE_SCHEMA')
+        store = PostgresIpHopStore(
+            dsn,
+            ensure_schema=(True if ensure_schema is None
+                           else _activated('IP_HOP_POSTGRES_ENSURE_SCHEMA')))
+    else:
+        path = Path(value)
+        if not path.is_absolute() or not path.parent.is_dir() or path.is_symlink():
+            raise ValueError('IP_HOP_DATABASE_PATH requires an absolute local path')
+        store = SqliteIpHopStore(str(path))
+
+    try:
+        resolver = build_geo_resolver(
+            database_path=os.environ.get('IP_HOP_GEOIP_DB', '').strip() or None,
+            asn_database_path=os.environ.get('IP_HOP_GEOIP_ASN_DB', '').strip() or None,
+            trust_geo_headers=_activated('IP_HOP_TRUST_GEO_HEADERS'))
+        email_hook = _email_hook()
+    except Exception:
+        close = getattr(store, 'close', None)
+        if callable(close):
+            close()
+        raise
+    return IpHopGuard(store, resolver=resolver, email_hook=email_hook,
+                      fail_closed=fail_closed)
+
+
 def build():
     from .domain import Lifecycle
     if os.environ.get('ACCOUNT_ACTIVATED') != 'true':
@@ -161,7 +217,8 @@ def build():
         os.environ['REDIS_URL'], decode_responses=True)), client)
     return Lifecycle(account_authority, admin,
                      CleanupData(data, stores, private_sync=private_sync,
-                                 live_collaboration=live_collaboration)), admin
+                                 live_collaboration=live_collaboration),
+                     ip_hop=_ip_hop()), admin
 
 
 def create_app():
@@ -169,6 +226,23 @@ def create_app():
     from .api import router
     service, admin = build()
     app = FastAPI(title='Ovid account lifecycle')
+    if getattr(service, 'ip_hop', None) is not None:
+        from server.security.ip_hop import (request_context, reset_request_context,
+                                           set_request_context)
+
+        @app.middleware('http')
+        async def ip_hop_request_context(request, call_next):
+            # The guard needs the request's coarse location even when the
+            # admission happens in a mounted module (shares/sync/collaboration).
+            token = None
+            if request.headers.get('authorization'):
+                token = set_request_context(request_context(request))
+            try:
+                return await call_next(request)
+            finally:
+                if token is not None:
+                    reset_request_context(token)
+
     app.include_router(router(service, admin.verify))
     from server.shares.runtime import mount_shares
     mount_shares(app, service.data.stores.shares, service, admin,

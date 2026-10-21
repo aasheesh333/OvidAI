@@ -34,6 +34,7 @@ from pydantic import BaseModel
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ovid_plans as plans  # noqa: E402  (shared with the LiteLLM pools hook)
+import m1_alerts  # noqa: E402  (injectable webhook/log alert sink)
 
 # ── config (from env; secrets never in code) ──
 FIREBASE_PROJECT = os.environ["FIREBASE_PROJECT_ID"]          # e.g. ovid-ai
@@ -59,6 +60,9 @@ WEB_TEAM_DAILY_USD = float(os.environ.get("WEB_TEAM_DAILY_USD", "25"))
 ALERT_TELEGRAM_BOT_TOKEN = os.environ.get("ALERT_TELEGRAM_BOT_TOKEN", "")
 ALERT_TELEGRAM_CHAT_ID = os.environ.get("ALERT_TELEGRAM_CHAT_ID", "")
 ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "")
+# M1 gate: structured, sanitized alert delivery (webhook -> log fallback).
+M1_ALERT_WEBHOOK_URL = os.environ.get("M1_ALERT_WEBHOOK_URL", "")
+ALERT_SINK = m1_alerts.AlertSink(webhook_url=M1_ALERT_WEBHOOK_URL)
 DAILY_SPEND_ALERT_USD = float(os.environ.get("DAILY_SPEND_ALERT_USD", "20"))
 LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://litellm:4000")
 LITELLM_MASTER_KEY = os.environ["LITELLM_MASTER_KEY"]
@@ -91,6 +95,8 @@ SEEDS = {
     "est_input_tokens": int(os.environ.get("EST_INPUT_TOKENS", "2000")),
     "est_output_tokens": int(os.environ.get("EST_OUTPUT_TOKENS", "600")),
     "est_image_tokens": int(os.environ.get("EST_IMAGE_TOKENS", "1500")),
+    # M1: per-user UTC-day spend alert (queue drained by the sweeper).
+    "user_daily_spend_alert_usd": float(os.environ.get("USER_DAILY_SPEND_ALERT_USD", "0.5")),
 }
 # Back-compat names (images_gateway, billing): legacy tier ids are aliases.
 TIER_MULT = {"free": 1, "3x": 3, "7x": 7, "15x": 15}
@@ -108,6 +114,9 @@ REAPPLY_STATUS_KEY = "config:reapply_status"
 RESET_STATUS_KEY = "config:reset_status"
 AUDIT_LIST = "audit:admin"
 AUDIT_MAX = int(os.environ.get("AUDIT_MAX", "5000"))
+# M1 alert history for /admin/alerts (newest first, capped).
+ALERTS_LIST = "alerts:recent"
+ALERTS_MAX = int(os.environ.get("M1_ALERTS_MAX", "200"))
 KEY_NAMESPACES = ("", "web:")          # android key, web key
 
 
@@ -388,11 +397,8 @@ def verify_app_check(token: str) -> str:
 
 
 
-def alert(kind: str, message: str, every_s: int = 3600) -> None:
-    """Send an operator alert at most once per `every_s` per kind."""
-    bucket = int(time.time() // every_s)
-    if not rds.set(f"alertsent:{kind}:{bucket}", "1", nx=True, ex=every_s):
-        return
+def _emit_alert(kind: str, message: str) -> None:
+    """Log and send one operator alert (callers own any dedupe)."""
     print(f"[mint] ALERT {kind}: {message}", flush=True)
     text = f"Ovid gateway alert [{kind}]\n{message}"
 
@@ -408,6 +414,66 @@ def alert(kind: str, message: str, every_s: int = 3600) -> None:
             print(f"[mint] alert send failed: {type(e).__name__}", flush=True)
 
     threading.Thread(target=_send, daemon=True).start()
+
+
+def alert(kind: str, message: str, every_s: int = 3600) -> None:
+    """Send an operator alert at most once per `every_s` per kind."""
+    bucket = int(time.time() // every_s)
+    if not rds.set(f"alertsent:{kind}:{bucket}", "1", nx=True, ex=every_s):
+        return
+    _emit_alert(kind, message)
+
+
+def _record_recent_alert(payload: dict, delivery: str) -> None:
+    """Keep a capped, sanitized history for /admin/alerts."""
+    entry = {**payload, "delivery": delivery}
+    try:
+        rds.lpush(ALERTS_LIST, json.dumps(entry, sort_keys=True))
+        rds.ltrim(ALERTS_LIST, 0, ALERTS_MAX - 1)
+    except Exception as e:  # noqa: BLE001 — history must not block delivery
+        print(f"[mint] alert history error: {type(e).__name__}", flush=True)
+
+
+def flush_user_spend_alerts() -> int:
+    """M1: emit the per-user daily spend alerts queued by the LiteLLM hook.
+
+    The hook sets the queue entry once per uid/UTC-day (it has no alert
+    transport). This drains the set and uses a separate `sent` marker so a
+    redelivered entry can never emit twice. Each alert goes to the injectable
+    `ALERT_SINK` (webhook, retried once, then log). Payloads carry a SHA-256
+    uid hash and the spend/cap/window/timestamp only — never a raw uid, email,
+    prompt or token.
+    """
+    sent = 0
+    for raw in list(rds.smembers(plans.SPEND_ALERT_PENDING)):
+        rds.srem(plans.SPEND_ALERT_PENDING, raw)
+        try:
+            item = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(item, dict):
+            continue
+        uid, day = str(item.get("uid") or ""), str(item.get("day") or "")
+        if not uid or not day:
+            continue
+        if not rds.set(plans.spend_alert_sent_key(uid, day), "1", nx=True, ex=2 * 86400):
+            continue
+        spend = _float_or(item.get("spend"), 0.0)
+        threshold = _float_or(item.get("threshold"), 0.5)
+        payload = m1_alerts.build_payload(
+            "user_spend", uid=uid, spend=spend, cap=threshold,
+            window=f"utc_day:{day}")
+        delivery = ALERT_SINK.deliver(payload)
+        _record_recent_alert(payload, delivery)
+        sent += 1
+    return sent
+
+
+def kill_switch_state() -> dict:
+    """Env override + runtime flag, as shown to admins and enforced at /mint."""
+    env = plans.env_kill_switch_active()
+    runtime = plans.truthy(rds.get(plans.KILL_SWITCH_KEY))
+    return {"env": env, "runtime": runtime, "active": env or runtime}
 
 
 def litellm_client(timeout: float = 20) -> httpx.Client:
@@ -533,6 +599,28 @@ def ensure_user_budget(c: httpx.Client, headers: dict, uid: str, tier: str,
 
 def free_cap_remaining(uid: str) -> float:
     return max(0.0, free_cap_usd(uid) - month_spent(uid))
+
+
+def token_decision(uid: str, plan_id: str | None = None) -> plans.TokenDecision:
+    """The typed free-plan token decision for `uid`, taken before a model call."""
+    plan_id = plan_id or effective_tier(uid)
+    if plan_id != "free":
+        return plans.decide_tokens(plan_id, None, None, time.time())
+    keys = plans.token_keys(uid)
+    return plans.decide_tokens(plan_id, rds.hgetall(keys["day"]),
+                               rds.hgetall(keys["month"]), time.time())
+
+
+def limit_http_exception(decision: plans.TokenDecision) -> HTTPException:
+    """429/503 with a machine-readable code, reset time and retry-after."""
+    headers = {"x-ovid-error": decision.code or "limit_reached"}
+    if decision.retry_at:
+        headers["x-ovid-resets-at"] = decision.retry_at
+        headers["retry-after"] = str(
+            max(1, plans.retry_after_seconds(decision.retry_at, time.time())))
+    detail = {"error": decision.code, "reason": decision.reason,
+              "resets_at": decision.retry_at, "remaining": decision.remaining}
+    return HTTPException(decision.status, detail=detail, headers=headers)
 
 
 def _key_info(c: httpx.Client, key_id: str) -> dict | None:
@@ -736,6 +824,7 @@ def _sweeper() -> None:
     while True:
         try:
             sweep_slow_mode()
+            flush_user_spend_alerts()
             refresh_model_groups()
         except Exception as e:  # noqa: BLE001
             print(f"[mint] sweeper: {type(e).__name__}", flush=True)
@@ -749,7 +838,8 @@ def reset_window_user(c: httpx.Client, uid: str, reset_month_free: bool = False)
     s = get_settings()
     pools = pools_for(uid, s)
     k = plans.pool_keys(uid)
-    rds.delete(k["spend"], k["auto"], f"usagecache:{uid}")
+    tk = plans.token_keys(uid)
+    rds.delete(k["spend"], k["auto"], tk["day"], tk["month"], f"usagecache:{uid}")
     rds.set(k["start"], f"{time.time():.3f}", ex=int(pools["window_hours"] * 3600))
     rds.hdel(plans.SLOW_HASH, uid)
     rds.srem(plans.SLOW_PENDING, uid)
@@ -1096,6 +1186,21 @@ def mint(
     enforce_ip_signup_quota(uid, ip)
 
     tier = effective_tier(uid)
+    # M1 kill switch + free-plan token ceilings (50M/24h, 1.5B/30d), decided
+    # before any model call. The kill switch is a distinct 503 code.
+    tkeys = plans.token_keys(uid)
+    is_free = tier == "free"
+    decision = plans.decide_request(
+        tier,
+        rds.hgetall(tkeys["day"]) if is_free else None,
+        rds.hgetall(tkeys["month"]) if is_free else None,
+        time.time(),
+        kill_switch=kill_switch_state()["active"])
+    if decision.reason == "paid_models_disabled":
+        alert("kill_switch",
+              "OVID_PAID_MODELS_KILL_SWITCH is on: all model calls are denied", 3600)
+    if not decision.allow:
+        raise limit_http_exception(decision)
     # Free tier: stop at the $10/month ceiling.
     if tier == "free" and free_cap_remaining(uid) <= 0:
         raise HTTPException(402, "monthly free limit reached")
@@ -1467,6 +1572,18 @@ def compute_usage(uid: str) -> tuple[dict, dict]:
     resets_iso = _iso(resets_at)
     budget, remaining = st["all"]["cap"], st["all"]["remaining"]
     fraction = round(min(1.0, remaining / budget), 4) if budget > 0 else 0.0
+    # Free-plan token ceilings (display/observability; enforcement is pre-call).
+    tdec = token_decision(uid, plan["id"])
+    tokens_body = None
+    if plan["id"] == "free":
+        tokens_body = {
+            "daily": {"cap": plans.FREE_DAILY_TOKENS,
+                      "remaining": tdec.remaining["daily"],
+                      "used": plans.FREE_DAILY_TOKENS - tdec.remaining["daily"]},
+            "monthly": {"cap": plans.FREE_MONTHLY_TOKENS,
+                        "remaining": tdec.remaining["monthly"],
+                        "used": plans.FREE_MONTHLY_TOKENS - tdec.remaining["monthly"]},
+        }
     # One allowance per plan; `pools` keeps its list shape for compatibility.
     pool_list = [{"class": "all", "remaining_fraction": fraction, "resets_at": resets_iso,
                   "slow_mode": bool(st["slow_mode"])}]
@@ -1491,6 +1608,7 @@ def compute_usage(uid: str) -> tuple[dict, dict]:
         "today": today,
         "remaining_fraction": fraction,
         "pools": pool_list,
+        "tokens": tokens_body,
         "models": model_estimates(
             cat, st, s, measured, fraction,
             auto_members=[m["model"] for m in s["auto_oss_members"]] if pools["auto_oss"] else None,
@@ -1499,6 +1617,7 @@ def compute_usage(uid: str) -> tuple[dict, dict]:
     detail = {"keys": key_detail, "spend_usd": round(spent, 6), "logged_spend_usd": round(log_spend, 6),
               "hook_counter_usd": counters, "pools_usd": pools,
               "pool_state_usd": {k: v for k, v in st.items() if k != "slow_mode"},
+              "tokens": tokens_body,
               "slow_mode": bool(st["slow_mode"]),
               "window_start": _iso(start), "remaining_usd": round(remaining, 6)}
     return body, detail
@@ -1524,6 +1643,7 @@ class UsageResp(BaseModel):
     today: dict
     remaining_fraction: float
     pools: list[dict]
+    tokens: dict | None = None
     models: list[dict]
 
 
@@ -1988,6 +2108,58 @@ def admin_audit(limit: int = 100, authorization: str = Header(default="")):
     return {"entries": [json.loads(x) for x in rds.lrange(AUDIT_LIST, 0, limit - 1)]}
 
 
+@app.get("/admin/alerts")
+def admin_alerts(limit: int = 50, authorization: str = Header(default="")):
+    """Recent M1 alerts (newest first) + how many are still queued.
+
+    Entries are the same sanitized payloads the webhook receives, plus the
+    delivery outcome (`webhook`, `log`, `log_fallback`). No raw uid, prompt or
+    token is ever stored here.
+    """
+    _require_admin(authorization)
+    limit = max(1, min(limit, ALERTS_MAX))
+    entries = []
+    for raw in rds.lrange(ALERTS_LIST, 0, limit - 1):
+        try:
+            entries.append(json.loads(raw))
+        except (TypeError, ValueError):
+            continue
+    return {
+        "alerts": entries,
+        "pending": rds.scard(plans.SPEND_ALERT_PENDING),
+        "webhook_configured": bool(getattr(ALERT_SINK, "webhook_url", "")),
+        "limit": limit,
+    }
+
+
+class KillSwitchAction(BaseModel):
+    enabled: bool
+
+
+@app.get("/admin/kill-switch")
+def admin_get_kill_switch(authorization: str = Header(default="")):
+    """Current kill-switch state: env (hard override) + runtime flag."""
+    _require_admin(authorization)
+    return kill_switch_state()
+
+
+@app.post("/admin/kill-switch")
+def admin_set_kill_switch(body: KillSwitchAction, request: Request,
+                          authorization: str = Header(default="")):
+    """Flip the runtime kill switch. The env flag remains the hard override:
+    with it set, `enabled: false` clears the runtime flag but models stay
+    denied until the env var is changed and the process restarted."""
+    _require_admin(authorization)
+    before = kill_switch_state()
+    if body.enabled:
+        rds.set(plans.KILL_SWITCH_KEY, "1")
+    else:
+        rds.delete(plans.KILL_SWITCH_KEY)
+    after = kill_switch_state()
+    audit(request, "kill-switch", "global", before, after)
+    return {"ok": True, "kill_switch": after, "env_override": after["env"]}
+
+
 
 
 @app.get("/admin/reapply-status")
@@ -1999,9 +2171,11 @@ def admin_reapply_status(authorization: str = Header(default="")):
 
 @app.post("/admin/sweep")
 def admin_sweep(request: Request, authorization: str = Header(default="")):
-    """Run the slow-mode sweep now (it also runs in the background)."""
+    """Run the slow-mode sweep and drain spend alerts now (also in background)."""
     _require_admin(authorization)
-    return sweep_slow_mode()
+    out = sweep_slow_mode()
+    out["user_spend_alerts"] = flush_user_spend_alerts()
+    return out
 
 
 @app.get("/admin/export")
@@ -2058,9 +2232,11 @@ _ADMIN_HTML = """<!doctype html><html><head><meta charset=utf-8>
  <div class=row>
   <div><label>Free allowance per user per 24h (USD)</label><input id=g_free_daily_usd type=number step=0.01 min=0></div>
   <div><label>Free monthly backstop per user (USD / 30 days)</label><input id=g_free_monthly_cap_usd type=number step=0.01 min=0></div>
+  <div><label>M1 alert: per-user daily spend (USD)</label><input id=g_user_daily_spend_alert_usd type=number step=0.01 min=0></div>
   <div><label>Key ceiling for slow-mode plans (× allowance)</label><input id=g_hard_ceiling_mult type=number step=0.1 min=1></div>
  </div>
  <div class=muted>The monthly backstop is a second cap on free users across all their keys: with a high daily amount it stops a heavy user after a few days (e.g. $3/day with a $10 backstop: day 4). <span id=backstopNote></span></div>
+ <div class=muted>M1: one alert per user per UTC day when their spend crosses the alert amount. Set <b>OVID_PAID_MODELS_KILL_SWITCH=true</b> on mint and LiteLLM to deny every model call (code <b>paid_models_disabled</b>).</div>
  <div class=row>
   <div><label>Normal rpm</label><input id=g_normal_rpm type=number min=1></div>
   <div><label>Normal tpm</label><input id=g_normal_tpm type=number min=1></div>
@@ -2155,7 +2331,7 @@ _ADMIN_HTML = """<!doctype html><html><head><meta charset=utf-8>
 
 <script>
 const $=id=>document.getElementById(id);
-const GLOBAL=['free_daily_usd','free_monthly_cap_usd','hard_ceiling_mult','normal_rpm','normal_tpm','normal_parallel','slow_rpm','slow_tpm','slow_parallel','est_input_tokens','est_output_tokens','est_image_tokens'];
+const GLOBAL=['free_daily_usd','free_monthly_cap_usd','user_daily_spend_alert_usd','hard_ceiling_mult','normal_rpm','normal_tpm','normal_parallel','slow_rpm','slow_tpm','slow_parallel','est_input_tokens','est_output_tokens','est_image_tokens'];
 const PFIELDS=['mult','window_hours'];const PBOOLS=['slow_mode','auto_oss'];let members=[];
 let current=null, settings=null, models=[];
 function mk(){return $('mk').value.trim()}

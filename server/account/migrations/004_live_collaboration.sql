@@ -1,5 +1,7 @@
 -- Explicit, idempotent PostgreSQL live-collaboration migration. Apply in the
 -- same schema as account_deletions. Equivalent to schema_collaboration.sql.
+-- The turn-lock, storage and 50-member invite contract ships separately in
+-- 005_collaboration_contract.sql (or server/collaboration/schema_extensions.sql).
 CREATE TABLE IF NOT EXISTS collab_accounts (uid text PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS collab_sessions (
     session_id text PRIMARY KEY, token_hash text NOT NULL UNIQUE,
@@ -25,7 +27,7 @@ CREATE INDEX IF NOT EXISTS collab_memberships_uid ON collab_memberships(uid);
 CREATE TABLE IF NOT EXISTS collab_invites (
     invite_id text PRIMARY KEY, session_id text NOT NULL,
     code_hash text NOT NULL UNIQUE, issued_generation bigint NOT NULL,
-    max_uses integer NOT NULL CHECK (max_uses BETWEEN 1 AND 9),
+    max_uses integer NOT NULL CHECK (max_uses BETWEEN 1 AND 50),
     uses integer NOT NULL DEFAULT 0 CHECK (uses >= 0 AND uses <= max_uses),
     revoked integer NOT NULL DEFAULT 0 CHECK (revoked IN (0,1)),
     created_at double precision NOT NULL, expires_at double precision NOT NULL

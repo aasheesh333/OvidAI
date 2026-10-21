@@ -254,7 +254,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("MINT_MOUNT_IMAGES", "false")
     monkeypatch.setenv("USAGE_CACHE_S", "0")
     monkeypatch.setenv("MINT_STATE_DIR", str(tmp_path))
-    for k in ("BASE_DAILY_USD", "FREE_MONTHLY_CAP_USD", "PAID_WINDOW"):
+    for k in ("BASE_DAILY_USD", "FREE_MONTHLY_CAP_USD", "PAID_WINDOW",
+              "M1_ALERT_WEBHOOK_URL", "OVID_PAID_MODELS_KILL_SWITCH"):
         monkeypatch.delenv(k, raising=False)
     if str(MINT_DIR) not in sys.path:
         sys.path.insert(0, str(MINT_DIR))

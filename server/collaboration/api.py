@@ -17,7 +17,8 @@ from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
 
 from .events import EventRejected, canonical_bytes, display_name
-from .repository import CollabError, MAX_BATCH_BYTES, MAX_LONG_POLL_SECONDS
+from .repository import (CollabError, MAX_BATCH_BYTES, MAX_LONG_POLL_SECONDS,
+                         TURN_TTL_SECONDS)
 
 MAX_BODY_BYTES = 1024 * 1024
 MAX_EVENTS = 100
@@ -38,6 +39,8 @@ _MESSAGES = {
     "member_not_found": "Member not found",
     "session_closed": "Session is closed",
     "session_full": "Session is full",
+    "turn_taken": "The turn is held by another member",
+    "file_conflict": "File conflicts with an existing upload",
     "owner_not_removable": "Owner cannot be removed",
     "event_id_conflict": "Event conflicts with an existing event",
     "request_already_used": "Request was already used",
@@ -314,6 +317,62 @@ def router(repository, verifier, admission, *, prefix="") -> APIRouter:
                           "nextCursor": result["cursor"], "hasMore": result["hasMore"]}
 
         return await handle(action)
+
+    @routes.post("/{session_token}/turn")
+    async def acquire_turn(session_token: str, request: Request,
+                           authorization: str = Header(default=""),
+                           x_firebase_appcheck: str = Header(default="")):
+        return await handle(lambda: _acquire_turn(session_token, request, authorization,
+                                                  x_firebase_appcheck))
+
+    async def _acquire_turn(token, request, authorization, app_check):
+        claims = authenticate(authorization, app_check)
+        data = await body(request)
+        keys = set(data)
+        if (not {"schemaVersion", "idempotencyKey"} <= keys or
+                keys - {"schemaVersion", "idempotencyKey", "ttlSeconds"} or
+                data["schemaVersion"] != 1 or type(data["idempotencyKey"]) is not str):
+            raise CollabError("invalid_request")
+        ttl = data.get("ttlSeconds", TURN_TTL_SECONDS)
+        if type(ttl) is not int:
+            raise CollabError("invalid_request")
+        turn = call(claims, lambda uid: repository.acquire_turn(
+            uid, token, ttl_seconds=ttl))
+        return ok({"turn": turn})
+
+    @routes.delete("/{session_token}/turn")
+    async def release_turn(session_token: str, authorization: str = Header(default=""),
+                           x_firebase_appcheck: str = Header(default="")):
+        def operation(uid):
+            return repository.release_turn(uid, session_token)
+        return await handle(lambda: ok({"turn": None,
+                                        **auth_action(authorization, x_firebase_appcheck,
+                                                      operation)}))
+
+    @routes.post("/{session_token}/files")
+    async def upload(session_token: str, request: Request,
+                     authorization: str = Header(default=""),
+                     x_firebase_appcheck: str = Header(default="")):
+        return await handle(lambda: _upload(session_token, request, authorization,
+                                            x_firebase_appcheck))
+
+    async def _upload(token, request, authorization, app_check):
+        claims = authenticate(authorization, app_check)
+        data = await body(request)
+        if (set(data) != {"schemaVersion", "idempotencyKey", "fileId", "sizeBytes"} or
+                data["schemaVersion"] != 1 or type(data["idempotencyKey"]) is not str or
+                type(data["fileId"]) is not str or type(data["sizeBytes"]) is not int):
+            raise CollabError("invalid_request")
+        storage = call(claims, lambda uid: repository.record_upload(
+            uid, token, file_id=data["fileId"], size_bytes=data["sizeBytes"]))
+        return ok({"storage": storage})
+
+    @routes.get("/{session_token}/storage")
+    async def storage(session_token: str, authorization: str = Header(default=""),
+                      x_firebase_appcheck: str = Header(default="")):
+        return await handle(lambda: ok({"storage": auth_action(
+            authorization, x_firebase_appcheck,
+            lambda uid: repository.storage_usage(uid, session_token))}))
 
     @routes.post("/{session_token}/close")
     async def close(session_token: str, request: Request,

@@ -5,7 +5,7 @@ import unittest
 
 from server.collaboration.events import EventRejected
 from server.collaboration.repository import (
-    MAX_ACTIVE_MEMBERS, CollabError, CollabRepository)
+    MAX_ACTIVE_MEMBERS, MAX_INVITE_USES, CollabError, CollabRepository)
 
 
 class Clock:
@@ -42,9 +42,15 @@ class Base(unittest.TestCase):
         return self.repo.create_invite(uid, token, **kwargs)['inviteCode']
 
     def fill(self, token, count):
-        """Join `count` participants (u1..uN) through one bounded invite."""
-        code = self.invite(token, max_uses=9)
-        return [self.repo.join(f'u{i}', token, code) for i in range(1, count + 1)]
+        """Join `count` participants (u1..uN) through bounded multi-use invites."""
+        joined, remaining = [], count
+        while remaining:
+            uses = min(remaining, MAX_INVITE_USES)
+            code = self.invite(token, max_uses=uses)
+            for _ in range(uses):
+                joined.append(self.repo.join(f'u{len(joined) + 1}', token, code))
+            remaining -= uses
+        return joined
 
 
 class CreateTest(Base):
@@ -170,26 +176,27 @@ class InviteJoinTest(Base):
 
 
 class CapacityTest(Base):
-    def test_tenth_member_ok_eleventh_rejected(self):
+    def test_fiftieth_member_ok_fifty_first_rejected(self):
         token, _ = self.session()
-        self.fill(token, 9)  # owner + 9 = 10
+        self.fill(token, MAX_ACTIVE_MEMBERS - 1)  # owner + 49 = 50
         self.assertEqual(len(self.repo.get_state('owner', token)['members']), MAX_ACTIVE_MEMBERS)
         code = self.invite(token)
-        self.assertError('session_full', self.repo.join, 'u10', token, code)
+        error = self.assertError('session_full', self.repo.join, 'u50', token, code)
+        self.assertEqual(error.status, 409)
         # Failed join consumed nothing: free a slot, the same invite works.
         member = self.repo.get_state('owner', token)['members'][-1]
         self.repo.revoke_member('owner', token, member['participantId'])
-        self.repo.join('u10', token, code)
+        self.repo.join('u50', token, code)
 
     def test_leave_frees_slot(self):
         token, _ = self.session()
-        self.fill(token, 9)
+        self.fill(token, MAX_ACTIVE_MEMBERS - 1)
         self.repo.leave('u1', token)
-        self.repo.join('u10', token, self.invite(token))
+        self.repo.join('u50', token, self.invite(token))
 
     def test_concurrent_joins_never_exceed_capacity(self):
         token, _ = self.session()
-        self.fill(token, 5)
+        self.fill(token, 40)  # owner + 40 = 41 active, 9 seats left
         codes = [self.invite(token) for _ in range(12)]
         barrier = threading.Barrier(len(codes))
         results, lock = [], threading.Lock()
@@ -210,13 +217,13 @@ class CapacityTest(Base):
             t.start()
         for t in threads:
             t.join()
-        self.assertEqual(results.count('ok'), 4)
-        self.assertEqual(results.count('session_full'), 8)
-        self.assertEqual(len(self.repo.get_state('owner', token)['members']), 10)
+        self.assertEqual(results.count('ok'), 9)
+        self.assertEqual(results.count('session_full'), 3)
+        self.assertEqual(len(self.repo.get_state('owner', token)['members']), MAX_ACTIVE_MEMBERS)
 
     def test_two_concurrent_boundary_joins_one_wins(self):
         token, _ = self.session()
-        self.fill(token, 8)  # 9 active
+        self.fill(token, MAX_ACTIVE_MEMBERS - 2)  # 49 active, one seat left
         codes = [self.invite(token), self.invite(token)]
         barrier, results = threading.Barrier(2), []
 
@@ -233,6 +240,7 @@ class CapacityTest(Base):
         [t.start() for t in threads]
         [t.join() for t in threads]
         self.assertEqual(sorted(results), ['ok', 'session_full'])
+        self.assertEqual(len(self.repo.get_state('owner', token)['members']), MAX_ACTIVE_MEMBERS)
 
 
 class RemovalTest(Base):

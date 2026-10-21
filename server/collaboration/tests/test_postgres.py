@@ -34,7 +34,10 @@ def pg_schema():
         db.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(schema)))
         db.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(schema)))
         db.execute(Path('server/account/schema.sql').read_text())
-        db.execute(Path('server/account/schema_collaboration.sql').read_text())
+    # Every PostgreSQL collaboration test runs against the real deployment path
+    # (account bootstrap + schema_extensions.sql), not a hand-built fixture.
+    from server.collaboration.migrate import initialize_schema
+    initialize_schema(dsn=dsn, schema=schema)
     try:
         yield dsn, schema
     finally:
@@ -91,6 +94,10 @@ def concurrent(count, operation):
 def test_capacity_and_invite_consumption_across_instances(pg):
     repo, _, factory = pg
     token = repo.create_session('owner', 'create')['sessionToken']
+    # Pre-fill to 49 active members, leaving exactly one seat at the cap of 50.
+    fill = repo.create_invite('owner', token, max_uses=50)['inviteCode']
+    for i in range(48):
+        repo.join(f'pre{i}', token, fill)
     codes = [repo.create_invite('owner', token)['inviteCode'] for _ in range(18)]
     def join(i):
         try:
@@ -98,11 +105,11 @@ def test_capacity_and_invite_consumption_across_instances(pg):
         except CollabError as error:
             return error.code
     results = concurrent(18, join)
-    assert sum(isinstance(r, dict) for r in results) == 9
-    assert results.count('session_full') == 9
-    assert len(repo.get_state('owner', token)['members']) == 10
+    assert sum(isinstance(r, dict) for r in results) == 1
+    assert results.count('session_full') == 17
+    assert len(repo.get_state('owner', token)['members']) == 50
     with repo._connection() as db:
-        assert db.execute('SELECT sum(uses) AS n FROM collab_invites').fetchone()['n'] == 9
+        assert db.execute('SELECT sum(uses) AS n FROM collab_invites').fetchone()['n'] == 49
 
 
 def test_concurrent_create_append_and_restart_replay(pg):
@@ -188,6 +195,7 @@ def test_schema_idempotent_identity_and_no_constructor_ddl(pg):
     with repo._connection(write=True) as db:
         db.execute(Path('server/account/schema_collaboration.sql').read_text())
         db.execute(Path('server/account/migrations/004_live_collaboration.sql').read_text())
+        db.execute(Path('server/account/migrations/005_collaboration_contract.sql').read_text())
     assert factory().create_session('owner', 'create') == created
     assert factory().authority_identity == repo.authority_identity
     assert PostgresCollabRepository(dsn=repo._dsn, schema=repo.schema,

@@ -108,7 +108,7 @@ def test_author_names_are_stamped_and_listed(service):
     assert 'displayName' not in state['initialMembers'][0]
 
 
-def test_link_admits_ten_including_owner_then_reports_full(service):
+def test_link_admits_fifty_including_owner_then_reports_full(service):
     repo, _, connect = service
     http = connect()
     token, invite = link(http)

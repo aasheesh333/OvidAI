@@ -31,3 +31,7 @@ server/reports/*
 server/account/deploy/*
 !server/account/deploy/Dockerfile
 !server/account/deploy/Dockerfile.dockerignore
+!server/security/
+server/security/*
+!server/security/*.py
+!server/security/*.sql

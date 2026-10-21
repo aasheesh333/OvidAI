@@ -57,6 +57,7 @@ class PostgresCollabRepository:
     _authority_stamp = staticmethod(CollabRepository._authority_stamp)
     _cursor = CollabRepository._cursor
     _invite_code = CollabRepository._invite_code
+    _turn_dto = staticmethod(CollabRepository._turn_dto)
 
     def __init__(self, account_authority=None, schema='public', clock=None, *,
                  dsn=None, authority_id=None):
@@ -199,6 +200,121 @@ class PostgresCollabRepository:
     def _bump_generation(db, session_id):
         return db.execute('UPDATE collab_sessions SET generation=generation+1 WHERE session_id=%s '
                           'RETURNING generation', (session_id,)).fetchone()['generation']
+
+    # ------------------------------------------------------------------
+    # Single-sender turn lock (the session row is already locked FOR UPDATE)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _live_turn(db, session, now):
+        row = db.execute('SELECT * FROM collab_turns WHERE session_id=%s',
+                         (session['session_id'],)).fetchone()
+        if (row is None or row['expires_at'] <= now or
+                row['generation'] != session['generation']):
+            return None
+        return row
+
+    def _claim_turn(self, db, session, member, uid, now, ttl_seconds):
+        db.execute('INSERT INTO collab_turns VALUES (%s,%s,%s,%s,%s,%s) '
+                   'ON CONFLICT (session_id) DO UPDATE SET uid=excluded.uid, '
+                   'participant_id=excluded.participant_id, generation=excluded.generation, '
+                   'acquired_at=excluded.acquired_at, expires_at=excluded.expires_at',
+                   (session['session_id'], uid, member['participant_id'],
+                    session['generation'], now, now + ttl_seconds))
+        return {'participantId': member['participant_id'],
+                'expiresAt': _rfc3339(now + ttl_seconds), 'mine': True}
+
+    @staticmethod
+    def _clear_turn(db, session_id, *, uid=None, participant_id=None):
+        if uid is not None:
+            db.execute('DELETE FROM collab_turns WHERE session_id=%s AND uid=%s',
+                       (session_id, uid))
+        elif participant_id is not None:
+            db.execute('DELETE FROM collab_turns WHERE session_id=%s AND participant_id=%s',
+                       (session_id, participant_id))
+        else:
+            db.execute('DELETE FROM collab_turns WHERE session_id=%s', (session_id,))
+
+    def acquire_turn(self, uid, token, *, ttl_seconds=policy.TURN_TTL_SECONDS):
+        if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= policy.MAX_TURN_TTL_SECONDS:
+            raise CollabError('invalid_request')
+        with self._transaction(uid) as db:
+            session = self._session(db, uid, token)
+            self._require_active(session)
+            member = self._active_member(db, session, uid)
+            now = self.clock()
+            turn = self._live_turn(db, session, now)
+            if turn is not None and turn['uid'] != uid:
+                raise CollabError('turn_taken')
+            return self._claim_turn(db, session, member, uid, now, ttl_seconds)
+
+    def release_turn(self, uid, token):
+        with self._transaction(uid) as db:
+            session = self._session(db, uid, token)
+            self._require_active(session)
+            self._active_member(db, session, uid)
+            released = db.execute('DELETE FROM collab_turns WHERE session_id=%s AND uid=%s',
+                                  (session['session_id'], uid)).rowcount > 0
+            return {'released': released}
+
+    # ------------------------------------------------------------------
+    # Creator-paid storage accounting
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _storage_dto(db, uid, owner_uid):
+        row = db.execute('SELECT * FROM collab_storage_usage WHERE owner_uid=%s',
+                         (owner_uid,)).fetchone()
+        return {'ownerUid': owner_uid,
+                'bytesUsed': row['bytes'] if row is not None else 0,
+                'fileCount': row['files'] if row is not None else 0,
+                'isCreator': uid == owner_uid}
+
+    @staticmethod
+    def _session_owner_uid(db, session_id):
+        row = db.execute("SELECT uid FROM collab_memberships "
+                         "WHERE session_id=%s AND role='owner'", (session_id,)).fetchone()
+        if row is None:
+            raise CollabError('session_not_found')
+        return row['uid']
+
+    def record_upload(self, uid, token, *, file_id, size_bytes):
+        self._identity(uid)
+        if not isinstance(file_id, str) or not policy._REQUEST_ID.fullmatch(file_id):
+            raise CollabError('invalid_request')
+        if type(size_bytes) is not int or not 0 <= size_bytes <= policy.MAX_STORAGE_FILE_BYTES:
+            raise CollabError('invalid_request')
+        with self._transaction(uid) as db:
+            session = self._session(db, uid, token)
+            self._require_active(session)
+            self._active_member(db, session, uid)
+            owner_uid = self._session_owner_uid(db, session['session_id'])
+            now = self.clock()
+            prior = db.execute('SELECT * FROM collab_storage_files WHERE file_id=%s',
+                               (file_id,)).fetchone()
+            if prior is not None:
+                if (prior['session_id'] != session['session_id'] or
+                        prior['owner_uid'] != owner_uid or
+                        prior['uploader_uid'] != uid or prior['size'] != size_bytes):
+                    raise CollabError('file_conflict')
+                return self._storage_dto(db, uid, owner_uid)
+            db.execute('INSERT INTO collab_storage_files VALUES (%s,%s,%s,%s,%s,%s)',
+                       (file_id, session['session_id'], uid, owner_uid, size_bytes, now))
+            db.execute('INSERT INTO collab_storage_usage VALUES (%s,%s,1,%s) '
+                       'ON CONFLICT (owner_uid) DO UPDATE SET '
+                       'bytes=collab_storage_usage.bytes+excluded.bytes, '
+                       'files=collab_storage_usage.files+excluded.files, '
+                       'updated_at=excluded.updated_at',
+                       (owner_uid, size_bytes, now))
+            return self._storage_dto(db, uid, owner_uid)
+
+    def storage_usage(self, uid, token):
+        with self._transaction(uid) as db:
+            session = self._session(db, uid, token)
+            self._require_active(session)
+            self._active_member(db, session, uid)
+            owner_uid = self._session_owner_uid(db, session['session_id'])
+            return self._storage_dto(db, uid, owner_uid)
 
     def _insert_event(self, db, session_id, sender, kind, payload, event_id, now, sender_name=None):
         sequence = db.execute('UPDATE collab_sessions SET next_sequence=next_sequence+1 '
@@ -364,10 +480,12 @@ class PostgresCollabRepository:
             owner = db.execute("SELECT * FROM collab_memberships WHERE session_id=%s AND role='owner'",
                                (session['session_id'],)).fetchone()
             names = self._display_names(db, session['session_id'], [row['participant_id'] for row in rows])
+            turn = self._live_turn(db, session, self.clock())
             return {'session': self._session_dto(db, session),
                     'member': self._named(self._member_dto(member), names),
                     'members': [self._named(self._member_dto(row), names) for row in rows],
                     'initialMembers': [self._member_dto(owner)],
+                    'turn': self._turn_dto(turn, member) if turn is not None else None,
                     'replayThroughSequence': session['next_sequence'] - 1, 'cursor': self._cursor(session, member, 0)}
 
     def revoke_member(self, uid, token, participant_id):
@@ -388,6 +506,7 @@ class PostgresCollabRepository:
             db.execute("UPDATE collab_memberships SET generation=%s WHERE session_id=%s AND status='active'", (generation, sid))
             db.execute("UPDATE collab_memberships SET status='revoked', revoked_generation=%s, generation=%s, updated_at=%s, "
                        'revoked_at=%s WHERE session_id=%s AND participant_id=%s', (generation, generation, now, now, sid, participant_id))
+            self._clear_turn(db, sid, participant_id=participant_id)
             self._membership_event(db, sid, participant_id, 'revoked', participant_id, now)
             return {'member': {**self._member_dto(row), 'status': 'revoked'}}
 
@@ -404,6 +523,7 @@ class PostgresCollabRepository:
             now = self.clock()
             db.execute("UPDATE collab_memberships SET status='left', generation=generation+1, updated_at=%s WHERE session_id=%s AND uid=%s",
                        (now, session['session_id'], uid))
+            self._clear_turn(db, session['session_id'], uid=uid)
             self._membership_event(db, session['session_id'], member['participant_id'], 'left', member['participant_id'], now)
             return {'member': {**self._member_dto(member), 'status': 'left'}}
 
@@ -429,6 +549,17 @@ class PostgresCollabRepository:
             fingerprint, prior = self._prior_request(db, session, member, uid, 'append', key, events)
             if prior is not None:
                 return prior
+            now = self.clock()
+            held = self._live_turn(db, session, now)
+            if held is not None and held['uid'] != uid:
+                raise CollabError('turn_taken')
+            if held is not None:
+                db.execute('UPDATE collab_turns SET expires_at=%s WHERE session_id=%s',
+                           (now + policy.TURN_TTL_SECONDS, session['session_id']))
+                send_lease = False
+            else:
+                self._claim_turn(db, session, member, uid, now, policy.SEND_LEASE_SECONDS)
+                send_lease = True
             result = []
             for event in events:
                 old = db.execute('SELECT * FROM collab_events WHERE session_id=%s AND event_id=%s',
@@ -443,6 +574,8 @@ class PostgresCollabRepository:
             page = {'events': result, 'nextCursor': self._cursor(session, member, max(e['eventSequence'] for e in result)),
                     'hasMore': False}
             self._save_request(db, session, member, uid, 'append', key, fingerprint, page)
+            if send_lease:
+                self._clear_turn(db, session['session_id'], uid=uid)
             return page
 
     def replay(self, uid, token, cursor=None, *, limit=policy.MAX_REPLAY_EVENTS, max_bytes=policy.MAX_REPLAY_BYTES):
@@ -500,6 +633,7 @@ class PostgresCollabRepository:
             sid, now = session['session_id'], self.clock()
             generation = self._bump_generation(db, sid)
             db.execute("UPDATE collab_memberships SET generation=%s WHERE session_id=%s AND status='active'", (generation, sid))
+            self._clear_turn(db, sid)
             db.execute("UPDATE collab_sessions SET lifecycle='closing' WHERE session_id=%s", (sid,))
             self._insert_event(db, sid, member['participant_id'], 'system', {'code': 'sessionClosing'}, 'srv:' + secrets.token_hex(16), now)
             session = db.execute("UPDATE collab_sessions SET lifecycle='closed', closed_at=%s WHERE session_id=%s RETURNING *", (now, sid)).fetchone()
@@ -524,13 +658,17 @@ class PostgresCollabRepository:
                 if session['owner_uid'] == uid:
                     db.execute('INSERT INTO deleted_sessions VALUES (%s,%s) ON CONFLICT DO NOTHING', (sid, session['token_hash']))
                     for table in ('collab_events', 'collab_invites', 'collab_memberships',
-                                  'collab_invite_requests', 'collab_requests', 'collab_rates'):
+                                  'collab_invite_requests', 'collab_requests', 'collab_rates',
+                                  'collab_turns', 'collab_storage_files'):
                         db.execute(sql.SQL('DELETE FROM {} WHERE session_id=%s').format(sql.Identifier(table)), (sid,))
                     db.execute('DELETE FROM collab_sessions WHERE session_id=%s', (sid,))
                 else:
                     member = self._membership(db, sid, uid)
                     if member is not None and member['status'] == 'active':
                         self._membership_event(db, sid, member['participant_id'], 'left', member['participant_id'], now)
+            db.execute('DELETE FROM collab_storage_usage WHERE owner_uid=%s', (uid,))
+            db.execute('DELETE FROM collab_storage_files WHERE owner_uid=%s', (uid,))
+            db.execute('DELETE FROM collab_turns WHERE uid=%s', (uid,))
             db.execute('DELETE FROM collab_memberships WHERE uid=%s', (uid,))
 
     def purge_expired(self, *, limit=500):

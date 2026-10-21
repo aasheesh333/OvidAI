@@ -55,8 +55,31 @@ def public(row):
 
 
 class Lifecycle:
-    def __init__(self, store, admin, data, clock=time.time):
+    def __init__(self, store, admin, data, clock=time.time, ip_hop=None):
         self.store, self.admin, self.data, self.clock = store, admin, data, clock
+        self.ip_hop = ip_hop
+
+    def observe(self, claims, request=None):
+        """Record the request location and enforce IP-hop session blocks.
+
+        This is deliberately separate from ``access``: the account routes call
+        it after token verification, while gateway/quota callers can pass the
+        same request through ``access(..., request=request)``.  When no request
+        is supplied, the account HTTP middleware's context is used.  No token is
+        handed to the security module; an opaque session id is derived instead.
+        """
+        if self.ip_hop is None:
+            return None
+        from server.security.ip_hop import current_request_context, request_context
+        if request is not None:
+            ip, session_id, headers = request_context(request)
+        else:
+            context = current_request_context()
+            if context is None:
+                return None
+            ip, session_id, headers = context
+        uid = identity(claims, allow_legacy_password=True)
+        return self.ip_hop.observe(uid, session_id, ip, headers=headers)
 
     def request(self, claims, request_id):
         uid = identity(claims, allow_legacy_password=True)
@@ -163,18 +186,36 @@ class Lifecycle:
             return self._cancel(db, row)
 
     @contextmanager
-    def access(self, claims):
+    def access(self, claims, *, request=None):
         """Quota/mint integration: hold across the ENTIRE UID-owned mutation.
 
         Call login separately for explicit sign-in. Background usage/token
-        refresh must never silently cancel deletion.
+        refresh must never silently cancel deletion.  The IP-hop guard observes
+        the supplied request or the middleware request context and may block
+        the session first.
         """
         uid = identity(claims)
+        self.observe(claims, request)
         with self.store.locked(uid) as db:
             row = db.get(uid)
             if row and row['state'] not in ('cancelled', 'active'):
                 raise AccountError('account_deletion_pending', 403)
             yield uid
+
+    def unblock_session(self, uid, session_id, *, actor, reason):
+        """Administrative override for a blocked IP-hop session.
+
+        The caller is responsible for authenticating the administrator; the
+        guard records the actor and reason in its append-only audit table.
+        """
+        if self.ip_hop is None:
+            raise AccountError('ip_hop_not_configured', 503)
+        if not isinstance(uid, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', uid):
+            raise AccountError('invalid_identity', 400)
+        try:
+            return self.ip_hop.admin_unblock(uid, session_id, actor=actor, reason=reason)
+        except ValueError:
+            raise AccountError('invalid_unblock_request', 400) from None
 
     def _grace_login(self, row, user):
         # Firebase only exposes the latest login, not history. Any newer login

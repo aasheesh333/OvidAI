@@ -22,12 +22,15 @@ def process_operation(arguments):
 def test_independent_process_capacity_idempotency_and_signed_replay(pg):
     repo, _, _ = pg
     token = repo.create_session('owner', 'create')['sessionToken']
+    fill = repo.create_invite('owner', token, max_uses=50)['inviteCode']
+    for i in range(48):
+        repo.join(f'pre{i}', token, fill)
     codes = [repo.create_invite('owner', token)['inviteCode'] for _ in range(14)]
     args = [(repo._dsn, repo.schema, 'join', (f'guest{i}', token, code), {}) for i, code in enumerate(codes)]
     with ProcessPoolExecutor(max_workers=14, mp_context=multiprocessing.get_context('spawn')) as pool:
         results = list(pool.map(process_operation, args))
-        assert sum(isinstance(r, dict) for r in results) == 9
-        assert results.count('session_full') == 5
+        assert sum(isinstance(r, dict) for r in results) == 1
+        assert results.count('session_full') == 13
         args = [(repo._dsn, repo.schema, 'append_batch', ('owner', token, [message('same')]),
                  {'idempotency_key': 'same'})] * 14
         appended = list(pool.map(process_operation, args))

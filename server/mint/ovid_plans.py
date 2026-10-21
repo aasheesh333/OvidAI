@@ -22,10 +22,13 @@ never sees this: usage is reported as "auto", attributed to the served model.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import math
+import os
 import random
 import re
+from dataclasses import dataclass
 
 LIMITS_HASH = "config:limits"
 BASE_BUDGET_KEY = "config:base_daily_usd"
@@ -37,6 +40,36 @@ SEED_AUTO_OSS_MEMBERS = [{"model": "glm-5.3-flash", "weight": 1.0},
                          {"model": "deepseek-v4.1-flash", "weight": 1.0},
                          {"model": "minimax-m3", "weight": 1.0}]
 PLAN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+# ── Free-plan token ceilings (product spec §11 / decision D1) ──
+#
+# Per user, rolling: 50M tokens in any trailing 24h and 1.5B in any trailing
+# 30 days. These are HARD ceilings on top of the USD allowance; a paid plan is
+# not subject to them (it keeps the existing free-allowance × mult behaviour).
+# No shared pool and no borrowing: every key is namespaced by uid, and the two
+# windows are evaluated independently (a user may not spend monthly headroom
+# because the day is fresh, or vice versa).
+#
+# Storage is bucketed so one Redis hash per user per window is enough: the
+# field is the bucket start (epoch seconds), the value is the token count. The
+# daily window uses 5-minute buckets and the monthly window 1-hour buckets; a
+# bucket that overlaps the window is counted in full, which makes enforcement
+# conservative (it can never under-count a live token) and makes the computed
+# reset time at most one bucket late.
+FREE_DAILY_TOKENS = 50_000_000
+FREE_MONTHLY_TOKENS = 1_500_000_000
+TOKEN_DAY_WINDOW_S = 24 * 3600
+TOKEN_MONTH_WINDOW_S = 30 * 24 * 3600
+TOKEN_DAY_BUCKET_S = 5 * 60
+TOKEN_MONTH_BUCKET_S = 3600
+
+# M1 monitoring gate: per-user UTC-day spend alert queue + the env kill switch.
+SPEND_ALERT_PENDING = "alerts:pending:user_spend"
+SPEND_ALERT_QUEUED_PREFIX = "alert:user_spend:queued"
+SPEND_ALERT_SENT_PREFIX = "alert:user_spend:sent"
+KILL_SWITCH_ENV = "OVID_PAID_MODELS_KILL_SWITCH"
+KILL_SWITCH_KEY = "config:kill_switch"   # runtime flip from /admin (env wins)
+PAID_MODELS_DISABLED = "paid_models_disabled"
 
 
 def seed_plans(paid_window_hours: int = 24) -> list[dict]:
@@ -67,6 +100,7 @@ SCALARS = {
     "normal_tpm": (int, 4_000_000, 1, 1_000_000_000),
     "normal_parallel": (int, 16, 1, 10_000),
     "hard_ceiling_mult": (float, 3.0, 1, 1000),   # key ceiling for slow-mode plans
+    "user_daily_spend_alert_usd": (float, 0.50, 0, 100000),  # M1 per-user alert
 }
 PLAN_NUMBERS = {  # field -> (lo, hi, default)
     "price_usd": (0, 100000, 0),
@@ -190,8 +224,10 @@ def pick_auto_member(members: list[dict], known: set | None = None, rng=random) 
 def validate_settings(s: dict) -> dict:
     out = {"free_daily_usd": _bounded("free_daily_usd", s["free_daily_usd"], 0, 100000)}
     out["auto_oss_members"] = validate_members(s.get("auto_oss_members", []))
-    for name, (typ, _seed, lo, hi) in SCALARS.items():
-        v = _bounded(name, s[name], lo, hi)
+    for name, (typ, seed, lo, hi) in SCALARS.items():
+        # Missing fields fall back to their seed so callers that build a
+        # partial settings dict (contract tests, first-run seeds) stay valid.
+        v = _bounded(name, s.get(name, seed), lo, hi)
         out[name] = int(v) if typ is int else v
     plans = [validate_plan(p) for p in (s.get("plans") or [])]
     ids = [p["id"] for p in plans]
@@ -269,6 +305,165 @@ def decide(pools: dict, spent: float) -> dict:
     if pools["all"] - float(spent) > 0 or pools["slow_mode"]:
         return {"action": "allow"}
     return {"action": "reject", "code": "daily_limit_reached"}
+
+
+# ── Free-plan token windows (rolling, per user) ──
+def token_keys(uid: str) -> dict:
+    """Redis hashes holding the user's bucketed token counts (one per window)."""
+    return {"day": f"tokens:{uid}:day", "month": f"tokens:{uid}:month"}
+
+
+def token_bucket(ts: float, size: int) -> int:
+    """Start (epoch seconds) of the bucket containing `ts`."""
+    return int(float(ts) // size) * size
+
+
+def _bucket_rows(buckets: dict | None) -> list[tuple[int, int]]:
+    rows = []
+    for field, value in (buckets or {}).items():
+        try:
+            start, n = int(float(field)), int(float(value))
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            rows.append((start, n))
+    rows.sort()
+    return rows
+
+
+def window_sum(buckets: dict | None, now: float, window_s: int, bucket_s: int) -> int:
+    """Tokens in the trailing window. A bucket that overlaps the window is
+    counted in full (conservative: never under-counts a live token)."""
+    cutoff = float(now) - window_s
+    return sum(n for start, n in _bucket_rows(buckets) if start + bucket_s > cutoff)
+
+
+def window_retry_at(buckets: dict | None, now: float, window_s: int, bucket_s: int,
+                    excess: int) -> float:
+    """Epoch when `excess` tokens have aged out of the window.
+
+    Conservative: waits for the whole bucket that carries the excess to leave
+    the window, so the returned time is never earlier than the true boundary.
+    """
+    cutoff = float(now) - window_s
+    acc = 0
+    for start, n in _bucket_rows(buckets):
+        if start + bucket_s <= cutoff:
+            continue
+        acc += n
+        if acc >= max(1, excess):
+            return float(start + bucket_s + window_s)
+    return float(now) + window_s
+
+
+def iso_utc(ts: float) -> str:
+    return (datetime.datetime.fromtimestamp(float(ts), datetime.timezone.utc)
+            .replace(microsecond=0).isoformat().replace("+00:00", "Z"))
+
+
+def retry_after_seconds(retry_at: str | None, now: float) -> int:
+    if not retry_at:
+        return 0
+    try:
+        at = datetime.datetime.fromisoformat(retry_at.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int(at - float(now)))
+
+
+@dataclass(frozen=True)
+class TokenDecision:
+    """The admission decision for one request, taken BEFORE any model call.
+
+    `allow`     — whether the request may proceed.
+    `reason`    — stable machine reason (`daily_token_cap`, `monthly_token_cap`,
+                  `paid_models_disabled`) or None.
+    `retry_at`  — ISO-8601 UTC instant when the cap clears, or None.
+    `remaining` — tokens left per window (`daily`/`monthly`), None for paid.
+    `code`      — wire code for the 429/503 body (`free_daily_cap`, ...).
+    `status`    — HTTP status the caller should return.
+    """
+    allow: bool
+    reason: str | None
+    retry_at: str | None
+    remaining: dict
+    code: str | None = None
+    status: int = 200
+
+    def as_dict(self) -> dict:
+        return {"allow": self.allow, "reason": self.reason, "retry_at": self.retry_at,
+                "remaining": dict(self.remaining), "code": self.code, "status": self.status}
+
+
+def paid_models_disabled() -> TokenDecision:
+    """M1 kill switch: deny every model call (all upstream models are paid)."""
+    return TokenDecision(False, "paid_models_disabled", None,
+                         {"daily": None, "monthly": None},
+                         PAID_MODELS_DISABLED, 503)
+
+
+def truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def env_kill_switch_active() -> bool:
+    """The env flag is the hard override and needs no Redis."""
+    return truthy(os.environ.get(KILL_SWITCH_ENV, "false"))
+
+
+def kill_switch_active(runtime=None) -> bool:
+    """Env flag OR the runtime flag read from Redis.
+
+    Callers should pass the runtime value they read from
+    ``KILL_SWITCH_KEY``. The env flag always wins: turning the runtime flag
+    off cannot re-enable models while the env flag is set.
+    """
+    return env_kill_switch_active() or truthy(runtime)
+
+
+def decide_tokens(plan_id: str, day_buckets: dict | None, month_buckets: dict | None,
+                  now: float, daily_cap: int = FREE_DAILY_TOKENS,
+                  monthly_cap: int = FREE_MONTHLY_TOKENS) -> TokenDecision:
+    """Free-plan token ceiling decision. Paid plans are never token-capped.
+
+    The cap is inclusive: exactly `cap` tokens used means the next request is
+    denied, because the cap is the maximum allowance, not one past it.
+    """
+    if plan_id != "free":
+        return TokenDecision(True, None, None, {"daily": None, "monthly": None}, None, 200)
+    day = window_sum(day_buckets, now, TOKEN_DAY_WINDOW_S, TOKEN_DAY_BUCKET_S)
+    month = window_sum(month_buckets, now, TOKEN_MONTH_WINDOW_S, TOKEN_MONTH_BUCKET_S)
+    remaining = {"daily": max(0, int(daily_cap) - day),
+                 "monthly": max(0, int(monthly_cap) - month)}
+    if day >= daily_cap:
+        retry = window_retry_at(day_buckets, now, TOKEN_DAY_WINDOW_S,
+                                TOKEN_DAY_BUCKET_S, day - daily_cap + 1)
+        return TokenDecision(False, "daily_token_cap", iso_utc(retry), remaining,
+                             "free_daily_cap", 429)
+    if month >= monthly_cap:
+        retry = window_retry_at(month_buckets, now, TOKEN_MONTH_WINDOW_S,
+                                TOKEN_MONTH_BUCKET_S, month - monthly_cap + 1)
+        return TokenDecision(False, "monthly_token_cap", iso_utc(retry), remaining,
+                             "free_monthly_cap", 429)
+    return TokenDecision(True, None, None, remaining, None, 200)
+
+
+def decide_request(plan_id: str, day_buckets: dict | None, month_buckets: dict | None,
+                   now: float, kill_switch: bool = False) -> TokenDecision:
+    """Kill switch first, then the free-plan token ceilings."""
+    if kill_switch:
+        return paid_models_disabled()
+    return decide_tokens(plan_id, day_buckets, month_buckets, now)
+
+
+def spend_alert_queued_key(uid: str, day: str) -> str:
+    return f"{SPEND_ALERT_QUEUED_PREFIX}:{uid}:{day}"
+
+
+def spend_alert_sent_key(uid: str, day: str) -> str:
+    return f"{SPEND_ALERT_SENT_PREFIX}:{uid}:{day}"
 
 
 def pool_keys(uid: str) -> dict:
