@@ -14,6 +14,10 @@ on:
       # AAB (the keystore secrets exist) so a device-testable artifact is
       # always available without merging to main.
       - 'feat/ovid-cloud'
+      # The v2 UI rebuild branch: same guarantee. Without this entry a push
+      # here only ran the `cloud` workflow, so the branch that ships the new
+      # shell never produced an installable artifact.
+      - 'feat/ovid-si-rebuild'
   pull_request:
     branches: [main, ci/verified-android-build-20260827]
   workflow_dispatch:
