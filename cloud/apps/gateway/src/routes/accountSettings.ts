@@ -12,6 +12,7 @@ import {
   type CustomPreset,
 } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
+import { assertModelAllowed, PlanGateError } from "../planGate.js";
 import { badRequest, isUuid, notFound, sendError, zodBadRequest } from "./http.js";
 
 /**
@@ -87,7 +88,19 @@ export function registerAccountSettingsRoutes(app: FastifyInstance, deps: Gatewa
     const parsed = customPresetBodySchema.safeParse(request.body ?? undefined);
     if (!parsed.success) return zodBadRequest(reply, parsed.error);
     const body = parsed.data;
+    const { uid, email } = request.principal;
+    // P3 plan gate: a preset's model is a ROUTED model — runs that apply the
+    // preset use it directly, so Free/Go must not be able to store one.
+    const user = await users.ensure(deps.db, uid, email);
     if (body.model !== null) {
+      try {
+        assertModelAllowed(user.tier, body.model);
+      } catch (err) {
+        if (err instanceof PlanGateError) {
+          return sendError(reply, err.status, err.code, err.message);
+        }
+        throw err;
+      }
       const known = await modelCatalog(deps);
       if (known !== null && !known.has(body.model.toLowerCase())) {
         return sendError(
@@ -98,7 +111,6 @@ export function registerAccountSettingsRoutes(app: FastifyInstance, deps: Gatewa
         );
       }
     }
-    const { uid, email } = request.principal;
     const existing = await customPresets.list(deps.db, uid);
     if (!existing.some((p) => p.id === id) && existing.length >= MAX_CUSTOM_PRESETS) {
       return sendError(
@@ -108,7 +120,6 @@ export function registerAccountSettingsRoutes(app: FastifyInstance, deps: Gatewa
         `You can keep up to ${MAX_CUSTOM_PRESETS} custom presets. Delete one first.`,
       );
     }
-    await users.ensure(deps.db, uid, email);
     const preset: CustomPreset = {
       id,
       label: body.label,
@@ -139,8 +150,23 @@ export function registerAccountSettingsRoutes(app: FastifyInstance, deps: Gatewa
     const parsed = sessionPresetBodySchema.safeParse(request.body ?? undefined);
     if (!parsed.success) return zodBadRequest(reply, parsed.error);
     const presetId = parsed.data.presetId;
-    if (!isBuiltInPreset(presetId) && (await customPresets.get(deps.db, uid, presetId)) === null) {
-      return sendError(reply, 404, "not_found", "Preset not found.");
+    if (!isBuiltInPreset(presetId)) {
+      const preset = await customPresets.get(deps.db, uid, presetId);
+      if (preset === null) return sendError(reply, 404, "not_found", "Preset not found.");
+      // P3 plan gate for the routed-model path: applying a preset pins its
+      // model for the chat's next runs. A manual model requires Plus/Pro —
+      // enforced here even if the preset was stored before a downgrade.
+      if (preset.model !== null) {
+        const user = await users.ensure(deps.db, uid, null);
+        try {
+          assertModelAllowed(user.tier, preset.model);
+        } catch (err) {
+          if (err instanceof PlanGateError) {
+            return sendError(reply, err.status, err.code, err.message);
+          }
+          throw err;
+        }
+      }
     }
     await sessionState.patch(deps.db, sessionId, { presetId });
     return { sessionId, presetId };

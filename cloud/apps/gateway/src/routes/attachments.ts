@@ -15,13 +15,36 @@ import { isUuid, notFound, sendError, zodBadRequest } from "./http.js";
 // client's side of the contract.
 
 /**
+ * Conditions the upload URL MUST sign. A presigned PUT that signs only the
+ * key lets the client upload any number of bytes of any type (the row's
+ * `size`/`name` are merely declared), so the declared length and media type
+ * ride into the signature and the storage layer rejects a mismatch.
+ */
+export interface AttachmentUploadConditions {
+  /** Exact byte length the client declared; signed as Content-Length. */
+  contentLength: number;
+  /** Media type the client declared; signed as Content-Type. */
+  contentType: string;
+}
+
+/**
  * The P8-Q3 presigner seam: structurally the StorageAdapter.presignPut
  * contract from @ovid/storage (ruling R3 / contract 6 — `presignPut(key,
- * ttlSeconds)`), so the R2 adapter (or the fs adapter in dev) satisfies it
- * as-is. Injectable via GatewayDeps.presigner; the composition root wires it.
+ * ttlSeconds, conditions)`), so the R2 adapter (or the fs adapter in dev)
+ * satisfies it as-is (the optional third argument keeps every existing
+ * two-argument adapter source-compatible). Injectable via
+ * GatewayDeps.presigner; the composition root wires it.
+ *
+ * SECURITY: an adapter MUST sign `Content-Length` and `Content-Type` from
+ * [AttachmentUploadConditions]; an adapter that ignores them re-opens the
+ * unsigned-PUT hole (arbitrary size/type into the account's prefix).
  */
 export interface AttachmentPresigner {
-  presignPut(key: string, ttlSeconds: number): Promise<string>;
+  presignPut(
+    key: string,
+    ttlSeconds: number,
+    conditions?: AttachmentUploadConditions,
+  ): Promise<string>;
 }
 
 /** Hard size cap (brief): anything over 25 MB is refused before signing. */
@@ -39,9 +62,18 @@ export function attachmentObjectKey(
   return `users/${userId}/sessions/${sessionId}/uploads/${attachmentId}`;
 }
 
-// name non-empty string; size a positive integer. .strict() rejects unknown keys.
+/** A single canonical `type/subtype` token (no parameters) — the signed value. */
+const MEDIA_TYPE_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/i;
+
+// name non-empty string; size a positive integer; contentType an optional
+// media type (defaults to application/octet-stream). .strict() rejects
+// unknown keys.
 const createAttachmentBody = z
-  .object({ name: z.string().min(1), size: z.number().int().positive() })
+  .object({
+    name: z.string().min(1),
+    size: z.number().int().positive(),
+    contentType: z.string().regex(MEDIA_TYPE_RE).max(127).optional(),
+  })
   .strict();
 
 export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps): void {
@@ -64,6 +96,7 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
     const parsed = createAttachmentBody.safeParse(request.body ?? undefined);
     if (!parsed.success) return zodBadRequest(reply, parsed.error);
     const { name, size } = parsed.data;
+    const contentType = parsed.data.contentType ?? "application/octet-stream";
 
     // 3. Size cap → 400 attachment_too_large (checked BEFORE signing and any
     //    write, so a refused upload costs neither).
@@ -112,7 +145,12 @@ export function registerAttachmentRoutes(app: FastifyInstance, deps: GatewayDeps
     }
     const attachmentId = newId();
     const r2Key = attachmentObjectKey(uid, sessionId, attachmentId);
-    const uploadUrl = await presigner.presignPut(r2Key, ATTACHMENT_UPLOAD_TTL_SECONDS);
+    // The declared size/type are BOUND to the URL: the storage layer can only
+    // accept a PUT whose Content-Length/Content-Type match this signature.
+    const uploadUrl = await presigner.presignPut(r2Key, ATTACHMENT_UPLOAD_TTL_SECONDS, {
+      contentLength: size,
+      contentType,
+    });
 
     // 5. Provision the users row (FK target) and persist the attachment.
     await users.ensure(deps.db, uid, email);

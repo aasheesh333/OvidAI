@@ -23,17 +23,35 @@
 //    list_agents, interrupt_agent, report) deliberately stay.
 //  • The dispatch tool result is the child's FINAL REPORT TEXT (the `report`
 //    tool when used, else the last assistant message) — bare, with no Dart
-//    `[id state · Ns]` wrapper. The 30-minute timeout is a cloud-only pin and
-//    lives on the tool (tools/subagentTools.ts).
+//    `[id state · Ns]` wrapper. The dispatch tool's timeout is aligned with
+//    the 8-hour child budget (tools/subagentTools.ts) so the parent call can
+//    never end while a legitimate child is still working.
+//  • The 50-subagent ceiling is a LIFETIME TOTAL per root session, not a
+//    count of active children: the durable store is the source of truth and
+//    an in-memory counter only short-circuits the read once the ceiling is
+//    known to be reached. Nothing frees a slot when a child finishes.
+//  • A settled child owns no live sandbox resources: every settle path
+//    (success, timeout, cancel, error) kills the child's background jobs and
+//    in-flight exec calls before the dispatch returns.
 
 import { messages, runs, sessionState, sessions, type Db } from "@ovid/db";
 
 import { nativeToolsFor } from "./claudeCodeTools.js";
 import type { AgentEngine } from "./engine.js";
-import type { EventSink, HookEngine, HookStopResult, SessionStateStore } from "./ports.js";
+import type {
+  EventSink,
+  HookEngine,
+  HookStopResult,
+  SandboxPort,
+  SessionStateStore,
+} from "./ports.js";
 import { presetById, type AgentPreset } from "./presets.js";
 import { canonicalTools } from "./promptCache.js";
-import { CHILD_DENIED_TOOLS, computeToolRoster } from "./roster.js";
+import {
+  computeToolRoster,
+  isChildHardDeniedTool,
+  isChildSensitiveTool,
+} from "./roster.js";
 import {
   clampSubagentLogTailLines,
   createSubagentLog,
@@ -57,11 +75,14 @@ export const MAX_SUBAGENT_DEPTH = 2;
 /** Dart `_maxSubagentStopBlocks` (AS:24807). */
 export const MAX_SUBAGENT_STOP_BLOCKS = 3;
 /**
- * SI spec §9: at most 50 subagents may hold a slot under one ROOT session.
- * The counter is a hard cap on concurrently ACTIVE children (a child that
- * completes, fails, is cancelled or times out releases its slot); the 51st
- * dispatch is refused with a typed SubagentLimitError — never silently
- * dropped. Kept under the old name for callers that imported it.
+ * SI spec §9: at most 50 subagents may be created under one ROOT session for
+ * the whole life of that session. This is a TOTAL, not a concurrency cap: a
+ * child that completes, fails, is cancelled or times out does NOT free a
+ * slot. The 51st dispatch is refused with a typed SubagentLimitError — never
+ * silently dropped. The durable store is the source of truth (so the count
+ * survives worker restarts and is shared between dispatchers); the in-memory
+ * cache is only a fast path in front of it. Kept under the old name for
+ * callers that imported it.
  */
 export const MAX_SUBAGENTS_PER_ROOT = 50;
 export const MAX_CONCURRENT_SUBAGENTS = MAX_SUBAGENTS_PER_ROOT;
@@ -146,17 +167,17 @@ export class SubagentRefusalError extends Error {
   }
 }
 
-/** The 51st active subagent under one root session (SI spec §9). */
+/** The subagent ceiling (SI spec §9): 50 TOTAL children per root session. */
 export class SubagentLimitError extends SubagentRefusalError {
   readonly rootSessionId: string;
   readonly limit: number;
 
   constructor(rootSessionId: string, limit: number) {
     super(
-      `dispatch_agent refused: the subagent ceiling (${limit} active per root ` +
-        "session) is reached. Wait for a running subagent to finish " +
-        "(list_agents shows them), interrupt one you no longer need, or do this " +
-        "task yourself — do not retry in a loop.",
+      `dispatch_agent refused: the subagent ceiling (${limit} total per root ` +
+        "session) is reached. This cap counts every subagent ever created " +
+        "under this chat, not just the running ones — start a new chat for " +
+        "more delegation or do this task yourself. Do not retry in a loop.",
       "subagent_limit_exceeded",
     );
     this.name = "SubagentLimitError";
@@ -225,19 +246,26 @@ function entryMatches(entry: string, name: string): boolean {
 
 /**
  * The policy gate applied ON TOP of the roster (Dart `SubagentToolPolicy.
- * allows`): always-denied/spawn tools and main-agent-only tools never pass
- * even when explicitly listed; deny entries subtract; an empty allow list
- * inherits.
+ * allows`): always-denied/spawn/scheduler tools and main-agent-only tools
+ * never pass even when explicitly listed; deny entries subtract; an empty
+ * allow list inherits — EXCEPT the credential/egress class, which is
+ * default-deny and opens only to an explicit name/pattern allow.
  */
 export function subagentPolicyAllows(
   name: string,
   policy: { allow: readonly string[]; deny: readonly string[] },
 ): boolean {
-  if (CHILD_DENIED_TOOLS.has(name)) return false;
+  if (isChildHardDeniedTool(name)) return false;
   if (MAIN_AGENT_ONLY_TOOLS.has(name)) return false;
   if (policy.deny.some((entry) => entryMatches(entry, name))) return false;
+  // A bare `*` is inheritance, not a credential grant: only an explicit
+  // (non-wildcard) entry re-admits a sensitive tool.
+  const explicitlyAllowed = policy.allow.some(
+    (entry) => entry !== "*" && entryMatches(entry, name),
+  );
+  if (isChildSensitiveTool(name) && !explicitlyAllowed) return false;
   if (policy.allow.length === 0 || policy.allow.includes("*")) return true;
-  return policy.allow.some((entry) => entryMatches(entry, name));
+  return explicitlyAllowed;
 }
 
 /**
@@ -293,6 +321,14 @@ export interface SubagentStore {
   /** Root → session chain, INCLUSIVE (Dart `lineageOf`), bounded 8 in cloud. */
   lineage(sessionId: string): Promise<string[]>;
   listChildren(parentSessionId: string, userId: string): Promise<string[]>;
+  /**
+   * The DURABLE lifetime total of children created under [rootSessionId].
+   * This is the source of truth for the 50-per-root ceiling: it is never
+   * decremented when a child settles, so sequential dispatch cannot mint
+   * fresh slots. No nesting is possible (a child cannot dispatch), so the
+   * direct children of the root are every subagent the root ever created.
+   */
+  countChildrenUnderRoot(rootSessionId: string, userId: string): Promise<number>;
 }
 
 /**
@@ -314,6 +350,19 @@ export function createDbSubagentStore(db: Db): SubagentStore {
     >;
     const parent = state[SUBAGENT_PARENT_KEY];
     return typeof parent === "string" && parent !== "" ? parent : null;
+  }
+
+  async function childrenOf(
+    parentSessionId: string,
+    userId: string,
+  ): Promise<string[]> {
+    // Only used by a cold-resume caller; the live registry is in-memory.
+    const { rows } = await sessions.list(db, userId, 1000);
+    const children: string[] = [];
+    for (const row of rows) {
+      if ((await parentOf(row.id)) === parentSessionId) children.push(row.id);
+    }
+    return children;
   }
 
   return {
@@ -369,13 +418,12 @@ export function createDbSubagentStore(db: Db): SubagentStore {
       return chain;
     },
     async listChildren(parentSessionId, userId) {
-      // Only used by a cold-resume caller; the live registry is in-memory.
-      const { rows } = await sessions.list(db, userId, 1000);
-      const children: string[] = [];
-      for (const row of rows) {
-        if ((await parentOf(row.id)) === parentSessionId) children.push(row.id);
-      }
-      return children;
+      return childrenOf(parentSessionId, userId);
+    },
+    async countChildrenUnderRoot(rootSessionId, userId) {
+      // The row scan is bounded at 1000 — far above the 50-per-root ceiling,
+      // so it can never under-count a root that is at (or near) the cap.
+      return (await childrenOf(rootSessionId, userId)).length;
     },
   };
 }
@@ -400,8 +448,15 @@ export interface SubagentSupervisorDeps {
   now?: () => number;
   /** SI spec §9 hard runtime cap per subagent (default 8 h). */
   maxRuntimeMs?: number;
-  /** SI spec §9 concurrent-subagent cap per root (default 50; test seam). */
+  /** SI spec §9 TOTAL-subagent cap per root (default 50; test seam). */
   maxSubagents?: number;
+  /**
+   * Sandbox seam. When provided, a settled child's background jobs and
+   * in-flight exec calls are killed on EVERY settle path (success, timeout,
+   * cancel, error) — an engine cancel alone only aborts the model transport,
+   * it does not stop detached sandbox work.
+   */
+  sandbox?: SandboxPort | null;
   /** Log directory (default /workspace/.ovid/logs; tests inject a temp dir). */
   logDir?: string;
   /**
@@ -531,6 +586,13 @@ function clip(text: string, max: number): string {
 const DEFAULT_STOP_REASON =
   "[system] Continue working on the task; do not repeat your last message verbatim.";
 
+/**
+ * How long a cancelled/timed-out child's engine run may take to unwind before
+ * its sandbox resources are killed. Bounded so a wedged transport can never
+ * hold the parent's dispatch call open.
+ */
+const CHILD_CANCEL_GRACE_MS = 5_000;
+
 export function createSubagentSupervisor(deps: SubagentSupervisorDeps): SubagentSupervisor {
   const store = deps.store ?? createDbSubagentStore(deps.db);
   const now = deps.now ?? Date.now;
@@ -538,37 +600,177 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
   const maxRuntimeMs = deps.maxRuntimeMs ?? DEFAULT_SUBAGENT_MAX_RUNTIME_MS;
   const maxSubagents = deps.maxSubagents ?? MAX_SUBAGENTS_PER_ROOT;
   /**
-   * rootSessionId → active children. Increment/decrement happen in the SAME
-   * synchronous tick as the ceiling check, so parallel dispatches cannot race
-   * past 50. Every terminal path (complete/fail/cancel/timeout/throw) releases
-   * in `dispatch`'s finally.
+   * rootSessionId → a LIFETIME total of children created under it. This is an
+   * in-memory cache IN FRONT of the durable store count (`slotCounts`), never
+   * the source of truth: a worker restart loses the cache and re-reads the
+   * store, and a second dispatcher sharing the same store still sees the
+   * total. Nothing decrements it when a child settles — the cap is on TOTAL
+   * subagents per session, not on active ones.
+   *
+   * `slotLocks` serializes check-and-increment per root so parallel
+   * dispatches cannot both observe 49 and race past the ceiling.
    */
-  const activeSlots = new Map<string, number>();
+  const slotCounts = new Map<string, number>();
+  const slotLocks = new Map<string, Promise<void>>();
 
-  function tryAcquireSlot(rootSessionId: string): boolean {
-    const active = activeSlots.get(rootSessionId) ?? 0;
-    if (active >= maxSubagents) return false;
-    activeSlots.set(rootSessionId, active + 1);
-    return true;
+  function withRootLock<T>(rootSessionId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = slotLocks.get(rootSessionId) ?? Promise.resolve();
+    const run = previous.then(fn, fn);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    slotLocks.set(rootSessionId, tail);
+    void tail.then(() => {
+      if (slotLocks.get(rootSessionId) === tail) slotLocks.delete(rootSessionId);
+    });
+    return run;
   }
 
-  function releaseSlot(rootSessionId: string): void {
-    const active = activeSlots.get(rootSessionId) ?? 0;
-    if (active <= 1) activeSlots.delete(rootSessionId);
-    else activeSlots.set(rootSessionId, active - 1);
+  /** Reserve one of the root's 50 lifetime slots; false = ceiling reached. */
+  function reserveSlot(rootSessionId: string, userId: string): Promise<boolean> {
+    return withRootLock(rootSessionId, async () => {
+      const cached = slotCounts.get(rootSessionId) ?? 0;
+      // Fast path: the cache already proves the ceiling is reached; skip the
+      // durable read (the common refusal path).
+      if (cached >= maxSubagents) return false;
+      // Slow path: the durable count is authoritative — it survives restarts
+      // and is shared by every dispatcher for this root.
+      const durable = await store.countChildrenUnderRoot(rootSessionId, userId);
+      const total = Math.max(cached, durable);
+      if (total >= maxSubagents) {
+        slotCounts.set(rootSessionId, total);
+        return false;
+      }
+      slotCounts.set(rootSessionId, total + 1);
+      return true;
+    });
   }
 
   /**
-   * The child's log observer. The engine persists the event first and then
-   * mirrors it here; message deltas are coalesced out (the completed message
-   * carries the same text), everything else — including full tool output — is
-   * appended verbatim so the log is the complete audit trail.
+   * Give a reservation back when NO child was created (an infrastructure
+   * failure before `store.createChild`). A created child keeps its slot even
+   * if the run then fails: the durable row exists, so the total is real.
    */
-  function childLogSink(log: SubagentLog): EventSink {
+  function unreserveSlot(rootSessionId: string): Promise<void> {
+    return withRootLock(rootSessionId, async () => {
+      const current = slotCounts.get(rootSessionId) ?? 0;
+      if (current <= 1) slotCounts.delete(rootSessionId);
+      else slotCounts.set(rootSessionId, current - 1);
+    });
+  }
+
+  /**
+   * Sandbox resources (background jobs + in-flight exec calls) started by one
+   * child. The child's event stream is the only place these ids appear: the
+   * loop emits `tool_started` with `runId`+`callId` (the sandbox callKey is
+   * `${runId}:${callId}`) and `tool_completed` with the job_start/job_kill
+   * result text that carries the job id.
+   */
+  interface ChildResources {
+    calls: Set<string>;
+    jobs: Set<string>;
+    /**
+     * Set once the child has settled and its resources were killed. Late
+     * events (an engine that ignores a cancel for longer than the grace) are
+     * killed IMMEDIATELY instead of being tracked, so nothing outlives the
+     * dispatch call.
+     */
+    settled: boolean;
+  }
+
+  const childResources = new Map<string, ChildResources>();
+
+  function resourcesOf(sessionId: string): ChildResources {
+    let resources = childResources.get(sessionId);
+    if (resources === undefined) {
+      resources = { calls: new Set(), jobs: new Set(), settled: false };
+      childResources.set(sessionId, resources);
+    }
+    return resources;
+  }
+
+  /**
+   * Kill everything the child started in the sandbox. Idempotent: the sets
+   * are cleared first, so a later backstop call has nothing left to do.
+   * `drop` removes the bookkeeping entirely (the child is fully settled).
+   */
+  async function killChildResources(
+    childSessionId: string,
+    userId: string,
+    drop = false,
+  ): Promise<void> {
+    const resources = childResources.get(childSessionId);
+    if (resources === undefined) return;
+    const calls = [...resources.calls];
+    const jobs = [...resources.jobs];
+    resources.calls.clear();
+    resources.jobs.clear();
+    resources.settled = true;
+    if (drop) childResources.delete(childSessionId);
+    const sandbox = deps.sandbox ?? null;
+    if (sandbox === null) return;
+    await Promise.allSettled([
+      ...calls.map((callKey) => sandbox.killCall(userId, callKey)),
+      ...jobs.map((jobId) => sandbox.jobKill(userId, jobId)),
+    ]);
+  }
+
+  /**
+   * The child's log observer + resource tracker. The engine persists the
+   * event first and then mirrors it here; message deltas are coalesced out
+   * (the completed message carries the same text), everything else —
+   * including full tool output — is appended verbatim so the log is the
+   * complete audit trail. Tracking runs even when logging is unavailable.
+   */
+  function childSink(
+    log: SubagentLog | null,
+    resources: ChildResources,
+    userId: string,
+  ): EventSink {
+    const sandbox = deps.sandbox ?? null;
+    const killNow = (kill: Promise<void>): void => {
+      void kill.catch(() => {});
+    };
     return {
       async emit(type, payload) {
+        if (type === "tool_started") {
+          const runId = payload["runId"];
+          const callId = payload["callId"];
+          if (typeof runId === "string" && typeof callId === "string") {
+            const callKey = `${runId}:${callId}`;
+            if (resources.settled) {
+              if (sandbox !== null) killNow(sandbox.killCall(userId, callKey));
+            } else {
+              resources.calls.add(callKey);
+            }
+          }
+        } else if (type === "tool_completed") {
+          const runId = payload["runId"];
+          const callId = payload["callId"];
+          if (typeof runId === "string" && typeof callId === "string") {
+            resources.calls.delete(`${runId}:${callId}`);
+          }
+          const name = payload["name"];
+          const content = payload["content"];
+          if (typeof content === "string") {
+            if (name === "job_start") {
+              const match = /^job (\S+) started\b/.exec(content);
+              if (match !== null) {
+                if (resources.settled && sandbox !== null) {
+                  killNow(sandbox.jobKill(userId, match[1]!));
+                } else {
+                  resources.jobs.add(match[1]!);
+                }
+              }
+            } else if (name === "job_kill") {
+              const match = /^job (\S+) killed\b/.exec(content);
+              if (match !== null) resources.jobs.delete(match[1]!);
+            }
+          }
+        }
         if (type === "message_delta") return;
-        await log.append({ type, ...payload });
+        await log?.append({ type, ...payload });
       },
     };
   }
@@ -661,9 +863,10 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
         throw new SubagentRefusalError("parent run is cancelled");
       }
 
-      // Hard 50-per-root slot. Acquire BEFORE any further await so parallel
-      // dispatches cannot race past the ceiling; every exit releases it.
-      if (!tryAcquireSlot(rootSessionId)) {
+      // Hard ceiling: 50 TOTAL subagents per root session (SI spec §9). The
+      // durable store count is authoritative; the in-memory cache only
+      // short-circuits the read. Never released on settle — see reserveSlot.
+      if (!(await reserveSlot(rootSessionId, parent.userId))) {
         throw new SubagentLimitError(rootSessionId, maxSubagents);
       }
 
@@ -672,6 +875,10 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
       let log: SubagentLog | null = null;
       let handle: MutableChildHandle | undefined;
+      let childSessionId: string | null = null;
+      // A reservation is only real once the child row exists. Before that an
+      // infrastructure failure must hand the slot back.
+      let childCreated = false;
 
       try {
         const agentType = (args.agentType ?? "").trim() || "general-purpose";
@@ -701,6 +908,8 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
           userId: parent.userId,
           title: `subagent: ${clip(prompt.replace(/\s+/g, " "), 60)}`,
         });
+        childCreated = true;
+        childSessionId = child.sessionId;
         // T8 C1: a child is born planMode:false — NEVER inherit the parent's
         // plan flag. A fresh session's zero state already satisfies this; force
         // it defensively so a reused/cold-resumed row cannot leak the gate.
@@ -738,6 +947,10 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
             message: err instanceof Error ? err.message : String(err),
           });
         }
+
+        // Track the child's sandbox resources even when the log writer is
+        // unavailable: a settle must kill them either way.
+        const sinkForRun = childSink(log, resourcesOf(child.sessionId), parent.userId);
 
         handle = new MutableChildHandle({
           sessionId: child.sessionId,
@@ -794,6 +1007,8 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
         let currentPrompt = prompt;
         let stopBlocks = 0;
         let finalStatus: ChildStatus = "running";
+        /** The in-flight engine promise, kept so a cancelled run can unwind. */
+        let lastRun: Promise<void> | null = null;
 
         try {
           for (;;) {
@@ -816,8 +1031,9 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
               depth: depth + 1,
               subagentBriefing: prompt,
               roster,
-              ...(log !== null ? { sink: childLogSink(log) } : {}),
+              sink: sinkForRun,
             });
+            lastRun = runPromise;
             // The timeout branch may return while the run is still unwinding
             // (engine.cancel aborts it); never surface that as unhandled.
             void runPromise.catch(() => {});
@@ -892,6 +1108,23 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
 
         childHandle.setStatus(finalStatus);
 
+        // ── the child owns no live sandbox resources once it settles ─────
+        // An engine cancel only aborts the model transport; a sandbox job or
+        // an in-flight exec keeps running detached. Give a cancelled/timed-out
+        // run a short grace to unwind (so calls it started are tracked), then
+        // kill every remaining job and call. This runs on EVERY settle path:
+        // completed, timeout, cancelled and failed.
+        if (finalStatus !== "completed" && lastRun !== null) {
+          await Promise.race([
+            lastRun.catch(() => undefined),
+            new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, CHILD_CANCEL_GRACE_MS);
+              timer.unref?.();
+            }),
+          ]);
+        }
+        await killChildResources(child.sessionId, parent.userId);
+
         // ── strict ≤300-token JSON result (SI spec §9) ────────────────────
         const terminalStatus: SubagentSummaryStatus = finalStatus;
         const summary = buildSubagentSummary({
@@ -916,15 +1149,24 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
         return childHandle;
       } catch (err) {
         // Infrastructure escape before the child loop settled: never leave a
-        // handle stuck in `running` (which would look like a held slot).
+        // handle stuck in `running`, and never leave the child's sandbox work
+        // behind (this is a settle path too).
+        if (childSessionId !== null) {
+          await killChildResources(childSessionId, parent.userId);
+        }
         if (handle !== undefined && handle.status() === "running") {
           handle.setStatus("failed");
         }
         throw err;
       } finally {
         if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+        // Backstop for every path (including a throw while building the
+        // summary): idempotent because the previous pass emptied the sets.
+        if (childSessionId !== null) {
+          await killChildResources(childSessionId, parent.userId, true);
+        }
         if (log !== null) await log.close();
-        releaseSlot(rootSessionId);
+        if (!childCreated) await unreserveSlot(rootSessionId);
       }
     },
 
@@ -956,8 +1198,9 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
 /**
  * The dispatch tool's return value: strict five-key JSON, always within the
  * 300-token budget. A handle that already settled carries the serialized
- * summary; a fake/legacy handle's raw text is normalized here so the contract
- * holds at the tool boundary too.
+ * summary; a fake/legacy handle's raw text is validated here too — text that
+ * does not match the five-key contract is REJECTED (never echoed as a
+ * finding) so the contract holds at the tool boundary.
  */
 export function subagentResultJson(handle: ChildHandle): string {
   const current = handle.status();

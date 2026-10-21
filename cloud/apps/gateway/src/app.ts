@@ -249,9 +249,50 @@ export interface GatewayDeps {
 export interface BuildGatewayOptions {
   /** Fastify logger option; defaults to false so inject() tests stay silent. */
   logger?: FastifyServerOptions["logger"];
+  /** Wall-clock budget for a request (node http `requestTimeout`). */
+  requestTimeout?: number;
+  /** Idle-socket budget while headers/body arrive (`connectionTimeout`). */
+  connectionTimeout?: number;
+  /** Explicit global JSON body cap; per-route parsers may override. */
+  bodyLimit?: number;
 }
 
 export const API_PREFIX = "/cloud/v1";
+
+/**
+ * Transport hardening defaults (never left to framework defaults):
+ * - requestTimeout: 60 s bounds one request end-to-end (mint calls are
+ *   individually bounded at 10 s; a workspace PUT may wait up to 20 s for a
+ *   cold workspace plus the transfer itself, so this must stay above that).
+ * - connectionTimeout: 10 s for a socket to become useful — a slow-loris hold
+ *   cannot pin a connection indefinitely.
+ * - bodyLimit: 10 MiB of JSON for the whole app. Route-scoped parsers keep
+ *   their own (larger) caps: shares 1.5 MiB, workspace PUTs putMaxBytes*2.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+export const DEFAULT_CONNECTION_TIMEOUT_MS = 10_000;
+export const DEFAULT_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Stable client-facing error bodies. A 4xx NEVER echoes Fastify's raw
+ * `error.message` (it can carry parser internals, header snippets or route
+ * detail); the real error is logged server-side and the client gets this map.
+ */
+const CLIENT_ERRORS: Readonly<Record<number, { code: string; message: string }>> = Object.freeze({
+  400: { code: "bad_request", message: "Invalid request." },
+  401: { code: "unauthenticated", message: "Authentication required." },
+  403: { code: "forbidden", message: "Request refused." },
+  404: { code: "not_found", message: "Not found." },
+  405: { code: "method_not_allowed", message: "Method not allowed." },
+  408: { code: "request_timeout", message: "Request timed out." },
+  413: { code: "payload_too_large", message: "Request body too large." },
+  415: { code: "unsupported_media_type", message: "Unsupported media type." },
+  429: { code: "rate_limited", message: "Too many requests." },
+});
+
+function clientErrorFor(status: number): { code: string; message: string } {
+  return CLIENT_ERRORS[status] ?? CLIENT_ERRORS[400]!;
+}
 
 /**
  * Capped WS frame size (I2): 256 KiB per frame. The @fastify/websocket (ws)
@@ -272,12 +313,15 @@ export function buildGateway(
 ): FastifyInstance {
   const app = Fastify({
     logger: opts.logger ?? false,
+    requestTimeout: opts.requestTimeout ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    connectionTimeout: opts.connectionTimeout ?? DEFAULT_CONNECTION_TIMEOUT_MS,
+    bodyLimit: opts.bodyLimit ?? DEFAULT_BODY_LIMIT_BYTES,
   });
 
   // Anything that THROWS (route bug, Fastify body-parse rejection) is mapped
-  // to the shared envelope here. 4xx keep Fastify's own message (e.g. the
-  // JSON parse complaint); 5xx are logged with the real error server-side and
-  // collapsed to a generic message for the client.
+  // to the shared envelope here. 4xx answer a STABLE code/message from the
+  // table above (the raw error is logged server-side only); 5xx are logged
+  // with the real error and collapsed to a generic message for the client.
   app.setErrorHandler((error: FastifyError, request, reply) => {
     const status = typeof error.statusCode === "number" ? error.statusCode : 500;
     if (status < 400 || status >= 500) {
@@ -287,12 +331,9 @@ export function buildGateway(
       };
       return reply.code(500).send(body);
     }
-    const body: ApiError = {
-      error: {
-        code: status === 404 ? "not_found" : "bad_request",
-        message: error.message,
-      },
-    };
+    request.log.warn({ err: error }, "client request rejected");
+    const stable = clientErrorFor(status);
+    const body: ApiError = { error: { code: stable.code, message: stable.message } };
     return reply.code(status).send(body);
   });
 

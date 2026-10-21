@@ -9,11 +9,17 @@
  *
  *   - the token is passed to `git` ONLY through the child's environment
  *     (`GIT_ASKPASS` + `OVID_GIT_TOKEN`), never as an argv element;
- *   - the askpass helper is created for exactly one operation and deleted in
- *     a `finally`; the env object is cleared by `dispose()`;
- *   - every operation re-scans `.git/config` (and its own argv) for the
- *     token before reporting success;
- *   - every log line and error message goes through `redactToken`.
+ *   - the askpass helper lives in a root-owned, non-sandbox-writable
+ *     directory, is created for exactly one operation and deleted in a
+ *     `finally`; the env object is cleared by `dispose()`;
+ *   - tokens are resolved PER USER; the deployment-wide `GITHUB_API_TOKEN` is
+ *     never handed to git;
+ *   - every operation scans `.git/config`, the home `.gitconfig` and
+ *     `.git-credentials` (and its own argv) on success AND failure;
+ *   - remote URLs are re-derived and host-allowlisted before any fetch, and
+ *     TLS verification/proxy settings are forced;
+ *   - every log line and error message goes through `redactToken`, and user
+ *     errors are fixed strings (never raw git stderr).
  *
  * Why a host-side git process rather than `SandboxHandle.exec`? The jail
  * layer injects `ExecRequest.env` into bwrap's `--setenv` argv, which would
@@ -30,7 +36,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { access, rm, stat } from "node:fs/promises";
+import { access, lstat, realpath, rm } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 
 import {
@@ -225,8 +231,22 @@ export interface StudioGitDeps {
   log?: (line: string) => void;
   /** Test-only: allow file:// remotes (production is https only). */
   allowLocalUrls?: boolean;
+  /**
+   * Hosts a token may be sent to. Defaults to `github.com`. An https URL on
+   * any other host is refused BEFORE git runs, so the askpass helper can
+   * never answer an attacker's challenge.
+   */
+  allowedHosts?: readonly string[];
+  /**
+   * Root-owned, non-sandbox-writable directory for the ephemeral askpass
+   * helper. Defaults to @ovid/sandbox's production helper root.
+   */
+  credentialDir?: string;
   now?: () => Date;
 }
+
+/** The default allowlist: the only host a Studio token is ever presented to. */
+export const DEFAULT_GITHUB_HOSTS: readonly string[] = ["github.com"];
 
 // ---------------------------------------------------------------------------
 // Validation helpers
@@ -239,7 +259,10 @@ const GITHUB_SHORTHAND = /^[\w.-]+\/[\w.-]+$/;
  * could smuggle a credential (userinfo, non-https scheme, ssh/scp form —
  * askpass cannot answer those prompts).
  */
-export function normalizeRepoUrl(repo: string, opts: { allowLocalUrls?: boolean } = {}): string {
+export function normalizeRepoUrl(
+  repo: string,
+  opts: { allowLocalUrls?: boolean; allowedHosts?: readonly string[] } = {},
+): string {
   const raw = repo.trim();
   if (raw === "") throw new StudioGitError("invalid_repo", "Choose a repository first.");
   if (GITHUB_SHORTHAND.test(raw)) return `https://github.com/${raw}.git`;
@@ -262,6 +285,31 @@ export function normalizeRepoUrl(repo: string, opts: { allowLocalUrls?: boolean 
     throw new StudioGitError("invalid_repo", "Studio clones repositories over https only.");
   }
   if (url.hostname === "") throw new StudioGitError("invalid_repo", "That repository has no host.");
+  // Exact-host allowlist: a token must never be offered to `github.com.evil`
+  // (or any other host that can issue a Basic-auth challenge).
+  const allowed = new Set(
+    (opts.allowedHosts !== undefined && opts.allowedHosts.length > 0
+      ? opts.allowedHosts
+      : DEFAULT_GITHUB_HOSTS
+    )
+      .map((host) => host.trim().toLowerCase())
+      .filter((host) => host !== ""),
+  );
+  const hostname = url.hostname.toLowerCase();
+  if (!allowed.has(hostname)) {
+    throw new StudioGitError(
+      "invalid_repo",
+      "Studio can only clone from an approved git host. Connect GitHub instead.",
+    );
+  }
+  if (url.port !== "") {
+    throw new StudioGitError("invalid_repo", "Studio clones repositories over the default https port only.");
+  }
+  // Query strings have historically carried credentials; a clone URL never
+  // needs one, and the full URL is logged in bounded form.
+  if (url.search !== "" || url.hash !== "") {
+    throw new StudioGitError("invalid_repo", "The repository address has unexpected parameters.");
+  }
   return url.toString();
 }
 
@@ -349,14 +397,41 @@ function resolveWorkspaceDir(workspaceDir: string, rel: string | undefined): str
   return dir;
 }
 
-async function assertGitRepo(dir: string): Promise<void> {
-  let isDir = false;
+/**
+ * The canonical workspace root and the repo directory must both be inside it
+ * after symlink resolution. `resolveWorkspaceDir` is lexical only; a crafted
+ * `app -> /etc` link would otherwise make git operate outside the workspace.
+ */
+async function assertRealpathWithin(workspaceDir: string, dir: string): Promise<void> {
+  let rootReal: string;
+  let dirReal: string;
   try {
-    isDir = (await stat(join(dir, ".git"))).isDirectory();
+    rootReal = await realpath(resolve(workspaceDir));
+    dirReal = await realpath(dir);
+  } catch (err) {
+    if (isErrnoException(err) && err.code === "ENOENT") {
+      throw new StudioGitError("not_a_repo", "This folder is not a git repository yet.");
+    }
+    throw err;
+  }
+  if (dirReal !== rootReal && !dirReal.startsWith(`${rootReal}${sep}`)) {
+    throw new StudioGitError("invalid_path", "That folder is outside the workspace.");
+  }
+}
+
+async function assertGitRepo(workspaceDir: string, dir: string): Promise<void> {
+  await assertRealpathWithin(workspaceDir, dir);
+  let entry;
+  try {
+    // lstat, NOT stat: a symlinked `.git` must never be followed. Git would
+    // then read/write a config outside the workspace (and the token helper
+    // would answer whatever remote that config names).
+    entry = await lstat(join(dir, ".git"));
   } catch (err) {
     if (!isErrnoException(err) || err.code !== "ENOENT") throw err;
+    throw new StudioGitError("not_a_repo", "This folder is not a git repository yet.");
   }
-  if (!isDir) {
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
     throw new StudioGitError("not_a_repo", "This folder is not a git repository yet.");
   }
 }
@@ -376,10 +451,117 @@ function firstLine(text: string): string {
   return text.trim().split("\n")[0]?.trim() ?? "";
 }
 
+/** Host + repo only: a clone URL may carry query credentials. */
+function displayRepo(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "file:") {
+      return `local/${basename(parsed.pathname).replace(/\.git$/i, "") || "repo"}`;
+    }
+    const parts = parsed.pathname
+      .replace(/\.git$/i, "")
+      .split("/")
+      .filter((part) => part !== "");
+    // owner/repo only: never the query, userinfo or a long path prefix.
+    const repo = parts.slice(-2).join("/");
+    return repo === "" ? parsed.host : `${parsed.host}/${repo}`;
+  } catch {
+    return "repository";
+  }
+}
+
+/**
+ * Force the transport settings a repository-controlled config must never be
+ * able to override: the remote URL, TLS verification and proxy usage.
+ */
+function hardenedRemoteArgs(url: string): string[] {
+  if (url.startsWith("file:")) return ["-c", `remote.origin.url=${url}`];
+  return [
+    // Override `remote.origin.url` for this invocation only: the value comes
+    // from the validated config/origin we read, never from an agent edit made
+    // between the read and the fetch.
+    "-c",
+    `remote.origin.url=${url}`,
+    // `http.<url>.sslVerify` is MORE specific than `http.sslVerify`, so set
+    // both. A repo-level `sslVerify=false` would otherwise disable TLS.
+    "-c",
+    "http.sslVerify=true",
+    "-c",
+    `http.${url}.sslVerify=true`,
+    // A repo-level proxy would route the request (and its token) elsewhere.
+    "-c",
+    "http.proxy=",
+    "-c",
+    `http.${url}.proxy=`,
+    "-c",
+    "remote.origin.proxy=",
+  ];
+}
+
+/**
+ * Read `remote.origin.url`, canonicalize it against the same allowlist used
+ * for clone, and return the URL the fetch must use. Anything off-list (an
+ * agent-edited `.git/config`, a proxy URL, a credential-bearing URL) is
+ * refused before git runs.
+ */
+async function canonicalOrigin(
+  run: (args: string[], cwd: string, timeoutMs?: number) => Promise<GitCommandResult>,
+  dir: string,
+  opts: { allowLocalUrls?: boolean; allowedHosts?: readonly string[] },
+): Promise<string> {
+  const res = await run(["config", "--get", "remote.origin.url"], dir);
+  const raw = res.stdout.trim();
+  if (res.code !== 0 || raw === "") {
+    throw new StudioGitError("fetch_failed", "This repository has no remote configured.");
+  }
+  let canonical: string;
+  try {
+    canonical = normalizeRepoUrl(raw, opts);
+  } catch {
+    throw new StudioGitError(
+      "fetch_failed",
+      "The repository remote is not an approved git host. Rebind the repository in Studio.",
+    );
+  }
+
+  // Git applies `url.<base>.insteadOf` rewrites from the repo config BEFORE
+  // contacting a remote. An agent could set `insteadOf = https://github.com/`
+  // and have our "canonical" URL rewritten to an attacker host. `remote
+  // get-url` shows the effective (rewritten) URL, so compare it and refuse.
+  const effective = await run(["remote", "get-url", "--all", "origin"], dir);
+  if (effective.code !== 0) {
+    throw new StudioGitError("fetch_failed", "This repository has no remote configured.");
+  }
+  const effectiveUrls = effective.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  for (const effectiveUrl of effectiveUrls) {
+    let normalized: string;
+    try {
+      normalized = normalizeRepoUrl(effectiveUrl, opts);
+    } catch {
+      throw new StudioGitError(
+        "fetch_failed",
+        "The repository remote is not an approved git host. Rebind the repository in Studio.",
+      );
+    }
+    if (normalized !== canonical) {
+      throw new StudioGitError(
+        "fetch_failed",
+        "The repository remote is not an approved git host. Rebind the repository in Studio.",
+      );
+    }
+  }
+  return canonical;
+}
+
 export function createStudioGit(deps: StudioGitDeps): StudioGit {
   const runner = deps.runner ?? createSpawnGitRunner();
   const now = deps.now ?? (() => new Date());
   const log = deps.log ?? ((line: string) => console.log(line));
+  const allowedHosts = deps.allowedHosts ?? DEFAULT_GITHUB_HOSTS;
+  const repoOpts = { allowLocalUrls: deps.allowLocalUrls, allowedHosts };
 
   const baseEnv = (homeDir: string): Record<string, string> => ({
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
@@ -402,12 +584,14 @@ export function createStudioGit(deps: StudioGitDeps): StudioGit {
       logSafe: (line: string) => void;
       fail: (code: StudioGitErrorCode, message: string, stashRef?: string) => never;
     }) => Promise<T>,
+    /** Where to scan for persisted credentials; runs on success AND failure. */
+    leakCheck?: { repoDir: string; argv?: readonly string[] },
   ): Promise<T> => {
     const cred = await installGitCredential({
       homeDir: handle.homeDir,
       token,
       uid: handle.uid,
-      visibleHomeDir: handle.homeDir,
+      ...(deps.credentialDir !== undefined ? { helperDir: deps.credentialDir } : {}),
     });
     const env = { ...baseEnv(handle.homeDir), ...cred.env };
     const logSafe = (line: string): void => log(redactToken(line, token));
@@ -422,9 +606,25 @@ export function createStudioGit(deps: StudioGitDeps): StudioGit {
         uid: handle.uid,
         timeoutMs,
       });
+    let leakError: unknown;
     try {
       return await fn({ cred, env, run, logSafe, fail });
     } finally {
+      // Scan on EVERY exit path (failed clone, failed fetch, credential error):
+      // partial operations can persist a token just as easily as successful
+      // ones. The scan sees the pre-cleanup files, then disposal runs.
+      if (leakCheck !== undefined) {
+        try {
+          await assertNoCredentialLeak({
+            repoDir: leakCheck.repoDir,
+            homeDir: handle.homeDir,
+            token,
+            ...(leakCheck.argv !== undefined ? { argv: leakCheck.argv } : {}),
+          });
+        } catch (err) {
+          leakError = err;
+        }
+      }
       // Deleting the helper and clearing the env is unconditional — a failed
       // clone must not leave an askpass script (or a live token env) behind.
       // `env` is the merged object actually handed to the runner, so clear it
@@ -434,12 +634,13 @@ export function createStudioGit(deps: StudioGitDeps): StudioGit {
       delete env[GIT_ASKPASS_REQUIRE_ENV];
       delete env.OVID_GIT_USERNAME;
       await cred.dispose();
+      if (leakError !== undefined) throw leakError;
     }
   };
 
   return {
     async clone(req) {
-      const url = normalizeRepoUrl(req.repo, { allowLocalUrls: deps.allowLocalUrls });
+      const url = normalizeRepoUrl(req.repo, repoOpts);
       const requested = req.dest?.trim() ?? "";
       const relDir = safeRepoDirName(requested === "" ? defaultRepoDir(url) : requested);
       const handle = await deps.manager.attach(req.userId);
@@ -454,134 +655,157 @@ export function createStudioGit(deps: StudioGitDeps): StudioGit {
       const branch = req.branch?.trim() ?? "";
       if (branch !== "") assertSafeBranch(branch);
 
-      return withCredential(handle, req.token, async ({ run, logSafe, fail }) => {
-        const args = ["clone"];
-        if (branch !== "") args.push("--branch", branch);
-        args.push("--", url, relDir);
-        logSafe(`[studio-git] clone start: ${url} -> ${relDir}`);
-        const res = await run(args, handle.workspaceDir);
-        if (res.code !== 0) {
-          // The destination did not exist before this call, so removing a
-          // partial clone cannot destroy user data.
-          await removePartialClone(dest);
-          fail("clone_failed", `Could not clone the repository. ${firstLine(res.stderr)}`);
-        }
-        await assertNoCredentialLeak({ repoDir: dest, token: req.token, argv: args });
+      const args = ["clone"];
+      if (branch !== "") args.push("--branch", branch);
+      args.push("--", url, relDir);
 
-        const head = await run(["rev-parse", "--abbrev-ref", "HEAD"], dest);
-        const actualBranch = head.code === 0 ? head.stdout.trim() : branch;
-        logSafe(`[studio-git] clone ok: ${relDir} (${actualBranch})`);
-        return { status: "cloned" as const, repoDir: relDir, branch: actualBranch };
-      });
+      try {
+        return await withCredential(
+          handle,
+          req.token,
+          async ({ run, logSafe, fail }) => {
+            // Host + repo only: the full URL may carry query credentials.
+            logSafe(`[studio-git] clone start: ${displayRepo(url)} -> ${relDir}`);
+            const res = await run(args, handle.workspaceDir);
+            if (res.code !== 0) {
+              // Redacted stderr goes to the operator log; the user gets a
+              // fixed message (never internal hosts/paths from git).
+              logSafe(`[studio-git] clone failed: ${firstLine(res.stderr)}`);
+              fail("clone_failed", "Could not clone the repository. Check the address and your GitHub connection.");
+            }
+
+            const head = await run(["rev-parse", "--abbrev-ref", "HEAD"], dest);
+            const actualBranch = head.code === 0 ? head.stdout.trim() : branch;
+            logSafe(`[studio-git] clone ok: ${relDir} (${actualBranch})`);
+            return { status: "cloned" as const, repoDir: relDir, branch: actualBranch };
+          },
+          { repoDir: dest, argv: args },
+        );
+      } catch (err) {
+        // The destination did not exist before this call, so removing a
+        // partial clone cannot destroy user data. The leak scan above ran
+        // BEFORE this cleanup, so a token written by a failed clone is seen.
+        await removePartialClone(dest);
+        throw err;
+      }
     },
 
     async syncLatest(req) {
       const handle = await deps.manager.attach(req.userId);
       const dir = resolveWorkspaceDir(handle.workspaceDir, req.repoDir);
-      await assertGitRepo(dir);
+      await assertGitRepo(handle.workspaceDir, dir);
 
-      return withCredential(handle, req.token, async ({ run, logSafe, fail }) => {
-        // Fetch is safe with any working-tree state; it never touches local
-        // files or branches (no --force, no prune of local refs beyond origin).
-        const fetched = await run(["fetch", "--prune", "origin"], dir);
-        if (fetched.code !== 0) {
-          fail("fetch_failed", `Could not reach the remote. ${firstLine(fetched.stderr)}`);
-        }
+      return withCredential(
+        handle,
+        req.token,
+        async ({ run, logSafe, fail }) => {
+          // The remote is repo-controlled. Re-derive it server-side, validate
+          // the host, and override `remote.origin.url` for this fetch only, so
+          // an agent-edited `.git/config` cannot redirect the token.
+          const origin = await canonicalOrigin(run, dir, repoOpts);
+          // Fetch is safe with any working-tree state; it never touches local
+          // files or branches (no --force, no prune of local refs beyond origin).
+          const fetched = await run([...hardenedRemoteArgs(origin), "fetch", "--prune", "origin"], dir);
+          if (fetched.code !== 0) {
+            logSafe(`[studio-git] fetch failed: ${firstLine(fetched.stderr)}`);
+            fail("fetch_failed", "Could not reach the remote. Check your connection and try again.");
+          }
 
-        const status = await run(["status", "--porcelain"], dir);
-        const dirty = status.stdout.trim() !== "";
-        const branchRes = await run(["rev-parse", "--abbrev-ref", "HEAD"], dir);
-        const branch = branchRes.code === 0 ? branchRes.stdout.trim() : "";
+          const status = await run(["status", "--porcelain"], dir);
+          const dirty = status.stdout.trim() !== "";
+          const branchRes = await run(["rev-parse", "--abbrev-ref", "HEAD"], dir);
+          const branch = branchRes.code === 0 ? branchRes.stdout.trim() : "";
 
-        const upstream = await run(
-          ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-          dir,
-        );
-        if (upstream.code !== 0) {
+          const upstream = await run(
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+            dir,
+          );
+          if (upstream.code !== 0) {
+            return {
+              status: "needs_merge" as const,
+              dirty,
+              behind: 0,
+              ahead: 0,
+              branch,
+              reason: "no_upstream" as const,
+              message: "This branch has no upstream. Publish it before syncing.",
+            };
+          }
+
+          const behindRes = await run(["rev-list", "--count", "HEAD..@{upstream}"], dir);
+          const aheadRes = await run(["rev-list", "--count", "@{upstream}..HEAD"], dir);
+          const behind = Number.parseInt(behindRes.stdout.trim(), 10) || 0;
+          const ahead = Number.parseInt(aheadRes.stdout.trim(), 10) || 0;
+
+          if (dirty) {
+            logSafe(`[studio-git] sync needs_merge: dirty worktree (${behind} behind)`);
+            return {
+              status: "needs_merge" as const,
+              dirty: true,
+              behind,
+              ahead,
+              branch,
+              reason: "dirty_worktree" as const,
+              message:
+                behind > 0
+                  ? "You have uncommitted changes. Commit or stash them before syncing."
+                  : "You have uncommitted changes. There is nothing new to pull.",
+            };
+          }
+
+          if (behind === 0) {
+            logSafe(`[studio-git] sync up_to_date: ${branch} (${ahead} ahead)`);
+            return {
+              status: "up_to_date" as const,
+              dirty: false,
+              behind: 0,
+              ahead,
+              branch,
+              message: ahead > 0 ? "Up to date. You have local commits to push." : "Up to date.",
+            };
+          }
+
+          // Fast-forward only when HEAD is an ancestor of upstream. A diverged
+          // history is a merge decision for the user, never ours.
+          const ancestor = await run(["merge-base", "--is-ancestor", "HEAD", "@{upstream}"], dir);
+          if (ancestor.code !== 0) {
+            logSafe(`[studio-git] sync needs_merge: diverged (${behind} behind, ${ahead} ahead)`);
+            return {
+              status: "needs_merge" as const,
+              dirty: false,
+              behind,
+              ahead,
+              branch,
+              reason: "diverged" as const,
+              message: "The remote and your branch have both changed. Review the diff to merge.",
+            };
+          }
+
+          const merged = await run(["merge", "--ff-only", "@{upstream}"], dir);
+          if (merged.code !== 0) {
+            logSafe(`[studio-git] sync merge failed: ${firstLine(merged.stderr)}`);
+            return {
+              status: "needs_merge" as const,
+              dirty: false,
+              behind,
+              ahead,
+              branch,
+              reason: "merge_failed" as const,
+              message: "Could not fast-forward. Review the diff to merge.",
+            };
+          }
+          logSafe(`[studio-git] sync ok: ${branch} fast-forwarded ${behind}`);
           return {
-            status: "needs_merge" as const,
-            dirty,
-            behind: 0,
-            ahead: 0,
-            branch,
-            reason: "no_upstream" as const,
-            message: "This branch has no upstream. Publish it before syncing.",
-          };
-        }
-
-        const behindRes = await run(["rev-list", "--count", "HEAD..@{upstream}"], dir);
-        const aheadRes = await run(["rev-list", "--count", "@{upstream}..HEAD"], dir);
-        const behind = Number.parseInt(behindRes.stdout.trim(), 10) || 0;
-        const ahead = Number.parseInt(aheadRes.stdout.trim(), 10) || 0;
-
-        if (dirty) {
-          logSafe(`[studio-git] sync needs_merge: dirty worktree (${behind} behind)`);
-          return {
-            status: "needs_merge" as const,
-            dirty: true,
+            status: "synced" as const,
+            dirty: false,
             behind,
             ahead,
             branch,
-            reason: "dirty_worktree" as const,
-            message:
-              behind > 0
-                ? "You have uncommitted changes. Commit or stash them before syncing."
-                : "You have uncommitted changes. There is nothing new to pull.",
+            message: `Updated to the latest ${behind} change${behind === 1 ? "" : "s"}.`,
           };
-        }
-
-        if (behind === 0) {
-          logSafe(`[studio-git] sync up_to_date: ${branch} (${ahead} ahead)`);
-          return {
-            status: "up_to_date" as const,
-            dirty: false,
-            behind: 0,
-            ahead,
-            branch,
-            message: ahead > 0 ? "Up to date. You have local commits to push." : "Up to date.",
-          };
-        }
-
-        // Fast-forward only when HEAD is an ancestor of upstream. A diverged
-        // history is a merge decision for the user, never ours.
-        const ancestor = await run(["merge-base", "--is-ancestor", "HEAD", "@{upstream}"], dir);
-        if (ancestor.code !== 0) {
-          logSafe(`[studio-git] sync needs_merge: diverged (${behind} behind, ${ahead} ahead)`);
-          return {
-            status: "needs_merge" as const,
-            dirty: false,
-            behind,
-            ahead,
-            branch,
-            reason: "diverged" as const,
-            message: "The remote and your branch have both changed. Review the diff to merge.",
-          };
-        }
-
-        const merged = await run(["merge", "--ff-only", "@{upstream}"], dir);
-        if (merged.code !== 0) {
-          logSafe(`[studio-git] sync merge failed: ${firstLine(merged.stderr)}`);
-          return {
-            status: "needs_merge" as const,
-            dirty: false,
-            behind,
-            ahead,
-            branch,
-            reason: "merge_failed" as const,
-            message: "Could not fast-forward. Review the diff to merge.",
-          };
-        }
-        await assertNoCredentialLeak({ repoDir: dir, token: req.token, argv: ["merge", "--ff-only"] });
-        logSafe(`[studio-git] sync ok: ${branch} fast-forwarded ${behind}`);
-        return {
-          status: "synced" as const,
-          dirty: false,
-          behind,
-          ahead,
-          branch,
-          message: `Updated to the latest ${behind} change${behind === 1 ? "" : "s"}.`,
-        };
-      });
+        },
+        { repoDir: dir },
+      );
     },
 
     async switchBranch(req) {
@@ -589,7 +813,7 @@ export function createStudioGit(deps: StudioGitDeps): StudioGit {
       const target = req.branch.trim();
       const handle = await deps.manager.attach(req.userId);
       const dir = resolveWorkspaceDir(handle.workspaceDir, req.repoDir);
-      await assertGitRepo(dir);
+      await assertGitRepo(handle.workspaceDir, dir);
 
       return withCredential(handle, req.token, async ({ run, logSafe, fail }) => {
         const currentRes = await run(["rev-parse", "--abbrev-ref", "HEAD"], dir);
@@ -611,7 +835,13 @@ export function createStudioGit(deps: StudioGitDeps): StudioGit {
         );
         let createTracking = false;
         if (local.code !== 0) {
-          const fetched = await run(["fetch", "origin", target], dir);
+          // Same hardening as sync: validate and override the remote instead
+          // of trusting the repo-controlled `origin`.
+          const origin = await canonicalOrigin(run, dir, repoOpts);
+          const fetched = await run(
+            [...hardenedRemoteArgs(origin), "fetch", "origin", target],
+            dir,
+          );
           if (fetched.code !== 0) {
             fail("switch_failed", `Could not find the branch "${target}" on the remote.`);
           }
@@ -672,7 +902,7 @@ export function createStudioGit(deps: StudioGitDeps): StudioGit {
               ? `Switched to ${target}. ${stashNote}`
               : `Switched to ${target}.`,
         };
-      });
+      }, { repoDir: dir });
     },
   };
 }
@@ -708,6 +938,71 @@ export type StudioGitOutcome =
   | { op: "sync"; result: StudioSyncResult }
   | { op: "switch_branch"; result: StudioSwitchResult };
 
+/** What a token resolver is allowed to know: never the token of another user. */
+export interface StudioGitTokenRequest {
+  userId: string;
+  /** Present for clone (the normalized repo address). */
+  repo?: string;
+  /** Present for sync/switch. */
+  repoDir?: string;
+}
+
+/**
+ * Resolves the token for ONE user (and, when known, one repository). Returning
+ * null MUST refuse the job — there is deliberately no deployment-wide
+ * fallback.
+ */
+export type StudioGitTokenResolver = (
+  req: StudioGitTokenRequest,
+) => Promise<string | null>;
+
+/** The minimal row shape the per-user GitHub resolver reads. */
+export interface GithubTokenSourceRow {
+  id: string;
+  curatedId: string | null;
+  enabled?: boolean;
+  secretsSealed: unknown;
+}
+
+/**
+ * Per-user GitHub token from the user's own curated `github` integration
+ * (the `GITHUB_TOKEN` secret, sealed with the worker's master key). The
+ * deployment's `GITHUB_API_TOKEN` is NEVER used here: it can read every
+ * private repo the deployment account can, so a job without a per-user token
+ * fails as `token_unavailable`.
+ */
+export function createPerUserGithubTokenResolver(opts: {
+  listServers: (userId: string) => Promise<readonly GithubTokenSourceRow[]>;
+  decrypt: (sealed: unknown, recordId: string) => string;
+}): StudioGitTokenResolver {
+  return async (req) => {
+    let rows: readonly GithubTokenSourceRow[];
+    try {
+      rows = await opts.listServers(req.userId);
+    } catch {
+      return null;
+    }
+    const row = rows.find(
+      (candidate) =>
+        candidate.enabled !== false &&
+        candidate.curatedId === "github" &&
+        candidate.secretsSealed != null,
+    );
+    if (row === undefined) return null;
+    try {
+      const secrets = JSON.parse(
+        opts.decrypt(row.secretsSealed, `mcp_servers:${row.id}`),
+      ) as unknown;
+      if (typeof secrets !== "object" || secrets === null) return null;
+      const token = (secrets as Record<string, unknown>).GITHUB_TOKEN;
+      return typeof token === "string" && token.trim() !== "" ? token.trim() : null;
+    } catch {
+      // A wrong key/forged envelope must refuse the job, not fall back.
+      return null;
+    }
+  };
+}
+
 /**
  * Wraps the git service for a queue consumer. The token is resolved per job
  * (gateway/mint own storage) and is never part of the job payload, the
@@ -715,12 +1010,16 @@ export type StudioGitOutcome =
  */
 export function createStudioGitProcessor(opts: {
   git: StudioGit;
-  tokenFor: (job: StudioGitJob) => Promise<string | null>;
+  tokenFor: StudioGitTokenResolver;
   log?: (line: string) => void;
 }): (job: StudioGitJob) => Promise<StudioGitOutcome> {
   const log = opts.log ?? ((line: string) => console.log(line));
   return async (job) => {
-    const token = await opts.tokenFor(job);
+    const token = await opts.tokenFor({
+      userId: job.userId,
+      ...(job.op === "clone" ? { repo: job.repo } : {}),
+      ...(job.op !== "clone" && job.repoDir !== undefined ? { repoDir: job.repoDir } : {}),
+    });
     if (token === null || token === "") {
       throw new StudioGitError(
         "token_unavailable",

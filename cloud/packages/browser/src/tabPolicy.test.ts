@@ -83,6 +83,18 @@ describe("agent-owned tabs (spec §8)", () => {
     expect(page.on).not.toHaveBeenCalled(); // never instrumented
   });
 
+  it("an actor-less addTab is refused (tab creation is never opt-in by default)", () => {
+    const registry = registryWithSession();
+    const before = registry.get("s1")!.tabs.length;
+    const page = stubPage();
+
+    expect(() => registry.addTab("s1", page as unknown as Page)).toThrow(
+      BrowserTabCreationForbiddenError,
+    );
+    expect(registry.get("s1")!.tabs).toHaveLength(before);
+    expect(page.on).not.toHaveBeenCalled();
+  });
+
   it("createTabAsUser always throws, even for an unknown session", () => {
     const registry = registryWithSession();
     expect(() => registry.createTabAsUser("s1")).toThrow(BrowserTabCreationForbiddenError);

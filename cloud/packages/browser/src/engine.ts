@@ -64,7 +64,7 @@ import {
   type SessionOps,
 } from "./sessionOps.js";
 import { createBrowserSessionRegistry, type BrowserSessionRegistry, type SessionBrowser } from "./sessions.js";
-import type { StorageStatePersistence } from "./stateStore.js";
+import { STATE_ID_RE, type StorageStatePersistence } from "./stateStore.js";
 import type { StorageState } from "./storageState.js";
 import { createBrowserTools } from "./tools/definitions.js";
 import type {
@@ -144,6 +144,47 @@ export interface BrowserEngine {
 /** The 10 s screencast-follow/load monitor cadence (unref'd — never holds the process open). */
 const MONITOR_INTERVAL_MS = 10_000;
 
+/**
+ * The session workspace path from raw ids. Both components come from the
+ * caller and land in a filesystem path, so they are held to the stateStore's
+ * id regex — `../` (or any separator) can never escape the workspaces root.
+ */
+export function workspacePathFor(root: string, userId: string, sessionId: string): string {
+  if (!STATE_ID_RE.test(userId)) {
+    throw new Error(
+      `browser workspace: userId must match /^[A-Za-z0-9_-]{1,64}$/ (got ${JSON.stringify(userId)})`,
+    );
+  }
+  if (!STATE_ID_RE.test(sessionId)) {
+    throw new Error(
+      `browser workspace: sessionId must match /^[A-Za-z0-9_-]{1,64}$/ (got ${JSON.stringify(sessionId)})`,
+    );
+  }
+  return join(root, userId, "sessions", sessionId);
+}
+
+export interface TakeoverOwnerState {
+  takeover: boolean;
+  takeoverViewerId: string | null;
+}
+
+/**
+ * Takeover is exclusive: an ENABLE is accepted only when no different holder
+ * already owns it, and an identified viewer must actually be attached to the
+ * browser. An actor-less legacy request (viewerId undefined) may still take
+ * over a free session, but can never displace an identified holder.
+ */
+export function canTakeOver(
+  session: TakeoverOwnerState,
+  viewerId: string | undefined,
+  isAttached: (id: string) => boolean,
+): boolean {
+  const holder = session.takeover ? session.takeoverViewerId : null;
+  if (holder !== null && holder !== (viewerId ?? null)) return false;
+  if (viewerId !== undefined && !isAttached(viewerId)) return false;
+  return true;
+}
+
 export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<BrowserEngine> {
   const cfg = deps.cfg;
   const persistence = deps.persistence;
@@ -155,7 +196,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     deps.workspaceDir ??
     (async (userId: string, sessionId: string) => {
       const root = process.env.OVID_WORKSPACES_ROOT ?? "/workspaces/users";
-      const dir = join(root, userId, "sessions", sessionId);
+      const dir = workspacePathFor(root, userId, sessionId);
       await mkdir(dir, { recursive: true });
       return dir;
     });
@@ -699,6 +740,24 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   }
 
   function onTakeover(sessionId: string, enabled: boolean, viewerId?: string): void {
+    if (enabled) {
+      const current = registry.get(sessionId);
+      if (current === null) {
+        publishState(sessionId);
+        return;
+      }
+      if (!canTakeOver(current, viewerId, (id) => bridge.hasViewer(sessionId, id))) {
+        // A different viewer already holds control, or the requester is not
+        // an attached viewer. Never silently steal or overwrite the holder.
+        log(
+          `refused takeover on session ${sessionId}: ${
+            viewerId === undefined ? "no viewer id" : `viewer ${viewerId} is not attached`
+          } or another viewer holds control`,
+        );
+        publishState(sessionId);
+        return;
+      }
+    }
     registry.setTakeover(sessionId, enabled, viewerId ?? null);
     // "Take control" resumes a headless stream and pauses agent actions (the
     // registry flag already refuses every browser_* tool). Releasing control

@@ -125,6 +125,9 @@ function fakeStore(lineages: Record<string, string[]> = {}) {
         .filter((s) => s.parent === parentSessionId)
         .map((s) => s.id);
     },
+    async countChildrenUnderRoot(rootSessionId) {
+      return [...sessionsById.values()].filter((s) => s.parent === rootSessionId).length;
+    },
   };
 
   return {
@@ -242,6 +245,10 @@ const AVAILABLE: ToolSpec[] = [
   "list_agents",
   "read_subagent_log",
   "report",
+  "schedule_create",
+  "schedule_list",
+  "browser_navigate",
+  "fetch_url",
 ].map(spec);
 
 function parentCtx(o: Partial<ToolContext> = {}): ToolContext {
@@ -297,6 +304,17 @@ function summaryOf(handle: ChildHandle) {
   return parsed.summary;
 }
 
+/** A valid five-key child answer (the only shape the parent accepts). */
+function contractText(keyFindings: string[]): string {
+  return JSON.stringify({
+    status: "completed",
+    files_modified: [],
+    artifacts_created: [],
+    key_findings: keyFindings,
+    error_if_any: null,
+  });
+}
+
 describe("subagentToolPolicy", () => {
   it("expands CC names eagerly and keeps MCP/prefix patterns", () => {
     const policy = subagentToolPolicy(["!Bash", "Edit", "mcp__srv__*", "Grep(x*)"]);
@@ -323,6 +341,31 @@ describe("subagentToolPolicy", () => {
       expect(subagentPolicyAllows(name, policy)).toBe(false);
       expect(CHILD_DENIED_TOOLS.has(name)).toBe(true);
     }
+  });
+
+  it("denies schedule_* to a child even when the policy explicitly allows it", () => {
+    // A child must not be able to self-confirm a persistent autonomous run.
+    const policy = subagentToolPolicy(["schedule_create", "schedule_update", "*"]);
+    for (const name of ["schedule_create", "schedule_update", "schedule_delete"]) {
+      expect(subagentPolicyAllows(name, policy), name).toBe(false);
+    }
+  });
+
+  it("default-denies credentials/egress but re-admits an explicitly allowlisted tool", () => {
+    // Inheritance (no tools list) is NOT an allowlist for the sensitive class.
+    const inherit = subagentToolPolicy([]);
+    for (const name of ["fetch_url", "browser_navigate", "mcp__srv__ping", "plugin__x__y"]) {
+      expect(subagentPolicyAllows(name, inherit), name).toBe(false);
+    }
+    // A bare wildcard does not open the sensitive class either.
+    const wildcard = subagentToolPolicy(["*"]);
+    expect(subagentPolicyAllows("fetch_url", wildcard)).toBe(false);
+    expect(subagentPolicyAllows("browser_navigate", wildcard)).toBe(false);
+    // An explicit per-dispatch allow (name or pattern) does.
+    const explicit = subagentToolPolicy(["fetch_url", "mcp__srv__*"]);
+    expect(subagentPolicyAllows("fetch_url", explicit)).toBe(true);
+    expect(subagentPolicyAllows("mcp__srv__ping", explicit)).toBe(true);
+    expect(subagentPolicyAllows("browser_navigate", explicit)).toBe(false);
   });
 
   it("a disallowedTools specifier scopes the WHOLE CC tool", () => {
@@ -366,6 +409,29 @@ describe("projectChildRoster", () => {
     expect(names).not.toContain("read_subagent_log");
     expect(names).toContain("file_read");
   });
+
+  it("a child cannot see or call schedule_* (no self-confirmed autonomous runs)", () => {
+    // Even an explicit tools:["schedule_create"] cannot re-admit the scheduler.
+    const policy = subagentToolPolicy(["schedule_create", "schedule_list"]);
+    expect(subagentPolicyAllows("schedule_create", policy)).toBe(false);
+    const names = projectChildRoster(AVAILABLE, policy).map((t) => t.name);
+    expect(names).not.toContain("schedule_create");
+    expect(names).not.toContain("schedule_list");
+  });
+
+  it("credential/egress tools are dropped by inheritance and re-admitted only when allowlisted", () => {
+    const inherited = projectChildRoster(AVAILABLE, subagentToolPolicy([])).map((t) => t.name);
+    expect(inherited).not.toContain("browser_navigate");
+    expect(inherited).not.toContain("fetch_url");
+    expect(inherited).toContain("file_read");
+
+    const granted = projectChildRoster(
+      AVAILABLE,
+      subagentToolPolicy(["fetch_url", "file_read"]),
+    ).map((t) => t.name);
+    expect(granted).toEqual(["fetch_url", "file_read"]);
+    expect(granted).not.toContain("browser_navigate");
+  });
 });
 
 // ── dispatch: creation, events, roster, result ─────────────────────────────
@@ -374,7 +440,7 @@ describe("createSubagentSupervisor.dispatch", () => {
   it("creates a child session + run, emits started→completed, and returns the answer", async () => {
     const { fake, jobs, events, supervisor } = build({
       onRun: (job) => {
-        fake.setLastText(job.sessionId, "the answer");
+        fake.setLastText(job.sessionId, contractText(["the answer"]));
       },
     });
 
@@ -628,7 +694,7 @@ describe("follow-up turns", () => {
     let firstRun = true;
     const { engine, jobs } = fakeEngine(fake, {
       onRun: async (job) => {
-        fake.setLastText(job.sessionId, `answer:${job.prompt}`);
+        fake.setLastText(job.sessionId, contractText([`answer:${job.prompt}`]));
         if (firstRun) {
           firstRun = false;
           // Simulate a send_message that landed after the loop's last drain:
@@ -686,7 +752,7 @@ describe.skipIf(!TEST_DATABASE_URL)("createSubagentSupervisor (real postgres)", 
         await messages.append(db, {
           sessionId: job.sessionId,
           role: "assistant",
-          content: "real answer",
+          content: contractText(["real answer"]),
         });
         await runs.finish(db, job.runId, "completed");
       },

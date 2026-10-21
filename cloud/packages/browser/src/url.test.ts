@@ -1,7 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { BrowserEngineConfig } from "./config.js";
-import { assertPublicHost, createSsrfGuardedFetch, navigableUrlReason, SsrfError } from "./url.js";
+import {
+  assertPublicHost,
+  clearPinnedHosts,
+  createSsrfGuardedFetch,
+  navigableUrlReason,
+  pinPublicHost,
+  pinnedHostLookup,
+  resolvePublicHost,
+  SsrfError,
+} from "./url.js";
 
 const cfg = (over: Partial<BrowserEngineConfig> = {}): Pick<
   BrowserEngineConfig,
@@ -116,6 +125,37 @@ describe("createSsrfGuardedFetch", () => {
     const res = await guarded("https://203.0.113.9/");
     expect(res.status).toBe(200);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(fetchImpl).toHaveBeenCalledWith("https://203.0.113.9/");
+    expect(fetchImpl).toHaveBeenCalledWith("https://203.0.113.9/", { redirect: "manual" });
+  });
+
+  it("refuses a redirect to a private host without calling the transport for it", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: "http://169.254.169.254/latest/meta-data/" },
+        }),
+    );
+    const guarded = createSsrfGuardedFetch(cfg(), fetchImpl);
+    await expect(guarded("https://203.0.113.9/start")).rejects.toBeInstanceOf(SsrfError);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("DNS pinning (rebinding defence)", () => {
+  it("judges a vetted host by its pinned address, not a second resolution", async () => {
+    const config = cfg();
+    const vetted = await resolvePublicHost("https://ok.example/", config, async () => ["203.0.113.9"]);
+    pinPublicHost(config, vetted);
+    const lookup = pinnedHostLookup(config, async () => ["169.254.169.254"]);
+
+    expect(await lookup("ok.example")).toEqual(["203.0.113.9"]);
+    await expect(assertPublicHost("https://ok.example/", config, lookup)).resolves.toBeUndefined();
+
+    // Dropping the pin exposes the rebinding answer again — fail-closed.
+    clearPinnedHosts(config);
+    await expect(assertPublicHost("https://ok.example/", config, lookup)).rejects.toBeInstanceOf(
+      SsrfError,
+    );
   });
 });

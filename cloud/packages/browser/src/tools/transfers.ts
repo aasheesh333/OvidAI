@@ -17,6 +17,8 @@
  *   - MIME: downloads must declare an allowed attachment type (images,
  *     documents, text, archives, media — never active content or
  *     executables); uploads are typed by extension against the same policy.
+ *   - SSRF: redirects are followed MANUALLY and every hop is re-gated with
+ *     `assertPublicHost`, so a 302 to loopback/metadata is never fetched.
  *
  * `browser_download` shares the session's cookie jar (authenticated downloads
  * work without re-login). `browser_upload` hands an absolute, jailed path to
@@ -30,11 +32,14 @@ import { basename, join } from "node:path";
 import type { BrowserContext } from "playwright-core";
 import { z } from "zod";
 
+import type { BrowserEngineConfig } from "../config.js";
 import { guardUrl, withSession } from "../sessionOps.js";
+import { SsrfError, assertPublicHost, navigableUrlReason } from "../url.js";
 import {
   DOWNLOAD_MAX_BYTES,
   TRANSFER_MIME_ALLOWLIST,
   UPLOAD_MAX_BYTES,
+  isAllowedTransferFilename,
   isAllowedTransferMime,
   mimeTypeForFilename,
   normalizeMimeType,
@@ -60,6 +65,7 @@ export {
   DOWNLOAD_MAX_BYTES,
   TRANSFER_MIME_ALLOWLIST,
   UPLOAD_MAX_BYTES,
+  isAllowedTransferFilename,
   isAllowedTransferMime,
   mimeTypeForFilename,
   normalizeMimeType,
@@ -71,6 +77,12 @@ export type { WorkspacePathReason, WorkspacePathResult } from "./transferPolicy.
 
 /** Fetch timeout for explicit downloads. */
 const DOWNLOAD_TIMEOUT_MS = 30_000;
+
+/** Redirect hops an explicit download may follow before refusing. */
+const DOWNLOAD_MAX_REDIRECTS = 5;
+
+/** Status codes that start a redirect chain (fetch `redirect: "manual"`). */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 /** Model-facing copy for a refused upload path. */
 function uploadPathRefusal(reason: WorkspacePathReason, relPath: string): string {
@@ -99,57 +111,25 @@ interface BoundedResponse {
   tooLarge: boolean;
   /** Non-null when the declared type is outside TRANSFER_MIME_ALLOWLIST. */
   refusedMime: string | null;
+  /** The last URL in the redirect chain (the one whose body was read). */
+  finalUrl: string;
 }
 
-/**
- * GET `url` with the context's cookies, reading at most `maxBytes` of body.
- * `tooLarge` short-circuits before the body is touched when Content-Length
- * declares more than the cap, and aborts mid-stream when it does not.
- * Disallowed content types are refused before the body is read.
- */
-async function boundedGet(
-  context: BrowserContext,
-  url: string,
+/** Read at most `maxBytes` from an already-gated response. */
+async function readBoundedBody(
+  response: Response,
+  base: { status: number; ok: boolean; contentType: string },
   maxBytes: number,
+  controller: AbortController,
 ): Promise<BoundedResponse> {
-  const cookies = await context.cookies(url);
-  const cookieHeader = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
-  const controller = new AbortController();
-
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      headers: cookieHeader !== "" ? { cookie: cookieHeader } : {},
-      // Redirects keep the pre-existing T12 behavior (guardUrl gates the
-      // initial URL only; Task 16's nftables egress rules are the backstop).
-      redirect: "follow",
-      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)]),
-    });
-  } catch (err) {
-    throw new Error(`download failed: ${messageOf(err)}`);
-  }
-
-  const base = {
-    status: response.status,
-    ok: response.ok,
-    contentType: normalizeMimeType(response.headers.get("content-type")),
-  };
-  if (!response.ok) return { ...base, body: null, tooLarge: false, refusedMime: null };
-
-  if (!isAllowedTransferMime(base.contentType)) {
-    controller.abort();
-    await response.body?.cancel().catch(() => {});
-    return { ...base, body: null, tooLarge: false, refusedMime: base.contentType };
-  }
-
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
     controller.abort();
-    return { ...base, body: null, tooLarge: true, refusedMime: null };
+    return { ...base, body: null, tooLarge: true, refusedMime: null, finalUrl: response.url };
   }
 
   if (response.body === null) {
-    return { ...base, body: Buffer.alloc(0), tooLarge: false, refusedMime: null };
+    return { ...base, body: Buffer.alloc(0), tooLarge: false, refusedMime: null, finalUrl: response.url };
   }
 
   const reader = response.body.getReader();
@@ -164,7 +144,7 @@ async function boundedGet(
         // Stop the transfer at the boundary — never buffer the remainder.
         controller.abort();
         await reader.cancel().catch(() => {});
-        return { ...base, body: null, tooLarge: true, refusedMime: null };
+        return { ...base, body: null, tooLarge: true, refusedMime: null, finalUrl: response.url };
       }
       chunks.push(value);
     }
@@ -178,7 +158,84 @@ async function boundedGet(
     body: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))),
     tooLarge: false,
     refusedMime: null,
+    finalUrl: response.url,
   };
+}
+
+/**
+ * GET `url` with the context's cookies, reading at most `maxBytes` of body.
+ * Redirects are followed MANUALLY so every hop is re-gated with
+ * `assertPublicHost`: `redirect: "follow"` would validate only the first URL
+ * and happily fetch a 302 to loopback/the metadata service. Cookies are
+ * recomputed per hop, so the original site's cookies never follow a redirect
+ * to a different host. Disallowed content types are refused before the body
+ * is read; oversized bodies are aborted at the cap.
+ */
+async function boundedGet(
+  context: BrowserContext,
+  url: string,
+  maxBytes: number,
+  cfg: BrowserEngineConfig,
+): Promise<BoundedResponse> {
+  let current = url;
+  for (let hop = 0; hop <= DOWNLOAD_MAX_REDIRECTS; hop++) {
+    // Scheme + SSRF gate for THIS hop (including the first, so a caller that
+    // bypassed guardUrl still cannot reach a private address).
+    const schemeReason = navigableUrlReason(current, "browser_download");
+    if (schemeReason !== null) throw new SsrfError(schemeReason);
+    await assertPublicHost(current, cfg);
+
+    const cookies = await context.cookies(current);
+    const cookieHeader = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+    const controller = new AbortController();
+
+    let response: Response;
+    try {
+      response = await fetch(current, {
+        headers: cookieHeader !== "" ? { cookie: cookieHeader } : {},
+        redirect: "manual",
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)]),
+      });
+    } catch (err) {
+      throw new Error(`download failed: ${messageOf(err)}`);
+    }
+
+    const base = {
+      status: response.status,
+      ok: response.ok,
+      contentType: normalizeMimeType(response.headers.get("content-type")),
+    };
+
+    if (REDIRECT_STATUSES.has(response.status)) {
+      const location = response.headers.get("location");
+      controller.abort();
+      await response.body?.cancel().catch(() => {});
+      if (location === null || location === "") {
+        return { ...base, body: null, tooLarge: false, refusedMime: null, finalUrl: current };
+      }
+      let next: string;
+      try {
+        next = new URL(location, current).toString();
+      } catch {
+        throw new Error(`download failed: invalid redirect location from ${current}`);
+      }
+      current = next;
+      continue;
+    }
+
+    if (!response.ok) {
+      return { ...base, body: null, tooLarge: false, refusedMime: null, finalUrl: current };
+    }
+
+    if (!isAllowedTransferMime(base.contentType)) {
+      controller.abort();
+      await response.body?.cancel().catch(() => {});
+      return { ...base, body: null, tooLarge: false, refusedMime: base.contentType, finalUrl: current };
+    }
+
+    return readBoundedBody(response, base, maxBytes, controller);
+  }
+  throw new SsrfError(`download refused: more than ${DOWNLOAD_MAX_REDIRECTS} redirects`);
 }
 
 /** Default filename from a URL's last path segment, or null when absent/invalid. */
@@ -238,7 +295,13 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
 
       return withSession(deps, ctx, async (session) => {
         const limit = deps.downloadMaxBytes ?? DOWNLOAD_MAX_BYTES;
-        const response = await boundedGet(session.handle.context, url, limit);
+        let response: BoundedResponse;
+        try {
+          response = await boundedGet(session.handle.context, url, limit, deps.cfg);
+        } catch (err) {
+          if (err instanceof SsrfError) return { content: `Download refused: ${err.message}` };
+          throw err;
+        }
         if (!response.ok) {
           return { content: `${TOOL_ERROR_PREFIX}download failed: HTTP ${response.status} ${url}` };
         }
@@ -256,7 +319,8 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
         const name =
           requested !== undefined
             ? sanitizeFilename(requested)
-            : (defaultFilename(url) ?? `download-${deps.now?.() ?? Date.now()}`);
+            : (defaultFilename(response.finalUrl !== "" ? response.finalUrl : url) ??
+              `download-${deps.now?.() ?? Date.now()}`);
         if (name === null) return { content: "Download refused: invalid filename." };
 
         const root = await deps.workspaceDir(ctx.userId, artifactSessionId(ctx));

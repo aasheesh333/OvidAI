@@ -339,3 +339,114 @@ describe.skipIf(!chromiumExecutableExists())("BrowserPool", () => {
     expect(pool.stats()).toEqual({ browserAlive: true, live: 1, tier1: 0, queued: 0 });
   });
 });
+
+/**
+ * Per-request SSRF gate: no chromium needed — a fake browser captures the
+ * route handler so the handler can be driven directly.
+ */
+describe("BrowserPool context request guard", () => {
+  function cfg(): BrowserEngineConfig {
+    return {
+      maxLiveBrowsers: 1,
+      tier1FallbackContexts: 0,
+      idleEvictMs: 180_000,
+      maxTier1Processes: 1,
+      tier1TimeoutMs: 1_000,
+      maxActiveScreencasts: 1,
+      screencastDetachGraceMs: 0,
+      screencastLoadMax: 6,
+      screencast: { width: 800, height: 600, quality: 60, everyNthFrame: 2, maxFramesInFlight: 1 },
+      stateDir: null,
+      lightpandaBin: null,
+      allowHosts: [],
+      ownPublicIp: null,
+      blockHeavyResources: false,
+      chromiumArgs: [],
+    };
+  }
+
+  type Handler = (route: {
+    request(): { url(): string; resourceType(): string };
+    abort(code?: string): Promise<void>;
+    continue(): Promise<void>;
+  }) => Promise<void>;
+
+  async function rig(hostLookup: (host: string) => Promise<string[]>) {
+    const handlers: Handler[] = [];
+    const context = {
+      async route(_pattern: string, handler: Handler) {
+        handlers.push(handler);
+      },
+      async newPage() {
+        return {};
+      },
+      async close() {},
+    };
+    const browser = {
+      async newContext() {
+        return context;
+      },
+      on() {},
+      async close() {},
+    };
+    const pool = createBrowserPool(cfg(), {
+      launch: async () => browser as unknown as Browser,
+      sweepIntervalMs: 0,
+      hostLookup,
+    });
+    await pool.acquireLive("s1");
+    return { pool, handlers };
+  }
+
+  function mockRoute(url: string, resourceType = "document") {
+    return {
+      request: () => ({ url: () => url, resourceType: () => resourceType }),
+      abort: vi.fn(async () => {}),
+      continue: vi.fn(async () => {}),
+    };
+  }
+
+  it("aborts a request to a private host before the browser connects", async () => {
+    const { pool, handlers } = await rig(async () => ["203.0.113.9"]);
+    try {
+      expect(handlers).toHaveLength(1);
+      const route = mockRoute("http://169.254.169.254/latest/meta-data/");
+      await handlers[0](route);
+      expect(route.abort).toHaveBeenCalledWith("blockedbyclient");
+      expect(route.continue).not.toHaveBeenCalled();
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it("aborts a redirect/subresource host that RESOLVES private at request time", async () => {
+    const { pool, handlers } = await rig(async (host) =>
+      host === "rebind.test" ? ["127.0.0.1"] : ["203.0.113.9"],
+    );
+    try {
+      const initial = mockRoute("http://203.0.113.9/");
+      await handlers[0](initial);
+      expect(initial.continue).toHaveBeenCalled();
+
+      // The 302 target is a fresh routed request: DNS now answers loopback.
+      const redirect = mockRoute("http://rebind.test/");
+      await handlers[0](redirect);
+      expect(redirect.abort).toHaveBeenCalledWith("blockedbyclient");
+      expect(redirect.continue).not.toHaveBeenCalled();
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it("lets a public request through to the network", async () => {
+    const { pool, handlers } = await rig(async () => ["203.0.113.9"]);
+    try {
+      const route = mockRoute("https://public.test/asset.js", "script");
+      await handlers[0](route);
+      expect(route.continue).toHaveBeenCalledTimes(1);
+      expect(route.abort).not.toHaveBeenCalled();
+    } finally {
+      await pool.close();
+    }
+  });
+});

@@ -1,5 +1,6 @@
 import { lookup as dnsLookup } from "node:dns/promises";
-import { isIP } from "node:net";
+import { request as httpsRequest } from "node:https";
+import { isIP, type LookupFunction } from "node:net";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { accountSettings, byokKeysRepo, newId, users, type ByokKeyRow, type Db } from "@ovid/db";
@@ -26,18 +27,36 @@ import { sendError, zodBadRequest } from "./http.js";
  *    same 404 (no existence leak).
  *  - `POST /byok/:id/test` validates the target (port allow-list + the
  *    canonical `isNonPublicAddress` classifier), then decrypts and probes the
- *    provider's `GET <endpoint>/models` with a 10 s timeout. The DNS check is
- *    ADVISORY, not binding: `fetch` resolves again at connect time, so the
- *    rebinding TOCTOU documented at the fetch below remains. Probe errors are
- *    sanitized; the result is persisted via byokKeysRepo.setTestResult.
+ *    provider's `GET <endpoint>/models` with a 10 s timeout. The validated
+ *    address is PINNED into the transport (see `pinnedLookup`): the TLS
+ *    handshake still targets the canonical host name (SNI + certificate
+ *    verification), but the TCP connect goes to exactly the address the SSRF
+ *    guard approved, so a second DNS answer cannot redirect it. Probe errors
+ *    are sanitized; the result is persisted via byokKeysRepo.setTestResult.
  *
  * All routes sit behind the gateway authHook; `request.principal.uid` is the
  * only owner identity ever used.
  */
 
+/** One probe request; `address` is the address the SSRF guard validated. */
+export interface ByokProbeRequest {
+  url: string;
+  apiKey: string;
+  address: string;
+  family: 4 | 6;
+}
+
+export interface ByokProbeResult {
+  ok: boolean;
+  status?: number;
+}
+
+/** The probe transport. Tests inject a stub; production pins the address. */
+export type ByokProbe = (request: ByokProbeRequest) => Promise<ByokProbeResult>;
+
 /** Injectable seams for the probe (never set by the composition root). */
 export interface ByokRouteOverrides {
-  fetchImpl?: typeof fetch;
+  probe?: ByokProbe;
   lookupHost?: (host: string) => Promise<string[]>;
 }
 
@@ -210,11 +229,16 @@ export function registerByokRoutes(app: FastifyInstance, deps: ByokDeps): void {
     // at all. Resolve the canonical endpoint's host and refuse private,
     // link-local, loopback, CGNAT and metadata targets before any fetch.
     let target: { host: string; port: number };
+    let pinned: { address: string; family: 4 | 6 } | null = null;
     try {
       target = probeTarget(row.endpoint);
       if (!ALLOWED_PROBE_PORTS.has(target.port)) throw new EndpointRejectedError();
       const addresses = await resolveAddresses(target.host, deps.lookupHost);
       if (addresses.some(isNonPublicAddress)) throw new EndpointRejectedError();
+      // Every answer is public (checked above); PIN the first one so the
+      // transport cannot resolve the host again at connect time.
+      const address = addresses[0]!;
+      pinned = { address, family: isIP(address) === 6 ? 6 : 4 };
     } catch (err) {
       if (err instanceof EndpointRejectedError) {
         await setTestResult(deps.db, row.id, false, request);
@@ -243,49 +267,26 @@ export function registerByokRoutes(app: FastifyInstance, deps: ByokDeps): void {
       return sendError(reply, 500, "internal", "BYOK key could not be decrypted.");
     }
 
-    // ── DNS-rebinding TOCTOU: accepted risk, documented (review M1) ───────
-    // The guard above resolves the host and refuses non-public answers, but
-    // `fetch` performs its OWN resolution at connect time. A resolver with a
-    // near-zero TTL (or an alternating answer set) can therefore return a
-    // public address to the check and a private/metadata address to the
-    // transport. This is the same remaining limit documented at the top of
-    // `@ovid/agent-core/src/ssrf.ts`; the resolution is advisory, not binding.
-    //
-    // Why the validated address is not pinned here: pinning needs a
-    // per-request DNS lookup (or connect-to-IP + Host/SNI split), which the
-    // WHATWG `fetch` surface does not expose. Doing it would require an
-    // undici Agent (not a gateway dependency) or node:https with a custom
-    // `lookup`, replacing the injectable `fetchImpl` seam the probe tests use
-    // and coupling the route to one transport. The exposure is bounded
-    // instead: the endpoint policy is HTTPS-ONLY (never widen it to http),
-    // TLS verification makes a rebind to an internal HTTP service
-    // (metadata/admin) fail the handshake unless it holds a certificate valid
-    // for the user's hostname, redirects are not followed, and the response
-    // body is cancelled unread below — only the status code is surfaced. The
-    // worst case is blind SSRF with no response or metadata read.
-    const fetchImpl = deps.fetchImpl ?? fetch;
+    // ── DNS pinning (rebinding TOCTOU closed) ─────────────────────────────
+    // The guard above resolved the host ONCE and refused every non-public
+    // answer. The transport below does not resolve again: its `lookup` always
+    // answers with `pinned.address`, so a near-zero TTL / alternating answer
+    // set cannot hand the check a public address and the connect a private
+    // one. TLS still verifies the CANONICAL host name (hostname + SNI), so a
+    // pinned internal-IP rebind cannot present a valid certificate either.
+    // Redirects are never followed and only the status code is surfaced.
+    const probe = deps.probe ?? pinnedHttpsProbe;
     let ok = false;
     let error: string | undefined;
     try {
-      const response = await fetchImpl(modelsUrl(row.endpoint), {
-        method: "GET",
-        // No redirect following: a public endpoint must not be able to bounce
-        // the probe into a private target (redirect-based SSRF).
-        redirect: "manual",
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          accept: "application/json",
-        },
-        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      const result = await probe({
+        url: modelsUrl(row.endpoint),
+        apiKey,
+        address: pinned!.address,
+        family: pinned!.family,
       });
-      ok = response.ok;
-      if (!ok) error = `HTTP ${response.status}`;
-      // Never read or forward the body (provider payloads may be large).
-      try {
-        await response.body?.cancel();
-      } catch {
-        /* already consumed/absent */
-      }
+      ok = result.ok;
+      if (!ok) error = `HTTP ${result.status ?? 0}`;
     } catch {
       error = "request_failed";
     }
@@ -361,6 +362,56 @@ function probeTarget(endpoint: string): { host: string; port: number } {
   if (host === "" || !Number.isInteger(port)) throw new EndpointRejectedError();
   return { host, port };
 }
+
+/**
+ * A DNS `lookup` for the probe transport that always returns the ONE address
+ * the SSRF guard validated. `https.request` still connects to `hostname` for
+ * SNI/Host/certificate purposes; only address resolution is replaced.
+ */
+export function pinnedLookup(address: string, family: 4 | 6): LookupFunction {
+  return ((_hostname: string, _options: unknown, callback: (err: null, address: string, family: number) => void) => {
+    callback(null, address, family);
+  }) as unknown as LookupFunction;
+}
+
+/**
+ * The production probe transport. node:https (not WHATWG fetch) so the
+ * validated address can be pinned through `lookup` while `hostname`/SNI keep
+ * the canonical provider name — closing the check-then-resolve rebinding
+ * window. Redirects are never followed; the body is discarded unread.
+ */
+export const pinnedHttpsProbe: ByokProbe = (request) => {
+  const url = new URL(request.url);
+  const port = url.port === "" ? 443 : Number(url.port);
+  return new Promise((resolve, reject) => {
+    const outgoing = httpsRequest(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port,
+        path: `${url.pathname}${url.search}`,
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${request.apiKey}`,
+          accept: "application/json",
+        },
+        lookup: pinnedLookup(request.address, request.family),
+        servername: url.hostname,
+        timeout: PROBE_TIMEOUT_MS,
+      },
+      (response) => {
+        const status = response.statusCode ?? 0;
+        // Never read or forward the body (provider payloads may be large):
+        // the status line is all the probe needs.
+        response.destroy();
+        resolve({ ok: status >= 200 && status < 300, status });
+      },
+    );
+    outgoing.on("timeout", () => outgoing.destroy(new Error("BYOK probe timed out")));
+    outgoing.on("error", reject);
+    outgoing.end();
+  });
+};
 
 async function resolveAddresses(
   host: string,

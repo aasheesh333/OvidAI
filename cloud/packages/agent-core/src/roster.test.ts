@@ -102,6 +102,18 @@ const FIXTURE_NAMES: string[] = [
   "ralph",
   "request_permission",
   "request_working_folder",
+  // scheduler surface (persistent autonomy — must never reach a child)
+  "schedule_create",
+  "schedule_update",
+  "schedule_delete",
+  "schedule_list",
+  // credential / egress surface (default-deny for children)
+  "fetch_url",
+  "web_search",
+  "repo_sync",
+  "git_push",
+  "session_search",
+  "session_read",
   // memory (harness + plain)
   "memory_save",
   "memory_search",
@@ -270,6 +282,10 @@ describe("computeToolRoster — subagent projection", () => {
         "dispatch_agent",
         "workflow",
         "ralph",
+        "schedule_create",
+        "schedule_update",
+        "schedule_delete",
+        "schedule_list",
       ].sort(),
     );
   });
@@ -286,6 +302,43 @@ describe("computeToolRoster — subagent projection", () => {
     expect(names.has("list_agents")).toBe(true);
     expect(names.has("interrupt_agent")).toBe(true);
     expect(names.has("report")).toBe(true);
+  });
+
+  it("a child can never be offered schedule_* (no self-confirmed autonomy)", () => {
+    const names = rosterNames(ctx({ isSubagent: true }));
+    for (const name of [
+      "schedule_create",
+      "schedule_update",
+      "schedule_delete",
+      "schedule_list",
+    ]) {
+      expect(names.has(name), `${name} must be denied to a child`).toBe(false);
+      expect(isToolPermitted(name, ctx({ isSubagent: true }))).toBe(false);
+    }
+    // The main agent keeps its scheduler surface.
+    expect(rosterNames(ctx()).has("schedule_create")).toBe(true);
+  });
+
+  it("default-denies the credential/egress class to a child", () => {
+    const names = rosterNames(ctx({ isSubagent: true }));
+    for (const name of [
+      "browser_navigate",
+      "browser_click",
+      "fetch_url",
+      "web_search",
+      "mcp__srv__ping",
+      "plugin__x__y",
+      "repo_sync",
+      "git_push",
+      "session_search",
+      "session_read",
+    ]) {
+      expect(names.has(name), `${name} must not reach a child by default`).toBe(false);
+    }
+    // The benign working set still inherits.
+    expect(names.has("file_read")).toBe(true);
+    expect(names.has("run_shell")).toBe(true);
+    expect(names.has("fs_edit")).toBe(true);
   });
 });
 

@@ -3,7 +3,12 @@ import type { FastifyInstance } from "fastify";
 import { byokKeysRepo, users, type Db } from "@ovid/db";
 import { createEnvelopeCrypto, byokRecordId } from "@ovid/escrow";
 import { buildGateway } from "../app.js";
-import { MAX_BYOK_KEYS_PER_USER } from "./byok.js";
+import {
+  MAX_BYOK_KEYS_PER_USER,
+  pinnedLookup,
+  type ByokProbe,
+  type ByokProbeRequest,
+} from "./byok.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
   authHeaders,
@@ -25,9 +30,25 @@ const MASTER_KEY_HEX = "ab7d31c4e59f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5
 const UUIDV7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const API_KEY = "sk-live-SENTINEL-do-not-leak-0001";
 
-interface FetchCall {
-  url: string;
-  init: RequestInit | undefined;
+interface ProbeStub {
+  calls: ByokProbeRequest[];
+  probe: ByokProbe;
+}
+
+/**
+ * Captures every request the route hands the transport. The PROBE seam is
+ * the transport boundary (node:https with the validated address pinned), so
+ * asserting on it is exactly how the SSRF pin is verified without network I/O.
+ */
+function stubProbe(behavior: { status?: number; throws?: boolean } = {}): ProbeStub {
+  const calls: ByokProbeRequest[] = [];
+  const probe: ByokProbe = async (request) => {
+    calls.push(request);
+    if (behavior.throws === true) throw new Error("probe transport down");
+    const status = behavior.status ?? 200;
+    return { ok: status >= 200 && status < 300, status };
+  };
+  return { calls, probe };
 }
 
 describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () => {
@@ -47,7 +68,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () =>
   });
 
   function makeApp(opts: {
-    fetchImpl?: typeof fetch;
+    probe?: ByokProbe;
     lookupHost?: (host: string) => Promise<string[]>;
     noCrypto?: boolean;
   } = {}): FastifyInstance {
@@ -62,7 +83,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () =>
       events: noopEvents,
       ...(opts.noCrypto ? {} : { crypto: createEnvelopeCrypto(MASTER_KEY_HEX) }),
       byok: {
-        ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+        ...(opts.probe ? { probe: opts.probe } : {}),
         ...(opts.lookupHost ? { lookupHost: opts.lookupHost } : {}),
       },
     });
@@ -233,12 +254,8 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () =>
 
   it("POST /:id/test probes GET <endpoint>/models with the key and persists the result", async () => {
     const uid = testUid("byok-test-ok");
-    const calls: FetchCall[] = [];
-    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
-      calls.push({ url: String(input), init });
-      return new Response('{"data":[]}', { status: 200 });
-    }) as typeof fetch;
-    const app = makeApp({ fetchImpl, lookupHost: async () => ["93.184.216.34"] });
+    const { calls, probe } = stubProbe();
+    const app = makeApp({ probe, lookupHost: async () => ["93.184.216.34"] });
 
     const created = await createKey(app, uid);
     const id = created.body.id as string;
@@ -252,8 +269,10 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () =>
 
     expect(calls.length).toBe(1);
     expect(calls[0]!.url).toBe("https://api.example.com/v1/models");
-    const headers = calls[0]!.init!.headers as Record<string, string>;
-    expect(headers.authorization).toBe(`Bearer ${API_KEY}`);
+    expect(calls[0]!.apiKey).toBe(API_KEY);
+    // DNS pin: the transport receives the address the guard validated.
+    expect(calls[0]!.address).toBe("93.184.216.34");
+    expect(calls[0]!.family).toBe(4);
     expect(JSON.stringify(res.body)).not.toContain(API_KEY);
 
     const row = await byokKeysRepo.get(db, id, uid);
@@ -263,8 +282,8 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () =>
 
   it("POST /:id/test maps a provider rejection to {ok:false, error} and persists false", async () => {
     const uid = testUid("byok-test-fail");
-    const fetchImpl = (async () => new Response("nope", { status: 401 })) as typeof fetch;
-    const app = makeApp({ fetchImpl, lookupHost: async () => ["93.184.216.34"] });
+    const { probe } = stubProbe({ status: 401 });
+    const app = makeApp({ probe, lookupHost: async () => ["93.184.216.34"] });
     const created = await createKey(app, uid);
     const id = created.body.id as string;
 
@@ -280,13 +299,9 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () =>
     expect(row!.lastTestAt).toBeInstanceOf(Date);
   });
 
-  it("SSRF: private/reserved/metadata targets → 400 endpoint_rejected with NO fetch", async () => {
+  it("SSRF: private/reserved/metadata targets → 400 endpoint_rejected with NO probe", async () => {
     const uid = testUid("byok-ssrf");
-    const calls: FetchCall[] = [];
-    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
-      calls.push({ url: String(input), init });
-      return new Response("{}", { status: 200 });
-    }) as typeof fetch;
+    const { calls, probe } = stubProbe();
 
     const targets: Array<{ endpoint: string; lookup?: string[]; label?: string }> = [
       { endpoint: "https://127.0.0.1/v1" },
@@ -333,7 +348,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () =>
     for (const target of targets) {
       const label = target.label ?? target.endpoint;
       const app = makeApp({
-        fetchImpl,
+        probe,
         lookupHost: async () => target.lookup ?? [],
       });
       const created = await createKey(app, uid, { endpoint: target.endpoint });
@@ -350,14 +365,51 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () =>
     expect(calls.length).toBe(0);
   });
 
+  it("SECURITY: DNS is resolved ONCE and the validated address is pinned into the transport", async () => {
+    const uid = testUid("byok-rebind");
+    // A rebinding resolver: the first answer is public, every later one is
+    // the cloud metadata address. The route must never ask twice, and the
+    // transport must receive the PUBLIC address it approved.
+    const answers = ["93.184.216.34", "169.254.169.254"];
+    let lookups = 0;
+    const lookupHost = async (): Promise<string[]> => {
+      const answer = answers[Math.min(lookups, answers.length - 1)]!;
+      lookups += 1;
+      return [answer];
+    };
+    const { calls, probe } = stubProbe();
+    const app = makeApp({ probe, lookupHost });
+
+    const created = await createKey(app, uid);
+    const res = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/byok/${created.body.id as string}/test`,
+      headers: authHeaders(uid),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    expect(lookups).toBe(1); // no second resolution anywhere
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.address).toBe("93.184.216.34");
+
+    // The production transport's lookup ignores the host name entirely: the
+    // connect can only ever reach the pinned address.
+    const pinned = pinnedLookup("93.184.216.34", 4);
+    const seen: unknown[] = [];
+    pinned(
+      "api.example.com",
+      {} as never,
+      ((err: null, address: string, family: number) => {
+        seen.push([err, address, family]);
+      }) as never,
+    );
+    expect(seen).toEqual([[null, "93.184.216.34", 4]]);
+  });
+
   it("probe rejects ports other than 443/80", async () => {
     const uid = testUid("byok-port");
-    const calls: FetchCall[] = [];
-    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
-      calls.push({ url: String(input), init });
-      return new Response("{}", { status: 200 });
-    }) as typeof fetch;
-    const app = makeApp({ fetchImpl, lookupHost: async () => ["93.184.216.34"] });
+    const { calls, probe } = stubProbe();
+    const app = makeApp({ probe, lookupHost: async () => ["93.184.216.34"] });
     const created = await createKey(app, uid, {
       endpoint: "https://api.example.com:8443/v1",
     });
@@ -400,12 +452,8 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () =>
 
   it("L5: an endpoint already ending in /models is not doubled", async () => {
     const uid = testUid("byok-models");
-    const calls: FetchCall[] = [];
-    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
-      calls.push({ url: String(input), init });
-      return new Response("{}", { status: 200 });
-    }) as typeof fetch;
-    const app = makeApp({ fetchImpl, lookupHost: async () => ["93.184.216.34"] });
+    const { calls, probe } = stubProbe();
+    const app = makeApp({ probe, lookupHost: async () => ["93.184.216.34"] });
 
     const created = await createKey(app, uid, {
       endpoint: "https://api.example.com/v1/models",

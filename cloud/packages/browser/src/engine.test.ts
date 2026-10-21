@@ -52,7 +52,7 @@ import {
 } from "@ovid/shared";
 
 import type { BrowserEngineConfig } from "./config.js";
-import { createBrowserEngine, type BrowserEngine } from "./engine.js";
+import { createBrowserEngine, canTakeOver, workspacePathFor, type BrowserEngine } from "./engine.js";
 import { chromiumExecutableExists } from "./pool.js";
 import { frameMagicFormat } from "./screencast.js";
 import { TAKEOVER_REFUSAL } from "./sessions.js";
@@ -771,5 +771,30 @@ describe("BrowserEngine uid-drop boot contract", () => {
     });
     await engine.close();
     expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("engine path + takeover hardening", () => {
+  it("workspacePathFor rejects ../ (and separators) in userId and sessionId", () => {
+    const root = "/workspaces/users";
+    expect(workspacePathFor(root, "u1", "chat-1")).toBe("/workspaces/users/u1/sessions/chat-1");
+    expect(() => workspacePathFor(root, "../escape", "chat-1")).toThrow(/userId/);
+    expect(() => workspacePathFor(root, "u1", "../escape")).toThrow(/sessionId/);
+    expect(() => workspacePathFor(root, "u/1", "chat-1")).toThrow(/userId/);
+    expect(() => workspacePathFor(root, "u1", "a".repeat(65))).toThrow(/sessionId/);
+  });
+
+  it("canTakeOver refuses a different holder and a non-attached viewer", () => {
+    const attached = new Set(["v1", "v2"]);
+    const held = { takeover: true, takeoverViewerId: "v1" };
+    expect(canTakeOver(held, "v1", (id) => attached.has(id))).toBe(true);
+    // v2 cannot steal control from v1.
+    expect(canTakeOver(held, "v2", (id) => attached.has(id))).toBe(false);
+    // A stale holder id can never be displaced either.
+    expect(canTakeOver(held, undefined, () => false)).toBe(false);
+    // No holder: an attached viewer may take over, a ghost viewer may not.
+    const free = { takeover: false, takeoverViewerId: null };
+    expect(canTakeOver(free, "v2", (id) => attached.has(id))).toBe(true);
+    expect(canTakeOver(free, "ghost", (id) => attached.has(id))).toBe(false);
   });
 });

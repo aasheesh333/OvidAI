@@ -73,6 +73,7 @@ function harness(opts: {
 
   const registry = {
     get: () => session,
+    getOwned: (_sessionId: string, userId: string) => (userId === session.userId ? session : null),
     touch: () => {},
     refuseReasonIfTakeover: () => null,
   } as unknown as BrowserSessionRegistry;

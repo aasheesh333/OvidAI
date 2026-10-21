@@ -10,7 +10,7 @@ import {
   DISPATCH_AGENT_TIMEOUT_MS,
 } from "./subagentTools.js";
 import type { ChildHandle, ChildStatus, DispatchArgs, SubagentSupervisor } from "../subagents.js";
-import { SubagentLimitError } from "../subagents.js";
+import { DEFAULT_SUBAGENT_MAX_RUNTIME_MS, SubagentLimitError } from "../subagents.js";
 import type { SubagentLogTail } from "../subagentLog.js";
 import type { ToolContext } from "../types.js";
 
@@ -152,7 +152,7 @@ function byName(list: ReturnType<typeof createSubagentTools>, name: string) {
 }
 
 describe("createSubagentTools — registration", () => {
-  it("registers the management tools; dispatch_agent pins 1_800_000 ms", () => {
+  it("registers the management tools; dispatch_agent waits past the 8 h child budget", () => {
     const list = tools({}).tools;
     expect(list.map((t) => t.spec.name)).toEqual([
       "dispatch_agent",
@@ -162,8 +162,11 @@ describe("createSubagentTools — registration", () => {
       "read_subagent_log",
       "report",
     ]);
-    expect(byName(list, "dispatch_agent").timeoutMs).toBe(1_800_000);
-    expect(DISPATCH_AGENT_TIMEOUT_MS).toBe(1_800_000);
+    // The dispatch call must not end before the supervisor's 8 h deadline can
+    // stop the child — otherwise the child keeps running detached.
+    expect(DISPATCH_AGENT_TIMEOUT_MS).toBeGreaterThan(DEFAULT_SUBAGENT_MAX_RUNTIME_MS);
+    expect(DISPATCH_AGENT_TIMEOUT_MS).toBeGreaterThan(1_800_000);
+    expect(byName(list, "dispatch_agent").timeoutMs).toBe(DISPATCH_AGENT_TIMEOUT_MS);
     // Cloud-reduced args only.
     const params = byName(list, "dispatch_agent").spec.parameters as {
       properties: Record<string, unknown>;
@@ -178,7 +181,7 @@ describe("createSubagentTools — registration", () => {
 });
 
 describe("dispatch_agent", () => {
-  it("returns the strict five-key JSON summary, never the bare report text", async () => {
+  it("returns the strict five-key JSON summary and rejects non-contract text", async () => {
     const { tools: list, dispatched } = tools({
       dispatch: async () =>
         handle({ status: "completed", result: "RFC 4180 quoting required" }),
@@ -199,15 +202,38 @@ describe("dispatch_agent", () => {
       "key_findings",
       "status",
     ]);
+    // Non-contract prose is never echoed up as a finding.
     expect(JSON.parse(result.content)).toMatchObject({
       status: "completed",
-      key_findings: ["RFC 4180 quoting required"],
+      key_findings: [],
     });
+    expect(JSON.parse(result.content).error_if_any).toContain("five-key");
+    expect(result.content).not.toContain("RFC 4180");
     expect(dispatched[0]).toEqual({
       prompt: "audit the CSV parser",
       tools: ["Read"],
       disallowedTools: ["Bash"],
       agentType: "reviewer",
+    });
+  });
+
+  it("adopts a child's contract JSON result", async () => {
+    const contract = JSON.stringify({
+      status: "completed",
+      files_modified: ["src/csv.ts"],
+      artifacts_created: [],
+      key_findings: ["RFC 4180 quoting required"],
+      error_if_any: null,
+    });
+    const { tools: list } = tools({
+      dispatch: async () => handle({ status: "completed", result: contract }),
+    });
+    const result = await byName(list, "dispatch_agent").execute({ prompt: "audit" }, ctx());
+    expect(JSON.parse(result.content)).toMatchObject({
+      status: "completed",
+      files_modified: ["src/csv.ts"],
+      key_findings: ["RFC 4180 quoting required"],
+      error_if_any: null,
     });
   });
 

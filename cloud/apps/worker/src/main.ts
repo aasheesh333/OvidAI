@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { Redis } from "ioredis";
-import { createDb, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
+import { createDb, dbPoolOptionsFromEnv, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, mcpOauthFlows, mcpServers as mcpServersRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
 import {
   createCloudCleanup,
   createFirebaseAdmin,
@@ -72,7 +72,11 @@ import { buildFileService } from "./fileService.js";
 import { createMcpRuntime } from "./mcpRuntime.js";
 import { createNotifier, createFcmPushSender } from "./notify.js";
 import { createPluginInstallProcessor } from "./pluginInstallProcessor.js";
-import { createStudioGit, createStudioGitProcessor } from "./studioGit.js";
+import {
+  createPerUserGithubTokenResolver,
+  createStudioGit,
+  createStudioGitProcessor,
+} from "./studioGit.js";
 import { createStudioGitWorker } from "./studioGitQueue.js";
 import { startWorkerPtyBridge } from "./ptyBridge.js";
 import { createSandboxPort, createStepLimiter } from "./sandboxAdapter.js";
@@ -113,6 +117,11 @@ export interface WorkerEnv {
   windowTokens: number;
   approvalTimeoutMs: number;
   githubToken: string | null;
+  /**
+   * Exact hosts a Studio git token may be presented to
+   * (OVID_GIT_ALLOWED_HOSTS, comma-separated; default github.com).
+   */
+  gitAllowedHosts: string[];
   runStaleMs: number;
   runQueueWaitMs: number;
   /** P4 Task 10: scheduler pass cadence (env OVID_SCHEDULER_TICK_MS). */
@@ -225,6 +234,20 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
       ? raw.OVID_ANTHROPIC_BASE!.trim()
       : DEFAULT_ANTHROPIC_BASE;
   const githubToken = raw.GITHUB_API_TOKEN?.trim();
+  // Studio git token egress allowlist. Defaults to github.com; a deployment
+  // running GitHub Enterprise must name its host explicitly.
+  const gitAllowedHosts = (() => {
+    const configured = raw.OVID_GIT_ALLOWED_HOSTS?.trim();
+    if (configured === undefined || configured === "") return ["github.com"];
+    const hosts = configured
+      .split(",")
+      .map((host) => host.trim().toLowerCase())
+      .filter((host) => host !== "");
+    if (hosts.length === 0) {
+      throw new Error("OVID_GIT_ALLOWED_HOSTS must list at least one host");
+    }
+    return hosts;
+  })();
   const windowTokens = positiveInt("OVID_WINDOW_TOKENS", DEFAULT_WINDOW_TOKENS);
   const approvalTimeoutMs = positiveInt(
     "OVID_APPROVAL_TIMEOUT_MS",
@@ -305,6 +328,7 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
     windowTokens,
     approvalTimeoutMs,
     githubToken: githubToken !== undefined && githubToken !== "" ? githubToken : null,
+    gitAllowedHosts,
     runStaleMs,
     runQueueWaitMs,
     schedulerTickMs,
@@ -644,16 +668,32 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
 
   // ---- P0: Studio git jobs (clone / sync / branch switch). ----------------
   // The credential helper + git service live in studioGit.ts; this registers
-  // the BullMQ consumer beside the other processors. The token is resolved per
-  // job (never in the payload): today the deployment's GITHUB_API_TOKEN is the
-  // only server-side source, so a worker without it fails jobs as
-  // `token_unavailable` instead of cloning anonymously. Per-user OAuth tokens
-  // replace the `tokenFor` seam when the gateway's store lands.
+  // the BullMQ consumer beside the other processors.
+  //
+  // SECURITY: tokens are resolved PER USER from the user's own curated GitHub
+  // integration. The deployment-wide GITHUB_API_TOKEN is never passed to git:
+  // it can read every private repo the deployment account can, so using it for
+  // arbitrary jobs would leak every user's repositories. A user without a
+  // token is refused (`token_unavailable`), never cloned anonymously.
+  //
+  // The job payload carries the userId, so Redis-level writers cannot forge a
+  // job: every payload is HMAC-signed with OVID_INTERNAL_API_SECRET.
+  const studioGitCrypto =
+    cfg.masterKey === null ? null : createEnvelopeCrypto(cfg.masterKey);
   const studioGitWorker = createStudioGitWorker({
     connection: { url: cfg.redisQUrl },
+    jobSecret: cfg.internalApiSecret,
     processor: createStudioGitProcessor({
-      git: createStudioGit({ manager }),
-      tokenFor: async () => cfg.githubToken,
+      git: createStudioGit({ manager, allowedHosts: cfg.gitAllowedHosts }),
+      tokenFor: createPerUserGithubTokenResolver({
+        listServers: (userId) => mcpServersRepo.list(db, userId),
+        decrypt: (sealed, recordId) => {
+          if (studioGitCrypto === null) {
+            throw new Error("OVID_MASTER_KEY is not configured");
+          }
+          return studioGitCrypto.decrypt(sealed as never, recordId);
+        },
+      }),
     }),
   });
   studioGitWorker.on("error", (err) => {

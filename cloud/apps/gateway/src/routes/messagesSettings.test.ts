@@ -4,7 +4,7 @@
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { sessionState, userPreferences, type Db } from "@ovid/db";
+import { sessionState, userPreferences, users, type Db } from "@ovid/db";
 import { buildGateway, type GatewayDeps } from "../app.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
@@ -88,9 +88,16 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1a send settings + preferences (real p
     return r[0]!.n as number;
   }
 
+  /** Manual model selection needs a plan that includes it (Plus/Pro). */
+  async function setTier(uid: string, tier: string): Promise<void> {
+    await users.ensure(db, uid, null);
+    await db.$client.unsafe("UPDATE users SET tier = $2 WHERE uid = $1", [uid, tier]);
+  }
+
   it("persists model/mode/planMode/presetId into agent state, mode on the job and the row, and echoes the model", async () => {
     const h = makeApp({ catalog });
     const uid = testUid("w1a-set");
+    await setTier(uid, "plus");
     const sid = await createSession(h, uid);
     const res = await send(h, uid, sid, {
       content: "hi",
@@ -136,6 +143,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1a send settings + preferences (real p
   it("unknown model while the catalog is known → 400 model_unavailable before mint or any write", async () => {
     const h = makeApp({ catalog });
     const uid = testUid("w1a-badmodel");
+    await setTier(uid, "plus");
     const sid = await createSession(h, uid);
     const res = await send(h, uid, sid, { content: "hi", model: "not-a-model" });
     expect(res.statusCode).toBe(400);
@@ -145,17 +153,72 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1a send settings + preferences (real p
     expect(await runCount(sid)).toBe(0);
   });
 
-  it("catalog unavailable → the model is accepted (documented fail-open)", async () => {
+  it("catalog unavailable → a manual model is refused (fail closed), nothing minted or written", async () => {
     const h = makeApp({
       catalog: async () => {
         throw new Error("redis down");
       },
     });
-    const uid = testUid("w1a-failopen");
+    const uid = testUid("w1a-failclosed");
+    await setTier(uid, "pro");
     const sid = await createSession(h, uid);
     const res = await send(h, uid, sid, { content: "hi", model: "anything-x" });
-    expect(res.statusCode).toBe(202);
-    expect((await sessionState.get(db, sid)).modelPin).toBe("anything-x");
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error.code).toBe("model_catalog_unavailable");
+    expect((await sessionState.get(db, sid)).modelPin).toBeNull();
+    expect(h.mint.calls).toHaveLength(0);
+    expect(h.adds).toHaveLength(0);
+    expect(await runCount(sid)).toBe(0);
+
+    // Auto never needs the catalog and still goes through.
+    const auto = await send(h, uid, sid, { content: "hi", model: "auto" });
+    expect(auto.statusCode).toBe(202);
+  });
+
+  it("SECURITY: a Free/Go direct API call cannot pin a manual model (server-side plan gate)", async () => {
+    const h = makeApp({ catalog });
+    for (const tier of ["free", "go"] as const) {
+      const uid = testUid(`w1a-plan-${tier}`);
+      await setTier(uid, tier);
+      const sid = await createSession(h, uid);
+      const mintBefore = h.mint.calls.length;
+      const addsBefore = h.adds.length;
+      const res = await send(h, uid, sid, { content: "hi", model: "glm-5.3" });
+      expect(res.statusCode, tier).toBe(403);
+      expect(res.json().error.code, tier).toBe("manual_model_not_allowed");
+      expect(res.json().error.message, tier).toMatch(/Plus or Ovid Pro/);
+      // Refused before key provisioning and every write.
+      expect(h.mint.calls, tier).toHaveLength(mintBefore);
+      expect(h.adds, tier).toHaveLength(addsBefore);
+      expect(await runCount(sid), tier).toBe(0);
+      expect((await sessionState.get(db, sid)).modelPin, tier).toBeNull();
+
+      // Auto (and its effort suffix) stays available on every plan.
+      const auto = await send(h, uid, sid, { content: "hi", model: "auto · high" });
+      expect(auto.statusCode, tier).toBe(202);
+      expect(auto.json().model, tier).toBe("auto");
+    }
+  });
+
+  it("SECURITY: a stale manual pin cannot be used by a downgraded account (no model on the turn)", async () => {
+    const h = makeApp({ catalog });
+    const uid = testUid("w1a-stalepin");
+    const sid = await createSession(h, uid);
+    // Pinned while the plan allowed it, then the account dropped to Free.
+    await sessionState.patch(db, sid, { modelPin: "glm-5.3" });
+
+    const denied = await send(h, uid, sid, { content: "hi" });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error.code).toBe("manual_model_not_allowed");
+    expect(h.mint.calls).toHaveLength(0);
+    expect(h.adds).toHaveLength(0);
+    expect(await runCount(sid)).toBe(0);
+    expect((await sessionState.get(db, sid)).modelPin).toBe("glm-5.3");
+
+    // Picking Auto clears the pin and the send proceeds.
+    const auto = await send(h, uid, sid, { content: "hi", model: "auto" });
+    expect(auto.statusCode).toBe(202);
+    expect((await sessionState.get(db, sid)).modelPin).toBeNull();
   });
 
   it("unknown presetId → 400 and nothing is persisted", async () => {
@@ -171,6 +234,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1a send settings + preferences (real p
   it("a failed mint persists no settings", async () => {
     const h = makeApp({ catalog, mintThrows: new Error("mint down") });
     const uid = testUid("w1a-mintfail");
+    await setTier(uid, "plus");
     const sid = await createSession(h, uid);
     const res = await send(h, uid, sid, { content: "hi", model: "glm-5.3", mode: "drive" });
     expect(res.statusCode).toBe(409);
@@ -182,6 +246,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 1a send settings + preferences (real p
   it("CH-010: a clientMsgId retry replays the original run with no second run and no re-persisted settings", async () => {
     const h = makeApp({ catalog });
     const uid = testUid("w1a-replay");
+    await setTier(uid, "plus");
     const sid = await createSession(h, uid);
     const first = await send(h, uid, sid, { content: "hi", clientMsgId: "k-1", model: "glm-5.3", mode: "safe" });
     expect(first.statusCode).toBe(202);

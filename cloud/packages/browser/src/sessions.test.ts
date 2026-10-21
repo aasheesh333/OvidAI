@@ -91,6 +91,14 @@ describe("BrowserSessionRegistry (unit — no chromium)", () => {
     expect(registry.get("missing")).toBe(null);
   });
 
+  it("getOwned returns the entry only to its owner", () => {
+    const registry = createBrowserSessionRegistry();
+    const s = registry.open({ sessionId: "s1", userId: "u1", handle: stubHandle(stubPage()) });
+    expect(registry.getOwned("s1", "u1")).toBe(s);
+    expect(registry.getOwned("s1", "u2")).toBe(null);
+    expect(registry.getOwned("missing", "u1")).toBe(null);
+  });
+
   it("close() removes the entry only — the POOL owns context closing (pool-ownership boundary)", () => {
     const registry = createBrowserSessionRegistry();
     const page = stubPage();
@@ -111,7 +119,7 @@ describe("BrowserSessionRegistry (unit — no chromium)", () => {
     const p1 = stubPage();
     const handle = stubHandle(p0);
     const s = registry.open({ sessionId: "s1", userId: "u1", handle });
-    registry.addTab("s1", p1 as unknown as Page);
+    registry.addTabForAgent("s1", p1 as unknown as Page);
     expect(s.activeIndex).toBe(1);
 
     // Invalid index.
@@ -127,7 +135,7 @@ describe("BrowserSessionRegistry (unit — no chromium)", () => {
 
     // Closing the ACTIVE tab with others left clamps to the last remaining.
     const p2 = stubPage();
-    registry.addTab("s1", p2 as unknown as Page); // tabs [p1, p2], active 1
+    registry.addTabForAgent("s1", p2 as unknown as Page); // tabs [p1, p2], active 1
     expect(registry.closeTab("s1", 1)).toBe(true); // close active p2
     expect(s.activeIndex).toBe(0);
     expect(s.tabs[0]).toBe(p1 as unknown as Page);
@@ -144,7 +152,7 @@ describe("BrowserSessionRegistry (unit — no chromium)", () => {
     const handle = stubHandle(p0);
     registry.open({ sessionId: "s1", userId: "u1", handle });
     const p1 = stubPage();
-    registry.addTab("s1", p1 as unknown as Page);
+    registry.addTabForAgent("s1", p1 as unknown as Page);
     expect(registry.switchTab("s1", 5)).toBe(false);
     expect(registry.switchTab("s1", -1)).toBe(false);
     expect(registry.switchTab("missing", 0)).toBe(false);
@@ -352,7 +360,7 @@ describe("BrowserSessionRegistry (unit — no chromium)", () => {
     const handle = stubHandle(p0);
     const s = registry.open({ sessionId: "s1", userId: "u1", handle });
     const p1 = stubPage();
-    registry.addTab("s1", p1 as unknown as Page);
+    registry.addTabForAgent("s1", p1 as unknown as Page);
     fire(p0, "console", { type: () => "log", text: () => "from-tab-0", location: () => null });
     fire(p1, "console", { type: () => "log", text: () => "from-tab-1", location: () => null });
     expect(s.console.map((e) => e.text)).toEqual(["from-tab-0", "from-tab-1"]);
@@ -486,7 +494,7 @@ describe.skipIf(!chromiumExecutableExists())("BrowserSessionRegistry (chromium)"
     const { handle, s } = await openSession(registry, "s1");
     await handle.page.goto(server.url("/"));
     const page2 = await handle.context.newPage();
-    const idx = registry.addTab("s1", page2);
+    const idx = registry.addTabForAgent("s1", page2);
     expect(idx).toBe(1);
     expect(s.tabs).toHaveLength(2);
     expect(s.activeIndex).toBe(1);
@@ -503,7 +511,7 @@ describe.skipIf(!chromiumExecutableExists())("BrowserSessionRegistry (chromium)"
     const { handle, s } = await openSession(registry, "s1");
     const original = handle.page;
     const page2 = await handle.context.newPage();
-    registry.addTab("s1", page2);
+    registry.addTabForAgent("s1", page2);
 
     expect(registry.closeTab("s1", 0)).toBe(true);
     await vi.waitFor(() => {

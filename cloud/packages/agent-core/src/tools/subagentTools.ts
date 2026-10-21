@@ -10,8 +10,10 @@
 //  • dispatch_agent args = {prompt, tools?, disallowedTools?, agentType?} —
 //    Dart's label/mode/run_in_background/continuable/persona/output-schema
 //    surface is cut. agentType maps subagent_type.
-//  • 30-minute timeout (1_800_000 ms) — cloud-only; Dart has no dispatch
-//    timeout (the child is bounded by its own turn loop).
+//  • The dispatch tool's OWN timeout is aligned with the child budget: the
+//    supervisor stops a child at DEFAULT_SUBAGENT_MAX_RUNTIME_MS (8 h) and
+//    this tool waits a grace period longer. A shorter tool timeout would end
+//    the parent's call while the 8-hour child kept running detached.
 //  • send_message/interrupt_agent default to the NEWEST RUNNING CHILD when no
 //    sessionId is given (a cloud convenience; Dart is handle-id based).
 //  • list_agents renders children of the CURRENT session.
@@ -27,6 +29,7 @@
 
 import type { EventSink } from "../ports.js";
 import {
+  DEFAULT_SUBAGENT_MAX_RUNTIME_MS,
   READ_SUBAGENT_LOG_TOOL_NAME,
   renderChildLine,
   subagentResultJson,
@@ -41,7 +44,14 @@ import {
 import type { SessionStateStore } from "../ports.js";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
 
-export const DISPATCH_AGENT_TIMEOUT_MS = 1_800_000;
+/**
+ * The dispatch tool's budget. It must EXCEED the supervisor's 8-hour child
+ * deadline: the supervisor is the component that knows how to stop the child
+ * (engine cancel + sandbox kill), so the tool must not win the race and leave
+ * the child running after the parent's call has already returned an error.
+ */
+export const DISPATCH_AGENT_TIMEOUT_MS =
+  DEFAULT_SUBAGENT_MAX_RUNTIME_MS + 2 * 60 * 1000;
 
 function argString(args: Record<string, unknown>, key: string): string {
   const value = args[key];
@@ -116,9 +126,10 @@ export function createSubagentTools(deps: {
             type: "array",
             items: { type: "string" },
             description:
-              "Restrict the child to these tools (default: everything except " +
-              "spawning and user-facing tools). [CC] names such as Read, Edit, " +
-              "Bash and MCP patterns are accepted.",
+              "Restrict the child to these tools. Sensitive tools (browser, " +
+              "MCP/plugin servers, web fetch/search, repo sync, scheduling) " +
+              "are denied to children unless named here explicitly. [CC] " +
+              "names such as Read, Edit, Bash and MCP patterns are accepted.",
           },
           disallowedTools: {
             type: "array",

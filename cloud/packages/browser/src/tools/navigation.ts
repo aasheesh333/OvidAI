@@ -134,7 +134,7 @@ function navigationSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
         await page.close().catch(() => {});
         return { content: `${TOOL_ERROR_PREFIX}navigation failed: ${messageOf(err)}` };
       }
-      const index = deps.registry.addTab(ctx.sessionId, page);
+      const index = deps.registry.addTabForAgent(ctx.sessionId, page);
       deps.notifyState?.(ctx.sessionId);
       return {
         content: `${await page.title()}\n${page.url()} (tab ${index} of ${session.tabs.length})`,
@@ -203,7 +203,7 @@ function navigationSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
     parameters: { type: "object", properties: {} },
     inputSchema: z.object({}),
     async execute(_input, ctx) {
-      const session = deps.registry.get(ctx.sessionId);
+      const session = deps.registry.getOwned(ctx.sessionId, ctx.userId);
       if (!session) return { content: "No tabs open." };
       const lines: string[] = [];
       for (let i = 0; i < session.tabs.length; i++) {

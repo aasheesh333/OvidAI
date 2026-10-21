@@ -71,6 +71,7 @@ async function harness(root: string): Promise<Harness> {
   } as unknown as SessionBrowser;
   const registry = {
     get: () => session,
+    getOwned: (_sessionId: string, userId: string) => (userId === session.userId ? session : null),
     touch: () => {},
     refuseReasonIfTakeover: () => null,
   } as unknown as BrowserSessionRegistry;
@@ -225,6 +226,7 @@ describe("browser file bridge (W4)", () => {
     await h.fireDownload({
       url: () => "https://example.test/data.csv",
       suggestedFilename: () => "data.csv",
+      page: () => (h.deps.registry.get("x") as SessionBrowser).tabs[0],
       path: async () => temp,
       saveAs: async (dest: string) => writeFile(dest, "page bytes"),
       delete: async () => {},
@@ -236,7 +238,7 @@ describe("browser file bridge (W4)", () => {
         userId: "u1",
         sessionId: "chat-1",
         path: "browser/downloads/data.csv",
-        mimeType: "application/octet-stream",
+        mimeType: "text/csv",
       },
     ]);
   });
@@ -380,5 +382,57 @@ describe("browser file bridge (W4)", () => {
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
+  });
+
+  it("refuses a redirect to a private address — only the vetted hop is fetched", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: "http://169.254.169.254/latest/meta-data/iam/security-credentials/" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const h = await harness(root);
+
+    const result = await exec(h, "browser_download", {
+      url: "http://127.0.0.1:1/start",
+      filename: "meta.txt",
+    });
+
+    expect(result.content).toContain("Download refused");
+    expect(result.content).toContain("non-public");
+    // The 302 target was never requested.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(root, "browser", "downloads", "meta.txt"))).toBe(false);
+    expect(h.vaultRegisters).toEqual([]);
+  });
+
+  it("follows an allowed redirect manually, re-gating each hop", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "http://127.0.0.1:1/start") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "http://127.0.0.1:1/final.txt" },
+        });
+      }
+      const body = Buffer.from("redirected bytes");
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/plain", "content-length": String(body.length) },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const h = await harness(root);
+
+    const result = await exec(h, "browser_download", {
+      url: "http://127.0.0.1:1/start",
+      filename: "final.txt",
+    });
+
+    expect(result.content).toContain("saved 16 bytes to browser/downloads/final.txt");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(await readFile(join(root, "browser/downloads/final.txt"), "utf8")).toBe("redirected bytes");
   });
 });

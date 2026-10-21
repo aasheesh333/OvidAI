@@ -15,7 +15,7 @@ import {
   stubSystemBus,
 } from "../test/stubs.js";
 import { OPEN_APP_SCRIPT, pageCsp, SHARES_HEADERS } from "./headers.js";
-import type { ShareAdmission } from "./routes.js";
+import type { ShareAdmission, ShareRateLimit } from "./routes.js";
 
 // Port of server/shares/tests/test_shares.py + parallel_shares_invariants.py.
 // Real Postgres, Fastify inject; the verifier is the gateway stub mapped onto
@@ -64,6 +64,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway legacy shares routes (real postgres
   interface AppOpts {
     now?: () => Date;
     admission?: ShareAdmission;
+    rateLimit?: ShareRateLimit;
   }
 
   function makeApp(opts: AppOpts = {}): FastifyInstance {
@@ -80,6 +81,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway legacy shares routes (real postgres
         baseUrl: BASE_URL,
         clock: opts.now ?? (() => BASE),
         ...(opts.admission ? { admission: opts.admission } : {}),
+        ...(opts.rateLimit ? { rateLimit: opts.rateLimit } : {}),
       },
     });
     built.push(app);
@@ -215,6 +217,62 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway legacy shares routes (real postgres
 
     const after = await create(app, uid, { request_id: "after-delete" });
     expect(after.statusCode).toBe(201);
+  });
+
+  it("SECURITY: parallel creates cannot exceed the active quota (count + insert in one transaction)", async () => {
+    const uid = testUid("share-quota-race");
+    const app = makeApp();
+    // One slot left: 99 active receipts already exist.
+    const rows = Array.from({ length: 99 }, (_, i) => ({
+      token: seedToken(),
+      ownerUid: uid,
+      sessionId: "session-1",
+      requestId: `seed-${i}`,
+      content: { messages: [{ role: "user", content: "seed" }] },
+      messageCount: 1,
+      createdAt: BASE,
+      expiresAt: new Date(BASE.getTime() + TTL_SECONDS * 1000),
+    }));
+    await db.insert(schema.shares).values(rows);
+
+    // Six simultaneous new requests: exactly ONE may win the last slot.
+    const responses = await Promise.all(
+      Array.from({ length: 6 }, (_, i) => create(app, uid, { request_id: `race-${i}` })),
+    );
+    const winners = responses.filter((r) => r.statusCode === 201);
+    const refused = responses.filter((r) => r.statusCode === 429);
+    expect(winners).toHaveLength(1);
+    expect(refused).toHaveLength(5);
+    for (const r of refused) expect(r.json()).toEqual({ detail: "share_limit_reached" });
+
+    const [count] = await db.$client`
+      SELECT count(*)::int AS n FROM shares
+      WHERE owner_uid = ${uid} AND revoked_at IS NULL AND content IS NOT NULL`;
+    expect(count!.n).toBe(100);
+  });
+
+  it("SECURITY: per-uid token bucket rate-limits share create and fork", async () => {
+    const uid = testUid("share-ratelimit");
+    const app = makeApp({ rateLimit: { capacity: 2, refillPerSecond: 0 } });
+
+    expect((await create(app, uid, { request_id: "rl-1" })).statusCode).toBe(201);
+    expect((await create(app, uid, { request_id: "rl-2" })).statusCode).toBe(201);
+    const third = await create(app, uid, { request_id: "rl-3" });
+    expect(third.statusCode).toBe(429);
+    expect(third.json()).toEqual({ detail: "rate_limited" });
+
+    // The bucket is per uid: another account still gets its own tokens.
+    expect((await create(app, testUid("share-ratelimit-bob"))).statusCode).toBe(201);
+
+    // Fork shares the same per-uid bucket, checked before any lookup.
+    const fork = await app.inject({
+      method: "POST",
+      url: `/shares/${"A".repeat(43)}/fork`,
+      headers: authHeaders(uid),
+      payload: { request_id: "fork-rate" },
+    });
+    expect(fork.statusCode).toBe(429);
+    expect(fork.json()).toEqual({ detail: "rate_limited" });
   });
 
   it("lifetime 1000 budget is not reset by revocation or expiry", async () => {

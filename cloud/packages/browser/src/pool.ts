@@ -26,6 +26,12 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import type { BrowserEngineConfig } from "./config.js";
 import type { StorageState } from "./storageState.js";
 import { prepareBrowserUidDrop, type BrowserUidDrop } from "./uidDrop.js";
+import {
+  assertPublicHost,
+  clearPinnedHosts,
+  pinnedHostLookup,
+  type HostLookup,
+} from "./url.js";
 
 export type PoolClass = "live" | "tier1";
 
@@ -80,6 +86,11 @@ export interface BrowserPoolOptions {
   now?(): number;
   /** Background evictIdle interval, default 30_000 (unref'd); 0 disables. */
   sweepIntervalMs?: number;
+  /**
+   * Test seam for the per-request SSRF gate. Production uses the resolver,
+   * except for hosts whose vetted addresses `guardUrl` pinned (DNS rebinding).
+   */
+  hostLookup?: HostLookup;
 }
 
 export interface BrowserPool {
@@ -255,19 +266,56 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
   ];
 
   /**
-   * Resource diet (Muse ephemeral-lease model). Media and fonts are the two
-   * heaviest categories that a page can load without changing what the agent
-   * reads, and ad/tracker hosts cost CPU and memory for nothing. Documents,
-   * scripts, stylesheets, XHR/fetch and images stay: the agent's DOM reads
-   * and screenshots depend on them.
+   * Per-request gate + resource diet (Muse ephemeral-lease model).
+   *
+   * ALWAYS installed (independent of `blockHeavyResources`): Playwright routes
+   * every context request — the initial `goto`, each redirect hop, every
+   * subresource/XHR and `browser_evaluate`'s fetches — through this handler, so
+   * a private/loopback/metadata target is aborted before Chromium connects.
+   * The route is the authoritative SSRF boundary; the tool-side `guardUrl`
+   * remains the fast, user-facing refusal.
+   *
+   * Media and fonts are the two heaviest categories that a page can load
+   * without changing what the agent reads, and ad/tracker hosts cost CPU and
+   * memory for nothing. Documents, scripts, stylesheets, XHR/fetch and images
+   * stay: the agent's DOM reads and screenshots depend on them. The diet is
+   * only applied when `cfg.blockHeavyResources` is on.
    *
    * Aborted requests are logged nowhere on purpose — a blocked ad must not
    * look like a page failure in the agent's network view.
    */
-  async function applyResourceDiet(context: BrowserContext): Promise<void> {
-    if (!cfg.blockHeavyResources) return;
-    await context.route("**/*", (route) => {
+  const guardedLookup = pinnedHostLookup(cfg, opts.hostLookup);
+
+  async function applyContextGuards(context: BrowserContext): Promise<void> {
+    await context.route("**/*", async (route) => {
       const request = route.request();
+
+      // Only network schemes can reach an SSRF target; data:/blob:/about:
+      // stay untouched (they never open a socket).
+      let protocol: string;
+      try {
+        protocol = new URL(request.url()).protocol;
+      } catch {
+        return route.abort("blockedbyclient");
+      }
+      if (
+        protocol === "http:" ||
+        protocol === "https:" ||
+        protocol === "ws:" ||
+        protocol === "wss:"
+      ) {
+        try {
+          // Pinned hosts are judged on the addresses `guardUrl` vetted; a
+          // redirect/subresource to a new host is resolved here, at request
+          // time, and fails closed on any non-public answer.
+          await assertPublicHost(request.url(), cfg, guardedLookup);
+        } catch {
+          return route.abort("blockedbyclient");
+        }
+      }
+
+      if (!cfg.blockHeavyResources) return route.continue();
+
       const type = request.resourceType();
       if (type === "media" || type === "font") {
         return route.abort();
@@ -297,7 +345,7 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
       ignoreHTTPSErrors: false,
       serviceWorkers: "block",
     });
-    await applyResourceDiet(context);
+    await applyContextGuards(context);
     return context;
   }
 
@@ -499,6 +547,8 @@ export function createBrowserPool(cfg: BrowserEngineConfig, opts: BrowserPoolOpt
       const b = browser;
       browser = null;
       browserAlive = false;
+      // Pins are per-config; this pool is the last consumer of them.
+      clearPinnedHosts(cfg);
       if (b) {
         try {
           await b.close();

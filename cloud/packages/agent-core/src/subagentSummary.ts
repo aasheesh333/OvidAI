@@ -39,6 +39,17 @@ export interface SubagentSummary {
 export const SUBAGENT_SUMMARY_TOKEN_BUDGET = 300;
 export const SUBAGENT_TRUNCATION_MARKER = "…[truncated]";
 
+/**
+ * The rejection message used when a child's final text is not the five-key
+ * contract JSON. SECURITY: non-contract text is untrusted prose — it may
+ * contain instructions aimed at the parent — so it is REJECTED as a finding
+ * rather than embedded verbatim. The runtime status always survives.
+ */
+export const SUBAGENT_NON_CONTRACT_ERROR =
+  "subagent output rejected: the final answer is not the required five-key " +
+  "JSON summary (status, files_modified, artifacts_created, key_findings, " +
+  "error_if_any).";
+
 const SUMMARY_STATUSES: ReadonlySet<string> = new Set<SubagentSummaryStatus>([
   "completed",
   "failed",
@@ -318,8 +329,11 @@ export function enforceSubagentTokenBudget(
  *
  * If the text is already a strict-contract JSON object it is adopted (the
  * runtime's terminal status always wins, because the runtime — not the model —
- * knows whether the run was cancelled/timed out). Otherwise the text becomes
- * a single key finding. Either way the 300-token budget is applied.
+ * knows whether the run was cancelled/timed out). Otherwise the text is
+ * REJECTED: non-contract prose is never copied into `key_findings`, because a
+ * child's transcript is untrusted data and must not smuggle instructions to
+ * the parent. The rejection is reported in `error_if_any` instead. Either way
+ * the 300-token budget is applied.
  */
 export function buildSubagentSummary(input: {
   status: SubagentSummaryStatus;
@@ -348,8 +362,11 @@ export function buildSubagentSummary(input: {
         key_findings: parsed.summary.key_findings,
         error_if_any: input.error ?? parsed.summary.error_if_any,
       };
-    } else if (input.keyFindings === undefined) {
-      base.key_findings = [text];
+    } else {
+      // Reject, never embed. Explicit findings passed by the caller are kept;
+      // the offending text itself is discarded.
+      base.key_findings = [...(input.keyFindings ?? [])];
+      base.error_if_any = input.error ?? SUBAGENT_NON_CONTRACT_ERROR;
     }
   }
 
@@ -357,7 +374,11 @@ export function buildSubagentSummary(input: {
   if (input.artifactsCreated !== undefined) {
     base.artifacts_created = [...input.artifactsCreated];
   }
-  if (input.error !== undefined) base.error_if_any = input.error;
+  // A runtime error (timeout/cancel/failed) wins over the child's own text;
+  // `null` means "no runtime error" and must not erase a rejection message.
+  if (input.error !== undefined && input.error !== null) {
+    base.error_if_any = input.error;
+  }
 
   return enforceSubagentTokenBudget(base);
 }

@@ -236,18 +236,27 @@ describe.skipIf(!chromiumExecutableExists())("browser tools II", () => {
   // Cookies
   // -------------------------------------------------------------------------
 
-  it("browser_cookies get/set/delete/clear round-trips", async () => {
+  it("browser_cookies get/set/delete/clear round-trips (values redacted)", async () => {
     await open("/setcookie");
-    expect((await exec("browser_cookies", { get: "login_tok" })).content).toBe("login_tok=abc123");
+    expect((await exec("browser_cookies", { get: "login_tok" })).content).toBe(
+      "login_tok=<redacted> (6 chars)",
+    );
 
     expect((await exec("browser_cookies", { set: "x=1; path=/" })).content).toBe("cookie set");
-    expect((await exec("browser_cookies", { get: "x" })).content).toBe("x=1");
+    expect((await exec("browser_cookies", { get: "x" })).content).toBe("x=<redacted> (1 chars)");
 
     expect((await exec("browser_cookies", { delete: "x" })).content).toBe("cookie deleted");
     expect((await exec("browser_cookies", { get: "x" })).content).toBe("no cookie named x");
 
     expect((await exec("browser_cookies", { clear: true })).content).toBe("all cookies cleared");
     expect((await exec("browser_cookies", { get: "login_tok" })).content).toBe("no cookie named login_tok");
+  });
+
+  it("browser_cookies set refuses a domain outside the active origin (cookie tossing)", async () => {
+    await open("/setcookie");
+    const result = await exec("browser_cookies", { set: "tossed=1; domain=.other.test; path=/" });
+    expect(result.content).toContain("does not match the active origin");
+    expect((await exec("browser_cookies", { get: "tossed" })).content).toBe("no cookie named tossed");
   });
 
   // -------------------------------------------------------------------------

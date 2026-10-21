@@ -22,9 +22,12 @@
 //      gate and roster both refuse dispatch_agent while planning; the union
 //      is the drift Dart's G4 test rejects) — and never a
 //      PLAN_HARD_DENIED_PREFIXES match;
-//   5. isSubagent → drop CHILD_DENIED_TOOLS (layer 2 of 3: a child never
-//      even SEES the spawn tools; management tools stay so it can talk to
-//      its parent and coordinate with siblings);
+//   5. isSubagent → drop CHILD_DENIED_TOOLS, the schedule_/device_ prefix
+//      classes and the default-deny credential/egress set (layer 2 of 3: a
+//      child never even SEES the spawn/user-facing/scheduler tools;
+//      management tools stay so it can talk to its parent and coordinate
+//      with siblings). Credential/egress tools can be re-admitted only by an
+//      explicit dispatch allowlist;
 //   6. preset: allowedTools non-empty → intersection (harness always kept);
 //      else deniedTools → subtraction;
 //   7. activeSkillScopes non-empty → intersect through nativeToolsFor —
@@ -57,6 +60,12 @@ export interface RosterContext {
 /// (no user is watching a child's session — it must not hijack the parent's
 /// composer with questions or plan reviews). The management tools —
 /// send_message, list_agents, interrupt_agent, report — deliberately stay.
+///
+/// SECURITY (SI spec §9 hardening): scheduling is also denied. A child must
+/// never be able to mint a persistent autonomous run (schedule_create with
+/// `confirmed:true`) on the user's behalf; scheduling needs a real user
+/// confirmation in an attended main-agent session. `CHILD_DENIED_PREFIXES`
+/// below catches future `schedule_*` tools too.
 export const CHILD_DENIED_TOOLS: ReadonlySet<string> = new Set([
   "ask_user_question",
   "exit_plan_mode",
@@ -65,7 +74,54 @@ export const CHILD_DENIED_TOOLS: ReadonlySet<string> = new Set([
   "dispatch_agent",
   "workflow",
   "ralph",
+  "schedule_create",
+  "schedule_update",
+  "schedule_delete",
+  "schedule_list",
 ]);
+
+/// Prefix classes a child may never use, even when the dispatch policy
+/// explicitly allows them. `device_*` is denied for every session (D5);
+/// `schedule_*` is the persistent-autonomy class (see above).
+export const CHILD_DENIED_PREFIXES: readonly string[] = ["schedule_", "device_"];
+
+/// Credential/egress classes that a child gets ONLY when the dispatch policy
+/// name-allowlists them (an omitted `tools` list, or a bare `*`, is not an
+/// allowlist). A child inherits the parent's credentials and network path, so
+/// browser control, MCP/plugin servers (stored credentials), web egress and
+/// repository sync are default-deny.
+export const CHILD_SENSITIVE_PREFIXES: readonly string[] = [
+  "browser_",
+  "mcp__",
+  "plugin__",
+];
+
+/// Exact-name members of the default-deny credential/egress set.
+export const CHILD_SENSITIVE_TOOLS: ReadonlySet<string> = new Set([
+  "fetch_url",
+  "web_search",
+  "repo_sync",
+  "repo_tree",
+  "git_clone",
+  "git_push",
+  "commit",
+  "preview",
+  "generate_image",
+  "session_search",
+  "session_read",
+]);
+
+/** Never allowed to a child, whatever the policy says. */
+export function isChildHardDeniedTool(name: string): boolean {
+  if (CHILD_DENIED_TOOLS.has(name)) return true;
+  return CHILD_DENIED_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+/** Sensitive (credentials/egress); needs an explicit per-dispatch allow. */
+export function isChildSensitiveTool(name: string): boolean {
+  if (CHILD_SENSITIVE_TOOLS.has(name)) return true;
+  return CHILD_SENSITIVE_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
 
 /// The GitHub-sync-gated pair (Dart `_repoToolNames`): without a connection
 /// the agent works purely in the local workspace.
@@ -102,8 +158,13 @@ export function isToolPermitted(name: string, ctx: RosterContext): boolean {
   if (!ctx.githubConnected && REPO_TOOLS.has(name)) return false;
   // 4. Plan mode: default-deny projection.
   if (ctx.planMode && !planRosterAdmits(name)) return false;
-  // 5. A subagent never sees the spawn or user-facing tools.
-  if (ctx.isSubagent && CHILD_DENIED_TOOLS.has(name)) return false;
+  // 5. A subagent never sees the spawn, user-facing, scheduling or
+  //    credential/egress classes. Sensitive tools are default-deny here; a
+  //    dispatch can re-admit one only through its explicit `tools` allowlist
+  //    (see subagentPolicyAllows in subagents.ts).
+  if (ctx.isSubagent && (isChildHardDeniedTool(name) || isChildSensitiveTool(name))) {
+    return false;
+  }
   // 6. Preset composition (allowlist keeps the harness; denylist subtracts).
   const preset = ctx.preset;
   if (preset) {

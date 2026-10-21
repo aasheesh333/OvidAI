@@ -6,7 +6,7 @@ import {
   type AttachmentUploadResponse,
 } from "@ovid/shared";
 import { buildGateway } from "../app.js";
-import type { AttachmentPresigner } from "./attachments.js";
+import type { AttachmentPresigner, AttachmentUploadConditions } from "./attachments.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
   authHeaders,
@@ -29,14 +29,15 @@ const UUIDV7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a
 interface PresignCall {
   key: string;
   ttlSeconds: number;
+  conditions?: AttachmentUploadConditions;
 }
 
 function stubPresigner(behavior: { fail?: boolean } = {}): AttachmentPresigner & { calls: PresignCall[] } {
   const calls: PresignCall[] = [];
   return {
     calls,
-    async presignPut(key, ttlSeconds) {
-      calls.push({ key, ttlSeconds });
+    async presignPut(key, ttlSeconds, conditions) {
+      calls.push({ key, ttlSeconds, ...(conditions !== undefined ? { conditions } : {}) });
       if (behavior.fail) throw new Error("presigner unavailable");
       return `https://r2.test/bucket/${encodeURIComponent(key)}?X-Signature=stub`;
     },
@@ -130,7 +131,13 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
 
     // Key layout pin (brief): users/{uid}/sessions/{sessionId}/uploads/{attachmentId}
     const expectedKey = `users/${uid}/sessions/${sid}/uploads/${body.attachmentId}`;
-    expect(presigner.calls).toEqual([{ key: expectedKey, ttlSeconds: 900 }]);
+    expect(presigner.calls).toEqual([
+      {
+        key: expectedKey,
+        ttlSeconds: 900,
+        conditions: { contentLength: 1234, contentType: "application/octet-stream" },
+      },
+    ]);
     expect(body.uploadUrl).toBe(`https://r2.test/bucket/${encodeURIComponent(expectedKey)}?X-Signature=stub`);
 
     // path is the workspace-relative uploads/{sanitizedName}
@@ -152,6 +159,40 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
       size: 1234,
       r2Key: expectedKey,
     });
+  });
+
+  it("SECURITY: the presigned PUT is bound to the declared size and media type", async () => {
+    const { app, presigner } = makeApp();
+    const uid = testUid("att-conditions");
+    const sid = await createSession(app, uid);
+
+    const res = await postAttachment(app, uid, sid, {
+      name: "photo.png",
+      size: 4321,
+      contentType: "image/png",
+    });
+    expect(res.statusCode).toBe(201);
+    expect(presigner.calls).toHaveLength(1);
+    expect(presigner.calls[0]!.conditions).toEqual({
+      contentLength: 4321,
+      contentType: "image/png",
+    });
+
+    // Only a canonical type/subtype token may be signed: a parameterized,
+    // header-injecting or malformed value is refused before any signing.
+    for (const contentType of [
+      "",
+      "image/png; charset=utf-8",
+      "nope",
+      "a/b/c",
+      "text/plain\r\nX-Injected: 1",
+      42,
+    ]) {
+      const bad = await postAttachment(app, uid, sid, { name: "x.png", size: 10, contentType });
+      expect(bad.statusCode, JSON.stringify(contentType)).toBe(400);
+      expect(bad.json().error.code).toBe("bad_request");
+    }
+    expect(presigner.calls).toHaveLength(1);
   });
 
   it("size over the 25 MB cap → 400 attachment_too_large; exactly 25_000_000 is allowed; nothing written over the cap", async () => {

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { reportsRepo, type Db } from "@ovid/db";
 import { z } from "zod";
 import type { AuthPrincipal, Verifier } from "../auth.js";
+import { sqlText } from "../sql.js";
 
 /**
  * Legacy `POST /v1/reports` — port of `server/reports/api.py`.
@@ -176,28 +177,49 @@ async function withAdmission<T>(
 }
 
 /**
+ * Dedup and the daily cap are checked and the row is inserted in ONE
+ * transaction, serialized per reporter by an advisory lock: parallel posts
+ * can no longer all read "49 so far" and then all insert.
+ *
  * Python checks `(reporter, request_id)` BEFORE the daily window, so a replay
- * still returns 200 at the limit (and never burns quota).
+ * still returns 200 at the limit (and never burns quota); that order is kept.
  */
-async function enforceDailyLimit(
+async function createReportWithinLimit(
   deps: ReportsDeps,
   uid: string,
-  requestId: string,
+  body: CreateReport,
   now: Date,
-): Promise<void> {
-  const existing = await deps.db.$client`
-    SELECT id FROM reports
-    WHERE reporter_uid = ${uid} AND request_id = ${requestId}
-    LIMIT 1`;
-  if (existing.length > 0) return;
-  const since = new Date(now.getTime() - DAY_SECONDS * 1000);
-  const [row] = await deps.db.$client`
-    SELECT count(*)::int AS n FROM reports
-    WHERE reporter_uid = ${uid} AND created_at > ${since.toISOString()}`;
-  const recent = Number((row as { n?: unknown } | undefined)?.n ?? 0);
-  if (recent >= (deps.dailyLimit ?? DEFAULT_DAILY_LIMIT)) {
-    throw new ReportsHttpError(429, "report_limit_reached");
-  }
+): Promise<{ id: string; created: boolean }> {
+  const limit = deps.dailyLimit ?? DEFAULT_DAILY_LIMIT;
+  return deps.db.transaction(async (tx) => {
+    await tx.execute(`SELECT pg_advisory_xact_lock(hashtext(${sqlText(`reports:${uid}`)}))`);
+    const existing = (await tx.execute(
+      `SELECT id FROM reports
+       WHERE reporter_uid = ${sqlText(uid)} AND request_id = ${sqlText(body.request_id)}
+       LIMIT 1`,
+    )) as unknown as unknown[];
+    if (existing.length === 0) {
+      const since = new Date(now.getTime() - DAY_SECONDS * 1000);
+      const rows = (await tx.execute(
+        `SELECT count(*)::int AS n FROM reports
+         WHERE reporter_uid = ${sqlText(uid)} AND created_at > ${sqlText(since.toISOString())}`,
+      )) as unknown as Array<{ n?: unknown }>;
+      const recent = Number(rows[0]?.n ?? 0);
+      if (recent >= limit) {
+        throw new ReportsHttpError(429, "report_limit_reached");
+      }
+    }
+    // Same transaction (nested savepoint): the row commits only with the cap.
+    return reportsRepo.create(tx as unknown as Db, uid, {
+      requestId: body.request_id,
+      kind: body.kind,
+      reason: body.reason,
+      details: body.details,
+      excerpt: body.excerpt,
+      targetId: body.target_id,
+      model: body.model,
+    });
+  });
 }
 
 export function registerReportsRoutes(app: FastifyInstance, deps: ReportsDeps): void {
@@ -226,18 +248,9 @@ export function registerReportsRoutes(app: FastifyInstance, deps: ReportsDeps): 
     scope.post("/v1/reports", async (request, reply) => {
       const principal = await requirePrincipal(request, deps.verifier);
       const body = parseCreateReport(request.body);
-      const result = await withAdmission(deps, principal, async (uid) => {
-        await enforceDailyLimit(deps, uid, body.request_id, nowOf(deps));
-        return reportsRepo.create(deps.db, uid, {
-          requestId: body.request_id,
-          kind: body.kind,
-          reason: body.reason,
-          details: body.details,
-          excerpt: body.excerpt,
-          targetId: body.target_id,
-          model: body.model,
-        });
-      });
+      const result = await withAdmission(deps, principal, (uid) =>
+        createReportWithinLimit(deps, uid, body, nowOf(deps)),
+      );
       return reply.code(result.created ? 201 : 200).send({ id: result.id });
     });
   });

@@ -131,6 +131,15 @@ describe("loadBrowserEngineConfig overrides", () => {
     expect(cfg.allowHosts).toEqual(["a.com", "b.com"]);
   });
 
+  it("ignores OVID_BROWSER_ALLOW_HOSTS in production (no SSRF bypass via env)", () => {
+    const cfg = loadBrowserEngineConfig({
+      NODE_ENV: "production",
+      OVID_BROWSER_EGRESS_UID: "230000",
+      OVID_BROWSER_ALLOW_HOSTS: "169.254.169.254, localhost",
+    });
+    expect(cfg.allowHosts).toEqual([]);
+  });
+
   it("OVID_BROWSER_STATE_DIR / OVID_LIGHTPANDA_BIN / OVID_PUBLIC_IP are honored", () => {
     const cfg = loadBrowserEngineConfig({
       OVID_BROWSER_STATE_DIR: "/var/lib/ovid/browser",

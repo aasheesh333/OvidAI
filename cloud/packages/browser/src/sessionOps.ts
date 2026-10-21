@@ -19,7 +19,7 @@ import type { BrowserPool } from "./pool.js";
 import type { BrowserSessionRegistry, SessionBrowser } from "./sessions.js";
 import type { StorageStatePersistence } from "./stateStore.js";
 import type { StorageState } from "./storageState.js";
-import { SsrfError, assertPublicHost, navigableUrlReason } from "./url.js";
+import { SsrfError, navigableUrlReason, pinPublicHost, resolvePublicHost } from "./url.js";
 import {
   BrowserToolFailure,
   messageOf,
@@ -84,15 +84,32 @@ function rememberUrl(sessionId: string, url: string): void {
   }
 }
 
+/** Refusal copy for a browser key reused by a different account. */
+function sessionOwnerRefusal(sessionId: string): BrowserToolFailure {
+  return new BrowserToolFailure(
+    `Browser session ${JSON.stringify(sessionId)} belongs to a different user — refusing to reuse it.`,
+  );
+}
+
 export async function ensureSession(ops: SessionOps, ctx: BrowserToolContext): Promise<SessionBrowser> {
   const existing = ops.registry.get(ctx.sessionId);
   if (existing) {
+    // The browser key is caller-supplied: the same key with a different user
+    // must never hand over another account's context, cookies or tabs.
+    if (existing.userId !== ctx.userId) throw sessionOwnerRefusal(ctx.sessionId);
     ops.registry.touch(ctx.sessionId);
     return existing;
   }
 
   const inFlight = opening.get(ctx.sessionId);
-  if (inFlight) return inFlight;
+  if (inFlight) {
+    // A concurrent open is keyed by the browser key only; the owner must
+    // still match before the shared handle is handed to this caller.
+    const shared = await inFlight;
+    if (shared.userId !== ctx.userId) throw sessionOwnerRefusal(ctx.sessionId);
+    ops.registry.touch(ctx.sessionId);
+    return shared;
+  }
 
   const promise = (async (): Promise<SessionBrowser> => {
     const storageState = ops.persistence ? await ops.persistence.restore(ctx.userId) : null;
@@ -102,6 +119,7 @@ export async function ensureSession(ops: SessionOps, ctx: BrowserToolContext): P
     // awaiting; reuse that entry rather than re-opening over it.
     const raced = ops.registry.get(ctx.sessionId);
     if (raced) {
+      if (raced.userId !== ctx.userId) throw sessionOwnerRefusal(ctx.sessionId);
       ops.registry.touch(ctx.sessionId);
       return raced;
     }
@@ -212,7 +230,9 @@ export async function guardUrl(
   if (relative) return null;
 
   try {
-    await assertPublicHost(url, cfg);
+    const verdict = await resolvePublicHost(url, cfg);
+    // Pin the vetted address set for the browser route layer (DNS rebinding).
+    pinPublicHost(cfg, verdict);
     return null;
   } catch (err) {
     if (err instanceof SsrfError) return `${toolName}: refused — ${err.message}`;

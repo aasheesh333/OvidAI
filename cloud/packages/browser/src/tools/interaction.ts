@@ -22,6 +22,7 @@ import { createHumanizer, type Humanizer, type Point } from "../humanInput.js";
 import { BrowserInputError, clampToViewport } from "../input.js";
 import { guardUrl, withSession } from "../sessionOps.js";
 import type { SessionBrowser } from "../sessions.js";
+import { cookieDomainMatchesOrigin, formatCookieForModel } from "./cookiePolicy.js";
 import {
   TOOL_ERROR_PREFIX,
   defineBrowserTool,
@@ -539,7 +540,7 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
   const cookies: BrowserToolSpec = {
     name: "browser_cookies",
     description:
-      'Read or modify the session cookies. Provide exactly one of: get:"name", set:"name=value; path=/", delete:"name", clear:true.',
+      'Read or modify the session cookies. Provide exactly one of: get:"name", set:"name=value; path=/", delete:"name", clear:true. get returns the cookie name with its value redacted; set is bound to the active origin.',
     parameters: {
       type: "object",
       properties: {
@@ -574,7 +575,7 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
         const all = await context.cookies();
         if (input.get !== undefined) {
           const found = all.find((cookie) => cookie.name === input.get);
-          return { content: found ? `${found.name}=${found.value}` : `no cookie named ${input.get}` };
+          return { content: found ? formatCookieForModel(found.name, found.value) : `no cookie named ${input.get}` };
         }
 
         const origin = safeOrigin(page.url());
@@ -585,15 +586,16 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
         if (input.set !== undefined) {
           const parsed = parseSetCookie(input.set);
           if (parsed === null) return { content: `${TOOL_ERROR_PREFIX}invalid cookie: ${input.set}` };
-          if (parsed.domain !== undefined) {
-            await context.addCookies([
-              { name: parsed.name, value: parsed.value, domain: parsed.domain, path: parsed.path ?? "/" },
-            ]);
-          } else {
-            await context.addCookies([
-              { name: parsed.name, value: parsed.value, url: origin + (parsed.path ?? "/") },
-            ]);
+          // Bind the write to the ACTIVE origin: a `domain=` for any other
+          // host is cookie tossing from the page the agent is on.
+          if (parsed.domain !== undefined && !cookieDomainMatchesOrigin(origin, parsed.domain)) {
+            return {
+              content: `${TOOL_ERROR_PREFIX}cookie domain ${parsed.domain} does not match the active origin`,
+            };
           }
+          await context.addCookies([
+            { name: parsed.name, value: parsed.value, url: origin + (parsed.path ?? "/") },
+          ]);
           return { content: "cookie set" };
         }
 
@@ -631,7 +633,7 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
     }),
     async execute(input, ctx) {
       const action: "read" | "accept" | "dismiss" = input.action;
-      const session: SessionBrowser | null = deps.registry.get(ctx.sessionId);
+      const session: SessionBrowser | null = deps.registry.getOwned(ctx.sessionId, ctx.userId);
       const entry = session?.dialogs[0];
       if (entry === undefined) return { content: "no pending dialog" };
       if (action === "read") return { content: `${entry.type}: ${entry.message}` };
@@ -651,7 +653,7 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
     },
     inputSchema: z.object({ action: z.enum(["read", "clear"]) }),
     async execute(input, ctx) {
-      const session = deps.registry.get(ctx.sessionId);
+      const session = deps.registry.getOwned(ctx.sessionId, ctx.userId);
       if (input.action === "clear") {
         if (session) session.console.length = 0;
         return { content: "console cleared" };
@@ -672,7 +674,7 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
     },
     inputSchema: z.object({ action: z.enum(["list", "clear"]) }),
     async execute(input, ctx) {
-      const session = deps.registry.get(ctx.sessionId);
+      const session = deps.registry.getOwned(ctx.sessionId, ctx.userId);
       if (input.action === "clear") {
         if (session) session.network.length = 0;
         return { content: "network log cleared" };
@@ -705,7 +707,7 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
         message: "url is required for action:open",
       }),
     async execute(input, ctx) {
-      const session = deps.registry.get(ctx.sessionId);
+      const session = deps.registry.getOwned(ctx.sessionId, ctx.userId);
       if (input.action === "clear") {
         if (session) session.popups.length = 0;
         return { content: "popups cleared" };
@@ -726,7 +728,7 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
           await page.close().catch(() => {});
           return { content: `${TOOL_ERROR_PREFIX}navigation failed: ${messageOf(err)}` };
         }
-        deps.registry.addTab(ctx.sessionId, page);
+        deps.registry.addTabForAgent(ctx.sessionId, page);
         deps.notifyState?.(ctx.sessionId);
         return { content: `opened ${url}` };
       });

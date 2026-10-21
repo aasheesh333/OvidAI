@@ -6,6 +6,8 @@ import {
   scheduleRuns,
   schedules,
   ScheduleError,
+  sessionState,
+  sessions,
   updateSchedule,
   users,
   type ScheduleRow,
@@ -22,6 +24,7 @@ import {
 } from "@ovid/shared";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import type { GatewayDeps } from "../app.js";
+import { assertModelAllowed, PlanGateError } from "../planGate.js";
 import {
   badRequest,
   isUuid,
@@ -96,6 +99,30 @@ async function publish(deps: GatewayDeps, uid: string, event: SystemEvent): Prom
   await deps.system.publish(uid, event);
 }
 
+/**
+ * P3 plan gate for scheduled runs. An occurrence executes the target
+ * session's model pin, so a Free/Go account must never schedule (or fire) a
+ * run pinned to a manual model — including an old pin left on the session by
+ * a downgraded plan. Auto always passes. Returns the typed refusal, or null.
+ */
+async function sessionModelDenial(
+  deps: GatewayDeps,
+  uid: string,
+  tier: string,
+  sessionId: string,
+): Promise<PlanGateError | null> {
+  const session = await sessions.get(deps.db, sessionId, uid);
+  if (session === null) return null; // ownership/404 is the service's job
+  const pin = (await sessionState.get(deps.db, sessionId)).modelPin;
+  try {
+    assertModelAllowed(tier, pin);
+    return null;
+  } catch (err) {
+    if (err instanceof PlanGateError) return err;
+    throw err;
+  }
+}
+
 export function registerScheduleRoutes(app: FastifyInstance, deps: GatewayDeps): void {
   app.post("/schedules", async (request, reply) => {
     const parsed = scheduleCreateRequestSchema.safeParse(request.body ?? {});
@@ -104,7 +131,14 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: GatewayDeps):
     const { uid, email } = request.principal;
     // Provision the users row FIRST: schedules.userId has an FK here, and the
     // service's cron gate re-reads the stored tier (it never trusts the body).
-    await users.ensure(deps.db, uid, email);
+    const user = await users.ensure(deps.db, uid, email);
+
+    // P3 plan gate: scheduling an existing chat must not smuggle its manual
+    // model pin past the send-time entitlement (Free/Go are Auto-only).
+    if (parsed.data.sessionId !== undefined) {
+      const denial = await sessionModelDenial(deps, uid, user.tier, parsed.data.sessionId);
+      if (denial !== null) return sendError(reply, denial.status, denial.code, denial.message);
+    }
 
     let row: ScheduleRow;
     try {
@@ -175,6 +209,14 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: GatewayDeps):
     if (!isUuid(id)) return notFound(reply, SCHEDULE_NOT_FOUND);
     const { uid } = request.principal;
 
+    // P3 plan gate BEFORE the occurrence is claimed: the run executes the
+    // session's model pin, and a Free/Go account may not run a manual model.
+    const owned = await schedules.get(deps.db, id, uid);
+    if (owned === null) return notFound(reply, SCHEDULE_NOT_FOUND);
+    const user = await users.ensure(deps.db, uid, null);
+    const denial = await sessionModelDenial(deps, uid, user.tier, owned.sessionId);
+    if (denial !== null) return sendError(reply, denial.status, denial.code, denial.message);
+
     let fired: Awaited<ReturnType<typeof runScheduleNow>>;
     try {
       fired = await runScheduleNow(deps.db, { userId: uid, scheduleId: id });
@@ -185,7 +227,7 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: GatewayDeps):
 
     const { schedule, runId, scheduleRun, prompt } = fired;
     const autonomy = schedule.autonomy as "safe" | "auto";
-    const tier = (await users.ensure(deps.db, uid, null)).tier;
+    const tier = user.tier;
     try {
       await deps.queues.agentRuns.add(
         AGENT_RUN_JOB_NAME,

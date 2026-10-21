@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  isAllowedTransferFilename,
   isAllowedTransferMime,
   mimeTypeForFilename,
   normalizeMimeType,
@@ -58,6 +59,17 @@ describe("transfer policy", () => {
       expect(mimeTypeForFilename("icon.svg")).toBeNull();
       expect(mimeTypeForFilename("README")).toBeNull();
       expect(mimeTypeForFilename(".env")).toBeNull();
+    });
+
+    it("allows extension-less page downloads but refuses active/unknown extensions", () => {
+      expect(isAllowedTransferFilename("attachment")).toBe(true);
+      expect(isAllowedTransferFilename("report.csv")).toBe(true);
+      expect(isAllowedTransferFilename("page.html")).toBe(false);
+      expect(isAllowedTransferFilename("icon.svg")).toBe(false);
+      expect(isAllowedTransferFilename("setup.exe")).toBe(false);
+      expect(isAllowedTransferFilename("archive.weird")).toBe(false);
+      expect(isAllowedTransferFilename(".html")).toBe(false);
+      expect(isAllowedTransferFilename(".env")).toBe(false);
     });
 
     it("sanitizes to a single plain filename", () => {

@@ -8,6 +8,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
   GIT_ASKPASS_ENV,
   GIT_ASKPASS_MODE,
+  GIT_HELPER_DIR_MODE,
   GIT_TERMINAL_PROMPT_ENV,
   GIT_TOKEN_ENV,
   GitCredentialLeakError,
@@ -28,12 +29,20 @@ afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
 
-function tempHome(): string {
+interface TempHome {
+  home: string;
+  /** Root-owned helper dir, deliberately OUTSIDE the agent-writable home. */
+  helperDir: string;
+}
+
+function tempHome(): TempHome {
   const root = mkdtempSync(join(tmpdir(), "ovid-gitcred-"));
   roots.push(root);
   const home = join(root, "home");
+  const helperDir = join(root, "git-helper");
   mkdirSync(home, { recursive: true });
-  return home;
+  mkdirSync(helperDir, { recursive: true });
+  return { home, helperDir };
 }
 
 function uid(): number {
@@ -51,14 +60,30 @@ async function runHelper(script: string, prompt: string, extraEnv: Record<string
 }
 
 describe("installGitCredential", () => {
-  it("writes an owner-only helper that contains no secret and returns the askpass env", async () => {
-    const home = tempHome();
-    const cred = await installGitCredential({ homeDir: home, token: TOKEN, uid: uid() });
+  it("writes a non-writable helper outside the sandbox home that contains no secret", async () => {
+    const { home, helperDir } = tempHome();
+    const cred = await installGitCredential({
+      homeDir: home,
+      helperDir,
+      token: TOKEN,
+      uid: uid(),
+    });
     try {
       const mode = statSync(cred.scriptPath).mode & 0o777;
       expect(mode).toBe(GIT_ASKPASS_MODE);
-      expect(mode & 0o077).toBe(0); // no group/other access
-      expect(statSync(join(home, ".ovid")).mode & 0o077).toBe(0);
+      // No write bits: the agent can execute the helper but never replace it.
+      expect(mode & 0o022).toBe(0);
+      expect(mode & 0o111).not.toBe(0);
+      expect(statSync(helperDir).mode & 0o022).toBe(0);
+      expect(statSync(helperDir).mode & 0o777).toBe(
+        typeof process.getuid === "function" && process.getuid() === 0
+          ? GIT_HELPER_DIR_MODE
+          : 0o700,
+      );
+
+      // The helper is NOT in the agent-writable home.
+      expect(cred.scriptPath.startsWith(home)).toBe(false);
+      expect(existsSync(join(home, ".ovid"))).toBe(false);
 
       const body = readFileSync(cred.scriptPath, "utf8");
       expect(containsToken(body, TOKEN)).toBe(false);
@@ -68,17 +93,35 @@ describe("installGitCredential", () => {
       expect(cred.env[GIT_TERMINAL_PROMPT_ENV]).toBe("0");
       expect(cred.env[GIT_TOKEN_ENV]).toBe(TOKEN);
       expect(cred.env.GIT_CONFIG_NOSYSTEM).toBe("1");
-      // Isolation config is empty: no credential.helper can leak in.
+      // Isolation config is empty: no credential.helper can leak in, and it
+      // is root-owned/non-writable so the sandbox cannot add one.
       expect(readFileSync(cred.configPath, "utf8")).toBe("");
-      expect(statSync(cred.configPath).mode & 0o777).toBe(0o600);
+      expect(statSync(cred.configPath).mode & 0o022).toBe(0);
     } finally {
       await cred.dispose();
     }
   });
 
+  it("refuses a helper directory inside the agent-writable home", async () => {
+    const { home } = tempHome();
+    await expect(
+      installGitCredential({
+        homeDir: home,
+        helperDir: join(home, ".ovid"),
+        token: TOKEN,
+        uid: uid(),
+      }),
+    ).rejects.toThrow(/must not be inside the sandbox home/);
+  });
+
   it("prints the token from the environment (and a username), never from the file", async () => {
-    const home = tempHome();
-    const cred = await installGitCredential({ homeDir: home, token: TOKEN, uid: uid() });
+    const { home, helperDir } = tempHome();
+    const cred = await installGitCredential({
+      homeDir: home,
+      helperDir,
+      token: TOKEN,
+      uid: uid(),
+    });
     try {
       const password = await runHelper(cred.scriptPath, "Password for 'https://github.com':");
       expect(password.stdout.trim()).toBe(TOKEN);
@@ -95,26 +138,32 @@ describe("installGitCredential", () => {
     }
   });
 
-  it("honours a jail-visible home path while keeping the host path for cleanup", async () => {
-    const home = tempHome();
+  it("honours a jail-visible helper path while keeping the host path for cleanup", async () => {
+    const { home, helperDir } = tempHome();
     const cred = await installGitCredential({
       homeDir: home,
+      helperDir,
       token: TOKEN,
       uid: uid(),
-      visibleHomeDir: "/root",
+      visibleHelperDir: "/run/ovid-git",
     });
     try {
-      expect(cred.scriptPath.startsWith(home)).toBe(true);
-      expect(cred.env[GIT_ASKPASS_ENV]).toMatch(/^\/root\/\.ovid\/git-askpass-[0-9a-f]+\.sh$/);
-      expect(cred.env.GIT_CONFIG_GLOBAL).toMatch(/^\/root\/\.ovid\/git-config-[0-9a-f]+$/);
+      expect(cred.scriptPath.startsWith(helperDir)).toBe(true);
+      expect(cred.env[GIT_ASKPASS_ENV]).toMatch(/^\/run\/ovid-git\/git-askpass-[0-9a-f]+\.sh$/);
+      expect(cred.env.GIT_CONFIG_GLOBAL).toMatch(/^\/run\/ovid-git\/git-config-[0-9a-f]+$/);
     } finally {
       await cred.dispose();
     }
   });
 
   it("is what git itself uses: credential fill returns the token without touching disk", async () => {
-    const home = tempHome();
-    const cred = await installGitCredential({ homeDir: home, token: TOKEN, uid: uid() });
+    const { home, helperDir } = tempHome();
+    const cred = await installGitCredential({
+      homeDir: home,
+      helperDir,
+      token: TOKEN,
+      uid: uid(),
+    });
     try {
       const { stdout } = await execFileAsync(
         "/bin/sh",
@@ -140,8 +189,13 @@ describe("installGitCredential", () => {
   });
 
   it("dispose removes the helper and the isolation config and clears the token env", async () => {
-    const home = tempHome();
-    const cred = await installGitCredential({ homeDir: home, token: TOKEN, uid: uid() });
+    const { home, helperDir } = tempHome();
+    const cred = await installGitCredential({
+      homeDir: home,
+      helperDir,
+      token: TOKEN,
+      uid: uid(),
+    });
     await cred.dispose();
 
     expect(() => statSync(cred.scriptPath)).toThrow();
@@ -154,10 +208,10 @@ describe("installGitCredential", () => {
   });
 
   it("refuses an empty token rather than falling back to a terminal prompt", async () => {
-    const home = tempHome();
-    await expect(installGitCredential({ homeDir: home, token: "", uid: uid() })).rejects.toThrow(
-      /non-empty/,
-    );
+    const { home, helperDir } = tempHome();
+    await expect(
+      installGitCredential({ homeDir: home, helperDir, token: "", uid: uid() }),
+    ).rejects.toThrow(/non-empty/);
   });
 
   it("renders a script with no token interpolation point other than the env var", () => {
@@ -217,6 +271,46 @@ describe("credential leak checks", () => {
     const dir = mkdtempSync(join(tmpdir(), "ovid-gitcfg-empty-"));
     roots.push(dir);
     await expect(assertNoTokenInGitConfig(dir, TOKEN)).resolves.toBeUndefined();
+  });
+
+  it("detects a token in the home .gitconfig and .git-credentials", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ovid-githome-"));
+    roots.push(home);
+    const repo = repoWithConfig("[remote \"origin\"]\n\turl = https://github.com/acme/app.git\n");
+
+    writeFileSync(join(home, ".gitconfig"), `[github]\n\ttoken = ${TOKEN}\n`);
+    await expect(assertNoCredentialLeak({ repoDir: repo, homeDir: home, token: TOKEN })).rejects.toMatchObject(
+      { code: "credential_leak", where: "global git config" },
+    );
+
+    rmSync(join(home, ".gitconfig"));
+    writeFileSync(
+      join(home, ".git-credentials"),
+      `https://x-access-token:${TOKEN}@github.com\n`,
+    );
+    await expect(assertNoCredentialLeak({ repoDir: repo, homeDir: home, token: TOKEN })).rejects.toMatchObject(
+      { code: "credential_leak", where: "git credential store" },
+    );
+
+    // And on a FAILED operation path too: the caller scans unconditionally.
+    rmSync(join(home, ".git-credentials"));
+    await expect(
+      assertNoCredentialLeak({ repoDir: repo, homeDir: home, token: TOKEN }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("detects a credential-bearing .gitconfig even when the secret is not the current token", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ovid-githome-stale-"));
+    roots.push(home);
+    writeFileSync(
+      join(home, ".gitconfig"),
+      '[credential]\n\thelper = "store --file=/root/.git-credentials"\n',
+    );
+    // No token here, but the credential store file below carries a stale secret.
+    writeFileSync(join(home, ".git-credentials"), "https://me:old-secret@github.com\n");
+    await expect(
+      assertNoCredentialLeak({ homeDir: home, token: TOKEN }),
+    ).rejects.toMatchObject({ code: "credential_leak", where: "git credential store (URL userinfo)" });
   });
 
   it("throws when the token appears in argv", () => {

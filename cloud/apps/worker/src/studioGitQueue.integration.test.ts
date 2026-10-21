@@ -5,8 +5,12 @@ import {
   STUDIO_GIT_JOB_NAME,
   STUDIO_GIT_QUEUE,
   createStudioGitWorker,
+  signStudioGitJob,
+  type StudioGitSignedJob,
 } from "./studioGitQueue.js";
 import type { StudioGitJob, StudioGitOutcome } from "./studioGit.js";
+
+const JOB_SECRET = "studio-git-integration-secret-0123456789";
 
 /**
  * Real BullMQ leg (skipped without TEST_REDIS_URL): proves the worker created
@@ -30,12 +34,12 @@ const SYNC_RESULT = {
 
 describe.skipIf(!TEST_REDIS_URL)("studio_git BullMQ registration (real Redis)", () => {
   const connection = { url: TEST_REDIS_URL! };
-  let queue: Queue<StudioGitJob>;
+  let queue: Queue<StudioGitSignedJob>;
   let worker: ReturnType<typeof createStudioGitWorker>;
   const seen: StudioGitJob[] = [];
 
   beforeAll(async () => {
-    queue = new Queue<StudioGitJob>(STUDIO_GIT_QUEUE, {
+    queue = new Queue<StudioGitSignedJob>(STUDIO_GIT_QUEUE, {
       connection,
       prefix: QUEUE_PREFIX,
     });
@@ -43,6 +47,7 @@ describe.skipIf(!TEST_REDIS_URL)("studio_git BullMQ registration (real Redis)", 
     worker = createStudioGitWorker({
       connection,
       prefix: QUEUE_PREFIX,
+      jobSecret: JOB_SECRET,
       concurrency: 2,
       processor: async (job): Promise<StudioGitOutcome> => {
         seen.push(job);
@@ -57,7 +62,7 @@ describe.skipIf(!TEST_REDIS_URL)("studio_git BullMQ registration (real Redis)", 
     await queue?.close();
   });
 
-  function settled(kind: "completed" | "failed"): Promise<{ job: Job<StudioGitJob>; err?: Error }> {
+  function settled(kind: "completed" | "failed"): Promise<{ job: Job<StudioGitSignedJob>; err?: Error }> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
         () => reject(new Error(`timed out waiting for a ${kind} job`)),
@@ -66,14 +71,14 @@ describe.skipIf(!TEST_REDIS_URL)("studio_git BullMQ registration (real Redis)", 
       if (kind === "failed") {
         worker.once(
           "failed",
-          (job: Job<StudioGitJob> | undefined, err: Error) => {
+          (job: Job<StudioGitSignedJob> | undefined, err: Error) => {
             clearTimeout(timer);
             if (job === undefined) reject(new Error("failed event carried no job"));
             else resolve({ job, err });
           },
         );
       } else {
-        worker.once("completed", (job: Job<StudioGitJob>) => {
+        worker.once("completed", (job: Job<StudioGitSignedJob>) => {
           clearTimeout(timer);
           resolve({ job });
         });
@@ -83,11 +88,10 @@ describe.skipIf(!TEST_REDIS_URL)("studio_git BullMQ registration (real Redis)", 
 
   it("consumes a job added to studio_git and returns the typed outcome", async () => {
     const completion = settled("completed");
-    const added = await queue.add(STUDIO_GIT_JOB_NAME, {
-      op: "sync",
-      userId: "user-1",
-      repoDir: "app",
-    });
+    const added = await queue.add(
+      STUDIO_GIT_JOB_NAME,
+      signStudioGitJob({ op: "sync", userId: "user-1", repoDir: "app" }, JOB_SECRET),
+    );
     await completion;
 
     const job = (await queue.getJob(added.id!))!;
@@ -98,10 +102,12 @@ describe.skipIf(!TEST_REDIS_URL)("studio_git BullMQ registration (real Redis)", 
 
   it("fails a malformed payload with the typed invalid_job reason", async () => {
     const failure = settled("failed");
-    await queue.add(STUDIO_GIT_JOB_NAME, {
-      op: "sync",
-      // userId missing
-    } as unknown as StudioGitJob);
+    await queue.add(
+      STUDIO_GIT_JOB_NAME,
+      // userId missing, but correctly signed: the failure must come from the
+      // payload schema, not the signature check.
+      signStudioGitJob({ op: "sync" } as unknown as StudioGitJob, JOB_SECRET),
+    );
     const { job, err } = await failure;
 
     expect(await job.getState()).toBe("failed");

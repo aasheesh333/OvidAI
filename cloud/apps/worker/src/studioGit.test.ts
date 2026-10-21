@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -9,6 +9,7 @@ import type { SandboxManager } from "@ovid/sandbox";
 import {
   StudioGitError,
   assertSafeBranch,
+  createPerUserGithubTokenResolver,
   createSpawnGitRunner,
   createStudioGit,
   createStudioGitProcessor,
@@ -53,6 +54,8 @@ interface Fixture {
   root: string;
   home: string;
   workspace: string;
+  /** Root-owned helper dir, outside the agent-writable home. */
+  helperDir: string;
   remote: string;
   remoteUrl: string;
   seed: string;
@@ -64,8 +67,10 @@ async function fixture(): Promise<Fixture> {
   roots.push(root);
   const home = join(root, "home");
   const workspace = join(root, "workspace");
+  const helperDir = join(root, "git-helper");
   mkdirSync(home, { recursive: true });
   mkdirSync(workspace, { recursive: true });
+  mkdirSync(helperDir, { recursive: true });
 
   const remote = join(root, "app.git");
   await git(root, "init", "--bare", "-b", "main", "app.git");
@@ -90,7 +95,7 @@ async function fixture(): Promise<Fixture> {
     attach: async () => handle,
   } as unknown as Pick<SandboxManager, "attach">;
 
-  return { root, home, workspace, remote, remoteUrl, seed, manager };
+  return { root, home, workspace, helperDir, remote, remoteUrl, seed, manager };
 }
 
 /** Records every git request and delegates to the real spawn runner. */
@@ -128,6 +133,7 @@ async function cloneFixture(fx: Fixture, extra: { log?: (l: string) => void; run
   const gitJob = createStudioGit({
     manager: fx.manager,
     allowLocalUrls: true,
+    credentialDir: fx.helperDir,
     ...(extra.runner !== undefined ? { runner: extra.runner } : {}),
     ...(extra.log !== undefined ? { log: extra.log } : {}),
   });
@@ -179,12 +185,17 @@ describe("Studio clone", () => {
     expect(rec.askpass.length).toBeGreaterThan(0);
     for (const seen of rec.askpass) {
       expect(seen.existed).toBe(true);
-      expect(seen.mode & 0o077).toBe(0);
+      // Never writable by group/other (the sandbox uid): the agent can
+      // execute the helper but cannot replace it.
+      expect(seen.mode & 0o022).toBe(0);
+      expect(seen.mode & 0o111).not.toBe(0);
     }
 
-    // 4. …and was deleted afterwards, together with the isolation config.
-    expect(existsSync(join(fx.home, ".ovid"))).toBe(true);
-    expect(readdirSync(join(fx.home, ".ovid"))).toEqual([]);
+    // 4. The helper lived OUTSIDE the agent-writable home and was deleted
+    //    afterwards, together with the isolation config.
+    expect(existsSync(join(fx.home, ".ovid"))).toBe(false);
+    expect(existsSync(fx.helperDir)).toBe(true);
+    expect(readdirSync(fx.helperDir)).toEqual([]);
 
     // 5. No log line carried the token.
     expect(logs.length).toBeGreaterThan(0);
@@ -212,6 +223,7 @@ describe("Studio clone", () => {
     const gitJob = createStudioGit({
       manager: fx.manager,
       allowLocalUrls: true,
+      credentialDir: fx.helperDir,
       runner: failing,
       log: (l) => logs.push(l),
     });
@@ -225,10 +237,13 @@ describe("Studio clone", () => {
     expect(caught).toBeInstanceOf(StudioGitError);
     expect((caught as StudioGitError).code).toBe("clone_failed");
     expect((caught as Error).message).not.toContain(TOKEN);
-    expect((caught as Error).message).toContain("[redacted]");
+    // Fixed user-facing message: raw git stderr (internal hosts/paths) never
+    // reaches the caller.
+    expect((caught as Error).message).not.toContain("github.com/acme/app");
+    expect((caught as Error).message).toMatch(/Could not clone the repository/);
     for (const line of logs) expect(line).not.toContain(TOKEN);
 
-    expect(readdirSync(join(fx.home, ".ovid"))).toEqual([]);
+    expect(readdirSync(fx.helperDir)).toEqual([]);
     expect(existsSync(join(fx.workspace, "app"))).toBe(false);
   });
 
@@ -256,6 +271,42 @@ describe("Studio clone", () => {
     expect(() => normalizeRepoUrl("git@github.com:acme/app.git")).toThrow(/not a URL/);
     expect(() => normalizeRepoUrl("https://github.com/acme/app.git", {})).not.toThrow();
     expect(defaultRepoDir("https://github.com/acme/app.git")).toBe("app");
+  });
+
+  it("refuses a non-approved host so the token cannot answer an attacker's challenge", () => {
+    for (const url of [
+      "https://evil.example/acme/app.git",
+      "https://github.com.evil.example/acme/app.git",
+      "https://githubXcom/acme/app.git",
+      "https://github.com:444/acme/app.git",
+      "https://github.com/acme/app.git?access_token=stolen",
+    ]) {
+      expect(() => normalizeRepoUrl(url)).toThrow(/approved git host|unexpected parameters|default https port/);
+    }
+
+    // A deployment-configured allowlist is honoured, exact-host only.
+    const opts = { allowedHosts: ["github.com", "git.corp.example"] };
+    expect(normalizeRepoUrl("https://git.corp.example/acme/app.git", opts)).toBe(
+      "https://git.corp.example/acme/app.git",
+    );
+    expect(() => normalizeRepoUrl("https://evil.example/acme/app.git", opts)).toThrow(
+      /approved git host/,
+    );
+  });
+
+  it("logs only host + repo (never URL query credentials)", async () => {
+    const fx = await fixture();
+    const logs: string[] = [];
+    // The allowlist rejects query strings, but a configured host may still
+    // have a long path; pin that the log is built from host+repo, not the raw
+    // URL. normalizeRepoUrl returned this value, so exercise displayRepo via a
+    // successful local clone log line instead.
+    const { gitJob } = await cloneFixture(fx, { log: (l) => logs.push(l) });
+    await gitJob.syncLatest({ userId: "user-1", repoDir: "app", token: TOKEN });
+    const start = logs.find((line) => line.includes("clone start"));
+    expect(start).toBeDefined();
+    expect(start).toContain("local/app");
+    expect(start).not.toContain(fx.remoteUrl);
   });
 });
 
@@ -285,6 +336,101 @@ describe("Sync latest changes", () => {
       expect(call.argv).not.toContain("--hard");
     }
     expect(configText(join(fx.workspace, "app"))).not.toContain(TOKEN);
+
+    // The fetch forces the server-derived remote, so a repo-level origin edit
+    // cannot change where the token goes.
+    const fetchCall = rec.calls.find((call) => call.argv.includes("fetch"));
+    expect(fetchCall).toBeDefined();
+    expect(fetchCall!.argv.join("\n")).toContain(`remote.origin.url=${fx.remoteUrl}`);
+  });
+
+  it("forces TLS verification and disables repo-controlled proxies on https remotes", async () => {
+    const fx = await fixture();
+    // A bare directory with a real .git dir is enough: the runner is faked, so
+    // no network is touched and no valid git metadata is needed.
+    mkdirSync(join(fx.workspace, "fake", ".git"), { recursive: true });
+    const calls: GitCommandRequest[] = [];
+    const runner: GitRunner = async (req) => {
+      calls.push(req);
+      if (req.argv.includes("config") || req.argv.includes("get-url")) {
+        return {
+          code: 0,
+          stdout: "https://github.com/acme/app.git\n",
+          stderr: "",
+          timedOut: false,
+        };
+      }
+      return { code: 128, stdout: "", stderr: "fatal: no network in test", timedOut: false };
+    };
+    const gitJob = createStudioGit({
+      manager: fx.manager,
+      credentialDir: fx.helperDir,
+      runner,
+      log: () => {},
+    });
+
+    await expect(
+      gitJob.syncLatest({ userId: "user-1", repoDir: "fake", token: TOKEN }),
+    ).rejects.toMatchObject({ code: "fetch_failed" });
+
+    const fetchCall = calls.find((call) => call.argv.includes("fetch"));
+    expect(fetchCall).toBeDefined();
+    const argv = fetchCall!.argv.join("\n");
+    expect(argv).toContain("remote.origin.url=https://github.com/acme/app.git");
+    expect(argv).toContain("http.sslVerify=true");
+    expect(argv).toContain("http.https://github.com/acme/app.git.sslVerify=true");
+    expect(argv).toContain("http.proxy=");
+    expect(argv).toContain("remote.origin.proxy=");
+    // A repo-level sslVerify=false never runs as the effective setting.
+    expect(argv).not.toContain("sslVerify=false");
+  });
+
+  it("refuses an agent-edited origin instead of redirecting the token", async () => {
+    const fx = await fixture();
+    const rec = recordingRunner();
+    const { gitJob } = await cloneFixture(fx, { runner: rec.runner });
+    const repo = join(fx.workspace, "app");
+    const config = configText(repo).replace(
+      /url = .*/,
+      "url = https://evil.example/acme/app.git",
+    );
+    writeFileSync(join(repo, ".git", "config"), config);
+
+    const before = rec.calls.length;
+    await expect(
+      gitJob.syncLatest({ userId: "user-1", repoDir: "app", token: TOKEN }),
+    ).rejects.toMatchObject({ code: "fetch_failed" });
+
+    // No git command was ever pointed at the attacker host.
+    for (const call of rec.calls.slice(before)) {
+      expect(call.argv.join(" ")).not.toContain("evil.example");
+    }
+  });
+
+  it("refuses a repo-level url.insteadOf rewrite of the remote", async () => {
+    const fx = await fixture();
+    const { gitJob } = await cloneFixture(fx);
+    const repo = join(fx.workspace, "app");
+    const config =
+      configText(repo) +
+      `[url "file://${fx.root}/evil/"]\n\tinsteadOf = file://${fx.remote}\n`;
+    writeFileSync(join(repo, ".git", "config"), config);
+
+    await expect(
+      gitJob.syncLatest({ userId: "user-1", repoDir: "app", token: TOKEN }),
+    ).rejects.toMatchObject({ code: "fetch_failed" });
+  });
+
+  it("refuses a symlinked .git instead of reading/writing outside the workspace", async () => {
+    const fx = await fixture();
+    const { gitJob } = await cloneFixture(fx);
+    const repo = join(fx.workspace, "app");
+    rmSync(join(repo, ".git"), { recursive: true, force: true });
+    symlinkSync(fx.remote, join(repo, ".git"), "dir");
+
+    await expect(
+      gitJob.syncLatest({ userId: "user-1", repoDir: "app", token: TOKEN }),
+    ).rejects.toMatchObject({ code: "not_a_repo" });
   });
 
   it("reports needs_merge on a dirty tree and leaves the work untouched", async () => {
@@ -518,5 +664,64 @@ describe("Studio git processor", () => {
     });
     expect(seen).toEqual([TOKEN]);
     expect(JSON.stringify(outcome)).not.toContain(TOKEN);
+  });
+
+  it("resolves the token per user and passes the repo to the resolver", async () => {
+    const requests: Array<{ userId: string; repo?: string; repoDir?: string }> = [];
+    const tokensSeen: string[] = [];
+    const processor = createStudioGitProcessor({
+      git: {
+        clone: async (req) => {
+          tokensSeen.push(req.token);
+          return { status: "cloned", repoDir: "app", branch: "main" };
+        },
+        syncLatest: async () => {
+          throw new Error("unreachable");
+        },
+        switchBranch: async () => {
+          throw new Error("unreachable");
+        },
+      },
+      // Per-user lookup: user-2 has a token, user-1 does not.
+      tokenFor: async (req) => {
+        requests.push(req);
+        return req.userId === "user-2" ? "token-for-user-2" : null;
+      },
+      log: () => {},
+    });
+
+    await processor({ op: "clone", userId: "user-2", repo: "acme/app" });
+    expect(requests).toEqual([{ userId: "user-2", repo: "acme/app" }]);
+    expect(tokensSeen).toEqual(["token-for-user-2"]);
+
+    // No token for that user ⇒ refuse, never fall back to another user's.
+    await expect(
+      processor({ op: "sync", userId: "user-1", repoDir: "app" }),
+    ).rejects.toMatchObject({ code: "token_unavailable" });
+    expect(tokensSeen).toEqual(["token-for-user-2"]);
+  });
+
+  it("reads the per-user GitHub token from that user's own integration only", async () => {
+    const rows: Record<string, Array<{ id: string; curatedId: string | null; enabled?: boolean; secretsSealed: unknown }>> = {
+      "user-2": [
+        { id: "srv-2", curatedId: "github", enabled: true, secretsSealed: { sealed: "user-2" } },
+      ],
+      "user-3": [
+        { id: "srv-3", curatedId: "github", enabled: false, secretsSealed: { sealed: "user-3" } },
+      ],
+    };
+    const resolver = createPerUserGithubTokenResolver({
+      listServers: async (userId) => rows[userId] ?? [],
+      decrypt: (sealed, recordId) => {
+        const value = (sealed as { sealed: string }).sealed;
+        expect(recordId).toBe(`mcp_servers:srv-${value.split("-")[1]}`);
+        return JSON.stringify({ GITHUB_TOKEN: `ghp_${value}` });
+      },
+    });
+
+    await expect(resolver({ userId: "user-2", repo: "acme/app" })).resolves.toBe("ghp_user-2");
+    // Disabled integration or unknown user ⇒ no token, never the deployment's.
+    await expect(resolver({ userId: "user-3" })).resolves.toBeNull();
+    await expect(resolver({ userId: "user-1" })).resolves.toBeNull();
   });
 });

@@ -12,7 +12,7 @@
  * model request, and P7's artifact pipeline resolves the same path.
  */
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { z } from "zod";
@@ -20,6 +20,7 @@ import { z } from "zod";
 import { captureScreenshot } from "../screencast.js";
 import { extractReadable } from "../staticExtract.js";
 import { withSession } from "../sessionOps.js";
+import { resolveWorkspaceDir } from "./transferPolicy.js";
 import {
   READ_MARKDOWN_CAP,
   SNAPSHOT_CAP,
@@ -287,8 +288,12 @@ function inspectionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
         const bytes = await captureScreenshot(page, { type, quality });
         const root = await deps.workspaceDir(ctx.userId, artifactSessionId(ctx));
         const relDir = "browser/screenshots";
-        const dir = join(root, relDir);
-        await mkdir(dir, { recursive: true });
+        // Same jail as transfers: create the directory one component at a
+        // time and refuse a symlinked `browser/` that leaves the workspace.
+        const dir = await resolveWorkspaceDir(root, relDir);
+        if (dir === null) {
+          return { content: "Screenshot refused: destination escapes the session workspace." };
+        }
 
         const stamp = new Date(deps.now?.() ?? Date.now()).toISOString().replace(/[:.]/g, "-");
         const name = `${stamp}-${randomSuffix()}.${type === "png" ? "png" : "jpg"}`;

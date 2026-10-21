@@ -44,10 +44,10 @@ export function browserStateKeyPath(userId: string, profileId: string): string {
 
 // userId/profileId both land in filesystem paths — anything outside this set
 // is a path-traversal attempt and throws before any fs call.
-const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+export const STATE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 function assertId(kind: "userId" | "profileId", id: string): void {
-  if (!ID_RE.test(id)) {
+  if (!STATE_ID_RE.test(id)) {
     throw new BrowserStateError(
       `${kind} must match /^[A-Za-z0-9_-]{1,64}$/ (got ${JSON.stringify(id)})`,
     );

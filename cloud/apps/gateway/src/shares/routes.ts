@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { sharesRepo, type Db } from "@ovid/db";
 import type { AuthPrincipal, Verifier } from "../auth.js";
+import { sqlText } from "../sql.js";
 import { pageCsp, SHARES_HEADERS } from "./headers.js";
 import { parseCreateShare, parseForkShare, ShareValidationError } from "./snapshot.js";
 import { escapeHtml, landingPage, packageName, playStoreUrl } from "./viewer.js";
@@ -41,6 +42,26 @@ export type ShareAdmission = <T>(
   fn: (uid: string) => Promise<T>,
 ) => Promise<T>;
 
+/**
+ * Per-uid token bucket for the WRITE endpoints (create + fork). The quota is
+ * a product limit, not a burst limiter: without this an account can hammer
+ * the create path (and the per-owner quota lock) as fast as the network allows.
+ */
+export interface ShareRateLimit {
+  /** Burst size handed out to a cold caller. */
+  capacity: number;
+  /** Tokens replenished per second. */
+  refillPerSecond: number;
+}
+
+export const DEFAULT_SHARE_RATE_LIMIT: ShareRateLimit = {
+  capacity: 10,
+  refillPerSecond: 0.5,
+};
+
+/** Hard bound on the bucket map so hostile uids cannot grow it forever. */
+const MAX_RATE_BUCKETS = 10_000;
+
 export interface SharesDeps {
   db: Db;
   /** The gateway verifier, mapped onto the Python `verify_uid` contract. */
@@ -50,6 +71,7 @@ export interface SharesDeps {
   admission?: ShareAdmission;
   clock?: () => Date;
   ttlSeconds?: number;
+  rateLimit?: ShareRateLimit;
 }
 
 /** Composition-root config: db/verifier come from GatewayDeps. */
@@ -186,29 +208,93 @@ function receiptJson(
 }
 
 /**
- * Python enforces quotas inside the create transaction. Task 2's repo exposes
- * only `counts()`, so the route reproduces the same ORDER: an existing
- * (owner, requestId) receipt is resolved by create() first (identical →
- * receipt, revoked/expired/changed → 409); only a genuinely new request at
- * the boundary is rejected with 429.
+ * Quota counters read INSIDE the caller's transaction (raw SQL: the repo's
+ * `counts()` takes a `Db`, not a transaction handle, and the whole point is
+ * that the count and the insert are one atomic unit).
  */
-async function enforceQuota(
+async function countSharesInTransaction(
+  tx: Db,
+  uid: string,
+  now: Date,
+): Promise<{ active: number; lifetime: number }> {
+  const rows = (await tx.execute(
+    `SELECT
+       count(*) FILTER (
+         WHERE revoked_at IS NULL AND content IS NOT NULL AND expires_at > ${sqlText(
+           now.toISOString(),
+         )}::timestamptz
+       )::int AS active,
+       count(*)::int AS lifetime
+     FROM shares
+     WHERE owner_uid = ${sqlText(uid)}`,
+  )) as unknown as Array<{ active: number; lifetime: number }>;
+  return { active: Number(rows[0]?.active ?? 0), lifetime: Number(rows[0]?.lifetime ?? 0) };
+}
+
+/**
+ * Create ONE share with the quota enforced inside the insert transaction
+ * (Python parity). The per-owner advisory lock serializes concurrent creates,
+ * so N parallel requests can never all observe "one slot left".
+ *
+ * ORDER is preserved: when at the boundary, an existing (owner, requestId)
+ * receipt still falls through to `create()` — identical content replays the
+ * receipt, revoked/expired/changed content is its 409 — and only a genuinely
+ * new request is 429.
+ */
+async function createWithQuota(
   deps: SharesDeps,
   uid: string,
-  requestId: string,
+  body: ReturnType<typeof parseCreateShare>,
   now: Date,
-): Promise<void> {
-  const counts = await sharesRepo.counts(deps.db, uid, { now });
-  if (counts.active < ACTIVE_LIMIT && counts.lifetime < LIFETIME_LIMIT) return;
-  const previous = await deps.db.$client`
-    SELECT token FROM shares
-    WHERE owner_uid = ${uid} AND request_id = ${requestId}
-    LIMIT 1`;
-  if (previous.length > 0) return;
-  if (counts.active >= ACTIVE_LIMIT) {
-    throw new SharesHttpError(429, "share_limit_reached");
-  }
-  throw new SharesHttpError(429, "share_storage_limit_reached");
+) {
+  return deps.db.transaction(async (tx) => {
+    await tx.execute(`SELECT pg_advisory_xact_lock(hashtext(${sqlText(`shares:${uid}`)}))`);
+    const counts = await countSharesInTransaction(tx as unknown as Db, uid, now);
+    if (counts.active >= ACTIVE_LIMIT || counts.lifetime >= LIFETIME_LIMIT) {
+      const previous = (await tx.execute(
+        `SELECT token FROM shares
+         WHERE owner_uid = ${sqlText(uid)} AND request_id = ${sqlText(body.request_id)}
+         LIMIT 1`,
+      )) as unknown as unknown[];
+      if (previous.length === 0) {
+        if (counts.active >= ACTIVE_LIMIT) {
+          throw new SharesHttpError(429, "share_limit_reached");
+        }
+        throw new SharesHttpError(429, "share_storage_limit_reached");
+      }
+    }
+    // drizzle nests this as a savepoint on the SAME transaction, so the row
+    // commits only together with the quota check above.
+    return sharesRepo.create(tx as unknown as Db, uid, toRepoBody(body), {
+      now,
+      ttlSeconds: deps.ttlSeconds ?? DEFAULT_TTL_SECONDS,
+    });
+  });
+}
+
+/** Per-uid token bucket; `false` = over budget (legacy 429 `rate_limited`). */
+function createTokenBucket(
+  config: ShareRateLimit,
+  now: () => Date,
+): (uid: string) => boolean {
+  const capacity = Math.max(1, config.capacity);
+  const refillPerSecond = Math.max(0, config.refillPerSecond);
+  const buckets = new Map<string, { tokens: number; updatedAt: number }>();
+  return (uid: string): boolean => {
+    const nowMs = now().getTime();
+    let bucket = buckets.get(uid);
+    if (bucket === undefined) {
+      if (buckets.size >= MAX_RATE_BUCKETS) buckets.clear();
+      bucket = { tokens: capacity, updatedAt: nowMs };
+      buckets.set(uid, bucket);
+    }
+    const elapsedSeconds = Math.max(0, nowMs - bucket.updatedAt) / 1000;
+    bucket.tokens = Math.min(capacity, bucket.tokens + elapsedSeconds * refillPerSecond);
+    bucket.updatedAt = nowMs;
+    if (bucket.tokens < 1) return false;
+    bucket.tokens -= 1;
+    return true;
+  };
 }
 
 async function publicSnapshot(
@@ -221,6 +307,10 @@ async function publicSnapshot(
 
 export function registerSharesRoutes(app: FastifyInstance, deps: SharesDeps): void {
   const publicBase = resolveBase(deps.baseUrl);
+  const takeToken = createTokenBucket(
+    deps.rateLimit ?? DEFAULT_SHARE_RATE_LIMIT,
+    () => nowOf(deps),
+  );
 
   app.register(async (scope) => {
     // Legacy error shape for every failure in this scope.
@@ -284,15 +374,11 @@ export function registerSharesRoutes(app: FastifyInstance, deps: SharesDeps): vo
 
     scope.post("/shares", async (request, reply) => {
       const principal = await requirePrincipal(request, deps.verifier);
+      if (!takeToken(principal.uid)) throw new SharesHttpError(429, "rate_limited");
       const body = parseCreateShare(request.body);
-      const receipt = await withAdmission(deps, principal, async (uid) => {
-        const now = nowOf(deps);
-        await enforceQuota(deps, uid, body.request_id, now);
-        return sharesRepo.create(deps.db, uid, toRepoBody(body), {
-          now,
-          ttlSeconds: deps.ttlSeconds ?? DEFAULT_TTL_SECONDS,
-        });
-      });
+      const receipt = await withAdmission(deps, principal, (uid) =>
+        createWithQuota(deps, uid, body, nowOf(deps)),
+      );
       return reply.code(201).send(receiptJson(receipt, publicBase.base));
     });
 
@@ -330,6 +416,7 @@ export function registerSharesRoutes(app: FastifyInstance, deps: SharesDeps): vo
 
     scope.post("/shares/:token/fork", async (request, reply) => {
       const principal = await requirePrincipal(request, deps.verifier);
+      if (!takeToken(principal.uid)) throw new SharesHttpError(429, "rate_limited");
       const body = parseForkShare(request.body);
       const { token } = request.params as { token: string };
       const result = await withAdmission(deps, principal, (uid) =>

@@ -66,6 +66,11 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgr
     return row.id;
   }
 
+  async function setTier(uid: string, tier: string): Promise<void> {
+    await users.ensure(db, uid, null);
+    await db.$client.unsafe("UPDATE users SET tier = $2 WHERE uid = $1", [uid, tier]);
+  }
+
   async function createSession(app: FastifyInstance, uid: string): Promise<string> {
     const res = await app.inject({
       method: "POST",
@@ -144,6 +149,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgr
   it("custom presets: create, list with tool groups, apply to a chat, delete", async () => {
     const app = makeApp({ modelCatalog: async () => ["auto", "glm-5.3"] });
     const uid = testUid("w4pre");
+    await setTier(uid, "plus");
     const put = await app.inject({
       method: "PUT",
       url: "/cloud/v1/presets/custom-no-shell",
@@ -179,6 +185,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgr
   it("presets: unknown model, unknown tool, bad id and someone else's preset are refused", async () => {
     const app = makeApp({ modelCatalog: async () => ["auto"] });
     const uid = testUid("w4prx");
+    await setTier(uid, "plus");
     const badModel = await app.inject({
       method: "PUT",
       url: "/cloud/v1/presets/custom-a",
@@ -217,6 +224,42 @@ describe.skipIf(!TEST_DATABASE_URL)("Wave 4 account settings routes (real postgr
       payload: { presetId: "custom-mine" },
     });
     expect(apply.statusCode).toBe(404);
+  });
+
+  it("SECURITY: Free/Go cannot store or apply a manual-model preset (routed-model plan gate)", async () => {
+    const app = makeApp({ modelCatalog: async () => ["auto", "glm-5.3"] });
+    const uid = testUid("w4routed");
+    const putPreset = (model: string | null) =>
+      app.inject({
+        method: "PUT",
+        url: "/cloud/v1/presets/custom-manual",
+        headers: authHeaders(uid),
+        payload: { label: "Manual", model },
+      });
+
+    // Free: refusing to STORE the routed model.
+    await setTier(uid, "free");
+    const denied = await putPreset("glm-5.3");
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error.code).toBe("manual_model_not_allowed");
+    expect((await app.inject({ method: "GET", url: "/cloud/v1/presets", headers: authHeaders(uid) })).json().custom).toEqual([]);
+
+    // Plus may store it.
+    await setTier(uid, "plus");
+    expect((await putPreset("glm-5.3")).statusCode).toBe(200);
+
+    // Applying the preset pins a routed model for the chat's runs.
+    await setTier(uid, "free");
+    const sid = await createSession(app, uid);
+    const apply = await app.inject({
+      method: "PUT",
+      url: `/cloud/v1/sessions/${sid}/preset`,
+      headers: authHeaders(uid),
+      payload: { presetId: "custom-manual" },
+    });
+    expect(apply.statusCode).toBe(403);
+    expect(apply.json().error.code).toBe("manual_model_not_allowed");
+    expect((await sessionState.get(db, sid)).presetId).toBeNull();
   });
 
   // -- /memory -----------------------------------------------------------------

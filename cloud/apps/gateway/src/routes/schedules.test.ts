@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { newId, type Db } from "@ovid/db";
+import { newId, sessionState, type Db } from "@ovid/db";
 import {
   pageSchema,
   scheduleDtoSchema,
@@ -627,6 +627,42 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway schedule routes (real postgres)", (
     const dto = scheduleDtoSchema.parse(res.json());
     expect(dto.title).toBe("Renamed");
     expect(dto.nextRunAt).toBe(created.nextRunAt);
+  });
+
+  it("SECURITY: a Free/Go schedule never runs a manual model pin (plan gate on create and run-now)", async () => {
+    const uid = testUid("sched-plan");
+    const created = await createSchedule(uid); // Free by default
+    await sessionState.patch(db, created.sessionId, { modelPin: "glm-5.3" });
+    const jobsBefore = queueAdds.length;
+
+    // Run-now: refused BEFORE an occurrence is claimed (no run row, no job).
+    const runDenied = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/schedules/${created.id}/run`,
+      headers: authHeaders(uid),
+    });
+    expect(runDenied.statusCode).toBe(403);
+    expect(runDenied.json()).toMatchObject({ error: { code: "manual_model_not_allowed" } });
+    expect(queueAdds).toHaveLength(jobsBefore);
+
+    // Scheduling another run on that pinned chat is refused too.
+    const createDenied = await app.inject({
+      method: "POST",
+      url: "/cloud/v1/schedules",
+      headers: authHeaders(uid),
+      payload: createBody({ sessionId: created.sessionId, title: "Bound" }),
+    });
+    expect(createDenied.statusCode).toBe(403);
+    expect(createDenied.json()).toMatchObject({ error: { code: "manual_model_not_allowed" } });
+
+    // The same schedule is fine once the account includes manual models.
+    await setTier(uid, "plus");
+    const allowed = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/schedules/${created.id}/run`,
+      headers: authHeaders(uid),
+    });
+    expect(allowed.statusCode).toBe(202);
   });
 
   it("all schedule routes answer 401 unauthenticated", async () => {

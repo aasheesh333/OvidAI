@@ -62,17 +62,66 @@ async function defaultLookup(host: string): Promise<string[]> {
   return records.map((r) => r.address);
 }
 
+/** The vetted host + the exact addresses the gate approved. */
+export interface PublicHostVerdict {
+  /** Bare, lowercase host. */
+  host: string;
+  /** Vetted addresses; empty for an exact `allowHosts` bypass. */
+  addresses: string[];
+}
+
 /**
- * Throws SsrfError unless every address `url`'s host maps to is public.
- * Blocks RFC1918, 127/8, 169.254/16, 100.64/10, ::1, fc00::/7, fe80::/10,
- * IPv4-embedded IPv6, and the host's own public IP. `allowHosts` is an
- * exact-host bypass (tests and explicit opt-ins only).
+ * Vetted hosts → the exact addresses the tool gate approved. Keyed by the
+ * engine config object (one engine per config), so pins never leak between
+ * worker instances. The browser route layer authorizes requests against this
+ * pin instead of resolving the name a second time: a DNS-rebinding answer
+ * between `guardUrl` and `goto` can no longer widen the gate.
  */
-export async function assertPublicHost(
+const pinnedHosts = new WeakMap<SsrfConfig, Map<string, string[]>>();
+
+/** Remember the addresses `guardUrl` vetted for `verdict.host`. */
+export function pinPublicHost(cfg: SsrfConfig, verdict: PublicHostVerdict): void {
+  if (verdict.addresses.length === 0) return; // allowHosts bypass — no pin needed
+  let pins = pinnedHosts.get(cfg);
+  if (pins === undefined) {
+    pins = new Map();
+    pinnedHosts.set(cfg, pins);
+  }
+  pins.set(verdict.host, [...verdict.addresses]);
+}
+
+/**
+ * A lookup that answers from the pins recorded by `guardUrl`, falling back to
+ * `fallback` for hosts that were never vetted (subresources, redirects). This
+ * is the request-time half of DNS-rebinding defence.
+ */
+export function pinnedHostLookup(
+  cfg: SsrfConfig,
+  fallback: HostLookup = defaultLookup,
+): HostLookup {
+  return async (host: string): Promise<string[]> => {
+    const pinned = pinnedHosts.get(cfg)?.get(bareHost(host));
+    if (pinned !== undefined) return [...pinned];
+    return fallback(host);
+  };
+}
+
+/** Drop every pin for `cfg` (engine/pool teardown). */
+export function clearPinnedHosts(cfg: SsrfConfig): void {
+  pinnedHosts.delete(cfg);
+}
+
+/**
+ * Resolve and classify `url`'s host. Throws SsrfError unless every address
+ * the host maps to is public. Blocks RFC1918, 127/8, 169.254/16, 100.64/10,
+ * ::1, fc00::/7, fe80::/10, IPv4-embedded IPv6, and the host's own public IP.
+ * `allowHosts` is an exact-host bypass (tests and explicit opt-ins only).
+ */
+export async function resolvePublicHost(
   url: string,
   cfg: SsrfConfig,
   lookup: HostLookup = defaultLookup,
-): Promise<void> {
+): Promise<PublicHostVerdict> {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -82,7 +131,9 @@ export async function assertPublicHost(
   const host = bareHost(parsed.hostname);
   if (host === "") throw new SsrfError(`"${url}" has no host`);
   // Exact-match bypass only ("127.0.0.1" must not match "x.127.0.0.1").
-  if (cfg.allowHosts.some((h) => bareHost(h) === host)) return;
+  if (cfg.allowHosts.some((h) => bareHost(h) === host)) {
+    return { host, addresses: [] };
+  }
   if (host === "localhost" || host.endsWith(".localhost")) {
     throw new SsrfError(`host "${host}" is a loopback name`);
   }
@@ -115,22 +166,54 @@ export async function assertPublicHost(
   } else if (cfg.ownPublicIp !== null && bareHost(cfg.ownPublicIp) === host) {
     throw new SsrfError(`host "${host}" is this service's own IP — refusing`);
   }
+  return { host, addresses };
+}
+
+/** Throws unless every address `url`'s host maps to is public. */
+export async function assertPublicHost(
+  url: string,
+  cfg: SsrfConfig,
+  lookup: HostLookup = defaultLookup,
+): Promise<void> {
+  await resolvePublicHost(url, cfg, lookup);
 }
 
 /**
  * A fetch wrapper that runs assertPublicHost on every request URL before
- * handing it to the transport. NOTE: unlike @ovid/agent-core's
- * createGuardedEgressFetch this does NOT follow redirects manually — the
- * browser engine's fetches are navigation/resource loads whose redirects are
- * handled (and re-gated) by the engine itself.
+ * handing it to the transport. Redirects are followed MANUALLY (at most
+ * `maxRedirects` hops) and each hop is re-gated: letting the transport follow
+ * `Location` would validate only the first URL. `allowHosts` still bypasses
+ * the gate exactly as `assertPublicHost` does.
  */
 export function createSsrfGuardedFetch(
   cfg: SsrfConfig,
   fetchImpl: typeof fetch = fetch,
+  maxRedirects = 5,
 ): typeof fetch {
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    await assertPublicHost(url, cfg);
-    return init === undefined ? fetchImpl(input as Parameters<typeof fetch>[0]) : fetchImpl(input as Parameters<typeof fetch>[0], init);
+    let current =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    for (let hop = 0; hop <= maxRedirects; hop++) {
+      await assertPublicHost(current, cfg);
+      const response = init === undefined
+        ? await fetchImpl(current, { redirect: "manual" })
+        : await fetchImpl(current, { ...init, redirect: "manual" });
+      if (![301, 302, 303, 307, 308].includes(response.status)) {
+        // Keep `res.url` describing the URL that was actually fetched (the
+        // transport's manual-mode Response may report the original request or
+        // an empty string for a stub).
+        try {
+          Object.defineProperty(response, "url", { value: current, configurable: true });
+        } catch {
+          // Non-configurable Response — the caller's fallback still applies.
+        }
+        return response;
+      }
+      const location = response.headers.get("location");
+      await response.body?.cancel().catch(() => {});
+      if (location === null || location === "") return response;
+      current = new URL(location, current).toString();
+    }
+    throw new SsrfError(`refused: more than ${maxRedirects} redirects`);
   };
 }

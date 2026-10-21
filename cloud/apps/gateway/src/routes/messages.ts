@@ -31,6 +31,7 @@ import {
 } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { DEFAULT_MINT_TIMEOUT_MS, MintTimeoutError } from "../keys.js";
+import { assertModelAllowed, PlanGateError } from "../planGate.js";
 import {
   badRequest,
   etagFor,
@@ -366,14 +367,16 @@ function baseModelId(raw: string): string {
   return (m === null ? raw : raw.slice(0, m.index)).trim();
 }
 
-function isAutoModel(base: string): boolean {
+function isAutoAlias(base: string): boolean {
   return base === "" || AUTO_MODEL_ALIASES.includes(base.toLowerCase());
 }
 
 /**
  * The allowed model ids (lowercased) or null when the catalog is unknown —
- * the documented fail-open (absent seam, null answer, empty list or a thrown
- * read all mean "cannot judge"; LiteLLM's key scope still bounds the run).
+ * absent seam, null answer, empty list or a thrown read all mean "cannot
+ * judge". A null answer is FAIL-CLOSED for manual models at the call site:
+ * without the catalog the gateway cannot prove the pinned id exists, so the
+ * request is refused (Auto never needs the catalog).
  */
 async function readModelCatalog(
   deps: GatewayDeps,
@@ -385,7 +388,7 @@ async function readModelCatalog(
     if (list === null || list.length === 0) return null;
     return new Set(list.map((m) => m.trim().toLowerCase()));
   } catch (err) {
-    log.warn({ err }, "model catalog unavailable; accepting the requested model");
+    log.warn({ err }, "model catalog unavailable; refusing manual model pins");
     return null;
   }
 }
@@ -540,15 +543,42 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     if (settings.presetId !== undefined && !(CLOUD_PRESET_IDS as readonly string[]).includes(settings.presetId)) {
       return badRequest(reply, `presetId must be one of: ${CLOUD_PRESET_IDS.join(", ")}.`);
     }
+    // The caller's row is needed for the entitlement gate below (its tier is
+    // ALSO the queue-priority source later). users.ensure is an idempotent
+    // upsert, so doing it here changes no contract — only the ordering.
+    const user = await users.ensure(deps.db, uid, email);
     let modelPin: string | null | undefined;
     if (settings.model !== undefined) {
       const raw = settings.model.trim();
       const base = baseModelId(raw);
-      if (raw === "" || isAutoModel(base)) {
+      if (raw === "" || isAutoAlias(base)) {
         modelPin = null;
       } else {
+        // SECURITY (plan gate P3): manual model selection is a server-side
+        // entitlement, not a UI affordance. Free/Go are Auto-only; a direct
+        // API call naming a catalog model must be refused before any key is
+        // provisioned. Auto (including the effort suffix) always passes.
+        try {
+          assertModelAllowed(user.tier, raw);
+        } catch (err) {
+          if (err instanceof PlanGateError) {
+            return sendError(reply, err.status, err.code, err.message);
+          }
+          throw err;
+        }
+        // FAIL CLOSED: an unknown catalog means the gateway cannot prove the
+        // pinned id is a real catalog model, so a manual pin is refused
+        // rather than accepted unvalidated. Auto never consults the catalog.
         const known = await readModelCatalog(deps, request.log);
-        if (known !== null && !known.has(base.toLowerCase())) {
+        if (known === null) {
+          return sendError(
+            reply,
+            503,
+            "model_catalog_unavailable",
+            "Model selection is temporarily unavailable. Use Auto or retry shortly.",
+          );
+        }
+        if (!known.has(base.toLowerCase())) {
           return sendError(
             reply,
             400,
@@ -557,6 +587,19 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
           );
         }
         modelPin = raw;
+      }
+    } else {
+      // No `model` on this turn: the run uses the SESSION's persisted pin. A
+      // pin left from a plan that allowed it (or set while downgraded) must
+      // not smuggle a paid model past the gate — check the effective pin.
+      const persisted = (await sessionState.get(deps.db, sessionId)).modelPin;
+      try {
+        assertModelAllowed(user.tier, persisted);
+      } catch (err) {
+        if (err instanceof PlanGateError) {
+          return sendError(reply, err.status, err.code, err.message);
+        }
+        throw err;
       }
     }
     // R1: the explicit @-tags — sessionRefs ids plus `@[Title]` tokens.
@@ -608,9 +651,9 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     }
     const projectRefs = rawProjectRefs;
 
-    // 3. Provision the users row (FK target for everything below); its tier
-    //    sets the queue priority (free → 2, anything else → 1).
-    const user = await users.ensure(deps.db, uid, email);
+    // 3. The users row (FK target for everything below) was provisioned at
+    //    2d; its tier gates model selection there and sets the queue priority
+    //    here (free → 2, anything else → 1).
 
     // 4. Key provisioning BEFORE any write: if mint fails, no message row,
     //    no run row and no queue job are left behind (ordering pinned by

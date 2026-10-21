@@ -65,18 +65,22 @@ export function isTabCreationForbiddenError(err: unknown): err is BrowserTabCrea
   );
 }
 
-/** True only for the agent — the single writer of the tab strip. */
-export function isAgentActor(actor: TabActor): boolean {
+/** True only for an EXPLICIT agent actor — `undefined` is a refusal. */
+export function isAgentActor(actor: TabActor | undefined): boolean {
   return actor === "agent";
 }
 
 /**
- * Gate one tab-create request. The agent passes; anyone else gets the typed
- * refusal before any page is allocated or instrumented.
+ * Gate one tab-create request. Only an explicit `"agent"` actor passes;
+ * anyone else (including an actor-less legacy call) gets the typed refusal
+ * before any page is allocated or instrumented.
  */
-export function assertTabCreationAllowed(actor: TabActor, sessionId: string | null = null): void {
+export function assertTabCreationAllowed(
+  actor: TabActor | undefined,
+  sessionId: string | null = null,
+): void {
   if (!isAgentActor(actor)) {
-    throw new BrowserTabCreationForbiddenError(actor, sessionId);
+    throw new BrowserTabCreationForbiddenError(actor ?? "user", sessionId);
   }
 }
 

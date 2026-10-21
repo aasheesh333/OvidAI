@@ -90,6 +90,12 @@ export interface BrowserSessionRegistry {
   open(entry: { sessionId: string; userId: string; handle: LiveContextHandle }, actor?: TabActor): SessionBrowser;
   get(sessionId: string): SessionBrowser | null;
   /**
+   * Owner-scoped lookup: the entry only when its userId matches `userId`.
+   * Every tool-facing read of a caller-supplied browser key goes through this
+   * (a shared key must never expose another account's session).
+   */
+  getOwned(sessionId: string, userId: string): SessionBrowser | null;
+  /**
    * Every live session id — exactly the "context alive" set. The Task-14
    * engine's close() enumerates this (its own published-live set is a
    * subset: browser_open suppresses the creation notify and publishes only
@@ -102,7 +108,8 @@ export interface BrowserSessionRegistry {
   activePage(sessionId: string): Page | null;
   /**
    * Instruments, appends, switches active; returns the new index (-1 when
-   * unknown). AGENT ONLY: a `"user"` actor is refused with the typed
+   * unknown). AGENT ONLY: an explicit `"agent"` actor is required, so an
+   * omitted actor (legacy call site) is refused with the typed
    * `BrowserTabCreationForbiddenError` before any page is touched.
    */
   addTab(sessionId: string, page: Page, actor?: TabActor): number;
@@ -187,6 +194,11 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
     return sessions.get(sessionId) ?? null;
   }
 
+  function getOwned(sessionId: string, userId: string): SessionBrowser | null {
+    const s = sessions.get(sessionId);
+    return s !== undefined && s.userId === userId ? s : null;
+  }
+
   function close(sessionId: string): SessionBrowser | null {
     const s = sessions.get(sessionId);
     if (!s) return null;
@@ -202,10 +214,10 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
     return s ? s.tabs[s.activeIndex] ?? null : null;
   }
 
-  function addTab(sessionId: string, page: Page, actor: TabActor = "agent"): number {
-    // Agent-owned tabs: refuse a user create BEFORE looking at the session,
-    // so the refusal is identical for known and unknown keys (and no page is
-    // allocated/instrumented on the rejected path).
+  function addTab(sessionId: string, page: Page, actor?: TabActor): number {
+    // Agent-owned tabs: refuse a user (or an actor-less legacy caller) BEFORE
+    // looking at the session. Tab creation is allowed only with an EXPLICIT
+    // "agent" actor — the policy is not opt-in at each call site.
     assertTabCreationAllowed(actor, sessionId);
     const s = sessions.get(sessionId);
     if (!s) return -1;
@@ -268,6 +280,7 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
   return {
     open,
     get,
+    getOwned,
     ids: () => [...sessions.keys()],
     close,
     activePage,

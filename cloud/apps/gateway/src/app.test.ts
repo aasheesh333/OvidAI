@@ -14,7 +14,10 @@ describe("buildGateway", () => {
     while (built.length > 0) await built.pop()!.close();
   });
 
-  function makeApp(tickets: TicketStub = stubTickets()): { app: FastifyInstance; tickets: TicketStub } {
+  function makeApp(
+    tickets: TicketStub = stubTickets(),
+    limits: { requestTimeout?: number; connectionTimeout?: number; bodyLimit?: number } = {},
+  ): { app: FastifyInstance; tickets: TicketStub } {
     const { queues } = stubQueues();
     const app = buildGateway({
       system: stubSystemBus(),
@@ -25,7 +28,7 @@ describe("buildGateway", () => {
       keys: stubKeys(),
       mint: stubMint(),
       events: noopEvents,
-    });
+    }, limits);
     built.push(app);
     return { app, tickets };
   }
@@ -63,6 +66,58 @@ describe("buildGateway", () => {
       error: { code: "internal", message: "Internal server error." },
     });
     expect(res.body).not.toContain("ticket redis boom");
+  });
+
+  it("hardens the transport: explicit requestTimeout, connectionTimeout and bodyLimit", async () => {
+    // Fastify's own config type omits requestTimeout (it is forwarded to the
+    // http server), though the value is present on initialConfig at runtime.
+    type Config = FastifyInstance["initialConfig"] & { requestTimeout?: number };
+    const { app } = makeApp();
+    const config = app.initialConfig as Config;
+    expect(config.requestTimeout).toBe(60_000);
+    expect(config.connectionTimeout).toBe(10_000);
+    expect(config.bodyLimit).toBe(10 * 1024 * 1024);
+    expect(app.server.requestTimeout).toBe(60_000);
+
+    // Every knob is overridable by the composition root / tests.
+    const custom = makeApp(stubTickets(), {
+      requestTimeout: 5_000,
+      connectionTimeout: 2_000,
+      bodyLimit: 1_024,
+    });
+    const customConfig = custom.app.initialConfig as Config;
+    expect(customConfig.requestTimeout).toBe(5_000);
+    expect(customConfig.connectionTimeout).toBe(2_000);
+    expect(customConfig.bodyLimit).toBe(1_024);
+
+    // The explicit cap is enforced: an over-limit body is a stable 413, not
+    // a connection that stays open until the client gives up.
+    const tooBig = await custom.app.inject({
+      method: "POST",
+      url: "/cloud/v1/auth/ticket",
+      headers: { ...authHeaders("ws-user-big"), "content-type": "application/json" },
+      payload: JSON.stringify({ pad: "x".repeat(2_048) }),
+    });
+    expect(tooBig.statusCode).toBe(413);
+    expect(tooBig.json()).toEqual({
+      error: { code: "payload_too_large", message: "Request body too large." },
+    });
+  });
+
+  it("a 4xx never echoes Fastify's raw error message (stable code + server-side log)", async () => {
+    const { app } = makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/cloud/v1/auth/ticket",
+      headers: { ...authHeaders("ws-user-json"), "content-type": "application/json" },
+      payload: "{not valid json",
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error: { code: "bad_request", message: "Invalid request." } });
+    // No parser internals, token snippets or byte offsets reach the client.
+    expect(res.body).not.toContain("JSON");
+    expect(res.body).not.toContain("Unexpected");
+    expect(res.body).not.toContain("position");
   });
 
   it("unknown route → 404 {code:'not_found'} envelope (consistent shape)", async () => {

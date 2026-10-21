@@ -261,11 +261,11 @@ export function defineBrowserTool(deps: BrowserToolsDeps, spec: BrowserToolSpec)
       // before the body for an existing session and after it for the call
       // that just created one (browser_open), so a subsequent click/link
       // download is always captured.
-      const existing = deps.registry.get(ctx.sessionId);
+      const existing = deps.registry.getOwned(ctx.sessionId, ctx.userId);
       if (existing !== null) wireDownloads(deps, existing, artifactSessionId(ctx));
       try {
         const result = await spec.execute(parsed.data, ctx, deps);
-        const current = deps.registry.get(ctx.sessionId);
+        const current = deps.registry.getOwned(ctx.sessionId, ctx.userId);
         if (current !== null) wireDownloads(deps, current, artifactSessionId(ctx));
         return result;
       } catch (err) {

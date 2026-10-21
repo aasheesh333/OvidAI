@@ -145,6 +145,22 @@ export function mimeTypeForFilename(filename: string): string | null {
   return EXTENSION_MIME[ext] ?? null;
 }
 
+/**
+ * True when a filename may be stored as a download. A KNOWN extension must be
+ * on the allowlist (`payload.html`/`icon.svg`/`setup.exe` are refused); an
+ * extension-less name is generic binary — it cannot be served back as active
+ * content by extension, so it is allowed (page fixtures and generated files
+ * commonly have no suffix).
+ */
+export function isAllowedTransferFilename(filename: string): boolean {
+  const dot = filename.lastIndexOf(".");
+  // A leading-dot name (".html") still carries an extension for this check —
+  // it must not slip past as "no extension".
+  const hasExtension = dot !== -1 && dot < filename.length - 1;
+  if (!hasExtension) return true;
+  return mimeTypeForFilename(filename) !== null;
+}
+
 /** Single-component filename only: no separators, no `..`, no NUL. */
 export function sanitizeFilename(raw: string | null | undefined): string | null {
   if (typeof raw !== "string") return null;

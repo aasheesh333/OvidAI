@@ -15,10 +15,16 @@
  *    machine-readable `code`, and payload failures are `StudioGitJobError`.
  *
  * The token is NOT part of the job payload. `createStudioGitProcessor` (see
- * studioGit.ts) resolves it per job through the injected `tokenFor`, and the
+ * studioGit.ts) resolves it per USER through the injected `tokenFor`, and the
  * outcome never carries it either.
+ *
+ * The `userId` in the payload is MAC-bound: every job must be signed with
+ * OVID_INTERNAL_API_SECRET (`signStudioGitJob`) and the worker refuses
+ * unsigned/tampered payloads BEFORE the service sees them. That stops a Redis
+ * writer from cloning into another user's workspace.
  */
 
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { Worker, type ConnectionOptions, type Job } from "bullmq";
 import { z } from "zod";
 
@@ -84,6 +90,62 @@ export const studioGitJobSchema = z.discriminatedUnion("op", [
     .strict(),
 ]);
 
+/** A signed payload as it travels through Redis. */
+export type StudioGitSignedJob = StudioGitJob & { sig: string };
+
+const SIG_RE = /^[0-9a-f]{64}$/;
+
+/** Deterministic JSON: flat keys in sorted order, `sig` excluded. */
+function canonicalJobJson(job: Record<string, unknown>): string {
+  const keys = Object.keys(job)
+    .filter((key) => key !== "sig")
+    .sort();
+  const ordered: Record<string, unknown> = {};
+  for (const key of keys) ordered[key] = job[key];
+  return JSON.stringify(ordered);
+}
+
+/**
+ * Producer-side signing. The gateway (or any other producer) must call this
+ * with the same shared secret the worker verifies with. The payload's
+ * `userId` is part of the MAC, so a Redis writer cannot clone into another
+ * user's workspace even though the userId itself is not a secret.
+ */
+export function signStudioGitJob(job: StudioGitJob, secret: string): StudioGitSignedJob {
+  if (secret === "") throw new Error("studio_git job secret must be non-empty");
+  const sig = createHmac("sha256", secret)
+    .update(canonicalJobJson(job as unknown as Record<string, unknown>))
+    .digest("hex");
+  return { ...job, sig };
+}
+
+/**
+ * Consumer-side verification. Unsigned, truncated, wrong-secret or tampered
+ * payloads all fail identically (constant-time compare, no oracle).
+ */
+export function verifyStudioGitJob(data: unknown, secret: string): StudioGitJob {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new StudioGitJobError("invalid_job", "invalid studio_git job signature");
+  }
+  const record = data as Record<string, unknown>;
+  const sig = record.sig;
+  if (typeof sig !== "string" || !SIG_RE.test(sig)) {
+    throw new StudioGitJobError(
+      "invalid_job",
+      "missing studio_git job signature — the producer must sign the payload",
+    );
+  }
+  const expected = createHmac("sha256", secret)
+    .update(canonicalJobJson(record))
+    .digest();
+  const provided = Buffer.from(sig, "hex");
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+    throw new StudioGitJobError("invalid_job", "invalid studio_git job signature");
+  }
+  const { sig: _sig, ...payload } = record;
+  return parseStudioGitJob(payload);
+}
+
 export type StudioGitJobFailureCode = "invalid_job" | "unknown";
 
 /** A typed job-level failure (payload or infrastructure, never user text). */
@@ -122,9 +184,13 @@ export function parseStudioGitJob(data: unknown): StudioGitJob {
  */
 export function createStudioGitJobHandler(
   processor: (job: StudioGitJob) => Promise<StudioGitOutcome>,
+  opts: { secret: string },
 ): (job: { data: unknown }) => Promise<StudioGitOutcome> {
+  if (opts.secret === "") throw new Error("studio_git job secret must be non-empty");
   return async (job) => {
-    const parsed = parseStudioGitJob(job.data);
+    // Verify BEFORE parsing: the MAC covers userId, so an unauthenticated
+    // Redis writer cannot retarget a job at another user's workspace.
+    const parsed = verifyStudioGitJob(job.data, opts.secret);
     try {
       return await processor(parsed);
     } catch (err) {
@@ -143,6 +209,11 @@ export interface StudioGitWorkerOptions {
   /** BullMQ connection OPTIONS OBJECT (a bare URL string hangs — Task 7). */
   connection: ConnectionOptions;
   processor: (job: StudioGitJob) => Promise<StudioGitOutcome>;
+  /**
+   * Shared HMAC secret for job signatures (OVID_INTERNAL_API_SECRET). Required:
+   * without it any Redis writer could retarget a job at another user.
+   */
+  jobSecret: string;
   /** Defaults to STUDIO_GIT_CONCURRENCY; must be a positive integer. */
   concurrency?: number;
   /** Test/namespace prefix; must match the producer's prefix. */
@@ -174,9 +245,12 @@ export function createStudioGitWorker(
       `studio_git concurrency must be a positive integer, got: ${concurrency}`,
     );
   }
+  if (typeof opts.jobSecret !== "string" || opts.jobSecret === "") {
+    throw new Error("studio_git jobSecret must be a non-empty string");
+  }
   return new Worker<StudioGitJob>(
     STUDIO_GIT_QUEUE,
-    createStudioGitJobHandler(opts.processor),
+    createStudioGitJobHandler(opts.processor, { secret: opts.jobSecret }),
     {
       connection: withBlockingSafeRetries(opts.connection),
       ...(opts.prefix !== undefined ? { prefix: opts.prefix } : {}),

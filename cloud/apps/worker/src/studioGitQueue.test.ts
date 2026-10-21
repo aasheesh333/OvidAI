@@ -39,9 +39,12 @@ import {
   createStudioGitJobHandler,
   createStudioGitWorker,
   parseStudioGitJob,
+  signStudioGitJob,
   studioGitJobSchema,
 } from "./studioGitQueue.js";
 
+const SECRET = "studio-git-test-secret-0123456789";
+const SYNC_JOB = { op: "sync", userId: "u1", repoDir: "app" } as const;
 const SYNC_RESULT = {
   status: "up_to_date" as const,
   dirty: false,
@@ -128,37 +131,71 @@ describe("studio_git payload validation", () => {
 describe("studio_git job handler", () => {
   it("validates BEFORE the service sees the job", async () => {
     const processor = vi.fn(async () => ({ op: "sync" as const, result: SYNC_RESULT }));
-    const handler = createStudioGitJobHandler(processor);
+    const handler = createStudioGitJobHandler(processor, { secret: SECRET });
 
-    await expect(handler({ data: { op: "sync" } })).rejects.toMatchObject({
-      code: "invalid_job",
-    });
+    await expect(
+      handler({ data: signStudioGitJob({ op: "sync" } as unknown as StudioGitJob, SECRET) }),
+    ).rejects.toMatchObject({ code: "invalid_job" });
     expect(processor).not.toHaveBeenCalled();
   });
 
   it("dispatches the parsed job and returns the service outcome", async () => {
     const seen: unknown[] = [];
-    const handler = createStudioGitJobHandler(async (job) => {
-      seen.push(job);
-      return { op: "sync", result: SYNC_RESULT };
-    });
+    const handler = createStudioGitJobHandler(
+      async (job) => {
+        seen.push(job);
+        return { op: "sync", result: SYNC_RESULT };
+      },
+      { secret: SECRET },
+    );
 
-    const outcome = await handler({ data: { op: "sync", userId: "u1", repoDir: "app" } });
+    const outcome = await handler({ data: signStudioGitJob(SYNC_JOB, SECRET) });
     expect(outcome).toEqual({ op: "sync", result: SYNC_RESULT });
+    // `sig` is stripped before the service sees the payload.
     expect(seen).toEqual([{ op: "sync", userId: "u1", repoDir: "app" }]);
+  });
+
+  it("rejects an unsigned or tampered job (the userId is MAC-bound)", async () => {
+    const processor = vi.fn(async () => ({ op: "sync" as const, result: SYNC_RESULT }));
+    const handler = createStudioGitJobHandler(processor, { secret: SECRET });
+
+    // No signature at all.
+    await expect(handler({ data: SYNC_JOB })).rejects.toMatchObject({ code: "invalid_job" });
+
+    // Signed for u1, retargeted at u2 by a Redis writer.
+    const signed = signStudioGitJob(SYNC_JOB, SECRET);
+    await expect(
+      handler({ data: { ...signed, userId: "u2" } }),
+    ).rejects.toMatchObject({ code: "invalid_job" });
+
+    // Signed with the wrong secret.
+    await expect(
+      handler({ data: signStudioGitJob(SYNC_JOB, "wrong-secret") }),
+    ).rejects.toMatchObject({ code: "invalid_job" });
+    expect(processor).not.toHaveBeenCalled();
   });
 
   it("keeps the service's typed failure and wraps unknown throws", async () => {
     const typed = new StudioGitError("token_unavailable", "Reconnect GitHub.");
-    const keeps = createStudioGitJobHandler(async () => {
-      throw typed;
-    });
-    await expect(keeps({ data: { op: "sync", userId: "u1" } })).rejects.toBe(typed);
+    const keeps = createStudioGitJobHandler(
+      async () => {
+        throw typed;
+      },
+      { secret: SECRET },
+    );
+    await expect(
+      keeps({ data: signStudioGitJob({ op: "sync", userId: "u1" }, SECRET) }),
+    ).rejects.toBe(typed);
 
-    const wraps = createStudioGitJobHandler(async () => {
-      throw new Error("git binary missing");
-    });
-    await expect(wraps({ data: { op: "sync", userId: "u1" } })).rejects.toMatchObject({
+    const wraps = createStudioGitJobHandler(
+      async () => {
+        throw new Error("git binary missing");
+      },
+      { secret: SECRET },
+    );
+    await expect(
+      wraps({ data: signStudioGitJob({ op: "sync", userId: "u1" }, SECRET) }),
+    ).rejects.toMatchObject({
       name: "StudioGitJobError",
       code: "unknown",
       message: "git binary missing",
@@ -173,6 +210,7 @@ describe("studio_git worker registration", () => {
     createStudioGitWorker({
       connection: { url: "redis://127.0.0.1:6379" },
       processor,
+      jobSecret: SECRET,
     });
 
     const worker = captured.workers.at(-1)!;
@@ -190,6 +228,7 @@ describe("studio_git worker registration", () => {
     createStudioGitWorker({
       connection: { url: "redis://127.0.0.1:6379" },
       processor,
+      jobSecret: SECRET,
       concurrency: 2,
       prefix: "ovid-test-studio",
     });
@@ -210,6 +249,7 @@ describe("studio_git worker registration", () => {
         createStudioGitWorker({
           connection: { url: "redis://127.0.0.1:6379" },
           processor,
+          jobSecret: SECRET,
           concurrency,
         }),
       ).toThrow(/positive integer/);
@@ -220,6 +260,7 @@ describe("studio_git worker registration", () => {
     createStudioGitWorker({
       connection: { url: "redis://127.0.0.1:6379" },
       processor,
+      jobSecret: SECRET,
     });
     const worker = captured.workers.at(-1)!;
 
@@ -227,7 +268,9 @@ describe("studio_git worker registration", () => {
       code: "invalid_job",
     });
     await expect(
-      worker.processor({ data: { op: "sync", userId: "u1" } }),
+      worker.processor({
+        data: signStudioGitJob({ op: "sync", userId: "u1" }, SECRET),
+      }),
     ).resolves.toEqual({ op: "sync", result: SYNC_RESULT });
   });
 });

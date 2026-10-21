@@ -203,6 +203,26 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway legacy /v1/reports route (real post
     expect((await post(app, bob, { request_id: "c".repeat(20) })).statusCode).toBe(201);
   });
 
+  it("SECURITY: parallel posts cannot exceed the daily cap (count + insert in one transaction)", async () => {
+    const uid = testUid("report-race");
+    const app = makeApp({ dailyLimit: 3 });
+
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, (_, i) =>
+        post(app, uid, { request_id: `race-${i}`.padEnd(16, "x") }),
+      ),
+    );
+    const created = responses.filter((r) => r.statusCode === 201);
+    const refused = responses.filter((r) => r.statusCode === 429);
+    expect(created).toHaveLength(3);
+    expect(refused).toHaveLength(5);
+    for (const r of refused) expect(r.json()).toEqual({ detail: "report_limit_reached" });
+
+    const rows = await db.$client`
+      SELECT count(*)::int AS n FROM reports WHERE reporter_uid = ${uid}`;
+    expect(rows[0]!.n).toBe(3);
+  });
+
   it("admission fence → 403 with the lifecycle detail", async () => {
     const uid = testUid("report-fenced");
     let calls = 0;

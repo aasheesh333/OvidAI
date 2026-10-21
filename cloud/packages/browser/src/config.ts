@@ -278,10 +278,15 @@ export function loadBrowserEngineConfig(raw: NodeJS.ProcessEnv): BrowserEngineCo
     },
     stateDir: optionalString(raw, "OVID_BROWSER_STATE_DIR"),
     lightpandaBin: optionalString(raw, "OVID_LIGHTPANDA_BIN"),
-    allowHosts: (raw.OVID_BROWSER_ALLOW_HOSTS ?? "")
-      .split(",")
-      .map((h) => h.trim())
-      .filter((h) => h !== ""),
+    // OVID_BROWSER_ALLOW_HOSTS is a tests/dev escape hatch. In production a
+    // single mistyped entry would open SSRF (e.g. 127.0.0.1), so the env var
+    // is ignored entirely when NODE_ENV=production.
+    allowHosts: production
+      ? []
+      : (raw.OVID_BROWSER_ALLOW_HOSTS ?? "")
+          .split(",")
+          .map((h) => h.trim())
+          .filter((h) => h !== ""),
     ownPublicIp: optionalString(raw, "OVID_PUBLIC_IP"),
     blockHeavyResources: (raw.OVID_BROWSER_BLOCK_HEAVY_RESOURCES ?? "1") !== "0",
     // Resource diet (Muse ephemeral-lease model): a small V8 heap, at most
