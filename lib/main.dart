@@ -19,11 +19,17 @@ import 'core/composer_drafts.dart';
 import 'core/firebase_service.dart';
 import 'core/native_routes.dart';
 import 'core/play_billing.dart';
+import 'core/revenuecat_billing.dart';
 import 'core/session_history_store.dart';
 import 'core/theme.dart';
 import 'ui/app_router.dart';
+import 'ui/design/o_theme.dart';
 import 'ui/login_gate.dart';
 import 'ui/shell.dart';
+import 'ui/v2/app/v2_app_shell.dart';
+import 'ui/v2/app/app_lock_gate.dart';
+import 'ui/v2/app/v2_onboarding_gate.dart';
+import 'ui/v2/v2_gallery.dart';
 import 'core/share_link_resolver.dart';
 import 'l10n/l10n.dart';
 import 'ui/collab_session_screen.dart';
@@ -31,6 +37,15 @@ import 'ui/shared_conversation_screen.dart';
 import 'ui/widgets/error_views.dart';
 
 export 'ui/app_router.dart' show appNavigatorKey;
+
+/// Dev/review switch: `flutter run --dart-define=OVID_UI_V2=true` opens the
+/// screen gallery instead of the live app. Off by default so production is
+/// untouched until the wiring pass flips it.
+const bool kOvidUiV2 = bool.fromEnvironment('OVID_UI_V2');
+
+/// Design-review surface: every v2 screen with a light/dark toggle.
+/// `flutter run --dart-define=OVID_UI_GALLERY=true`.
+const bool kOvidUiGallery = bool.fromEnvironment('OVID_UI_GALLERY');
 
 bool openShareWithNavigator(GlobalKey<NavigatorState> navigatorKey, Uri uri) {
   final route = ShareLinkResolver.route(uri);
@@ -177,6 +192,11 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   /// `MaterialApp`, its theme and every route once per token. Only a theme
   /// toggle is worth a rebuild, so the listener now compares before rebuilding.
   bool _builtDark = Aether.dark;
+
+  /// Persisted preference this widget last built with. A change from
+  /// `system` to `light` does not necessarily flip [Aether.dark] (the device
+  /// may already be light), but MaterialApp still has to rebuild.
+  String _builtMode = AppState.I.themeMode;
   final _links = AppLinks();
   final _resolver = ShareLinkResolver();
   StreamSubscription<Uri>? _linkSubscription;
@@ -352,7 +372,10 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   void _openShare(Uri uri) => _shareOpener.open(uri);
 
   void _onThemeChanged() {
-    if (!mounted || Aether.dark == _builtDark) return;
+    if (!mounted) return;
+    final mode = AppState.I.themeMode;
+    if (Aether.dark == _builtDark && mode == _builtMode) return;
+    _builtMode = mode;
     _applyPalette();
   }
 
@@ -363,6 +386,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   /// painting the old palette.
   void _applyPalette() {
     _builtDark = Aether.dark;
+    _builtMode = AppState.I.themeMode;
     setState(() {});
     Aether.rebuildAll(context);
   }
@@ -421,14 +445,43 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
       scaffoldMessengerKey: appScaffoldMessengerKey,
       onGenerateRoute: AppRouter.onGenerateRoute,
       debugShowCheckedModeBanner: false,
-      theme: Aether.themeFor(dark: false),
-      darkTheme: Aether.themeFor(dark: true),
-      // The app resolves "system" itself (didChangePlatformBrightness) so the
-      // static palette and the Theme always agree on the same frame.
-      themeMode: _builtDark ? ThemeMode.dark : ThemeMode.light,
+      // Ovid Si palette: the approved Stitch theme for dark, a derived light
+      // counterpart, and `system` by default with light as the fallback.
+      theme: OTheme.light(),
+      darkTheme: OTheme.dark(),
+      themeMode: OTheme.modeFor(AppState.I.themeMode),
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
-      home: const LoginGate(child: OvidShell()),
+      home: kOvidUiGallery
+          ? const V2GalleryPage()
+          : kOvidUiV2
+          ? V2OnboardingGate(
+              purchase: (planId) async {
+                // Paywall ids are product names; billing uses plan tiers.
+                final tier = switch (planId) {
+                  'go' => '3x',
+                  'plus' => '7x',
+                  'pro' => '15x',
+                  _ => null,
+                };
+                if (tier == null) return false;
+                final rc = RevenueCatBilling.I;
+                final outcome = rc.available
+                    ? await rc.buy(tier)
+                    : await PlayBillingService.I.buy(tier);
+                if (outcome.ok) {
+                  AppState.I.setOvidCloudTier(outcome.tier ?? tier);
+                }
+                return outcome.ok;
+              },
+              child: LoginGate(
+                child: AppLockGate(
+                  onSignOut: () => FirebaseService.I.signOut(),
+                  child: const V2AppShell(),
+                ),
+              ),
+            )
+          : const LoginGate(child: OvidShell()),
     );
   }
 }

@@ -77,7 +77,7 @@ def manifest_proto(target, compiled_debuggable=None):
         return field(1, body)
 
     return element('manifest', [('package', 'com.dhanuk.ovidai')], [
-        element('uses-sdk', [('minSdkVersion', '23'), ('targetSdkVersion', str(target))]),
+        element('uses-sdk', [('minSdkVersion', '24'), ('targetSdkVersion', str(target))]),
         element('application'),
     ])
 
