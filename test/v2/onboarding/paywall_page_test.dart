@@ -9,7 +9,7 @@ Future<void> _pump(
   WidgetTester tester, {
   bool dark = false,
   bool settle = true,
-  V2PaywallData data = const V2PaywallData(),
+  V2PaywallData data = const V2PaywallData(trialDays: 7),
   ValueChanged<String>? onPlanSelected,
   ValueChanged<V2Currency>? onCurrencyChanged,
   ValueChanged<String>? onStartTrial,
@@ -75,6 +75,16 @@ void main() {
     expect(find.text('Compare all plans'), findsNothing);
     // A tour step, not a pushed route: no dead back arrow.
     expect(find.byIcon(Icons.arrow_back_rounded), findsNothing);
+  });
+
+  testWidgets('no configured trial means no trial promise', (tester) async {
+    // trialDays defaults to 0 because nothing in the app reads a Play
+    // introductory offer yet. The CTA must not invent a 7-day trial.
+    await _pump(tester, data: const V2PaywallData());
+
+    expect(find.text('Start 7-day free trial'), findsNothing);
+    expect(find.textContaining('free trial'), findsNothing);
+    expect(find.text('Subscribe to Ovid Plus'), findsOneWidget);
   });
 
   testWidgets('Free and Go say they are Auto-only', (tester) async {

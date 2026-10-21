@@ -98,6 +98,7 @@ class V2PaywallData {
     this.purchaseStatus,
     this.purchaseDetail,
     this.testModeNote,
+    this.trialDays = 0,
   });
 
   final List<V2PlanOption> plans;
@@ -120,6 +121,10 @@ class V2PaywallData {
   /// Legacy test-store note. Still honoured as the banner detail; new hosts
   /// should pass `purchaseStatus: V2PurchaseBannerStatus.testStore` instead.
   final String? testModeNote;
+
+  /// Length of the Play introductory offer, in days. Zero means no trial is
+  /// configured, so the call to action must not promise one.
+  final int trialDays;
 }
 
 class PaywallPage extends StatefulWidget {
@@ -389,7 +394,9 @@ class _PaywallPageState extends State<PaywallPage> {
                   key: const Key('paywall-trial'),
                   label: selectedPlan.isFree
                       ? 'Continue with Free'
-                      : 'Start 7-day free trial',
+                      : data.trialDays > 0
+                      ? 'Start ${data.trialDays}-day free trial'
+                      : 'Subscribe to ${selectedPlan.name}',
                   icon: Icons.arrow_forward_rounded,
                   expand: true,
                   loading: data.purchasing,

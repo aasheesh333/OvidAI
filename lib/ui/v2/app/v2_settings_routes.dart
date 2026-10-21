@@ -239,8 +239,9 @@ class V2SettingsRoutes {
       legalNote: RevenueCatBilling.I.usingTestStore
           ? 'Test mode: RevenueCat Test Store simulates purchases. No card is '
                 'charged and no real subscription is created.'
-          : 'Subscriptions renew automatically each month until canceled. '
-                'You can cancel anytime from Google Play Store subscriptions.',
+          : 'Subscriptions renew automatically each ${period == V2BillingPeriod.yearly ? 'year' : 'month'} '
+                'until canceled. You can cancel anytime from Google Play Store '
+                'subscriptions.',
       // Every card names its own plan; the old screen hard-coded Plus here,
       // so a Go user's "Upgrade" bought Plus. The period travels with the
       // request so the yearly toggle cannot silently buy the monthly product.
