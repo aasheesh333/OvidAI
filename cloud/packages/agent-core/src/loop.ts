@@ -154,6 +154,13 @@ export interface AgentRunJob {
    * this set; absent → the normal computeToolRoster projection.
    */
   roster?: readonly ToolSpec[];
+  /**
+   * Task 8.10 (additive): an observer sink for THIS run's events. The engine
+   * always writes to the session log first, then mirrors to this sink (errors
+   * swallowed) — the subagent supervisor uses it to append the child's full
+   * tool-call/output log without stealing persistence from the normal sink.
+   */
+  sink?: EventSink;
 }
 
 export interface NormalizedRunJob extends AgentRunJob {

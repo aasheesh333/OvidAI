@@ -107,6 +107,22 @@ export function createAgentEngine(deps: AgentEngineDeps): AgentEngine {
       live.set(job.sessionId, { runId: job.runId, generation, rt, controller });
 
       try {
+        const primary = sinkFor(job.sessionId);
+        const sink: EventSink =
+          job.sink === undefined
+            ? primary
+            : {
+                async emit(type, payload) {
+                  // Persistence first; the observer is strictly additive and
+                  // must never be able to fail the run (Task 8.10).
+                  await primary.emit(type, payload);
+                  try {
+                    await job.sink!.emit(type, payload);
+                  } catch {
+                    /* observer failure is not a run failure */
+                  }
+                },
+              };
         await runAgentLoop(
           {
             runId: job.runId,
@@ -136,7 +152,7 @@ export function createAgentEngine(deps: AgentEngineDeps): AgentEngine {
               : {}),
             ...(job.roster !== undefined ? { roster: job.roster } : {}),
           },
-          { ...deps, sink: sinkFor(job.sessionId) },
+          { ...deps, sink },
           rt,
         );
       } catch (err) {

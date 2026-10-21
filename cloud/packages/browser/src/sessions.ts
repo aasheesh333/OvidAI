@@ -28,6 +28,7 @@
 import type { Page } from "playwright-core";
 
 import type { LiveContextHandle } from "./pool.js";
+import { assertTabCreationAllowed, type TabActor } from "./tabPolicy.js";
 
 export const TAKEOVER_REFUSAL =
   "The user is currently controlling the browser live (takeover). Browser tools are paused — wait for the user to release control, then retry.";
@@ -81,8 +82,12 @@ export interface SessionBrowser {
 }
 
 export interface BrowserSessionRegistry {
-  /** Registers a live handle; instruments entry.handle.page as tab 0. */
-  open(entry: { sessionId: string; userId: string; handle: LiveContextHandle }): SessionBrowser;
+  /**
+   * Registers a live handle; instruments entry.handle.page as tab 0. The
+   * first tab is AGENT-owned: a `"user"` actor is refused with the typed
+   * error before any entry is created.
+   */
+  open(entry: { sessionId: string; userId: string; handle: LiveContextHandle }, actor?: TabActor): SessionBrowser;
   get(sessionId: string): SessionBrowser | null;
   /**
    * Every live session id — exactly the "context alive" set. The Task-14
@@ -95,11 +100,20 @@ export interface BrowserSessionRegistry {
   /** Removes the entry only — the POOL owns context closing. */
   close(sessionId: string): SessionBrowser | null;
   activePage(sessionId: string): Page | null;
-  /** Instruments, appends, switches active; returns the new index (-1 when unknown). */
-  addTab(sessionId: string, page: Page): number;
+  /**
+   * Instruments, appends, switches active; returns the new index (-1 when
+   * unknown). AGENT ONLY: a `"user"` actor is refused with the typed
+   * `BrowserTabCreationForbiddenError` before any page is touched.
+   */
+  addTab(sessionId: string, page: Page, actor?: TabActor): number;
+  /** Convenience for the agent tool path — always allowed. */
+  addTabForAgent(sessionId: string, page: Page): number;
+  /** A user-initiated create: ALWAYS throws the typed refusal. */
+  createTabAsUser(sessionId: string): never;
   /** Closes the page (not the context), fixes activeIndex; refuses the last tab. */
-  closeTab(sessionId: string, index: number): boolean;
-  switchTab(sessionId: string, index: number): boolean;
+  closeTab(sessionId: string, index: number, actor?: TabActor): boolean;
+  /** Users may switch between existing tabs (never create one). */
+  switchTab(sessionId: string, index: number, actor?: TabActor): boolean;
   /** false when session unknown. `viewerId` records the controller (cleared on release). */
   setTakeover(sessionId: string, enabled: boolean, viewerId?: string | null): boolean;
   /** TAKEOVER_REFUSAL when flagged, else null (unknown session ⇒ null). */
@@ -134,7 +148,12 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
     s.dialogTimers.clear();
   }
 
-  function open(entry: { sessionId: string; userId: string; handle: LiveContextHandle }): SessionBrowser {
+  function open(
+    entry: { sessionId: string; userId: string; handle: LiveContextHandle },
+    actor: TabActor = "agent",
+  ): SessionBrowser {
+    // The first tab is agent-owned, exactly like every later one.
+    assertTabCreationAllowed(actor, entry.sessionId);
     // Re-opening an existing session replaces the stale entry — its hold
     // timers must not fire into the new one.
     const stale = sessions.get(entry.sessionId);
@@ -183,7 +202,11 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
     return s ? s.tabs[s.activeIndex] ?? null : null;
   }
 
-  function addTab(sessionId: string, page: Page): number {
+  function addTab(sessionId: string, page: Page, actor: TabActor = "agent"): number {
+    // Agent-owned tabs: refuse a user create BEFORE looking at the session,
+    // so the refusal is identical for known and unknown keys (and no page is
+    // allocated/instrumented on the rejected path).
+    assertTabCreationAllowed(actor, sessionId);
     const s = sessions.get(sessionId);
     if (!s) return -1;
     s.tabs.push(page);
@@ -193,7 +216,13 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
     return s.activeIndex;
   }
 
-  function closeTab(sessionId: string, index: number): boolean {
+  function createTabAsUser(sessionId: string): never {
+    assertTabCreationAllowed("user", sessionId);
+    // Unreachable: assertTabCreationAllowed always throws for a user actor.
+    throw new Error("unreachable: user tab creation was not refused");
+  }
+
+  function closeTab(sessionId: string, index: number, _actor: TabActor = "agent"): boolean {
     const s = sessions.get(sessionId);
     if (!s) return false;
     if (index < 0 || index >= s.tabs.length) return false;
@@ -208,7 +237,7 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
     return true;
   }
 
-  function switchTab(sessionId: string, index: number): boolean {
+  function switchTab(sessionId: string, index: number, _actor: TabActor = "agent"): boolean {
     const s = sessions.get(sessionId);
     if (!s) return false;
     if (index < 0 || index >= s.tabs.length) return false;
@@ -243,6 +272,8 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
     close,
     activePage,
     addTab,
+    addTabForAgent: (sessionId: string, page: Page) => addTab(sessionId, page, "agent"),
+    createTabAsUser,
     closeTab,
     switchTab,
     setTakeover,

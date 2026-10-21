@@ -51,4 +51,6 @@ export * from "./compaction/compactor.js";
 export * from "./compaction/ledger.js";
 export * from "./compaction/policy.js";
 export * from "./subagents.js";
+export * from "./subagentSummary.js";
+export * from "./subagentLog.js";
 export * from "./tools/subagentTools.js";

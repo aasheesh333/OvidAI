@@ -70,6 +70,19 @@ export interface BrowserStateDto {
   takeover: boolean;
   /** True while the worker is streaming screencast frames. */
   screencast: boolean;
+  /**
+   * Additive (browser runtime): measured screencast delivery rate in the
+   * trailing second — the "watching live · 4 fps" indicator. 0 when not
+   * casting. Optional so older workers (which never publish it) stay
+   * schema-valid; clients treat absent as "unknown".
+   */
+  fps?: number;
+  /**
+   * Additive (browser runtime): true after the 45 s no-human-input conversion
+   * to headless — frames stopped, the session/context stays alive. Optional
+   * like `fps`.
+   */
+  headless?: boolean;
   /** Format of the binary frames currently on the wire. */
   frameFormat: BrowserFrameFormat;
   /** Page CSS-pixel viewport the client scales its canvas to. */
@@ -182,6 +195,11 @@ export const browserStateDtoSchema: z.ZodType<BrowserStateDto> = z.object({
   title: z.string().nullable(),
   takeover: z.boolean(),
   screencast: z.boolean(),
+  // Additive browser-runtime stream metadata. Absent on older workers; when
+  // present the types are enforced (an fps must be a finite, non-negative
+  // number and headless a boolean), matching the DTO's other optional fields.
+  fps: z.number().nonnegative().finite().optional(),
+  headless: z.boolean().optional(),
   frameFormat: z.enum(["jpeg", "webp"]),
   viewport: z.object({ width: viewportDim, height: viewportDim }),
   takeoverViewerId: z.string().min(1).nullable().optional(),

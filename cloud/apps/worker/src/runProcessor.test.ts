@@ -40,7 +40,10 @@ import {
   type SandboxHandle,
   type SandboxManager,
 } from "@ovid/sandbox";
-import type { SandboxPort } from "@ovid/agent-core";
+import type {
+  CreateSubagentLogOptions,
+  SandboxPort,
+} from "@ovid/agent-core";
 import type { KeyResolver, SessionEvent } from "@ovid/shared";
 import { createToolRegistry } from "./tools/registry.js";
 import type { ToolRegistry } from "./tools/registry.js";
@@ -1823,8 +1826,14 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         stderr: "",
       },
       files: Record<string, string> = {},
-    ): { port: SandboxPort; execs: Array<{ cmd: string; callKey?: string }> } {
+    ): {
+      port: SandboxPort;
+      execs: Array<{ cmd: string; callKey?: string }>;
+      writes: Array<{ path: string; content: string }>;
+      files: Record<string, string>;
+    } {
       const execs: Array<{ cmd: string; callKey?: string }> = [];
+      const writes: Array<{ path: string; content: string }> = [];
       const port: SandboxPort = {
         async exec(_userId, o) {
           execs.push({ cmd: o.cmd, callKey: o.callKey });
@@ -1834,9 +1843,12 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         async readFile(_userId, path) {
           return files[path] ?? "";
         },
-        async writeFile() {},
-        async exists() {
-          return false;
+        async writeFile(_userId, path, content) {
+          writes.push({ path, content });
+          files[path] = content;
+        },
+        async exists(_userId, path) {
+          return files[path] !== undefined;
         },
         async listDir() {
           return [];
@@ -1852,7 +1864,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         },
         async jobKill() {},
       };
-      return { port, execs };
+      return { port, execs, writes, files };
     }
 
     /**
@@ -2141,7 +2153,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(generate?.function.description).toContain("ovid-image:img-one");
     });
 
-    it("full processor: dispatch_agent runs a real child loop and returns its report (fix I-1)", async () => {
+    it("full processor: dispatch_agent runs a real child loop and returns the strict JSON summary, with the child log inside the sandbox (fix I-1 / §9)", async () => {
       const seeded = await seedRun();
       const sbx = makeFakePort();
       const sse = await startTurnSse([
@@ -2163,13 +2175,95 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       const completed = evts.find(
         (e) => e.type === "tool_completed" && e.payload.name === "dispatch_agent",
       )!;
-      expect(completed.payload).toMatchObject({ ok: true, content: "child answer" });
+      expect(completed.payload).toMatchObject({ ok: true });
+
+      // SI spec §9: the dispatch result is the five-key JSON summary — never
+      // the child's transcript. The child's prose is a key finding.
+      const content = String(completed.payload.content);
+      expect(content).not.toBe("child answer");
+      const summary = JSON.parse(content) as Record<string, unknown>;
+      expect(Object.keys(summary).sort()).toEqual([
+        "artifacts_created",
+        "error_if_any",
+        "files_modified",
+        "key_findings",
+        "status",
+      ]);
+      expect(summary).toEqual({
+        status: "completed",
+        files_modified: [],
+        artifacts_created: [],
+        key_findings: ["child answer"],
+        error_if_any: null,
+      });
+
       // The child is a real session with its own persisted transcript.
       const started = evts.find((e) => e.type === "subagent_started")!;
       const childSessionId = String(started.payload.childSessionId);
       const childRows = await messages.page(db, childSessionId, { limit: 10 });
       expect(childRows.rows.some((r) => r.role === "assistant" && r.content === "child answer")).toBe(true);
       expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+
+      // §9 log destination: the supervisor's logFactory wrote through the
+      // sandbox port at the JAIL path, not the worker host's /workspace.
+      const logPath = `/workspace/.ovid/logs/subagent_${childSessionId}.log`;
+      const logWrite = sbx.writes.filter((w) => w.path === logPath).at(-1);
+      expect(logWrite).toBeDefined();
+      const logLines = logWrite!.content
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(logLines[0]).toMatchObject({
+        type: "subagent_log_started",
+        sessionId: childSessionId,
+        parentSessionId: seeded.sessionId,
+      });
+      const resultLine = logLines.find((entry) => entry.type === "subagent_result");
+      expect(resultLine).toMatchObject({ status: "completed", key_findings: ["child answer"] });
+    });
+
+    it("full processor: logDir/logFactory are plumbed into agent-core at the sandbox log path (SI §9)", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort();
+      const seen: CreateSubagentLogOptions[] = [];
+      const sse = await startTurnSse([
+        toolCallTurn("call_d", "dispatch_agent", { prompt: "child task" }),
+        textTurn("child answer"),
+        textTurn("parent done"),
+      ]);
+      const processor = createFullAgentRunProcessor(
+        makeFullDeps(sse.url, sbx.port, {
+          subagentLogFactory: async (options) => {
+            seen.push(options);
+            return {
+              path: `/tmp/unused-${options.sessionId}.log`,
+              async append() {},
+              async close() {},
+              lastError: () => null,
+            };
+          },
+        }),
+      );
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({
+        // The JAIL path, never the worker host's literal /workspace.
+        dir: "/workspace/.ovid/logs",
+        header: {
+          parentSessionId: seeded.sessionId,
+          agentType: "general-purpose",
+          depth: 1,
+        },
+      });
+      // The default sandbox-backed writer was NOT used (the injected factory
+      // replaced it), so no log file was written through the port.
+      expect(sbx.writes.filter((w) => w.path.includes("/.ovid/logs/"))).toEqual([]);
     });
 
     it("full processor: a prompt hook is model-evaluated and can block (fix I-6)", async () => {

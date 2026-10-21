@@ -6,6 +6,9 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createDb,
   messages,
@@ -32,7 +35,9 @@ import {
   subagentToolPolicy,
   type RunStatus,
   type SubagentStore,
+  type ChildHandle,
 } from "./subagents.js";
+import { parseSubagentSummary } from "./subagentSummary.js";
 import type { ToolContext, ToolSpec } from "./types.js";
 import { createToolRegistry } from "./types.js";
 
@@ -278,11 +283,18 @@ function build(o: {
       },
     }))),
     store: fake.store,
+    logDir: mkdtempSync(join(tmpdir(), "ovid-subagent-")),
   });
   return { fake, jobs, stopCalls, events, supervisor };
 }
 
 // ── SubagentToolPolicy (subagent_tools.dart:25–136) ────────────────────────
+
+function summaryOf(handle: ChildHandle) {
+  const parsed = parseSubagentSummary(handle.result() ?? "");
+  if (!parsed.ok) throw new Error(`not a strict summary: ${parsed.error}`);
+  return parsed.summary;
+}
 
 describe("subagentToolPolicy", () => {
   it("expands CC names eagerly and keeps MCP/prefix patterns", () => {
@@ -363,7 +375,13 @@ describe("createSubagentSupervisor.dispatch", () => {
     expect(fake.childCreates).toBe(1);
     expect(handle.sessionId).toBe("child-1");
     expect(handle.status()).toBe("completed");
-    expect(handle.result()).toBe("the answer");
+    expect(summaryOf(handle)).toMatchObject({
+      status: "completed",
+      files_modified: [],
+      artifacts_created: [],
+      key_findings: ["the answer"],
+      error_if_any: null,
+    });
 
     // The child run is a real in-process engine run at depth+1.
     expect(jobs).toHaveLength(1);
@@ -625,7 +643,7 @@ describe("follow-up turns", () => {
     });
     const handle = await supervisor.dispatch(parentCtx(), { prompt: "initial" });
     expect(jobs.map((j) => j.prompt)).toEqual(["initial", "during-stop"]);
-    expect(handle.result()).toBe("answer:during-stop");
+    expect(summaryOf(handle).key_findings).toEqual(["answer:during-stop"]);
   });
 });
 
@@ -677,6 +695,7 @@ describe.skipIf(!TEST_DATABASE_URL)("createSubagentSupervisor (real postgres)", 
       hooks,
       sinkFactory,
       registry: createToolRegistry([]),
+      logDir: mkdtempSync(join(tmpdir(), "ovid-subagent-pg-")),
     });
 
     const handle = await supervisor.dispatch(
@@ -690,7 +709,7 @@ describe.skipIf(!TEST_DATABASE_URL)("createSubagentSupervisor (real postgres)", 
     expect(events[0]!.payload).toMatchObject({ agentType: "CodeSubagent", childSessionId: handle.sessionId });
     expect(childJobs[0]).not.toHaveProperty("turnContext");
     expect(childJobs[0]).not.toHaveProperty("sessionRefs");
-    expect(handle.result()).toBe("real answer");
+    expect(summaryOf(handle).key_findings).toEqual(["real answer"]);
     expect(await sessions.get(db, handle.sessionId, uid)).not.toBeNull();
     // Durable lineage: root → child (the JSONB parent-link seam).
     expect(await createDbSubagentStore(db).lineage(handle.sessionId)).toEqual([

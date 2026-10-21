@@ -19,6 +19,27 @@ describe("screencast frame-rate cap (Wave 5 R3)", () => {
   it("a malformed OVID_SCREENCAST_MAX_FPS fails fast naming the variable", () => {
     expect(() => loadBrowserEngineConfig({ OVID_SCREENCAST_MAX_FPS: "fast" })).toThrow(/OVID_SCREENCAST_MAX_FPS/);
   });
+
+  it("clamps the target into the spec's 3–5 fps band", () => {
+    expect(loadBrowserEngineConfig({ OVID_SCREENCAST_MAX_FPS: "1" }).screencast.maxFps).toBe(3);
+    expect(loadBrowserEngineConfig({ OVID_SCREENCAST_MAX_FPS: "3" }).screencast.maxFps).toBe(3);
+    expect(loadBrowserEngineConfig({ OVID_SCREENCAST_MAX_FPS: "4" }).screencast.maxFps).toBe(4);
+    expect(loadBrowserEngineConfig({ OVID_SCREENCAST_MAX_FPS: "30" }).screencast.maxFps).toBe(5);
+  });
+});
+
+describe("watch inactivity → headless (spec §8)", () => {
+  it("defaults to 45 s and is env-tunable (0 disables)", () => {
+    expect(loadBrowserEngineConfig({}).watchIdleHeadlessMs).toBe(45_000);
+    expect(loadBrowserEngineConfig({ OVID_WATCH_IDLE_HEADLESS_MS: "1200" }).watchIdleHeadlessMs).toBe(1200);
+    expect(loadBrowserEngineConfig({ OVID_WATCH_IDLE_HEADLESS_MS: "0" }).watchIdleHeadlessMs).toBe(0);
+  });
+
+  it("a malformed window fails fast naming the variable", () => {
+    expect(() => loadBrowserEngineConfig({ OVID_WATCH_IDLE_HEADLESS_MS: "-1" })).toThrow(
+      /OVID_WATCH_IDLE_HEADLESS_MS/,
+    );
+  });
 });
 
 describe("detach grace (Wave 6 W4)", () => {

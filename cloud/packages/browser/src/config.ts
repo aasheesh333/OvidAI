@@ -4,6 +4,8 @@
  * variable (fail-fast at worker boot, never at request time).
  */
 
+import { clampScreencastFps } from "./screencast.js";
+
 export interface ScreencastConfig {
   width: number;
   height: number;
@@ -21,6 +23,13 @@ export interface ScreencastConfig {
 export interface BrowserEngineConfig {
   /** MAX_LIVE_BROWSERS, default 4 */
   maxLiveBrowsers: number;
+  /**
+   * Product spec §8: 45 s with no human input while a viewer is attached puts
+   * the page headless (frames stop, the session/context stays alive).
+   * OVID_WATCH_IDLE_HEADLESS_MS; 0 disables the conversion (tests/tight boxes).
+   * Optional so older configs keep compiling; the engine defaults to 45 s.
+   */
+  watchIdleHeadlessMs?: number;
   /** MAX_TIER1_FALLBACK_CONTEXTS, default 2 */
   tier1FallbackContexts: number;
   /**
@@ -243,6 +252,8 @@ export function loadBrowserEngineConfig(raw: NodeJS.ProcessEnv): BrowserEngineCo
 
   return {
     maxLiveBrowsers: positiveInt(raw, "MAX_LIVE_BROWSERS") ?? 4,
+    // Spec §8 default is 45 s; 0 disables the inactivity conversion.
+    watchIdleHeadlessMs: nonNegativeInt(raw, "OVID_WATCH_IDLE_HEADLESS_MS") ?? 45_000,
     tier1FallbackContexts: positiveInt(raw, "MAX_TIER1_FALLBACK_CONTEXTS") ?? 2,
     idleEvictMs: positiveInt(raw, "BROWSER_IDLE_EVICT_MS") ?? 15_000,
     // The deploy env files (worker.env / .env.staging.example) spell this
@@ -261,7 +272,9 @@ export function loadBrowserEngineConfig(raw: NodeJS.ProcessEnv): BrowserEngineCo
       quality: positiveInt(raw, "OVID_SCREENCAST_QUALITY") ?? 60,
       everyNthFrame: positiveInt(raw, "OVID_SCREENCAST_EVERY_NTH_FRAME") ?? 2,
       maxFramesInFlight: positiveInt(raw, "OVID_SCREENCAST_MAX_FRAMES_IN_FLIGHT") ?? 1,
-      maxFps: positiveNumber(raw, "OVID_SCREENCAST_MAX_FPS") ?? 4,
+      // Spec §8: the live view is 3–5 fps, default 4. Clamp so a typo'd env
+      // value can never turn the stream into a slideshow or a 30 fps firehose.
+      maxFps: clampScreencastFps(positiveNumber(raw, "OVID_SCREENCAST_MAX_FPS")),
     },
     stateDir: optionalString(raw, "OVID_BROWSER_STATE_DIR"),
     lightpandaBin: optionalString(raw, "OVID_LIGHTPANDA_BIN"),

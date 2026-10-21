@@ -50,7 +50,14 @@ import {
   probeWebpSupport,
   startScreencast,
   type ScreencastHandle,
+  type ScreencastMetadata,
 } from "./screencast.js";
+import { isTabCreationForbiddenError } from "./tabPolicy.js";
+import {
+  WATCH_IDLE_HEADLESS_MS,
+  createWatchHeadless,
+  type WatchHeadlessController,
+} from "./watchHeadless.js";
 import {
   ensureSession,
   releaseSession as releaseSessionOps,
@@ -96,6 +103,18 @@ export interface BrowserEngineDeps {
   log?(msg: string, err?: unknown): void;
 }
 
+/**
+ * The published state plus the live stream metadata the product surface
+ * needs ("watching live · 4 fps", headless badge). The shared DTO stays the
+ * wire contract; these additive fields are ignored by older gateways.
+ */
+export interface BrowserLiveState extends BrowserStateDto {
+  /** Measured delivery rate in the trailing second (0 when not casting). */
+  fps?: number;
+  /** True after the 45 s inactivity conversion (stream stopped, session alive). */
+  headless?: boolean;
+}
+
 export interface BrowserEngine {
   pool: BrowserPool;
   registry: BrowserSessionRegistry;
@@ -112,6 +131,10 @@ export interface BrowserEngine {
   viewerCount(sessionId: string): number;
   /** Wave 6 W4: true while the detach grace window is holding the cast open. */
   detachGracePending(sessionId: string): boolean;
+  /** True after 45 s of no human input while watched (stream stopped, session alive). */
+  isHeadless(sessionId: string): boolean;
+  /** Live stream metadata (target/actual fps, dropped frames), or null when not casting. */
+  streamMetadata(sessionId: string): ScreencastMetadata | null;
   /** True while the engine listens on the key's ctl/input channels. */
   isWatching(sessionId: string): boolean;
   /** releaseSession(all live, flushing state) → bridge.close → research.close → pool.close; idempotent. */
@@ -185,6 +208,31 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
         onTakeover(sessionId, enabled, viewerId),
       onSwitchTab: (sessionId: string, index: number, viewerId?: string) =>
         onSwitchTab(sessionId, index, viewerId),
+      onUserTabCreate: (sessionId: string, payload: unknown) => onUserTabCreate(sessionId, payload),
+    },
+  });
+
+  // Product spec §8: 45 s with no human input while watched → headless
+  // (frames stop, the session/context stays alive). "Take control" or any
+  // human input resumes the stream. The callbacks are declared below and
+  // close over the bridge/cast bookkeeping; they only run after construction.
+  const watchHeadless: WatchHeadlessController = createWatchHeadless({
+    idleMs: cfg.watchIdleHeadlessMs ?? WATCH_IDLE_HEADLESS_MS,
+    onHeadless: (sessionId: string) => {
+      log(`session ${sessionId} went headless after ${cfg.watchIdleHeadlessMs ?? WATCH_IDLE_HEADLESS_MS} ms without human input`);
+      // Publish first so the headless badge lands even when no cast was live.
+      publishState(sessionId);
+      void stopScreencast(sessionId).catch((err: unknown) =>
+        log(`screencast stop after inactivity failed for session ${sessionId}`, err),
+      );
+    },
+    onResume: (sessionId: string) => {
+      publishState(sessionId);
+      if (bridge.viewerCount(sessionId) > 0) {
+        void startScreencastFor(sessionId).catch((err: unknown) =>
+          log(`screencast resume failed for session ${sessionId}`, err),
+        );
+      }
     },
   });
 
@@ -251,9 +299,14 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     return webpSupport === true ? "webp" : "jpeg";
   }
 
-  /** Wave 6 W4: keep casting for viewers OR a pending detach grace window. */
+  /**
+   * Wave 6 W4 + spec §8: keep casting for viewers OR a pending detach grace
+   * window — but never for an idle/headless session. Take-control clears the
+   * headless flag before this is consulted, so resume works immediately.
+   */
   function shouldCast(sessionId: string): boolean {
-    return bridge.viewerCount(sessionId) > 0 || detachGrace.pending(sessionId);
+    if (detachGrace.pending(sessionId)) return true;
+    return bridge.viewerCount(sessionId) > 0 && !watchHeadless.isHeadless(sessionId);
   }
 
   async function startScreencastFor(sessionId: string): Promise<void> {
@@ -370,7 +423,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   const tabTitleCache = new Map<Page, string>();
   const refreshingTabTitles = new Set<string>();
 
-  function deadState(sessionId: string): BrowserStateDto {
+  function deadState(sessionId: string): BrowserLiveState {
     return {
       sessionId,
       live: false,
@@ -383,6 +436,8 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       viewport: { width: cfg.screencast.width, height: cfg.screencast.height },
       tabs: [],
       activeTabIndex: 0,
+      fps: 0,
+      headless: false,
     };
   }
 
@@ -446,7 +501,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       title: tabTitleCache.get(tab) ?? (index === activeIndex ? titleCache.get(sessionId) ?? null : null),
       active: index === activeIndex,
     }));
-    bridge.publishState(sessionId, {
+    const state: BrowserLiveState = {
       sessionId,
       live: true,
       url: page.url(),
@@ -458,7 +513,12 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       viewport,
       tabs,
       activeTabIndex: activeIndex,
-    });
+      // Product spec §8 metadata: "watching live · 4 fps" and the headless
+      // badge. actualFps is measured, never the configured cap.
+      fps: casts.get(sessionId)?.handle.fps() ?? 0,
+      headless: watchHeadless.isHeadless(sessionId),
+    };
+    bridge.publishState(sessionId, state);
     // The first publish after a navigation carries the previous title; the
     // refresh republishes with the fresh one. The gateway keeps the latest.
     void refreshTitle(sessionId, page);
@@ -511,6 +571,9 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     if (viewers === 0) viewerCounts.delete(sessionId);
     else viewerCounts.set(sessionId, viewers);
     if (viewers === 0) {
+      // The detach-grace path owns "last viewer left"; stop the inactivity
+      // clock so it cannot fire into an unwatched session.
+      watchHeadless.viewerLeft(sessionId);
       // Takeover is void without a viewer: its owner is gone, and a flag
       // left set would brick every browser_* tool until idle eviction
       // destroys the session. Both disconnect paths funnel through here —
@@ -532,6 +595,9 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     }
     // A viewer is back (or another one is): the grace conversion is moot.
     detachGrace.cancel(sessionId);
+    // Spec §8: arm the 45 s inactivity clock; a join on a headless session
+    // resumes the stream immediately (the viewer is watching again).
+    watchHeadless.viewerJoined(sessionId);
     // FE-026: takeover belongs to ONE viewer. When that viewer is gone
     // (leave or stale sweep) while others still watch, release it — the
     // remaining viewers must not inherit someone else's control.
@@ -615,8 +681,10 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
             continue;
           }
           try {
-            // Viewer input is activity: reset the idle-eviction clock so an
-            // interacting user never has the tab evicted mid-interaction.
+            // Viewer input is activity: reset BOTH clocks — the pool's idle
+            // eviction and the spec's 45 s watch-inactivity conversion. Input
+            // also resumes a headless stream (the human is back).
+            watchHeadless.humanActivity(sessionId);
             registry.touch(sessionId);
             await applyInputEvent(page, next);
           } catch (err) {
@@ -632,6 +700,29 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
 
   function onTakeover(sessionId: string, enabled: boolean, viewerId?: string): void {
     registry.setTakeover(sessionId, enabled, viewerId ?? null);
+    // "Take control" resumes a headless stream and pauses agent actions (the
+    // registry flag already refuses every browser_* tool). Releasing control
+    // keeps the inactivity clock running.
+    if (enabled) watchHeadless.takeControl(sessionId);
+    else watchHeadless.releaseControl(sessionId);
+    publishState(sessionId);
+  }
+
+  /**
+   * A user-initiated tab create (only reachable from a buggy/older client —
+   * the shared ctl union has no `new_tab`). The registry throws the typed
+   * refusal before any page exists; log it and republish the honest state.
+   */
+  function onUserTabCreate(sessionId: string, _payload: unknown): void {
+    try {
+      registry.createTabAsUser(sessionId);
+    } catch (err) {
+      if (isTabCreationForbiddenError(err)) {
+        log(`refused user tab creation on session ${sessionId}: ${err.message}`);
+      } else {
+        log(`user tab creation failed on session ${sessionId}`, err);
+      }
+    }
     publishState(sessionId);
   }
 
@@ -643,6 +734,8 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   function onSwitchTab(sessionId: string, index: number, _viewerId?: string): void {
     const session = registry.get(sessionId);
     if (session === null) return;
+    // Selecting a tab is human activity (resets the 45 s clock).
+    watchHeadless.humanActivity(sessionId);
     const previous = session.tabs[session.activeIndex] ?? null;
     if (!registry.switchTab(sessionId, index)) return;
     const next = registry.activePage(sessionId);
@@ -678,6 +771,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
 
   async function releaseSession(sessionId: string): Promise<void> {
     detachGrace.cancel(sessionId);
+    watchHeadless.forget(sessionId);
     await stopScreencast(sessionId);
     // capture → flush → registry.close → pool.releaseLive → notify {live:false}
     await releaseSessionOps(ops, sessionId);
@@ -694,6 +788,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
    */
   async function onPoolIdleEvict(sessionId: string, context: BrowserContext): Promise<void> {
     detachGrace.cancel(sessionId);
+    watchHeadless.forget(sessionId);
     await stopScreencast(sessionId);
     const session = registry.get(sessionId);
     if (session !== null) {
@@ -722,6 +817,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     closePromise = (async () => {
       clearInterval(monitorTimer);
       detachGrace.clear();
+      watchHeadless.clear();
       // Flush BEFORE any process dies (Review Focus #2): every live session
       // goes through the full capture→flush→close path first. The REGISTRY
       // is the enumeration source (the "context alive" set) — the engine's
@@ -763,6 +859,8 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     screencastCount: () => casts.size,
     viewerCount: (sessionId: string) => bridge.viewerCount(sessionId),
     detachGracePending: (sessionId: string) => detachGrace.pending(sessionId),
+    isHeadless: (sessionId: string) => watchHeadless.isHeadless(sessionId),
+    streamMetadata: (sessionId: string) => casts.get(sessionId)?.handle.metadata() ?? null,
     isWatching: (sessionId: string) => bridge.isWatching(sessionId),
     close,
   };

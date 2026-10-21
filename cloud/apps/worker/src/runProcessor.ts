@@ -70,6 +70,7 @@ import {
   type AgentTransport,
   type AgentEngine,
   type Compactor,
+  type CreateSubagentLogOptions,
   type EgressFetch,
   type EgressHopHook,
   type GitHubApiPort,
@@ -78,6 +79,7 @@ import {
   type SessionMode,
   type SkillCatalog,
   type SsrfGuard,
+  type SubagentLog,
   type Tool as CoreTool,
   type ToolContext as CoreToolContext,
   type ToolRegistry as CoreToolRegistry,
@@ -103,6 +105,7 @@ import type { ImageCapabilities, ImageTooling, ImageVisionGuard } from "./tools/
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.js";
 import { MAX_TOOL_ROUNDS, SYSTEM_PROMPT_V1, TOOL_EVENT_CONTENT_CAP } from "./tools/systemPrompt.js";
 import type { AgentTool, ToolContext, ToolResult } from "./tools/types.js";
+import { createSandboxSubagentLogFactory, SANDBOX_SUBAGENT_LOG_DIR } from "./subagentLogSink.js";
 
 /**
  * Agent-run processor v1 (P3 Task 16): the P2-compat contract backed by the
@@ -393,6 +396,22 @@ export interface FullRunDeps {
     uid: string,
     runCtx: { sessionId: string; runId: string },
   ) => Promise<void>;
+  /**
+   * SI spec §9 / Task 8.10: where a subagent's append-only log lives. The
+   * default is the path INSIDE the sandbox (`/workspace/.ovid/logs`); the
+   * supervisor forwards it to `subagentLogFactory` as `options.dir`.
+   * Production never overrides it — the test seam exists so a suite can point
+   * the log at a temp directory.
+   */
+  subagentLogDir?: string;
+  /**
+   * SI spec §9 / Task 8.10: the writer for the per-child log. The default is
+   * `createSandboxSubagentLogFactory`, which writes through this run's
+   * `SandboxPort` so the file lands in the SANDBOX workspace, not on the
+   * worker host. Tests inject a recorder; deployments with another sandbox
+   * implementation can substitute one here.
+   */
+  subagentLogFactory?: (options: CreateSubagentLogOptions) => Promise<SubagentLog>;
 }
 
 /** The full processor plus its shutdown handle (the redis approval bridge). */
@@ -2036,6 +2055,16 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       memoryEnabled,
       githubConnected,
       presets: presetFor,
+      // SI spec §9: the child's append-only log belongs INSIDE the sandbox.
+      // agent-core's default writer targets the worker HOST at this literal
+      // path; the sandbox-backed factory resolves it onto the session
+      // workspace the jail mounts at /workspace. `logDir` is still passed so
+      // the supervisor's contract (and any injected factory) sees the spec
+      // path explicitly.
+      logDir: deps.subagentLogDir ?? SANDBOX_SUBAGENT_LOG_DIR,
+      logFactory:
+        deps.subagentLogFactory ??
+        createSandboxSubagentLogFactory({ sandbox: runSandbox, userId }),
     });
     const subagentTools = createSubagentTools({
       supervisor: subagentSupervisor,

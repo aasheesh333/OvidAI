@@ -10,6 +10,7 @@ import {
   DISPATCH_AGENT_TIMEOUT_MS,
 } from "./subagentTools.js";
 import type { ChildHandle, ChildStatus, DispatchArgs, SubagentSupervisor } from "../subagents.js";
+import { SubagentLimitError } from "../subagents.js";
 import type { ToolContext } from "../types.js";
 
 function ctx(o: Partial<ToolContext> = {}): ToolContext {
@@ -58,6 +59,9 @@ function handle(o: {
       return status;
     },
     result() {
+      return o.result ?? null;
+    },
+    rawResult() {
       return o.result ?? null;
     },
   };
@@ -150,9 +154,10 @@ describe("createSubagentTools — registration", () => {
 });
 
 describe("dispatch_agent", () => {
-  it("returns the child's bare report text (no [id state · Ns] wrapper)", async () => {
+  it("returns the strict five-key JSON summary, never the bare report text", async () => {
     const { tools: list, dispatched } = tools({
-      dispatch: async () => handle({ result: "RFC 4180 quoting required" }),
+      dispatch: async () =>
+        handle({ status: "completed", result: "RFC 4180 quoting required" }),
     });
     const result = await byName(list, "dispatch_agent").execute(
       {
@@ -163,7 +168,17 @@ describe("dispatch_agent", () => {
       },
       ctx(),
     );
-    expect(result).toEqual({ content: "RFC 4180 quoting required" });
+    expect(Object.keys(JSON.parse(result.content)).sort()).toEqual([
+      "artifacts_created",
+      "error_if_any",
+      "files_modified",
+      "key_findings",
+      "status",
+    ]);
+    expect(JSON.parse(result.content)).toMatchObject({
+      status: "completed",
+      key_findings: ["RFC 4180 quoting required"],
+    });
     expect(dispatched[0]).toEqual({
       prompt: "audit the CSV parser",
       tools: ["Read"],
@@ -172,12 +187,18 @@ describe("dispatch_agent", () => {
     });
   });
 
-  it("empty final text becomes the Dart 'finished without a final answer' line", async () => {
+  it("empty final text still yields a valid summary with no findings", async () => {
     const { tools: list } = tools({
-      dispatch: async () => handle({ result: null }),
+      dispatch: async () => handle({ status: "completed", result: null }),
     });
     const result = await byName(list, "dispatch_agent").execute({ prompt: "x" }, ctx());
-    expect(result.content).toBe("Subagent child-1 finished without a final answer.");
+    expect(JSON.parse(result.content)).toMatchObject({
+      status: "completed",
+      key_findings: [],
+      files_modified: [],
+      artifacts_created: [],
+      error_if_any: null,
+    });
   });
 
   it("renders a supervisor refusal as a tool error, never a throw", async () => {
@@ -189,6 +210,18 @@ describe("dispatch_agent", () => {
     const result = await byName(list, "dispatch_agent").execute({ prompt: "x" }, ctx());
     expect(result.isError).toBe(true);
     expect(result.content).toContain("Subagent depth limit (2) reached");
+  });
+
+  it("surfaces the typed limit code at the tool boundary", async () => {
+    const { tools: list } = tools({
+      dispatch: async () => {
+        throw new SubagentLimitError("root", 50);
+      },
+    });
+    const result = await byName(list, "dispatch_agent").execute({ prompt: "x" }, ctx());
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("subagent_limit_exceeded:");
+    expect(result.content).toContain("subagent ceiling (50");
   });
 
   it("requires a prompt", async () => {

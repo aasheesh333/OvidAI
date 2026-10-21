@@ -4,6 +4,7 @@
  * across calls (prompt-cache friendly, spec §6.1).
  */
 
+import { createHumanizer } from "../humanInput.js";
 import { inspectionTools } from "./inspection.js";
 import { interactionTools } from "./interaction.js";
 import { navigationTools } from "./navigation.js";
@@ -54,6 +55,12 @@ export const BROWSER_TOOL_NAMES: readonly string[] = Object.freeze([
 ]);
 
 export function createBrowserTools(deps: BrowserToolsDeps): BrowserToolDef[] {
+  // ONE shared humanizer: pointer position carries across calls (a click
+  // after a hover starts where the hover ended), matching a real cursor.
+  // Assign onto the caller's deps (rather than spreading a copy) so live test
+  // seams — e.g. `deps.downloadMaxBytes = 1` after construction — stay visible
+  // to every tool, exactly as before this module gained a default.
+  if (deps.humanizer === undefined) deps.humanizer = createHumanizer();
   return [
     ...navigationTools(deps),
     ...inspectionTools(deps),

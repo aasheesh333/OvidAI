@@ -70,6 +70,15 @@ async function clampPoint(page: Page, xRaw: unknown, yRaw: unknown, xField: stri
   };
 }
 
+/**
+ * Public viewport clamp for the agent's human-like pointer path (the viewer
+ * path already clamps inside `applyInputEvent`). Throws BrowserInputError for
+ * non-finite coordinates, exactly like the event mapper.
+ */
+export async function clampToViewport(page: Page, x: unknown, y: unknown): Promise<Point> {
+  return clampPoint(page, x, y, "x", "y");
+}
+
 /** Clamp a signed wheel delta to ±MAX_WHEEL_DELTA (finiteness already checked). */
 function clampDelta(delta: number): number {
   return Math.min(Math.max(delta, -MAX_WHEEL_DELTA), MAX_WHEEL_DELTA);

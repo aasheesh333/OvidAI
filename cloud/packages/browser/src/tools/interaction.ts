@@ -1,11 +1,12 @@
 /**
  * Interaction + form + cookie + buffer tools (P6 Task 13).
  *
- * Pointer/keyboard injection reuses Task 7's `applyInputEvent` so tool-driven
- * taps/swipes/long-presses and viewer-driven input share ONE mapping (and one
- * set of validation/refusal strings). Form tools use Playwright's native
- * fill/select/press actions — those dispatch `input`/`change` events exactly
- * like a user edit.
+ * Pointer/keyboard injection for AGENT actions goes through the humanizer
+ * (interpolated jittered moves + per-key typing delays, spec §8); viewer input
+ * still reuses Task 7's `applyInputEvent` directly — a real finger is already
+ * human. Coordinates share one validation/refusal shape (`clampToViewport`).
+ * Form selects/presses use Playwright's native actions — those dispatch
+ * `input`/`change` events exactly like a user edit.
  *
  * Cookies are context-scoped (not page-scoped): `get`/`set`/`delete`/`clear`
  * operate on the session's persistent context so logins survive tab changes.
@@ -17,7 +18,8 @@
 
 import { z } from "zod";
 
-import { applyInputEvent, BrowserInputError } from "../input.js";
+import { createHumanizer, type Humanizer, type Point } from "../humanInput.js";
+import { BrowserInputError, clampToViewport } from "../input.js";
 import { guardUrl, withSession } from "../sessionOps.js";
 import type { SessionBrowser } from "../sessions.js";
 import {
@@ -38,6 +40,39 @@ function notFound(selector: string): string {
 
 async function requireSelector(page: import("playwright-core").Page, selector: string): Promise<boolean> {
   return (await page.locator(selector).count()) > 0;
+}
+
+/** The shared humanizer (definitions.ts injects one; direct callers get a default). */
+function humanFor(deps: BrowserToolsDeps): Humanizer {
+  return deps.humanizer ?? createHumanizer();
+}
+
+/**
+ * Scroll the element into view and return its center in CSS pixels — the
+ * landing point for a human-like pointer path. null when the element has no
+ * layout box (hidden / detached).
+ */
+async function centerOf(page: import("playwright-core").Page, selector: string): Promise<Point | null> {
+  const loc = page.locator(selector).first();
+  await loc.scrollIntoViewIfNeeded({ timeout: CLICK_TIMEOUT_MS }).catch(() => {
+    // Not scrollable/visible enough — boundingBox() below is the honest test.
+  });
+  const box = await loc.boundingBox();
+  if (box === null || box.width <= 0 || box.height <= 0) return null;
+  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+}
+
+/** Focus the field, clear it, then type character-by-character with delays. */
+async function typeInto(
+  page: import("playwright-core").Page,
+  human: Humanizer,
+  selector: string,
+  text: string,
+): Promise<void> {
+  await page.locator(selector).first().focus();
+  // Replacing the value is still an explicit clear; the ENTRY is human-like.
+  await page.fill(selector, "");
+  await human.type(page, text);
 }
 
 /** BrowserInputError is malformed input, not a browser failure — same prefix, clean copy. */
@@ -104,7 +139,10 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       const selector: string = input.selector;
       return withSession(deps, ctx, async (_session, page) => {
         if (!(await requireSelector(page, selector))) return { content: notFound(selector) };
-        await page.click(selector, { timeout: CLICK_TIMEOUT_MS });
+        const point = await centerOf(page, selector);
+        if (point === null) return { content: notFound(selector) };
+        // Human-like: jittered, interpolated move → pause → press → release.
+        await humanFor(deps).click(page, point);
         return { content: `clicked ${selector}` };
       });
     },
@@ -128,10 +166,15 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       const count: 2 | 3 = input.count ?? 2;
       return withSession(deps, ctx, async (_session, page) => {
         if (!(await requireSelector(page, selector))) return { content: notFound(selector) };
+        const point = await centerOf(page, selector);
+        if (point === null) return { content: notFound(selector) };
+        const human = humanFor(deps);
         if (count === 3) {
-          await page.locator(selector).first().click({ clickCount: 3, timeout: CLICK_TIMEOUT_MS });
+          await human.click(page, point);
+          await human.click(page, point);
+          await human.click(page, point);
         } else {
-          await page.dblclick(selector, { timeout: CLICK_TIMEOUT_MS });
+          await human.doubleClick(page, point);
         }
         return { content: `double-clicked ${selector}` };
       });
@@ -151,7 +194,9 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       const selector: string = input.selector;
       return withSession(deps, ctx, async (_session, page) => {
         if (!(await requireSelector(page, selector))) return { content: notFound(selector) };
-        await page.hover(selector, { timeout: CLICK_TIMEOUT_MS });
+        const point = await centerOf(page, selector);
+        if (point === null) return { content: notFound(selector) };
+        await humanFor(deps).moveMouse(page, point);
         return { content: `hovered ${selector}` };
       });
     },
@@ -175,7 +220,8 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       const y: number = input.y;
       return withSession(deps, ctx, async (_session, page) => {
         try {
-          await applyInputEvent(page, { type: "tap", x, y });
+          const point = await clampToViewport(page, x, y);
+          await humanFor(deps).click(page, point);
         } catch (err) {
           return inputError(err);
         }
@@ -217,7 +263,10 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       };
       return withSession(deps, ctx, async (_session, page) => {
         try {
-          await applyInputEvent(page, event);
+          const from = await clampToViewport(page, event.fromX, event.fromY);
+          const to = await clampToViewport(page, event.toX, event.toY);
+          // Human-like drag: press, interpolated/jittered path, release.
+          await humanFor(deps).drag(page, from, to, event.steps !== undefined ? { steps: event.steps } : {});
         } catch (err) {
           return inputError(err);
         }
@@ -261,12 +310,8 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
           y = box.y + box.height / 2;
         }
         try {
-          await applyInputEvent(page, {
-            type: "long_press",
-            x,
-            y,
-            ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
-          });
+          const point = await clampToViewport(page, x, y);
+          await humanFor(deps).longPress(page, point, input.durationMs ?? 600);
         } catch (err) {
           return inputError(err);
         }
@@ -323,7 +368,8 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       const text: string = input.text;
       const submit: boolean = input.submit === true;
       return withSession(deps, ctx, async (_session, page) => {
-        await page.fill(selector, text);
+        // Spec §8: per-key delays, not a programmatic fill.
+        await typeInto(page, humanFor(deps), selector, text);
         if (submit) await page.press(selector, "Enter");
         return { content: `typed ${text.length} chars into ${selector}` };
       });
@@ -357,7 +403,7 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
             lines.push(`MISSING ${selector}`);
             continue;
           }
-          await page.fill(selector, text);
+          await typeInto(page, humanFor(deps), selector, text);
           lines.push(`filled ${selector} with ${text.length} chars`);
         }
         return { content: lines.length > 0 ? lines.join("\n") : "no fields to fill" };

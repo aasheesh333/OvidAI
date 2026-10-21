@@ -23,6 +23,8 @@
 import type { EventSink } from "../ports.js";
 import {
   renderChildLine,
+  subagentResultJson,
+  SubagentRefusalError,
   type ChildHandle,
   type SubagentSupervisor,
 } from "../subagents.js";
@@ -127,16 +129,17 @@ export function createSubagentTools(deps: {
           ...(disallowedTools !== undefined ? { disallowedTools } : {}),
           ...(agentType !== "" ? { agentType } : {}),
         });
-        const text = handle.result();
-        return {
-          content:
-            text !== null && text.trim() !== ""
-              ? text
-              : `Subagent ${handle.sessionId} finished without a final answer.`,
-        };
+        // SI spec §9: the parent receives ONLY the strict ≤300-token JSON
+        // summary — never the child's transcript or bare report text.
+        return { content: subagentResultJson(handle) };
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        // Surface the typed discriminator to the caller as well as the copy:
+        // the model can distinguish the ceiling/nesting/depth refusals without
+        // parsing prose (the supervisor throws typed errors).
+        const code = err instanceof SubagentRefusalError ? `${err.code}: ` : "";
         return {
-          content: err instanceof Error ? err.message : String(err),
+          content: `${code}${message}`,
           isError: true,
         };
       }

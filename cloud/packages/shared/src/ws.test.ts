@@ -130,6 +130,15 @@ describe("wsServerMsg browser ops (P6)", () => {
     expect(wsServerMsg(input)).toEqual(input);
   });
 
+  it("parses browser_state carrying additive fps/headless metadata", () => {
+    const input = {
+      op: "browser_state",
+      sessionId: "s1",
+      state: { ...browserState, fps: 4, headless: false },
+    };
+    expect(wsServerMsg(input)).toEqual(input);
+  });
+
   it("rejects browser_state with a malformed state", () => {
     expect(() =>
       wsServerMsg({

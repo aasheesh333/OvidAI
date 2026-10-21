@@ -423,6 +423,9 @@ importers:
       '@ovid/storage':
         specifier: workspace:*
         version: link:../../packages/storage
+      bullmq:
+        specifier: ^5.81.5
+        version: 5.81.5
       fastify:
         specifier: ^5.12.7
         version: 5.12.7

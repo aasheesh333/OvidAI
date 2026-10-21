@@ -92,6 +92,37 @@ describe("browserStateDtoSchema", () => {
   });
 });
 
+describe("browser stream metadata (browser runtime)", () => {
+  it("keeps old payloads valid: absent fps/headless parse as undefined", () => {
+    const parsed = browserStateDtoSchema.parse(validState);
+    expect(parsed.fps).toBeUndefined();
+    expect(parsed.headless).toBeUndefined();
+  });
+
+  it("round-trips additive fps/headless fields unchanged", () => {
+    const input = { ...validState, fps: 3.8, headless: true };
+    expect(browserStateDtoSchema.parse(input)).toEqual(input);
+  });
+
+  it("accepts the not-casting / not-headless zero values", () => {
+    const input = { ...validState, screencast: false, fps: 0, headless: false };
+    expect(browserStateDtoSchema.parse(input)).toEqual(input);
+  });
+
+  it("rejects a non-number fps", () => {
+    expect(() => browserStateDtoSchema.parse({ ...validState, fps: "4" })).toThrow();
+  });
+
+  it("rejects a negative or non-finite fps", () => {
+    expect(() => browserStateDtoSchema.parse({ ...validState, fps: -1 })).toThrow();
+    expect(() => browserStateDtoSchema.parse({ ...validState, fps: Number.POSITIVE_INFINITY })).toThrow();
+  });
+
+  it("rejects a non-boolean headless", () => {
+    expect(() => browserStateDtoSchema.parse({ ...validState, headless: "yes" })).toThrow();
+  });
+});
+
 describe("browserCtlMsgSchema", () => {
   it("round-trips viewer_join, viewer_leave and takeover", () => {
     const join = { type: "viewer_join", viewerId: "v1" };

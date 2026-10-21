@@ -24,11 +24,45 @@ import type { ScreencastConfig } from "./config.js";
 export interface ScreencastFrame {
   format: BrowserFrameFormat;
   data: Buffer;
+  /**
+   * Measured delivery rate at the moment this frame was handed off (frames
+   * delivered in the trailing 1 s window). Metadata only — the gateway sends
+   * bare image bytes; the worker's published state carries the same number.
+   */
+  fps?: number;
+  /** Monotonic delivery sequence (diagnostics/tests). */
+  sequence?: number;
 }
 
 export interface LadderStep {
   quality: number;
   everyNthFrame: number;
+}
+
+/** Product spec §8: the live view streams at 3–5 fps, default 4. */
+export const SCREENCAST_FPS_MIN = 3;
+export const SCREENCAST_FPS_MAX = 5;
+export const SCREENCAST_FPS_DEFAULT = 4;
+
+/** Clamp a configured target into the spec's 3–5 fps band (default 4). */
+export function clampScreencastFps(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return SCREENCAST_FPS_DEFAULT;
+  return Math.min(SCREENCAST_FPS_MAX, Math.max(SCREENCAST_FPS_MIN, value));
+}
+
+/** The stream's metadata, exposed by `ScreencastHandle.metadata()`. */
+export interface ScreencastMetadata {
+  format: BrowserFrameFormat;
+  /** Configured cap; 0 when uncapped (legacy/test mode). */
+  targetFps: number;
+  /** Frames delivered in the trailing `sampleWindowMs` (the ACTUAL fps). */
+  actualFps: number;
+  /** Alias of `actualFps` for the "watching live · N fps" indicator. */
+  fps: number;
+  framesDelivered: number;
+  /** Stale frames superseded before their slot (dropped, never queued). */
+  framesDropped: number;
+  sampleWindowMs: number;
 }
 
 /** Research §5 knob 2 — step-down ladder for overloaded workers (Task 8). */
@@ -41,6 +75,12 @@ export const SCREENCAST_LADDER: readonly LadderStep[] = [
 export interface ScreencastHandle {
   format(): BrowserFrameFormat;
   framesSent(): number;
+  /** The measured actual fps in the trailing second (0 before any frame). */
+  fps(): number;
+  /** Number of stale frames dropped instead of queued. */
+  droppedFrames(): number;
+  /** Full stream metadata: target/actual fps, delivered/dropped counters. */
+  metadata(): ScreencastMetadata;
   /**
    * Stop + restart the cast with new quality/everyNthFrame (same format).
    *
@@ -121,25 +161,42 @@ export async function startScreencast(
   page: Page,
   cfg: ScreencastConfig,
   onFrame: (f: ScreencastFrame) => void,
-  opts?: { format?: BrowserFrameFormat },
+  opts?: { format?: BrowserFrameFormat; now?: () => number },
 ): Promise<ScreencastHandle> {
   const format: BrowserFrameFormat = opts?.format ?? "jpeg";
+  const now = opts?.now ?? Date.now;
   const cdp: CDPSession = await page.context().newCDPSession(page);
 
   let frames = 0;
+  let dropped = 0;
   let stopped = false;
   let stopPromise: Promise<void> | null = null;
   let currentStep: LadderStep = { quality: cfg.quality, everyNthFrame: cfg.everyNthFrame };
 
-  // Wave 5 R3 frame-rate cap. A frame that arrives before its slot is HELD
-  // (newest wins) and left UNACKED until the slot, so with maxFramesInFlight
-  // 1 chromium encodes at most ~maxFps frames per second. The held frame is
+  // Wave 5 R3 / spec §8 frame-rate cap. A frame that arrives before its slot
+  // is HELD (newest wins) and left UNACKED until the slot, so with
+  // maxFramesInFlight 1 chromium encodes at most ~maxFps frames per second.
+  // There is deliberately NO queue: a newer frame SUPERSEDES the held one
+  // (the stale frame is acked and counted as dropped). The held frame is
   // always delivered at its slot (trailing edge): the viewer never misses the
   // final state of a page that stopped repainting.
-  const minIntervalMs = cfg.maxFps !== undefined && cfg.maxFps > 0 ? 1000 / cfg.maxFps : 0;
+  const targetFps = cfg.maxFps !== undefined && cfg.maxFps > 0 ? cfg.maxFps : 0;
+  const minIntervalMs = targetFps > 0 ? 1000 / targetFps : 0;
   let lastForwardAt = Number.NEGATIVE_INFINITY;
   let held: { data: Buffer; sessionId: number } | null = null;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Actual-fps measurement: delivery timestamps in the trailing window.
+  const FPS_WINDOW_MS = 1_000;
+  const deliveryTimes: number[] = [];
+  function pruneDeliveries(): void {
+    const cutoff = now() - FPS_WINDOW_MS;
+    while (deliveryTimes.length > 0 && deliveryTimes[0] < cutoff) deliveryTimes.shift();
+  }
+  function actualFps(): number {
+    pruneDeliveries();
+    return deliveryTimes.length;
+  }
 
   // Never awaited: the listener must not go async, and a dead session must
   // not produce unhandled rejects.
@@ -148,9 +205,11 @@ export async function startScreencast(
   };
 
   const forward = (data: Buffer, sessionId: number): void => {
-    lastForwardAt = Date.now();
+    lastForwardAt = now();
     frames++;
-    onFrame({ format, data });
+    deliveryTimes.push(lastForwardAt);
+    pruneDeliveries();
+    onFrame({ format, data, fps: actualFps(), sequence: frames });
     // Ack AFTER the handoff — chromium holds the next frame (up to
     // maxFramesInFlight) until this lands.
     ack(sessionId);
@@ -167,14 +226,18 @@ export async function startScreencast(
   const onFrameEvent = (ev: ScreencastFrameEvent): void => {
     if (stopped) return;
     const data = Buffer.from(ev.data, "base64");
-    const wait = lastForwardAt + minIntervalMs - Date.now();
+    const wait = lastForwardAt + minIntervalMs - now();
     if (wait <= 0 && held === null) {
       forward(data, ev.sessionId);
       return;
     }
-    // A superseded held frame is acked so chromium's in-flight window stays
-    // open; the newer frame takes the slot.
-    if (held !== null) ack(held.sessionId);
+    // A superseded held frame is STALE: ack it so chromium's in-flight window
+    // stays open, count it as dropped, and let the newer frame take the slot.
+    // Nothing is ever queued behind it.
+    if (held !== null) {
+      ack(held.sessionId);
+      dropped++;
+    }
     held = { data, sessionId: ev.sessionId };
     if (flushTimer === null) {
       flushTimer = setTimeout(flushHeld, Math.max(0, wait));
@@ -204,6 +267,7 @@ export async function startScreencast(
       stopped = true;
       if (flushTimer !== null) clearTimeout(flushTimer);
       flushTimer = null;
+      if (held !== null) dropped++; // a pending stale frame is never delivered
       held = null;
       cdp.off("Page.screencastFrame", onFrameEvent);
       // Both steps are best-effort: the page/target may already be gone
@@ -229,9 +293,11 @@ export async function startScreencast(
       quality: currentStep.quality,
     })) as { data: string };
     if (stopped) return;
-    lastForwardAt = Date.now();
+    lastForwardAt = now();
     frames++;
-    onFrame({ format, data: Buffer.from(shot.data, "base64") });
+    deliveryTimes.push(lastForwardAt);
+    pruneDeliveries();
+    onFrame({ format, data: Buffer.from(shot.data, "base64"), fps: actualFps(), sequence: frames });
   }
 
   async function adjust(next: LadderStep): Promise<void> {
@@ -249,9 +315,25 @@ export async function startScreencast(
     }
   }
 
+  function metadata(): ScreencastMetadata {
+    const measured = actualFps();
+    return {
+      format,
+      targetFps,
+      actualFps: measured,
+      fps: measured,
+      framesDelivered: frames,
+      framesDropped: dropped,
+      sampleWindowMs: FPS_WINDOW_MS,
+    };
+  }
+
   return {
     format: () => format,
     framesSent: () => frames,
+    fps: actualFps,
+    droppedFrames: () => dropped,
+    metadata,
     adjust,
     refresh,
     stop,

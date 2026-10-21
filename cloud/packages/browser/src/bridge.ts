@@ -51,6 +51,7 @@ import {
 } from "@ovid/shared";
 
 import type { ScreencastFrame } from "./screencast.js";
+import { isUserTabCreateCtl } from "./tabPolicy.js";
 
 export interface BridgeHandlers {
   /** Fired on every 0↔n or n↔m viewer-size transition of a watched session. */
@@ -61,6 +62,13 @@ export interface BridgeHandlers {
   onTakeover(sessionId: string, enabled: boolean, viewerId?: string): void;
   /** Wave 6 W4: a viewer selected an existing tab (never creates one). */
   onSwitchTab(sessionId: string, index: number, viewerId?: string): void;
+  /**
+   * Agent-owned tabs: a create-shaped ctl payload from a client is refused
+   * with the typed error by the engine. The shared ctl union has no
+   * `new_tab`, so this only fires for a buggy/older client — the bridge
+   * answers it explicitly instead of logging "schema-invalid".
+   */
+  onUserTabCreate?(sessionId: string, payload: unknown): void;
 }
 
 export interface BrowserBridge {
@@ -149,6 +157,12 @@ export function createRedisBrowserBridge(opts: {
       parsed = JSON.parse(text);
     } catch {
       log(`ignoring malformed ctl JSON on ${channel}: ${text.slice(0, 64)}`);
+      return;
+    }
+    // Agent-owned tabs: answer a user create with the typed refusal even
+    // though the shared ctl schema deliberately has no `new_tab` member.
+    if (isUserTabCreateCtl(parsed)) {
+      handlers.onUserTabCreate?.(sessionId, parsed);
       return;
     }
     const msg: BrowserCtlMsg | null = browserCtlMsgSchema.safeParse(parsed).success

@@ -64,6 +64,27 @@ export interface BrowserAttachHandlers {
   onFrame(image: Buffer): void;
 }
 
+/**
+ * Result of parsing one state-channel payload. `state` is the zod-parsed DTO,
+ * which preserves the additive browser-runtime fields (`fps`, `headless`) and
+ * drops any other unknown key — exactly what the gateway forwards to clients.
+ */
+export type BrowserStateParse =
+  | { ok: true; state: BrowserStateDto }
+  | { ok: false; reason: "malformed" | "schema" };
+
+/** Parse a raw state-channel payload; malformed JSON and schema misses are distinguished for logging. */
+export function parseBrowserStatePayload(raw: string): BrowserStateParse {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "malformed" };
+  }
+  const check = browserStateDtoSchema.safeParse(parsed);
+  return check.success ? { ok: true, state: check.data } : { ok: false, reason: "schema" };
+}
+
 /** One attached viewer; created by createBrowserAttach, owned by ws.ts. */
 export interface BrowserAttach {
   /** The BROWSER key (Wave 5: `userBrowserKey(uid)`) — channel namespace. */
@@ -130,29 +151,27 @@ export function createBrowserAttach(opts: {
     if (detached) return; // raced a detach: nothing more forwards
     const ch = channel.toString("utf8");
     if (ch === stateChannel) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(message.toString("utf8"));
-      } catch {
-        log(`ignoring malformed state JSON on ${ch}: ${message.toString("utf8").slice(0, 64)}`);
+      const raw = message.toString("utf8");
+      const parsed = parseBrowserStatePayload(raw);
+      if (!parsed.ok) {
+        if (parsed.reason === "malformed") {
+          log(`ignoring malformed state JSON on ${ch}: ${raw.slice(0, 64)}`);
+        } else {
+          log(`ignoring schema-invalid state payload on ${ch}`);
+        }
         return;
       }
-      const check = browserStateDtoSchema.safeParse(parsed);
-      if (!check.success) {
-        log(`ignoring schema-invalid state payload on ${ch}`);
-        return;
-      }
-      latestState = check.data;
+      latestState = parsed.state;
       if (
         subscribed &&
-        check.data.live &&
-        !check.data.screencast &&
+        parsed.state.live &&
+        !parsed.state.screencast &&
         Date.now() - lastRejoinAt >= BROWSER_REJOIN_MIN_INTERVAL_MS
       ) {
         lastRejoinAt = Date.now();
         publish(ctlChannel, join);
       }
-      handlers.onState(check.data);
+      handlers.onState(parsed.state);
       return;
     }
     if (ch === framesChannel) {

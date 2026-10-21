@@ -22,7 +22,11 @@ import { buildGateway } from "./app.js";
 import { createTicketStore, type TicketStore } from "./tickets.js";
 import type { PtyBridge } from "./wsPty.js";
 import { handleWsConnection, type WsConnectionOptions, type WsDeps } from "./ws.js";
-import { BROWSER_FRAME_HIGH_WATER, BROWSER_VIEWER_HEARTBEAT_MS } from "./browserChannel.js";
+import {
+  BROWSER_FRAME_HIGH_WATER,
+  BROWSER_VIEWER_HEARTBEAT_MS,
+  parseBrowserStatePayload,
+} from "./browserChannel.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "./test/db.js";
 import { stubSystemBus, stubKeys, stubMint, stubQueues, stubTickets, stubVerifier } from "./test/stubs.js";
 
@@ -366,6 +370,27 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
       await redis.publish(browserFramesChannel(userBrowserKey(uid)), framePayload(JPEG));
       await client.waitFor(() => client.binary.length === 1, "binary frame");
       expect(client.binary[0]).toEqual(JPEG);
+    }, 20_000);
+
+    it("browser_state: additive fps/headless pass through to the client unchanged", async () => {
+      const uid = testUid("ws9meta");
+      const sid = await createOwnedSession(uid);
+      const ctlTap = await openTap(browserCtlChannel(userBrowserKey(uid)));
+
+      const { wsBase } = await makeApp();
+      const client = await newClient(wsBase, await tickets.mint(uid));
+      client.send({ op: "browser_attach", sessionId: sid });
+      const join = parseJson((await ctlTap.next("viewer_join")).message);
+
+      const state = { ...mkState(sid), fps: 3.8, headless: true };
+      await redis.publish(browserStateChannel(userBrowserKey(uid)), JSON.stringify(state));
+      await client.waitFor(
+        () => client.messages.some((m) => m.op === "browser_state"),
+        "browser_state with stream metadata",
+      );
+      expect(client.messages).toEqual([
+        { op: "browser_state", sessionId: sid, state, viewerId: join.viewerId },
+      ]);
     }, 20_000);
 
     it("browser_input → exact event JSON on the input channel; browser_takeover → ctl takeover", async () => {
@@ -910,5 +935,36 @@ describe("browser channel constants (Task 9 pins)", () => {
   it("BROWSER_VIEWER_HEARTBEAT_MS is 30 s; the frame high-water is 4 MiB", () => {
     expect(BROWSER_VIEWER_HEARTBEAT_MS).toBe(30_000);
     expect(BROWSER_FRAME_HIGH_WATER).toBe(4 * 1024 * 1024);
+  });
+});
+
+describe("browser state payload parse (additive stream metadata)", () => {
+  it("parses an old worker payload without fps/headless", () => {
+    const parsed = parseBrowserStatePayload(JSON.stringify(mkState("s1")));
+    expect(parsed).toEqual({ ok: true, state: mkState("s1") });
+  });
+
+  it("preserves additive fps/headless unchanged", () => {
+    const state = { ...mkState("s1"), fps: 3.8, headless: true };
+    expect(parseBrowserStatePayload(JSON.stringify(state))).toEqual({ ok: true, state });
+  });
+
+  it("rejects invalid additive field types instead of forwarding them", () => {
+    expect(parseBrowserStatePayload(JSON.stringify({ ...mkState("s1"), fps: "4" }))).toEqual({
+      ok: false,
+      reason: "schema",
+    });
+    expect(parseBrowserStatePayload(JSON.stringify({ ...mkState("s1"), headless: "yes" }))).toEqual({
+      ok: false,
+      reason: "schema",
+    });
+  });
+
+  it("distinguishes malformed JSON from a schema miss", () => {
+    expect(parseBrowserStatePayload("{not json")).toEqual({ ok: false, reason: "malformed" });
+    expect(parseBrowserStatePayload(JSON.stringify({ nope: true }))).toEqual({
+      ok: false,
+      reason: "schema",
+    });
   });
 });

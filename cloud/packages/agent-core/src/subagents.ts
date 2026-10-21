@@ -34,6 +34,13 @@ import type { EventSink, HookEngine, HookStopResult, SessionStateStore } from ".
 import { presetById, type AgentPreset } from "./presets.js";
 import { canonicalTools } from "./promptCache.js";
 import { CHILD_DENIED_TOOLS, computeToolRoster } from "./roster.js";
+import { createSubagentLog, type SubagentLog, type CreateSubagentLogOptions } from "./subagentLog.js";
+import {
+  buildSubagentSummary,
+  serializeSubagentSummary,
+  type SubagentSummary,
+  type SubagentSummaryStatus,
+} from "./subagentSummary.js";
 import type { ToolContext, ToolRegistry, ToolSpec } from "./types.js";
 
 /** Dart `_maxSubagentDepth` (AS:23048): root = 0, child = 1, grandchild = 2. */
@@ -41,17 +48,21 @@ export const MAX_SUBAGENT_DEPTH = 2;
 /** Dart `_maxSubagentStopBlocks` (AS:24807). */
 export const MAX_SUBAGENT_STOP_BLOCKS = 3;
 /**
- * Dart `_maxConcurrentSubagents` (AS:23052), per owning ROOT. Children are
- * SEQUENTIAL per parent in cloud (a dispatch is awaited), so this is a
- * defence-in-depth guard rather than a reachable limit — the refusal string
- * is ported anyway so a future parallel fan-out cannot silently lose it.
+ * SI spec §9: at most 50 subagents may hold a slot under one ROOT session.
+ * The counter is a hard cap on concurrently ACTIVE children (a child that
+ * completes, fails, is cancelled or times out releases its slot); the 51st
+ * dispatch is refused with a typed SubagentLimitError — never silently
+ * dropped. Kept under the old name for callers that imported it.
  */
-export const MAX_CONCURRENT_SUBAGENTS = 50;
+export const MAX_SUBAGENTS_PER_ROOT = 50;
+export const MAX_CONCURRENT_SUBAGENTS = MAX_SUBAGENTS_PER_ROOT;
+/** SI spec §9: a subagent may be active for at most 8 hours. */
+export const DEFAULT_SUBAGENT_MAX_RUNTIME_MS = 8 * 60 * 60 * 1000;
 
 /** The JSONB key holding the durable parent link on a child's agent state. */
 export const SUBAGENT_PARENT_KEY = "subagentParentSessionId";
 
-export type ChildStatus = "running" | "completed" | "failed" | "cancelled";
+export type ChildStatus = "running" | "completed" | "failed" | "cancelled" | "timeout";
 
 export interface ChildHandle {
   sessionId: string;
@@ -68,8 +79,14 @@ export interface ChildHandle {
   interrupt(reason: string): Promise<boolean>;
   sendMessage(text: string): Promise<void>;
   status(): ChildStatus;
-  /** Final report text: the `report` tool when used, else the last answer. */
+  /**
+   * The dispatch result: ALWAYS the strict five-key JSON summary (SI spec §9),
+   * serialized. Never the child's transcript. Use `rawResult()` internally for
+   * the pre-contract text.
+   */
   result(): string | null;
+  /** The last report/assistant text before summary serialization (internal). */
+  rawResult(): string | null;
 }
 
 export interface DispatchArgs {
@@ -88,9 +105,45 @@ export interface SubagentSupervisor {
 
 /** A refusal the dispatch tool renders as an ordinary tool error. */
 export class SubagentRefusalError extends Error {
-  constructor(message: string) {
+  /** Stable machine-readable discriminator (typed errors, never bare text). */
+  readonly code: string;
+
+  constructor(message: string, code = "subagent_refused") {
     super(message);
     this.name = "SubagentRefusalError";
+    this.code = code;
+  }
+}
+
+/** The 51st active subagent under one root session (SI spec §9). */
+export class SubagentLimitError extends SubagentRefusalError {
+  readonly rootSessionId: string;
+  readonly limit: number;
+
+  constructor(rootSessionId: string, limit: number) {
+    super(
+      `dispatch_agent refused: the subagent ceiling (${limit} active per root ` +
+        "session) is reached. Wait for a running subagent to finish " +
+        "(list_agents shows them), interrupt one you no longer need, or do this " +
+        "task yourself — do not retry in a loop.",
+      "subagent_limit_exceeded",
+    );
+    this.name = "SubagentLimitError";
+    this.rootSessionId = rootSessionId;
+    this.limit = limit;
+  }
+}
+
+/** A subagent run tried to dispatch another subagent (SI spec §9). */
+export class SubagentNestedError extends SubagentRefusalError {
+  constructor() {
+    super(
+      "SUBAGENT: a subagent cannot dispatch subagents — you are one. " +
+        "Do the task yourself with the tools you have, or report back to " +
+        "your parent with what you need.",
+      "subagent_nested",
+    );
+    this.name = "SubagentNestedError";
   }
 }
 
@@ -311,6 +364,17 @@ export interface SubagentSupervisorDeps {
   /** Wave 4 (SE-007): built-ins + the user's custom presets (absent = built-ins). */
   presets?: (id: string | null) => AgentPreset | null;
   now?: () => number;
+  /** SI spec §9 hard runtime cap per subagent (default 8 h). */
+  maxRuntimeMs?: number;
+  /** SI spec §9 concurrent-subagent cap per root (default 50; test seam). */
+  maxSubagents?: number;
+  /** Log directory (default /workspace/.ovid/logs; tests inject a temp dir). */
+  logDir?: string;
+  /**
+   * Integration seam: replace the default host-filesystem writer with one
+   * that writes through the sandbox (the spec path lives INSIDE the jail).
+   */
+  logFactory?: (options: CreateSubagentLogOptions) => Promise<SubagentLog>;
 }
 
 class MutableChildHandle implements ChildHandle {
@@ -326,6 +390,8 @@ class MutableChildHandle implements ChildHandle {
   private state: ChildStatus = "running";
   private reportText: string | null = null;
   private lastText: string | null = null;
+  private summaryJson: string | null = null;
+  private summaryValue: SubagentSummary | null = null;
   private interrupted = false;
   private readonly interruptFn: (reason: string) => Promise<boolean>;
   private readonly sendFn: (text: string) => Promise<void>;
@@ -367,12 +433,25 @@ class MutableChildHandle implements ChildHandle {
   }
 
   result(): string | null {
+    return this.summaryJson ?? this.reportText ?? this.lastText;
+  }
+
+  rawResult(): string | null {
     return this.reportText ?? this.lastText;
+  }
+
+  summary(): SubagentSummary | null {
+    return this.summaryValue;
   }
 
   // ── supervisor-internal ────────────────────────────────────────────────
   setStatus(status: ChildStatus): void {
     this.state = status;
+  }
+
+  setSummary(summary: SubagentSummary): void {
+    this.summaryValue = summary;
+    this.summaryJson = serializeSubagentSummary(summary);
   }
 
   setReport(text: string): void {
@@ -396,23 +475,7 @@ function depthRefusal(): SubagentRefusalError {
   return new SubagentRefusalError(
     `Subagent depth limit (${MAX_SUBAGENT_DEPTH}) reached — ` +
       "do the task yourself with the tools you have.",
-  );
-}
-
-function subagentParentRefusal(): SubagentRefusalError {
-  return new SubagentRefusalError(
-    "SUBAGENT: a subagent cannot dispatch subagents — you are one. " +
-      "Do the task yourself with the tools you have, or report back to " +
-      "your parent with what you need.",
-  );
-}
-
-function concurrencyRefusal(tool: string): SubagentRefusalError {
-  return new SubagentRefusalError(
-    `${tool} refused: the subagent ceiling (${MAX_CONCURRENT_SUBAGENTS} running ` +
-      "at once per root session) is reached. Wait for a running subagent to finish " +
-      "(list_agents shows them), interrupt one you no longer need, or do this " +
-      "task yourself — do not retry in a loop.",
+    "subagent_depth_exceeded",
   );
 }
 
@@ -432,6 +495,43 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
   const store = deps.store ?? createDbSubagentStore(deps.db);
   const now = deps.now ?? Date.now;
   const handles: MutableChildHandle[] = [];
+  const maxRuntimeMs = deps.maxRuntimeMs ?? DEFAULT_SUBAGENT_MAX_RUNTIME_MS;
+  const maxSubagents = deps.maxSubagents ?? MAX_SUBAGENTS_PER_ROOT;
+  /**
+   * rootSessionId → active children. Increment/decrement happen in the SAME
+   * synchronous tick as the ceiling check, so parallel dispatches cannot race
+   * past 50. Every terminal path (complete/fail/cancel/timeout/throw) releases
+   * in `dispatch`'s finally.
+   */
+  const activeSlots = new Map<string, number>();
+
+  function tryAcquireSlot(rootSessionId: string): boolean {
+    const active = activeSlots.get(rootSessionId) ?? 0;
+    if (active >= maxSubagents) return false;
+    activeSlots.set(rootSessionId, active + 1);
+    return true;
+  }
+
+  function releaseSlot(rootSessionId: string): void {
+    const active = activeSlots.get(rootSessionId) ?? 0;
+    if (active <= 1) activeSlots.delete(rootSessionId);
+    else activeSlots.set(rootSessionId, active - 1);
+  }
+
+  /**
+   * The child's log observer. The engine persists the event first and then
+   * mirrors it here; message deltas are coalesced out (the completed message
+   * carries the same text), everything else — including full tool output — is
+   * appended verbatim so the log is the complete audit trail.
+   */
+  function childLogSink(log: SubagentLog): EventSink {
+    return {
+      async emit(type, payload) {
+        if (type === "message_delta") return;
+        await log.append({ type, ...payload });
+      },
+    };
+  }
 
   function findHandle(sessionId: string): MutableChildHandle | undefined {
     return handles.find((h) => h.sessionId === sessionId);
@@ -478,7 +578,7 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
           parentSessionId: handle.parentSessionId,
           state: handle.status(),
           interrupted: handle.isInterrupted(),
-          result: clip(handle.result() ?? lastAssistantMessage, 400),
+          result: clip(handle.rawResult() ?? lastAssistantMessage, 400),
         },
         "subagent_stop",
       );
@@ -507,8 +607,12 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
       const lineageDepth = Math.max(0, chain.length - 1);
       const depth = Math.max(lineageDepth, parent.depth);
       if (depth >= MAX_SUBAGENT_DEPTH) throw depthRefusal();
-      // Layer 3: a subagent parent (depth 1 in the real flow) may not spawn.
-      if (parent.isSubagent) throw subagentParentRefusal();
+      // SI spec §9: a subagent can NEVER dispatch another subagent. The flag is
+      // the live contract; depth/lineage are escape-proof backstops in case a
+      // caller constructs a child context with isSubagent=false.
+      if (parent.isSubagent || parent.depth >= 1 || lineageDepth >= 1) {
+        throw new SubagentNestedError();
+      }
 
       const rootSessionId = chain[0] ?? parent.sessionId;
       // A parent that was already stopped must not start new work (the
@@ -516,176 +620,272 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
       if (parent.signal.aborted) {
         throw new SubagentRefusalError("parent run is cancelled");
       }
-      const liveForRoot = handles.filter(
-        (h) => h.rootSessionId === rootSessionId && h.status() === "running",
-      ).length;
-      if (liveForRoot >= MAX_CONCURRENT_SUBAGENTS) {
-        throw concurrencyRefusal("dispatch_agent");
+
+      // Hard 50-per-root slot. Acquire BEFORE any further await so parallel
+      // dispatches cannot race past the ceiling; every exit releases it.
+      if (!tryAcquireSlot(rootSessionId)) {
+        throw new SubagentLimitError(rootSessionId, maxSubagents);
       }
 
-      const agentType = (args.agentType ?? "").trim() || "general-purpose";
-      const policy = subagentToolPolicy(
-        storedSubagentTools({ tools: args.tools, disallowedTools: args.disallowedTools }),
-      );
-      // The child inherits the PARENT'S roster (mode/preset/skill scopes),
-      // then loses CHILD_DENIED_TOOLS + the subagent policy's deny set.
-      const parentState = await deps.state.get(parent.sessionId);
-      const parentRoster = computeToolRoster(
-        {
-          mode: parent.mode,
-          planMode: parent.planMode,
-          isSubagent: parent.isSubagent,
-          memoryEnabled: deps.memoryEnabled ?? true,
-          githubConnected: deps.githubConnected ?? true,
-          preset: (deps.presets ?? presetById)(parentState.presetId),
-          activeSkillScopes: parentState.activeSkillScopes,
-        },
-        deps.registry.all().map((tool) => tool.spec),
-      );
-      const roster = projectChildRoster(parentRoster, policy);
-
-      // ── child session + run row (durable BEFORE the start event) ──────
-      const child = await store.createChild({
-        parentSessionId: parent.sessionId,
-        userId: parent.userId,
-        title: `subagent: ${clip(prompt.replace(/\s+/g, " "), 60)}`,
-      });
-      // T8 C1: a child is born planMode:false — NEVER inherit the parent's
-      // plan flag. A fresh session's zero state already satisfies this; force
-      // it defensively so a reused/cold-resumed row cannot leak the gate.
-      const childState = await deps.state.get(child.sessionId);
-      if (childState.planMode) {
-        await deps.state.patch(child.sessionId, { planMode: false });
-      }
-      const first = await startTurn(child.sessionId, prompt);
-
-      const handle = new MutableChildHandle({
-        sessionId: child.sessionId,
-        runId: first.runId,
-        parentSessionId: parent.sessionId,
-        rootSessionId,
-        depth: depth + 1,
-        prompt,
-        agentType,
-        startedAt: now(),
-        interrupt: async (reason: string) => {
-          if (handle.status() !== "running") return false;
-          handle.markInterrupted();
-          return deps.engine.cancel(child.sessionId, reason);
-        },
-        sendMessage: async (text: string) => {
-          // Route to the LIVE loop: append + queue; the loop's steering drain
-          // claims it at its next step boundary. Never start a second run.
-          if (handle.status() !== "running") return;
-          await startTurn(child.sessionId, text);
-        },
-      });
-      handles.push(handle);
-
-      const parentSink = deps.sinkFactory(parent.sessionId);
-      await parentSink.emit("subagent_started", {
-        runId: parent.runId,
-        childSessionId: child.sessionId,
-        childRunId: first.runId,
-        prompt: prompt.slice(0, 200),
-        // Wave 1b (additive): the live activity card's name.
-        agentType,
-      });
-
-      // Parent cancel cascades (p2_subagent_races parity). The listener is
-      // removed when the child settles so a long-lived signal never leaks.
-      const onParentAbort = (): void => {
-        void deps.engine
-          .cancel(child.sessionId, "parent run cancelled")
-          .catch(() => {});
-      };
-      if (parent.signal.aborted) onParentAbort();
-      else parent.signal.addEventListener("abort", onParentAbort, { once: true });
-
-      let runId = first.runId;
-      let currentPrompt = prompt;
-      let stopBlocks = 0;
-      let finalStatus: ChildStatus = "running";
+      const startedAt = now();
+      const deadline = startedAt + maxRuntimeMs;
+      let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+      let log: SubagentLog | null = null;
+      let handle: MutableChildHandle | undefined;
 
       try {
-        for (;;) {
-          if (parent.signal.aborted) {
-            finalStatus = "cancelled";
-            break;
-          }
-          await deps.engine.run({
-            runId,
-            sessionId: child.sessionId,
-            userId: parent.userId,
-            prompt: currentPrompt,
+        const agentType = (args.agentType ?? "").trim() || "general-purpose";
+        const policy = subagentToolPolicy(
+          storedSubagentTools({ tools: args.tools, disallowedTools: args.disallowedTools }),
+        );
+        // The child inherits the PARENT'S roster (mode/preset/skill scopes),
+        // then loses CHILD_DENIED_TOOLS + the subagent policy's deny set.
+        const parentState = await deps.state.get(parent.sessionId);
+        const parentRoster = computeToolRoster(
+          {
             mode: parent.mode,
-            isSubagent: true,
-            depth: depth + 1,
-            subagentBriefing: prompt,
-            roster,
-          });
+            planMode: parent.planMode,
+            isSubagent: parent.isSubagent,
+            memoryEnabled: deps.memoryEnabled ?? true,
+            githubConnected: deps.githubConnected ?? true,
+            preset: (deps.presets ?? presetById)(parentState.presetId),
+            activeSkillScopes: parentState.activeSkillScopes,
+          },
+          deps.registry.all().map((tool) => tool.spec),
+        );
+        const roster = projectChildRoster(parentRoster, policy);
 
-          const runStatus = await store.runStatus(runId, parent.userId);
-          if (runStatus === "cancelled" || handle.isInterrupted()) {
-            finalStatus = "cancelled";
-            break;
-          }
-          if (runStatus === "failed") {
-            finalStatus = "failed";
-            break;
-          }
-
-          const answer = await store.lastAssistantText(child.sessionId);
-          handle.setLastText(answer);
-
-          // ── natural stop → [CC] SubagentStop gate (≤3 blocks) ─────────
-          const stop = await fireSubagentStop(
-            handle,
-            answer ?? "",
-            stopBlocks,
-          );
-          if (stop.veto && stopBlocks < MAX_SUBAGENT_STOP_BLOCKS) {
-            stopBlocks += 1;
-            currentPrompt =
-              stop.reason !== null && stop.reason.trim() !== ""
-                ? stop.reason
-                : DEFAULT_STOP_REASON;
-            const next = await startTurn(child.sessionId, currentPrompt);
-            runId = next.runId;
-            continue;
-          }
-
-          // ── follow-up that arrived AFTER the final drain ─────────────
-          const queued = await store.queuedRuns(child.sessionId);
-          const next = queued[0];
-          if (next !== undefined) {
-            await store.claimRun(next.runId);
-            currentPrompt =
-              next.promptMessageId !== null
-                ? ((await store.promptText(next.promptMessageId)) ?? "")
-                : "";
-            runId = next.runId;
-            continue;
-          }
-
-          finalStatus = "completed";
-          break;
+        // ── child session + run row (durable BEFORE the start event) ──────
+        const child = await store.createChild({
+          parentSessionId: parent.sessionId,
+          userId: parent.userId,
+          title: `subagent: ${clip(prompt.replace(/\s+/g, " "), 60)}`,
+        });
+        // T8 C1: a child is born planMode:false — NEVER inherit the parent's
+        // plan flag. A fresh session's zero state already satisfies this; force
+        // it defensively so a reused/cold-resumed row cannot leak the gate.
+        const childState = await deps.state.get(child.sessionId);
+        if (childState.planMode) {
+          await deps.state.patch(child.sessionId, { planMode: false });
         }
-      } catch {
-        // Run-level failures are the engine's terminal states; an escape here
-        // is infrastructure — the handle still settles as failed rather than
-        // leaving the parent's dispatch hanging.
-        finalStatus = "failed";
-      } finally {
-        parent.signal.removeEventListener("abort", onParentAbort);
-        handle.setStatus(finalStatus);
-      }
+        const first = await startTurn(child.sessionId, prompt);
 
-      await parentSink.emit("subagent_completed", {
-        childRunId: first.runId,
-        status: finalStatus,
-      });
-      return handle;
+        const parentSink = deps.sinkFactory(parent.sessionId);
+
+        // ── append-only full log (SI spec §9) ─────────────────────────────
+        // Logging is fail-open: a host that cannot create /workspace/.ovid/logs
+        // must not make delegation impossible, but the parent is told.
+        try {
+          log = await (deps.logFactory ?? createSubagentLog)({
+            sessionId: child.sessionId,
+            ...(deps.logDir !== undefined ? { dir: deps.logDir } : {}),
+            now,
+            header: {
+              parentSessionId: parent.sessionId,
+              rootSessionId,
+              agentType,
+              depth: depth + 1,
+              prompt,
+              startedAt,
+              maxRuntimeMs,
+            },
+          });
+        } catch (err) {
+          log = null;
+          await parentSink.emit("system_note", {
+            code: "subagent_log_failed",
+            childSessionId: child.sessionId,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+
+        handle = new MutableChildHandle({
+          sessionId: child.sessionId,
+          runId: first.runId,
+          parentSessionId: parent.sessionId,
+          rootSessionId,
+          depth: depth + 1,
+          prompt,
+          agentType,
+          startedAt,
+          interrupt: async (reason: string) => {
+            if (handle === undefined || handle.status() !== "running") return false;
+            handle.markInterrupted();
+            return deps.engine.cancel(child.sessionId, reason);
+          },
+          sendMessage: async (text: string) => {
+            // Route to the LIVE loop: append + queue; the loop's steering drain
+            // claims it at its next step boundary. Never start a second run.
+            if (handle === undefined || handle.status() !== "running") return;
+            await startTurn(child.sessionId, text);
+          },
+        });
+        const childHandle = handle;
+        handles.push(childHandle);
+
+        await parentSink.emit("subagent_started", {
+          runId: parent.runId,
+          childSessionId: child.sessionId,
+          childRunId: first.runId,
+          prompt: prompt.slice(0, 200),
+          // Wave 1b (additive): the live activity card's name.
+          agentType,
+        });
+
+        // Parent cancel cascades (p2_subagent_races parity). The listener is
+        // removed when the child settles so a long-lived signal never leaks.
+        const onParentAbort = (): void => {
+          void deps.engine
+            .cancel(child.sessionId, "parent run cancelled")
+            .catch(() => {});
+        };
+        if (parent.signal.aborted) onParentAbort();
+        else parent.signal.addEventListener("abort", onParentAbort, { once: true });
+
+        // One timer for the WHOLE subagent (all turns), not per engine run.
+        const timeoutSignal = new Promise<"timeout">((resolve) => {
+          const remaining = Math.max(0, deadline - now());
+          timeoutTimer = setTimeout(() => resolve("timeout"), remaining);
+          // Never keep the worker process alive just for a deadline.
+          timeoutTimer.unref?.();
+        });
+
+        let runId = first.runId;
+        let currentPrompt = prompt;
+        let stopBlocks = 0;
+        let finalStatus: ChildStatus = "running";
+
+        try {
+          for (;;) {
+            if (parent.signal.aborted) {
+              finalStatus = "cancelled";
+              break;
+            }
+            if (now() >= deadline) {
+              finalStatus = "timeout";
+              break;
+            }
+
+            const runPromise = deps.engine.run({
+              runId,
+              sessionId: child.sessionId,
+              userId: parent.userId,
+              prompt: currentPrompt,
+              mode: parent.mode,
+              isSubagent: true,
+              depth: depth + 1,
+              subagentBriefing: prompt,
+              roster,
+              ...(log !== null ? { sink: childLogSink(log) } : {}),
+            });
+            // The timeout branch may return while the run is still unwinding
+            // (engine.cancel aborts it); never surface that as unhandled.
+            void runPromise.catch(() => {});
+
+            const outcome = await Promise.race([
+              runPromise.then(() => "done" as const),
+              timeoutSignal,
+            ]);
+            if (outcome === "timeout") {
+              finalStatus = "timeout";
+              await deps.engine
+                .cancel(child.sessionId, "subagent timeout")
+                .catch(() => false);
+              await log?.append({
+                type: "subagent_timeout",
+                maxRuntimeMs,
+                deadline,
+              });
+              break;
+            }
+
+            const runStatus = await store.runStatus(runId, parent.userId);
+            if (runStatus === "cancelled" || childHandle.isInterrupted()) {
+              finalStatus = "cancelled";
+              break;
+            }
+            if (runStatus === "failed") {
+              finalStatus = "failed";
+              break;
+            }
+
+            const answer = await store.lastAssistantText(child.sessionId);
+            childHandle.setLastText(answer);
+
+            // ── natural stop → [CC] SubagentStop gate (≤3 blocks) ─────────
+            const stop = await fireSubagentStop(childHandle, answer ?? "", stopBlocks);
+            if (stop.veto && stopBlocks < MAX_SUBAGENT_STOP_BLOCKS) {
+              stopBlocks += 1;
+              currentPrompt =
+                stop.reason !== null && stop.reason.trim() !== ""
+                  ? stop.reason
+                  : DEFAULT_STOP_REASON;
+              const next = await startTurn(child.sessionId, currentPrompt);
+              runId = next.runId;
+              continue;
+            }
+
+            // ── follow-up that arrived AFTER the final drain ─────────────
+            const queued = await store.queuedRuns(child.sessionId);
+            const next = queued[0];
+            if (next !== undefined) {
+              await store.claimRun(next.runId);
+              currentPrompt =
+                next.promptMessageId !== null
+                  ? ((await store.promptText(next.promptMessageId)) ?? "")
+                  : "";
+              runId = next.runId;
+              continue;
+            }
+
+            finalStatus = "completed";
+            break;
+          }
+        } catch {
+          // Run-level failures are the engine's terminal states; an escape
+          // here is infrastructure — the handle still settles as failed rather
+          // than leaving the parent's dispatch hanging.
+          finalStatus = "failed";
+        } finally {
+          parent.signal.removeEventListener("abort", onParentAbort);
+        }
+
+        childHandle.setStatus(finalStatus);
+
+        // ── strict ≤300-token JSON result (SI spec §9) ────────────────────
+        const terminalStatus: SubagentSummaryStatus = finalStatus;
+        const summary = buildSubagentSummary({
+          status: terminalStatus,
+          text: childHandle.rawResult(),
+          error:
+            finalStatus === "timeout"
+              ? `Subagent exceeded the maximum runtime of ${maxRuntimeMs} ms and was stopped.`
+              : finalStatus === "failed"
+                ? "Subagent run failed."
+                : finalStatus === "cancelled"
+                  ? "Subagent run was cancelled."
+                  : null,
+        });
+        childHandle.setSummary(summary);
+        await log?.append({ type: "subagent_result", ...summary });
+
+        await parentSink.emit("subagent_completed", {
+          childRunId: first.runId,
+          status: finalStatus,
+        });
+        return childHandle;
+      } catch (err) {
+        // Infrastructure escape before the child loop settled: never leave a
+        // handle stuck in `running` (which would look like a held slot).
+        if (handle !== undefined && handle.status() === "running") {
+          handle.setStatus("failed");
+        }
+        throw err;
+      } finally {
+        if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+        if (log !== null) await log.close();
+        releaseSlot(rootSessionId);
+      }
     },
 
     childrenOf(sessionId: string): readonly ChildHandle[] {
@@ -699,6 +899,20 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
       return true;
     },
   };
+}
+
+/**
+ * The dispatch tool's return value: strict five-key JSON, always within the
+ * 300-token budget. A handle that already settled carries the serialized
+ * summary; a fake/legacy handle's raw text is normalized here so the contract
+ * holds at the tool boundary too.
+ */
+export function subagentResultJson(handle: ChildHandle): string {
+  const current = handle.status();
+  const status: SubagentSummaryStatus = current === "running" ? "failed" : current;
+  return serializeSubagentSummary(
+    buildSubagentSummary({ status, text: handle.result() }),
+  );
 }
 
 /** `list_agents` line: status + the first 80 chars of the prompt. */

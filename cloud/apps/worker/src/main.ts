@@ -72,6 +72,8 @@ import { buildFileService } from "./fileService.js";
 import { createMcpRuntime } from "./mcpRuntime.js";
 import { createNotifier, createFcmPushSender } from "./notify.js";
 import { createPluginInstallProcessor } from "./pluginInstallProcessor.js";
+import { createStudioGit, createStudioGitProcessor } from "./studioGit.js";
+import { createStudioGitWorker } from "./studioGitQueue.js";
 import { startWorkerPtyBridge } from "./ptyBridge.js";
 import { createSandboxPort, createStepLimiter } from "./sandboxAdapter.js";
 import { adaptBrowserTools, createUserBrowserLeases } from "./browserToolAdapter.js";
@@ -640,6 +642,25 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     console.log("[worker] consuming plugin-installs");
   }
 
+  // ---- P0: Studio git jobs (clone / sync / branch switch). ----------------
+  // The credential helper + git service live in studioGit.ts; this registers
+  // the BullMQ consumer beside the other processors. The token is resolved per
+  // job (never in the payload): today the deployment's GITHUB_API_TOKEN is the
+  // only server-side source, so a worker without it fails jobs as
+  // `token_unavailable` instead of cloning anonymously. Per-user OAuth tokens
+  // replace the `tokenFor` seam when the gateway's store lands.
+  const studioGitWorker = createStudioGitWorker({
+    connection: { url: cfg.redisQUrl },
+    processor: createStudioGitProcessor({
+      git: createStudioGit({ manager }),
+      tokenFor: async () => cfg.githubToken,
+    }),
+  });
+  studioGitWorker.on("error", (err) => {
+    console.error("[worker] studio-git worker error", err);
+  });
+  console.log("[worker] consuming studio_git");
+
   // P2 Task 13: the terminal-over-WS worker bridge. Started AFTER recovery —
   // a pty ctl can only be served once the manager chain is ready; its stop()
   // runs BEFORE manager.close() in shutdown() (the manager's env teardown
@@ -1146,6 +1167,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       // P5 Task 14: drain in-flight install transactions BEFORE the runtime
       // closes the system bus / router they report through.
       await pluginInstallsWorker?.close();
+      // P0: drain Studio git jobs before the sandbox manager tears down the
+      // workspaces they attach to.
+      await studioGitWorker.close();
       // P5 Task 16: stop the MCP router (closes live MCP clients and the
       // system bus; pending approvals deny) BEFORE the sandbox manager kills
       // the jailed stdio processes they ride on.

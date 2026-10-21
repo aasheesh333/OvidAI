@@ -19,6 +19,7 @@ import type { Page } from "playwright-core";
 import { z } from "zod";
 
 import type { BrowserEngineConfig } from "../config.js";
+import type { Humanizer } from "../humanInput.js";
 import { BrowserPoolBusyError, type BrowserPool } from "../pool.js";
 import type { BrowserSessionRegistry } from "../sessions.js";
 import type { StorageStatePersistence } from "../stateStore.js";
@@ -156,6 +157,12 @@ export interface BrowserToolsDeps {
   credentials?: BrowserCredentialsPort;
   /** Wave 6 W4: workspace ↔ Artifact Vault bridge; absent ⇒ workspace-only transfers. */
   artifactVault?: BrowserArtifactVaultPort;
+  /**
+   * Spec §8 "the agent drives like a human": interpolated pointer moves with
+   * jitter and per-key typing delays. The engine passes one shared instance;
+   * tests inject a seeded one for deterministic plans.
+   */
+  humanizer?: Humanizer;
 }
 
 /** Every failure content starts with this (except takeover/URL refusals). */
