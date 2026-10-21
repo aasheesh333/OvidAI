@@ -1,16 +1,17 @@
 # Ovid Si rebuild — living TODO
 
-**Updated:** 2026-10-21 (P4 wiring wave landed)
+**Updated:** 2026-10-21 (28-agent audit wave landed)
 **Branch:** `feat/ovid-si-rebuild`
 **Overall production readiness:** ~88 %
 **UI rebuild (design system + 51 screens + shell wiring):** ~99 %
 
 Verified now:
 - `flutter analyze` → **No issues found**
-- `flutter test` → **3956 passed, 0 failed** (2 skipped)
+- `flutter test` → **4324 passed, 0 failed** (2 skipped)
+- Android host tests (`./gradlew :app:testDebugUnitTest`) → **41 passed**
+- `python3 -m pytest server -q` → **1156 passed, 138 skipped**
+- Cloud: gateway **450**, agent-core **767**, browser **320**, sandbox **372**, worker **216**, mint **296**
 - 320 dp / 200 % text ratchet → **102 passed** (51 screens × light/dark)
-- Server: `python3 -m pytest server -q` → **1058 passed, 138 skipped**
-- Cloud: agent-core **734**, browser **279**, sandbox **369**, worker **207**, shared **239**, gateway **168** (503 with PG/Redis)
 
 ---
 
@@ -82,11 +83,16 @@ Verified now:
 
 ## Remaining P1
 
-- [ ] Open collab live/members from a shared chat in the v2 shell (routes exist, no entry point)
-- [ ] Open subagent detail from a `dispatch_agent` row (route exists, no entry point)
-- [ ] "Sync latest" / Live Preview entry from the Studio workspace (route exists in `v2_studio_routes.dart`)
+- [ ] Schedules screen: `v2_work_routes.dart` still passes null for create/toggle/run-now, so the list is read-only (`V2SchedulesFlow.openSchedules` exists and is unused there)
+- [ ] Collab live/members still have no entry point from the shell (`V2CollabRoutes.openLive`/`openMembers` exist)
+- [ ] Live preview has no app-side client: `livePreviewDataFor` supplies no frame, URL or expiry, so the screen stays in its honest waiting state
+- [ ] Studio changes/commit: no app-side diff or commit client, so "Commit & push" is disabled
+- [ ] `_responseWait` auto-extend / notify-at-limit have no persisted field in `AppState` and no watchdog consumer
+- [ ] Account health device/2FA actions are null (no device or 2FA service)
+- [ ] Connector catalog rows carry no tool manifest, so per-tool permissions stay empty until an MCP `tools/list` or provider scope map exists
+- [ ] Yearly billing: `kOvidPlayProducts` has monthly base plans only, so a yearly selection still charges monthly
+- [ ] `paywall_page` currency toggle is view-only (no persistence, no billing effect)
 - [ ] Notification permission banner wired to the Android state
-- [ ] `@project:` capability gate when the gateway lacks `turnProjectRefs`
 
 ## Remaining P2
 
@@ -96,7 +102,6 @@ Verified now:
 - [ ] `dart format lib/ui/v2`
 - [ ] Remove local `OPill`/`_Tag` workarounds now that the shared pill is fixed
 - [ ] `docs/play/DATA-SAFETY.md` still says a 7-day deletion grace (code is 24 h) and "Name: No"
-- [ ] Plan table says Starter/Pro/Max at $5/$25/$60; the product spec is Go $5 / Plus $18 / Pro $99. `server/mint/ovid_plans.py` and `OvidPlanCatalog.fallback` agree with each other but not with the spec, so the rename + repricing has to land on both at once.
 
 ---
 
