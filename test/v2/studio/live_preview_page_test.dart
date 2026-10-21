@@ -16,11 +16,30 @@ Widget _app(Widget child, {bool dark = false, double textScale = 1}) =>
       home: child,
     );
 
+/// Text that paints past the left or right edge of the screen.
+List<String> _offScreenText(WidgetTester tester) {
+  final width = tester.view.physicalSize.width / tester.view.devicePixelRatio;
+  final off = <String>[];
+  for (final element in find.byType(Text).evaluate()) {
+    final box = element.renderObject;
+    if (box is! RenderBox || !box.hasSize) continue;
+    final rect = MatrixUtils.transformRect(
+      box.getTransformTo(null),
+      Offset.zero & box.size,
+    );
+    if (rect.left < -0.5 || rect.right > width + 0.5) {
+      off.add('"${(element.widget as Text).data}" $rect');
+    }
+  }
+  return off;
+}
+
 /// Copy for the site being previewed. Production copy comes from the wiring
 /// layer; the screen itself ships no sample values.
 V2LivePreviewData _preview({
   V2PreviewStatus status = V2PreviewStatus.content,
   String? errorMessage,
+  DateTime? expiresAt,
 }) => V2LivePreviewData(
   status: status,
   siteName: 'Acme Cloud',
@@ -49,6 +68,7 @@ V2LivePreviewData _preview({
   featureBody: 'Requests steer to the best available GPUs.',
   featureBadge: 'Auto-balancing live',
   expiresLabel: '55 min',
+  expiresAt: expiresAt,
   errorMessage: errorMessage,
 );
 
@@ -119,16 +139,64 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('share link reports the primary action', (tester) async {
+  testWidgets('share preview reports the primary action', (tester) async {
     var shares = 0;
     await tester.pumpWidget(
       _app(V2LivePreviewPage(data: _preview(), onShareLink: () => shares++)),
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Share link'));
-    await tester.tap(find.text('Share link'));
+    await tester.ensureVisible(find.text('Share preview'));
+    await tester.tap(find.text('Share preview'));
     expect(shares, 1);
+  });
+
+  testWidgets('open in browser calls its action', (tester) async {
+    var opens = 0;
+    await tester.pumpWidget(
+      _app(V2LivePreviewPage(data: _preview(), onOpenInBrowser: () => opens++)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Open in browser'));
+    await tester.tap(find.text('Open in browser'));
+    expect(opens, 1);
+  });
+
+  testWidgets('states that the preview is read-only', (tester) async {
+    await tester.pumpWidget(_app(V2LivePreviewPage(data: _preview())));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Read-only preview'), findsOneWidget);
+    expect(
+      find.text(
+        'This is a view-only copy of your site. Edits happen in Studio.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('the expiry countdown ticks down and stops when expired', (
+    tester,
+  ) async {
+    final expiresAt = DateTime.now().add(
+      const Duration(minutes: 1, seconds: 5, milliseconds: 900),
+    );
+    await tester.pumpWidget(
+      _app(V2LivePreviewPage(data: _preview(expiresAt: expiresAt))),
+    );
+    await tester.pump();
+
+    expect(find.text('Expires in 1m 05s'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 2));
+    expect(find.text('Expires in 1m 03s'), findsOneWidget);
+
+    // Running past the deadline stops the timer and says so plainly.
+    await tester.pump(const Duration(seconds: 70));
+    expect(find.text('Expired'), findsOneWidget);
+
+    // Unmount so the periodic timer is cancelled before the test ends.
+    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('refresh and extend are wired to callbacks', (tester) async {
@@ -153,7 +221,9 @@ void main() {
     expect(extensions, 1);
   });
 
-  testWidgets('lays out at 320 dp with 200 % text', (tester) async {
+  testWidgets('lays out at 320 dp with 200 % text in light and dark', (
+    tester,
+  ) async {
     tester.view.physicalSize = const Size(320, 640);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
@@ -167,8 +237,11 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(find.text('Live preview'), findsOneWidget);
       expect(find.text('Live · Preview from your workspace'), findsOneWidget);
-      expect(find.text('Share link'), findsOneWidget);
+      expect(find.text('Read-only preview'), findsOneWidget);
+      expect(find.text('Share preview'), findsOneWidget);
+      expect(find.text('Open in browser'), findsOneWidget);
       expect(find.text('+30 min'), findsOneWidget);
+      expect(_offScreenText(tester), isEmpty);
     }
   });
 

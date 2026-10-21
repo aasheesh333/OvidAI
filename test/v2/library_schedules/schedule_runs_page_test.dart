@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/v2/schedules/run_timeline.dart';
 import 'package:ovid_ai/ui/v2/schedules/schedule_runs_page.dart';
 
 const _data = V2ScheduleRunsData(
+  scheduleTitle: 'Morning AI news briefing',
+  sessionTitle: 'AI news research',
   total: 24,
   succeeded: 23,
   failed: 1,
@@ -51,10 +53,8 @@ const _data = V2ScheduleRunsData(
   ],
 );
 
-Widget _app(Widget home, {bool dark = false}) => MaterialApp(
-  theme: dark ? OTheme.dark() : OTheme.light(),
-  home: home,
-);
+Widget _app(Widget home, {bool dark = false}) =>
+    MaterialApp(theme: dark ? OTheme.dark() : OTheme.light(), home: home);
 
 void _phone(WidgetTester tester) {
   tester.view.physicalSize = const Size(430, 932);
@@ -90,14 +90,34 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Schedule runs'), findsOneWidget);
-    expect(
-      find.text('24 runs · 23 succeeded · 1 failed'),
-      findsOneWidget,
-    );
+    expect(find.text('Morning AI news briefing'), findsOneWidget);
+    expect(find.text('Source session: AI news research'), findsOneWidget);
+    expect(find.text('24 runs · 23 succeeded · 1 failed'), findsOneWidget);
     expect(find.text('95.8% success'), findsOneWidget);
     expect(find.text('TODAY — MAY 18'), findsOneWidget);
-    expect(find.text('Completed'), findsWidgets);
-    expect(find.text('Failed'), findsOneWidget);
+    expect(find.text('YESTERDAY — MAY 17'), findsOneWidget);
+    expect(find.text('daily-brief.md'), findsOneWidget);
+    expect(
+      find.text('Summarized 12 news items into daily-brief.md.'),
+      findsOneWidget,
+    );
+    expect(find.text('Retry run'), findsOneWidget);
+
+    // Status is more than colour: each dot carries a check or a cross.
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey<String>('run-status-r1')),
+        matching: find.byIcon(Icons.check_rounded),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey<String>('run-status-r2')),
+        matching: find.byIcon(Icons.close_rounded),
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets('renders the run history in dark mode', (tester) async {
@@ -109,6 +129,7 @@ void main() {
 
     expect(find.text('Schedule runs'), findsOneWidget);
     expect(find.text('24 runs · 23 succeeded · 1 failed'), findsOneWidget);
+    expect(find.text('Source session: AI news research'), findsOneWidget);
     expect(find.text('Today — May 18'), findsNothing);
     expect(find.text('TODAY — MAY 18'), findsOneWidget);
   });
@@ -119,9 +140,7 @@ void main() {
     await tester.pumpWidget(
       _app(
         ScheduleRunsPage(
-          data: const V2ScheduleRunsData(
-            status: V2ScheduleRunsStatus.empty,
-          ),
+          data: const V2ScheduleRunsData(status: V2ScheduleRunsStatus.empty),
           onBackToSchedule: () => back++,
         ),
       ),
@@ -133,47 +152,63 @@ void main() {
     expect(back, 1);
   });
 
-  testWidgets('Open chat fires for a completed run', (tester) async {
+  testWidgets('empty history keeps the source session for context', (
+    tester,
+  ) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        const ScheduleRunsPage(
+          data: V2ScheduleRunsData(
+            status: V2ScheduleRunsStatus.empty,
+            scheduleTitle: 'Morning AI news briefing',
+            sessionTitle: 'AI news research',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Morning AI news briefing'), findsOneWidget);
+    expect(find.text('Source session: AI news research'), findsOneWidget);
+    expect(find.text('No runs yet'), findsOneWidget);
+  });
+
+  testWidgets('the artifact link fires for a completed run', (tester) async {
     _phone(tester);
     V2ScheduleRun? opened;
     await tester.pumpWidget(
       _app(
-        ScheduleRunsPage(data: _data, onOpenChat: (run) => opened = run),
+        ScheduleRunsPage(data: _data, onViewArtifact: (run) => opened = run),
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Open chat'));
-    // Normal text keeps the reference layout: both actions share one row.
-    expect(
-      tester.getCenter(find.text('Open chat')).dy,
-      moreOrLessEquals(tester.getCenter(find.text('View artifact')).dy),
+    await tester.scrollUntilVisible(
+      find.text('daily-brief.md'),
+      120,
+      scrollable: find.byType(Scrollable).first,
     );
-    await tester.tap(find.text('Open chat'));
+    await tester.tap(find.text('daily-brief.md'));
     expect(opened?.id, 'r1');
   });
 
-  testWidgets('failed run expands and retries', (tester) async {
+  testWidgets('failed run shows its detail and retries', (tester) async {
     _phone(tester);
     V2ScheduleRun? retried;
     await tester.pumpWidget(
-      _app(
-        ScheduleRunsPage(data: _data, onRetryRun: (run) => retried = run),
-      ),
+      _app(ScheduleRunsPage(data: _data, onRetryRun: (run) => retried = run)),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Retry now'), findsNothing);
-    await tester.ensureVisible(find.text('Show details'));
-    await tester.tap(find.text('Show details'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('What happened'), findsOneWidget);
     expect(find.textContaining('storage connector'), findsOneWidget);
-    expect(find.text('Retry now'), findsOneWidget);
 
-    await tester.ensureVisible(find.text('Retry now'));
-    await tester.tap(find.text('Retry now'));
+    await tester.scrollUntilVisible(
+      find.text('Retry run'),
+      120,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('Retry run'));
     expect(retried?.id, 'r2');
   });
 
@@ -186,9 +221,22 @@ void main() {
     await tester.tap(find.text('Failed (1)'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Show details'), findsOneWidget);
-    expect(find.text('Open chat'), findsNothing);
+    expect(find.textContaining('Nightly backup'), findsOneWidget);
+    expect(find.text('daily-brief.md'), findsNothing);
     expect(find.text('Failed (1)'), findsOneWidget);
+  });
+
+  testWidgets('history is rendered by the shared run timeline', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(_app(const ScheduleRunsPage(data: _data)));
+    await tester.pumpAndSettle();
+
+    final timeline = tester.widget<RunTimeline>(find.byType(RunTimeline));
+    expect(timeline.data.days.length, 2);
+    expect(timeline.data.days.first.label, 'Today — May 18');
+    expect(timeline.data.days.first.runs.first.id, 'r1');
+    expect(timeline.data.days.last.label, 'Yesterday — May 17');
+    expect(find.byKey(const ValueKey<String>('run-status-r2')), findsOneWidget);
   });
 
   testWidgets('loading state shows skeletons', (tester) async {
@@ -212,9 +260,7 @@ void main() {
     await tester.pumpWidget(
       _app(
         ScheduleRunsPage(
-          data: const V2ScheduleRunsData(
-            status: V2ScheduleRunsStatus.error,
-          ),
+          data: const V2ScheduleRunsData(status: V2ScheduleRunsStatus.error),
           onRetry: () => retries++,
         ),
       ),
@@ -246,69 +292,52 @@ void main() {
     expect(find.text('Schedule runs'), findsOneWidget);
     expect(find.text('95.8% success'), findsOneWidget);
     expect(find.text('TODAY — MAY 18'), findsOneWidget);
-    expect(find.text('Open chat'), findsOneWidget);
+    expect(find.text('daily-brief.md'), findsOneWidget);
   });
 
   for (final dark in [false, true]) {
-    testWidgets(
-      'survives 320 dp and 200% text (${dark ? 'dark' : 'light'})',
-      (tester) async {
-        _smallPhone(tester);
-        await tester.pumpWidget(
-          _smallApp(const ScheduleRunsPage(data: _data), dark: dark),
-        );
-        await tester.pumpAndSettle();
+    testWidgets('survives 320 dp and 200% text (${dark ? 'dark' : 'light'})', (
+      tester,
+    ) async {
+      _smallPhone(tester);
+      await tester.pumpWidget(
+        _smallApp(const ScheduleRunsPage(data: _data), dark: dark),
+      );
+      await tester.pumpAndSettle();
 
-        expect(tester.takeException(), isNull);
+      expect(tester.takeException(), isNull);
 
-        // The two card actions must stay readable: at this width the row
-        // layout squeezes each label to a few characters, so they stack.
-        await tester.scrollUntilVisible(
-          find.text('Open chat'),
-          160,
-          scrollable: find.byType(Scrollable).first,
-        );
-        await tester.pumpAndSettle();
-        final openChat = tester.renderObject<RenderParagraph>(
-          find.text('Open chat'),
-        );
-        // The test font is a square fallback, so the label still needs an
-        // ellipsis there; what matters is that the button now owns the whole
-        // card width instead of a ~52 dp sliver.
-        expect(openChat.size.width, greaterThan(150));
-        expect(
-          tester.getTopLeft(find.text('View artifact')).dy,
-          greaterThan(tester.getBottomLeft(find.text('Open chat')).dy),
-        );
-        expect(tester.takeException(), isNull);
+      // The timeline must lay out at this width: the run meta, summary,
+      // failure detail and artifact link all wrap instead of overflowing.
+      await tester.scrollUntilVisible(
+        find.text('daily-brief.md'),
+        160,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
 
-        // Expand the failed run: the detail box and its actions are the
-        // densest part of the card. The card starts below the fold at this
-        // size, so scroll it into view first.
-        await tester.scrollUntilVisible(
-          find.text('Show details'),
-          160,
-          scrollable: find.byType(Scrollable).first,
-        );
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Show details'));
-        await tester.pumpAndSettle();
+      // The failed run's detail and retry action are the densest part.
+      await tester.scrollUntilVisible(
+        find.text('Retry run'),
+        160,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('storage connector'), findsOneWidget);
+      expect(tester.takeException(), isNull);
 
-        expect(find.text('What happened'), findsOneWidget);
-        expect(tester.takeException(), isNull);
-
-        // Filter chips and their empty state also have to survive.
-        await tester.scrollUntilVisible(
-          find.text('Failed (1)'),
-          -160,
-          scrollable: find.byType(Scrollable).first,
-        );
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Failed (1)'));
-        await tester.pumpAndSettle();
-        expect(tester.takeException(), isNull);
-      },
-    );
+      // Filter chips and their empty state also have to survive.
+      await tester.scrollUntilVisible(
+        find.text('Failed (1)'),
+        -160,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Failed (1)'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
 
     testWidgets(
       'empty state survives 320 dp and 200% text (${dark ? 'dark' : 'light'})',

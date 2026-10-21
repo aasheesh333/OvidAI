@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/v2/onboarding/phone_auth_sheet.dart';
 import 'package:ovid_ai/ui/v2/onboarding/sign_in_page.dart';
 
 Future<void> _pump(
@@ -12,6 +14,14 @@ Future<void> _pump(
   ValueChanged<String>? onPasswordChanged,
   void Function(String email, String password)? onSubmit,
   VoidCallback? onGoogle,
+  VoidCallback? onPhone,
+  V2PhoneAuthData? phoneData,
+  ValueChanged<String>? onPhoneChanged,
+  ValueChanged<V2PhoneCountry>? onPhoneCountryChanged,
+  ValueChanged<String>? onSendPhoneCode,
+  ValueChanged<String>? onVerifyPhoneCode,
+  VoidCallback? onResendPhoneCode,
+  VoidCallback? onChangePhoneNumber,
   VoidCallback? onApple,
   VoidCallback? onForgotPassword,
   VoidCallback? onCreateAccount,
@@ -39,6 +49,14 @@ Future<void> _pump(
         onPasswordChanged: onPasswordChanged,
         onSubmit: onSubmit,
         onGoogle: onGoogle,
+        onPhone: onPhone,
+        phoneData: phoneData,
+        onPhoneChanged: onPhoneChanged,
+        onPhoneCountryChanged: onPhoneCountryChanged,
+        onSendPhoneCode: onSendPhoneCode,
+        onVerifyPhoneCode: onVerifyPhoneCode,
+        onResendPhoneCode: onResendPhoneCode,
+        onChangePhoneNumber: onChangePhoneNumber,
         onApple: onApple,
         onForgotPassword: onForgotPassword,
         onCreateAccount: onCreateAccount,
@@ -278,5 +296,232 @@ void main() {
 
     expect(find.bySemanticsLabel('Language, English'), findsOneWidget);
     handle.dispose();
+  });
+
+  group('phone sheet', () {
+    Future<void> openSheet(WidgetTester tester) async {
+      await tester.ensureVisible(find.byKey(const Key('sign-in-phone')));
+      await tester.tap(find.byKey(const Key('sign-in-phone')));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('phone action opens the sheet instead of only calling back', (
+      tester,
+    ) async {
+      var phoneTaps = 0;
+      await _pump(tester, onPhone: () => phoneTaps++, onSendPhoneCode: (_) {});
+
+      await openSheet(tester);
+
+      expect(find.byType(V2PhoneAuthSheet), findsOneWidget);
+      expect(find.text('Sign in with your phone'), findsOneWidget);
+      expect(find.byKey(const Key('phone-auth-phone')), findsOneWidget);
+      // Opening the sheet is the action; the legacy callback is not fired.
+      expect(phoneTaps, 0);
+    });
+
+    testWidgets('send maps the typed national number', (tester) async {
+      String? sent;
+      await _pump(
+        tester,
+        onPhone: () {},
+        onSendPhoneCode: (phone) => sent = phone,
+      );
+
+      await openSheet(tester);
+      await tester.enterText(
+        find.byKey(const Key('phone-auth-phone')),
+        '98765 43210',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('phone-auth-send')));
+      await tester.pump();
+
+      expect(sent, '98765 43210');
+    });
+
+    testWidgets('host step change moves the sheet to code entry and verifies', (
+      tester,
+    ) async {
+      String? sent;
+      String? verified;
+      var phoneData = const V2PhoneAuthData();
+
+      await tester.binding.setSurfaceSize(const Size(400, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: OTheme.light(),
+          home: StatefulBuilder(
+            builder: (context, setState) => SignInPage(
+              phoneData: phoneData,
+              onPhone: () {},
+              onSendPhoneCode: (phone) {
+                sent = phone;
+                phoneData = V2PhoneAuthData(
+                  step: V2PhoneAuthStep.code,
+                  phone: phone,
+                  resendSeconds: 30,
+                );
+                setState(() {});
+              },
+              onVerifyPhoneCode: (code) => verified = code,
+              onResendPhoneCode: () {},
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await openSheet(tester);
+      await tester.enterText(
+        find.byKey(const Key('phone-auth-phone')),
+        '98765 43210',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('phone-auth-send')));
+      await tester.pumpAndSettle();
+
+      expect(sent, '98765 43210');
+      expect(find.text('Enter your code'), findsOneWidget);
+      expect(find.textContaining('+91 98765 43210'), findsOneWidget);
+
+      await tester.enterText(
+        find.byKey(const Key('phone-auth-code-field')),
+        '123456',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('phone-auth-verify')));
+      await tester.pump();
+
+      expect(verified, '123456');
+    });
+
+    testWidgets('resend maps to its callback once the countdown is over', (
+      tester,
+    ) async {
+      var resends = 0;
+      await _pump(
+        tester,
+        phoneData: const V2PhoneAuthData(
+          step: V2PhoneAuthStep.code,
+          phone: '98765 43210',
+        ),
+        onPhone: () {},
+        onSendPhoneCode: (_) {},
+        onVerifyPhoneCode: (_) {},
+        onResendPhoneCode: () => resends++,
+      );
+
+      await openSheet(tester);
+      expect(find.byKey(const Key('phone-auth-resend')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('phone-auth-resend')));
+      await tester.pump();
+
+      expect(resends, 1);
+    });
+
+    testWidgets('change number returns the sheet to the number step', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        phoneData: const V2PhoneAuthData(
+          step: V2PhoneAuthStep.code,
+          phone: '98765 43210',
+        ),
+        onPhone: () {},
+        onSendPhoneCode: (_) {},
+        onVerifyPhoneCode: (_) {},
+      );
+
+      await openSheet(tester);
+      await tester.tap(find.byKey(const Key('phone-auth-back')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Sign in with your phone'), findsOneWidget);
+      expect(find.byKey(const Key('phone-auth-code-field')), findsNothing);
+    });
+
+    testWidgets('change number host callback is honoured', (tester) async {
+      var changes = 0;
+      await _pump(
+        tester,
+        phoneData: const V2PhoneAuthData(
+          step: V2PhoneAuthStep.code,
+          phone: '98765 43210',
+        ),
+        onPhone: () {},
+        onSendPhoneCode: (_) {},
+        onVerifyPhoneCode: (_) {},
+        onChangePhoneNumber: () => changes++,
+      );
+
+      await openSheet(tester);
+      await tester.tap(find.byKey(const Key('phone-auth-back')));
+      await tester.pump();
+
+      expect(changes, 1);
+    });
+
+    testWidgets('close dismisses the sheet without signing in', (tester) async {
+      var phoneTaps = 0;
+      await _pump(tester, onPhone: () => phoneTaps++, onSendPhoneCode: (_) {});
+
+      await openSheet(tester);
+      await tester.tap(find.byKey(const Key('phone-auth-close')));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(V2PhoneAuthSheet), findsNothing);
+      expect(phoneTaps, 0);
+      expect(find.text('Welcome back'), findsOneWidget);
+    });
+
+    testWidgets('legacy host with only onPhone still owns its OTP flow', (
+      tester,
+    ) async {
+      var legacyTaps = 0;
+      await _pump(tester, onPhone: () => legacyTaps++);
+
+      await openSheet(tester);
+      await tester.enterText(
+        find.byKey(const Key('phone-auth-phone')),
+        '98765 43210',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('phone-auth-send')));
+      await tester.pumpAndSettle();
+
+      expect(legacyTaps, 1);
+      expect(find.byType(V2PhoneAuthSheet), findsNothing);
+    });
+
+    testWidgets('phone action is disabled when onPhone is null', (
+      tester,
+    ) async {
+      await _pump(tester);
+
+      final phone = tester.widget<OButton>(
+        find.byKey(const Key('sign-in-phone')),
+      );
+      expect(phone.onPressed, isNull);
+    });
+
+    testWidgets('sheet fits 320 dp at 200 % text', (tester) async {
+      await _pump(
+        tester,
+        width: 320,
+        textScale: 2,
+        onPhone: () {},
+        onSendPhoneCode: (_) {},
+      );
+
+      await openSheet(tester);
+
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const Key('phone-auth-phone')), findsOneWidget);
+    });
   });
 }

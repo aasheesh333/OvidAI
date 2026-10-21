@@ -22,6 +22,38 @@ class V2SignInDevice {
   final bool current;
 }
 
+/// Where the account stands with the service.
+enum V2AccountStatus {
+  /// In good standing.
+  active,
+
+  /// A deletion request is scheduled but can still be cancelled.
+  deletionPending,
+
+  /// Blocked for abuse; data is kept and support can review it.
+  suspendedForAbuse,
+}
+
+/// One usage or storage line in the account summary.
+@immutable
+class V2AccountUsageMetric {
+  const V2AccountUsageMetric({
+    required this.id,
+    required this.title,
+    this.value = '',
+    this.detail = '',
+  });
+
+  final String id;
+  final String title;
+
+  /// The headline, e.g. `2.1 GB` or `38M tokens`. Empty until measured.
+  final String value;
+
+  /// The qualifier, e.g. `of 3 GB` or `Resets in 6h 12m`.
+  final String detail;
+}
+
 /// One service shown in the status list.
 @immutable
 class V2ServiceStatus {
@@ -68,6 +100,14 @@ class V2AccountHealthPageData {
     this.emailVerified = true,
     this.emailLabel = '',
     this.regionLabel = '',
+    this.accountStatus = V2AccountStatus.active,
+    this.usage = const <V2AccountUsageMetric>[
+      V2AccountUsageMetric(id: 'storage', title: 'Storage left'),
+      V2AccountUsageMetric(id: 'daily_usage', title: 'Daily usage left'),
+      V2AccountUsageMetric(id: 'monthly_usage', title: 'Monthly usage left'),
+    ],
+    this.deletionRequestedLabel = '',
+    this.deletionScheduledLabel = '',
     this.services = const <V2ServiceStatus>[],
     this.devices = const <V2SignInDevice>[],
     this.recentSignIns = const <V2SignInEvent>[],
@@ -81,6 +121,7 @@ class V2AccountHealthPageData {
     this.onVerifyEmail,
     this.onContactSupport,
     this.onRunCheck,
+    this.onCancelDeletion,
     this.onRetry,
   });
 
@@ -100,6 +141,21 @@ class V2AccountHealthPageData {
   final bool emailVerified;
   final String emailLabel;
   final String regionLabel;
+
+  /// Where the account stands right now. Suspended and deletion-pending
+  /// accounts keep their data but change what the page can promise.
+  final V2AccountStatus accountStatus;
+
+  /// Storage and allowance lines. The page never invents a number: a metric
+  /// with an empty [V2AccountUsageMetric.value] reads "Not measured yet".
+  final List<V2AccountUsageMetric> usage;
+
+  /// When deletion was asked for, e.g. `21 Oct 2026`.
+  final String deletionRequestedLabel;
+
+  /// The date the data goes, e.g. `20 Nov 2026`.
+  final String deletionScheduledLabel;
+
   final List<V2ServiceStatus> services;
   final List<V2SignInDevice> devices;
   final List<V2SignInEvent> recentSignIns;
@@ -114,9 +170,36 @@ class V2AccountHealthPageData {
   final VoidCallback? onVerifyEmail;
   final VoidCallback? onContactSupport;
   final VoidCallback? onRunCheck;
+
+  /// Cancels a scheduled deletion. The page confirms first.
+  final VoidCallback? onCancelDeletion;
   final VoidCallback? onRetry;
 
   int? get resolvedScore => score?.clamp(0, 100);
+
+  bool get deletionPending => accountStatus == V2AccountStatus.deletionPending;
+
+  String get accountStatusLabel => switch (accountStatus) {
+    V2AccountStatus.active => 'Active',
+    V2AccountStatus.deletionPending => 'Deletion pending',
+    V2AccountStatus.suspendedForAbuse => 'Suspended',
+  };
+
+  String get accountStatusDetail => switch (accountStatus) {
+    V2AccountStatus.active => 'Your account is in good standing.',
+    V2AccountStatus.deletionPending =>
+      'Your account is scheduled for deletion.',
+    V2AccountStatus.suspendedForAbuse =>
+      'Suspended for abuse. Contact support to appeal.',
+  };
+
+  /// `Requested 21 Oct 2026 · Deletes on 20 Nov 2026` with empty parts
+  /// dropped, or an empty string when the caller has no dates yet.
+  String get deletionSummary => [
+    if (deletionRequestedLabel.isNotEmpty) 'Requested $deletionRequestedLabel',
+    if (deletionScheduledLabel.isNotEmpty)
+      'Deletes on $deletionScheduledLabel',
+  ].join(' · ');
 
   /// True once a security check has actually run and reported a time.
   bool get hasCheckResult =>
@@ -173,6 +256,10 @@ class AccountHealthPage extends StatelessWidget {
         child: OStagger(
           children: [
             _hero(context),
+            _summary(context),
+            if (data.accountStatus == V2AccountStatus.suspendedForAbuse)
+              _suspendedNotice(context),
+            if (data.deletionPending) _deletionRequest(context),
             _healthCard(context),
             _devices(context),
             _recentSignIns(context),
@@ -284,6 +371,233 @@ class AccountHealthPage extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  /// One card answers "how much is left, and where does my account stand".
+  /// The page shows `Not measured yet` rather than a made-up number.
+  Widget _summary(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.l),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          OSectionHeader(
+            label: 'Account summary',
+            padding: const EdgeInsets.only(bottom: OSpace.s),
+          ),
+          OCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _HealthRow(
+                  key: const ValueKey<String>('health-account-status'),
+                  icon: Icons.verified_user_outlined,
+                  title: 'Account status',
+                  subtitle: data.accountStatusDetail,
+                  showChevron: false,
+                  trailing: OPill(
+                    label: data.accountStatusLabel,
+                    tone: switch (data.accountStatus) {
+                      V2AccountStatus.active => OPillTone.success,
+                      V2AccountStatus.deletionPending => OPillTone.warn,
+                      V2AccountStatus.suspendedForAbuse => OPillTone.danger,
+                    },
+                    dot: true,
+                  ),
+                ),
+                for (final metric in data.usage) ...[
+                  Divider(color: c.hairline, height: 1),
+                  _HealthRow(
+                    key: ValueKey<String>('health-usage-${metric.id}'),
+                    icon: _usageIcon(metric.id),
+                    title: metric.title,
+                    subtitle: _usageDetail(metric),
+                    showChevron: false,
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  IconData _usageIcon(String id) => switch (id) {
+    'storage' => Icons.cloud_outlined,
+    'daily_usage' => Icons.today_outlined,
+    'monthly_usage' => Icons.calendar_month_outlined,
+    _ => Icons.bar_chart_rounded,
+  };
+
+  String _usageDetail(V2AccountUsageMetric metric) {
+    if (metric.value.trim().isEmpty) return 'Not measured yet';
+    if (metric.detail.trim().isEmpty) return metric.value;
+    return '${metric.value} · ${metric.detail}';
+  }
+
+  Widget _suspendedNotice(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.l),
+      child: Container(
+        key: const ValueKey<String>('account-health-suspended-notice'),
+        padding: const EdgeInsets.all(OSpace.l),
+        decoration: BoxDecoration(
+          color: c.danger.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(ORadius.l),
+          border: Border.all(color: c.danger.withValues(alpha: 0.35)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.gpp_bad_outlined, size: 20, color: c.danger),
+                const SizedBox(width: OSpace.s),
+                Expanded(
+                  child: Text(
+                    'Suspended for abuse',
+                    style: OType.h3.copyWith(color: c.text),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: OSpace.s),
+            Text(
+              'Your data is kept. Contact support to appeal this decision.',
+              style: OType.bodySm.copyWith(color: c.textMuted),
+            ),
+            const SizedBox(height: OSpace.m),
+            OButton(
+              key: const ValueKey<String>('account-health-suspended-support'),
+              label: 'Contact support',
+              icon: Icons.support_agent_rounded,
+              variant: OButtonVariant.secondary,
+              expand: true,
+              onPressed: data.onContactSupport,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _deletionRequest(BuildContext context) {
+    final c = OColors.of(context);
+    final summary = data.deletionSummary;
+    final when = data.deletionScheduledLabel.isEmpty
+        ? ''
+        : ' on ${data.deletionScheduledLabel}';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.l),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          OSectionHeader(
+            label: 'Deletion request',
+            padding: const EdgeInsets.only(bottom: OSpace.s),
+          ),
+          OCard(
+            key: const ValueKey<String>('account-health-deletion-card'),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.delete_outline_rounded,
+                      size: 20,
+                      color: c.warn,
+                    ),
+                    const SizedBox(width: OSpace.s),
+                    Expanded(
+                      child: Text(
+                        'Deletion requested',
+                        style: OType.h3.copyWith(color: c.text),
+                      ),
+                    ),
+                    const SizedBox(width: OSpace.s),
+                    const OPill(
+                      label: 'Pending',
+                      tone: OPillTone.warn,
+                      dot: true,
+                    ),
+                  ],
+                ),
+                if (summary.isNotEmpty) ...[
+                  const SizedBox(height: OSpace.s),
+                  Text(
+                    summary,
+                    style: OType.bodySm.copyWith(color: c.textMuted),
+                  ),
+                ],
+                const SizedBox(height: OSpace.s),
+                Text(
+                  'Your chats, files, memory and artifacts will be deleted'
+                  '$when. Until then, you can cancel.',
+                  style: OType.bodySm.copyWith(color: c.textMuted),
+                ),
+                const SizedBox(height: OSpace.m),
+                OButton(
+                  key: const ValueKey<String>('account-health-cancel-deletion'),
+                  label: 'Cancel deletion',
+                  variant: OButtonVariant.secondary,
+                  expand: true,
+                  onPressed: data.onCancelDeletion == null
+                      ? null
+                      : () => _confirmCancelDeletion(context),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _confirmCancelDeletion(BuildContext context) async {
+    final confirmed = await showOSheet<bool>(
+      context,
+      title: 'Cancel account deletion?',
+      builder: (context) {
+        final c = OColors.of(context);
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.l),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Your account and all its data will be kept. You can request '
+                'deletion again at any time.',
+                style: OType.bodySm.copyWith(color: c.textMuted),
+              ),
+              const SizedBox(height: OSpace.l),
+              OButton(
+                label: 'Keep deletion',
+                variant: OButtonVariant.secondary,
+                expand: true,
+                onPressed: () => Navigator.of(context).pop(false),
+              ),
+              const SizedBox(height: OSpace.s),
+              OButton(
+                key: const ValueKey<String>(
+                  'account-health-confirm-cancel-deletion',
+                ),
+                label: 'Cancel deletion',
+                expand: true,
+                onPressed: () => Navigator.of(context).pop(true),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (confirmed == true) data.onCancelDeletion?.call();
   }
 
   Widget _healthCard(BuildContext context) {
@@ -676,6 +990,7 @@ class AccountHealthPage extends StatelessWidget {
 /// moves under the title instead of squeezing it into a sliver.
 class _HealthRow extends StatelessWidget {
   const _HealthRow({
+    super.key,
     required this.title,
     this.subtitle,
     this.icon,

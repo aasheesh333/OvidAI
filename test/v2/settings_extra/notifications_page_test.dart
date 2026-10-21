@@ -59,6 +59,141 @@ void main() {
     expect(find.text('New sign-ins'), findsOneWidget);
   });
 
+  testWidgets('master switch is on by default and reports changes', (
+    tester,
+  ) async {
+    bool? master;
+    await _pump(
+      tester,
+      V2NotificationsPageData(onMasterChanged: (value) => master = value),
+    );
+
+    final toggle = find.byKey(
+      const ValueKey<String>('notifications-master-switch'),
+    );
+    expect(tester.widget<Switch>(toggle).value, isTrue);
+    expect(
+      find.textContaining('On: get notified when a cloud run finishes'),
+      findsOneWidget,
+    );
+
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+
+    expect(master, isFalse);
+  });
+
+  testWidgets('master off disables channels, delivery and sounds', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    var toggles = 0;
+    var sounds = 0;
+    await _pump(
+      tester,
+      V2NotificationsPageData(
+        masterEnabled: false,
+        onMasterChanged: (_) {},
+        onToggle: (_, _) => toggles++,
+        onSoundChanged: (_, _) => sounds++,
+      ),
+    );
+
+    expect(
+      find.textContaining('Off: Ovid Cloud sends no notifications'),
+      findsOneWidget,
+    );
+
+    final channel = find.byKey(
+      const ValueKey<String>('notification-switch-run_finished'),
+    );
+    expect(tester.widget<Switch>(channel).onChanged, isNull);
+    expect(
+      tester.getSemantics(channel).getSemanticsData().flagsCollection.isEnabled,
+      Tristate.isFalse,
+    );
+    await tester.tap(channel);
+    await tester.pumpAndSettle();
+    expect(toggles, 0);
+
+    final soundToggle = find.byKey(
+      const ValueKey<String>('notification-switch-sound'),
+    );
+    await tester.ensureVisible(soundToggle);
+    await tester.tap(soundToggle);
+    await tester.pumpAndSettle();
+    expect(toggles, 0);
+
+    final soundRow = find.byKey(
+      const ValueKey<String>('sound-row-agent_updates'),
+    );
+    await tester.ensureVisible(soundRow);
+    expect(
+      find.textContaining('Turn push notifications on to pick a sound.'),
+      findsNWidgets(2),
+    );
+    await tester.tap(find.descendant(of: soundRow, matching: find.text('System')));
+    await tester.pumpAndSettle();
+    expect(sounds, 0);
+
+    handle.dispose();
+  });
+
+  testWidgets('first-run prompt explains the permission and can be deferred', (
+    tester,
+  ) async {
+    var allowed = 0;
+    var dismissed = 0;
+    await _pump(
+      tester,
+      V2NotificationsPageData(
+        showPermissionPrompt: true,
+        onAllowNotifications: () => allowed++,
+        onDismissPermissionPrompt: () => dismissed++,
+      ),
+    );
+
+    expect(
+      find.byKey(const ValueKey<String>('notifications-permission-prompt')),
+      findsOneWidget,
+    );
+    expect(find.text('Get notified when Ovid Si finishes'), findsOneWidget);
+    expect(
+      find.textContaining('Ovid Si works in the cloud'),
+      findsOneWidget,
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('notifications-permission-later')),
+    );
+    await tester.pumpAndSettle();
+    expect(dismissed, 1);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('notifications-permission-allow')),
+    );
+    await tester.pumpAndSettle();
+    expect(allowed, 1);
+  });
+
+  testWidgets('first-run prompt gives way to the blocked banner', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      const V2NotificationsPageData(
+        showPermissionPrompt: true,
+        notificationsBlocked: true,
+      ),
+    );
+
+    expect(
+      find.byKey(const ValueKey<String>('notifications-permission-prompt')),
+      findsNothing,
+    );
+    expect(find.text('Notifications are blocked'), findsOneWidget);
+  });
+
   testWidgets('toggles a notification category', (tester) async {
     String? toggledId;
     bool? toggledValue;
@@ -72,7 +207,9 @@ void main() {
       ),
     );
 
-    await tester.tap(find.byType(Switch).first);
+    await tester.tap(
+      find.byKey(const ValueKey<String>('notification-switch-run_finished')),
+    );
     await tester.pumpAndSettle();
 
     expect(toggledId, 'run_finished');
@@ -368,13 +505,17 @@ void main() {
   testWidgets('fits 320 dp at 200% text in dark', (tester) async {
     await _pump(
       tester,
-      const V2NotificationsPageData(),
+      const V2NotificationsPageData(
+        showPermissionPrompt: true,
+        masterEnabled: false,
+      ),
       dark: true,
       size: const Size(320, 640),
       textScale: 2,
     );
 
     expect(tester.takeException(), isNull);
+    expect(find.text('Get notified when Ovid Si finishes'), findsOneWidget);
     await tester.ensureVisible(find.text('Quiet hours'));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
@@ -390,6 +531,7 @@ void main() {
 
     for (final label in const [
       'Notifications are blocked',
+      'PUSH NOTIFICATIONS',
       'ACTIVITY',
       'SECURITY',
       'DELIVERY',
@@ -404,11 +546,23 @@ void main() {
     await _pump(tester, const V2NotificationsPageData());
 
     final toggle = tester
-        .getSemantics(find.byType(Switch).first)
+        .getSemantics(
+          find.byKey(
+            const ValueKey<String>('notification-switch-run_finished'),
+          ),
+        )
         .getSemanticsData();
     // Tristate.none would mean the control does not announce its state at all.
     expect(toggle.flagsCollection.isEnabled, Tristate.isFalse);
     expect(toggle.flagsCollection.isToggled, Tristate.isTrue);
+
+    final master = tester
+        .getSemantics(
+          find.byKey(const ValueKey<String>('notifications-master-switch')),
+        )
+        .getSemanticsData();
+    expect(master.flagsCollection.isEnabled, Tristate.isFalse);
+    expect(master.flagsCollection.isToggled, Tristate.isTrue);
 
     final quietHours = tester
         .getSemantics(find.byType(OListRow))
@@ -422,11 +576,19 @@ void main() {
     final semantics = tester.ensureSemantics();
     await _pump(
       tester,
-      V2NotificationsPageData(onToggle: (_, _) {}, onQuietHours: () {}),
+      V2NotificationsPageData(
+        onToggle: (_, _) {},
+        onMasterChanged: (_) {},
+        onQuietHours: () {},
+      ),
     );
 
     final toggle = tester
-        .getSemantics(find.byType(Switch).first)
+        .getSemantics(
+          find.byKey(
+            const ValueKey<String>('notification-switch-run_finished'),
+          ),
+        )
         .getSemanticsData();
     expect(toggle.flagsCollection.isEnabled, Tristate.isTrue);
 

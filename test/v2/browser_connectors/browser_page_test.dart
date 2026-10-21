@@ -1,7 +1,12 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/browser/browser_page.dart';
+import 'package:ovid_ai/ui/v2/browser/control_bar.dart';
+import 'package:ovid_ai/ui/v2/browser/tab_strip.dart';
+import 'package:ovid_ai/ui/v2/browser/viewport.dart';
 
 Widget _app(Widget child, {ThemeData? theme, double textScale = 1}) {
   return MaterialApp(
@@ -369,5 +374,184 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('Action log'), findsOneWidget);
+  });
+
+  testWidgets('mounts the shared tab strip and maps headless tabs', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      BrowserPage(
+        data: const V2BrowserData(
+          tabs: [
+            V2BrowserTab(id: 'docs', title: 'Docs', host: 'ovidsi.com'),
+            V2BrowserTab(
+              id: 'github',
+              title: 'GitHub',
+              host: 'github.com',
+              headless: true,
+            ),
+          ],
+          activeTabId: 'docs',
+          address: 'ovidsi.com/docs/quickstart',
+        ),
+      ),
+    );
+
+    expect(find.byType(BrowserTabStrip), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-docs')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('v2-browser-tab-headless-github')),
+      findsOneWidget,
+    );
+    expect(find.text('Headless'), findsOneWidget);
+  });
+
+  testWidgets('paints the injected frame in the shared viewport', (
+    tester,
+  ) async {
+    final frame = MemoryImage(
+      base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0l'
+        'EQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      ),
+    );
+    await _pump(
+      tester,
+      BrowserPage(
+        data: V2BrowserData(
+          tabs: const [
+            V2BrowserTab(id: 'docs', title: 'Docs', host: 'ovidsi.com'),
+          ],
+          activeTabId: 'docs',
+          address: 'ovidsi.com/docs/quickstart',
+          frame: frame,
+          cursor: const V2ViewportCursor(x: 0.4, y: 0.6),
+        ),
+      ),
+    );
+
+    expect(find.byType(BrowserViewport), findsOneWidget);
+    final image = tester.widget<Image>(find.byType(Image).first);
+    expect(image.image, same(frame));
+    expect(find.byKey(BrowserViewport.cursorKey), findsOneWidget);
+    expect(find.text('Live · 3–5 fps'), findsOneWidget);
+  });
+
+  testWidgets('viewport status and retry flow through the page', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    var retries = 0;
+    await _pump(
+      tester,
+      BrowserPage(
+        data: const V2BrowserData(
+          tabs: [V2BrowserTab(id: 'docs', title: 'Docs', host: 'ovidsi.com')],
+          activeTabId: 'docs',
+          address: 'ovidsi.com/docs/quickstart',
+          viewportStatus: V2ViewportStatus.streamLost,
+        ),
+        onRetry: () => retries++,
+      ),
+    );
+
+    expect(find.text('Stream lost'), findsWidgets);
+    await tester.tap(find.byKey(BrowserViewport.retryKey));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(retries, 1);
+  });
+
+  testWidgets('control bar carries fps, countdown and input tools', (
+    tester,
+  ) async {
+    var back = 0;
+    var keyboard = 0;
+    var trackpad = 0;
+    var uploads = 0;
+    var downloads = 0;
+    var released = 0;
+    await _pump(
+      tester,
+      BrowserPage(
+        data: const V2BrowserData(
+          tabs: [V2BrowserTab(id: 'docs', title: 'Docs', host: 'ovidsi.com')],
+          activeTabId: 'docs',
+          address: 'ovidsi.com/docs/quickstart',
+          headlessLabel: 'Headless in 45 s',
+          controlling: true,
+          canGoBack: true,
+        ),
+        onBack: () => back++,
+        onToggleKeyboard: () => keyboard++,
+        onToggleTrackpad: () => trackpad++,
+        onUpload: () => uploads++,
+        onDownload: () => downloads++,
+        onReleaseControl: () => released++,
+      ),
+    );
+
+    expect(find.byType(BrowserControlBar), findsOneWidget);
+    expect(find.text('3–5 fps'), findsOneWidget);
+    expect(find.text('Headless in 45 s'), findsOneWidget);
+    expect(find.byKey(BrowserControlBar.backKey), findsOneWidget);
+
+    await tester.tap(find.byKey(BrowserControlBar.backKey));
+    await tester.tap(find.byKey(BrowserControlBar.keyboardKey));
+    await tester.tap(find.byKey(BrowserControlBar.trackpadKey));
+    await tester.tap(find.byKey(BrowserControlBar.uploadKey));
+    await tester.tap(find.byKey(BrowserControlBar.downloadKey));
+    await tester.tap(find.byKey(BrowserControlBar.takeControlKey));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(back, 1);
+    expect(keyboard, 1);
+    expect(trackpad, 1);
+    expect(uploads, 1);
+    expect(downloads, 1);
+    expect(released, 1);
+  });
+
+  testWidgets('control bar can hand the page over', (tester) async {
+    var takes = 0;
+    await _pump(
+      tester,
+      BrowserPage(data: _data(), onTakeControl: () => takes++),
+    );
+
+    await tester.tap(find.byKey(BrowserControlBar.takeControlKey));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(takes, 1);
+  });
+
+  testWidgets('controlling layout fits 320 dp at 200 % text', (tester) async {
+    await _pumpSmall(
+      tester,
+      BrowserPage(
+        data: const V2BrowserData(
+          tabs: [V2BrowserTab(id: 'docs', title: 'Docs', host: 'ovidsi.com')],
+          activeTabId: 'docs',
+          address: 'ovidsi.com/docs/quickstart',
+          headlessLabel: 'Headless in 45 s',
+          controlling: true,
+          keyboard: true,
+          trackpad: true,
+          canGoBack: true,
+          canGoForward: true,
+        ),
+        onBack: () {},
+        onForward: () {},
+        onToggleKeyboard: () {},
+        onToggleTrackpad: () {},
+        onUpload: () {},
+        onDownload: () {},
+      ),
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(find.byType(BrowserControlBar), findsOneWidget);
+    expect(find.text('Headless in 45 s'), findsWidgets);
   });
 }

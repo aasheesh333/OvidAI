@@ -10,13 +10,14 @@ const _profile = V2AccountProfile(
   name: 'Aarav Sharma',
   email: 'aarav@gmail.com',
   role: 'Senior Platform Architect',
+  planName: 'Ovid Plus',
   initials: 'AS',
 );
 
 const _fields = <V2AccountField>[
   V2AccountField(
-    id: 'full_name',
-    label: 'Full name',
+    id: 'display_name',
+    label: 'Display name',
     value: 'Aarav Sharma',
     editable: true,
   ),
@@ -54,11 +55,18 @@ V2AccountData _accountData({
   ValueChanged<V2AccountField>? onFieldTap,
   ValueChanged<V2ConnectedAccount>? onAccountTap,
   VoidCallback? onLinkAccount,
+  VoidCallback? onOpenCredentials,
+  VoidCallback? onTeamSupport,
   VoidCallback? onSignOut,
   VoidCallback? onDeleteAccount,
+  VoidCallback? onManageSubscription,
+  VoidCallback? onRestoreAccount,
   VoidCallback? onSignIn,
   VoidCallback? onRetry,
   bool signOutLoading = false,
+  bool deletionPending = false,
+  DateTime? deletionDeadline,
+  bool deletionLoading = false,
   String syncLabel = 'All synced',
   bool syncOk = true,
 }) {
@@ -72,11 +80,18 @@ V2AccountData _accountData({
     onFieldTap: onFieldTap,
     onAccountTap: onAccountTap,
     onLinkAccount: onLinkAccount,
+    onOpenCredentials: onOpenCredentials,
+    onTeamSupport: onTeamSupport,
     onSignOut: onSignOut,
     onDeleteAccount: onDeleteAccount,
+    onManageSubscription: onManageSubscription,
+    onRestoreAccount: onRestoreAccount,
     onSignIn: onSignIn,
     onRetry: onRetry,
     signOutLoading: signOutLoading,
+    deletionPending: deletionPending,
+    deletionDeadline: deletionDeadline,
+    deletionLoading: deletionLoading,
     syncLabel: syncLabel,
     syncOk: syncOk,
   );
@@ -122,14 +137,18 @@ void main() {
     expect(find.text('Account'), findsOneWidget);
     expect(find.text('Aarav Sharma'), findsWidgets);
     expect(find.text('Senior Platform Architect'), findsOneWidget);
+    expect(find.text('Ovid Plus'), findsOneWidget);
     expect(find.text('Change photo'), findsOneWidget);
     expect(find.text('PROFILE DETAILS'), findsOneWidget);
     expect(find.text('All synced'), findsOneWidget);
+    expect(find.text('Display name'), findsOneWidget);
     expect(find.text('Email address'), findsOneWidget);
     expect(find.text('Verified'), findsOneWidget);
-    expect(find.text('CONNECTED ACCOUNTS'), findsOneWidget);
+    expect(find.text('SIGN-IN METHODS'), findsOneWidget);
     expect(find.text('Google'), findsOneWidget);
     expect(find.text('Apple'), findsOneWidget);
+    expect(find.text('Credentials'), findsOneWidget);
+    expect(find.text('Team & support'), findsOneWidget);
     expect(find.text('Sign out'), findsOneWidget);
     expect(find.text('Delete account'), findsOneWidget);
   });
@@ -200,10 +219,144 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Full name'));
+    await tester.tap(find.text('Display name'));
     await tester.pump();
 
-    expect(tapped?.id, 'full_name');
+    expect(tapped?.id, 'display_name');
+  });
+
+  testWidgets('credentials row opens the credentials screen', (tester) async {
+    _phoneSize(tester);
+    var opened = 0;
+    await tester.pumpWidget(
+      _app(OTheme.light(), _accountData(onOpenCredentials: () => opened++)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Credentials'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Credentials'));
+    await tester.pump();
+
+    expect(opened, 1);
+  });
+
+  testWidgets('team and support row calls its callback', (tester) async {
+    _phoneSize(tester);
+    var opened = 0;
+    await tester.pumpWidget(
+      _app(OTheme.light(), _accountData(onTeamSupport: () => opened++)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Team & support'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Team & support'));
+    await tester.pump();
+
+    expect(opened, 1);
+  });
+
+  testWidgets('delete explains the grace period and can be cancelled', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    var deleted = 0;
+    var managed = 0;
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _accountData(
+          onDeleteAccount: () => deleted++,
+          onManageSubscription: () => managed++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Delete account'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete account'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('24-hour grace period'), findsWidgets);
+    expect(
+      find.textContaining(
+        'Signing in during the 24-hour grace period cancels the deletion',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('offers Restore account'), findsOneWidget);
+    expect(find.text('Manage Play subscription'), findsOneWidget);
+    expect(deleted, 0);
+
+    await tester.tap(find.text('Manage Play subscription'));
+    await tester.pump();
+    expect(managed, 1);
+
+    await tester.tap(find.text('Keep account'));
+    await tester.pumpAndSettle();
+    expect(deleted, 0);
+
+    await tester.tap(find.text('Delete account'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete after 24 hours'));
+    await tester.pumpAndSettle();
+
+    expect(deleted, 1);
+  });
+
+  testWidgets('pending deletion shows the deadline and restores the account', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    final deadline = DateTime.now().add(const Duration(hours: 12));
+    var restored = 0;
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _accountData(
+          deletionPending: true,
+          deletionDeadline: deadline,
+          onRestoreAccount: () => restored++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Deletion scheduled'), findsOneWidget);
+    expect(find.textContaining('24-hour grace period'), findsWidgets);
+    // Deleting again would only extend the request, so the action is hidden.
+    expect(find.text('Delete account'), findsNothing);
+
+    await tester.ensureVisible(find.widgetWithText(OButton, 'Restore account'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(OButton, 'Restore account'));
+    await tester.pump();
+
+    expect(restored, 1);
+  });
+
+  testWidgets('delete sheet fits a narrow phone at 200% text', (tester) async {
+    _narrowSize(tester);
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _accountData(onDeleteAccount: () {}, onManageSubscription: () {}),
+        textScale: 2,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Delete account'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete account'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    await tester.ensureVisible(find.text('Delete after 24 hours'));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete after 24 hours'), findsOneWidget);
   });
 
   testWidgets('full empty state signs in', (tester) async {
@@ -276,11 +429,22 @@ void main() {
 
   testWidgets('fits 320 dp at 200% text in dark', (tester) async {
     _narrowSize(tester);
-    await tester.pumpWidget(_app(OTheme.dark(), _accountData(), textScale: 2));
+    await tester.pumpWidget(
+      _app(
+        OTheme.dark(),
+        _accountData(
+          deletionPending: true,
+          deletionDeadline: DateTime.now().add(const Duration(hours: 20)),
+          onRestoreAccount: () {},
+        ),
+        textScale: 2,
+      ),
+    );
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
     expect(find.text('Connected'), findsNWidgets(2));
+    expect(find.text('Deletion scheduled'), findsOneWidget);
   });
 
   testWidgets('loading shows skeleton rows', (tester) async {

@@ -2,10 +2,13 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../../../core/state.dart';
 import '../../../core/voice_input_service.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
+
+/// The language saved in Settings, installed by the shell so this library has
+/// no `core/state.dart` import and can compile for web.
+String v2SavedVoiceLanguage = '';
 
 /// Seam over [VoiceInputService] so the composer can be tested with a fake.
 abstract class V2VoiceService {
@@ -85,7 +88,7 @@ abstract final class V2VoiceLocales {
   /// Settings when there is one, otherwise the device language mapped to a
   /// supported id.
   static String deviceLanguage() {
-    final saved = AppState.I.voiceLanguage;
+    final saved = v2SavedVoiceLanguage;
     if (saved.isNotEmpty) return saved;
     final code = WidgetsBinding.instance.platformDispatcher.locale.languageCode
         .toLowerCase();

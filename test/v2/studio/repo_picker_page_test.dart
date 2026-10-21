@@ -4,8 +4,21 @@ import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/studio/repo_picker_page.dart';
 
-Widget _app(Widget child, {bool dark = false}) =>
-    MaterialApp(theme: dark ? OTheme.dark() : OTheme.light(), home: child);
+Widget _app(Widget child, {bool dark = false, double textScale = 1}) =>
+    MaterialApp(
+      theme: dark ? OTheme.dark() : OTheme.light(),
+      builder: textScale == 1
+          ? null
+          : (context, content) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: TextScaler.linear(textScale)),
+              child: content!,
+            ),
+      home: child,
+    );
+
+void _noopConfirm(V2Repo repo, String branch) {}
 
 const _repos = <V2Repo>[
   V2Repo(
@@ -16,6 +29,15 @@ const _repos = <V2Repo>[
     language: 'TypeScript',
     updatedLabel: 'Updated 2h ago',
     isPrivate: true,
+    defaultBranch: 'main',
+    branches: <V2RepoBranch>[
+      V2RepoBranch(name: 'main', isDefault: true, lastCommitLabel: '2h ago'),
+      V2RepoBranch(name: 'develop', lastCommitLabel: 'Yesterday'),
+      V2RepoBranch(
+        name: 'feature/hero-revamp',
+        lastCommitLabel: '3 days ago',
+      ),
+    ],
   ),
   V2Repo(
     id: '2',
@@ -24,6 +46,11 @@ const _repos = <V2Repo>[
     description: 'Public API and background jobs',
     language: 'Dart',
     updatedLabel: 'Updated yesterday',
+    defaultBranch: 'main',
+    branches: <V2RepoBranch>[
+      V2RepoBranch(name: 'main', isDefault: true),
+      V2RepoBranch(name: 'release'),
+    ],
   ),
 ];
 
@@ -83,6 +110,182 @@ void main() {
 
     await tester.tap(find.text('acme/api-server'));
     expect(selected?.id, '2');
+  });
+
+  testWidgets('requires a repository and branch before the primary enables', (
+    tester,
+  ) async {
+    V2Repo? confirmedRepo;
+    String? confirmedBranch;
+    const noDefault = <V2Repo>[
+      V2Repo(
+        id: '3',
+        name: 'no-default',
+        owner: 'acme',
+        branches: <V2RepoBranch>[
+          V2RepoBranch(name: 'trunk'),
+          V2RepoBranch(name: 'release'),
+        ],
+      ),
+    ];
+
+    await tester.pumpWidget(
+      _app(
+        V2RepoPickerPage(
+          data: const V2RepoPickerData(repos: noDefault),
+          onConfirm: (repo, branch) {
+            confirmedRepo = repo;
+            confirmedBranch = branch;
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    OButton primary() =>
+        tester.widget<OButton>(find.byKey(const Key('repo-picker-primary')));
+
+    expect(primary().onPressed, isNull);
+    expect(find.text('Choose a repository'), findsOneWidget);
+
+    await tester.tap(find.text('acme/no-default'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Choose branch'), findsOneWidget);
+    expect(find.text('trunk'), findsOneWidget);
+    expect(find.text('release'), findsOneWidget);
+    expect(primary().onPressed, isNull);
+    expect(find.widgetWithText(OButton, 'Choose a branch'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const Key('repo-picker-branch-release')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(primary().onPressed, isNotNull);
+    expect(find.text('Start coding'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('repo-picker-primary')));
+    await tester.pumpAndSettle();
+
+    expect(confirmedRepo?.id, '3');
+    expect(confirmedBranch, 'release');
+  });
+
+  testWidgets('preselects the default branch and reports it on confirm', (
+    tester,
+  ) async {
+    V2Repo? confirmedRepo;
+    String? confirmedBranch;
+    await tester.pumpWidget(
+      _app(
+        V2RepoPickerPage(
+          data: const V2RepoPickerData(repos: _repos),
+          onConfirm: (repo, branch) {
+            confirmedRepo = repo;
+            confirmedBranch = branch;
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('acme/landing-page'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Choose branch'), findsOneWidget);
+    final primary = tester.widget<OButton>(
+      find.byKey(const Key('repo-picker-primary')),
+    );
+    expect(primary.onPressed, isNotNull);
+
+    await tester.tap(find.byKey(const Key('repo-picker-primary')));
+    await tester.pumpAndSettle();
+
+    expect(confirmedRepo?.id, '1');
+    expect(confirmedBranch, 'main');
+  });
+
+  testWidgets('changing the branch changes what is confirmed', (tester) async {
+    String? confirmedBranch;
+    await tester.pumpWidget(
+      _app(
+        V2RepoPickerPage(
+          data: const V2RepoPickerData(repos: _repos),
+          onConfirm: (_, branch) => confirmedBranch = branch,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('acme/landing-page'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('repo-picker-branch-develop')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('repo-picker-primary')));
+    await tester.pumpAndSettle();
+
+    expect(confirmedBranch, 'develop');
+  });
+
+  testWidgets('change repository returns to the repo list and re-gates', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        V2RepoPickerPage(
+          data: const V2RepoPickerData(repos: _repos),
+          onConfirm: (_, _) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('acme/landing-page'));
+    await tester.pumpAndSettle();
+    expect(find.text('Choose branch'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('repo-picker-change-repo')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Choose branch'), findsNothing);
+    expect(find.text('acme/landing-page'), findsOneWidget);
+    final primary = tester.widget<OButton>(
+      find.byKey(const Key('repo-picker-primary')),
+    );
+    expect(primary.onPressed, isNull);
+  });
+
+  testWidgets('a repo without branches cannot pass the gate', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        const V2RepoPickerPage(
+          data: V2RepoPickerData(
+            repos: <V2Repo>[
+              V2Repo(id: '4', name: 'empty', owner: 'acme'),
+            ],
+          ),
+          onConfirm: _noopConfirm,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('acme/empty'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Choose branch'), findsOneWidget);
+    expect(find.text('No branches found'), findsOneWidget);
+    final primary = tester.widget<OButton>(
+      find.byKey(const Key('repo-picker-primary')),
+    );
+    expect(primary.onPressed, isNull);
+
+    await tester.ensureVisible(find.text('Change repository').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Change repository').last);
+    await tester.pumpAndSettle();
+    expect(find.text('acme/empty'), findsOneWidget);
   });
 
   testWidgets('search filters the repository list', (tester) async {
@@ -234,24 +437,65 @@ void main() {
       ),
     };
 
-    for (final entry in scenarios.entries) {
+    for (final dark in <bool>[false, true]) {
+      for (final entry in scenarios.entries) {
+        await tester.pumpWidget(
+          _app(
+            Builder(
+              builder: (context) => MediaQuery(
+                data: MediaQuery.of(context).copyWith(
+                  textScaler: const TextScaler.linear(2),
+                ),
+                child: entry.value,
+              ),
+            ),
+            dark: dark,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          tester.takeException(),
+          isNull,
+          reason:
+              '${entry.key} overflowed at 320 dp / 200% text '
+              '(${dark ? 'dark' : 'light'})',
+        );
+      }
+    }
+  });
+
+  testWidgets('320 dp at 200% text lays out the branch step in both themes', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    for (final dark in <bool>[false, true]) {
       await tester.pumpWidget(
         _app(
-          Builder(
-            builder: (context) => MediaQuery(
-              data: MediaQuery.of(context).copyWith(
-                textScaler: const TextScaler.linear(2),
-              ),
-              child: entry.value,
+          const V2RepoPickerPage(
+            data: V2RepoPickerData(
+              repos: _repos,
+              accountLabel: 'Priya Ramanathan',
             ),
+            onConfirm: _noopConfirm,
           ),
+          dark: dark,
+          textScale: 2,
         ),
       );
       await tester.pumpAndSettle();
+
+      await tester.tap(find.text('acme/landing-page'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Choose branch'), findsOneWidget);
       expect(
         tester.takeException(),
         isNull,
-        reason: '${entry.key} overflowed at 320 dp / 200% text',
+        reason: 'branch step overflowed at 320 dp / 200% text '
+            '(${dark ? 'dark' : 'light'})',
       );
     }
   });

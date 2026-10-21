@@ -3,12 +3,65 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'timeline.dart';
 
 // TODO(l10n): extract this screen's English copy during the ARB pass.
 
 enum V2RunTrajectoryStatus { loading, empty, error, ready }
 
 enum V2RunStepKind { message, plan, search, write, preview, finish }
+
+/// Where a subagent launch ended up.
+enum V2SubagentLaunchStatus { running, completed, failed, timedOut, cancelled }
+
+/// One subagent the main agent launched during the run.
+@immutable
+class V2SubagentLaunch {
+  const V2SubagentLaunch({
+    required this.id,
+    required this.agentName,
+    required this.taskSummary,
+    required this.timeLabel,
+    required this.durationLabel,
+    this.startedAt,
+    this.status = V2SubagentLaunchStatus.completed,
+    this.statusLabel,
+  });
+
+  final String id;
+
+  /// The agent preset or role the main agent dispatched, e.g. "Frontend
+  /// builder".
+  final String agentName;
+
+  /// One line describing what the subagent was asked to do.
+  final String taskSummary;
+
+  /// Clock label for when the launch happened, e.g. "10:41".
+  final String timeLabel;
+
+  /// How long the subagent ran, e.g. "4m 12s".
+  final String durationLabel;
+
+  /// When the launch happened. Used to order the timeline; null keeps the
+  /// caller's order.
+  final DateTime? startedAt;
+
+  final V2SubagentLaunchStatus status;
+
+  /// Overrides the default label for [status] when the runtime reports one.
+  final String? statusLabel;
+
+  String get effectiveStatusLabel =>
+      statusLabel ??
+      switch (status) {
+        V2SubagentLaunchStatus.running => 'Running',
+        V2SubagentLaunchStatus.completed => 'Completed',
+        V2SubagentLaunchStatus.failed => 'Failed',
+        V2SubagentLaunchStatus.timedOut => 'Timed out',
+        V2SubagentLaunchStatus.cancelled => 'Cancelled',
+      };
+}
 
 /// A source the run looked at, shown as a chip under a step.
 @immutable
@@ -66,6 +119,7 @@ class V2RunTrajectoryPageData {
     required this.tokensLabel,
     required this.durationLabel,
     this.steps = const [],
+    this.subagents = const [],
     this.status = V2RunTrajectoryStatus.ready,
     this.errorMessage = 'We could not load this run.',
   });
@@ -74,11 +128,40 @@ class V2RunTrajectoryPageData {
   final String runLabel;
   final String prompt;
   final List<V2RunStep> steps;
+  final List<V2SubagentLaunch> subagents;
   final String model;
   final String tokensLabel;
   final String durationLabel;
   final V2RunTrajectoryStatus status;
   final String errorMessage;
+
+  /// "1 subagent" / "3 subagents".
+  String get subagentCountLabel =>
+      subagents.length == 1 ? '1 subagent' : '${subagents.length} subagents';
+
+  /// Launches in start order.
+  ///
+  /// Timestamped launches sort first, oldest first; launches without a
+  /// timestamp keep the order the caller supplied after the dated ones.
+  List<V2SubagentLaunch> get orderedSubagents {
+    final indexed = [
+      for (var i = 0; i < subagents.length; i++) (i, subagents[i]),
+    ];
+    indexed.sort((a, b) {
+      final at = a.$2.startedAt;
+      final bt = b.$2.startedAt;
+      if (at != null && bt != null) {
+        final byTime = at.compareTo(bt);
+        if (byTime != 0) return byTime;
+      } else if (at != null) {
+        return -1;
+      } else if (bt != null) {
+        return 1;
+      }
+      return a.$1.compareTo(b.$1);
+    });
+    return [for (final entry in indexed) entry.$2];
+  }
 }
 
 /// A run shown as a step-by-step timeline.
@@ -91,6 +174,7 @@ class RunTrajectoryPage extends StatelessWidget {
     this.onOpenSource,
     this.onOpenFile,
     this.onOpenPreview,
+    this.onOpenSubagent,
     this.onRetry,
   });
 
@@ -100,6 +184,7 @@ class RunTrajectoryPage extends StatelessWidget {
   final ValueChanged<String>? onOpenSource;
   final ValueChanged<String>? onOpenFile;
   final VoidCallback? onOpenPreview;
+  final ValueChanged<String>? onOpenSubagent;
   final VoidCallback? onRetry;
 
   @override
@@ -152,6 +237,25 @@ class RunTrajectoryPage extends StatelessWidget {
             children: [
               _OverviewCard(data: data, onRerun: onRerun),
               const SizedBox(height: OSpace.l),
+              if (data.subagents.isNotEmpty) ...[
+                OSectionHeader(
+                  label: 'Subagents (${data.subagents.length})',
+                  padding: const EdgeInsets.fromLTRB(0, 0, 0, OSpace.m),
+                ),
+                V2Timeline(
+                  items: [
+                    for (final launch in data.orderedSubagents)
+                      _launchItem(
+                        context,
+                        launch,
+                        opensDetail: onOpenSubagent != null,
+                      ),
+                  ],
+                  onItemTap: onOpenSubagent,
+                  semanticLabel: 'Subagent launches',
+                ),
+                const SizedBox(height: OSpace.l),
+              ],
               OSectionHeader(
                 label: 'Execution trajectory (${data.steps.length} steps)',
                 padding: const EdgeInsets.fromLTRB(0, OSpace.s, 0, OSpace.m),
@@ -163,7 +267,7 @@ class RunTrajectoryPage extends StatelessWidget {
                 onOpenPreview: onOpenPreview,
               ),
               const SizedBox(height: OSpace.l),
-              _FooterCard(data: data, onShareRun: onShareRun),
+              _FooterCard(onShareRun: onShareRun),
               const SizedBox(height: OSpace.s),
               Text(
                 'Shared runs never include your files or connectors.',
@@ -250,10 +354,90 @@ class _OverviewCard extends StatelessWidget {
               ],
             ),
           ),
+          const SizedBox(height: OSpace.m),
+          Wrap(
+            spacing: OSpace.l,
+            runSpacing: OSpace.s,
+            children: [
+              if (data.model.isNotEmpty)
+                _MetaItem(
+                  icon: Icons.memory_rounded,
+                  label: data.model,
+                  color: c.accent,
+                ),
+              _MetaItem(
+                icon: Icons.smart_toy_outlined,
+                label: data.subagentCountLabel,
+                color: c.accent,
+              ),
+              _MetaItem(
+                icon: Icons.generating_tokens_rounded,
+                label: data.tokensLabel,
+                color: c.success,
+              ),
+              _MetaItem(
+                icon: Icons.timer_outlined,
+                label: data.durationLabel,
+                color: c.textMuted,
+              ),
+            ],
+          ),
         ],
       ),
     );
   }
+}
+
+/// A subagent launch as a [V2TimelineItem]: when it started, which agent ran,
+/// what it was asked to do, how it ended and how long it took.
+///
+/// [opensDetail] adds a quiet "View details" footer when the page has an
+/// `onOpenSubagent` callback, keeping the affordance the old custom rail had.
+V2TimelineItem _launchItem(
+  BuildContext context,
+  V2SubagentLaunch launch, {
+  required bool opensDetail,
+}) {
+  final c = OColors.of(context);
+  return V2TimelineItem(
+    id: launch.id,
+    title: launch.agentName,
+    description: launch.taskSummary,
+    timeLabel: launch.timeLabel,
+    durationLabel: launch.durationLabel,
+    status: switch (launch.status) {
+      V2SubagentLaunchStatus.running => V2TimelineStatus.running,
+      V2SubagentLaunchStatus.completed => V2TimelineStatus.success,
+      V2SubagentLaunchStatus.failed => V2TimelineStatus.danger,
+      V2SubagentLaunchStatus.timedOut => V2TimelineStatus.warning,
+      V2SubagentLaunchStatus.cancelled => V2TimelineStatus.neutral,
+    },
+    statusLabel: launch.effectiveStatusLabel,
+    icon: switch (launch.status) {
+      V2SubagentLaunchStatus.running => Icons.smart_toy_rounded,
+      V2SubagentLaunchStatus.completed => Icons.check_rounded,
+      V2SubagentLaunchStatus.failed => Icons.error_outline_rounded,
+      V2SubagentLaunchStatus.timedOut => Icons.timer_off_outlined,
+      V2SubagentLaunchStatus.cancelled => Icons.block_rounded,
+    },
+    footer: opensDetail
+        ? Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'View details',
+                style: OType.caption.copyWith(color: c.accent),
+              ),
+              const SizedBox(width: 2),
+              Icon(
+                Icons.chevron_right_rounded,
+                size: 16,
+                color: c.accent,
+              ),
+            ],
+          )
+        : null,
+  );
 }
 
 class _Timeline extends StatelessWidget {
@@ -745,40 +929,16 @@ class _PreviewCard extends StatelessWidget {
 }
 
 class _FooterCard extends StatelessWidget {
-  const _FooterCard({required this.data, this.onShareRun});
+  const _FooterCard({this.onShareRun});
 
-  final V2RunTrajectoryPageData data;
   final VoidCallback? onShareRun;
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
     return OCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Wrap(
-            spacing: OSpace.l,
-            runSpacing: OSpace.s,
-            children: [
-              _MetaItem(
-                icon: Icons.memory_rounded,
-                label: data.model,
-                color: c.accent,
-              ),
-              _MetaItem(
-                icon: Icons.generating_tokens_rounded,
-                label: data.tokensLabel,
-                color: c.success,
-              ),
-              _MetaItem(
-                icon: Icons.timer_outlined,
-                label: data.durationLabel,
-                color: c.textMuted,
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.l),
           OButton(
             label: 'Share run',
             icon: Icons.share_rounded,

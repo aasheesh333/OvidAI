@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'control_bar.dart';
+import 'tab_strip.dart';
+import 'viewport.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
 
@@ -35,6 +38,9 @@ class V2BrowserAction {
 }
 
 /// One open tab. Ovid owns the tabs; the person only switches between them.
+///
+/// A tab whose live view was closed for 45 seconds or more is [headless]:
+/// Ovid keeps driving the page in the background, but there is no picture.
 @immutable
 class V2BrowserTab {
   const V2BrowserTab({
@@ -42,12 +48,24 @@ class V2BrowserTab {
     required this.title,
     required this.host,
     this.icon = Icons.language_rounded,
+    this.favicon,
+    this.headless = false,
+    this.closable = true,
   });
 
   final String id;
   final String title;
   final String host;
   final IconData icon;
+
+  /// A real favicon supplied by the wiring layer. Never fetched here.
+  final ImageProvider? favicon;
+
+  /// True when the live view was left closed long enough to go headless.
+  final bool headless;
+
+  /// False for a tab the wiring layer does not allow closing.
+  final bool closable;
 }
 
 /// Everything the browser screen needs to render. Immutable so the wiring
@@ -72,6 +90,15 @@ class V2BrowserData {
     this.connection = V2BrowserConnection.live,
     this.actions = const <V2BrowserAction>[],
     this.status = V2BrowserStatus.content,
+    this.frame,
+    this.viewportStatus = V2ViewportStatus.live,
+    this.cursor,
+    this.controlling = false,
+    this.keyboard = false,
+    this.trackpad = false,
+    this.canGoBack = false,
+    this.canGoForward = false,
+    this.fpsLabel = '3–5 fps',
     this.emptyTitle = 'No page open',
     this.emptyMessage = 'Ask Ovid to open a page and it will show up here.',
     this.errorMessage = 'The live view lost its connection.',
@@ -91,6 +118,31 @@ class V2BrowserData {
   final V2BrowserConnection connection;
   final List<V2BrowserAction> actions;
   final V2BrowserStatus status;
+
+  /// The latest decoded screencast frame. Null means "no picture yet", which
+  /// shows the viewport's neutral placeholder instead of inventing content.
+  final ImageProvider? frame;
+
+  /// What the live picture is doing, separate from the page status.
+  final V2ViewportStatus viewportStatus;
+
+  /// Where Ovid's pointer is inside the frame, normalized to `0..1`.
+  final V2ViewportCursor? cursor;
+
+  /// True while this person holds the page.
+  final bool controlling;
+
+  /// Input tools that are currently switched on while controlling.
+  final bool keyboard;
+  final bool trackpad;
+
+  /// Browser history availability for the back / forward controls.
+  final bool canGoBack;
+  final bool canGoForward;
+
+  /// Product hint for the screencast cadence, e.g. `3–5 fps`.
+  final String fpsLabel;
+
   final String emptyTitle;
   final String emptyMessage;
   final String errorMessage;
@@ -130,6 +182,11 @@ class BrowserPage extends StatelessWidget {
     this.onDownload,
     this.onUpload,
     this.onShowActionLog,
+    this.onReleaseControl,
+    this.onToggleKeyboard,
+    this.onToggleTrackpad,
+    this.onBack,
+    this.onForward,
   });
 
   final V2BrowserData data;
@@ -149,6 +206,11 @@ class BrowserPage extends StatelessWidget {
   final VoidCallback? onDownload;
   final VoidCallback? onUpload;
   final VoidCallback? onShowActionLog;
+  final VoidCallback? onReleaseControl;
+  final VoidCallback? onToggleKeyboard;
+  final VoidCallback? onToggleTrackpad;
+  final VoidCallback? onBack;
+  final VoidCallback? onForward;
 
   @override
   Widget build(BuildContext context) {
@@ -162,18 +224,6 @@ class BrowserPage extends StatelessWidget {
             : '${data.tabs.length} tabs · read-only view',
         actions: [
           OIconButton(
-            icon: Icons.download_rounded,
-            semanticLabel: 'Download file',
-            tooltip: 'Download file',
-            onPressed: onDownload,
-          ),
-          OIconButton(
-            icon: Icons.upload_rounded,
-            semanticLabel: 'Upload file',
-            tooltip: 'Upload file',
-            onPressed: onUpload,
-          ),
-          OIconButton(
             icon: Icons.more_vert_rounded,
             semanticLabel: 'Browser menu',
             onPressed: onMenu,
@@ -183,11 +233,22 @@ class BrowserPage extends StatelessWidget {
       body: OFadeSlide(
         child: Column(
           children: [
-            _TabStrip(
-              tabs: data.tabs,
+            BrowserTabStrip(
+              tabs: [
+                for (final tab in data.tabs)
+                  V2BrowserTabItem(
+                    id: tab.id,
+                    title: tab.title,
+                    host: tab.host,
+                    icon: tab.icon,
+                    favicon: tab.favicon,
+                    headless: tab.headless,
+                    closable: tab.closable,
+                  ),
+              ],
               activeTabId: active?.id ?? '',
-              onSelect: onSelectTab,
-              onClose: onCloseTab,
+              onSelectTab: onSelectTab,
+              onCloseTab: onCloseTab,
             ),
             Expanded(child: _body(context, c)),
           ],
@@ -236,104 +297,137 @@ class BrowserPage extends StatelessWidget {
           onRetry: onRetry,
         ),
     ];
-    final footer = <Widget>[
-      _ActionLog(
-        actions: data.actions,
-        headlessLabel: data.headlessLabel,
-        onShowAll: onShowActionLog,
-      ),
-      Padding(
-        padding: const EdgeInsets.all(OSpace.l),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final driving = _DrivingCard(
-              title: data.drivingTitle,
-              detail: data.drivingDetail,
-            );
-            final stop = OButton(
-              label: 'Stop',
-              icon: Icons.stop_circle_outlined,
-              variant: OButtonVariant.secondary,
-              onPressed: onStop,
-            );
-            final takeControl = OButton(
-              label: 'Take control',
-              icon: Icons.front_hand_outlined,
-              onPressed: onTakeControl,
-            );
-            // At 320 dp, or as soon as the text grows, two side-by-side
-            // buttons would squeeze "Take control" to an ellipsis. Stack
-            // them instead of shrinking the copy.
-            final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
-            if (constraints.maxWidth < 330 || textScale > 1.3) {
-              return Column(
-                children: [
-                  Row(
-                    children: [
-                      Expanded(child: driving),
-                      const SizedBox(width: OSpace.s),
-                      stop,
-                    ],
-                  ),
-                  const SizedBox(height: OSpace.s),
-                  SizedBox(width: double.infinity, child: takeControl),
-                ],
-              );
-            }
-            return Row(
-              children: [
-                Expanded(child: driving),
-                const SizedBox(width: OSpace.m),
-                stop,
-                const SizedBox(width: OSpace.s),
-                takeControl,
-              ],
-            );
-          },
-        ),
-      ),
+    // Only the log scrolls with the picture. The driving row and the control
+    // bar stay pinned to the bottom so Stop, take control, upload and download
+    // are always one tap away, even on a short window or at 200 % text.
+    final activity = <Widget>[
+      _ActionLog(actions: data.actions, onShowAll: onShowActionLog),
     ];
     final viewport = Padding(
       padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, 0),
-      child: Container(
-        clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(
-          color: c.surface,
-          borderRadius: BorderRadius.circular(ORadius.l),
-          border: Border.all(color: c.hairline),
-        ),
-        child: viewportChild ?? const _ViewportPlaceholder(),
-      ),
+      child: viewportChild != null
+          ? Container(
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                color: c.surface,
+                borderRadius: BorderRadius.circular(ORadius.l),
+                border: Border.all(color: c.hairline),
+              ),
+              child: viewportChild,
+            )
+          : BrowserViewport(
+              frame: data.frame,
+              status: data.viewportStatus,
+              cursor: data.cursor,
+              controlling: data.controlling,
+              onTakeControl: onTakeControl,
+              onRetry: onRetry,
+              fpsLabel: data.fpsLabel,
+            ),
     );
     final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
+    final main = Expanded(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // A short window (landscape, split screen) cannot hold the fixed
+          // rows either, so it gets the same scroll treatment as large text.
+          if (textScale <= 1.3 && constraints.maxHeight >= 420) {
+            return Column(
+              children: [
+                ...header,
+                Expanded(child: viewport),
+                ...activity,
+              ],
+            );
+          }
+          // Large text makes the fixed rows taller than a short phone. Scroll
+          // the whole page and keep a readable slice of the live view instead
+          // of squeezing the copy or dropping rows.
+          final viewportHeight = (constraints.maxHeight * 0.35).clamp(
+            80.0,
+            360.0,
+          );
+          return SingleChildScrollView(
+            child: Column(
+              children: [
+                ...header,
+                SizedBox(height: viewportHeight, child: viewport),
+                ...activity,
+              ],
+            ),
+          );
+        },
+      ),
+    );
+    final drivingRow = Padding(
+      padding: const EdgeInsets.fromLTRB(OSpace.l, OSpace.s, OSpace.l, 0),
+      child: Row(
+        children: [
+          Expanded(
+            child: _DrivingCard(
+              title: data.drivingTitle,
+              detail: data.drivingDetail,
+            ),
+          ),
+          const SizedBox(width: OSpace.s),
+          OButton(
+            label: 'Stop',
+            icon: Icons.stop_circle_outlined,
+            variant: OButtonVariant.secondary,
+            onPressed: onStop,
+          ),
+        ],
+      ),
+    );
+    final controlBar = BrowserControlBar(
+      controlling: data.controlling,
+      keyboard: data.keyboard,
+      trackpad: data.trackpad,
+      canGoBack: data.canGoBack,
+      canGoForward: data.canGoForward,
+      fpsLabel: data.fpsLabel,
+      countdownLabel: data.headlessLabel,
+      // The built-in viewport carries its own tap-to-control overlay. A
+      // custom viewport cannot, so the bar keeps the labelled primary
+      // action there instead of showing a second hidden one. With no
+      // callback at all the bar still shows the disabled label so the
+      // action is explained, not silently missing.
+      showTakeControlLabel: viewportChild != null || onTakeControl == null,
+      onTakeControl: onTakeControl,
+      onReleaseControl: onReleaseControl,
+      onToggleKeyboard: onToggleKeyboard,
+      onToggleTrackpad: onToggleTrackpad,
+      onBack: onBack,
+      onForward: onForward,
+      onUpload: onUpload,
+      onDownload: onDownload,
+    );
     return LayoutBuilder(
-      builder: (context, constraints) {
-        // A short window (landscape, split screen) cannot hold the fixed rows
-        // either, so it gets the same scroll treatment as large text.
-        if (textScale <= 1.3 && constraints.maxHeight >= 420) {
-          return Column(
-            children: [
-              ...header,
-              Expanded(child: viewport),
-              ...footer,
-            ],
+      builder: (context, page) {
+        // A landscape phone or a split window cannot hold the pinned rows at
+        // all. Let the whole page scroll instead of overflowing; the live
+        // picture keeps its own slice.
+        if (page.maxHeight < 300) {
+          return SingleChildScrollView(
+            child: Column(
+              children: [
+                ...header,
+                SizedBox(height: 140, child: viewport),
+                ...activity,
+                drivingRow,
+                const SizedBox(height: OSpace.s),
+                controlBar,
+              ],
+            ),
           );
         }
-        // Large text makes the fixed rows taller than a short phone. Scroll
-        // the whole page and keep a readable slice of the live view instead
-        // of squeezing the copy or dropping rows.
-        final viewportHeight = (constraints.maxHeight * 0.4).clamp(
-          140.0,
-          360.0,
-        );
-        return SingleChildScrollView(
-          child: Column(
-            children: [
-              ...header,
-              SizedBox(height: viewportHeight, child: viewport),
-              ...footer,
-            ],
-          ),
+        return Column(
+          children: [
+            main,
+            drivingRow,
+            const SizedBox(height: OSpace.s),
+            controlBar,
+          ],
         );
       },
     );
@@ -483,14 +577,9 @@ class _ConnectionBanner extends StatelessWidget {
 }
 
 class _ActionLog extends StatelessWidget {
-  const _ActionLog({
-    required this.actions,
-    required this.headlessLabel,
-    this.onShowAll,
-  });
+  const _ActionLog({required this.actions, this.onShowAll});
 
   final List<V2BrowserAction> actions;
-  final String headlessLabel;
   final VoidCallback? onShowAll;
 
   @override
@@ -540,27 +629,6 @@ class _ActionLog extends StatelessWidget {
                                 'Action log',
                                 style: OType.label.copyWith(color: c.text),
                               ),
-                              if (headlessLabel.isNotEmpty)
-                                Row(
-                                  children: [
-                                    Icon(
-                                      Icons.timer_outlined,
-                                      size: 12,
-                                      color: c.warn,
-                                    ),
-                                    const SizedBox(width: OSpace.xs),
-                                    Flexible(
-                                      child: Text(
-                                        headlessLabel,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: OType.caption.copyWith(
-                                          color: c.warn,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
                             ],
                           ),
                         ),
@@ -667,109 +735,6 @@ class _ActionRow extends StatelessWidget {
               style: OType.caption.copyWith(color: c.textFaint),
             ),
           ],
-        ],
-      ),
-    );
-  }
-}
-
-class _TabStrip extends StatelessWidget {
-  const _TabStrip({
-    required this.tabs,
-    required this.activeTabId,
-    this.onSelect,
-    this.onClose,
-  });
-
-  final List<V2BrowserTab> tabs;
-  final String activeTabId;
-  final ValueChanged<String>? onSelect;
-  final ValueChanged<String>? onClose;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return SizedBox(
-      height: 56,
-      child: Row(
-        children: [
-          Expanded(
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: OSpace.l),
-              itemCount: tabs.length,
-              separatorBuilder: (_, _) => const SizedBox(width: OSpace.s),
-              itemBuilder: (context, index) {
-                final tab = tabs[index];
-                final selected = tab.id == activeTabId;
-                return Center(
-                  child: Semantics(
-                    selected: selected,
-                    label: '${tab.title}, ${tab.host}',
-                    child: OPressable(
-                      onTap: onSelect == null ? null : () => onSelect!(tab.id),
-                      semanticLabel: '${tab.title}, ${tab.host}',
-                      child: Container(
-                        height: 48,
-                        padding: const EdgeInsets.only(left: OSpace.m),
-                        decoration: BoxDecoration(
-                          color: selected ? c.surface : c.surfaceAlt,
-                          borderRadius: const BorderRadius.vertical(
-                            top: Radius.circular(ORadius.m),
-                          ),
-                          border: Border(
-                            bottom: BorderSide(
-                              color: selected ? c.accent : Colors.transparent,
-                              width: 2,
-                            ),
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              tab.icon,
-                              size: 16,
-                              color: selected ? c.accent : c.textMuted,
-                            ),
-                            const SizedBox(width: OSpace.s),
-                            ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 150),
-                              child: Text(
-                                tab.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: OType.label.copyWith(
-                                  color: selected ? c.text : c.textMuted,
-                                ),
-                              ),
-                            ),
-                            OIconButton(
-                              icon: Icons.close_rounded,
-                              semanticLabel: 'Close ${tab.title}',
-                              size: 16,
-                              onPressed: onClose == null
-                                  ? null
-                                  : () => onClose!(tab.id),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.only(right: OSpace.s),
-            child: OIconButton(
-              icon: Icons.add_rounded,
-              semanticLabel: 'Ovid opens tabs',
-              tooltip: 'Ovid opens tabs',
-              onPressed: null,
-            ),
-          ),
         ],
       ),
     );
@@ -907,55 +872,6 @@ class _AddressBlock extends StatelessWidget {
                     ),
                   ],
                 ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Calm placeholder for the live page. The page itself is injected through
-/// [BrowserPage.viewportChild]; this never draws sample content, so a build
-/// that forgot to wire the view cannot show fake pages or fake secrets.
-class _ViewportPlaceholder extends StatelessWidget {
-  const _ViewportPlaceholder();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(OSpace.l),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 56,
-              height: 56,
-              decoration: BoxDecoration(
-                color: c.accentSoft,
-                shape: BoxShape.circle,
-              ),
-              child: Icon(Icons.visibility_outlined, size: 26, color: c.accent),
-            ),
-            const SizedBox(height: OSpace.m),
-            Text(
-              'The live page shows here',
-              textAlign: TextAlign.center,
-              style: OType.bodySm.copyWith(
-                color: c.text,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: OSpace.xs),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 280),
-              child: Text(
-                'Ovid draws the page it is reading in this space.',
-                textAlign: TextAlign.center,
-                style: OType.caption.copyWith(color: c.textMuted),
               ),
             ),
           ],

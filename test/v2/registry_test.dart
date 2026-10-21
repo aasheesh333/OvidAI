@@ -8,7 +8,7 @@ void main() {
   });
 
   test('the gallery covers every approved area', () {
-    expect(v2Screens.length, greaterThanOrEqualTo(51));
+    expect(v2Screens.length, greaterThanOrEqualTo(50));
     final groups = v2Screens.map((s) => s.group).toSet();
     expect(
       groups,

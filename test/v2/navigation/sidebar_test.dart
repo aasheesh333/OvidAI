@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/v2/sidebar/project_detail_page.dart';
 import 'package:ovid_ai/ui/v2/sidebar/sidebar.dart';
+import 'package:ovid_ai/ui/v2/sidebar/sidebar_footer.dart';
 
 const _pinned = V2SidebarSession(
   id: 'p1',
@@ -29,6 +31,7 @@ const _project = V2SidebarProject(
   id: 'pr1',
   name: 'Mobile App Redesign',
   chatCount: 3,
+  memoryFileCount: 3,
 );
 
 V2SidebarData _contentData() => const V2SidebarData(
@@ -38,6 +41,7 @@ V2SidebarData _contentData() => const V2SidebarData(
   projects: <V2SidebarProject>[_project],
   today: <V2SidebarSession>[_today],
   yesterday: <V2SidebarSession>[_yesterday],
+  scheduleNextRun: 'Next run 9:00 AM',
 );
 
 Widget _app(Widget child, {ThemeData? theme}) => MaterialApp(
@@ -74,6 +78,36 @@ void _useNarrowScreen(WidgetTester tester) {
 }
 
 void main() {
+  testWidgets('sidebar uses the shared footer with the next-run subtitle', (
+    tester,
+  ) async {
+    var schedule = 0;
+    await tester.pumpWidget(
+      _app(Sidebar(data: _contentData(), onSchedule: () => schedule++)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(SidebarFooter), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('v2-sidebar-footer-schedule')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('v2-sidebar-footer-artifacts')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('v2-sidebar-footer-settings')),
+      findsOneWidget,
+    );
+    expect(find.text('Next run 9:00 AM'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('v2-sidebar-footer-schedule')),
+    );
+    expect(schedule, 1);
+  });
+
   testWidgets('sidebar renders profile, sections and footer in light', (
     tester,
   ) async {
@@ -82,7 +116,7 @@ void main() {
 
     expect(find.text('Alex Rivera'), findsOneWidget);
     expect(find.text('Free plan'), findsOneWidget);
-    expect(find.text('New chat'), findsOneWidget);
+    expect(find.text('New session'), findsOneWidget);
     expect(find.text('Search'), findsOneWidget);
     expect(find.text('PINNED'), findsOneWidget);
     expect(find.text('PROJECTS'), findsOneWidget);
@@ -91,7 +125,9 @@ void main() {
     expect(find.text('Next.js Portfolio Setup'), findsOneWidget);
     expect(find.text('Landing page copy review'), findsOneWidget);
     expect(find.text('Mobile App Redesign'), findsOneWidget);
+    expect(find.text('3 files'), findsOneWidget);
     expect(find.text('Schedule'), findsOneWidget);
+    expect(find.text('Next run 9:00 AM'), findsOneWidget);
     expect(find.text('Artifacts'), findsOneWidget);
     expect(find.text('Settings'), findsOneWidget);
   });
@@ -107,7 +143,7 @@ void main() {
     expect(find.text('Schedule'), findsOneWidget);
   });
 
-  testWidgets('sidebar empty state offers New chat', (tester) async {
+  testWidgets('sidebar empty state offers New session', (tester) async {
     var newChats = 0;
     await tester.pumpWidget(
       _app(
@@ -120,7 +156,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('No chats yet'), findsOneWidget);
-    await tester.tap(find.text('New chat').last);
+    await tester.tap(find.text('New session').last);
     expect(newChats, 1);
   });
 
@@ -251,9 +287,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      tester.getSemantics(find.text('New chat')),
+      tester.getSemantics(find.text('New session')),
       isSemantics(
-        label: 'New chat',
+        label: 'New session',
         isButton: true,
         hasEnabledState: true,
         isEnabled: false,
@@ -343,5 +379,241 @@ void main() {
     expect(find.text('TODAY'), findsOneWidget);
     expect(find.text('YESTERDAY'), findsOneWidget);
     expect(find.text('Next.js Portfolio Setup'), findsOneWidget);
+  });
+
+  testWidgets('project memory chip opens the project detail sheet', (
+    tester,
+  ) async {
+    const project = V2SidebarProject(
+      id: 'pr2',
+      name: 'Brand Voice',
+      chatCount: 2,
+      memoryFileCount: 2,
+      detail: V2ProjectDetailData(
+        projectName: 'Brand Voice',
+        chatCount: 2,
+        chats: <V2ProjectChat>[
+          V2ProjectChat(id: 'c1', title: 'Tone of voice chat'),
+        ],
+        memoryFiles: <V2ProjectMemoryFile>[
+          V2ProjectMemoryFile(
+            id: 'm1',
+            name: 'tone.md',
+            sizeLabel: '8 KB',
+            updatedLabel: 'Updated 1h ago',
+          ),
+        ],
+        storageLabel: '24 MB of 3 GB',
+        storageFraction: 0.2,
+      ),
+    );
+    await tester.pumpWidget(
+      _app(
+        const Sidebar(
+          data: V2SidebarData(
+            name: 'Alex Rivera',
+            projects: <V2SidebarProject>[project],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('2 files'), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.memory_rounded));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Tone of voice chat'), findsOneWidget);
+    expect(find.text('tone.md'), findsOneWidget);
+    expect(find.text('24 MB of 3 GB'), findsOneWidget);
+  });
+
+  testWidgets('project memory chip reports the project when wired', (
+    tester,
+  ) async {
+    V2SidebarProject? memory;
+    await tester.pumpWidget(
+      _app(
+        Sidebar(
+          data: _contentData(),
+          onProjectMemory: (project) => memory = project,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.memory_rounded));
+    expect(memory?.id, 'pr1');
+  });
+
+  testWidgets('projects without memory show a muted chip', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        const Sidebar(
+          data: V2SidebarData(
+            name: 'Alex Rivera',
+            projects: <V2SidebarProject>[
+              V2SidebarProject(id: 'pr3', name: 'Fresh project', chatCount: 0),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('No memory'), findsOneWidget);
+  });
+
+  testWidgets('pinned rows carry a pin glyph and project name', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        const Sidebar(
+          data: V2SidebarData(
+            name: 'Alex Rivera',
+            pinned: <V2SidebarSession>[_pinned],
+            today: <V2SidebarSession>[
+              V2SidebarSession(
+                id: 't2',
+                title: 'Brand colours',
+                modelLabel: 'Auto',
+                projectName: 'Brand Voice',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('v2-session-pin-p1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('v2-session-pin-t2')),
+      findsNothing,
+    );
+    expect(find.text('Brand Voice'), findsOneWidget);
+  });
+
+  testWidgets('inline delete reports the chat and only shows when wired', (
+    tester,
+  ) async {
+    V2SidebarSession? deleted;
+    await tester.pumpWidget(
+      _app(
+        Sidebar(
+          data: const V2SidebarData(
+            name: 'Alex Rivera',
+            today: <V2SidebarSession>[_today],
+          ),
+          onSessionDelete: (session) => deleted = session,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.delete_outline_rounded));
+    expect(deleted?.id, 't1');
+
+    // Without the callback the row does not show a dead control.
+    await tester.pumpWidget(
+      _app(
+        const Sidebar(
+          data: V2SidebarData(
+            name: 'Alex Rivera',
+            today: <V2SidebarSession>[_today],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.delete_outline_rounded), findsNothing);
+  });
+
+  testWidgets('schedule subtitle is announced with the footer item', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        const Sidebar(
+          data: V2SidebarData(
+            name: 'Alex Rivera',
+            scheduleNextRun: 'Next run 9:00 AM',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Next run 9:00 AM'), findsOneWidget);
+    expect(
+      tester.getSemantics(find.text('Schedule')).label,
+      contains('Next run 9:00 AM'),
+    );
+    handle.dispose();
+  });
+
+  testWidgets('no schedule subtitle when none is supplied', (tester) async {
+    await tester.pumpWidget(
+      _app(const Sidebar(data: V2SidebarData(name: 'Alex Rivera'))),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Next run'), findsNothing);
+  });
+
+  testWidgets('project detail sheet fits 320 dp at 200 % text', (tester) async {
+    _useNarrowScreen(tester);
+
+    for (final theme in <ThemeData>[OTheme.light(), OTheme.dark()]) {
+      await tester.pumpWidget(
+        _narrow(
+          const Sidebar(
+            data: V2SidebarData(
+              name: 'Alex Rivera',
+              projects: <V2SidebarProject>[
+                V2SidebarProject(
+                  id: 'pr4',
+                  name: 'Brand Voice',
+                  chatCount: 2,
+                  memoryFileCount: 2,
+                  detail: V2ProjectDetailData(
+                    projectName: 'Brand Voice',
+                    chatCount: 2,
+                    chats: <V2ProjectChat>[
+                      V2ProjectChat(id: 'c1', title: 'Tone of voice chat'),
+                    ],
+                    memoryFiles: <V2ProjectMemoryFile>[
+                      V2ProjectMemoryFile(
+                        id: 'm1',
+                        name: 'tone.md',
+                        sizeLabel: '8 KB',
+                        updatedLabel: 'Updated 1h ago',
+                      ),
+                    ],
+                    storageLabel: '24 MB of 3 GB',
+                    storageFraction: 0.2,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          theme: theme,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.memory_rounded));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('tone.md', skipOffstage: false), findsOneWidget);
+
+      // Dismiss the sheet so the next theme starts from the drawer.
+      await tester.tapAt(const Offset(160, 20));
+      await tester.pumpAndSettle();
+    }
   });
 }

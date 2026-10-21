@@ -10,6 +10,7 @@ const _members = [
     subtitle: 'Platform Lead · Current turn',
     role: V2CollabRole.owner,
     isYou: true,
+    isCreator: true,
     online: true,
   ),
   V2CollabMember(
@@ -72,6 +73,7 @@ void main() {
       expect(find.text('Aarav Sharma'), findsOneWidget);
       expect(find.text('(you)'), findsOneWidget);
       expect(find.text('Owner'), findsOneWidget);
+      expect(find.text('Creator'), findsOneWidget);
       expect(find.text('Can chat'), findsNWidgets(2));
       expect(find.text('View only'), findsOneWidget);
       expect(find.text('The creator pays for storage'), findsOneWidget);
@@ -208,6 +210,42 @@ void main() {
     await tester.tap(find.byIcon(Icons.more_vert_rounded));
     await tester.pump();
     expect(menuMember?.id, 'priya');
+  });
+
+  testWidgets('capacity defaults to the 50 person cap and shows seats left', (
+    tester,
+  ) async {
+    expect(const V2CollabMembersPageData(memberCount: 0).capacity, 50);
+
+    await _pump(
+      tester,
+      CollabMembersPage(data: _data(memberCount: 12)),
+      OTheme.light(),
+    );
+
+    expect(find.text('12 of 50 members'), findsOneWidget);
+    expect(find.text('38 seats left'), findsOneWidget);
+    expect(
+      find.text('Up to 50 people can join, including the creator.'),
+      findsOneWidget,
+    );
+    expect(find.text('Room full'), findsNothing);
+  });
+
+  testWidgets('the creator badge and storage are attributed to the creator', (
+    tester,
+  ) async {
+    await _pump(tester, CollabMembersPage(data: _data()), OTheme.dark());
+
+    expect(find.text('Creator'), findsOneWidget);
+    expect(
+      find.text(
+        'Aarav Sharma pays for this chat. Storage is billed to the '
+        "creator's plan.",
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('12.4 GB of 15 GB used'), findsOneWidget);
   });
 }
 

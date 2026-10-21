@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/onboarding/paywall_page.dart';
+import 'package:ovid_ai/ui/v2/onboarding/purchase_banner.dart';
 
 Future<void> _pump(
   WidgetTester tester, {
@@ -14,6 +15,7 @@ Future<void> _pump(
   ValueChanged<String>? onStartTrial,
   VoidCallback? onComparePlans,
   VoidCallback? onRetry,
+  VoidCallback? onManageSubscription,
   double width = 400,
   double textScale = 1,
   bool disableAnimations = false,
@@ -37,6 +39,7 @@ Future<void> _pump(
         onStartTrial: onStartTrial,
         onComparePlans: onComparePlans,
         onRetry: onRetry,
+        onManageSubscription: onManageSubscription,
       ),
     ),
   );
@@ -90,7 +93,10 @@ void main() {
     expect(find.text('Compare all plans'), findsOneWidget);
 
     // Scroll the whole body to force every off-screen section to lay out.
-    await tester.drag(find.byType(SingleChildScrollView), const Offset(0, -4000));
+    await tester.drag(
+      find.byType(SingleChildScrollView),
+      const Offset(0, -4000),
+    );
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     expect(find.text('Compare all plans'), findsOneWidget);
@@ -102,7 +108,10 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Most popular'), findsOneWidget);
 
-    await tester.drag(find.byType(SingleChildScrollView), const Offset(0, -4000));
+    await tester.drag(
+      find.byType(SingleChildScrollView),
+      const Offset(0, -4000),
+    );
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
@@ -278,6 +287,9 @@ void main() {
       ),
     );
     expect(find.text('Test mode: purchases are simulated.'), findsOneWidget);
+    // The legacy note is rendered by the shared purchase banner, not ad hoc.
+    expect(find.byKey(const Key('purchase-banner-card')), findsOneWidget);
+    expect(find.text('Test Store mode'), findsOneWidget);
   });
 
   testWidgets('currency tabs keep a 48 dp touch target', (tester) async {
@@ -291,5 +303,131 @@ void main() {
       expect(size.height, greaterThanOrEqualTo(48), reason: '$key height');
       expect(size.width, greaterThanOrEqualTo(48), reason: '$key width');
     }
+  });
+
+  group('purchase banner', () {
+    testWidgets('no banner is painted when no purchase status is given', (
+      tester,
+    ) async {
+      await _pump(tester);
+
+      expect(find.byKey(const Key('purchase-banner-card')), findsNothing);
+    });
+
+    testWidgets('test store status renders the banner and no retry', (
+      tester,
+    ) async {
+      var retries = 0;
+      await _pump(
+        tester,
+        data: const V2PaywallData(
+          purchaseStatus: V2PurchaseBannerStatus.testStore,
+        ),
+        onRetry: () => retries++,
+      );
+
+      expect(find.byKey(const Key('purchase-banner-card')), findsOneWidget);
+      expect(find.text('Test Store mode'), findsOneWidget);
+      expect(find.text('Ovid Plus'), findsOneWidget);
+      // Simulated purchases must not offer a retry that looks like a rebuy.
+      expect(find.byKey(const Key('purchase-banner-retry')), findsNothing);
+      expect(retries, 0);
+    });
+
+    testWidgets('failed status retries and opens subscription management', (
+      tester,
+    ) async {
+      var retries = 0;
+      var managed = 0;
+      await _pump(
+        tester,
+        data: const V2PaywallData(
+          purchaseStatus: V2PurchaseBannerStatus.failed,
+          purchaseDetail: 'Card declined (test card).',
+        ),
+        onRetry: () => retries++,
+        onManageSubscription: () => managed++,
+      );
+
+      expect(find.text('Purchase did not finish'), findsOneWidget);
+      expect(find.text('Card declined (test card).'), findsOneWidget);
+
+      await tester.ensureVisible(
+        find.byKey(const Key('purchase-banner-retry')),
+      );
+      await tester.tap(find.byKey(const Key('purchase-banner-retry')));
+      await tester.pump();
+      expect(retries, 1);
+
+      await tester.ensureVisible(
+        find.byKey(const Key('purchase-banner-manage')),
+      );
+      await tester.tap(find.byKey(const Key('purchase-banner-manage')));
+      await tester.pump();
+      expect(managed, 1);
+    });
+
+    testWidgets('pending status names the selected plan and offers no retry', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        data: const V2PaywallData(
+          purchaseStatus: V2PurchaseBannerStatus.pending,
+        ),
+      );
+
+      expect(find.text('Finishing your purchase'), findsOneWidget);
+      expect(
+        find.text(
+          'Your Ovid Plus purchase is still being confirmed with the store. '
+          'This can take a moment.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('purchase-banner-retry')), findsNothing);
+    });
+
+    testWidgets('restored status confirms the plan is active again', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        data: const V2PaywallData(
+          purchaseStatus: V2PurchaseBannerStatus.restored,
+        ),
+      );
+
+      expect(find.text('Purchase restored'), findsOneWidget);
+      expect(
+        find.text('Your Ovid Plus subscription is active again.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('banner survives 320 dp at 200 % text in dark', (tester) async {
+      await _pump(
+        tester,
+        dark: true,
+        width: 320,
+        textScale: 2,
+        data: const V2PaywallData(
+          purchaseStatus: V2PurchaseBannerStatus.failed,
+          purchaseDetail: 'The store did not confirm the purchase in time.',
+        ),
+        onRetry: () {},
+        onManageSubscription: () {},
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const Key('purchase-banner-card')), findsOneWidget);
+
+      await tester.drag(
+        find.byType(SingleChildScrollView),
+        const Offset(0, -4000),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
   });
 }

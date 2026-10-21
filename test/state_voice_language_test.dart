@@ -56,6 +56,9 @@ void main() {
     () async {
       final app = AppState.createForTest();
       await app.setVoiceLanguage('pa');
+      // The shell mirrors the saved id into the composer so the chat UI has no
+      // core import (web-safe).
+      v2SavedVoiceLanguage = app.voiceLanguage;
 
       expect(V2VoiceLocales.deviceLanguage(), 'pa');
       expect(

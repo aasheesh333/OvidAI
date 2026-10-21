@@ -3,6 +3,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/chat/live_chat_page.dart';
+import 'package:ovid_ai/ui/v2/chat/model_chip.dart';
+import 'package:ovid_ai/ui/v2/chat/queue_dock.dart';
+import 'package:ovid_ai/ui/v2/chat/voice_reply_card.dart';
+
+void _noop() {}
 
 Widget _app(
   Widget home, {
@@ -54,7 +59,24 @@ const _items = <V2LiveChatItem>[
     statusLabel: 'Ready',
     previewLabel: 'Interactive HTML5 canvas',
   ),
+  _voiceReply,
 ];
+
+const _voiceReply = V2LiveVoiceReply(
+  id: 'voice1',
+  reply: V2VoiceReplyData(
+    title: 'Your portfolio is ready',
+    subtitle: 'A dark portfolio with four project cards.',
+    metrics: [
+      V2VoiceMetric(label: 'Projects', value: '4'),
+      V2VoiceMetric(label: 'Load time', value: '0.8 s'),
+    ],
+    actionLabel: 'Open preview',
+    transcript: 'I built the dark portfolio you asked for.',
+    duration: Duration(seconds: 18),
+    position: Duration(seconds: 4),
+  ),
+);
 
 const _data = V2LiveChatData(
   sessionTitle: 'Personal Portfolio Page',
@@ -81,6 +103,7 @@ void main() {
     );
     expect(find.text('portfolio-index.html'), findsOneWidget);
     expect(find.text('Download'), findsOneWidget);
+    expect(find.text('Your portfolio is ready'), findsOneWidget);
   });
 
   testWidgets('renders the transcript in dark', (tester) async {
@@ -200,6 +223,82 @@ void main() {
     expect(downloaded, 'art1');
   });
 
+  testWidgets('voice reply wires play, seek and action to its id', (
+    tester,
+  ) async {
+    String? played;
+    String? acted;
+    String? soughtId;
+    Duration? sought;
+    await tester.pumpWidget(
+      _app(
+        V2LiveChatPage(
+          data: const V2LiveChatData(items: [_voiceReply]),
+          onVoicePlay: (id) => played = id,
+          onVoiceSeek: (id, position) {
+            soughtId = id;
+            sought = position;
+          },
+          onVoiceAction: (id) => acted = id,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    await tester.ensureVisible(find.bySemanticsLabel('Play voice reply'));
+    await tester.pump();
+    await tester.tap(find.bySemanticsLabel('Play voice reply'));
+    expect(played, 'voice1');
+
+    final waveform = find.byKey(const ValueKey('voice-reply-waveform'));
+    await tester.ensureVisible(waveform);
+    await tester.pump();
+    await tester.tapAt(tester.getCenter(waveform));
+    expect(soughtId, 'voice1');
+    expect(sought!.inMilliseconds, inInclusiveRange(8500, 9500));
+
+    await tester.ensureVisible(find.text('Open preview'));
+    await tester.pump();
+    await tester.tap(find.text('Open preview'));
+    expect(acted, 'voice1');
+  });
+
+  testWidgets('voice reply transcript expands in place', (tester) async {
+    String? toggledId;
+    bool? expanded;
+    await tester.pumpWidget(
+      _app(
+        V2LiveChatPage(
+          data: const V2LiveChatData(items: [_voiceReply]),
+          onVoiceTranscriptToggle: (id, value) {
+            toggledId = id;
+            expanded = value;
+          },
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    await tester.ensureVisible(find.text('Show transcript'));
+    await tester.pump();
+    expect(
+      find.text('I built the dark portfolio you asked for.'),
+      findsNothing,
+    );
+    await tester.tap(find.text('Show transcript'));
+    await tester.pump();
+
+    expect(toggledId, 'voice1');
+    expect(expanded, isTrue);
+    expect(
+      find.text('I built the dark portfolio you asked for.'),
+      findsOneWidget,
+    );
+    expect(find.text('Hide transcript'), findsOneWidget);
+  });
+
   testWidgets('stop button is shown while running', (tester) async {
     var stops = 0;
     await tester.pumpWidget(
@@ -251,7 +350,9 @@ void main() {
   });
 
   testWidgets('primary controls expose semantic labels', (tester) async {
-    await tester.pumpWidget(_app(const V2LiveChatPage(data: _data)));
+    await tester.pumpWidget(
+      _app(const V2LiveChatPage(data: _data, onModelChipTap: _noop)),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
 
@@ -307,6 +408,131 @@ void main() {
     expect(
       tester.getSemantics(find.bySemanticsLabel('Send')),
       isSemantics(label: 'Send', isButton: true, isEnabled: true),
+    );
+  });
+
+  testWidgets('top bar uses the shared model chip with plan and subagents', (
+    tester,
+  ) async {
+    var taps = 0;
+    await tester.pumpWidget(
+      _app(
+        V2LiveChatPage(
+          data: const V2LiveChatData(
+            items: _items,
+            modelLabel: 'Ovid Pro 1.5',
+            autoOnly: true,
+            subagentCount: 2,
+          ),
+          onModelChipTap: () => taps++,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    final chip = tester.widget<V2ModelChip>(find.byType(V2ModelChip));
+    expect(chip.label, 'Ovid Pro 1.5');
+    expect(chip.autoOnly, isTrue);
+    expect(chip.subagentCount, 2);
+    expect(chip.enabled, isTrue);
+    expect(
+      find.bySemanticsLabel(
+        'Model: Ovid Pro 1.5. Auto only. 2 subagents. Change model',
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byType(V2ModelChip));
+    await tester.pump();
+    expect(taps, 1);
+  });
+
+  testWidgets('model chip is disabled when the host cannot change models', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(const V2LiveChatPage(data: _data)));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    final chip = tester.widget<V2ModelChip>(find.byType(V2ModelChip));
+    expect(chip.enabled, isFalse);
+    expect(
+      find.bySemanticsLabel('Model: Auto. Model selection unavailable'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('plus callback replaces the file picker', (tester) async {
+    var plus = 0;
+    var attaches = 0;
+    await tester.pumpWidget(
+      _app(
+        V2LiveChatPage(
+          data: const V2LiveChatData(),
+          onPlus: () => plus++,
+          onAttach: () => attaches++,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.bySemanticsLabel('Add attachment or action'), findsOneWidget);
+    expect(find.byIcon(Icons.add_rounded), findsOneWidget);
+    expect(find.bySemanticsLabel('Attach a file'), findsNothing);
+
+    await tester.tap(find.bySemanticsLabel('Add attachment or action'));
+    await tester.pump();
+
+    expect(plus, 1);
+    expect(attaches, 0);
+  });
+
+  testWidgets('composer keeps the picker when no plus callback is given', (
+    tester,
+  ) async {
+    var attaches = 0;
+    await tester.pumpWidget(
+      _app(V2LiveChatPage(data: _data, onAttach: () => attaches++)),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.bySemanticsLabel('Attach a file'), findsOneWidget);
+    expect(find.byIcon(Icons.attach_file_rounded), findsOneWidget);
+    expect(find.bySemanticsLabel('Add attachment or action'), findsNothing);
+
+    await tester.tap(find.bySemanticsLabel('Attach a file'));
+    await tester.pump();
+
+    expect(attaches, 1);
+  });
+
+  testWidgets('queued messages surface in the dock above the composer', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        V2LiveChatPage(
+          data: const V2LiveChatData(
+            items: _items,
+            running: true,
+            queuedCount: 1,
+            queuedPreview: 'Then add testimonials',
+          ),
+          onStop: _noop,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.byType(V2QueueDock), findsOneWidget);
+    expect(find.text('1 queued message'), findsOneWidget);
+    expect(find.text('Then add testimonials'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.byType(V2QueueDock)).dy,
+      lessThan(tester.getTopLeft(find.byType(TextField)).dy),
     );
   });
 }

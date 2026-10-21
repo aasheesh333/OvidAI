@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'artifact_preview.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
 
@@ -11,6 +14,17 @@ enum V2ArtifactDetailStatus { loading, content, error, missing }
 enum V2ArtifactDetailTab { preview, details }
 
 enum V2ArtifactDetailTone { neutral, success }
+
+/// What the lightweight preview shows. Documents and data are never rendered
+/// in-app; they show metadata and an "Open externally" action instead.
+enum V2ArtifactPreviewKind { image, code, document, data }
+
+/// Code previews render at most this many lines, so opening a huge file never
+/// stalls the UI. The rest stays one "Open externally" tap away.
+///
+/// The preview widget owns the cap; the page keeps the name because wiring and
+/// tests refer to it.
+const int v2ArtifactCodeLineCap = v2ArtifactPreviewCodeLineCap;
 
 @immutable
 class V2ArtifactDetailRow {
@@ -36,16 +50,19 @@ class V2ArtifactDetailData {
     this.versionLabel = 'Ready',
     this.sourceChatTitle = '',
     this.sourcePrompt = '',
+    this.previewKind = V2ArtifactPreviewKind.image,
     this.previewHeadline = '',
     this.previewSubtitle = '',
     this.previewTag = '',
     this.previewCodeFile = '',
     this.previewCode = '',
+    this.previewTotalLines,
     this.previewNote =
-        'This preview is read-only. Download the file or open it in Studio to make changes.',
+        'This preview is read-only. Open the file to make changes.',
     this.details = const <V2ArtifactDetailRow>[],
     this.thumbnail,
-    this.errorMessage = 'We could not open this artifact. Check your connection and try again.',
+    this.errorMessage =
+        'We could not open this artifact. Check your connection and try again.',
   });
 
   final V2ArtifactDetailStatus status;
@@ -56,35 +73,30 @@ class V2ArtifactDetailData {
   final String versionLabel;
   final String sourceChatTitle;
   final String sourcePrompt;
+  final V2ArtifactPreviewKind previewKind;
   final String previewHeadline;
   final String previewSubtitle;
   final String previewTag;
   final String previewCodeFile;
   final String previewCode;
+
+  /// Total lines in the real file when [previewCode] only carries the head of
+  /// it. Defaults to the number of lines in [previewCode].
+  final int? previewTotalLines;
   final String previewNote;
   final List<V2ArtifactDetailRow> details;
   final ImageProvider? thumbnail;
   final String errorMessage;
+
+  bool get isCode => previewKind == V2ArtifactPreviewKind.code;
 }
 
-/// Language badge for the preview snippet, taken from the file extension so a
-/// `.ts` artifact is never labelled `HTML`. Null when there is no extension.
-String? _codeLanguage(String file) {
-  final dot = file.lastIndexOf('.');
-  if (dot < 0 || dot == file.length - 1) return null;
-  return switch (file.substring(dot + 1).toLowerCase()) {
-    'html' || 'htm' => 'HTML',
-    'ts' || 'tsx' => 'TS',
-    'js' || 'jsx' => 'JS',
-    'css' => 'CSS',
-    'json' => 'JSON',
-    'md' => 'MD',
-    'py' => 'Python',
-    final other => other.toUpperCase(),
-  };
-}
-
-/// A single artifact with its preview, origin chat and technical details.
+/// A single artifact with its lightweight preview, origin chat, share/delete
+/// actions and technical details.
+///
+/// The preview is [V2ArtifactPreview]: no WebView, no document renderer. Images
+/// are drawn with [Image], code stops at [v2ArtifactCodeLineCap] lines, and
+/// documents show metadata with an "Open externally" action.
 class ArtifactDetailPage extends StatefulWidget {
   const ArtifactDetailPage({
     super.key,
@@ -92,7 +104,9 @@ class ArtifactDetailPage extends StatefulWidget {
     this.onDownload,
     this.onShareLink,
     this.onOpenInStudio,
+    this.onOpenExternally,
     this.onOpenChat,
+    this.onDelete,
     this.onMore,
     this.onRetry,
     this.onBackToArtifacts,
@@ -102,7 +116,9 @@ class ArtifactDetailPage extends StatefulWidget {
   final VoidCallback? onDownload;
   final VoidCallback? onShareLink;
   final VoidCallback? onOpenInStudio;
+  final VoidCallback? onOpenExternally;
   final VoidCallback? onOpenChat;
+  final VoidCallback? onDelete;
   final VoidCallback? onMore;
   final VoidCallback? onRetry;
   final VoidCallback? onBackToArtifacts;
@@ -113,6 +129,61 @@ class ArtifactDetailPage extends StatefulWidget {
 
 class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
   V2ArtifactDetailTab _tab = V2ArtifactDetailTab.preview;
+  bool _shareCopied = false;
+  Timer? _shareResetTimer;
+
+  @override
+  void dispose() {
+    _shareResetTimer?.cancel();
+    super.dispose();
+  }
+
+  void _share() {
+    widget.onShareLink?.call();
+    if (widget.onShareLink == null) return;
+    setState(() => _shareCopied = true);
+    _shareResetTimer?.cancel();
+    _shareResetTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _shareCopied = false);
+    });
+  }
+
+  Future<void> _confirmDelete() async {
+    final data = widget.data;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        final c = OColors.of(dialogContext);
+        final frees = data.sizeLabel.isEmpty
+            ? 'This frees its storage'
+            : 'This frees ${data.sizeLabel} of storage';
+        return AlertDialog(
+          backgroundColor: c.surface,
+          title: Text(
+            'Delete this artifact?',
+            style: OType.h2.copyWith(color: c.text),
+          ),
+          content: Text(
+            'This removes ${data.name} from your library. '
+            '$frees. This cannot be undone.',
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              style: TextButton.styleFrom(foregroundColor: c.danger),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed == true) widget.onDelete?.call();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -164,8 +235,6 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
         OSpace.xxl,
       ),
       children: [
-        _stage(c),
-        const SizedBox(height: OSpace.l),
         _summary(c),
         const SizedBox(height: OSpace.m),
         _sourceChat(c),
@@ -176,318 +245,45 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
         const SizedBox(height: OSpace.m),
         OAnimatedSwap(
           child: _tab == V2ArtifactDetailTab.preview
-              ? _previewTab(c, data)
+              ? _preview(data)
               : _detailsTab(c, data),
         ),
       ],
     );
   }
 
-  Widget _stage(OColors c) {
-    final data = widget.data;
-    final thumbnail = data.thumbnail;
-    return AspectRatio(
-      aspectRatio: 1.15,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(ORadius.l),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Container(
-              decoration: BoxDecoration(
-                color: c.codeBg,
-                border: Border.all(color: c.hairline),
-                borderRadius: BorderRadius.circular(ORadius.l),
-              ),
-              child: thumbnail != null
-                  ? Image(
-                      image: thumbnail,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => _mockPage(c),
-                    )
-                  : _mockPage(c),
-            ),
-            Positioned(
-              top: OSpace.s,
-              left: OSpace.s,
-              right: OSpace.s,
-              child: Wrap(
-                alignment: WrapAlignment.spaceBetween,
-                spacing: OSpace.s,
-                runSpacing: OSpace.xs,
-                children: [
-                  _stagePill(
-                    c,
-                    icon: Icons.devices_rounded,
-                    label: 'Responsive view',
-                  ),
-                  _stagePill(c, dot: c.success, label: 'Live preview'),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  // ---------------------------------------------------------------------------
+  // Preview — delegated to the shared cheap preview widget.
+  // ---------------------------------------------------------------------------
 
-  Widget _mockPage(OColors c) {
-    final data = widget.data;
-    final codeLines = data.previewCode.isEmpty
-        ? const <String>[]
-        : data.previewCode.split('\n');
-    return Column(
-      children: [
-        Container(
-          constraints: const BoxConstraints(minHeight: 30),
-          padding: const EdgeInsets.symmetric(
-            horizontal: OSpace.m,
-            vertical: 6,
-          ),
-          color: c.surface,
-          child: Row(
-            children: [
-              for (var i = 0; i < 3; i++) ...[
-                Container(
-                  width: 7,
-                  height: 7,
-                  decoration: BoxDecoration(
-                    color: c.hairlineStrong,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: OSpace.xs),
-              ],
-              Expanded(
-                child: Center(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: OSpace.m,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: c.codeBg,
-                      borderRadius: BorderRadius.circular(ORadius.s),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.lock_outline_rounded,
-                          size: 11,
-                          color: c.success,
-                        ),
-                        const SizedBox(width: OSpace.xs),
-                        Flexible(
-                          child: Text(
-                            'ovid.site',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: OType.caption.copyWith(color: c.textMuted),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 28),
-            ],
-          ),
-        ),
-        Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(OSpace.m),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      constraints: const BoxConstraints(
-                        minWidth: 22,
-                        minHeight: 22,
-                      ),
-                      padding: const EdgeInsets.symmetric(horizontal: 3),
-                      decoration: BoxDecoration(
-                        color: c.accentFill,
-                        borderRadius: BorderRadius.circular(ORadius.s),
-                      ),
-                      alignment: Alignment.center,
-                      child: Text(
-                        'AC',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.overline.copyWith(color: c.onAccent),
-                      ),
-                    ),
-                    const SizedBox(width: OSpace.s),
-                    Expanded(
-                      child: Text(
-                        'Alex Chen',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.caption.copyWith(
-                          color: c.text,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: OSpace.s),
-                    Flexible(
-                      child: Text.rich(
-                        TextSpan(
-                          children: [
-                            TextSpan(
-                              text: 'Work',
-                              style: OType.caption.copyWith(color: c.textMuted),
-                            ),
-                            TextSpan(
-                              text: ' · Contact',
-                              style: OType.caption.copyWith(color: c.accent),
-                            ),
-                          ],
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: OSpace.s),
-                if (data.previewTag.isNotEmpty)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: OSpace.s,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: c.accentSoft,
-                      borderRadius: BorderRadius.circular(ORadius.pill),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.code_rounded, size: 11, color: c.accent),
-                        const SizedBox(width: OSpace.xs),
-                        Flexible(
-                          child: Text(
-                            data.previewTag,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: OType.overline.copyWith(color: c.accent),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                const SizedBox(height: OSpace.s),
-                Text(
-                  data.previewHeadline,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.h3.copyWith(color: c.text),
-                ),
-                const SizedBox(height: OSpace.xs),
-                Text(
-                  data.previewSubtitle,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-                const SizedBox(height: OSpace.s),
-                if (codeLines.isNotEmpty)
-                  Container(
-                    padding: const EdgeInsets.all(OSpace.s),
-                    decoration: BoxDecoration(
-                      color: c.surface,
-                      borderRadius: BorderRadius.circular(ORadius.s),
-                      border: Border.all(color: c.hairline),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                data.previewCodeFile,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: OType.mono.copyWith(color: c.accent),
-                              ),
-                            ),
-                            if (_codeLanguage(data.previewCodeFile)
-                                case final language?)
-                              Text(
-                                language,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: OType.overline.copyWith(
-                                  color: c.textFaint,
-                                ),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: OSpace.xs),
-                        for (final line in codeLines.take(3))
-                          Text(
-                            line,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: OType.mono.copyWith(color: c.textMuted),
-                          ),
-                      ],
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _stagePill(
-    OColors c, {
-    IconData? icon,
-    Color? dot,
-    required String label,
-  }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.s,
-        vertical: OSpace.xs,
-      ),
-      decoration: BoxDecoration(
-        color: c.surfaceRaised,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (dot != null)
-            Container(
-              width: 6,
-              height: 6,
-              decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
-            )
-          else if (icon != null)
-            Icon(icon, size: 12, color: c.accent),
-          const SizedBox(width: OSpace.xs),
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.overline.copyWith(color: c.text),
-            ),
-          ),
+  Widget _preview(V2ArtifactDetailData data) {
+    return V2ArtifactPreview(
+      data: V2ArtifactPreviewData(
+        name: data.name,
+        type: _previewType(data.previewKind),
+        typeLabel: data.typeLabel,
+        sizeLabel: data.sizeLabel,
+        metadata: [
+          for (final row in data.details)
+            V2ArtifactPreviewMeta(label: row.label, value: row.value),
         ],
+        image: data.thumbnail,
+        code: data.previewCode,
+        codeFile: data.previewCodeFile,
+        codeTotalLines: data.previewTotalLines,
+        note: data.previewNote,
       ),
+      onOpenExternally: widget.onOpenExternally,
     );
   }
+
+  V2ArtifactPreviewType _previewType(V2ArtifactPreviewKind kind) =>
+      switch (kind) {
+        V2ArtifactPreviewKind.image => V2ArtifactPreviewType.image,
+        V2ArtifactPreviewKind.code => V2ArtifactPreviewType.code,
+        V2ArtifactPreviewKind.document ||
+        V2ArtifactPreviewKind.data => V2ArtifactPreviewType.document,
+      };
 
   Widget _summary(OColors c) {
     final data = widget.data;
@@ -500,10 +296,7 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
             runSpacing: OSpace.xs,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              Text(
-                data.name,
-                style: OType.h2.copyWith(color: c.text),
-              ),
+              Text(data.name, style: OType.h2.copyWith(color: c.text)),
               _versionBadge(c),
             ],
           ),
@@ -678,11 +471,7 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(
-                icon,
-                size: 17,
-                color: selected ? c.accent : c.textMuted,
-              ),
+              Icon(icon, size: 17, color: selected ? c.accent : c.textMuted),
               const SizedBox(width: OSpace.s),
               Flexible(
                 child: Text(
@@ -702,7 +491,9 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
   }
 
   Widget _actions() {
+    final canShare = widget.onShareLink != null;
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         OButton(
           label: 'Download',
@@ -715,63 +506,39 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
           children: [
             Expanded(
               child: OButton(
-                label: 'Share link',
-                icon: Icons.link_rounded,
+                label: _shareCopied ? 'Link copied' : 'Share link',
+                icon: _shareCopied ? Icons.check_rounded : Icons.link_rounded,
                 variant: OButtonVariant.secondary,
                 expand: true,
-                onPressed: widget.onShareLink,
+                onPressed: canShare ? _share : null,
+                semanticLabel: _shareCopied
+                    ? 'Link copied to clipboard'
+                    : 'Share link',
               ),
             ),
-            const SizedBox(width: OSpace.s),
-            Expanded(
-              child: OButton(
-                label: 'Open in Studio',
-                icon: Icons.terminal_rounded,
-                variant: OButtonVariant.secondary,
-                expand: true,
-                onPressed: widget.onOpenInStudio,
+            if (widget.data.isCode) ...[
+              const SizedBox(width: OSpace.s),
+              Expanded(
+                child: OButton(
+                  label: 'Open in Studio',
+                  icon: Icons.terminal_rounded,
+                  variant: OButtonVariant.secondary,
+                  expand: true,
+                  onPressed: widget.onOpenInStudio,
+                ),
               ),
-            ),
+            ],
           ],
         ),
+        const SizedBox(height: OSpace.s),
+        OButton(
+          label: 'Delete artifact',
+          icon: Icons.delete_outline_rounded,
+          variant: OButtonVariant.danger,
+          expand: true,
+          onPressed: widget.onDelete == null ? null : _confirmDelete,
+        ),
       ],
-    );
-  }
-
-  Widget _previewTab(OColors c, V2ArtifactDetailData data) {
-    return OCard(
-      accent: true,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: c.accentSoft,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(Icons.auto_awesome_rounded, size: 17, color: c.accent),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Ready to view',
-                  style: OType.bodyStrong.copyWith(color: c.text),
-                ),
-                const SizedBox(height: OSpace.xs),
-                Text(
-                  data.previewNote,
-                  style: OType.bodySm.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
     );
   }
 
@@ -820,7 +587,8 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
                             data.details[i].value,
                             textAlign: TextAlign.end,
                             style: OType.bodySm.copyWith(
-                              color: data.details[i].tone ==
+                              color:
+                                  data.details[i].tone ==
                                       V2ArtifactDetailTone.success
                                   ? c.success
                                   : c.text,

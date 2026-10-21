@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/settings/settings_hub.dart';
+import 'package:ovid_ai/ui/v2/settings/settings_search.dart';
 
 V2SettingsHubData _hubData({
   required List<String> taps,
@@ -102,11 +103,12 @@ V2SettingsHubData _hubData({
     models: V2SettingsSection(
       title: 'Models',
       items: [
+        // Deliberately reversed: Connectors must come first.
         row(
-          'connectors',
-          'Connectors',
-          Icons.extension_outlined,
-          subtitle: '3 connected · Add or manage',
+          'response_wait_limit',
+          'Response wait limit',
+          Icons.timer_outlined,
+          subtitle: '30 seconds',
         ),
         row(
           'agent_presets',
@@ -115,10 +117,10 @@ V2SettingsHubData _hubData({
           subtitle: 'Tone, speed and persona',
         ),
         row(
-          'response_wait_limit',
-          'Response wait limit',
-          Icons.timer_outlined,
-          subtitle: '30 seconds',
+          'connectors',
+          'Connectors',
+          Icons.extension_outlined,
+          subtitle: '3 connected · Add or manage',
         ),
       ],
     ),
@@ -258,6 +260,62 @@ void main() {
     expect(find.text('Response wait limit'), findsOneWidget);
   });
 
+  testWidgets('search opens over the hub sections and runs the row callback', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    final taps = <String>[];
+    await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: taps)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('settings-search')));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(SettingsSearchPage), findsOneWidget);
+    expect(find.text('Search settings'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), 'Storage');
+    await tester.pumpAndSettle();
+
+    expect(find.text('DATA CONTROL'), findsOneWidget);
+    // The search field itself holds the query, so the result row is the last
+    // `Storage` text on screen.
+    expect(find.text('Storage'), findsNWidgets(2));
+
+    await tester.tap(find.text('Storage').last);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(SettingsSearchPage), findsNothing);
+    expect(taps, contains('storage'));
+  });
+
+  testWidgets('search toggles show reasoning through the hub callback', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    bool? changed;
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _hubData(
+          taps: <String>[],
+          onReasoningChanged: (value) => changed = value,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('settings-search')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'reasoning');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Show reasoning'));
+    await tester.pumpAndSettle();
+
+    expect(changed, isFalse);
+    expect(find.byType(SettingsSearchPage), findsNothing);
+  });
+
   testWidgets('keeps the canonical row order', (tester) async {
     await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: <String>[])));
     await tester.pumpAndSettle();
@@ -292,6 +350,128 @@ void main() {
       expect(top, greaterThan(previous), reason: '$title should come next');
       previous = top;
     }
+  });
+
+  testWidgets('restores the personalization order from any input order', (
+    tester,
+  ) async {
+    V2SettingsItem row(String id, String label, IconData icon) =>
+        V2SettingsItem(id: id, label: label, icon: icon);
+
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2SettingsHubData(
+          chat: V2SettingsSection(
+            title: 'Chat',
+            items: [
+              row(
+                'show_reasoning',
+                'Show reasoning',
+                Icons.lightbulb_outline_rounded,
+              ),
+              row('memory_files', 'Memory files', Icons.folder_outlined),
+              row('memory', 'Memory', Icons.psychology_outlined),
+              row('shared_memory', 'Shared memory', Icons.hub_outlined),
+              row('appearance', 'Appearance', Icons.palette_outlined),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    const order = [
+      'Appearance',
+      'Memory',
+      'Shared memory',
+      'Memory files',
+      'Show reasoning',
+    ];
+    var previous = -1.0;
+    for (final label in order) {
+      final top = tester.getTopLeft(find.text(label)).dy;
+      expect(top, greaterThan(previous), reason: '$label should come next');
+      previous = top;
+    }
+  });
+
+  testWidgets('show reasoning is on by default', (tester) async {
+    expect(const V2SettingsHubData().showReasoning, isTrue);
+
+    await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: <String>[])));
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+  });
+
+  testWidgets(
+    'models card sits above data control and starts with connectors',
+    (tester) async {
+      await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: <String>[])));
+      await tester.pumpAndSettle();
+
+      final account = tester.getTopLeft(find.text('ACCOUNT')).dy;
+      final chat = tester.getTopLeft(find.text('CHAT')).dy;
+      final models = tester.getTopLeft(find.text('MODELS')).dy;
+      final dataControl = tester.getTopLeft(find.text('DATA CONTROL')).dy;
+      final advanced = tester.getTopLeft(find.text('ADVANCED')).dy;
+
+      expect(account, lessThan(chat));
+      expect(chat, lessThan(models));
+      expect(models, lessThan(dataControl));
+      expect(dataControl, lessThan(advanced));
+
+      final connectors = tester.getTopLeft(find.text('Connectors')).dy;
+      final presets = tester.getTopLeft(find.text('Agent presets')).dy;
+      final wait = tester.getTopLeft(find.text('Response wait limit')).dy;
+      expect(connectors, lessThan(presets));
+      expect(presets, lessThan(wait));
+      expect(wait, lessThan(dataControl));
+    },
+  );
+
+  testWidgets('short wiring ids still land in the canonical models order', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2SettingsHubData(
+          profile: const V2SettingsProfile(
+            name: 'Aarav Sharma',
+            email: 'aarav@gmail.com',
+          ),
+          models: V2SettingsSection(
+            title: 'Models',
+            items: [
+              V2SettingsItem(
+                id: 'response_wait',
+                label: 'Response wait limit',
+                icon: Icons.timer_outlined,
+              ),
+              V2SettingsItem(
+                id: 'presets',
+                label: 'Agent presets',
+                icon: Icons.tune_rounded,
+              ),
+              V2SettingsItem(
+                id: 'connectors',
+                label: 'Connectors',
+                icon: Icons.extension_outlined,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final connectors = tester.getTopLeft(find.text('Connectors')).dy;
+    final presets = tester.getTopLeft(find.text('Agent presets')).dy;
+    final wait = tester.getTopLeft(find.text('Response wait limit')).dy;
+    expect(connectors, lessThan(presets));
+    expect(presets, lessThan(wait));
   });
 
   testWidgets('empty state action fires', (tester) async {

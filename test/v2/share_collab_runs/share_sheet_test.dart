@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/v2/share/share_link_card.dart';
 import 'package:ovid_ai/ui/v2/share/share_sheet.dart';
 
 V2ShareSheetData _data({
@@ -91,6 +92,11 @@ void main() {
     );
 
     expect(find.text('This chat is not shared yet'), findsOneWidget);
+    // The mode is chosen before anything is generated.
+    expect(find.text('Collab'), findsOneWidget);
+    expect(find.text('Read only'), findsOneWidget);
+    await tester.ensureVisible(find.text('Create link'));
+    await tester.pump();
     await tester.tap(find.text('Create link'));
     await tester.pump();
     expect(created, 1);
@@ -113,6 +119,8 @@ void main() {
     await tester.pump();
     expect(copies, 1);
 
+    await tester.ensureVisible(find.text('Stop sharing'));
+    await tester.pump();
     await tester.tap(find.text('Stop sharing'));
     await tester.pump();
     expect(stops, 1);
@@ -143,6 +151,8 @@ void main() {
     await tester.pump();
     expect(showName, isFalse);
 
+    await tester.ensureVisible(find.text('Slack'));
+    await tester.pump();
     await tester.tap(find.text('Slack'));
     await tester.pump();
     expect(target, V2ShareTarget.slack);
@@ -257,5 +267,264 @@ void main() {
     );
     expect(tester.takeException(), isNull);
     expect(find.text('Try again'), findsOneWidget);
+  });
+
+  testWidgets('switching to Collab changes the copy and reports the mode', (
+    tester,
+  ) async {
+    V2ShareMode? picked;
+    await _pump(
+      tester,
+      ShareSheet(
+        data: V2ShareSheetData(
+          link: 'ovidsi.com/c/79f9b4c0e',
+          creatorName: 'Aarav Sharma',
+          memberCount: 3,
+        ),
+        onModeChanged: (mode) => picked = mode,
+      ),
+      OTheme.light(),
+    );
+
+    expect(find.text('SHARE MODE'), findsOneWidget);
+    expect(find.text('Collab'), findsOneWidget);
+    expect(find.text('Read only'), findsOneWidget);
+    expect(find.text('Anyone with the link can view'), findsOneWidget);
+    expect(find.textContaining('Up to 50 people can join'), findsNothing);
+
+    await tester.tap(find.text('Collab'));
+    await tester.pump();
+    expect(picked, V2ShareMode.collab);
+
+    // The owner of the state rebuilds the sheet in the new mode.
+    await _pump(
+      tester,
+      ShareSheet(
+        data: V2ShareSheetData(
+          link: 'ovidsi.com/c/79f9b4c0e',
+          creatorName: 'Aarav Sharma',
+          mode: V2ShareMode.collab,
+          memberCount: 3,
+        ),
+        onModeChanged: (mode) => picked = mode,
+      ),
+      OTheme.light(),
+    );
+
+    expect(find.text('3 of 50 members'), findsOneWidget);
+    expect(find.text('One person sends at a time'), findsOneWidget);
+    expect(find.text('You pay for storage'), findsOneWidget);
+    expect(
+      find.textContaining('Up to 50 people can join'),
+      findsOneWidget,
+    );
+    expect(find.text('Anyone with the link can view'), findsNothing);
+    expect(find.text('Read only'), findsOneWidget);
+  });
+
+  testWidgets('Collab shows the 50 person cap and a full room', (tester) async {
+    expect(v2ShareMemberLimit, 50);
+
+    await _pump(
+      tester,
+      ShareSheet(
+        data: V2ShareSheetData(
+          link: 'ovidsi.com/c/79f9b4c0e',
+          creatorName: 'Aarav Sharma',
+          mode: V2ShareMode.collab,
+          memberCount: 50,
+        ),
+      ),
+      OTheme.dark(),
+    );
+
+    expect(find.text('50 of 50 members'), findsOneWidget);
+    expect(find.text('Room full'), findsOneWidget);
+    expect(
+      find.textContaining('Up to 50 people can join'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a read-only viewer can fork into their own account', (
+    tester,
+  ) async {
+    var forks = 0;
+    await _pump(
+      tester,
+      ShareSheet(
+        data: V2ShareSheetData(
+          link: 'ovidsi.com/c/79f9b4c0e',
+          creatorName: 'Aarav Sharma',
+          viewerCanFork: true,
+        ),
+        onFork: () => forks++,
+      ),
+      OTheme.light(),
+    );
+
+    await tester.ensureVisible(find.text('Fork into my account'));
+    await tester.pump();
+    expect(find.text('Stop sharing'), findsNothing);
+    expect(find.text('Anyone with the link can view'), findsNothing);
+    await tester.tap(find.text('Fork into my account'));
+    await tester.pump();
+    expect(forks, 1);
+
+    // Collab rooms are not forkable.
+    await _pump(
+      tester,
+      ShareSheet(
+        data: V2ShareSheetData(
+          link: 'ovidsi.com/c/79f9b4c0e',
+          creatorName: 'Aarav Sharma',
+          mode: V2ShareMode.collab,
+          viewerCanFork: true,
+        ),
+        onFork: () => forks++,
+      ),
+      OTheme.light(),
+    );
+    expect(find.text('Fork into my account'), findsNothing);
+  });
+
+  testWidgets('a member who cannot change the mode does not see the selector', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      ShareSheet(
+        data: V2ShareSheetData(
+          link: 'ovidsi.com/c/79f9b4c0e',
+          creatorName: 'Aarav Sharma',
+          canChangeMode: false,
+        ),
+      ),
+      OTheme.light(),
+    );
+
+    expect(find.text('SHARE MODE'), findsNothing);
+    expect(find.text('Collab'), findsNothing);
+    // The link card's badge still states the mode the member is in.
+    expect(find.byType(V2ShareLinkCard), findsOneWidget);
+    expect(find.text('Read only'), findsOneWidget);
+  });
+
+  testWidgets('Collab and the fork action fit 320 dp at 200 % text', (
+    tester,
+  ) async {
+    for (final theme in [OTheme.light(), OTheme.dark()]) {
+      await _pumpNarrow(
+        tester,
+        ShareSheet(
+          data: V2ShareSheetData(
+            link: 'ovidsi.com/c/79f9b4c0e',
+            creatorName: 'Aarav Sharma',
+            mode: V2ShareMode.collab,
+            memberCount: 50,
+          ),
+          onModeChanged: (_) {},
+          onCopyLink: () {},
+          onStopSharing: () {},
+        ),
+        theme,
+      );
+      expect(tester.takeException(), isNull);
+      expect(find.text('50 of 50 members'), findsOneWidget);
+      expect(find.text('Stop sharing'), findsOneWidget);
+
+      await _pumpNarrow(
+        tester,
+        ShareSheet(
+          data: V2ShareSheetData(
+            link: 'ovidsi.com/c/79f9b4c0e',
+            creatorName: 'Aarav Sharma',
+            viewerCanFork: true,
+          ),
+          onFork: () {},
+        ),
+        theme,
+      );
+      expect(tester.takeException(), isNull);
+      expect(find.text('Fork into my account'), findsOneWidget);
+    }
+  });
+
+  testWidgets('the active link block is the shared V2ShareLinkCard', (
+    tester,
+  ) async {
+    var copies = 0;
+    await _pump(
+      tester,
+      ShareSheet(data: _data(), onCopyLink: () => copies++),
+      OTheme.light(),
+    );
+
+    final card = tester.widget<V2ShareLinkCard>(find.byType(V2ShareLinkCard));
+    expect(card.data.url, 'ovidsi.com/c/79f9b4c0e');
+    expect(card.data.mode, V2ShareMode.readOnly);
+    expect(card.data.copied, isFalse);
+    expect(card.data.viewer, isFalse);
+    expect(find.text('Copy link'), findsOneWidget);
+
+    await tester.tap(find.text('Copy link'));
+    await tester.pump();
+    expect(copies, 1);
+  });
+
+  testWidgets('the link card carries the Collab cap and member count', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      ShareSheet(
+        data: V2ShareSheetData(
+          link: 'ovidsi.com/c/79f9b4c0e',
+          creatorName: 'Aarav Sharma',
+          mode: V2ShareMode.collab,
+          memberCount: 50,
+        ),
+      ),
+      OTheme.dark(),
+    );
+
+    final card = tester.widget<V2ShareLinkCard>(find.byType(V2ShareLinkCard));
+    expect(card.data.mode, V2ShareMode.collab);
+    expect(card.data.memberCount, 50);
+    expect(card.data.capacity, v2ShareMemberLimit);
+    // The member count and the full-room pill live on the card, once.
+    expect(find.text('50 of 50 members'), findsOneWidget);
+    expect(find.text('Room full'), findsOneWidget);
+  });
+
+  testWidgets('a viewer reads the card as shared-with-them and can fork', (
+    tester,
+  ) async {
+    var forks = 0;
+    await _pump(
+      tester,
+      ShareSheet(
+        data: V2ShareSheetData(
+          link: 'ovidsi.com/c/79f9b4c0e',
+          creatorName: 'Aarav Sharma',
+          viewerCanFork: true,
+        ),
+        onFork: () => forks++,
+      ),
+      OTheme.light(),
+    );
+
+    final card = tester.widget<V2ShareLinkCard>(find.byType(V2ShareLinkCard));
+    expect(card.data.viewer, isTrue);
+    expect(find.text('Shared with you'), findsOneWidget);
+    // The card owns the fork action, so the sheet does not repeat it.
+    expect(find.text('Fork into my account'), findsOneWidget);
+    expect(find.text('Revoke link'), findsNothing);
+
+    await tester.ensureVisible(find.text('Fork into my account'));
+    await tester.pump();
+    await tester.tap(find.text('Fork into my account'));
+    await tester.pump();
+    expect(forks, 1);
   });
 }

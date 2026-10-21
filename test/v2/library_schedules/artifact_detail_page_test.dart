@@ -8,6 +8,7 @@ import 'package:ovid_ai/ui/design/o_motion.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/design/o_tokens.dart';
 import 'package:ovid_ai/ui/v2/library/artifact_detail_page.dart';
+import 'package:ovid_ai/ui/v2/library/artifact_preview.dart';
 
 /// 320 dp wide at 200 % text — the smallest surface the contract supports.
 Widget _narrowApp(Widget child, {bool dark = false}) => MaterialApp(
@@ -33,7 +34,8 @@ void _narrowPhone(WidgetTester tester) {
 /// clipped text shows up (an ellipsis is allowed, a cut-off line is not).
 /// Also fails when a text run paints past the screen edge.
 void _expectNoClippedText(WidgetTester tester) {
-  for (final paragraph in tester.allRenderObjects.whereType<RenderParagraph>()) {
+  for (final paragraph
+      in tester.allRenderObjects.whereType<RenderParagraph>()) {
     if (!paragraph.hasSize) continue;
     final needed = paragraph.getMaxIntrinsicHeight(paragraph.size.width);
     expect(
@@ -65,7 +67,7 @@ void _expectNoClippedText(WidgetTester tester) {
 Future<void> _scrollThrough(WidgetTester tester) async {
   _expectNoClippedText(tester);
   final state = tester.state<ScrollableState>(find.byType(Scrollable).first);
-  for (var i = 0; i < 60; i++) {
+  for (var i = 0; i < 80; i++) {
     final position = state.position;
     if (position.pixels + 0.5 >= position.maxScrollExtent) {
       // The extent can grow once more rows are built; stop only when a jump
@@ -84,27 +86,7 @@ Future<void> _scrollThrough(WidgetTester tester) async {
   }
 }
 
-/// The two overlay pills sit inside the preview stage at every text scale.
-void _expectStagePillsInsideStage(WidgetTester tester) {
-  final responsive = tester.getRect(find.text('Responsive view'));
-  final live = tester.getRect(find.text('Live preview'));
-  final stage = tester.getRect(
-    find
-        .ancestor(
-          of: find.text('Responsive view'),
-          matching: find.byType(ClipRRect),
-        )
-        .first,
-  );
-  expect(responsive.overlaps(live), isFalse);
-  expect(responsive.left, greaterThanOrEqualTo(stage.left));
-  expect(responsive.right, lessThanOrEqualTo(stage.right));
-  expect(live.left, greaterThanOrEqualTo(stage.left));
-  expect(live.right, lessThanOrEqualTo(stage.right));
-  expect(live.bottom, lessThanOrEqualTo(stage.bottom));
-}
-
-const _data = V2ArtifactDetailData(
+const _codeData = V2ArtifactDetailData(
   name: 'portfolio-index.html',
   typeLabel: 'HTML5 + Tailwind',
   sizeLabel: '14.2 KB',
@@ -112,10 +94,7 @@ const _data = V2ArtifactDetailData(
   versionLabel: 'v2.4 Ready',
   sourceChatTitle: 'Landing page redesign',
   sourcePrompt: 'Landing page redesign',
-  previewHeadline: 'Building generative interfaces & reactive engines.',
-  previewSubtitle:
-      'Full-stack developer crafting resilient interfaces with precision.',
-  previewTag: 'Available for Q3 projects',
+  previewKind: V2ArtifactPreviewKind.code,
   previewCodeFile: 'agent_manifest.ts',
   previewCode: 'export const client = createEngine({\n  streaming: true\n});',
   details: <V2ArtifactDetailRow>[
@@ -129,10 +108,30 @@ const _data = V2ArtifactDetailData(
   ],
 );
 
-Widget _app(Widget home, {bool dark = false}) => MaterialApp(
-  theme: dark ? OTheme.dark() : OTheme.light(),
-  home: home,
+const _documentData = V2ArtifactDetailData(
+  name: 'market-analysis-q2.pdf',
+  typeLabel: 'PDF document',
+  sizeLabel: '1.8 MB',
+  createdLabel: 'Created yesterday',
+  sourceChatTitle: 'Q2 market review',
+  sourcePrompt: 'Summarise the Q2 numbers',
+  previewKind: V2ArtifactPreviewKind.document,
+  details: <V2ArtifactDetailRow>[
+    V2ArtifactDetailRow(label: 'Pages', value: '18 pages'),
+    V2ArtifactDetailRow(label: 'File type', value: 'PDF'),
+  ],
 );
+
+const _imageData = V2ArtifactDetailData(
+  name: 'token-usage-breakdown.png',
+  typeLabel: 'PNG image',
+  sizeLabel: '480 KB',
+  createdLabel: 'Created May 15',
+  previewKind: V2ArtifactPreviewKind.image,
+);
+
+Widget _app(Widget home, {bool dark = false}) =>
+    MaterialApp(theme: dark ? OTheme.dark() : OTheme.light(), home: home);
 
 void _phone(WidgetTester tester) {
   tester.view.physicalSize = const Size(430, 932);
@@ -141,27 +140,36 @@ void _phone(WidgetTester tester) {
   addTearDown(tester.view.resetDevicePixelRatio);
 }
 
+Future<void> _scrollToBottom(WidgetTester tester) async {
+  final state = tester.state<ScrollableState>(find.byType(Scrollable).first);
+  state.position.jumpTo(state.position.maxScrollExtent);
+  await tester.pumpAndSettle();
+}
+
 void main() {
   testWidgets('renders the artifact in light mode', (tester) async {
     _phone(tester);
-    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _data)));
+    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
     await tester.pumpAndSettle();
 
     expect(find.text('Artifact detail'), findsOneWidget);
-    expect(find.text('portfolio-index.html'), findsOneWidget);
-    expect(find.text('HTML5 + Tailwind'), findsOneWidget);
+    expect(find.text('portfolio-index.html'), findsWidgets);
+    expect(find.text('HTML5 + Tailwind'), findsWidgets);
     expect(find.text('v2.4 Ready'), findsOneWidget);
     expect(find.text('Download'), findsOneWidget);
+    expect(find.text('Share link'), findsOneWidget);
+    expect(find.text('Open in Studio'), findsOneWidget);
+    expect(find.text('Delete artifact'), findsOneWidget);
   });
 
   testWidgets('renders the artifact in dark mode', (tester) async {
     _phone(tester);
     await tester.pumpWidget(
-      _app(const ArtifactDetailPage(data: _data), dark: true),
+      _app(const ArtifactDetailPage(data: _codeData), dark: true),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('portfolio-index.html'), findsOneWidget);
+    expect(find.text('portfolio-index.html'), findsWidgets);
     expect(find.text('Share link'), findsOneWidget);
     expect(find.text('Open in Studio'), findsOneWidget);
   });
@@ -190,9 +198,7 @@ void main() {
     _phone(tester);
     var downloads = 0;
     await tester.pumpWidget(
-      _app(
-        ArtifactDetailPage(data: _data, onDownload: () => downloads++),
-      ),
+      _app(ArtifactDetailPage(data: _codeData, onDownload: () => downloads++)),
     );
     await tester.pumpAndSettle();
 
@@ -200,9 +206,199 @@ void main() {
     expect(downloads, 1);
   });
 
+  testWidgets('Share link fires the callback and shows a copied state', (
+    tester,
+  ) async {
+    _phone(tester);
+    var shares = 0;
+    await tester.pumpWidget(
+      _app(ArtifactDetailPage(data: _codeData, onShareLink: () => shares++)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Share link'));
+    await tester.pump();
+
+    expect(shares, 1);
+    expect(find.text('Link copied'), findsOneWidget);
+    expect(find.text('Share link'), findsNothing);
+    expect(find.byIcon(Icons.check_rounded), findsOneWidget);
+
+    // The confirmation is temporary; the action comes back.
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+    expect(find.text('Share link'), findsOneWidget);
+    expect(find.text('Link copied'), findsNothing);
+  });
+
+  testWidgets('Delete asks for confirmation before firing', (tester) async {
+    _phone(tester);
+    var deletes = 0;
+    await tester.pumpWidget(
+      _app(ArtifactDetailPage(data: _codeData, onDelete: () => deletes++)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Delete artifact'));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete this artifact?'), findsOneWidget);
+    expect(find.textContaining('frees 14.2 KB of storage'), findsOneWidget);
+    expect(find.textContaining('cannot be undone'), findsOneWidget);
+
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(deletes, 0);
+    expect(find.text('Delete this artifact?'), findsNothing);
+
+    await tester.tap(find.text('Delete artifact'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+    expect(deletes, 1);
+  });
+
+  testWidgets('Open in Studio fires for code artifacts', (tester) async {
+    _phone(tester);
+    var studio = 0;
+    await tester.pumpWidget(
+      _app(ArtifactDetailPage(data: _codeData, onOpenInStudio: () => studio++)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Open in Studio'));
+    expect(studio, 1);
+  });
+
+  testWidgets('Open in Studio is not offered for images or documents', (
+    tester,
+  ) async {
+    _phone(tester);
+    for (final data in <V2ArtifactDetailData>[_imageData, _documentData]) {
+      await tester.pumpWidget(
+        _app(ArtifactDetailPage(data: data, onOpenInStudio: () {})),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Open in Studio'), findsNothing);
+    }
+  });
+
+  testWidgets('documents show metadata only and open externally', (
+    tester,
+  ) async {
+    _phone(tester);
+    var external = 0;
+    await tester.pumpWidget(
+      _app(
+        ArtifactDetailPage(
+          data: _documentData,
+          onOpenExternally: () => external++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // No heavy preview chrome or WebView-style page mockup.
+    expect(find.text('Responsive view'), findsNothing);
+    expect(find.text('Live preview'), findsNothing);
+    expect(find.textContaining('not rendered in the app'), findsWidgets);
+    expect(find.text('Pages'), findsOneWidget);
+    expect(find.text('18 pages'), findsOneWidget);
+
+    await _scrollToBottom(tester);
+    await tester.tap(find.text('Open externally'));
+    expect(external, 1);
+  });
+
+  testWidgets('images preview inline and offer an external open', (
+    tester,
+  ) async {
+    _phone(tester);
+    var external = 0;
+    await tester.pumpWidget(
+      _app(
+        ArtifactDetailPage(
+          data: _imageData,
+          onOpenExternally: () => external++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Image preview'), findsOneWidget);
+    expect(find.text('Open externally'), findsOneWidget);
+
+    await _scrollToBottom(tester);
+    await tester.tap(find.text('Open externally'));
+    expect(external, 1);
+  });
+
+  testWidgets('large code previews stop at the line cap', (tester) async {
+    _phone(tester);
+    final code = List.generate(
+      500,
+      (i) => 'CODE_LINE_${i + 1} = true;',
+    ).join('\n');
+    await tester.pumpWidget(
+      _app(
+        ArtifactDetailPage(
+          data: V2ArtifactDetailData(
+            name: 'huge-module.ts',
+            typeLabel: 'TypeScript',
+            sizeLabel: '920 KB',
+            previewKind: V2ArtifactPreviewKind.code,
+            previewCodeFile: 'huge-module.ts',
+            previewCode: code,
+            previewTotalLines: 500,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(v2ArtifactCodeLineCap, 120);
+    expect(find.textContaining('CODE_LINE_120'), findsOneWidget);
+    expect(find.textContaining('CODE_LINE_121'), findsNothing);
+    expect(
+      find.textContaining('Showing first 120 of 500 lines'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('the preview area is the shared artifact preview', (
+    tester,
+  ) async {
+    _phone(tester);
+    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(V2ArtifactPreview), findsOneWidget);
+    expect(find.text('HTML5 + Tailwind · 14.2 KB'), findsOneWidget);
+    expect(find.text('agent_manifest.ts'), findsOneWidget);
+    expect(find.textContaining('This preview is read-only'), findsOneWidget);
+    expect(find.text('Open externally'), findsOneWidget);
+  });
+
+  testWidgets('the preview is replaced by details and comes back', (
+    tester,
+  ) async {
+    _phone(tester);
+    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(V2ArtifactPreview), findsOneWidget);
+
+    await tester.tap(find.text('Details'));
+    await tester.pumpAndSettle();
+    expect(find.byType(V2ArtifactPreview), findsNothing);
+
+    await tester.tap(find.text('Preview'));
+    await tester.pumpAndSettle();
+    expect(find.byType(V2ArtifactPreview), findsOneWidget);
+  });
+
   testWidgets('Details tab reveals the technical rows', (tester) async {
     _phone(tester);
-    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _data)));
+    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
     await tester.pumpAndSettle();
 
     expect(find.text('Artifact hash'), findsNothing);
@@ -222,9 +418,7 @@ void main() {
     _phone(tester);
     var chats = 0;
     await tester.pumpWidget(
-      _app(
-        ArtifactDetailPage(data: _data, onOpenChat: () => chats++),
-      ),
+      _app(ArtifactDetailPage(data: _codeData, onOpenChat: () => chats++)),
     );
     await tester.pumpAndSettle();
 
@@ -235,12 +429,11 @@ void main() {
   testWidgets('content fits 320 dp at 200 % text in light', (tester) async {
     _narrowPhone(tester);
     await tester.pumpWidget(
-      _narrowApp(const ArtifactDetailPage(data: _data)),
+      _narrowApp(const ArtifactDetailPage(data: _codeData)),
     );
     await tester.pumpAndSettle();
 
     expect(find.text('portfolio-index.html'), findsOneWidget);
-    _expectStagePillsInsideStage(tester);
     _expectNoClippedText(tester);
 
     await tester.scrollUntilVisible(
@@ -252,10 +445,28 @@ void main() {
     await _scrollThrough(tester);
   });
 
+  testWidgets('document preview fits 320 dp at 200 % text in dark', (
+    tester,
+  ) async {
+    _narrowPhone(tester);
+    await tester.pumpWidget(
+      _narrowApp(const ArtifactDetailPage(data: _documentData), dark: true),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(
+      find.text('Open externally'),
+      120,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('Open externally'), findsOneWidget);
+    await _scrollThrough(tester);
+  });
+
   testWidgets('details fit 320 dp at 200 % text in dark', (tester) async {
     _narrowPhone(tester);
     await tester.pumpWidget(
-      _narrowApp(const ArtifactDetailPage(data: _data), dark: true),
+      _narrowApp(const ArtifactDetailPage(data: _codeData), dark: true),
     );
     await tester.pumpAndSettle();
 
@@ -299,7 +510,7 @@ void main() {
 
   testWidgets('controls are at least 48 dp and labelled', (tester) async {
     _phone(tester);
-    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _data)));
+    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
     await tester.pumpAndSettle();
 
     expect(
@@ -339,7 +550,7 @@ void main() {
               textScaler: const TextScaler.linear(2),
               disableAnimations: true,
             ),
-            child: const ArtifactDetailPage(data: _data),
+            child: const ArtifactDetailPage(data: _codeData),
           ),
         ),
       ),
@@ -361,17 +572,18 @@ void main() {
 
   testWidgets('the snippet badge follows the file type', (tester) async {
     _phone(tester);
-    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _data)));
+    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
     await tester.pumpAndSettle();
 
     // `agent_manifest.ts` must not be labelled HTML.
-    expect(find.text('TS'), findsOneWidget);
+    expect(find.text('TS'), findsWidgets);
     expect(find.text('HTML'), findsNothing);
 
     await tester.pumpWidget(
       _app(
         const ArtifactDetailPage(
           data: V2ArtifactDetailData(
+            previewKind: V2ArtifactPreviewKind.code,
             previewCodeFile: 'portfolio-index.html',
             previewCode: '<main></main>',
           ),
@@ -379,7 +591,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('HTML'), findsOneWidget);
+    expect(find.text('HTML'), findsWidgets);
   });
 
   testWidgets('Download is announced as disabled with no handler', (
@@ -387,7 +599,7 @@ void main() {
   ) async {
     final handle = tester.ensureSemantics();
     _phone(tester);
-    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _data)));
+    await tester.pumpWidget(_app(const ArtifactDetailPage(data: _codeData)));
     await tester.pumpAndSettle();
 
     final button = tester.widget<OButton>(

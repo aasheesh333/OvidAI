@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'confirm_typed_sheet.dart';
+import 'export_picker_sheet.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
 
@@ -14,13 +16,54 @@ class V2ImportValidation {
     required this.message,
     required this.valid,
     this.checkedLabel = 'Checked just now',
+    this.planQuotaLabel = '',
+    this.fitsPlan = true,
   });
 
   final String fileName;
   final String message;
   final bool valid;
   final String checkedLabel;
+
+  /// Plain-language result of the plan-storage check, for example
+  /// "Needs 1.4 GB · 2.1 GB free on your plan".
+  final String planQuotaLabel;
+
+  /// False when the archive is valid but the account does not have enough
+  /// plan storage for it. Import stays blocked until the user frees space.
+  final bool fitsPlan;
+
+  bool get canImport => valid && fitsPlan;
 }
+
+/// One chat in the export selection window. Only used when the account is over
+/// the 64 MB archive limit.
+@immutable
+class V2ExportSession {
+  const V2ExportSession({
+    required this.id,
+    required this.name,
+    required this.sizeBytes,
+    required this.sizeLabel,
+    this.detail = '',
+    this.selected = true,
+    this.heavyArtifacts = false,
+  });
+
+  final String id;
+  final String name;
+  final int sizeBytes;
+  final String sizeLabel;
+  final String detail;
+  final bool selected;
+
+  /// True when the chat contains videos or other large files that are not
+  /// part of a transcript archive and must be re-uploaded after an import.
+  final bool heavyArtifacts;
+}
+
+/// Called with the chat id and its new selected state.
+typedef V2ExportSessionToggle = void Function(String id, bool selected);
 
 /// Injected state for the Data control screen.
 @immutable
@@ -28,21 +71,27 @@ class V2DataControlPageData {
   const V2DataControlPageData({
     this.lastExportLabel = '',
     this.backupSizeLabel = '',
+    this.totalDataSizeLabel = '',
     this.exportLimitLabel = 'Up to 64 MB · 1,000 sessions · 20,000 messages',
+    this.exportLimitBytes = 64 * 1024 * 1024,
+    this.exportSessions = const <V2ExportSession>[],
     this.permissionSummary = '',
     this.storageUsedLabel = '',
     this.storageFraction = 0,
     this.storageFreeLabel = '',
-    this.crashReports = false,
+    this.crashReports = true,
     this.importValidation,
     this.importChecking = false,
     this.hasData = true,
     this.loading = false,
     this.errorMessage,
+    this.accountContact = '',
+    this.memorySummaryLabel = '',
     this.onExportImport,
     this.onExport,
     this.onChooseImport,
     this.onImport,
+    this.onExportSessionToggled,
     this.onPermissions,
     this.onCrashReportsChanged,
     this.onStorage,
@@ -53,11 +102,22 @@ class V2DataControlPageData {
 
   final String lastExportLabel;
   final String backupSizeLabel;
+
+  /// Total size of everything in the account, shown beside the export limits.
+  final String totalDataSizeLabel;
   final String exportLimitLabel;
+  final int exportLimitBytes;
+
+  /// Per-chat sizes. The selection window appears automatically when their
+  /// total is larger than [exportLimitBytes].
+  final List<V2ExportSession> exportSessions;
+
   final String permissionSummary;
   final String storageUsedLabel;
   final double storageFraction;
   final String storageFreeLabel;
+
+  /// Opt-out crash reports and anonymous analytics. On by default.
   final bool crashReports;
   final V2ImportValidation? importValidation;
   final bool importChecking;
@@ -65,16 +125,45 @@ class V2DataControlPageData {
   final bool loading;
   final String? errorMessage;
 
+  /// Registered email or phone the user must type to delete their data.
+  final String accountContact;
+
+  /// Optional summary such as "Global memory and 12 session files".
+  final String memorySummaryLabel;
+
   final VoidCallback? onExportImport;
   final VoidCallback? onExport;
   final VoidCallback? onChooseImport;
   final VoidCallback? onImport;
+  final V2ExportSessionToggle? onExportSessionToggled;
   final VoidCallback? onPermissions;
   final ValueChanged<bool>? onCrashReportsChanged;
   final VoidCallback? onStorage;
   final VoidCallback? onDeleteData;
   final VoidCallback? onResetMemory;
   final VoidCallback? onRetry;
+
+  int get exportTotalBytes =>
+      exportSessions.fold<int>(0, (sum, session) => sum + session.sizeBytes);
+
+  int get exportSelectedBytes => exportSessions
+      .where((session) => session.selected)
+      .fold<int>(0, (sum, session) => sum + session.sizeBytes);
+
+  int get exportSelectedCount =>
+      exportSessions.where((session) => session.selected).length;
+
+  bool get exportOverLimit => exportTotalBytes > exportLimitBytes;
+
+  bool get exportSelectionOverLimit => exportSelectedBytes > exportLimitBytes;
+
+  bool get showExportSelection => exportSessions.isNotEmpty && exportOverLimit;
+
+  bool get canExport =>
+      !exportOverLimit ||
+      (exportSelectedCount > 0 && !exportSelectionOverLimit);
+
+  bool get canImport => importValidation?.canImport ?? false;
 }
 
 /// Privacy and data controls: backup, permissions, crash reports and deletion.
@@ -269,6 +358,44 @@ class DataControlPage extends StatelessWidget {
                     ),
                   ],
                 ),
+                if (data.totalDataSizeLabel.isNotEmpty) ...[
+                  const SizedBox(height: OSpace.m),
+                  Container(
+                    padding: const EdgeInsets.all(OSpace.m),
+                    decoration: BoxDecoration(
+                      color: c.surfaceAlt,
+                      borderRadius: BorderRadius.circular(ORadius.m),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          Icons.data_usage_rounded,
+                          size: 18,
+                          color: c.textMuted,
+                        ),
+                        const SizedBox(width: OSpace.s),
+                        Expanded(
+                          child: Text(
+                            'Total data in your account',
+                            style: OType.caption.copyWith(color: c.textMuted),
+                          ),
+                        ),
+                        const SizedBox(width: OSpace.s),
+                        Flexible(
+                          child: Text(
+                            data.totalDataSizeLabel,
+                            textAlign: TextAlign.end,
+                            style: OType.caption.copyWith(
+                              color: c.text,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 const SizedBox(height: OSpace.m),
                 Wrap(
                   spacing: OSpace.s,
@@ -278,7 +405,9 @@ class DataControlPage extends StatelessWidget {
                       label: 'Export backup',
                       icon: Icons.download_rounded,
                       variant: OButtonVariant.secondary,
-                      onPressed: data.onExport,
+                      onPressed: data.onExport == null
+                          ? null
+                          : () => _handleExport(context),
                     ),
                     OButton(
                       label: 'Choose backup',
@@ -288,9 +417,123 @@ class DataControlPage extends StatelessWidget {
                     ),
                   ],
                 ),
+                if (data.showExportSelection) ...[
+                  const SizedBox(height: OSpace.m),
+                  _exportPickerNote(context),
+                ],
                 const SizedBox(height: OSpace.m),
                 _importStatus(context, check),
+                const SizedBox(height: OSpace.m),
+                _heavyArtifactsNote(context),
               ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Over the archive cap, exporting opens the shared picker instead of an
+  /// inline list. Everything the sheet shows comes from this page's immutable
+  /// session list; every checkbox and the export action go back through the
+  /// page's callbacks.
+  Future<void> _handleExport(BuildContext context) async {
+    final export = data.onExport;
+    if (export == null) return;
+    if (!data.showExportSelection) {
+      export();
+      return;
+    }
+    final toggle = data.onExportSessionToggled;
+    await showExportPickerSheet(
+      context,
+      data: V2ExportPickerSheetData(
+        sessions: [
+          for (final session in data.exportSessions)
+            V2ExportPickerSession(
+              id: session.id,
+              name: session.name,
+              sizeBytes: session.sizeBytes,
+              sizeLabel: session.sizeLabel,
+              messageCount: _messageCount(session.detail),
+              detail: session.detail,
+              selected: session.selected,
+              heavyArtifacts: session.heavyArtifacts,
+            ),
+        ],
+        limitBytes: data.exportLimitBytes,
+        limitChats: v2ExportPickerChatLimit,
+        limitMessages: v2ExportPickerMessageLimit,
+      ),
+      onToggleSession: toggle,
+      onSelectAll: toggle == null ? null : _applySelection,
+      onExport: () {
+        export();
+        Navigator.of(context).maybePop();
+      },
+      onRetry: data.onRetry,
+    );
+  }
+
+  /// Applies the picker's complete id set as individual toggles, so the page's
+  /// injected callback remains the single owner of the selection.
+  void _applySelection(List<String> ids) {
+    final selected = ids.toSet();
+    final toggle = data.onExportSessionToggled;
+    if (toggle == null) return;
+    for (final session in data.exportSessions) {
+      final next = selected.contains(session.id);
+      if (next != session.selected) toggle(session.id, next);
+    }
+  }
+
+  Widget _exportPickerNote(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      key: const ValueKey('export-picker-note'),
+      padding: const EdgeInsets.all(OSpace.m),
+      decoration: BoxDecoration(
+        color: c.surfaceAlt,
+        borderRadius: BorderRadius.circular(ORadius.m),
+        border: Border.all(color: c.hairline),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.filter_alt_outlined, size: 18, color: c.accent),
+          const SizedBox(width: OSpace.s),
+          Expanded(
+            child: Text(
+              'Your data is ${_mb(data.exportTotalBytes)}, over the '
+              '${_mb(data.exportLimitBytes)} archive limit. Export backup '
+              'opens a picker so you choose which chats to include.',
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _heavyArtifactsNote(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      key: const ValueKey('heavy-artifacts-note'),
+      padding: const EdgeInsets.all(OSpace.m),
+      decoration: BoxDecoration(
+        color: c.warn.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(ORadius.m),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.upload_file_rounded, size: 18, color: c.warn),
+          const SizedBox(width: OSpace.s),
+          Expanded(
+            child: Text(
+              'Heavy artifacts are not included in a backup. Large files, '
+              'videos and generated assets must be re-uploaded after importing.',
+              style: OType.caption.copyWith(color: c.textMuted),
             ),
           ),
         ],
@@ -367,14 +610,57 @@ class DataControlPage extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: OSpace.s),
+                Container(
+                  key: const ValueKey('import-plan-quota'),
+                  padding: const EdgeInsets.all(OSpace.s),
+                  decoration: BoxDecoration(
+                    color: check.fitsPlan
+                        ? c.success.withValues(alpha: 0.10)
+                        : c.danger.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(ORadius.s),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        check.fitsPlan
+                            ? Icons.cloud_done_outlined
+                            : Icons.cloud_off_outlined,
+                        size: 18,
+                        color: check.fitsPlan ? c.success : c.danger,
+                      ),
+                      const SizedBox(width: OSpace.s),
+                      Expanded(
+                        child: Text(
+                          check.planQuotaLabel.isNotEmpty
+                              ? check.planQuotaLabel
+                              : check.fitsPlan
+                              ? 'Fits your plan storage.'
+                              : 'Not enough plan storage for this archive.',
+                          style: OType.caption.copyWith(
+                            color: check.fitsPlan ? c.textMuted : c.danger,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: OSpace.s),
                 Align(
                   alignment: Alignment.centerRight,
-                  child: check.valid
+                  child: check.canImport
                       ? OButton(
                           label: 'Import now',
                           icon: Icons.file_download_outlined,
                           variant: OButtonVariant.ghost,
                           onPressed: data.onImport,
+                        )
+                      : check.valid && !check.fitsPlan
+                      ? OButton(
+                          label: 'Manage storage',
+                          icon: Icons.cloud_outlined,
+                          variant: OButtonVariant.ghost,
+                          onPressed: data.onStorage,
                         )
                       : OButton(
                           label: 'Choose another file',
@@ -425,7 +711,9 @@ class DataControlPage extends StatelessWidget {
             child: OListRow(
               icon: Icons.bug_report_outlined,
               title: 'Crash reports',
-              subtitle: 'Send anonymous diagnostic logs to improve stability',
+              subtitle:
+                  'Anonymous diagnostics and usage. Never includes chats, '
+                  'prompts or files.',
               showChevron: false,
               onTap: data.onCrashReportsChanged == null
                   ? null
@@ -510,7 +798,7 @@ class DataControlPage extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  'Synced locally & cloud',
+                  'Cloud storage for your plan',
                   style: OType.caption.copyWith(color: c.textMuted),
                 ),
               ),
@@ -549,27 +837,143 @@ class DataControlPage extends StatelessWidget {
             child: Column(
               children: [
                 OListRow(
+                  key: const ValueKey('delete-data-row'),
                   icon: Icons.delete_forever_outlined,
                   title: 'Delete your data',
                   subtitle:
-                      'Permanently delete conversations, files, and generated code',
+                      'Permanently delete chats, workspace files, artifacts, '
+                      'memory, drafts and shared links',
                   danger: true,
-                  onTap: data.onDeleteData,
+                  enabled: data.onDeleteData != null,
+                  onTap: data.onDeleteData == null
+                      ? null
+                      : () => _confirmDelete(context),
                 ),
                 Divider(color: c.hairline, height: 1),
                 OListRow(
+                  key: const ValueKey('reset-memory-row'),
                   icon: Icons.history_rounded,
                   title: 'Reset memory',
                   subtitle:
-                      'Wipe learned facts, project preferences, and personas',
+                      'Erase global memory and the memory file for every session',
                   danger: true,
-                  onTap: data.onResetMemory,
+                  enabled: data.onResetMemory != null,
+                  onTap: data.onResetMemory == null
+                      ? null
+                      : () => _confirmResetMemory(context),
                 ),
               ],
             ),
           ),
         ],
       ),
+    );
+  }
+
+  Future<void> _confirmDelete(BuildContext context) async {
+    final confirmed = await showConfirmTypedSheet(
+      context,
+      data: V2ConfirmTypedSheetData(
+        contact: data.accountContact,
+        title: 'Delete all your data?',
+        intro:
+            'Your account, plan and billing history are kept. Everything '
+            'else is removed now.',
+        graceNote:
+            'Chats, files, artifacts, memory, connectors and shared links are '
+            'deleted immediately. This cannot be undone.',
+        playNote: '',
+        confirmLabel: 'Delete everything',
+        cancelLabel: 'Cancel',
+      ),
+    );
+    if (confirmed) data.onDeleteData?.call();
+  }
+
+  Future<void> _confirmResetMemory(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => _ResetMemoryDialog(summary: data.memorySummaryLabel),
+    );
+    if (confirmed == true) data.onResetMemory?.call();
+  }
+}
+
+String _mb(int bytes) => '${(bytes / (1024 * 1024)).toStringAsFixed(0)} MB';
+
+/// Extracts `42` from `42 messages` for the picker's message total. The page
+/// does not carry a separate count, and a missing number simply contributes 0.
+int _messageCount(String detail) {
+  final match = RegExp(r'([0-9]+)').firstMatch(detail);
+  return match == null ? 0 : int.tryParse(match.group(1)!) ?? 0;
+}
+
+/// Reset memory confirmation. Separate from Delete data because chats and
+/// artifacts stay; only learned memory is removed.
+class _ResetMemoryDialog extends StatelessWidget {
+  const _ResetMemoryDialog({required this.summary});
+
+  final String summary;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return AlertDialog(
+      scrollable: true,
+      backgroundColor: c.surface,
+      icon: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: c.danger.withValues(alpha: 0.12),
+          shape: BoxShape.circle,
+        ),
+        child: Icon(Icons.history_rounded, color: c.danger),
+      ),
+      title: Text('Reset all memory?', style: OType.h2.copyWith(color: c.text)),
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            summary.isEmpty
+                ? 'Ovid forgets everything it learned about you:'
+                : summary,
+            style: OType.bodySm.copyWith(
+              color: c.text,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: OSpace.s),
+          Text(
+            '• Global memory\n'
+            '• Project memory for every project\n'
+            '• The memory file for every session',
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+          const SizedBox(height: OSpace.m),
+          Text(
+            'Chats, files and artifacts stay. This cannot be undone.',
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const ValueKey('reset-memory-confirm'),
+          onPressed: () => Navigator.pop(context, true),
+          style: FilledButton.styleFrom(
+            backgroundColor: c.danger,
+            foregroundColor: c.onDanger,
+            minimumSize: const Size(0, OSpace.touch),
+          ),
+          child: const Text('Reset memory'),
+        ),
+      ],
     );
   }
 }

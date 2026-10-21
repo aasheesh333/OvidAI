@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'commit_sheet.dart';
 
 /// What the changes screen is doing right now.
 enum V2ChangesStatus { loading, content, empty, error }
@@ -114,35 +115,16 @@ class V2ChangesPage extends StatefulWidget {
 }
 
 class _V2ChangesPageState extends State<V2ChangesPage> {
-  static const _maxMessageLength = 72;
-
-  late final TextEditingController _message;
   final Set<String> _expanded = <String>{};
 
   @override
   void initState() {
     super.initState();
-    _message = TextEditingController(text: widget.data.commitMessage);
     _expanded.addAll(
       widget.data.files
           .where((file) => file.initiallyExpanded)
           .map((file) => file.path),
     );
-  }
-
-  @override
-  void didUpdateWidget(covariant V2ChangesPage oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.data.commitMessage != widget.data.commitMessage &&
-        _message.text != widget.data.commitMessage) {
-      _message.text = widget.data.commitMessage;
-    }
-  }
-
-  @override
-  void dispose() {
-    _message.dispose();
-    super.dispose();
   }
 
   void _toggleFile(V2ChangedFile file) {
@@ -153,10 +135,46 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
     });
   }
 
-  bool get _canCommit =>
-      _message.text.trim().isNotEmpty &&
-      _message.text.length <= _maxMessageLength &&
-      widget.data.files.isNotEmpty;
+  /// Opens the shared commit sheet for the working tree. The page keeps the
+  /// diff review; the sheet owns the message and the final commit action.
+  Future<void> _openCommitSheet() async {
+    final data = widget.data;
+    if (data.files.isEmpty) return;
+    final message = await showOSheet<String>(
+      context,
+      builder: (sheetContext) => V2CommitSheet(
+        data: V2CommitSheetData(
+          files: [
+            for (final file in data.files)
+              V2CommitFile(
+                path: _commitPath(file),
+                additions: file.additions,
+                deletions: file.deletions,
+              ),
+          ],
+          initialMessage: data.commitMessage,
+          branchLabel: data.branchLabel,
+          behindCount: data.behindCount,
+        ),
+        showHandle: false,
+        onSync: widget.onSync,
+        onRetry: widget.onRetry,
+        onClose: () => Navigator.of(sheetContext).pop(),
+        onCommit: (value) => Navigator.of(sheetContext).pop(value),
+      ),
+    );
+    if (message != null) widget.onCommit?.call(message);
+  }
+
+  /// The commit sheet lists files by full path, while [V2ChangedFile] keeps the
+  /// file name and its directory apart.
+  String _commitPath(V2ChangedFile file) {
+    final directory = file.directory.trim();
+    if (directory.isEmpty || file.path.startsWith('$directory/')) {
+      return file.path;
+    }
+    return '$directory/${file.path}';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -274,8 +292,7 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
 
   Widget _buildCommitDock(BuildContext context) {
     final c = OColors.of(context);
-    final length = _message.text.length;
-    final tooLong = length > _maxMessageLength;
+    final files = widget.data.files.length;
     return SafeArea(
       top: false,
       child: Container(
@@ -293,54 +310,22 @@ class _V2ChangesPageState extends State<V2ChangesPage> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Commit message',
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ),
-                Semantics(
-                  label: tooLong
-                      ? 'Too long, $length of $_maxMessageLength characters'
-                      : '$length of $_maxMessageLength characters',
-                  child: ExcludeSemantics(
-                    child: Text(
-                      '$length/$_maxMessageLength',
-                      style: OType.caption.copyWith(
-                        color: tooLong ? c.danger : c.textFaint,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+            Text(
+              files == 1
+                  ? '1 file ready to commit'
+                  : '$files files ready to commit',
+              style: OType.caption.copyWith(color: c.textMuted),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
             const SizedBox(height: OSpace.xs),
-            Semantics(
-              label: 'Commit message',
-              child: TextField(
-                controller: _message,
-                onChanged: (_) => setState(() {}),
-                style: OType.bodySm.copyWith(color: c.text),
-                textInputAction: TextInputAction.done,
-                decoration: const InputDecoration(
-                  hintText: 'Describe your changes',
-                  prefixIcon: Icon(Icons.edit_note_rounded),
-                ),
-              ),
-            ),
-            const SizedBox(height: OSpace.m),
             OButton(
+              key: const Key('studio-open-commit-sheet'),
               label: 'Commit & push',
               icon: Icons.send_rounded,
               expand: true,
-              semanticLabel: _canCommit
-                  ? 'Commit & push'
-                  : 'Commit & push, write a message first',
-              onPressed: _canCommit
-                  ? () => widget.onCommit?.call(_message.text.trim())
-                  : null,
+              semanticLabel: 'Commit & push, review files and write a message',
+              onPressed: _openCommitSheet,
             ),
           ],
         ),

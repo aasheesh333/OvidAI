@@ -33,14 +33,24 @@ V2AddConnectorData _data({
   List<V2ConnectorSuggestion> suggestions = _suggestions,
   bool? testResult,
   bool testing = false,
-  String planNote = 'Free plan: 0 custom connectors. Go: 5.',
+  V2ConnectorPlan plan = V2ConnectorPlan.plus,
+  int used = 0,
+  V2ConnectorTarget target = V2ConnectorTarget.url,
+  bool? planLimitReached,
+  String planNote = '',
+  String planLimitMessage = '',
 }) {
   return V2AddConnectorData(
     suggestions: suggestions,
     status: status,
     testResult: testResult,
     testing: testing,
+    plan: plan,
+    customConnectorsUsed: used,
+    target: target,
+    planLimitReached: planLimitReached,
     planNote: planNote,
+    planLimitMessage: planLimitMessage,
   );
 }
 
@@ -59,6 +69,7 @@ Future<void> _pump(
 Future<void> _pumpCompact(
   WidgetTester tester,
   Widget child, {
+  ThemeData? theme,
   double scale = 2,
 }) async {
   tester.view.physicalSize = const Size(320, 720);
@@ -66,7 +77,7 @@ Future<void> _pumpCompact(
   addTearDown(tester.view.reset);
   await tester.pumpWidget(
     MaterialApp(
-      theme: OTheme.light(),
+      theme: theme ?? OTheme.light(),
       home: MediaQuery(
         data: MediaQueryData(
           size: const Size(320, 720),
@@ -80,19 +91,53 @@ Future<void> _pumpCompact(
   await tester.pump(const Duration(milliseconds: 700));
 }
 
+Future<void> _enterCustom(
+  WidgetTester tester, {
+  required String name,
+  required String endpoint,
+  bool command = false,
+}) async {
+  if (command) {
+    final choice = find.byKey(const Key('target-command'));
+    await tester.scrollUntilVisible(
+      choice,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.ensureVisible(choice);
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(choice);
+    await tester.pump(const Duration(milliseconds: 200));
+  }
+  await tester.enterText(find.byKey(const Key('add-connector-name')), name);
+  await tester.pump(const Duration(milliseconds: 100));
+  await tester.enterText(
+    find.byKey(Key(command ? 'add-connector-command' : 'add-connector-url')),
+    endpoint,
+  );
+  await tester.pump(const Duration(milliseconds: 200));
+}
+
 void main() {
-  testWidgets('add connector shows catalog, custom form and permissions', (
+  testWidgets('add connector shows the plan, safe-install and custom form', (
     tester,
   ) async {
     await _pump(tester, AddConnectorPage(data: _data()));
 
     expect(find.text('Add connector'), findsOneWidget);
+    expect(find.byKey(const Key('connector-plan-banner')), findsOneWidget);
+    expect(find.text('Custom connectors'), findsOneWidget);
+    expect(find.text('0 of 20 custom connectors used on Plus.'), findsOneWidget);
+    expect(find.byKey(const Key('chat-install-blocked')), findsOneWidget);
+    expect(
+      find.textContaining('never installs plugins or connectors from a chat'),
+      findsOneWidget,
+    );
     expect(find.text('FROM THE CATALOG'), findsOneWidget);
     expect(find.text('Supabase'), findsOneWidget);
-    expect(find.text('Figma'), findsOneWidget);
     expect(find.text('Name'), findsOneWidget);
     expect(find.text('Server URL'), findsOneWidget);
-    expect(find.text('API key'), findsWidgets);
+    expect(find.text('Server address'), findsOneWidget);
 
     await tester.scrollUntilVisible(
       find.text('Test connection'),
@@ -109,11 +154,12 @@ void main() {
     expect(find.text('Execute actions'), findsOneWidget);
 
     await tester.scrollUntilVisible(
-      find.text('Free plan: 0 custom connectors. Go: 5.'),
+      find.byKey(const Key('safe-install-note')),
       300,
       scrollable: find.byType(Scrollable).first,
     );
-    expect(find.text('Free plan: 0 custom connectors. Go: 5.'), findsOneWidget);
+    expect(find.byKey(const Key('safe-install-note')), findsOneWidget);
+    expect(find.text('Safe install'), findsOneWidget);
   });
 
   testWidgets('add connector renders in dark theme', (tester) async {
@@ -124,25 +170,141 @@ void main() {
     expect(find.text('Name'), findsOneWidget);
   });
 
-  testWidgets('empty catalog suggests a way out and fires it', (tester) async {
-    String? query;
+  testWidgets('Free plan blocks custom connectors and offers an upgrade', (
+    tester,
+  ) async {
+    var upgrades = 0;
+    V2CustomConnectorDraft? saved;
     await _pump(
       tester,
       AddConnectorPage(
-        data: _data(suggestions: const []),
-        onSearchChanged: (value) => query = value,
+        data: _data(plan: V2ConnectorPlan.free),
+        onSave: (draft) => saved = draft,
+        onUpgrade: () => upgrades++,
       ),
     );
 
-    expect(find.text('No suggestions'), findsOneWidget);
-    expect(find.text('Clear search'), findsOneWidget);
+    expect(find.text('Plan limit reached'), findsOneWidget);
+    expect(
+      find.textContaining('not available on the Free plan'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Upgrade to Go to add up to 5'), findsOneWidget);
 
-    await tester.tap(find.text('Clear search'));
+    await _enterCustom(
+      tester,
+      name: 'Internal API',
+      endpoint: 'https://api.internal.test/v1',
+    );
+    await tester.tap(find.text('Save'));
     await tester.pump(const Duration(milliseconds: 300));
-    expect(query, '');
+    expect(saved, isNull, reason: 'Free has no custom-connector slots');
+
+    final bannerUpgrade = find.descendant(
+      of: find.byKey(const Key('connector-plan-banner')),
+      matching: find.text('Upgrade'),
+    );
+    await tester.ensureVisible(bannerUpgrade);
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(bannerUpgrade);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(upgrades, 1);
   });
 
-  testWidgets('save is the primary callback and carries the draft', (
+  testWidgets('Go plan shows 5 slots and blocks at the limit', (tester) async {
+    V2CustomConnectorDraft? saved;
+    await _pump(
+      tester,
+      AddConnectorPage(
+        data: _data(plan: V2ConnectorPlan.go, used: 2),
+        onSave: (draft) => saved = draft,
+      ),
+    );
+
+    expect(find.text('2 of 5 custom connectors used on Go.'), findsOneWidget);
+    expect(find.text('3 slots left.'), findsOneWidget);
+
+    await _enterCustom(
+      tester,
+      name: 'Internal API',
+      endpoint: 'https://api.internal.test/v1',
+    );
+    await tester.tap(find.text('Save'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(saved, isNotNull);
+
+    await _pump(
+      tester,
+      AddConnectorPage(
+        data: _data(plan: V2ConnectorPlan.go, used: 5),
+        onSave: (draft) => saved = draft,
+      ),
+    );
+    await tester.drag(
+      find.byType(Scrollable).first,
+      const Offset(0, 3000),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Plan limit reached'), findsOneWidget);
+    expect(
+      find.text('You have used all 5 custom connectors on the Go plan.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('Plus and Pro both show the 20 connector allowance', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      AddConnectorPage(data: _data(plan: V2ConnectorPlan.plus, used: 3)),
+    );
+    expect(find.text('3 of 20 custom connectors used on Plus.'), findsOneWidget);
+    expect(find.text('17 slots left.'), findsOneWidget);
+
+    await _pump(
+      tester,
+      AddConnectorPage(data: _data(plan: V2ConnectorPlan.pro, used: 20)),
+    );
+    expect(find.text('Plan limit reached'), findsOneWidget);
+    expect(
+      find.text('You have used all 20 custom connectors on your plan.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('validation rejects shell metacharacters', (tester) async {
+    V2CustomConnectorDraft? saved;
+    await _pump(
+      tester,
+      AddConnectorPage(data: _data(), onSave: (draft) => saved = draft),
+    );
+
+    await _enterCustom(
+      tester,
+      name: 'Internal API',
+      endpoint: 'https://api.internal.test; rm -rf /',
+    );
+
+    expect(find.byKey(const Key('custom-connector-error')), findsOneWidget);
+    expect(find.textContaining('Remove shell characters'), findsOneWidget);
+    await tester.tap(find.text('Save'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(saved, isNull);
+
+    await _enterCustom(
+      tester,
+      name: 'Internal API',
+      endpoint: 'https://api.internal.test/v1',
+    );
+    expect(find.byKey(const Key('custom-connector-error')), findsNothing);
+    await tester.tap(find.text('Save'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(saved, isNotNull);
+    expect(saved!.url, 'https://api.internal.test/v1');
+  });
+
+  testWidgets('a command cannot name a path outside the workspace', (
     tester,
   ) async {
     V2CustomConnectorDraft? saved;
@@ -151,23 +313,94 @@ void main() {
       AddConnectorPage(data: _data(), onSave: (draft) => saved = draft),
     );
 
-    await tester.enterText(
-      find.byKey(const Key('add-connector-name')),
-      'Internal API',
+    await _enterCustom(
+      tester,
+      name: 'Local tools',
+      endpoint: 'node /etc/passwd',
+      command: true,
     );
-    await tester.pump();
-    await tester.enterText(
-      find.byKey(const Key('add-connector-url')),
-      'https://api.internal.test/v1',
+
+    expect(find.byKey(const Key('custom-connector-error')), findsOneWidget);
+    expect(
+      find.text(
+        'Use a path inside your workspace. Paths like ../ or /etc are not '
+        'allowed.',
+      ),
+      findsOneWidget,
     );
-    await tester.pump();
     await tester.tap(find.text('Save'));
     await tester.pump(const Duration(milliseconds: 300));
+    expect(saved, isNull);
 
+    await _enterCustom(
+      tester,
+      name: 'Local tools',
+      endpoint: 'node /workspace/server.js',
+      command: true,
+    );
+    expect(find.byKey(const Key('custom-connector-error')), findsNothing);
+    await tester.tap(find.text('Save'));
+    await tester.pump(const Duration(milliseconds: 300));
     expect(saved, isNotNull);
-    expect(saved!.name, 'Internal API');
-    expect(saved!.url, 'https://api.internal.test/v1');
-    expect(saved!.auth, V2ConnectorAuth.apiKey);
+    expect(saved!.target, V2ConnectorTarget.command);
+    expect(saved!.command, 'node /workspace/server.js');
+  });
+
+  testWidgets('test connection is wired and shows the result', (tester) async {
+    V2CustomConnectorDraft? tested;
+    await _pump(
+      tester,
+      AddConnectorPage(
+        data: _data(testResult: true),
+        onTestConnection: (draft) => tested = draft,
+      ),
+    );
+
+    await _enterCustom(
+      tester,
+      name: 'Internal API',
+      endpoint: 'https://api.internal.test/v1',
+    );
+    await tester.scrollUntilVisible(
+      find.text('Test connection'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.ensureVisible(find.text('Test connection'));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('Test connection'));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(tested, isNotNull);
+    expect(tested!.url, 'https://api.internal.test/v1');
+    expect(
+      find.text('Connection works. You can save this connector.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('the blocked state explains that chat cannot install plugins', (
+    tester,
+  ) async {
+    var backs = 0;
+    await _pump(
+      tester,
+      AddConnectorPage(
+        data: _data(status: V2AddConnectorStatus.blocked),
+        onBack: () => backs++,
+      ),
+    );
+
+    expect(find.text('Plugins are added here, not in chat'), findsOneWidget);
+    expect(
+      find.textContaining('never installs plugins or connectors from a chat'),
+      findsOneWidget,
+    );
+    expect(find.text('Back to connectors'), findsOneWidget);
+
+    await tester.tap(find.text('Back to connectors'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(backs, 1);
   });
 
   testWidgets('execute permission switch reports the new value', (
@@ -200,70 +433,6 @@ void main() {
     expect(value, isTrue);
   });
 
-  testWidgets('test connection is wired and shows the result', (tester) async {
-    var tests = 0;
-    await _pump(
-      tester,
-      AddConnectorPage(
-        data: _data(testResult: true),
-        onTestConnection: (draft) => tests++,
-      ),
-    );
-
-    await tester.scrollUntilVisible(
-      find.text('Test connection'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.ensureVisible(find.text('Test connection'));
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.text('Test connection'));
-    await tester.pump(const Duration(milliseconds: 300));
-
-    expect(tests, 1);
-    expect(
-      find.text('Connection works. You can save this connector.'),
-      findsOneWidget,
-    );
-  });
-
-  testWidgets('plan limit disables saving and offers an upgrade', (
-    tester,
-  ) async {
-    var upgrades = 0;
-    V2CustomConnectorDraft? saved;
-    await _pump(
-      tester,
-      AddConnectorPage(
-        data: const V2AddConnectorData(
-          planLimitReached: true,
-          planLimitMessage: 'Free plan includes 0 custom connectors.',
-        ),
-        onSave: (draft) => saved = draft,
-        onUpgrade: () => upgrades++,
-      ),
-    );
-
-    await tester.scrollUntilVisible(
-      find.text('Plan limit reached'),
-      300,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.text('Plan limit reached'), findsOneWidget);
-    expect(
-      find.text('Free plan includes 0 custom connectors.'),
-      findsOneWidget,
-    );
-
-    await tester.tap(find.text('Save'));
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(saved, isNull);
-
-    await tester.tap(find.text('Upgrade').last);
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(upgrades, 1);
-  });
-
   testWidgets('choosing sign-in explains that auth is required', (
     tester,
   ) async {
@@ -273,6 +442,13 @@ void main() {
       AddConnectorPage(data: _data(), onAuthChanged: (value) => auth = value),
     );
 
+    await tester.scrollUntilVisible(
+      find.text('OAuth'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.ensureVisible(find.text('OAuth'));
+    await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(find.text('OAuth'));
     await tester.pump(const Duration(milliseconds: 300));
 
@@ -295,20 +471,86 @@ void main() {
     expect(added, 'supabase');
   });
 
-  testWidgets('renders at 320 dp with 200% text without overflow', (
-    tester,
-  ) async {
-    await _pumpCompact(
+  testWidgets('adding a suggestion fills the name field', (tester) async {
+    await _pump(
       tester,
-      AddConnectorPage(data: _data(testResult: false)),
+      AddConnectorPage(data: _data(), onAddSuggested: (_) {}),
     );
 
-    // Walk the whole page so every lazily built child lays out.
-    for (var i = 0; i < 10; i++) {
-      await tester.drag(find.byType(Scrollable).first, const Offset(0, -260));
-      await tester.pump(const Duration(milliseconds: 300));
-      expect(tester.takeException(), isNull);
-    }
+    await tester.tap(find.text('Add').first);
+    await tester.pump(const Duration(milliseconds: 300));
+
+    final field = tester.widget<TextField>(
+      find.byKey(const Key('add-connector-name')),
+    );
+    expect(field.controller?.text, 'Supabase');
+  });
+
+  testWidgets('empty catalog suggests a way out and fires it', (tester) async {
+    String? query;
+    await _pump(
+      tester,
+      AddConnectorPage(
+        data: _data(suggestions: const []),
+        onSearchChanged: (value) => query = value,
+      ),
+    );
+
+    expect(find.text('No suggestions'), findsOneWidget);
+    expect(find.text('Clear search'), findsOneWidget);
+
+    await tester.tap(find.text('Clear search'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(query, '');
+  });
+
+  testWidgets('a missing plan note hides the note row', (tester) async {
+    await _pump(tester, AddConnectorPage(data: _data(planNote: '')));
+
+    expect(find.textContaining('Custom connectors —'), findsNothing);
+  });
+
+  testWidgets('error state offers a retry', (tester) async {
+    var retries = 0;
+    await _pump(
+      tester,
+      AddConnectorPage(
+        data: _data(status: V2AddConnectorStatus.error),
+        onRetry: () => retries++,
+      ),
+    );
+
+    expect(find.text('Something went wrong'), findsOneWidget);
+    await tester.tap(find.text('Try again'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(retries, 1);
+  });
+
+  for (final dark in <bool>[false, true]) {
+    testWidgets('fits 320 dp at 200% text (${dark ? 'dark' : 'light'})', (
+      tester,
+    ) async {
+      await _pumpCompact(
+        tester,
+        AddConnectorPage(data: _data(testResult: false)),
+        theme: dark ? OTheme.dark() : OTheme.light(),
+      );
+
+      // Walk the whole page so every lazily built child lays out.
+      for (var i = 0; i < 12; i++) {
+        await tester.drag(find.byType(Scrollable).first, const Offset(0, -260));
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(tester.takeException(), isNull);
+      }
+    });
+  }
+
+  testWidgets('the blocked state fits 320 dp at 200% text', (tester) async {
+    await _pumpCompact(
+      tester,
+      AddConnectorPage(data: _data(status: V2AddConnectorStatus.blocked)),
+    );
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('auth choices stay readable at 320 dp with 200% text', (
@@ -374,7 +616,7 @@ void main() {
     expect(tester.getSize(find.bySemanticsLabel('Save')), const Size(48, 48));
   });
 
-  testWidgets('save needs a name and a server URL', (tester) async {
+  testWidgets('save needs a name and a valid endpoint', (tester) async {
     V2CustomConnectorDraft? saved;
     await _pump(
       tester,
@@ -402,42 +644,5 @@ void main() {
     await tester.tap(find.text('Save'));
     await tester.pump(const Duration(milliseconds: 300));
     expect(saved, isNotNull);
-  });
-
-  testWidgets('adding a suggestion fills the name field', (tester) async {
-    await _pump(
-      tester,
-      AddConnectorPage(data: _data(), onAddSuggested: (_) {}),
-    );
-
-    await tester.tap(find.text('Add').first);
-    await tester.pump(const Duration(milliseconds: 300));
-
-    final field = tester.widget<TextField>(
-      find.byKey(const Key('add-connector-name')),
-    );
-    expect(field.controller?.text, 'Supabase');
-  });
-
-  testWidgets('a missing plan note hides the note row', (tester) async {
-    await _pump(tester, AddConnectorPage(data: _data(planNote: '')));
-
-    expect(find.textContaining('Free plan:'), findsNothing);
-  });
-
-  testWidgets('error state offers a retry', (tester) async {
-    var retries = 0;
-    await _pump(
-      tester,
-      AddConnectorPage(
-        data: _data(status: V2AddConnectorStatus.error),
-        onRetry: () => retries++,
-      ),
-    );
-
-    expect(find.text('Something went wrong'), findsOneWidget);
-    await tester.tap(find.text('Try again'));
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(retries, 1);
   });
 }

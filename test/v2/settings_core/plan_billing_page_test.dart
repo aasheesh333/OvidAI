@@ -82,6 +82,7 @@ V2PlanBillingData _billingData({
   V2PlanBillingStatus status = V2PlanBillingStatus.ready,
   V2Currency currency = V2Currency.usd,
   V2BillingPeriod period = V2BillingPeriod.monthly,
+  String currentPlanId = 'free',
   List<V2Plan> plans = _plans,
   List<V2BillingHistoryEntry> history = const [],
   ValueChanged<V2Currency>? onCurrencyChanged,
@@ -96,7 +97,7 @@ V2PlanBillingData _billingData({
     status: status,
     currency: currency,
     period: period,
-    currentPlanId: 'free',
+    currentPlanId: currentPlanId,
     plans: plans,
     history: history,
     onCurrencyChanged: onCurrencyChanged,
@@ -108,6 +109,16 @@ V2PlanBillingData _billingData({
     onRetry: onRetry,
   );
 }
+
+Finder _inCard(String planId, String text) => find.descendant(
+  of: find.byKey(ValueKey<String>('plan-card-$planId')),
+  matching: find.text(text),
+);
+
+Finder _inTable(String text) => find.descendant(
+  of: find.byKey(const ValueKey<String>('plan-compare-table')),
+  matching: find.text(text),
+);
 
 Widget _app(ThemeData theme, V2PlanBillingData data) {
   return MaterialApp(
@@ -132,26 +143,156 @@ void main() {
     expect(find.text('Plan & billing'), findsOneWidget);
     expect(find.text('ACCOUNT TIER'), findsOneWidget);
     expect(find.text('Current plan'), findsOneWidget);
-    expect(find.text('Free'), findsOneWidget);
-    expect(find.text(r'$0'), findsOneWidget);
-    expect(find.text('Go'), findsOneWidget);
-    expect(find.text(r'$5'), findsOneWidget);
-    expect(find.text('Plus'), findsOneWidget);
-    expect(find.text(r'$18'), findsOneWidget);
-    expect(find.text('Pro'), findsOneWidget);
-    expect(find.text(r'$99'), findsOneWidget);
+    expect(_inCard('free', 'Free'), findsOneWidget);
+    expect(_inCard('free', r'$0'), findsOneWidget);
+    expect(_inCard('go', 'Go'), findsOneWidget);
+    expect(_inCard('go', r'$5'), findsOneWidget);
+    expect(_inCard('plus', 'Plus'), findsOneWidget);
+    expect(_inCard('plus', r'$18'), findsOneWidget);
+    expect(_inCard('pro', 'Pro'), findsOneWidget);
+    expect(_inCard('pro', r'$99'), findsOneWidget);
     expect(find.text('Most popular'), findsOneWidget);
     expect(find.text('Monthly'), findsOneWidget);
     expect(find.text('Yearly'), findsOneWidget);
-    expect(find.text('3 GB storage'), findsOneWidget);
-    expect(find.text('5 GB storage'), findsOneWidget);
-    expect(find.text('15 GB storage'), findsOneWidget);
-    expect(find.text('75 GB storage'), findsOneWidget);
-    expect(find.text('Auto only'), findsOneWidget);
+    expect(_inCard('free', '3 GB'), findsOneWidget);
+    expect(_inCard('go', '5 GB'), findsOneWidget);
+    expect(_inCard('plus', '15 GB'), findsOneWidget);
+    expect(_inCard('pro', '75 GB'), findsOneWidget);
+    expect(find.text('Auto only'), findsNWidgets(4));
     expect(find.text('PAYMENT HISTORY'), findsOneWidget);
     expect(find.text('No payments yet'), findsOneWidget);
     expect(find.text('Restore purchases'), findsOneWidget);
     expect(find.textContaining('Google Play'), findsOneWidget);
+  });
+
+  testWidgets('every plan card shows the exact limits from the plan table', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(_app(OTheme.light(), _billingData()));
+    await tester.pumpAndSettle();
+
+    const expected = <String, List<String>>{
+      'free': [
+        '3 GB',
+        '50 files / day',
+        '80 files max / project',
+        'Auto only',
+        '1× auto',
+      ],
+      'go': [
+        '5 GB',
+        '80 files / 3 h',
+        '100 files max / project',
+        'Auto only',
+        '1.5× auto',
+      ],
+      'plus': [
+        '15 GB',
+        '80 files / 3 h',
+        '150 files max / project',
+        'Auto + manual models',
+        '5× auto',
+      ],
+      'pro': [
+        '75 GB',
+        '80 files / 3 h',
+        '250 files max / project',
+        'Auto + manual models',
+        '20× auto',
+      ],
+    };
+
+    for (final entry in expected.entries) {
+      for (final text in entry.value) {
+        expect(
+          _inCard(entry.key, text),
+          findsOneWidget,
+          reason: '${entry.key} should show "$text"',
+        );
+      }
+    }
+  });
+
+  testWidgets('plan limits table compares all four plans and gates models', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(_app(OTheme.light(), _billingData()));
+    await tester.pumpAndSettle();
+
+    expect(find.text('PLAN LIMITS'), findsOneWidget);
+    expect(_inTable('Go'), findsOneWidget);
+    expect(_inTable('Plus'), findsOneWidget);
+    expect(_inTable('Pro'), findsOneWidget);
+
+    for (final text in [
+      'Storage',
+      'Files / day',
+      'Files / project',
+      'Model access',
+      'Auto multiplier',
+      'Custom connectors',
+      'Token caps',
+      'Price',
+    ]) {
+      expect(_inTable(text), findsOneWidget, reason: 'row $text');
+    }
+
+    expect(_inTable('100 max'), findsOneWidget);
+    expect(_inTable('150 max'), findsOneWidget);
+    expect(_inTable('250 max'), findsOneWidget);
+    expect(_inTable('Auto + manual'), findsNWidgets(2));
+    expect(_inTable('1.5×'), findsOneWidget);
+    expect(_inTable('5×'), findsOneWidget);
+    expect(_inTable('20×'), findsOneWidget);
+    expect(_inTable('75M / 24 h'), findsOneWidget);
+    expect(_inTable('1.5B / 30 d'), findsOneWidget);
+
+    expect(find.text('Auto mode only'), findsOneWidget);
+    expect(
+      find.textContaining('Manual models unlock with Plus or Pro'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+    'the comparison column follows the current plan and file windows',
+    (tester) async {
+      _phoneSize(tester);
+      await tester.pumpWidget(
+        _app(OTheme.light(), _billingData(currentPlanId: 'go')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey<String>('plan-compare-current-go')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey<String>('plan-compare-header-go')),
+        findsOneWidget,
+      );
+      // Free is 50/day; the three paid plans normalise 80 every 3 h to 640/day.
+      expect(_inTable('50 / day'), findsOneWidget);
+      expect(_inTable('640 / day'), findsNWidgets(3));
+      expect(_inTable('80 / 3 h'), findsNWidgets(3));
+    },
+  );
+
+  testWidgets('the current plan badge follows the current plan id', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(
+      _app(OTheme.light(), _billingData(currentPlanId: 'plus')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Current plan'), findsOneWidget);
+    expect(_inCard('plus', 'Current plan'), findsOneWidget);
+    expect(_inCard('plus', '15 GB'), findsOneWidget);
+    expect(find.text('Select Plus'), findsNothing);
   });
 
   testWidgets('renders correctly in dark', (tester) async {
@@ -161,7 +302,8 @@ void main() {
 
     expect(find.text('Plan & billing'), findsOneWidget);
     expect(find.text('Most popular'), findsOneWidget);
-    expect(find.text(r'$18'), findsOneWidget);
+    expect(_inCard('plus', r'$18'), findsOneWidget);
+    expect(_inTable(r'$18'), findsOneWidget);
   });
 
   testWidgets('empty state retry fires', (tester) async {
@@ -228,15 +370,28 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text(r'$5'), findsOneWidget);
+    expect(_inCard('go', r'$5'), findsOneWidget);
     await tester.tap(find.text('INR (₹)'));
     await tester.pumpAndSettle();
 
     expect(changes, [V2Currency.inr]);
-    expect(find.text('₹0'), findsOneWidget);
-    expect(find.text('₹499'), findsOneWidget);
-    expect(find.text('₹1,799'), findsOneWidget);
-    expect(find.text('₹9,999'), findsOneWidget);
+    for (final entry in const {
+      'free': '₹0',
+      'go': '₹499',
+      'plus': '₹1,799',
+      'pro': '₹9,999',
+    }.entries) {
+      expect(
+        _inCard(entry.key, entry.value),
+        findsOneWidget,
+        reason: '${entry.key} card',
+      );
+      expect(
+        _inTable(entry.value),
+        findsOneWidget,
+        reason: '${entry.key} comparison column',
+      );
+    }
   });
 
   testWidgets('billing period toggle updates the prices', (tester) async {
@@ -264,15 +419,21 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text(r'$5'), findsOneWidget);
+    expect(_inCard('go', r'$5'), findsOneWidget);
     await tester.tap(find.text('Yearly'));
     await tester.pumpAndSettle();
 
     expect(changes, [V2BillingPeriod.yearly]);
-    expect(find.text(r'$50'), findsOneWidget);
-    expect(find.text(r'$180'), findsOneWidget);
-    expect(find.text(r'$990'), findsOneWidget);
-    expect(find.text('/ year'), findsNWidgets(4));
+    for (final entry in const {
+      'go': r'$50',
+      'plus': r'$180',
+      'pro': r'$990',
+    }.entries) {
+      expect(_inCard(entry.key, entry.value), findsOneWidget);
+      expect(_inTable(entry.value), findsOneWidget);
+    }
+    expect(_inCard('go', '/ year'), findsOneWidget);
+    expect(_inTable('/ year'), findsNWidgets(4));
   });
 
   testWidgets('payment history renders and rows call the callback', (
@@ -416,8 +577,17 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(AnimatedOpacity), findsNothing);
-    for (final label in ['Free', 'Go', 'Plus', 'Pro']) {
-      expect(find.text(label), findsOneWidget, reason: '$label stays visible');
+    for (final entry in const {
+      'free': 'Free',
+      'go': 'Go',
+      'plus': 'Plus',
+      'pro': 'Pro',
+    }.entries) {
+      expect(
+        _inCard(entry.key, entry.value),
+        findsOneWidget,
+        reason: '${entry.value} stays visible',
+      );
     }
     expect(find.text('Plus plan'), findsOneWidget);
   });

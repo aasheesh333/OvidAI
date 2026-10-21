@@ -3,6 +3,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/chat/chat_page.dart';
+import 'package:ovid_ai/ui/v2/chat/model_chip.dart';
+import 'package:ovid_ai/ui/v2/chat/queue_dock.dart';
 
 Widget _app(Widget home, {bool dark = false}) =>
     MaterialApp(theme: dark ? OTheme.dark() : OTheme.light(), home: home);
@@ -372,4 +374,124 @@ void main() {
     expect(errors, isEmpty);
     expect(find.text('Ovid Si'), findsOneWidget);
   });
+
+  testWidgets('top bar uses the shared model chip with plan and subagents', (
+    tester,
+  ) async {
+    var taps = 0;
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(
+          data: const V2ChatPageData(
+            modelLabel: 'Ovid Pro 1.5',
+            autoOnly: true,
+            subagentCount: 3,
+          ),
+          onModelChipTap: () => taps++,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final chip = tester.widget<V2ModelChip>(find.byType(V2ModelChip));
+    expect(chip.label, 'Ovid Pro 1.5');
+    expect(chip.autoOnly, isTrue);
+    expect(chip.subagentCount, 3);
+    expect(chip.enabled, isTrue);
+    expect(
+      find.bySemanticsLabel(
+        'Model: Ovid Pro 1.5. Auto only. 3 subagents. Change model',
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byType(V2ModelChip));
+    await tester.pump();
+    expect(taps, 1);
+  });
+
+  testWidgets('model chip is disabled when the host cannot change models', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(const V2ChatPage(data: V2ChatPageData())));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final chip = tester.widget<V2ModelChip>(find.byType(V2ModelChip));
+    expect(chip.enabled, isFalse);
+    expect(
+      find.bySemanticsLabel('Model: Auto. Model selection unavailable'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('plus callback replaces the file picker', (tester) async {
+    var plus = 0;
+    var attaches = 0;
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(
+          data: const V2ChatPageData(),
+          onPlus: () => plus++,
+          onAttach: () => attaches++,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.bySemanticsLabel('Add attachment or action'), findsOneWidget);
+    expect(find.bySemanticsLabel('Attach a file'), findsNothing);
+
+    await tester.tap(find.bySemanticsLabel('Add attachment or action'));
+    await tester.pump();
+
+    expect(plus, 1);
+    expect(attaches, 0);
+  });
+
+  testWidgets('composer keeps the picker when no plus callback is given', (
+    tester,
+  ) async {
+    var attaches = 0;
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(data: const V2ChatPageData(), onAttach: () => attaches++),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.bySemanticsLabel('Attach a file'), findsOneWidget);
+    expect(find.bySemanticsLabel('Add attachment or action'), findsNothing);
+
+    await tester.tap(find.bySemanticsLabel('Attach a file'));
+    await tester.pump();
+
+    expect(attaches, 1);
+  });
+
+  testWidgets('queued messages surface in the dock above the composer', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        V2ChatPage(
+          data: const V2ChatPageData(
+            queuedCount: 2,
+            queuedPreview: 'Add the pricing page',
+          ),
+          onStop: _noop,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byType(V2QueueDock), findsOneWidget);
+    expect(find.text('2 queued messages'), findsOneWidget);
+    expect(find.text('Add the pricing page'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.byType(V2QueueDock)).dy,
+      lessThan(tester.getTopLeft(find.byType(TextField)).dy),
+    );
+  });
 }
+
+void _noop() {}

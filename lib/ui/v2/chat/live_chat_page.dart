@@ -8,6 +8,10 @@ import '../../design/o_tokens.dart';
 import 'composer_attachments.dart';
 import 'composer_mentions.dart';
 import 'composer_voice.dart';
+import 'message_blocks.dart';
+import 'model_chip.dart';
+import 'queue_dock.dart';
+import 'voice_reply_card.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
 
@@ -78,6 +82,13 @@ class V2LiveArtifact extends V2LiveChatItem {
   final IconData icon;
 }
 
+/// A spoken answer with the visual summary card that backs it up.
+class V2LiveVoiceReply extends V2LiveChatItem {
+  const V2LiveVoiceReply({required super.id, required this.reply});
+
+  final V2VoiceReplyData reply;
+}
+
 /// Immutable view data for an active chat.
 @immutable
 class V2LiveChatData {
@@ -97,7 +108,11 @@ class V2LiveChatData {
     this.emptyTitle = 'No messages yet',
     this.emptyMessage = 'Ask Ovid to build something and it will show up here.',
     this.emptyActionLabel = 'Start a chat',
-  });
+    this.queuedCount = 0,
+    this.queuedPreview,
+    this.autoOnly = false,
+    this.subagentCount = 0,
+  }) : assert(subagentCount >= 0, 'subagentCount cannot be negative');
 
   final String title;
   final String? sessionId;
@@ -114,6 +129,19 @@ class V2LiveChatData {
   final String emptyTitle;
   final String emptyMessage;
   final String emptyActionLabel;
+
+  /// Messages waiting for the active run to finish.
+  final int queuedCount;
+
+  /// Preview of the next queued message. Null/empty omits the preview line.
+  final String? queuedPreview;
+
+  /// Free and Go are Auto-only. The model chip shows a lock and speaks
+  /// "Auto only"; it stays tappable so the upgrade menu can open.
+  final bool autoOnly;
+
+  /// Subagents launched in this session, shown as a badge on the model chip.
+  final int subagentCount;
 }
 
 /// A live transcript with thinking, tools, markdown and generated artifacts.
@@ -129,13 +157,23 @@ class V2LiveChatPage extends StatefulWidget {
     this.onSend,
     this.onStop,
     this.onDownload,
+    this.onCopyCode,
+    this.onOpenLink,
+    this.onDownloadLink,
     this.onThinkingToggle,
     this.onStartChat,
     this.onRetry,
     this.onAttach,
+    this.onPlus,
     this.onMic,
     this.onDraftChanged,
+    this.onSendQueuedNow,
+    this.onDismissQueued,
     this.onSubmit,
+    this.onVoicePlay,
+    this.onVoiceSeek,
+    this.onVoiceAction,
+    this.onVoiceTranscriptToggle,
     this.mentionSource,
     this.attachmentPicker,
     this.voiceService,
@@ -151,16 +189,50 @@ class V2LiveChatPage extends StatefulWidget {
   final ValueChanged<String>? onSend;
   final VoidCallback? onStop;
   final ValueChanged<String>? onDownload;
+
+  /// Copy the text of a code block in an assistant message.
+  final ValueChanged<String>? onCopyCode;
+
+  /// Open an image or non-download link from an assistant message.
+  final ValueChanged<String>? onOpenLink;
+
+  /// Download an artifact or download link from an assistant message.
+  final ValueChanged<String>? onDownloadLink;
+
   final void Function(String id, bool expanded)? onThinkingToggle;
   final VoidCallback? onStartChat;
   final VoidCallback? onRetry;
   final VoidCallback? onAttach;
+
+  /// When supplied, the composer "+" opens the host's plus menu instead of
+  /// the file picker. Null keeps the default picker behaviour.
+  final VoidCallback? onPlus;
+
   final VoidCallback? onMic;
   final ValueChanged<String>? onDraftChanged;
+
+  /// Send the queued message immediately by cancelling the active run. This
+  /// is the same behaviour as [onStop]; when null the dock falls back to it.
+  final VoidCallback? onSendQueuedNow;
+
+  /// Remove the queued message without sending it.
+  final VoidCallback? onDismissQueued;
 
   /// Rich send callback: text, staged files and the ids the draft references.
   /// When provided it replaces [onSend].
   final ValueChanged<V2ComposerSubmission>? onSubmit;
+
+  /// Play or pause a voice reply, by item id.
+  final ValueChanged<String>? onVoicePlay;
+
+  /// Seek inside a voice reply, by item id and position.
+  final void Function(String id, Duration position)? onVoiceSeek;
+
+  /// Open the next action attached to a voice reply's visual card.
+  final ValueChanged<String>? onVoiceAction;
+
+  /// The transcript was expanded or collapsed for a voice reply.
+  final void Function(String id, bool expanded)? onVoiceTranscriptToggle;
 
   /// `@` suggestion source. Defaults to the live root chats and projects.
   final V2MentionSource? mentionSource;
@@ -186,6 +258,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   late final TextEditingController _controller;
   late final V2VoiceDictation _voice;
   final Set<String> _expandedThinking = <String>{};
+  final Set<String> _expandedTranscripts = <String>{};
 
   final List<V2ComposerAttachment> _attachments = [];
   final Map<String, String> _pickedSessionIds = {};
@@ -240,7 +313,9 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   }
 
   V2MentionSource get _mentionSource =>
-      widget.mentionSource ?? const V2AppMentionSource();
+      widget.mentionSource ??
+      v2DefaultMentionSource ??
+      const V2EmptyMentionSource();
 
   void _handleControllerChanged() {
     if (_syncingDraft) return;
@@ -305,6 +380,10 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
 
   Future<void> _attach() async {
     if (widget.data.running) return;
+    if (widget.onPlus != null) {
+      widget.onPlus!();
+      return;
+    }
     final picker = widget.attachmentPicker;
     if (picker == null && widget.onAttach != null) {
       widget.onAttach!();
@@ -404,6 +483,17 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     widget.onThinkingToggle?.call(item.id, expanded);
   }
 
+  void _toggleTranscript(V2LiveVoiceReply item, bool expanded) {
+    setState(() {
+      if (expanded) {
+        _expandedTranscripts.add(item.id);
+      } else {
+        _expandedTranscripts.remove(item.id);
+      }
+    });
+    widget.onVoiceTranscriptToggle?.call(item.id, expanded);
+  }
+
   @override
   Widget build(BuildContext context) {
     final data = widget.data;
@@ -413,6 +503,8 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
         title: data.title,
         subtitle: data.sessionTitle,
         modelLabel: data.modelLabel,
+        autoOnly: data.autoOnly,
+        subagentCount: data.subagentCount,
         onMenu: widget.onMenu,
         onModelChipTap: widget.onModelChipTap,
         onStudio: widget.onStudio,
@@ -445,22 +537,36 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
                 maxHeight: constraints.maxHeight * 0.62,
               ),
               child: SingleChildScrollView(
-                child: _LiveComposer(
-                  data: data,
-                  controller: _controller,
-                  canSend:
-                      !data.running &&
-                      (_controller.text.trim().isNotEmpty ||
-                          (widget.onSubmit != null && _attachments.isNotEmpty)),
-                  attachments: _attachments,
-                  attachmentError: _attachmentError,
-                  voiceError: _voice.error,
-                  listening: _voice.listening,
-                  onRemoveAttachment: _removeAttachment,
-                  onSend: _send,
-                  onStop: widget.onStop,
-                  onAttach: _attach,
-                  onMic: _toggleVoice,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (data.queuedCount > 0)
+                      V2QueueDock(
+                        count: data.queuedCount,
+                        preview: data.queuedPreview ?? '',
+                        onSendNow: widget.onSendQueuedNow ?? widget.onStop,
+                        onDismiss: widget.onDismissQueued,
+                      ),
+                    _LiveComposer(
+                      data: data,
+                      controller: _controller,
+                      canSend:
+                          !data.running &&
+                          (_controller.text.trim().isNotEmpty ||
+                              (widget.onSubmit != null &&
+                                  _attachments.isNotEmpty)),
+                      attachments: _attachments,
+                      attachmentError: _attachmentError,
+                      voiceError: _voice.error,
+                      listening: _voice.listening,
+                      onRemoveAttachment: _removeAttachment,
+                      onSend: _send,
+                      onStop: widget.onStop,
+                      onAttach: _attach,
+                      onPlus: widget.onPlus,
+                      onMic: _toggleVoice,
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -526,7 +632,12 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
       V2LiveUserMessage message => _UserBubble(item: message),
       V2LiveAssistantMessage message => _AssistantFrame(
         showAvatar: showAvatar,
-        child: _AssistantBubble(item: message),
+        child: _AssistantBubble(
+          item: message,
+          onCopyCode: widget.onCopyCode,
+          onOpenLink: widget.onOpenLink,
+          onDownloadLink: widget.onDownloadLink,
+        ),
       ),
       V2LiveThinking message => _AssistantFrame(
         showAvatar: showAvatar,
@@ -544,6 +655,26 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
         showAvatar: showAvatar,
         child: _ArtifactCard(item: message, onDownload: widget.onDownload),
       ),
+      V2LiveVoiceReply message => _AssistantFrame(
+        showAvatar: showAvatar,
+        child: V2VoiceReplyCard(
+          key: ValueKey('voice-reply-${message.id}'),
+          data: message.reply,
+          transcriptExpanded: _expandedTranscripts.contains(message.id),
+          onPlay: widget.onVoicePlay == null
+              ? null
+              : () => widget.onVoicePlay!(message.id),
+          onSeek: widget.onVoiceSeek == null
+              ? null
+              : (position) => widget.onVoiceSeek!(message.id, position),
+          onOpenAction: widget.onVoiceAction == null
+              ? null
+              : () => widget.onVoiceAction!(message.id),
+          onToggleTranscript: message.reply.hasTranscript
+              ? (expanded) => _toggleTranscript(message, expanded)
+              : null,
+        ),
+      ),
     };
   }
 }
@@ -553,6 +684,8 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
     required this.title,
     required this.subtitle,
     required this.modelLabel,
+    required this.autoOnly,
+    required this.subagentCount,
     required this.onMenu,
     required this.onModelChipTap,
     required this.onStudio,
@@ -563,6 +696,8 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
   final String title;
   final String subtitle;
   final String modelLabel;
+  final bool autoOnly;
+  final int subagentCount;
   final VoidCallback? onMenu;
   final VoidCallback? onModelChipTap;
   final VoidCallback? onStudio;
@@ -588,7 +723,13 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
         children: [
           Flexible(
             flex: 3,
-            child: _LiveModelChip(label: modelLabel, onTap: onModelChipTap),
+            child: V2ModelChip(
+              label: modelLabel,
+              autoOnly: autoOnly,
+              subagentCount: subagentCount,
+              enabled: onModelChipTap != null,
+              onTap: onModelChipTap,
+            ),
           ),
           const SizedBox(width: OSpace.xs),
           Flexible(
@@ -635,54 +776,6 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
       bottom: PreferredSize(
         preferredSize: const Size.fromHeight(1),
         child: Divider(height: 1, color: c.hairline),
-      ),
-    );
-  }
-}
-
-class _LiveModelChip extends StatelessWidget {
-  const _LiveModelChip({required this.label, required this.onTap});
-
-  final String label;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OPressable(
-      onTap: onTap,
-      semanticLabel: 'Model: $label. Change model',
-      child: SizedBox(
-        height: OSpace.touch,
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: Container(
-            height: 32,
-            padding: const EdgeInsets.symmetric(horizontal: OSpace.s),
-            decoration: BoxDecoration(
-              color: c.surfaceAlt,
-              borderRadius: BorderRadius.circular(ORadius.pill),
-              border: Border.all(color: c.hairline),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.auto_awesome_rounded, size: 14, color: c.accent),
-                const SizedBox(width: 4),
-                Flexible(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.label.copyWith(color: c.text, fontSize: 13),
-                  ),
-                ),
-                const SizedBox(width: 2),
-                Icon(Icons.expand_more_rounded, size: 16, color: c.textMuted),
-              ],
-            ),
-          ),
-        ),
       ),
     );
   }
@@ -770,9 +863,17 @@ class _AssistantFrame extends StatelessWidget {
 }
 
 class _AssistantBubble extends StatelessWidget {
-  const _AssistantBubble({required this.item});
+  const _AssistantBubble({
+    required this.item,
+    this.onCopyCode,
+    this.onOpenLink,
+    this.onDownloadLink,
+  });
 
   final V2LiveAssistantMessage item;
+  final ValueChanged<String>? onCopyCode;
+  final ValueChanged<String>? onOpenLink;
+  final ValueChanged<String>? onDownloadLink;
 
   @override
   Widget build(BuildContext context) {
@@ -789,7 +890,12 @@ class _AssistantBubble extends StatelessWidget {
         ),
         border: Border.all(color: c.hairline),
       ),
-      child: _MarkdownText(markdown: item.markdown),
+      child: V2MessageBlocks(
+        markdown: item.markdown,
+        onCopyCode: onCopyCode,
+        onOpenLink: onOpenLink,
+        onDownload: onDownloadLink,
+      ),
     );
   }
 }
@@ -1049,87 +1155,6 @@ class _ArtifactCard extends StatelessWidget {
   }
 }
 
-class _MarkdownText extends StatelessWidget {
-  const _MarkdownText({required this.markdown});
-
-  final String markdown;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final lines = markdown.split('\n');
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        for (var i = 0; i < lines.length; i++)
-          Padding(
-            padding: EdgeInsets.only(bottom: i == lines.length - 1 ? 0 : 6),
-            child: _buildLine(c, lines[i]),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildLine(OColors c, String line) {
-    if (line.trim().isEmpty) return const SizedBox(height: 4);
-    if (line.startsWith('## ')) {
-      return Text(line.substring(3), style: OType.h3.copyWith(color: c.text));
-    }
-    final isBullet = line.startsWith('- ');
-    final content = isBullet ? line.substring(2) : line;
-    final text = Text.rich(
-      TextSpan(
-        style: OType.body.copyWith(color: c.text),
-        children: _inline(c, content),
-      ),
-    );
-    if (!isBullet) return text;
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('•', style: OType.body.copyWith(color: c.textMuted)),
-        const SizedBox(width: OSpace.s),
-        Expanded(child: text),
-      ],
-    );
-  }
-
-  List<InlineSpan> _inline(OColors c, String text) {
-    final pattern = RegExp(r'(\*\*[^*]+\*\*|`[^`]+`)');
-    final spans = <InlineSpan>[];
-    var index = 0;
-    for (final match in pattern.allMatches(text)) {
-      if (match.start > index) {
-        spans.add(TextSpan(text: text.substring(index, match.start)));
-      }
-      final token = match.group(0)!;
-      if (token.startsWith('**')) {
-        spans.add(
-          TextSpan(
-            text: token.substring(2, token.length - 2),
-            style: OType.bodyStrong.copyWith(color: c.text),
-          ),
-        );
-      } else {
-        spans.add(
-          TextSpan(
-            text: token.substring(1, token.length - 1),
-            style: OType.mono.copyWith(
-              color: c.accent,
-              backgroundColor: c.codeBg,
-            ),
-          ),
-        );
-      }
-      index = match.end;
-    }
-    if (index < text.length) {
-      spans.add(TextSpan(text: text.substring(index)));
-    }
-    return spans;
-  }
-}
-
 class _LiveComposer extends StatelessWidget {
   const _LiveComposer({
     required this.data,
@@ -1143,6 +1168,7 @@ class _LiveComposer extends StatelessWidget {
     required this.onSend,
     required this.onStop,
     required this.onAttach,
+    required this.onPlus,
     required this.onMic,
   });
 
@@ -1157,6 +1183,7 @@ class _LiveComposer extends StatelessWidget {
   final VoidCallback onSend;
   final VoidCallback? onStop;
   final VoidCallback? onAttach;
+  final VoidCallback? onPlus;
   final VoidCallback? onMic;
 
   @override
@@ -1270,8 +1297,12 @@ class _LiveComposer extends StatelessWidget {
                       ),
                     ),
                     OIconButton(
-                      icon: Icons.attach_file_rounded,
-                      semanticLabel: 'Attach a file',
+                      icon: onPlus != null
+                          ? Icons.add_rounded
+                          : Icons.attach_file_rounded,
+                      semanticLabel: onPlus != null
+                          ? 'Add attachment or action'
+                          : 'Attach a file',
                       onPressed: enabled ? onAttach : null,
                     ),
                     const SizedBox(width: OSpace.xs),

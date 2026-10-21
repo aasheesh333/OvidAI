@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'code_viewer.dart';
+import 'file_tree.dart';
+import 'studio_gate.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
 
@@ -103,42 +106,82 @@ class V2StudioWorkspacePage extends StatefulWidget {
 }
 
 class _V2StudioWorkspacePageState extends State<V2StudioWorkspacePage> {
-  final Set<String> _expanded = <String>{};
+  /// A file the user picked whose code the wiring layer has not delivered yet.
+  /// The viewer opens as soon as [V2StudioWorkspaceData.openFilePath] and the
+  /// code lines catch up, so a live adapter can load file content in the
+  /// background without the page inventing it.
+  String? _pendingViewerPath;
 
-  @override
-  void initState() {
-    super.initState();
-    _expandFoldersForOpenFile(widget.data.fileTree);
-  }
+  bool get _isBound =>
+      widget.data.repoName.trim().isNotEmpty &&
+      widget.data.branch.trim().isNotEmpty;
 
   @override
   void didUpdateWidget(covariant V2StudioWorkspacePage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.data.openFilePath != widget.data.openFilePath) {
-      _expandFoldersForOpenFile(widget.data.fileTree);
+    final pending = _pendingViewerPath;
+    final data = widget.data;
+    if (pending != null &&
+        pending == data.openFilePath &&
+        data.codeLines.isNotEmpty) {
+      _pendingViewerPath = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _pendingViewerPath != null) return;
+        if (widget.data.openFilePath == pending) _openCodeViewer();
+      });
     }
   }
 
-  bool _containsOpenFile(V2FileNode node) {
-    if (node.path == widget.data.openFilePath) return true;
-    return node.children.any(_containsOpenFile);
+  /// Maps a workspace node onto the shared searchable tree. The legacy
+  /// [V2FileNode.changed] flag has no add/delete distinction, so it becomes a
+  /// modification badge.
+  V2FileTreeEntry _treeEntry(V2FileNode node) {
+    return V2FileTreeEntry(
+      name: node.name,
+      path: node.path,
+      isFolder: node.isFolder,
+      change: node.changed ? V2FileChange.modified : null,
+      children: [for (final child in node.children) _treeEntry(child)],
+    );
   }
 
-  void _expandFoldersForOpenFile(List<V2FileNode> nodes) {
-    for (final node in nodes) {
-      if (node.isFolder && _containsOpenFile(node)) {
-        _expanded.add(node.id);
-        _expandFoldersForOpenFile(node.children);
-      }
+  V2CodeViewerData _viewerData() {
+    final data = widget.data;
+    return V2CodeViewerData(
+      fileName: data.openFileName,
+      filePath: data.openFilePath,
+      lines: [
+        for (final line in data.codeLines)
+          V2CodeViewerLine(number: line.number, text: line.text),
+      ],
+    );
+  }
+
+  void _openCodeViewer() {
+    final data = widget.data;
+    if (data.openFilePath.trim().isEmpty && data.codeLines.isEmpty) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (viewerContext) => V2CodeViewerPage(
+          data: _viewerData(),
+          onCopy: widget.onCopyFile,
+          onBack: () => Navigator.of(viewerContext).maybePop(),
+        ),
+      ),
+    );
+  }
+
+  void _selectFile(String path) {
+    widget.onSelectFile?.call(path);
+    final data = widget.data;
+    if (path == data.openFilePath && data.codeLines.isNotEmpty) {
+      _pendingViewerPath = null;
+      _openCodeViewer();
+      return;
     }
-  }
-
-  void _toggleFolder(V2FileNode node) {
-    setState(() {
-      if (!_expanded.add(node.id)) {
-        _expanded.remove(node.id);
-      }
-    });
+    // With a wiring callback the adapter will rebuild this page with the
+    // selected file; didUpdateWidget opens the viewer once its code arrives.
+    _pendingViewerPath = widget.onSelectFile == null ? null : path;
   }
 
   @override
@@ -207,6 +250,13 @@ class _V2StudioWorkspacePageState extends State<V2StudioWorkspacePage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                if (data.repoName.trim().isNotEmpty) ...[
+                  _BindingChip(
+                    repo: data.repoName.trim(),
+                    branch: data.branch.trim(),
+                  ),
+                  const SizedBox(height: OSpace.m),
+                ],
                 if (data.branch.trim().isNotEmpty) ...[
                   _BranchBar(
                     branch: data.branch,
@@ -218,23 +268,36 @@ class _V2StudioWorkspacePageState extends State<V2StudioWorkspacePage> {
                   _SyncBanner(count: data.syncCount, onSync: widget.onSync),
                   const SizedBox(height: OSpace.m),
                 ],
-                _FileExplorer(
-                  nodes: data.fileTree,
-                  expanded: _expanded,
-                  onToggleFolder: _toggleFolder,
-                  onSelectFile: widget.onSelectFile,
-                  openFilePath: data.openFilePath,
-                  fileCount: _countFiles(data.fileTree),
+                V2FileTree(
+                  key: const Key('studio-file-tree'),
+                  data: V2FileTreeData(
+                    status: data.fileTree.isEmpty
+                        ? V2FileTreeStatus.empty
+                        : V2FileTreeStatus.content,
+                    nodes: [for (final node in data.fileTree) _treeEntry(node)],
+                    selectedPath: data.openFilePath.trim().isEmpty
+                        ? null
+                        : data.openFilePath,
+                  ),
+                  onSelectFile: _selectFile,
+                  onRetry: widget.onRetry,
+                  onRefresh: widget.onRetry ?? widget.onSync,
                 ),
                 const SizedBox(height: OSpace.m),
-                _EditorPanel(
-                  fileName: data.openFileName,
-                  lines: data.codeLines,
-                  saved: data.saved,
-                  onCopyFile: data.openFileName.trim().isEmpty
-                      ? null
-                      : widget.onCopyFile,
-                ),
+                if (_isBound)
+                  _EditorPanel(
+                    fileName: data.openFileName,
+                    lines: data.codeLines,
+                    saved: data.saved,
+                    onOpenViewer: data.codeLines.isEmpty
+                        ? null
+                        : _openCodeViewer,
+                    onCopyFile: data.openFileName.trim().isEmpty
+                        ? null
+                        : widget.onCopyFile,
+                  )
+                else
+                  V2StudioGate(onPickRepo: widget.onPickRepo),
                 const SizedBox(height: OSpace.m),
                 const _LiveNote(),
               ],
@@ -243,18 +306,6 @@ class _V2StudioWorkspacePageState extends State<V2StudioWorkspacePage> {
         ),
       ),
     );
-  }
-
-  int _countFiles(List<V2FileNode> nodes) {
-    var count = 0;
-    for (final node in nodes) {
-      if (node.isFolder) {
-        count += _countFiles(node.children);
-      } else {
-        count += 1;
-      }
-    }
-    return count;
   }
 
   Widget _buildDock(BuildContext context) {
@@ -341,6 +392,48 @@ class _V2StudioWorkspacePageState extends State<V2StudioWorkspacePage> {
   }
 }
 
+class _BindingChip extends StatelessWidget {
+  const _BindingChip({required this.repo, required this.branch});
+
+  final String repo;
+  final String branch;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final label = branch.isEmpty
+        ? 'Bound to $repo'
+        : 'Bound to $repo @ $branch';
+    return Container(
+      key: const Key('studio-binding-chip'),
+      padding: const EdgeInsets.symmetric(
+        horizontal: OSpace.m,
+        vertical: OSpace.s,
+      ),
+      decoration: BoxDecoration(
+        color: c.surfaceAlt,
+        borderRadius: BorderRadius.circular(ORadius.m),
+        border: Border.all(color: c.hairline),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.link_rounded, size: 18, color: c.accent),
+          const SizedBox(width: OSpace.s),
+          Expanded(
+            child: Text(
+              label,
+              style: OType.bodySm.copyWith(
+                color: c.text,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _BranchBar extends StatelessWidget {
   const _BranchBar({required this.branch, this.onBranchTap});
 
@@ -349,41 +442,42 @@ class _BranchBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Row(
-      children: [
-        Container(
-          width: 40,
-          height: 40,
-          decoration: BoxDecoration(
-            color: c.surfaceAlt,
-            borderRadius: BorderRadius.circular(ORadius.m),
-          ),
-          child: Icon(Icons.terminal_rounded, size: 20, color: c.accent),
-        ),
-        const SizedBox(width: OSpace.m),
-        Flexible(
-          child: OPressable(
-            onTap: onBranchTap,
-            semanticLabel: 'Branch $branch',
-            child: SizedBox(
-              height: OSpace.touch,
-              // The chip keeps its natural width; a very long branch name
-              // scrolls sideways instead of overflowing or clipping.
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Center(
-                  child: OChip(
-                    label: branch,
-                    icon: Icons.account_tree_outlined,
-                    selected: true,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return Wrap(
+          spacing: OSpace.s,
+          runSpacing: OSpace.s,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: constraints.maxWidth),
+              child: OPressable(
+                onTap: onBranchTap,
+                semanticLabel: 'Branch $branch',
+                child: SizedBox(
+                  height: OSpace.touch,
+                  child: Center(
+                    widthFactor: 1,
+                    child: OChip(
+                      label: branch,
+                      icon: Icons.account_tree_outlined,
+                      selected: true,
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
-        ),
-      ],
+            OButton(
+              key: const Key('studio-change-branch'),
+              label: 'Change branch',
+              icon: Icons.alt_route_rounded,
+              variant: OButtonVariant.secondary,
+              size: OButtonSize.compact,
+              onPressed: onBranchTap,
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -438,7 +532,7 @@ class _SyncBanner extends StatelessWidget {
           const SizedBox(height: OSpace.s),
           Align(
             alignment: Alignment.centerRight,
-            child: OButton(label: 'Sync latest changes', onPressed: onSync),
+            child: _SyncChip(onTap: onSync),
           ),
         ],
       ),
@@ -446,198 +540,52 @@ class _SyncBanner extends StatelessWidget {
   }
 }
 
-class _FileExplorer extends StatelessWidget {
-  const _FileExplorer({
-    required this.nodes,
-    required this.expanded,
-    required this.onToggleFolder,
-    required this.openFilePath,
-    required this.fileCount,
-    this.onSelectFile,
-  });
+class _SyncChip extends StatelessWidget {
+  const _SyncChip({this.onTap});
 
-  final List<V2FileNode> nodes;
-  final Set<String> expanded;
-  final ValueChanged<V2FileNode> onToggleFolder;
-  final ValueChanged<String>? onSelectFile;
-  final String openFilePath;
-  final int fileCount;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return Container(
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(ORadius.l),
-        border: Border.all(color: c.hairline),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              OSpace.l,
-              OSpace.m,
-              OSpace.l,
-              OSpace.s,
+    final enabled = onTap != null;
+    return OPressable(
+      onTap: onTap,
+      semanticLabel: 'Sync latest changes',
+      child: Container(
+        key: const Key('studio-sync-chip'),
+        constraints: const BoxConstraints(minHeight: OSpace.touch),
+        padding: const EdgeInsets.symmetric(
+          horizontal: OSpace.m,
+          vertical: OSpace.s,
+        ),
+        decoration: BoxDecoration(
+          color: c.accentSoft,
+          borderRadius: BorderRadius.circular(ORadius.pill),
+          border: Border.all(color: c.accentFill.withValues(alpha: 0.35)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.sync_rounded,
+              size: 18,
+              color: enabled ? c.accent : c.textFaint,
             ),
-            child: Row(
-              children: [
-                Icon(Icons.folder_open_rounded, size: 18, color: c.accent),
-                const SizedBox(width: OSpace.s),
-                Expanded(
-                  child: Text(
-                    'EXPLORER',
-                    style: OType.overline.copyWith(color: c.textMuted),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+            const SizedBox(width: OSpace.xs),
+            Flexible(
+              child: Text(
+                'Sync latest changes',
+                style: OType.label.copyWith(
+                  color: enabled ? c.accent : c.textFaint,
                 ),
-                const SizedBox(width: OSpace.s),
-                Text(
-                  fileCount == 1 ? '1 file' : '$fileCount files',
-                  style: OType.caption.copyWith(color: c.textFaint),
-                  maxLines: 1,
-                ),
-              ],
-            ),
-          ),
-          Divider(height: 1, color: c.hairline),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: OSpace.xs),
-            child: OStagger(
-              children: [
-                for (final node in nodes)
-                  _FileTreeTile(
-                    node: node,
-                    depth: 0,
-                    expanded: expanded,
-                    openFilePath: openFilePath,
-                    onToggleFolder: onToggleFolder,
-                    onSelectFile: onSelectFile,
-                  ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _FileTreeTile extends StatelessWidget {
-  const _FileTreeTile({
-    required this.node,
-    required this.depth,
-    required this.expanded,
-    required this.openFilePath,
-    required this.onToggleFolder,
-    this.onSelectFile,
-  });
-
-  final V2FileNode node;
-  final int depth;
-  final Set<String> expanded;
-  final String openFilePath;
-  final ValueChanged<V2FileNode> onToggleFolder;
-  final ValueChanged<String>? onSelectFile;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final isOpen = expanded.contains(node.id);
-    final isSelected =
-        openFilePath.isNotEmpty &&
-        !node.isFolder &&
-        (node.path ?? node.name) == openFilePath;
-    final canTap = node.isFolder || onSelectFile != null;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Material(
-          color: isSelected ? c.accentSoft : Colors.transparent,
-          child: InkWell(
-            onTap: !canTap
-                ? null
-                : node.isFolder
-                ? () => onToggleFolder(node)
-                : () => onSelectFile?.call(node.path ?? node.name),
-            child: Semantics(
-              label: '${node.isFolder ? 'Folder' : 'File'} ${node.name}',
-              button: canTap,
-              enabled: canTap,
-              expanded: node.isFolder ? isOpen : null,
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(minHeight: OSpace.touch),
-                child: Padding(
-                  padding: EdgeInsets.only(
-                    left: OSpace.m + depth * OSpace.l,
-                    right: OSpace.l,
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        node.isFolder
-                            ? (isOpen
-                                  ? Icons.folder_open_rounded
-                                  : Icons.folder_rounded)
-                            : Icons.description_outlined,
-                        size: 19,
-                        color: isSelected ? c.accent : c.textMuted,
-                      ),
-                      const SizedBox(width: OSpace.s),
-                      Expanded(
-                        child: Text(
-                          node.name,
-                          style: OType.bodySm.copyWith(
-                            color: isSelected ? c.accent : c.text,
-                            fontWeight: isSelected
-                                ? FontWeight.w600
-                                : FontWeight.w400,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      if (node.changed)
-                        Container(
-                          width: 7,
-                          height: 7,
-                          decoration: BoxDecoration(
-                            color: c.accent,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                      if (node.isFolder) ...[
-                        const SizedBox(width: OSpace.xs),
-                        Icon(
-                          isOpen
-                              ? Icons.expand_more_rounded
-                              : Icons.chevron_right_rounded,
-                          size: 20,
-                          color: c.textFaint,
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
-          ),
+          ],
         ),
-        if (node.isFolder && isOpen)
-          for (final child in node.children)
-            _FileTreeTile(
-              node: child,
-              depth: depth + 1,
-              expanded: expanded,
-              openFilePath: openFilePath,
-              onToggleFolder: onToggleFolder,
-              onSelectFile: onSelectFile,
-            ),
-      ],
+      ),
     );
   }
 }
@@ -647,12 +595,14 @@ class _EditorPanel extends StatelessWidget {
     required this.fileName,
     required this.lines,
     required this.saved,
+    this.onOpenViewer,
     this.onCopyFile,
   });
 
   final String fileName;
   final List<V2CodeLine> lines;
   final bool saved;
+  final VoidCallback? onOpenViewer;
   final VoidCallback? onCopyFile;
 
   @override
@@ -705,6 +655,13 @@ class _EditorPanel extends StatelessWidget {
                       ),
                     ],
                   ),
+                ),
+                OIconButton(
+                  key: const Key('studio-open-code-viewer'),
+                  icon: Icons.open_in_full_rounded,
+                  semanticLabel: 'Open file in code viewer',
+                  tooltip: 'Open in viewer',
+                  onPressed: onOpenViewer,
                 ),
                 OIconButton(
                   icon: Icons.copy_rounded,

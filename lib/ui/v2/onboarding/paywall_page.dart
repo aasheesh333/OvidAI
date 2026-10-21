@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'purchase_banner.dart';
 
 // TODO(l10n): move paywall copy to the ARB files.
 
@@ -90,6 +91,8 @@ class V2PaywallData {
     this.loading = false,
     this.purchasing = false,
     this.error,
+    this.purchaseStatus,
+    this.purchaseDetail,
     this.testModeNote,
   });
 
@@ -100,7 +103,18 @@ class V2PaywallData {
   final bool purchasing;
   final String? error;
 
-  /// Shown above the CTA when purchases are simulated (RevenueCat Test Store).
+  /// What the billing layer says happened, rendered by [V2PurchaseBanner].
+  ///
+  /// When null the banner is derived from [error] (failed) and
+  /// [testModeNote] (test store), so existing hosts keep working.
+  final V2PurchaseBannerStatus? purchaseStatus;
+
+  /// Store-provided extra detail for [purchaseStatus], e.g. a failure reason.
+  /// Never replaces the standard banner copy.
+  final String? purchaseDetail;
+
+  /// Legacy test-store note. Still honoured as the banner detail; new hosts
+  /// should pass `purchaseStatus: V2PurchaseBannerStatus.testStore` instead.
   final String? testModeNote;
 }
 
@@ -113,6 +127,7 @@ class PaywallPage extends StatefulWidget {
     this.onStartTrial,
     this.onComparePlans,
     this.onRetry,
+    this.onManageSubscription,
     this.onClose,
   });
 
@@ -122,6 +137,9 @@ class PaywallPage extends StatefulWidget {
   final ValueChanged<String>? onStartTrial;
   final VoidCallback? onComparePlans;
   final VoidCallback? onRetry;
+
+  /// Opens the store's own subscription controls. Hidden when null.
+  final VoidCallback? onManageSubscription;
   final VoidCallback? onClose;
 
   @override
@@ -205,12 +223,43 @@ class _PaywallPageState extends State<PaywallPage> {
     return data.plans.first;
   }
 
+  /// One banner for every billing notice on the paywall.
+  ///
+  /// Explicit [V2PaywallData.purchaseStatus] wins. Otherwise the legacy
+  /// [V2PaywallData.error] and [V2PaywallData.testModeNote] fields map onto
+  /// the matching status, so older hosts do not lose their notice.
+  V2PurchaseBannerData _bannerData(
+    V2PaywallData data,
+    V2PlanOption selectedPlan,
+  ) {
+    final status =
+        data.purchaseStatus ??
+        (data.error != null
+            ? V2PurchaseBannerStatus.failed
+            : data.testModeNote != null
+            ? V2PurchaseBannerStatus.testStore
+            : V2PurchaseBannerStatus.hidden);
+    final detail =
+        data.purchaseDetail ??
+        switch (status) {
+          V2PurchaseBannerStatus.failed => data.error,
+          V2PurchaseBannerStatus.testStore => data.testModeNote,
+          _ => null,
+        };
+    return V2PurchaseBannerData(
+      status: status,
+      planName: selectedPlan.name,
+      detail: detail,
+    );
+  }
+
   Widget _content(
     BuildContext context,
     OColors c,
     V2PaywallData data,
     V2PlanOption selectedPlan,
   ) {
+    final banner = _bannerData(data, selectedPlan);
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
         OSpace.screen,
@@ -309,27 +358,12 @@ class _PaywallPageState extends State<PaywallPage> {
                     ),
                   ],
                 ),
-                if (data.error != null) ...[
+                if (banner.status != V2PurchaseBannerStatus.hidden) ...[
                   const SizedBox(height: OSpace.l),
-                  _InlineError(message: data.error!, onRetry: widget.onRetry),
-                ],
-                if (data.testModeNote != null) ...[
-                  const SizedBox(height: OSpace.l),
-                  Row(
-                    children: [
-                      Icon(
-                        Icons.science_outlined,
-                        size: 16,
-                        color: c.accent,
-                      ),
-                      const SizedBox(width: 6),
-                      Flexible(
-                        child: Text(
-                          data.testModeNote!,
-                          style: OType.caption.copyWith(color: c.accent),
-                        ),
-                      ),
-                    ],
+                  V2PurchaseBanner(
+                    data: banner,
+                    onRetry: widget.onRetry,
+                    onManageSubscription: widget.onManageSubscription,
                   ),
                 ],
                 const SizedBox(height: OSpace.l),
@@ -477,10 +511,7 @@ class _HeroPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 10,
-        vertical: OSpace.xs,
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: OSpace.xs),
       decoration: BoxDecoration(
         color: c.accentSoft,
         borderRadius: BorderRadius.circular(ORadius.pill),
@@ -683,10 +714,7 @@ class _PopularBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 10,
-        vertical: OSpace.xs,
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: OSpace.xs),
       decoration: BoxDecoration(
         color: c.accentFill,
         borderRadius: BorderRadius.circular(ORadius.pill),
@@ -706,52 +734,6 @@ class _PopularBadge extends StatelessWidget {
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _InlineError extends StatelessWidget {
-  const _InlineError({required this.message, this.onRetry});
-
-  final String message;
-  final VoidCallback? onRetry;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Semantics(
-      liveRegion: true,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(
-          OSpace.m,
-          OSpace.s,
-          OSpace.m,
-          OSpace.s,
-        ),
-        decoration: BoxDecoration(
-          color: c.danger.withValues(alpha: 0.10),
-          borderRadius: BorderRadius.circular(ORadius.m),
-          border: Border.all(color: c.danger.withValues(alpha: 0.40)),
-        ),
-        child: Wrap(
-          spacing: OSpace.s,
-          runSpacing: OSpace.s,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            Icon(Icons.error_outline_rounded, size: 20, color: c.danger),
-            Text(
-              message,
-              style: OType.bodySm.copyWith(color: c.danger),
-            ),
-            if (onRetry != null)
-              OButton(
-                label: 'Try again',
-                variant: OButtonVariant.ghost,
-                onPressed: onRetry,
-              ),
-          ],
-        ),
       ),
     );
   }

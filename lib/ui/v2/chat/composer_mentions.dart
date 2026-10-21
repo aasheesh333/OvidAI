@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../../../core/cloud/projects.dart';
-import '../../../core/state.dart';
 import '../../design/o_tokens.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
@@ -133,57 +131,20 @@ abstract class V2MentionSource {
   String? sessionIdForTitle(String title) => null;
 }
 
-/// Live source: root chats from [AppState] and projects from
-/// [ProjectsController].
-class V2AppMentionSource implements V2MentionSource {
-  const V2AppMentionSource();
+/// The live source is installed by `lib/ui/v2/app/mention_source_live.dart`
+/// (or by a test) so this library has no `core/` import and can compile for
+/// web. When null, typing `@` simply shows no suggestions.
+V2MentionSource? v2DefaultMentionSource;
+
+/// Used when no source is installed: no suggestions, no typed-title lookup.
+class V2EmptyMentionSource implements V2MentionSource {
+  const V2EmptyMentionSource();
 
   @override
-  List<V2MentionCandidate> search(String query, {int limit = 5}) {
-    final app = AppState.I;
-    final current = app.activeSessionId;
-    final sessions = <V2MentionCandidate>[
-      for (final session in app.rootSessionsByRecency)
-        if (session.id != current && session.title.trim().isNotEmpty)
-          V2MentionCandidate.session(
-            id: session.id,
-            title: session.title,
-            subtitle: _modelLabel(session.model),
-          ),
-    ];
-    final projects = <V2MentionCandidate>[
-      for (final project in ProjectsController.I.projects)
-        V2MentionCandidate.project(
-          id: project.id,
-          title: project.name,
-          subtitle: _projectSubtitle(project.sessionCount),
-        ),
-    ];
-    return rankV2Mentions(sessions, projects, query, limit: limit);
-  }
+  List<V2MentionCandidate> search(String query, {int limit = 5}) => const [];
 
   @override
-  String? sessionIdForTitle(String title) {
-    final wanted = V2MentionTokens.sanitizeTitle(title).toLowerCase();
-    if (wanted.isEmpty) return null;
-    for (final session in AppState.I.rootSessionsByRecency) {
-      if (V2MentionTokens.sanitizeTitle(session.title).toLowerCase() ==
-          wanted) {
-        return session.id;
-      }
-    }
-    return null;
-  }
-
-  static String _modelLabel(String model) {
-    final raw = model.trim();
-    if (raw.isEmpty || raw == 'Select a provider') return 'Auto';
-    if (raw.toLowerCase() == 'auto') return 'Auto';
-    return raw;
-  }
-
-  static String _projectSubtitle(int count) =>
-      count == 1 ? 'Project · 1 chat' : 'Project · $count chats';
+  String? sessionIdForTitle(String title) => null;
 }
 
 /// Deterministic source for tests and previews.

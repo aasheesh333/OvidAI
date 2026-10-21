@@ -19,6 +19,10 @@ class V2ScheduleItem {
     this.enabled = true,
     this.lastRunFailed = false,
     this.failureMessage,
+    this.sessionTitle,
+    this.createdLabel,
+    this.completedRuns,
+    this.totalRuns,
   });
 
   final String id;
@@ -33,6 +37,27 @@ class V2ScheduleItem {
   final bool enabled;
   final bool lastRunFailed;
   final String? failureMessage;
+
+  /// The chat this schedule was created from, shown for context.
+  final String? sessionTitle;
+
+  /// Plain-English creation date, e.g. "May 12, 2026".
+  final String? createdLabel;
+
+  /// How many runs have finished, and how many were planned in total.
+  final int? completedRuns;
+  final int? totalRuns;
+
+  /// "12 of 30 runs" when both counts are known, otherwise a single count.
+  String? get runCountLabel {
+    if (totalRuns != null) {
+      return '${completedRuns ?? 0} of $totalRuns runs';
+    }
+    if (completedRuns != null) {
+      return '$completedRuns ${completedRuns == 1 ? 'run' : 'runs'} completed';
+    }
+    return null;
+  }
 }
 
 @immutable
@@ -40,7 +65,8 @@ class V2SchedulesData {
   const V2SchedulesData({
     this.status = V2SchedulesStatus.content,
     this.schedules = const <V2ScheduleItem>[],
-    this.errorMessage = 'We could not load your schedules. Check your connection and try again.',
+    this.errorMessage =
+        'We could not load your schedules. Check your connection and try again.',
   });
 
   final V2SchedulesStatus status;
@@ -57,6 +83,9 @@ class SchedulesPage extends StatelessWidget {
     this.onScheduleMenu,
     this.onToggle,
     this.onRetryRun,
+    this.onEdit,
+    this.onRunNow,
+    this.onDelete,
     this.onCreate,
     this.onRetry,
     this.onMore,
@@ -64,9 +93,14 @@ class SchedulesPage extends StatelessWidget {
 
   final V2SchedulesData data;
   final ValueChanged<V2ScheduleItem>? onScheduleTap;
+
+  /// Escape hatch: replaces the built-in Edit / Pause / Run now / Delete menu.
   final ValueChanged<V2ScheduleItem>? onScheduleMenu;
   final void Function(V2ScheduleItem schedule, bool enabled)? onToggle;
   final ValueChanged<V2ScheduleItem>? onRetryRun;
+  final ValueChanged<V2ScheduleItem>? onEdit;
+  final ValueChanged<V2ScheduleItem>? onRunNow;
+  final ValueChanged<V2ScheduleItem>? onDelete;
   final VoidCallback? onCreate;
   final VoidCallback? onRetry;
   final VoidCallback? onMore;
@@ -94,9 +128,8 @@ class SchedulesPage extends StatelessWidget {
               onRetry: onRetry,
             ),
             V2SchedulesStatus.empty => _empty(c),
-            V2SchedulesStatus.content => data.schedules.isEmpty
-                ? _empty(c)
-                : _content(c),
+            V2SchedulesStatus.content =>
+              data.schedules.isEmpty ? _empty(c) : _content(context, c),
           },
         ),
       ),
@@ -129,9 +162,15 @@ class SchedulesPage extends StatelessWidget {
     );
   }
 
-  Widget _content(OColors c) {
-    final active = data.schedules.where((s) => s.enabled).length;
-    final rules = data.schedules.length;
+  Widget _content(BuildContext context, OColors c) {
+    final active = [
+      for (final schedule in data.schedules)
+        if (schedule.enabled) schedule,
+    ];
+    final paused = [
+      for (final schedule in data.schedules)
+        if (!schedule.enabled) schedule,
+    ];
     return ListView(
       padding: const EdgeInsets.fromLTRB(
         OSpace.screen,
@@ -141,22 +180,74 @@ class SchedulesPage extends StatelessWidget {
       ),
       children: [
         _explainer(c),
-        const SizedBox(height: OSpace.l),
-        OSectionHeader(
-          label: 'Active schedules ($active)',
-          padding: EdgeInsets.zero,
-          trailing: Text(
-            '$rules total ${rules == 1 ? 'rule' : 'rules'}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.end,
-            style: OType.caption.copyWith(color: c.textMuted),
+        const SizedBox(height: OSpace.m),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OPill(
+            label: data.schedules.length == 1
+                ? '1 total rule'
+                : '${data.schedules.length} total rules',
           ),
         ),
+        if (active.isNotEmpty) ...[
+          const SizedBox(height: OSpace.l),
+          _group(context, c, 'Active schedules (${active.length})', active),
+        ],
+        if (paused.isNotEmpty) ...[
+          const SizedBox(height: OSpace.l),
+          _group(context, c, 'Paused (${paused.length})', paused),
+        ],
+        const SizedBox(height: OSpace.l),
+        OCard(
+          padding: const EdgeInsets.all(OSpace.m),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.add_alarm_rounded, size: 20, color: c.accent),
+                  const SizedBox(width: OSpace.s),
+                  Expanded(
+                    child: Text(
+                      'Need another one? Ovid can run a second task on its '
+                      'own schedule.',
+                      style: OType.caption.copyWith(color: c.textMuted),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: OSpace.s),
+              Align(
+                alignment: Alignment.centerRight,
+                child: OButton(
+                  label: 'New schedule',
+                  variant: OButtonVariant.ghost,
+                  size: OButtonSize.compact,
+                  onPressed: onCreate,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: OSpace.s),
+      ],
+    );
+  }
+
+  Widget _group(
+    BuildContext context,
+    OColors c,
+    String label,
+    List<V2ScheduleItem> schedules,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        OSectionHeader(label: label, padding: EdgeInsets.zero),
         const SizedBox(height: OSpace.m),
         OStagger(
           children: [
-            for (final schedule in data.schedules) _card(c, schedule),
+            for (final schedule in schedules) _card(context, c, schedule),
           ],
         ),
       ],
@@ -203,11 +294,56 @@ class SchedulesPage extends StatelessWidget {
     );
   }
 
-  Widget _card(OColors c, V2ScheduleItem schedule) {
+  Widget _card(BuildContext context, OColors c, V2ScheduleItem schedule) {
     final onTap = onScheduleTap;
-    final onMenu = onScheduleMenu;
     final onToggleSchedule = onToggle;
     final onRetry = onRetryRun;
+    final runCount = schedule.runCountLabel;
+    final menuEnabled =
+        onScheduleMenu != null ||
+        onEdit != null ||
+        onToggle != null ||
+        onRunNow != null ||
+        onDelete != null;
+    final meta = <Widget>[];
+    void addMeta(
+      IconData icon,
+      String text, {
+      Color? color,
+      bool strong = false,
+    }) {
+      if (meta.isNotEmpty) meta.add(const SizedBox(height: OSpace.s));
+      meta.add(_metaRow(c, icon, text, color: color, strong: strong));
+    }
+
+    if (schedule.rule.isNotEmpty) {
+      addMeta(Icons.schedule_rounded, schedule.rule, color: c.accent);
+    }
+    if (schedule.enabled && schedule.nextRun != null) {
+      addMeta(
+        Icons.update_rounded,
+        'Next: ${schedule.nextRun}',
+        color: c.success,
+        strong: true,
+      );
+    }
+    if (runCount != null) {
+      addMeta(Icons.history_rounded, runCount);
+    }
+    if (schedule.sessionTitle != null && schedule.sessionTitle!.isNotEmpty) {
+      addMeta(
+        Icons.chat_bubble_outline_rounded,
+        'From ${schedule.sessionTitle}',
+      );
+    }
+    if (schedule.createdLabel != null && schedule.createdLabel!.isNotEmpty) {
+      addMeta(
+        Icons.calendar_today_rounded,
+        'Created ${schedule.createdLabel}',
+        color: c.textFaint,
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.m),
       child: OCard(
@@ -231,13 +367,15 @@ class SchedulesPage extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style: OType.bodyStrong.copyWith(color: c.text),
                       ),
-                      const SizedBox(height: 2),
-                      Text(
-                        schedule.description,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.bodySm.copyWith(color: c.textMuted),
-                      ),
+                      if (schedule.description.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          schedule.description,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.bodySm.copyWith(color: c.textMuted),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -258,9 +396,7 @@ class SchedulesPage extends StatelessWidget {
                           thumbColor: WidgetStateProperty.resolveWith(
                             (states) => states.contains(WidgetState.disabled)
                                 ? c.textFaint
-                                : (schedule.enabled
-                                      ? c.onAccent
-                                      : c.textFaint),
+                                : (schedule.enabled ? c.onAccent : c.textFaint),
                           ),
                           trackColor: WidgetStateProperty.resolveWith(
                             (states) =>
@@ -279,15 +415,15 @@ class SchedulesPage extends StatelessWidget {
                       icon: Icons.more_vert_rounded,
                       semanticLabel: 'More options for ${schedule.title}',
                       size: 18,
-                      onPressed: onMenu == null
-                          ? null
-                          : () => onMenu(schedule),
+                      onPressed: menuEnabled
+                          ? () => _openMenu(context, schedule)
+                          : null,
                     ),
                   ],
                 ),
               ],
             ),
-            if (schedule.rule.isNotEmpty) ...[
+            if (meta.isNotEmpty) ...[
               const SizedBox(height: OSpace.m),
               Container(
                 width: double.infinity,
@@ -299,46 +435,7 @@ class SchedulesPage extends StatelessWidget {
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(
-                          Icons.schedule_rounded,
-                          size: 16,
-                          color: c.accent,
-                        ),
-                        const SizedBox(width: OSpace.s),
-                        Expanded(
-                          child: Text(
-                            schedule.rule,
-                            style: OType.bodySm.copyWith(color: c.text),
-                          ),
-                        ),
-                      ],
-                    ),
-                    if (schedule.enabled && schedule.nextRun != null) ...[
-                      const SizedBox(height: OSpace.s),
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.update_rounded,
-                            size: 16,
-                            color: c.success,
-                          ),
-                          const SizedBox(width: OSpace.s),
-                          Expanded(
-                            child: Text(
-                              schedule.nextRun!,
-                              style: OType.caption.copyWith(
-                                color: c.success,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ],
+                  children: meta,
                 ),
               ),
             ],
@@ -350,9 +447,7 @@ class SchedulesPage extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: c.danger.withValues(alpha: 0.10),
                   borderRadius: BorderRadius.circular(ORadius.m),
-                  border: Border.all(
-                    color: c.danger.withValues(alpha: 0.30),
-                  ),
+                  border: Border.all(color: c.danger.withValues(alpha: 0.30)),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -393,6 +488,111 @@ class SchedulesPage extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Widget _metaRow(
+    OColors c,
+    IconData icon,
+    String text, {
+    Color? color,
+    bool strong = false,
+  }) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 1),
+          child: Icon(icon, size: 16, color: color ?? c.textMuted),
+        ),
+        const SizedBox(width: OSpace.s),
+        Expanded(
+          child: Text(
+            text,
+            style: (strong ? OType.caption : OType.bodySm).copyWith(
+              color: color ?? c.text,
+              fontWeight: strong ? FontWeight.w600 : null,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _openMenu(BuildContext context, V2ScheduleItem schedule) async {
+    final override = onScheduleMenu;
+    if (override != null) {
+      override(schedule);
+      return;
+    }
+    final action = await showOSheet<String>(
+      context,
+      title: schedule.title,
+      builder: (sheetContext) {
+        return SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(OSpace.s, 0, OSpace.s, OSpace.l),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              OListRow(
+                icon: Icons.edit_outlined,
+                title: 'Edit',
+                showChevron: false,
+                enabled: onEdit != null,
+                onTap: onEdit == null
+                    ? null
+                    : () => Navigator.of(sheetContext).pop('edit'),
+              ),
+              OListRow(
+                icon: schedule.enabled
+                    ? Icons.pause_circle_outline_rounded
+                    : Icons.play_circle_outline_rounded,
+                title: schedule.enabled ? 'Pause' : 'Resume',
+                subtitle: schedule.enabled
+                    ? 'Stop future runs until you turn it back on.'
+                    : 'Start running on its schedule again.',
+                showChevron: false,
+                enabled: onToggle != null,
+                onTap: onToggle == null
+                    ? null
+                    : () => Navigator.of(sheetContext).pop('toggle'),
+              ),
+              OListRow(
+                icon: Icons.play_arrow_rounded,
+                title: 'Run now',
+                subtitle: 'Start one run without waiting for the next time.',
+                showChevron: false,
+                enabled: onRunNow != null,
+                onTap: onRunNow == null
+                    ? null
+                    : () => Navigator.of(sheetContext).pop('run'),
+              ),
+              OListRow(
+                icon: Icons.delete_outline_rounded,
+                title: 'Delete',
+                subtitle: 'Remove this schedule and stop future runs.',
+                danger: true,
+                showChevron: false,
+                enabled: onDelete != null,
+                onTap: onDelete == null
+                    ? null
+                    : () => Navigator.of(sheetContext).pop('delete'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (!context.mounted || action == null) return;
+    switch (action) {
+      case 'edit':
+        onEdit?.call(schedule);
+      case 'toggle':
+        onToggle?.call(schedule, !schedule.enabled);
+      case 'run':
+        onRunNow?.call(schedule);
+      case 'delete':
+        onDelete?.call(schedule);
+    }
   }
 
   Widget _status(OColors c, V2ScheduleItem schedule) {

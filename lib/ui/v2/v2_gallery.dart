@@ -3,12 +3,16 @@ import 'package:flutter/material.dart';
 import '../design/o_components.dart';
 import '../design/o_theme.dart';
 import '../design/o_tokens.dart';
-import 'v2_registry.dart';
+import 'v2_screen_entry.dart';
 
 /// A QA/review surface for every UI v2 screen. Enabled with
 /// `--dart-define=OVID_UI_V2=true`; never the production home.
 class V2GalleryPage extends StatefulWidget {
-  const V2GalleryPage({super.key});
+  const V2GalleryPage({super.key, required this.screens});
+
+  /// The screens to show. Passed in so this file never imports the registry
+  /// (which reaches native-only core code); the web preview passes a subset.
+  final List<V2ScreenEntry> screens;
 
   @override
   State<V2GalleryPage> createState() => _V2GalleryPageState();
@@ -27,7 +31,8 @@ class _V2GalleryPageState extends State<V2GalleryPage> {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final filtered = v2Screens.where((s) {
+    final all = widget.screens;
+    final filtered = all.where((s) {
       final q = _query.trim().toLowerCase();
       if (q.isEmpty) return true;
       return s.title.toLowerCase().contains(q) ||
@@ -75,7 +80,7 @@ class _V2GalleryPageState extends State<V2GalleryPage> {
               ),
             ),
             Expanded(
-              child: v2Screens.isEmpty
+              child: all.isEmpty
                   ? OEmptyState(
                       icon: Icons.grid_view_rounded,
                       title: 'Screens are still landing',

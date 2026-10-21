@@ -36,6 +36,7 @@ class V2PermissionsPageData {
     this.permissions = const <V2PermissionItem>[],
     this.onRequest,
     this.onOpenSettings,
+    this.onResetAll,
     this.onRetry,
     this.errorMessage = 'We could not load your permissions.',
   });
@@ -46,6 +47,10 @@ class V2PermissionsPageData {
   /// Called with the permission id when the user taps Request.
   final ValueChanged<String>? onRequest;
   final VoidCallback? onOpenSettings;
+
+  /// Revokes every device permission Ovid asked for. Android asks again the
+  /// next time a task needs one.
+  final VoidCallback? onResetAll;
   final VoidCallback? onRetry;
   final String errorMessage;
 }
@@ -95,6 +100,7 @@ class PermissionsPage extends StatelessWidget {
           children: [
             _explainer(context),
             _permissionList(context),
+            _resetSection(context),
             _footer(context),
           ],
         ),
@@ -278,10 +284,7 @@ class PermissionsPage extends StatelessWidget {
     required Color background,
   }) {
     return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 10,
-        vertical: OSpace.xs,
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: OSpace.xs),
       decoration: BoxDecoration(
         color: background,
         borderRadius: BorderRadius.circular(ORadius.pill),
@@ -312,6 +315,105 @@ class PermissionsPage extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  Widget _resetSection(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.xl),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          OSectionHeader(
+            label: 'Reset',
+            padding: const EdgeInsets.only(bottom: OSpace.s),
+          ),
+          OCard(
+            padding: EdgeInsets.zero,
+            child: OListRow(
+              key: const ValueKey('reset-all-permissions-row'),
+              icon: Icons.restart_alt_rounded,
+              title: 'Reset all permissions',
+              subtitle:
+                  'Revoke camera, microphone, photos, notifications and files',
+              danger: true,
+              enabled: data.onResetAll != null,
+              onTap: data.onResetAll == null
+                  ? null
+                  : () => _confirmResetAll(context),
+            ),
+          ),
+          const SizedBox(height: OSpace.s),
+          Text(
+            'Android asks again the next time a task needs one. '
+            'Chats and files are not deleted.',
+            style: OType.caption.copyWith(color: c.textFaint),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _confirmResetAll(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        final c = OColors.of(context);
+        final names = data.permissions.map((item) => item.name).join(', ');
+        return AlertDialog(
+          scrollable: true,
+          backgroundColor: c.surface,
+          icon: Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: c.danger.withValues(alpha: 0.12),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(Icons.restart_alt_rounded, color: c.danger),
+          ),
+          title: Text(
+            'Reset all permissions?',
+            style: OType.h2.copyWith(color: c.text),
+          ),
+          content: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                names.isEmpty
+                    ? 'Ovid will lose every device permission it has.'
+                    : 'Ovid will lose access to $names.',
+                style: OType.bodySm.copyWith(color: c.text),
+              ),
+              const SizedBox(height: OSpace.s),
+              Text(
+                'Android asks again the next time a task needs one. '
+                'This does not delete chats, files or memory.',
+                style: OType.bodySm.copyWith(color: c.textMuted),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              key: const ValueKey('reset-all-permissions-confirm'),
+              onPressed: () => Navigator.pop(context, true),
+              style: FilledButton.styleFrom(
+                backgroundColor: c.danger,
+                foregroundColor: c.onDanger,
+                minimumSize: const Size(0, OSpace.touch),
+              ),
+              child: const Text('Reset all'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed == true) data.onResetAll?.call();
   }
 
   Widget _footer(BuildContext context) {

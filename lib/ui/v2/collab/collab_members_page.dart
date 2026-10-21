@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/collaboration/models.dart' show maxActiveMembers;
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
@@ -19,6 +20,7 @@ class V2CollabMember {
     this.subtitle = '',
     this.role = V2CollabRole.canChat,
     this.isYou = false,
+    this.isCreator = false,
     this.online = false,
     this.initials,
   });
@@ -28,6 +30,11 @@ class V2CollabMember {
   final String subtitle;
   final V2CollabRole role;
   final bool isYou;
+
+  /// True for the person whose account and storage own this room. The creator
+  /// badge is shown even when the owner has transferred the Owner role.
+  final bool isCreator;
+
   final bool online;
   final String? initials;
 }
@@ -40,7 +47,7 @@ class V2CollabMembersPageData {
     this.chatName = '',
     this.members = const [],
     required this.memberCount,
-    required this.capacity,
+    this.capacity = maxActiveMembers,
     this.creatorName = '',
     this.storageUsedLabel = '',
     this.storageTotalLabel = '',
@@ -48,7 +55,7 @@ class V2CollabMembersPageData {
     this.storagePercent = 0,
     this.status = V2CollabMembersStatus.ready,
     this.errorMessage = 'We could not load the member list.',
-  });
+  }) : assert(capacity > 0, 'A room always has a capacity');
 
   final String title;
   final String chatName;
@@ -58,6 +65,8 @@ class V2CollabMembersPageData {
 
   /// The true member count, which can be larger than [members].
   final int memberCount;
+
+  /// Hard room cap, [maxActiveMembers] by default.
   final int capacity;
   final String creatorName;
   final String storageUsedLabel;
@@ -68,6 +77,11 @@ class V2CollabMembersPageData {
   final String errorMessage;
 
   bool get roomFull => capacity > 0 && memberCount >= capacity;
+
+  /// Seats left before the room is full.
+  int get seatsLeft => capacity - memberCount < 0 ? 0 : capacity - memberCount;
+
+  String get capacityLabel => '$memberCount of $capacity members';
 
   /// True once the wiring has supplied storage numbers to show.
   bool get hasStorageInfo =>
@@ -274,11 +288,13 @@ class _SummaryCard extends StatelessWidget {
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               Text(
-                '${data.memberCount} of ${data.capacity} members',
+                data.capacityLabel,
                 style: OType.h2.copyWith(color: c.text),
               ),
               _Tag(
-                label: data.roomFull ? 'Room full' : 'Room open',
+                label: data.roomFull
+                    ? 'Room full'
+                    : '${data.seatsLeft} seats left',
                 tone: data.roomFull ? _TagTone.warn : _TagTone.success,
                 dot: true,
               ),
@@ -289,6 +305,21 @@ class _SummaryCard extends StatelessWidget {
             value: data.capacity == 0 ? 0 : data.memberCount / data.capacity,
           ),
           const SizedBox(height: OSpace.m),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.group_rounded, size: 16, color: c.accent),
+              const SizedBox(width: OSpace.s),
+              Expanded(
+                child: Text(
+                  'Up to ${data.capacity} people can join, including the '
+                  'creator.',
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: OSpace.s),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -393,6 +424,8 @@ class _MemberRow extends StatelessWidget {
                       '(you)',
                       style: OType.caption.copyWith(color: c.accent),
                     ),
+                  if (member.isCreator)
+                    const _Tag(label: 'Creator', tone: _TagTone.accent),
                 ],
               ),
               if (member.subtitle.isNotEmpty) ...[
@@ -544,7 +577,8 @@ class _StorageCard extends StatelessWidget {
                         if (data.creatorName.isNotEmpty) ...[
                           const SizedBox(height: OSpace.xs),
                           Text(
-                            '${data.creatorName} pays for this chat',
+                            '${data.creatorName} pays for this chat. Storage '
+                            'is billed to the creator\'s plan.',
                             style: OType.caption.copyWith(color: c.textMuted),
                           ),
                         ],

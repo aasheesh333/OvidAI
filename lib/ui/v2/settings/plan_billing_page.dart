@@ -4,12 +4,182 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'plan_compare_table.dart';
 
 enum V2PlanBillingStatus { loading, ready, empty, error }
 
 enum V2Currency { usd, inr }
 
 enum V2BillingPeriod { monthly, yearly }
+
+/// The authoritative plan table from the product spec (§11). Every limit is
+/// per user: storage, file intake, project size, model access and the token
+/// allowance multiplier over Free.
+///
+/// Paid token caps are Free × the plan's auto multiplier:
+/// Go 1.5×, Plus 5×, Pro 20× (50M / 24 h and 1.5B / 30 d on Free).
+@immutable
+class V2PlanLimits {
+  const V2PlanLimits({
+    required this.id,
+    required this.name,
+    required this.storageGb,
+    required this.filesPerWindow,
+    required this.fileWindowLabel,
+    required this.filesPerProject,
+    required this.manualModels,
+    required this.autoMultiplier,
+    required this.customConnectors,
+    required this.dailyTokenCap,
+    required this.monthlyTokenCap,
+  });
+
+  /// Canonical id (`free`, `go`, `plus`, `pro`).
+  final String id;
+  final String name;
+  final int storageGb;
+  final int filesPerWindow;
+
+  /// `day` for Free, `3 h` for the paid plans.
+  final String fileWindowLabel;
+  final int filesPerProject;
+  final bool manualModels;
+  final num autoMultiplier;
+  final int customConnectors;
+  final int dailyTokenCap;
+  final int monthlyTokenCap;
+
+  static const free = V2PlanLimits(
+    id: 'free',
+    name: 'Free',
+    storageGb: 3,
+    filesPerWindow: 50,
+    fileWindowLabel: 'day',
+    filesPerProject: 80,
+    manualModels: false,
+    autoMultiplier: 1,
+    customConnectors: 0,
+    dailyTokenCap: 50000000,
+    monthlyTokenCap: 1500000000,
+  );
+
+  static const go = V2PlanLimits(
+    id: 'go',
+    name: 'Ovid Go',
+    storageGb: 5,
+    filesPerWindow: 80,
+    fileWindowLabel: '3 h',
+    filesPerProject: 100,
+    manualModels: false,
+    autoMultiplier: 1.5,
+    customConnectors: 5,
+    dailyTokenCap: 75000000,
+    monthlyTokenCap: 2250000000,
+  );
+
+  static const plus = V2PlanLimits(
+    id: 'plus',
+    name: 'Ovid Plus',
+    storageGb: 15,
+    filesPerWindow: 80,
+    fileWindowLabel: '3 h',
+    filesPerProject: 150,
+    manualModels: true,
+    autoMultiplier: 5,
+    customConnectors: 20,
+    dailyTokenCap: 250000000,
+    monthlyTokenCap: 7500000000,
+  );
+
+  static const pro = V2PlanLimits(
+    id: 'pro',
+    name: 'Ovid Pro',
+    storageGb: 75,
+    filesPerWindow: 80,
+    fileWindowLabel: '3 h',
+    filesPerProject: 250,
+    manualModels: true,
+    autoMultiplier: 20,
+    customConnectors: 20,
+    dailyTokenCap: 1000000000,
+    monthlyTokenCap: 30000000000,
+  );
+
+  /// Table order: Free, Go, Plus, Pro.
+  static const plans = <V2PlanLimits>[free, go, plus, pro];
+
+  /// Resolves server tier ids (`3x`, `7x`, `15x`), plan ids (`go`, `plus`,
+  /// `pro`) and the display names to the canonical table.
+  static V2PlanLimits? forId(String id) {
+    final key = id.trim().toLowerCase().replaceAll(RegExp(r'[_\-]+'), ' ');
+    return switch (key) {
+      'free' || 'free plan' => free,
+      'go' || 'ovid go' || '3x' || 'starter' => go,
+      'plus' || 'ovid plus' || '7x' => plus,
+      'pro' || 'ovid pro' || '15x' || 'max' => pro,
+      _ => null,
+    };
+  }
+
+  static V2PlanLimits forIdOrFree(String? id) =>
+      (id == null ? null : forId(id)) ?? free;
+
+  /// Resolves a plan from its storage allowance (`3 GB`, `5 GB`, …). Used
+  /// only when the caller has not supplied a plan id.
+  static V2PlanLimits? forStorageGb(int? gb) {
+    if (gb == null) return null;
+    for (final plan in plans) {
+      if (plan.storageGb == gb) return plan;
+    }
+    return null;
+  }
+
+  V2PlanLimits withStorage(int gb) => V2PlanLimits(
+    id: id,
+    name: name,
+    storageGb: gb,
+    filesPerWindow: filesPerWindow,
+    fileWindowLabel: fileWindowLabel,
+    filesPerProject: filesPerProject,
+    manualModels: manualModels,
+    autoMultiplier: autoMultiplier,
+    customConnectors: customConnectors,
+    dailyTokenCap: dailyTokenCap,
+    monthlyTokenCap: monthlyTokenCap,
+  );
+
+  String get storageLabel => '$storageGb GB';
+
+  /// `50 files / day` or `80 files / 3 h`.
+  String get filesLabel => '$filesPerWindow files / $fileWindowLabel';
+
+  String get filesPerProjectLabel => '$filesPerProject files max / project';
+
+  String get modelAccessLabel =>
+      manualModels ? 'Auto + manual models' : 'Auto only';
+
+  String get autoMultiplierLabel => '${formatMultiplier(autoMultiplier)}× auto';
+
+  String get autoAllowanceLabel =>
+      '${formatMultiplier(autoMultiplier)}× Free auto allowance';
+
+  String get customConnectorsLabel => customConnectors == 0
+      ? 'No custom connectors'
+      : '$customConnectors custom connectors';
+
+  String get dailyCapLabel => _groupDigits(dailyTokenCap);
+
+  String get monthlyCapLabel => _groupDigits(monthlyTokenCap);
+
+  String get dailyCapDescription => '$dailyCapLabel tokens / 24 h';
+
+  String get monthlyCapDescription => '$monthlyCapLabel tokens / 30 days';
+}
+
+/// `1` → `1`, `1.5` → `1.5`, `20` → `20`.
+String formatMultiplier(num value) => value == value.roundToDouble()
+    ? value.toInt().toString()
+    : value.toString();
 
 @immutable
 class V2Plan {
@@ -23,6 +193,7 @@ class V2Plan {
     this.priceInrYearly = 0,
     this.storageGb = 0,
     this.autoOnly = false,
+    this.limits,
     this.features = const [],
     this.popular = false,
     this.ctaLabel,
@@ -37,9 +208,40 @@ class V2Plan {
   final int priceInrYearly;
   final int storageGb;
   final bool autoOnly;
+
+  /// Optional explicit limits. When null the canonical [V2PlanLimits] for
+  /// [id] (or the plan name) is used, so server-built plans still show the
+  /// exact product-spec numbers.
+  final V2PlanLimits? limits;
   final List<String> features;
   final bool popular;
   final String? ctaLabel;
+
+  /// The limits to render for this plan. Explicit [limits] win; otherwise the
+  /// canonical table fills in everything the server does not send.
+  V2PlanLimits get planLimits {
+    final canonical = V2PlanLimits.forId(id) ?? V2PlanLimits.forId(name);
+    final base = limits ?? canonical;
+    if (base == null) {
+      return V2PlanLimits(
+        id: id,
+        name: name,
+        storageGb: storageGb,
+        filesPerWindow: 0,
+        fileWindowLabel: 'day',
+        filesPerProject: 0,
+        manualModels: !autoOnly,
+        autoMultiplier: 1,
+        customConnectors: 0,
+        dailyTokenCap: 0,
+        monthlyTokenCap: 0,
+      );
+    }
+    if (storageGb > 0 && storageGb != base.storageGb) {
+      return base.withStorage(storageGb);
+    }
+    return base;
+  }
 
   int amount(V2Currency currency, V2BillingPeriod period) {
     final monthly = currency == V2Currency.inr ? priceInr : priceUsd;
@@ -158,6 +360,35 @@ class PlanBillingPage extends StatelessWidget {
     );
   }
 
+  /// The page's plans and the selected currency/period are mapped onto the
+  /// shared comparison contract, so the table always matches the plan cards.
+  V2PlanCompareData _compareData() {
+    return V2PlanCompareData(
+      plans: [for (final plan in data.plans) _comparePlan(plan)],
+      currentPlanId: data.currentPlanId,
+      onRetry: data.onRetry,
+    );
+  }
+
+  V2PlanComparePlan _comparePlan(V2Plan plan) {
+    final limits = plan.planLimits;
+    return V2PlanComparePlan(
+      id: plan.id,
+      name: plan.name,
+      priceLabel: plan.priceLabel(data.currency, period: data.period),
+      pricePeriodLabel: plan.periodSuffix(data.period),
+      storageGb: limits.storageGb,
+      filesPerWindow: limits.filesPerWindow,
+      fileWindowHours: _fileWindowHours(limits.fileWindowLabel),
+      filesPerProject: limits.filesPerProject,
+      manualModels: limits.manualModels,
+      autoMultiplier: limits.autoMultiplier,
+      customConnectors: limits.customConnectors,
+      dailyTokenCap: limits.dailyTokenCap,
+      monthlyTokenCap: limits.monthlyTokenCap,
+    );
+  }
+
   Widget _emptyState(BuildContext context) {
     return OEmptyState(
       icon: Icons.sell_outlined,
@@ -272,12 +503,19 @@ class PlanBillingPage extends StatelessWidget {
                       plan: plan,
                       currency: data.currency,
                       period: data.period,
+                      current: plan.id == data.currentPlanId,
                       onSelect: data.onSelectPlan,
                     ),
                   ),
               ],
             ),
           ],
+          const SizedBox(height: OSpace.xl),
+          OSectionHeader(label: 'Plan limits', padding: EdgeInsets.zero),
+          const SizedBox(height: OSpace.m),
+          PlanCompareTable(data: _compareData()),
+          const SizedBox(height: OSpace.m),
+          const _AutoModeNote(),
           const SizedBox(height: OSpace.l),
           Center(
             child: OButton(
@@ -561,6 +799,7 @@ class _CurrentPlanCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return OCard(
+      key: ValueKey<String>('plan-card-${plan.id}'),
       padding: const EdgeInsets.all(OSpace.l),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -625,27 +864,43 @@ class _PlanCard extends StatelessWidget {
     required this.plan,
     required this.currency,
     required this.period,
+    required this.current,
     required this.onSelect,
   });
 
   final V2Plan plan;
   final V2Currency currency;
   final V2BillingPeriod period;
+  final bool current;
   final ValueChanged<V2Plan>? onSelect;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return OCard(
+      key: ValueKey<String>('plan-card-${plan.id}'),
       accent: plan.popular,
       padding: const EdgeInsets.all(OSpace.l),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (plan.popular) ...[
-            const Align(
+          if (plan.popular || current) ...[
+            Align(
               alignment: Alignment.centerLeft,
-              child: OPill(label: 'Most popular', tone: OPillTone.accent),
+              child: Wrap(
+                spacing: OSpace.s,
+                runSpacing: OSpace.xs,
+                children: [
+                  if (current)
+                    const OPill(
+                      label: 'Current plan',
+                      tone: OPillTone.success,
+                      dot: true,
+                    ),
+                  if (plan.popular)
+                    const OPill(label: 'Most popular', tone: OPillTone.accent),
+                ],
+              ),
             ),
             const SizedBox(height: OSpace.m),
           ],
@@ -716,16 +971,141 @@ class _PlanMeta extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (plan.storageGb <= 0 && !plan.autoOnly) {
-      return const SizedBox.shrink();
-    }
-    return Wrap(
-      spacing: OSpace.s,
-      runSpacing: OSpace.s,
-      children: [
-        if (plan.storageGb > 0) OPill(label: '${plan.storageGb} GB storage'),
-        if (plan.autoOnly) const OPill(label: 'Auto only'),
-      ],
+    final limits = plan.planLimits;
+    final rows = <Widget>[
+      if (limits.storageGb > 0)
+        _PlanMetaRow(
+          icon: Icons.cloud_outlined,
+          label: 'Storage',
+          value: limits.storageLabel,
+        ),
+      if (limits.filesPerWindow > 0)
+        _PlanMetaRow(
+          icon: Icons.upload_file_outlined,
+          label: 'Files',
+          value: limits.filesLabel,
+        ),
+      if (limits.filesPerProject > 0)
+        _PlanMetaRow(
+          icon: Icons.folder_copy_outlined,
+          label: 'Per project',
+          value: limits.filesPerProjectLabel,
+        ),
+      _PlanMetaRow(
+        icon: Icons.auto_awesome_outlined,
+        label: 'Models',
+        value: limits.modelAccessLabel,
+      ),
+      _PlanMetaRow(
+        icon: Icons.bolt_outlined,
+        label: 'Auto allowance',
+        value: limits.autoMultiplierLabel,
+      ),
+    ];
+    if (rows.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: rows,
+    );
+  }
+}
+
+class _PlanMetaRow extends StatelessWidget {
+  const _PlanMetaRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.xs),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 15, color: c.textFaint),
+          const SizedBox(width: OSpace.s),
+          Expanded(
+            flex: 2,
+            child: Text(
+              label,
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
+          ),
+          const SizedBox(width: OSpace.s),
+          Expanded(
+            flex: 3,
+            child: Text(
+              value,
+              style: OType.caption.copyWith(
+                color: c.text,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// `day` → 24, `3 h` → 3. Unknown copy falls back to a daily window.
+int _fileWindowHours(String label) {
+  if (label.trim().toLowerCase() == 'day') return 24;
+  final match = RegExp(r'([0-9]+)').firstMatch(label);
+  return match == null ? 24 : int.tryParse(match.group(1)!) ?? 24;
+}
+
+class _AutoModeNote extends StatelessWidget {
+  const _AutoModeNote();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return OCard(
+      padding: const EdgeInsets.all(OSpace.l),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              color: c.accentSoft,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(Icons.lock_outline_rounded, size: 16, color: c.accent),
+          ),
+          const SizedBox(width: OSpace.m),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Auto mode only',
+                  style: OType.bodySm.copyWith(
+                    color: c.text,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Free and Go use Auto only. Manual models unlock with Plus '
+                  'or Pro, and Ovid rejects manual model requests on Free and '
+                  'Go.',
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -97,6 +97,8 @@ void main() {
     );
 
     expect(find.text('This chat is not shared yet'), findsOneWidget);
+    await tester.ensureVisible(find.text('Create link'));
+    await tester.pump();
     await tester.tap(find.text('Create link'));
     await tester.pump();
     expect(created, 1);
@@ -161,6 +163,8 @@ void main() {
       OTheme.light(),
     );
 
+    await tester.ensureVisible(find.text('WhatsApp'));
+    await tester.pump();
     await tester.tap(find.text('WhatsApp'));
     await tester.pump();
     expect(chosen, V2ShareTarget.whatsApp);
@@ -218,6 +222,77 @@ void main() {
       tester.getSize(find.byType(OIconButton)).width,
       greaterThanOrEqualTo(48),
     );
+  });
+
+  testWidgets('the chat variant offers Collab and Read only before sharing', (
+    tester,
+  ) async {
+    V2ShareMode? picked;
+    await _pump(
+      tester,
+      ShareChatSheet(
+        data: _data(),
+        onModeChanged: (mode) => picked = mode,
+      ),
+      OTheme.light(),
+    );
+
+    expect(find.text('Collab'), findsOneWidget);
+    expect(find.text('Read only'), findsOneWidget);
+    expect(
+      find.text('Anyone with the link can view or fork it.'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Collab'));
+    await tester.pump();
+    expect(picked, V2ShareMode.collab);
+
+    await _pump(
+      tester,
+      ShareChatSheet(
+        data: V2ShareChatSheetData(
+          link: 'https://ovid.si/c/8f92a10c',
+          mode: V2ShareMode.collab,
+          memberCount: 4,
+        ),
+      ),
+      OTheme.dark(),
+    );
+
+    expect(find.text('4 of 50 members'), findsOneWidget);
+    expect(find.text('One person sends at a time'), findsOneWidget);
+    expect(find.text('You pay for storage'), findsOneWidget);
+    expect(
+      find.textContaining('Up to 50 people can join'),
+      findsOneWidget,
+    );
+    expect(
+      find.text('Anyone with the link can view or fork it.'),
+      findsNothing,
+    );
+    expect(find.text('Fork into my account'), findsNothing);
+  });
+
+  testWidgets('a read-only chat viewer can fork the chat', (tester) async {
+    var forks = 0;
+    await _pump(
+      tester,
+      ShareChatSheet(
+        data: V2ShareChatSheetData(
+          link: 'https://ovid.si/c/8f92a10c',
+          viewerCanFork: true,
+        ),
+        onFork: () => forks++,
+      ),
+      OTheme.light(),
+    );
+
+    await tester.ensureVisible(find.text('Fork into my account'));
+    await tester.pump();
+    await tester.tap(find.text('Fork into my account'));
+    await tester.pump();
+    expect(forks, 1);
   });
 
   testWidgets('320 dp and 200% text do not overflow', (tester) async {

@@ -30,6 +30,7 @@ import 'ui/v2/app/v2_app_shell.dart';
 import 'ui/v2/app/app_lock_gate.dart';
 import 'ui/v2/app/v2_onboarding_gate.dart';
 import 'ui/v2/v2_gallery.dart';
+import 'ui/v2/v2_registry.dart';
 import 'core/share_link_resolver.dart';
 import 'l10n/l10n.dart';
 import 'ui/collab_session_screen.dart';
@@ -38,10 +39,13 @@ import 'ui/widgets/error_views.dart';
 
 export 'ui/app_router.dart' show appNavigatorKey;
 
-/// Dev/review switch: `flutter run --dart-define=OVID_UI_V2=true` opens the
-/// screen gallery instead of the live app. Off by default so production is
-/// untouched until the wiring pass flips it.
-const bool kOvidUiV2 = bool.fromEnvironment('OVID_UI_V2');
+/// UI generation switch.
+///
+/// The rebuilt UI is the default: every build ships the v2 shell, onboarding,
+/// settings and screens. The legacy shell is reachable only for rollback with
+/// `--dart-define=OVID_UI_V1=true`.
+const bool kOvidUiV1 = bool.fromEnvironment('OVID_UI_V1');
+const bool kOvidUiV2 = !kOvidUiV1;
 
 /// Design-review surface: every v2 screen with a light/dark toggle.
 /// `flutter run --dart-define=OVID_UI_GALLERY=true`.
@@ -453,7 +457,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
       home: kOvidUiGallery
-          ? const V2GalleryPage()
+          ? V2GalleryPage(screens: v2Screens)
           : kOvidUiV2
           ? V2OnboardingGate(
               purchase: (planId) async {

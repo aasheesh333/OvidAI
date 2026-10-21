@@ -1,5 +1,4 @@
-import 'package:flutter/material.dart';
-
+import 'v2_screen_entry.dart';
 import 'browser/browser_page.dart';
 import 'browser/take_control_sheet.dart';
 import 'chat/chat_page.dart';
@@ -42,7 +41,6 @@ import 'settings_extra/response_wait_page.dart';
 import 'share/share_chat_sheet.dart';
 import 'share/share_sheet.dart';
 import 'sidebar/projects_page.dart';
-import 'sidebar/search_page.dart';
 import 'sidebar/session_actions_sheet.dart';
 import 'sidebar/sidebar.dart';
 import 'states/system_states_page.dart';
@@ -51,28 +49,6 @@ import 'studio/changes_page.dart';
 import 'studio/live_preview_page.dart';
 import 'studio/repo_picker_page.dart';
 import 'studio/studio_workspace_page.dart';
-/// One entry in the UI v2 gallery. The builder returns a complete screen
-/// (including its own `OScaffold`); the gallery only supplies the frame.
-class V2ScreenEntry {
-  const V2ScreenEntry({
-    required this.id,
-    required this.title,
-    required this.group,
-    required this.summary,
-    required this.builder,
-    this.isSheet = false,
-  });
-
-  final String id;
-  final String title;
-  final String group;
-  final String summary;
-  final WidgetBuilder builder;
-
-  /// Sheet bodies need a Material host when shown outside `showOSheet`.
-  final bool isSheet;
-}
-
 /// Every UI v2 screen, in the order a reviewer should walk them. The builders
 /// use neutral/default data: screens show their real empty or disabled state,
 /// never sample content. Production never imports this file.
@@ -176,13 +152,6 @@ List<V2ScreenEntry> v2Screens = <V2ScreenEntry>[
     group: 'Navigation',
     summary: 'Shared projects, storage and member stacks',
     builder: (_) => const ProjectsPage(data: V2ProjectsData()),
-  ),
-  V2ScreenEntry(
-    id: 'search',
-    title: 'Search',
-    group: 'Navigation',
-    summary: 'Chats, projects and artifacts with recent searches',
-    builder: (_) => const SearchPage(data: V2SearchData()),
   ),
   V2ScreenEntry(
     id: 'session_actions',

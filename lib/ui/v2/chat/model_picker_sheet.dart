@@ -50,6 +50,11 @@ class V2ModelPickerData {
     this.freePlanNote = 'Free plan uses Auto only.',
     this.standardLabel = 'Standard models',
     this.advancedLabel = 'Advanced reasoning',
+    this.manualModelsAllowed = true,
+    this.upgradeHint =
+        'Upgrade to Plus or Pro to pick a model manually. '
+        'Auto is included on every plan.',
+    this.lockedPlanLabel = 'Plus plan',
     this.loading = false,
     this.errorMessage,
   });
@@ -66,10 +71,33 @@ class V2ModelPickerData {
   final String freePlanNote;
   final String standardLabel;
   final String advancedLabel;
+
+  /// Whether the current plan may pick a model manually. Free and Go are
+  /// Auto-only; Plus and Pro allow every model. When false, manual rows stay
+  /// visible but are greyed out and cannot be selected.
+  final bool manualModelsAllowed;
+
+  /// Short explanation shown under the header while the plan is Auto-only.
+  final String upgradeHint;
+
+  /// Plan a manual model requires, used by the locked-row tag and its spoken
+  /// label. Free and Go both need Plus.
+  final String lockedPlanLabel;
   final bool loading;
   final String? errorMessage;
 
   bool get autoSelected => selectedId == 'auto';
+
+  /// True when the plan can only use Auto, regardless of per-row flags. The
+  /// explicit [manualModelsAllowed] gate wins, and an Auto-only plan label is
+  /// also treated as such so a caller that forgets the flag cannot leak manual
+  /// models. `Starter` is the catalog's legacy name for the Go tier.
+  bool get autoOnly =>
+      !manualModelsAllowed ||
+      planLabel == 'Free' ||
+      planLabel == 'Free plan' ||
+      planLabel == 'Go' ||
+      planLabel == 'Starter';
 }
 
 /// Bottom-sheet contents for choosing a model. Search, Auto recommendation,
@@ -267,6 +295,19 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
     }
 
     final rows = <Widget>[];
+    // The plan explanation leads the scrollable body so it sits under the
+    // header without squeezing the list on short screens.
+    if (data.autoOnly) {
+      rows.add(
+        Padding(
+          padding: const EdgeInsets.only(bottom: OSpace.s),
+          child: _UpgradeNotice(
+            hint: data.upgradeHint,
+            planLabel: data.lockedPlanLabel,
+          ),
+        ),
+      );
+    }
     if (showAuto) {
       rows.add(_AutoCard(data: data, onTap: () => widget.onSelect('auto')));
     }
@@ -274,7 +315,13 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
     Widget row(V2ModelOption model) => _ModelRow(
       model: model,
       selected: data.selectedId == model.id,
-      onTap: model.locked ? null : () => widget.onSelect(model.id),
+      // The plan gate wins over the row flag: on an Auto-only plan every
+      // manual model is locked even if the caller left it unlocked.
+      locked: data.autoOnly || model.locked,
+      planLabel: data.lockedPlanLabel,
+      onTap: (data.autoOnly || model.locked)
+          ? null
+          : () => widget.onSelect(model.id),
     );
 
     // Grouped by tier so the labels always read Standard then Advanced, even
@@ -418,21 +465,56 @@ class _AutoCard extends StatelessWidget {
   }
 }
 
+class _UpgradeNotice extends StatelessWidget {
+  const _UpgradeNotice({required this.hint, required this.planLabel});
+
+  final String hint;
+  final String planLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      label: '$planLabel required. $hint',
+      child: Container(
+        padding: const EdgeInsets.all(OSpace.s),
+        decoration: BoxDecoration(
+          color: c.accentSoft,
+          borderRadius: BorderRadius.circular(ORadius.m),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.lock_outline_rounded, size: 18, color: c.accent),
+            const SizedBox(width: OSpace.s),
+            Expanded(
+              child: Text(hint, style: OType.caption.copyWith(color: c.text)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _ModelRow extends StatelessWidget {
   const _ModelRow({
     required this.model,
     required this.selected,
+    required this.locked,
+    required this.planLabel,
     required this.onTap,
   });
 
   final V2ModelOption model;
   final bool selected;
+  final bool locked;
+  final String planLabel;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final locked = model.locked;
     final row = Container(
       constraints: const BoxConstraints(minHeight: OSpace.listRow),
       padding: const EdgeInsets.all(OSpace.m),
@@ -489,6 +571,7 @@ class _ModelRow extends StatelessWidget {
                 Wrap(
                   spacing: OSpace.s,
                   runSpacing: OSpace.xs,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     _MetricPill(
                       icon: Icons.speed_rounded,
@@ -500,29 +583,18 @@ class _ModelRow extends StatelessWidget {
                       label: model.costHint,
                       tone: c.textMuted,
                     ),
+                    // The plan a locked row needs sits with the metrics rather
+                    // than in a trailing column: a side column steals ~110 dp
+                    // and wraps the subtitle on a 360 dp screen.
+                    if (locked) _Tag(label: planLabel, tone: OPillTone.accent),
                   ],
                 ),
               ],
             ),
           ),
-          const SizedBox(width: OSpace.s),
+          const SizedBox(width: OSpace.xs),
           if (locked)
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 110),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  const _Tag(label: 'Plus plan', tone: OPillTone.accent),
-                  const SizedBox(height: OSpace.xs),
-                  Icon(
-                    Icons.lock_outline_rounded,
-                    size: 18,
-                    color: c.textFaint,
-                  ),
-                ],
-              ),
-            )
+            Icon(Icons.lock_outline_rounded, size: 18, color: c.textFaint)
           else
             _SelectionMark(selected: selected),
         ],
@@ -531,7 +603,7 @@ class _ModelRow extends StatelessWidget {
 
     if (onTap == null) {
       return Semantics(
-        label: '${model.name}, locked, Plus plan',
+        label: '${model.name}, locked, $planLabel',
         enabled: false,
         child: row,
       );

@@ -315,4 +315,44 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expect(stays, 1);
   });
+
+  testWidgets('the trackpad chip mirrors the state handed over by the page', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await _pump(
+      tester,
+      TakeControlSheet(
+        data: const V2TakeControlData(keyboard: true, trackpad: true),
+        onToggleKeyboard: () {},
+        onToggleTrackpad: () {},
+      ),
+    );
+
+    expect(
+      tester.getSemantics(find.text('Trackpad')),
+      matchesSemantics(
+        label: 'Trackpad',
+        isButton: true,
+        isSelected: true,
+        hasSelectedState: true,
+        hasEnabledState: true,
+        isEnabled: true,
+        hasTapAction: true,
+      ),
+    );
+    handle.dispose();
+  });
+
+  testWidgets('an ended session drops the stale countdown', (tester) async {
+    await _pump(
+      tester,
+      TakeControlSheet(
+        data: const V2TakeControlData(status: V2TakeControlStatus.ended),
+      ),
+    );
+
+    expect(find.text('Ovid paused · 4:59'), findsNothing);
+    expect(find.text('Session ended'), findsOneWidget);
+  });
 }

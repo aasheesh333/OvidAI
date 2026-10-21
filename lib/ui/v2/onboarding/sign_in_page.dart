@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'phone_auth_sheet.dart';
 
 // TODO(l10n): move sign-in copy to the ARB files.
 
@@ -34,6 +35,13 @@ class SignInPage extends StatefulWidget {
     this.onSubmit,
     this.onGoogle,
     this.onPhone,
+    this.phoneData,
+    this.onPhoneChanged,
+    this.onPhoneCountryChanged,
+    this.onSendPhoneCode,
+    this.onVerifyPhoneCode,
+    this.onResendPhoneCode,
+    this.onChangePhoneNumber,
     this.onApple,
     this.onForgotPassword,
     this.onCreateAccount,
@@ -48,8 +56,33 @@ class SignInPage extends StatefulWidget {
   final void Function(String email, String password)? onSubmit;
   final VoidCallback? onGoogle;
 
-  /// Opens the existing [PhoneAuthFlow] OTP dialog. Null disables the action.
+  /// Opens [V2PhoneAuthSheet]. Null disables the phone action.
+  ///
+  /// The sheet's send / verify / resend actions are forwarded to the
+  /// [onSendPhoneCode], [onVerifyPhoneCode] and [onResendPhoneCode] callbacks.
+  /// When none of those are wired, tapping "Send code" closes the sheet and
+  /// falls back to invoking this callback, which keeps older hosts (that own
+  /// their own OTP dialog) working during the migration.
   final VoidCallback? onPhone;
+
+  /// Host-owned sheet state: which step is showing, loading, errors and the
+  /// resend countdown. Null shows the phone-number step.
+  final V2PhoneAuthData? phoneData;
+
+  final ValueChanged<String>? onPhoneChanged;
+  final ValueChanged<V2PhoneCountry>? onPhoneCountryChanged;
+
+  /// Sends a code to the national number the person typed.
+  final ValueChanged<String>? onSendPhoneCode;
+
+  /// Verifies the six-digit code.
+  final ValueChanged<String>? onVerifyPhoneCode;
+
+  final VoidCallback? onResendPhoneCode;
+
+  /// Returns the sheet to the number step. The host owns [phoneData]; when no
+  /// callback is wired the sheet clears the code locally.
+  final VoidCallback? onChangePhoneNumber;
 
   final VoidCallback? onApple;
   final VoidCallback? onForgotPassword;
@@ -74,6 +107,14 @@ class _SignInPageState extends State<SignInPage> {
   );
   bool _obscure = true;
 
+  /// Mirrors the host's [SignInPage.phoneData] into the open sheet route. A
+  /// modal bottom sheet does not rebuild with its opener, so the page pushes
+  /// later host updates through this notifier.
+  final ValueNotifier<V2PhoneAuthData> _phoneSheet = ValueNotifier(
+    const V2PhoneAuthData(),
+  );
+  bool _phoneSheetOpen = false;
+
   @override
   void didUpdateWidget(covariant SignInPage oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -85,17 +126,84 @@ class _SignInPageState extends State<SignInPage> {
         widget.data.password != _password.text) {
       _password.text = widget.data.password;
     }
+    if (_phoneSheetOpen) {
+      final next = widget.phoneData ?? const V2PhoneAuthData();
+      final previous = oldWidget.phoneData ?? const V2PhoneAuthData();
+      if (!_samePhoneData(next, previous)) {
+        // The page can rebuild inside a build phase; notify the sheet route
+        // after the frame instead of dirtying it mid-build.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _phoneSheetOpen) {
+            _phoneSheet.value = next;
+          }
+        });
+      }
+    }
   }
 
   @override
   void dispose() {
     _email.dispose();
     _password.dispose();
+    _phoneSheet.dispose();
     super.dispose();
   }
 
   void _submit() {
     widget.onSubmit?.call(_email.text.trim(), _password.text);
+  }
+
+  Future<void> _openPhoneSheet() async {
+    if (widget.onPhone == null || _phoneSheetOpen) return;
+    _phoneSheet.value = widget.phoneData ?? const V2PhoneAuthData();
+    _phoneSheetOpen = true;
+    try {
+      await showOSheet<void>(
+        context,
+        builder: (sheetContext) => ValueListenableBuilder<V2PhoneAuthData>(
+          valueListenable: _phoneSheet,
+          builder: (context, data, _) => V2PhoneAuthSheet(
+            data: data,
+            showHandle: false,
+            onCountryChanged: widget.onPhoneCountryChanged,
+            onPhoneChanged: widget.onPhoneChanged,
+            onSendCode: (phone) => _sendPhoneCode(sheetContext, phone),
+            onVerify: widget.onVerifyPhoneCode,
+            onResend: widget.onResendPhoneCode,
+            onChangeNumber: () => _changePhoneNumber(),
+            onClose: () => Navigator.of(sheetContext).pop(),
+          ),
+        ),
+      );
+    } finally {
+      _phoneSheetOpen = false;
+    }
+  }
+
+  void _sendPhoneCode(BuildContext sheetContext, String phone) {
+    final send = widget.onSendPhoneCode;
+    if (send != null) {
+      send(phone);
+      return;
+    }
+    // Legacy host: it owns the OTP UI, so hand control back after closing the
+    // sheet rather than leaving a sheet whose primary action does nothing.
+    Navigator.of(sheetContext).pop();
+    widget.onPhone?.call();
+  }
+
+  void _changePhoneNumber() {
+    final change = widget.onChangePhoneNumber;
+    if (change != null) {
+      change();
+      return;
+    }
+    final data = _phoneSheet.value;
+    _phoneSheet.value = V2PhoneAuthData(
+      country: data.country,
+      phone: data.phone,
+      countries: data.countries,
+    );
   }
 
   @override
@@ -188,7 +296,9 @@ class _SignInPageState extends State<SignInPage> {
                   variant: OButtonVariant.secondary,
                   icon: Icons.phone_iphone_rounded,
                   expand: true,
-                  onPressed: data.loading ? null : widget.onPhone,
+                  onPressed: data.loading || widget.onPhone == null
+                      ? null
+                      : _openPhoneSheet,
                 ),
                 const SizedBox(height: OSpace.m),
                 OButton(
@@ -332,6 +442,31 @@ class _SignInPageState extends State<SignInPage> {
       ),
     );
   }
+}
+
+/// Compares the host-owned sheet state field by field. [V2PhoneAuthData] has
+/// no `==`, and rebuilding on every parent frame would fight the sheet's own
+/// step changes.
+bool _samePhoneData(V2PhoneAuthData a, V2PhoneAuthData b) {
+  if (identical(a, b)) return true;
+  if (a.step != b.step ||
+      a.phone != b.phone ||
+      a.code != b.code ||
+      a.loading != b.loading ||
+      a.error != b.error ||
+      a.resendSeconds != b.resendSeconds ||
+      a.country.region != b.country.region ||
+      a.country.dialCode != b.country.dialCode ||
+      a.countries.length != b.countries.length) {
+    return false;
+  }
+  for (var i = 0; i < a.countries.length; i++) {
+    if (a.countries[i].region != b.countries[i].region ||
+        a.countries[i].dialCode != b.countries[i].dialCode) {
+      return false;
+    }
+  }
+  return true;
 }
 
 class _FieldLabel extends StatelessWidget {

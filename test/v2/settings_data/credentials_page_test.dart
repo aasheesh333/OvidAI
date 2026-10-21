@@ -58,23 +58,50 @@ const _token = V2Credential(
   subtitle: 'pat_live_••••••9x4q',
 );
 
+const _browser = V2BrowserCredential(
+  id: 'b1',
+  site: 'example.com',
+  username: 'aarav@example.com',
+  password: 'hunter2',
+);
+
 V2CredentialsPageData _data({
   VoidCallback? onAddToken,
   VoidCallback? onRevokeAll,
   VoidCallback? onManageCloudKey,
   ValueChanged<String>? onCredentialTap,
   V2Credential? token = _token,
+  List<V2BrowserCredential> browser = const [_browser],
+  bool? githubOAuthConnected,
+  bool githubPatAdded = false,
+  ValueChanged<V2BrowserCredential>? onAddBrowserCredential,
+  ValueChanged<V2BrowserCredential>? onEditBrowserCredential,
+  ValueChanged<V2BrowserCredential>? onDeleteBrowserCredential,
+  VoidCallback? onConnectGithubOAuth,
+  VoidCallback? onDisconnectGithubOAuth,
+  VoidCallback? onAddGithubPat,
+  VoidCallback? onRemoveGithubPat,
   bool cloudKeyActive = true,
 }) {
   return V2CredentialsPageData(
     google: _google,
     github: _github,
     token: token,
+    browserCredentials: browser,
+    githubOAuthConnected: githubOAuthConnected,
+    githubPatAdded: githubPatAdded,
     cloudKeyActive: cloudKeyActive,
     onAddToken: onAddToken,
     onRevokeAll: onRevokeAll,
     onManageCloudKey: onManageCloudKey,
     onCredentialTap: onCredentialTap,
+    onAddBrowserCredential: onAddBrowserCredential,
+    onEditBrowserCredential: onEditBrowserCredential,
+    onDeleteBrowserCredential: onDeleteBrowserCredential,
+    onConnectGithubOAuth: onConnectGithubOAuth,
+    onDisconnectGithubOAuth: onDisconnectGithubOAuth,
+    onAddGithubPat: onAddGithubPat,
+    onRemoveGithubPat: onRemoveGithubPat,
   );
 }
 
@@ -92,6 +119,17 @@ void main() {
     expect(find.text('pat_live_••••••9x4q'), findsOneWidget);
     expect(find.text('Cloud key active'), findsOneWidget);
     expect(find.text('Revoke all credentials'), findsOneWidget);
+    expect(find.text('BROWSER LOGINS'), findsOneWidget);
+    expect(find.text('example.com'), findsOneWidget);
+    expect(find.text('aarav@example.com · ••••••••'), findsOneWidget);
+    expect(
+      find.textContaining('never shown to the agent in plain text'),
+      findsWidgets,
+    );
+    expect(find.text('GITHUB ACCESS'), findsOneWidget);
+    expect(find.text('OAuth (browser sign-in)'), findsOneWidget);
+    expect(find.text('GitHub personal access token'), findsOneWidget);
+    expect(find.text('hunter2'), findsNothing);
   });
 
   testWidgets('renders in dark mode', (tester) async {
@@ -134,6 +172,152 @@ void main() {
     await tester.ensureVisible(find.text('Add'));
     await tester.tap(find.text('Add'));
     expect(added, isTrue);
+  });
+
+  testWidgets('adds a browser login with the entered values', (tester) async {
+    V2BrowserCredential? added;
+    await _pump(
+      tester,
+      data: _data(onAddBrowserCredential: (credential) => added = credential),
+    );
+
+    await tester.ensureVisible(find.text('Add login').first);
+    await tester.tap(find.text('Add login').first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Add browser login'), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const ValueKey('browser-site-field')),
+      'news.ycombinator.com',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('browser-username-field')),
+      'aarav',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('browser-password-field')),
+      's3cret',
+    );
+    await tester.pump();
+    await tester.tap(find.text('Save login'));
+    await tester.pumpAndSettle();
+
+    expect(added?.site, 'news.ycombinator.com');
+    expect(added?.username, 'aarav');
+    expect(added?.password, 's3cret');
+    expect(added?.id, isNotEmpty);
+  });
+
+  testWidgets('edits a browser login and keeps a blank password', (
+    tester,
+  ) async {
+    V2BrowserCredential? edited;
+    await _pump(
+      tester,
+      data: _data(onEditBrowserCredential: (credential) => edited = credential),
+    );
+
+    await tester.ensureVisible(find.byTooltip('Edit example.com'));
+    await tester.tap(find.byTooltip('Edit example.com'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Edit browser login'), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const ValueKey('browser-site-field')),
+      'example.org',
+    );
+    await tester.pump();
+    await tester.tap(find.text('Save changes'));
+    await tester.pumpAndSettle();
+
+    expect(edited?.id, 'b1');
+    expect(edited?.site, 'example.org');
+    expect(edited?.username, 'aarav@example.com');
+    expect(edited?.password, 'hunter2');
+  });
+
+  testWidgets('deletes a browser login after confirmation', (tester) async {
+    V2BrowserCredential? deleted;
+    await _pump(
+      tester,
+      data: _data(
+        onDeleteBrowserCredential: (credential) => deleted = credential,
+      ),
+    );
+
+    await tester.ensureVisible(find.byTooltip('Delete example.com'));
+    await tester.tap(find.byTooltip('Delete example.com'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Delete login?'), findsOneWidget);
+    expect(deleted, isNull);
+
+    await tester.tap(find.text('Delete login'));
+    await tester.pumpAndSettle();
+    expect(deleted?.id, 'b1');
+  });
+
+  testWidgets('cancelling a browser login delete keeps it', (tester) async {
+    var deleted = false;
+    await _pump(
+      tester,
+      data: _data(onDeleteBrowserCredential: (_) => deleted = true),
+    );
+
+    await tester.ensureVisible(find.byTooltip('Delete example.com'));
+    await tester.tap(find.byTooltip('Delete example.com'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Keep login'));
+    await tester.pumpAndSettle();
+
+    expect(deleted, isFalse);
+  });
+
+  testWidgets('shows GitHub OAuth and token state with actions', (
+    tester,
+  ) async {
+    var connected = false;
+    var removed = false;
+    await _pump(
+      tester,
+      data: _data(
+        githubOAuthConnected: false,
+        githubPatAdded: true,
+        onConnectGithubOAuth: () => connected = true,
+        onRemoveGithubPat: () => removed = true,
+      ),
+    );
+
+    expect(find.text('OAuth (browser sign-in)'), findsOneWidget);
+    expect(find.text('Not connected'), findsOneWidget);
+    expect(find.text('GitHub personal access token'), findsOneWidget);
+    expect(find.text('Added · used for git clone and push'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('Connect'));
+    await tester.tap(find.text('Connect'));
+    expect(connected, isTrue);
+
+    await tester.ensureVisible(find.text('Remove'));
+    await tester.tap(find.text('Remove'));
+    expect(removed, isTrue);
+  });
+
+  testWidgets('browser login sheet fits 320 dp at 200% text', (tester) async {
+    await _pump(
+      tester,
+      width: 320,
+      textScale: 2,
+      data: _data(onAddBrowserCredential: (_) {}),
+    );
+
+    await tester.ensureVisible(find.text('Add login').first);
+    await tester.tap(find.text('Add login').first);
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    await tester.ensureVisible(find.text('Save login'));
+    await tester.pumpAndSettle();
+    expect(find.text('Save login'), findsOneWidget);
   });
 
   testWidgets('revoke all asks for confirmation first', (tester) async {

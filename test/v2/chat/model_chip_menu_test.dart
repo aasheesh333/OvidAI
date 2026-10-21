@@ -46,6 +46,10 @@ const _data = V2ModelChipMenuData(
   ],
 );
 
+const _upgradeHint =
+    'Upgrade to Plus or Pro to pick a model manually. '
+    'Auto is included on every plan.';
+
 /// Pumps the menu on its own, the way a gallery or a preview would.
 Future<void> _pumpMenu(
   WidgetTester tester, {
@@ -102,6 +106,7 @@ void main() {
     expect(find.text('Compare plans'), findsOneWidget);
     expect(find.text(r'From $18/mo'), findsOneWidget);
     expect(find.text('Free plan uses Auto only.'), findsOneWidget);
+    expect(find.text(_upgradeHint), findsOneWidget);
     expect(tester.takeException(), isNull);
 
     // Nothing in the header or the action row is clipped at the card edge.
@@ -176,6 +181,91 @@ void main() {
     expect(compared, 1);
   });
 
+  for (final tier in ['Free', 'Go']) {
+    testWidgets('$tier gates manual rows behind an upgrade hint', (
+      tester,
+    ) async {
+      String? selected;
+      var compared = 0;
+      await _pumpMenu(
+        tester,
+        data: V2ModelChipMenuData(
+          lockedModels: _data.lockedModels,
+          tierLabel: tier,
+        ),
+        onSelect: (id) => selected = id,
+        onComparePlans: () => compared++,
+      );
+
+      expect(find.text(_upgradeHint), findsOneWidget);
+      expect(find.text('Plus plan'), findsNWidgets(3));
+      expect(find.byIcon(Icons.lock_outline_rounded), findsWidgets);
+
+      await tester.tap(find.text('Ovid Flash 2.5'));
+      await tester.pump();
+      expect(selected, isNull, reason: '$tier must not pick manual models');
+
+      // Auto stays available on every plan.
+      await tester.tap(find.text('Auto'));
+      await tester.pump();
+      expect(selected, 'auto');
+
+      // The upgrade path is always one tap away.
+      await tester.tap(find.text('Compare plans'));
+      expect(compared, 1);
+    });
+  }
+
+  for (final tier in ['Plus', 'Pro']) {
+    testWidgets('$tier allows every manual row', (tester) async {
+      final picks = <String>[];
+      var compared = 0;
+      await _pumpMenu(
+        tester,
+        data: V2ModelChipMenuData(
+          lockedModels: _data.lockedModels,
+          tierLabel: tier,
+          manualModelsAllowed: true,
+          selectedId: 'pro',
+        ),
+        onSelect: picks.add,
+        onComparePlans: () => compared++,
+      );
+
+      expect(find.text(_upgradeHint), findsNothing);
+      expect(find.text('Plus plan'), findsNothing);
+      expect(find.byIcon(Icons.check_circle_rounded), findsOneWidget);
+
+      await tester.tap(find.text('Ovid Flash 2.5'));
+      await tester.tap(find.text('the model Sonnet'));
+      expect(picks, ['flash', 'claude']);
+
+      await tester.tap(find.text('Compare plans'));
+      expect(compared, 1);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('a Go tier label overrides an allowed flag', (tester) async {
+    String? selected;
+    await _pumpMenu(
+      tester,
+      data: V2ModelChipMenuData(
+        lockedModels: _data.lockedModels,
+        tierLabel: 'Go',
+        manualModelsAllowed: true,
+      ),
+      onSelect: (id) => selected = id,
+    );
+
+    expect(find.text(_upgradeHint), findsOneWidget);
+    expect(find.text('Plus plan'), findsNWidgets(3));
+
+    await tester.tap(find.text('Ovid Flash 2.5'));
+    await tester.pump();
+    expect(selected, isNull);
+  });
+
   testWidgets('no locked models still shows Auto and the next action', (
     tester,
   ) async {
@@ -241,6 +331,7 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Auto'), findsOneWidget);
     expect(find.text('Compare plans'), findsOneWidget);
+    expect(find.text(_upgradeHint), findsOneWidget);
   });
 
   testWidgets('fits 320 dp at 200 % text in dark', (tester) async {
@@ -254,6 +345,30 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Auto'), findsOneWidget);
     expect(find.text('Compare plans'), findsOneWidget);
+    expect(find.text(_upgradeHint), findsOneWidget);
+  });
+
+  testWidgets('paid menu fits 320 dp at 200 % text in light and dark', (
+    tester,
+  ) async {
+    for (final dark in [false, true]) {
+      await _pumpMenu(
+        tester,
+        data: V2ModelChipMenuData(
+          lockedModels: _data.lockedModels,
+          tierLabel: 'Plus',
+          manualModelsAllowed: true,
+        ),
+        dark: dark,
+        size: const Size(320, 640),
+        textScale: 2,
+      );
+
+      expect(tester.takeException(), isNull, reason: 'dark: $dark');
+      expect(find.text('Ovid Flash 2.5'), findsOneWidget);
+      expect(find.text('Compare plans'), findsOneWidget);
+      expect(find.text(_upgradeHint), findsNothing);
+    }
   });
 
   testWidgets('the popover stays on screen and scrolls at 320 dp 200 % text', (

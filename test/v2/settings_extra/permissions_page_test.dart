@@ -47,6 +47,7 @@ V2PermissionsPageData _data({
   List<V2PermissionItem> permissions = _permissions,
   ValueChanged<String>? onRequest,
   VoidCallback? onOpenSettings,
+  VoidCallback? onResetAll,
   VoidCallback? onRetry,
 }) {
   return V2PermissionsPageData(
@@ -54,6 +55,7 @@ V2PermissionsPageData _data({
     permissions: permissions,
     onRequest: onRequest,
     onOpenSettings: onOpenSettings,
+    onResetAll: onResetAll,
     onRetry: onRetry,
   );
 }
@@ -290,5 +292,90 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(opens, 1);
+  });
+
+  testWidgets('reset all permissions confirms before revoking everything', (
+    tester,
+  ) async {
+    var resets = 0;
+    await _pump(tester, _data(onResetAll: () => resets++));
+
+    expect(find.text('Reset all permissions'), findsOneWidget);
+    expect(
+      find.textContaining('Revoke camera, microphone, photos'),
+      findsOneWidget,
+    );
+
+    await tester.ensureVisible(find.text('Reset all permissions'));
+    await tester.tap(find.text('Reset all permissions'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Reset all permissions?'), findsOneWidget);
+    expect(
+      find.textContaining('Ovid will lose access to Camera, Microphone'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('does not delete chats, files or memory'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(resets, 0);
+
+    await tester.ensureVisible(find.text('Reset all permissions'));
+    await tester.tap(find.text('Reset all permissions'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('reset-all-permissions-confirm')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(resets, 1);
+  });
+
+  testWidgets('reset row is disabled when no action is wired', (tester) async {
+    final handle = tester.ensureSemantics();
+    await _pump(tester, _data());
+
+    final row = tester.getSemantics(
+      find.byKey(const ValueKey('reset-all-permissions-row')),
+    );
+    expect(row, isSemantics(isButton: false, isEnabled: false));
+
+    handle.dispose();
+  });
+
+  testWidgets('reset confirm fits 320dp at 200% text in both themes', (
+    tester,
+  ) async {
+    for (final dark in [false, true]) {
+      final errors = <FlutterErrorDetails>[];
+      final previous = FlutterError.onError;
+      FlutterError.onError = errors.add;
+
+      await _pump(
+        tester,
+        _data(onResetAll: () {}),
+        dark: dark,
+        size: const Size(320, 640),
+        textScale: 2,
+      );
+      await tester.ensureVisible(find.text('Reset all permissions'));
+      await tester.tap(find.text('Reset all permissions'));
+      await tester.pumpAndSettle();
+
+      FlutterError.onError = previous;
+      expect(
+        errors,
+        isEmpty,
+        reason: errors.map((error) => error.toString()).join('\n'),
+      );
+      expect(find.text('Reset all permissions?'), findsOneWidget);
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+    }
   });
 }

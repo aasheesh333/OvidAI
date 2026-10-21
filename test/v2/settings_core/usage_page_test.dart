@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/v2/settings/usage_charts.dart';
 import 'package:ovid_ai/ui/v2/settings/usage_page.dart';
 
 const _days = <V2UsageDay>[
@@ -77,14 +79,18 @@ const _models = <V2UsageModel>[
 V2UsageData _usageData({
   V2UsageStatus status = V2UsageStatus.ready,
   V2UsageRange range = V2UsageRange.today,
+  String planId = 'free',
   List<V2UsageDay> days = _days,
   List<V2UsageModel> models = _models,
   String? selectedDayId = 'sun',
   String requestsLabel = '1,284',
   String imagesLabel = '86',
+  String imagesDetail = 'image generations',
   String storageUsedLabel = '1.2 GB',
   String storageLimitLabel = '3 GB',
   double storageFraction = 0.4,
+  String resetLabel = 'Resets in 6h 12m',
+  String resetsAtLabel = 'Oct 22, 2026, 6:12 AM',
   ValueChanged<V2UsageRange>? onRangeChanged,
   ValueChanged<V2UsageDay>? onDaySelected,
   VoidCallback? onStartChat,
@@ -93,10 +99,12 @@ V2UsageData _usageData({
 }) {
   return V2UsageData(
     status: status,
+    planId: planId,
     dailyUsedLabel: '12.4M',
     dailyLimitLabel: '50M',
     dailyFraction: 0.248,
-    resetLabel: 'Resets in 6h 12m',
+    resetLabel: resetLabel,
+    resetsAtLabel: resetsAtLabel,
     monthlyUsedLabel: '1.02B',
     monthlyLimitLabel: '1.5B',
     monthlyFraction: 0.68,
@@ -109,6 +117,7 @@ V2UsageData _usageData({
     range: range,
     requestsLabel: requestsLabel,
     imagesLabel: imagesLabel,
+    imagesDetail: imagesDetail,
     storageUsedLabel: storageUsedLabel,
     storageLimitLabel: storageLimitLabel,
     storageFraction: storageFraction,
@@ -160,27 +169,42 @@ void main() {
     expect(find.text('12.4M'), findsOneWidget);
     expect(find.text('of 50M tokens used'), findsOneWidget);
     expect(find.text('Resets in 6h 12m'), findsOneWidget);
+    expect(find.text('Resets at Oct 22, 2026, 6:12 AM'), findsOneWidget);
+    expect(find.text('Daily cap 50,000,000 tokens / 24 h'), findsOneWidget);
     expect(find.text('Monthly quota'), findsOneWidget);
     expect(find.text('1.02B used'), findsOneWidget);
     expect(find.text('1.5B limit'), findsOneWidget);
     expect(find.text('68%'), findsOneWidget);
+    expect(
+      find.text('Monthly cap 1,500,000,000 tokens / 30 days'),
+      findsOneWidget,
+    );
+    expect(find.text('1× Free auto allowance · Auto only'), findsOneWidget);
     expect(find.text('THIS MONTH AT A GLANCE'), findsOneWidget);
     expect(find.text('Requests'), findsOneWidget);
     expect(find.text('Images'), findsOneWidget);
     expect(find.text('Storage'), findsOneWidget);
     expect(find.text('1,284'), findsOneWidget);
     expect(find.text('86'), findsOneWidget);
+    expect(find.text('image generations'), findsOneWidget);
     expect(find.text('1.2 GB'), findsOneWidget);
     expect(find.text('of 3 GB'), findsOneWidget);
     expect(find.text('Activity'), findsOneWidget);
-    expect(find.text('Today'), findsOneWidget);
     expect(find.text('7 days'), findsOneWidget);
     expect(find.text('30 days'), findsOneWidget);
-    expect(find.text('USAGE BY MODEL'), findsOneWidget);
-    expect(find.text('3 models active'), findsOneWidget);
+    expect(find.byType(V2DailyTokensChart), findsOneWidget);
+    expect(find.byType(V2ModelShareChart), findsOneWidget);
+    expect(find.byType(V2ImageUsageChart), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('usage-chart-daily')),
+      findsOneWidget,
+    );
+    expect(find.text('Usage by model'), findsOneWidget);
+    expect(find.text('3 models'), findsOneWidget);
     expect(find.text('Auto'), findsOneWidget);
-    expect(find.text('Free plan uses Auto only.'), findsOneWidget);
-    expect(find.text('Upgraded models appear when active.'), findsOneWidget);
+    expect(find.text('Free and Go use Auto mode only.'), findsOneWidget);
+    expect(find.text('Manual models unlock with Plus or Pro.'), findsOneWidget);
+    expect(find.byType(OProgressBar), findsNWidgets(3));
   });
 
   testWidgets('renders correctly in dark', (tester) async {
@@ -191,7 +215,7 @@ void main() {
     expect(find.text('Usage'), findsOneWidget);
     expect(find.text('12.4M'), findsOneWidget);
     expect(find.text('Claude 3.7 Sonnet'), findsOneWidget);
-    expect(find.text('USAGE BY MODEL'), findsOneWidget);
+    expect(find.text('Usage by model'), findsOneWidget);
   });
 
   testWidgets('empty state action fires', (tester) async {
@@ -226,20 +250,72 @@ void main() {
     expect(upgraded, 1);
   });
 
-  testWidgets('tapping a bar reports the selected day', (tester) async {
-    V2UsageDay? selected;
+  testWidgets('daily token chart maps the page day list and range', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(OTheme.light(), _usageData()));
+    await tester.pumpAndSettle();
+
+    final chart = tester.widget<V2DailyTokensChart>(
+      find.byType(V2DailyTokensChart),
+    );
+    expect(chart.range, V2UsageChartRange.sevenDays);
+    expect(chart.points.map((point) => point.id), [
+      'mon',
+      'tue',
+      'wed',
+      'thu',
+      'fri',
+      'sat',
+      'sun',
+    ]);
+    expect(chart.points.first.value, closeTo(8.2 * 1000000, 1));
+    expect(chart.points.last.value, closeTo(12.4 * 1000000, 1));
+    expect(chart.points.last.valueLabel, '12.4M tokens');
+  });
+
+  testWidgets('model and image charts map the page data', (tester) async {
+    final days = [
+      for (var index = 0; index < 3; index++)
+        V2UsageDay(
+          id: 'day-$index',
+          label: 'Day $index',
+          fraction: 0.4 + index * 0.2,
+          valueLabel: '${index + 1}M tokens',
+          imageCount: index * 2,
+        ),
+    ];
     await tester.pumpWidget(
-      _app(OTheme.light(), _usageData(onDaySelected: (day) => selected = day)),
+      _app(OTheme.light(), _usageData(days: days, models: _models)),
     );
     await tester.pumpAndSettle();
 
-    final bar = find.byKey(const ValueKey<String>('usage-day-mon'));
-    await tester.ensureVisible(bar);
-    await tester.pumpAndSettle();
-    await tester.tap(bar);
-    await tester.pump();
+    final modelChart = tester.widget<V2ModelShareChart>(
+      find.byType(V2ModelShareChart),
+    );
+    expect(modelChart.slices.map((slice) => slice.id), [
+      'auto',
+      'gpt',
+      'claude',
+    ]);
+    expect(modelChart.slices.first.percent, 78.0);
+    expect(modelChart.slices.first.valueLabel, '9.6M tokens');
+    expect(
+      find.byKey(const ValueKey<String>('usage-chart-model-share')),
+      findsOneWidget,
+    );
 
-    expect(selected?.id, 'mon');
+    final imageChart = tester.widget<V2ImageUsageChart>(
+      find.byType(V2ImageUsageChart),
+    );
+    expect(imageChart.points.map((point) => point.count), [0, 2, 4]);
+    expect(imageChart.points.last.label, 'Day 2');
+    expect(find.text('6'), findsWidgets);
+    expect(find.text('images'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('usage-chart-images')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('range tabs call the injected callback', (tester) async {
@@ -290,56 +366,199 @@ void main() {
     expect(find.text('TOKENS TODAY'), findsOneWidget);
     expect(find.text('Monthly quota'), findsOneWidget);
     expect(find.text('Activity'), findsOneWidget);
-    expect(find.text('Free plan uses Auto only.'), findsOneWidget);
+    expect(find.text('Free and Go use Auto mode only.'), findsOneWidget);
     expect(find.text('Upgrade plan'), findsOneWidget);
+    expect(find.text('Daily cap 50,000,000 tokens / 24 h'), findsOneWidget);
   });
 
-  testWidgets('tabs and bars announce labels, targets and disabled state', (
-    tester,
-  ) async {
-    final handle = tester.ensureSemantics();
-    _phoneSize(tester);
+  testWidgets('fits 320 dp at 200% text in dark too', (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(
-      _app(
-        OTheme.light(),
-        _usageData(onRangeChanged: (_) {}, onDaySelected: (_) {}),
+      _scaledApp(
+        OTheme.dark(),
+        _usageData(
+          planId: 'pro',
+          models: [
+            ..._models,
+            const V2UsageModel(
+              id: 'custom-llama',
+              name: 'Llama 3.3 70B',
+              subtitle: 'Custom provider',
+              providerLabel: 'Ollama',
+              percent: 8,
+              tokensLabel: '0.9M tokens',
+              isCustomProvider: true,
+            ),
+          ],
+          onUpgrade: () {},
+        ),
+        2,
       ),
     );
     await tester.pumpAndSettle();
 
+    expect(tester.takeException(), isNull);
+    expect(find.text('Llama 3.3 70B'), findsOneWidget);
+    expect(find.text('Includes 1 custom provider model.'), findsOneWidget);
+    expect(find.text('0.9M tokens'), findsOneWidget);
+    expect(
+      find.text('Monthly cap 30,000,000,000 tokens / 30 days'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('daily and monthly caps follow the authoritative plan table', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    const caps = <String, (String, String)>{
+      'free': ('50,000,000', '1,500,000,000'),
+      'go': ('75,000,000', '2,250,000,000'),
+      'plus': ('250,000,000', '7,500,000,000'),
+      'pro': ('1,000,000,000', '30,000,000,000'),
+    };
+
+    for (final entry in caps.entries) {
+      await tester.pumpWidget(
+        _app(OTheme.light(), _usageData(planId: entry.key)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Daily cap ${entry.value.$1} tokens / 24 h'),
+        findsOneWidget,
+        reason: '${entry.key} daily cap',
+      );
+      expect(
+        find.text('Monthly cap ${entry.value.$2} tokens / 30 days'),
+        findsOneWidget,
+        reason: '${entry.key} monthly cap',
+      );
+    }
+  });
+
+  testWidgets('infers paid caps from the storage limit when planId is absent', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        const V2UsageData(
+          storageLimitLabel: '15 GB',
+          dailyUsedLabel: '1M',
+          dailyLimitLabel: '250M',
+          monthlyUsedLabel: '1B',
+          monthlyLimitLabel: '7.5B',
+          monthlyPercentLabel: '13%',
+          billingNote: 'Billed through Google Play.',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Daily cap 250,000,000 tokens / 24 h'), findsOneWidget);
+    expect(
+      find.text('Monthly cap 7,500,000,000 tokens / 30 days'),
+      findsOneWidget,
+    );
+    expect(
+      find.text('5× Free auto allowance · Auto + manual models'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('per-model breakdown includes custom providers and images', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _usageData(
+          models: const [
+            ..._models,
+            V2UsageModel(
+              id: 'custom-llama',
+              name: 'Llama 3.3 70B',
+              subtitle: 'Custom provider',
+              providerLabel: 'Ollama',
+              percent: 8,
+              tokensLabel: '0.9M tokens',
+              isCustomProvider: true,
+            ),
+            V2UsageModel(
+              id: 'custom-qwen',
+              name: 'Qwen 3 Coder',
+              subtitle: 'Custom provider',
+              providerLabel: 'OpenRouter',
+              percent: 4,
+              tokensLabel: '0.4M tokens',
+              isCustomProvider: true,
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('5 models'), findsOneWidget);
+    expect(find.text('Includes 2 custom provider models.'), findsOneWidget);
+    expect(find.text('Llama 3.3 70B'), findsOneWidget);
+    expect(find.text('Qwen 3 Coder'), findsOneWidget);
+    expect(find.text('0.9M tokens'), findsOneWidget);
+    expect(find.text('0.4M tokens'), findsOneWidget);
+    expect(find.text('Images'), findsOneWidget);
+    expect(find.text('86'), findsOneWidget);
+    expect(find.text('image generations'), findsOneWidget);
+  });
+
+  testWidgets('chart tabs and summaries announce their state', (tester) async {
+    final handle = tester.ensureSemantics();
+    _phoneSize(tester);
+
+    await tester.pumpWidget(
+      _app(OTheme.light(), _usageData(onRangeChanged: (_) {})),
+    );
+    await tester.pumpAndSettle();
+
     final tab = tester.getSemantics(find.text('7 days'));
-    expect(tab.label, '7 days');
+    expect(tab.label, 'Last 7 days');
     expect(tab.rect.height, greaterThanOrEqualTo(48));
     expect(
       tab,
       isSemantics(
-        label: '7 days',
+        label: 'Last 7 days',
         hasTapAction: true,
         isButton: true,
         hasEnabledState: true,
         isEnabled: true,
         hasSelectedState: true,
+        isSelected: true,
       ),
     );
 
-    final bar = tester.getSemantics(
-      find.byKey(const ValueKey<String>('usage-day-mon')),
+    final chart = tester.getSemantics(
+      find.byKey(const ValueKey<String>('usage-chart-daily')),
     );
-    expect(bar.label, 'Mon, 8.2M tokens');
-    expect(bar.rect.width, greaterThanOrEqualTo(48));
-    expect(bar.rect.height, greaterThanOrEqualTo(48));
+    expect(chart.label, contains('Daily tokens chart'));
+    expect(chart.label, contains('74.2M tokens total'));
+    expect(chart.label, contains('Peak Fri, 16.9M tokens'));
 
-    // With no callbacks wired the same controls report a disabled state.
+    // With no callbacks wired the range switch reports a disabled state.
     await tester.pumpWidget(_app(OTheme.light(), _usageData()));
     await tester.pumpAndSettle();
 
-    final disabledTab = tester.getSemantics(find.text('7 days'));
-    expect(disabledTab.label, '7 days');
+    final disabledTab = tester.getSemantics(find.text('30 days'));
+    expect(disabledTab.label, 'Last 30 days');
     expect(
       disabledTab,
       isSemantics(
-        label: '7 days',
+        label: 'Last 30 days',
         hasTapAction: false,
         hasEnabledState: true,
         isEnabled: false,

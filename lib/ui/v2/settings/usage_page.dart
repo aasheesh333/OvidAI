@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'plan_billing_page.dart';
+import 'usage_charts.dart';
 
 enum V2UsageStatus { loading, ready, empty, error }
 
@@ -18,6 +20,8 @@ class V2UsageDay {
     required this.label,
     required this.fraction,
     this.valueLabel = '',
+    this.tokens = 0,
+    this.imageCount = 0,
   });
 
   final String id;
@@ -26,6 +30,13 @@ class V2UsageDay {
   /// Share of the tallest bar in the chart, 0..1.
   final double fraction;
   final String valueLabel;
+
+  /// Absolute token count for the day. When zero the count is parsed from
+  /// [valueLabel] (for example `8.2M tokens`), so older callers keep working.
+  final int tokens;
+
+  /// Image generations for the day. Zero means no image activity.
+  final int imageCount;
 }
 
 @immutable
@@ -37,6 +48,8 @@ class V2UsageModel {
     required this.percent,
     required this.tokensLabel,
     this.tone = V2UsageTone.accent,
+    this.providerLabel,
+    this.isCustomProvider = false,
   });
 
   final String id;
@@ -45,20 +58,30 @@ class V2UsageModel {
   final int percent;
   final String tokensLabel;
   final V2UsageTone tone;
+
+  /// Provider name for custom connectors (`Ollama`, `OpenRouter`, …).
+  final String? providerLabel;
+
+  /// True when this row came from a user-added provider, not Ovid Cloud.
+  final bool isCustomProvider;
 }
 
 @immutable
 class V2UsageData {
   const V2UsageData({
     this.status = V2UsageStatus.ready,
+    this.planId,
     this.dailyUsedLabel = '',
     this.dailyLimitLabel = '',
     this.dailyFraction = 0,
+    this.dailyCapLabel = '',
     this.resetLabel = '',
+    this.resetsAtLabel = '',
     this.monthlyUsedLabel = '',
     this.monthlyLimitLabel = '',
     this.monthlyFraction = 0,
     this.monthlyPercentLabel = '',
+    this.monthlyCapLabel = '',
     this.billingNote = '',
     this.days = const [],
     this.selectedDayId,
@@ -68,6 +91,7 @@ class V2UsageData {
     this.showFreePlanNote = true,
     this.requestsLabel = '0',
     this.imagesLabel = '0',
+    this.imagesDetail = 'image generations',
     this.storageUsedLabel = '0 GB',
     this.storageLimitLabel = '0 GB',
     this.storageFraction = 0,
@@ -83,14 +107,41 @@ class V2UsageData {
   });
 
   final V2UsageStatus status;
+
+  /// Current plan id (`free`, `go`, `plus`, `pro` or a server tier alias).
+  /// Selects the exact token caps from the authoritative plan table. When
+  /// omitted, the plan is inferred from [storageLimitLabel] (the route already
+  /// derives that from the live tier).
+  final String? planId;
   final String dailyUsedLabel;
   final String dailyLimitLabel;
+
+  /// Display fallbacks: an unwired screen must never render "of  tokens used".
+  String get usedText => dailyUsedLabel.trim().isEmpty ? '0' : dailyUsedLabel;
+
+  String get limitText =>
+      dailyLimitLabel.trim().isEmpty ? '50,000,000' : dailyLimitLabel;
+
+  String get monthlyUsedText =>
+      monthlyUsedLabel.trim().isEmpty ? '0' : monthlyUsedLabel;
+
+  String get monthlyLimitText =>
+      monthlyLimitLabel.trim().isEmpty ? '1,500,000,000' : monthlyLimitLabel;
   final double dailyFraction;
+
+  /// Overrides for the exact 24 h cap; empty derives it from [planId].
+  final String dailyCapLabel;
   final String resetLabel;
+
+  /// Absolute reset time, e.g. `Oct 22, 2026, 6:12 AM`.
+  final String resetsAtLabel;
   final String monthlyUsedLabel;
   final String monthlyLimitLabel;
   final double monthlyFraction;
   final String monthlyPercentLabel;
+
+  /// Overrides for the exact 30 day cap; empty derives it from [planId].
+  final String monthlyCapLabel;
   final String billingNote;
   final List<V2UsageDay> days;
   final String? selectedDayId;
@@ -100,6 +151,7 @@ class V2UsageData {
   final bool showFreePlanNote;
   final String requestsLabel;
   final String imagesLabel;
+  final String imagesDetail;
   final String storageUsedLabel;
   final String storageLimitLabel;
   final double storageFraction;
@@ -112,6 +164,22 @@ class V2UsageData {
   final VoidCallback? onUpgrade;
   final VoidCallback? onRetry;
   final String errorMessage;
+
+  V2PlanLimits get planLimits {
+    final byId = planId == null ? null : V2PlanLimits.forId(planId!);
+    if (byId != null) return byId;
+    final gb = int.tryParse(storageLimitLabel.split(' ').first);
+    return V2PlanLimits.forStorageGb(gb) ?? V2PlanLimits.free;
+  }
+
+  String get effectiveDailyCapLabel =>
+      dailyCapLabel.isNotEmpty ? dailyCapLabel : planLimits.dailyCapLabel;
+
+  String get effectiveMonthlyCapLabel =>
+      monthlyCapLabel.isNotEmpty ? monthlyCapLabel : planLimits.monthlyCapLabel;
+
+  int get customProviderCount =>
+      models.where((model) => model.isCustomProvider).length;
 }
 
 class UsagePage extends StatelessWidget {
@@ -154,20 +222,6 @@ class UsagePage extends StatelessWidget {
 
   Widget _content(BuildContext context) {
     final c = OColors.of(context);
-    V2UsageDay? selectedDay;
-    for (final day in data.days) {
-      if (day.id == data.selectedDayId) {
-        selectedDay = day;
-        break;
-      }
-    }
-    selectedDay ??= data.days.isEmpty ? null : data.days.last;
-    final selectedLabel = data.selectedDayLabel.isNotEmpty
-        ? data.selectedDayLabel
-        : selectedDay == null
-        ? ''
-        : '${selectedDay.label}: ${selectedDay.valueLabel}';
-
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
         OSpace.screen,
@@ -184,13 +238,11 @@ class UsagePage extends StatelessWidget {
           const SizedBox(height: OSpace.m),
           _GlanceCard(data: data),
           const SizedBox(height: OSpace.m),
-          _ActivityCard(
-            data: data,
-            selectedDay: selectedDay,
-            selectedLabel: selectedLabel,
-          ),
+          _DailyTokensSection(data: data),
           const SizedBox(height: OSpace.m),
-          _ModelsCard(data: data),
+          _ModelShareSection(data: data),
+          const SizedBox(height: OSpace.m),
+          _ImageUsageSection(data: data),
           if (data.showFreePlanNote) ...[
             const SizedBox(height: OSpace.m),
             OCard(
@@ -217,12 +269,12 @@ class UsagePage extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Free plan uses Auto only.',
+                          'Free and Go use Auto mode only.',
                           style: OType.caption.copyWith(color: c.textMuted),
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          'Upgraded models appear when active.',
+                          'Manual models unlock with Plus or Pro.',
                           style: OType.caption.copyWith(color: c.textFaint),
                         ),
                       ],
@@ -259,8 +311,7 @@ class _DailyRingCard extends StatelessWidget {
       child: Column(
         children: [
           Semantics(
-            label:
-                '${data.dailyUsedLabel} of ${data.dailyLimitLabel} tokens used today',
+            label: '${data.usedText} of ${data.limitText} tokens used today',
             child: ConstrainedBox(
               // The ring keeps its 208 dp look but grows with the text scale
               // instead of clipping the labels inside it.
@@ -299,7 +350,7 @@ class _DailyRingCard extends StatelessWidget {
                         ),
                         const SizedBox(height: OSpace.xs),
                         Text(
-                          data.dailyUsedLabel,
+                          data.usedText,
                           textAlign: TextAlign.center,
                           style: OType.display.copyWith(
                             color: c.text,
@@ -308,7 +359,7 @@ class _DailyRingCard extends StatelessWidget {
                         ),
                         const SizedBox(height: OSpace.xs),
                         Text(
-                          'of ${data.dailyLimitLabel} tokens used',
+                          'of ${data.limitText} tokens used',
                           textAlign: TextAlign.center,
                           style: OType.caption.copyWith(color: c.textMuted),
                         ),
@@ -319,6 +370,44 @@ class _DailyRingCard extends StatelessWidget {
               ),
             ),
           ),
+          const SizedBox(height: OSpace.l),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '${data.usedText} used',
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ),
+              const SizedBox(width: OSpace.s),
+              Flexible(
+                child: Text(
+                  '${data.limitText} limit',
+                  textAlign: TextAlign.right,
+                  style: OType.caption.copyWith(
+                    color: c.text,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: OSpace.s),
+          OProgressBar(value: fraction, height: 8),
+          const SizedBox(height: OSpace.s),
+          Text(
+            'Daily cap ${data.effectiveDailyCapLabel} tokens / 24 h',
+            textAlign: TextAlign.center,
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+          if (data.resetsAtLabel.isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text(
+              'Resets at ${data.resetsAtLabel}',
+              textAlign: TextAlign.center,
+              style: OType.caption.copyWith(color: c.textFaint),
+            ),
+          ],
           const SizedBox(height: OSpace.l),
           Container(
             padding: const EdgeInsets.symmetric(
@@ -408,14 +497,14 @@ class _MonthlyCard extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  '${data.monthlyUsedLabel} used',
+                  '${data.monthlyUsedText} used',
                   style: OType.caption.copyWith(color: c.textMuted),
                 ),
               ),
               const SizedBox(width: OSpace.s),
               Flexible(
                 child: Text(
-                  '${data.monthlyLimitLabel} limit',
+                  '${data.monthlyLimitText} limit',
                   textAlign: TextAlign.right,
                   style: OType.caption.copyWith(
                     color: c.text,
@@ -424,6 +513,17 @@ class _MonthlyCard extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: OSpace.s),
+          Text(
+            'Monthly cap ${data.effectiveMonthlyCapLabel} tokens / 30 days',
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            '${data.planLimits.autoAllowanceLabel} · '
+            '${data.planLimits.modelAccessLabel}',
+            style: OType.caption.copyWith(color: c.textFaint),
           ),
         ],
       ),
@@ -465,7 +565,11 @@ class _GlanceCard extends StatelessWidget {
                 color: c.hairline,
               ),
               Expanded(
-                child: _GlanceStat(label: 'Images', value: data.imagesLabel),
+                child: _GlanceStat(
+                  label: 'Images',
+                  value: data.imagesLabel,
+                  detail: data.imagesDetail,
+                ),
               ),
               Container(
                 width: 1,
@@ -582,489 +686,134 @@ class _UpgradeCard extends StatelessWidget {
   }
 }
 
-class _ActivityCard extends StatelessWidget {
-  const _ActivityCard({
-    required this.data,
-    required this.selectedDay,
-    required this.selectedLabel,
-  });
+/// Daily token bars. The page's [V2UsageDay] list is the single source of
+/// truth; the chart only renders it and reports a range change.
+class _DailyTokensSection extends StatelessWidget {
+  const _DailyTokensSection({required this.data});
 
   final V2UsageData data;
-  final V2UsageDay? selectedDay;
-  final String selectedLabel;
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final title = Text(
-                'Activity',
-                style: OType.h3.copyWith(color: c.text),
-              );
-              // Stack the tabs under the title on narrow screens and whenever
-              // the text is scaled up, so the three segments always have room.
-              final compact =
-                  constraints.maxWidth < 300 ||
-                  MediaQuery.textScalerOf(context).scale(1) > 1.3;
-              final tabs = _RangeTabs(
-                value: data.range,
-                onChanged: data.onRangeChanged,
-                expanded: compact,
-              );
-              if (compact) {
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    title,
-                    const SizedBox(height: OSpace.s),
-                    tabs,
-                  ],
-                );
-              }
-              return Row(
-                children: [
-                  Expanded(child: title),
-                  tabs,
-                ],
-              );
-            },
-          ),
-          const SizedBox(height: OSpace.m),
-          if (data.days.isEmpty)
-            OEmptyState(
-              compact: true,
-              icon: Icons.bar_chart_rounded,
-              title: 'No activity yet',
-              message:
-                  'Your daily token use will appear after your first chat.',
-              action: OButton(
-                label: 'Start a chat',
-                icon: Icons.chat_bubble_outline_rounded,
-                onPressed: data.onStartChat,
-              ),
-            )
-          else ...[
-            SizedBox(
-              height: 176,
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    for (final day in data.days)
-                      _UsageBar(
-                        day: day,
-                        selected: day.id == selectedDay?.id,
-                        onTap: data.onDaySelected,
-                      ),
-                  ],
-                ),
-              ),
+    final range = data.range == V2UsageRange.thirtyDays
+        ? V2UsageChartRange.thirtyDays
+        : V2UsageChartRange.sevenDays;
+    final onRangeChanged = data.onRangeChanged;
+    return V2DailyTokensChart(
+      key: const ValueKey('usage-daily-tokens-chart'),
+      title: 'Activity',
+      points: [for (final day in data.days) _tokenPoint(day)],
+      range: range,
+      onRangeChanged: onRangeChanged == null
+          ? null
+          : (value) => onRangeChanged(
+              value == V2UsageChartRange.thirtyDays
+                  ? V2UsageRange.thirtyDays
+                  : V2UsageRange.sevenDays,
             ),
-            const SizedBox(height: OSpace.m),
-            Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: OSpace.m,
-                vertical: OSpace.s,
-              ),
-              decoration: BoxDecoration(
-                color: c.surfaceAlt,
-                borderRadius: BorderRadius.circular(ORadius.m),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Selected day',
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ),
-                  const SizedBox(width: OSpace.s),
-                  Flexible(
-                    child: Text(
-                      selectedLabel,
-                      textAlign: TextAlign.right,
-                      style: OType.caption.copyWith(
-                        color: c.text,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ],
-      ),
+      onStartChat: data.onStartChat,
+      onRetry: data.onRetry,
     );
   }
 }
 
-class _UsageBar extends StatelessWidget {
-  const _UsageBar({
-    required this.day,
-    required this.selected,
-    required this.onTap,
-  });
+/// Model share. Custom-provider models keep their explanatory line above the
+/// chart, while the chart owns the split bar and the legend.
+class _ModelShareSection extends StatelessWidget {
+  const _ModelShareSection({required this.data});
 
-  final V2UsageDay day;
-  final bool selected;
-  final ValueChanged<V2UsageDay>? onTap;
+  final V2UsageData data;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final color = selected
-        ? c.accentFill
-        : c.accentFill.withValues(alpha: 0.45);
-    final semanticsLabel = '${day.label}, ${day.valueLabel}';
-    final content = SizedBox(
-      key: ValueKey<String>('usage-day-${day.id}'),
-      width: 48,
-      height: 176,
-      child: Column(
-        children: [
-          Expanded(
-            child: Center(
-              child: SizedBox(
-                width: 22,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    DecoratedBox(
-                      decoration: BoxDecoration(
-                        color: c.surfaceAlt,
-                        borderRadius: BorderRadius.circular(ORadius.s),
-                      ),
-                    ),
-                    Align(
-                      alignment: Alignment.bottomCenter,
-                      child: FractionallySizedBox(
-                        widthFactor: 1,
-                        heightFactor: day.fraction.clamp(0.02, 1.0).toDouble(),
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: color,
-                            borderRadius: BorderRadius.circular(ORadius.s),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (data.customProviderCount > 0) ...[
+          Text(
+            data.customProviderCount == 1
+                ? 'Includes 1 custom provider model.'
+                : 'Includes ${data.customProviderCount} custom provider models.',
+            style: OType.caption.copyWith(color: c.textMuted),
           ),
           const SizedBox(height: OSpace.s),
-          ExcludeSemantics(
-            child: Text(
-              day.label,
-              textAlign: TextAlign.center,
-              style: OType.caption.copyWith(
-                color: selected ? c.accent : c.textMuted,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+        ],
+        V2ModelShareChart(
+          key: const ValueKey('usage-model-share-chart'),
+          title: 'Usage by model',
+          slices: [
+            for (final model in data.models)
+              V2ModelShareSlice(
+                id: model.id,
+                label: model.name,
+                percent: model.percent.toDouble(),
+                valueLabel: model.tokensLabel.isNotEmpty
+                    ? model.tokensLabel
+                    : model.subtitle,
               ),
-            ),
-          ),
-        ],
-      ),
-    );
-    if (onTap != null) {
-      // `OPressable` already reports button + enabled; adding those flags again
-      // splits the node in two, so only the selected state is added here.
-      return Semantics(
-        selected: selected,
-        child: OPressable(
-          onTap: () => onTap!(day),
-          semanticLabel: semanticsLabel,
-          child: content,
+          ],
+          onStartChat: data.onStartChat,
+          onRetry: data.onRetry,
         ),
-      );
-    }
-    // No `OPressable` here: a disabled bar must not advertise a tap.
-    return Semantics(
-      label: semanticsLabel,
-      button: false,
-      enabled: false,
-      selected: selected,
-      child: content,
+      ],
     );
   }
 }
 
-class _RangeTabs extends StatelessWidget {
-  const _RangeTabs({
-    required this.value,
-    required this.onChanged,
-    this.expanded = false,
-  });
-
-  final V2UsageRange value;
-  final ValueChanged<V2UsageRange>? onChanged;
-  final bool expanded;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final tabs = <Widget>[
-      _RangeTab(
-        label: 'Today',
-        range: V2UsageRange.today,
-        selected: value == V2UsageRange.today,
-        onChanged: onChanged,
-        expanded: expanded,
-      ),
-      _RangeTab(
-        label: '7 days',
-        range: V2UsageRange.sevenDays,
-        selected: value == V2UsageRange.sevenDays,
-        onChanged: onChanged,
-        expanded: expanded,
-      ),
-      _RangeTab(
-        label: '30 days',
-        range: V2UsageRange.thirtyDays,
-        selected: value == V2UsageRange.thirtyDays,
-        onChanged: onChanged,
-        expanded: expanded,
-      ),
-    ];
-    return Container(
-      padding: const EdgeInsets.all(OSpace.xs),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Row(
-        mainAxisSize: expanded ? MainAxisSize.max : MainAxisSize.min,
-        children: [
-          for (final tab in tabs)
-            if (expanded) Expanded(child: tab) else tab,
-        ],
-      ),
-    );
-  }
-}
-
-class _RangeTab extends StatelessWidget {
-  const _RangeTab({
-    required this.label,
-    required this.range,
-    required this.selected,
-    required this.onChanged,
-    required this.expanded,
-  });
-
-  final String label;
-  final V2UsageRange range;
-  final bool selected;
-  final ValueChanged<V2UsageRange>? onChanged;
-  final bool expanded;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final text = Text(
-      label,
-      textAlign: TextAlign.center,
-      style: OType.caption.copyWith(
-        color: selected ? c.onAccent : c.textMuted,
-        fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-      ),
-    );
-    final content = AnimatedContainer(
-      duration: OMotion.fast,
-      curve: OMotion.standard,
-      constraints: const BoxConstraints(minHeight: OSpace.touch),
-      padding: EdgeInsets.symmetric(
-        horizontal: expanded ? 4 : 10,
-        vertical: OSpace.s,
-      ),
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        color: selected ? c.accentFill : c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: ExcludeSemantics(child: text),
-    );
-    if (onChanged == null) {
-      // No `OPressable` here: a disabled control must not advertise a tap.
-      return Semantics(
-        label: label,
-        button: false,
-        enabled: false,
-        selected: selected,
-        child: content,
-      );
-    }
-    // `OPressable` already reports button + enabled; adding those flags again
-    // splits the node in two, so only the selected state is added here.
-    return Semantics(
-      selected: selected,
-      child: OPressable(
-        onTap: () => onChanged!(range),
-        semanticLabel: label,
-        child: content,
-      ),
-    );
-  }
-}
-
-class _ModelsCard extends StatelessWidget {
-  const _ModelsCard({required this.data});
+/// Daily image generations, mapped from the same day list.
+class _ImageUsageSection extends StatelessWidget {
+  const _ImageUsageSection({required this.data});
 
   final V2UsageData data;
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OSectionHeader(
-            label: 'Usage by model',
-            padding: EdgeInsets.zero,
-            trailing: Text(
-              data.models.length == 1
-                  ? '1 model active'
-                  : '${data.models.length} models active',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.right,
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
+    return V2ImageUsageChart(
+      key: const ValueKey('usage-image-chart'),
+      title: 'Images generated',
+      points: [
+        for (final day in data.days)
+          V2ImageUsagePoint(
+            id: day.id,
+            label: day.label,
+            count: day.imageCount,
+            valueLabel:
+                '${day.imageCount} '
+                '${day.imageCount == 1 ? 'image' : 'images'}',
           ),
-          const SizedBox(height: OSpace.m),
-          if (data.models.isEmpty)
-            OEmptyState(
-              compact: true,
-              icon: Icons.pie_chart_outline_rounded,
-              title: 'No model use yet',
-              message: 'Your model split will appear after your first chat.',
-              action: OButton(
-                label: 'Start a chat',
-                icon: Icons.chat_bubble_outline_rounded,
-                onPressed: data.onStartChat,
-              ),
-            )
-          else ...[
-            ClipRRect(
-              borderRadius: BorderRadius.circular(ORadius.pill),
-              child: SizedBox(
-                height: 8,
-                child: Row(
-                  children: [
-                    for (final model in data.models)
-                      Expanded(
-                        flex: model.percent.clamp(1, 100).toInt(),
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: _toneColor(c, model.tone),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: OSpace.l),
-            OStagger(
-              children: [
-                for (final model in data.models) _ModelRow(model: model),
-              ],
-            ),
-          ],
-        ],
-      ),
+      ],
+      onStartChat: data.onStartChat,
+      onRetry: data.onRetry,
     );
   }
 }
 
-class _ModelRow extends StatelessWidget {
-  const _ModelRow({required this.model});
-
-  final V2UsageModel model;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: OSpace.touch),
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: OSpace.m),
-        child: Row(
-          children: [
-            Container(
-              width: 12,
-              height: 12,
-              decoration: BoxDecoration(
-                color: _toneColor(c, model.tone),
-                shape: BoxShape.circle,
-              ),
-            ),
-            const SizedBox(width: OSpace.m),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    model.name,
-                    style: OType.bodySm.copyWith(
-                      color: c.text,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  Text(
-                    model.subtitle,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: OSpace.s),
-            Flexible(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    '${model.percent}%',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.right,
-                    style: OType.bodySm.copyWith(
-                      color: c.text,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  Text(
-                    model.tokensLabel,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.right,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+V2TokenChartPoint _tokenPoint(V2UsageDay day) {
+  final parsed = day.tokens > 0
+      ? day.tokens.toDouble()
+      : _tokensFromLabel(day.valueLabel);
+  return V2TokenChartPoint(
+    id: day.id,
+    label: day.label,
+    // A day without an absolute count still keeps its relative height.
+    value: parsed > 0 ? parsed : day.fraction * 1000000,
+    valueLabel: day.valueLabel,
+  );
 }
 
-Color _toneColor(OColors c, V2UsageTone tone) {
-  return switch (tone) {
-    V2UsageTone.accent => c.accentFill,
-    V2UsageTone.success => c.success,
-    V2UsageTone.warn => c.warn,
+/// Reads `8.2M tokens`, `950K` or `12,400` into an absolute token count.
+double _tokensFromLabel(String label) {
+  final match = RegExp(
+    r'([0-9]+(?:\.[0-9]+)?)\s*([KMB])?',
+    caseSensitive: false,
+  ).firstMatch(label.replaceAll(',', ''));
+  if (match == null) return 0;
+  final number = double.tryParse(match.group(1) ?? '') ?? 0;
+  return switch ((match.group(2) ?? '').toUpperCase()) {
+    'K' => number * 1000,
+    'M' => number * 1000000,
+    'B' => number * 1000000000,
+    _ => number,
   };
 }

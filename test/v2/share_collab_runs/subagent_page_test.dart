@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/runs/subagent_page.dart';
+import 'package:ovid_ai/ui/v2/runs/subagent_summary.dart';
 
 const _logLines = [
   V2SubagentLogLine(time: '10:41:02', text: 'Initializing component tree'),
@@ -24,6 +25,7 @@ const _logLines = [
 V2SubagentPageData _data({
   V2SubagentStatus status = V2SubagentStatus.ready,
   bool working = true,
+  bool withSummary = true,
 }) {
   return V2SubagentPageData(
     name: 'Frontend builder',
@@ -39,6 +41,16 @@ V2SubagentPageData _data({
     progress: 0.6,
     files: const ['Hero.tsx', 'Navbar.tsx', 'globals.css'],
     logLines: _logLines,
+    logPath: '/workspace/.ovid/logs/subagent_a402.log',
+    summary: withSummary
+        ? const V2SubagentSummary(
+            status: 'completed',
+            filesModified: ['Hero.tsx', 'Navbar.tsx', 'globals.css'],
+            artifactsCreated: ['preview-screenshot.png'],
+            keyFindings: ['Breakpoints hold at 320 dp and 200 % text.'],
+            errorIfAny: 'One test flaked once, then passed.',
+          )
+        : null,
     status: status,
     working: working,
   );
@@ -103,10 +115,24 @@ void main() {
       expect(find.text('Working'), findsOneWidget);
       expect(find.text('Overall progress'), findsOneWidget);
       expect(find.text('60%'), findsOneWidget);
-      expect(find.text('Hero.tsx'), findsOneWidget);
-      expect(find.text('3 files'), findsOneWidget);
+      // Hero.tsx shows in both the files-touched chips and the summary card.
+      expect(find.text('Hero.tsx'), findsNWidgets(2));
+      expect(find.text('3 files'), findsNWidgets(2));
       expect(find.text('8h max'), findsOneWidget);
       expect(find.text('View full log (42 lines)'), findsOneWidget);
+      expect(find.text('Read full log'), findsOneWidget);
+      expect(
+        find.text('/workspace/.ovid/logs/subagent_a402.log'),
+        findsOneWidget,
+      );
+      expect(find.text('JSON summary'), findsOneWidget);
+      expect(find.text('Completed'), findsOneWidget);
+      expect(find.text('preview-screenshot.png'), findsOneWidget);
+      expect(
+        find.text('Breakpoints hold at 320 dp and 200 % text.'),
+        findsOneWidget,
+      );
+      expect(find.text('One test flaked once, then passed.'), findsOneWidget);
       expect(find.text('Stop subagent'), findsOneWidget);
       expect(
         find.text('Subagents cannot start other subagents.'),
@@ -163,6 +189,52 @@ void main() {
     expect(views, 1);
   });
 
+  testWidgets('read full log opens the log path', (tester) async {
+    String? opened;
+    await _pump(
+      tester,
+      SubagentPage(data: _data(), onReadFullLog: (path) => opened = path),
+      OTheme.light(),
+    );
+
+    await tester.ensureVisible(find.text('Read full log'));
+    await tester.pump();
+    await tester.tap(find.text('Read full log'));
+    await tester.pump();
+    expect(opened, '/workspace/.ovid/logs/subagent_a402.log');
+  });
+
+  testWidgets('the strict JSON summary renders and reveals raw JSON', (
+    tester,
+  ) async {
+    await _pump(tester, SubagentPage(data: _data()), OTheme.light());
+
+    await tester.ensureVisible(find.text('JSON summary'));
+    await tester.pump();
+    expect(find.text('Completed'), findsOneWidget);
+    expect(find.text('FILES MODIFIED'), findsOneWidget);
+    expect(find.text('ARTIFACTS CREATED'), findsOneWidget);
+    expect(find.text('KEY FINDINGS'), findsOneWidget);
+    expect(find.text('ERROR IF ANY'), findsOneWidget);
+    expect(find.textContaining('"files_modified"'), findsNothing);
+
+    await tester.ensureVisible(find.text('Show raw JSON'));
+    await tester.pump();
+    await tester.tap(find.text('Show raw JSON'));
+    await tester.pump();
+
+    expect(find.textContaining('"files_modified"'), findsOneWidget);
+    expect(find.textContaining('"artifacts_created"'), findsOneWidget);
+    expect(find.textContaining('"key_findings"'), findsOneWidget);
+    expect(find.textContaining('"error_if_any"'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('Hide raw JSON'));
+    await tester.pump();
+    await tester.tap(find.text('Hide raw JSON'));
+    await tester.pump();
+    expect(find.textContaining('"files_modified"'), findsNothing);
+  });
+
   testWidgets('file chip opens the file', (tester) async {
     String? opened;
     await _pump(
@@ -171,9 +243,10 @@ void main() {
       OTheme.light(),
     );
 
-    await tester.ensureVisible(find.text('Navbar.tsx'));
+    // The first Navbar.tsx chip is the files-touched one above the summary.
+    await tester.ensureVisible(find.text('Navbar.tsx').first);
     await tester.pump();
-    await tester.tap(find.text('Navbar.tsx'));
+    await tester.tap(find.text('Navbar.tsx').first);
     await tester.pump();
     expect(opened, 'Navbar.tsx');
   });
@@ -221,11 +294,7 @@ void main() {
     tester,
   ) async {
     final handle = tester.ensureSemantics();
-    await _pump(
-      tester,
-      SubagentPage(data: _data()),
-      OTheme.light(),
-    );
+    await _pump(tester, SubagentPage(data: _data()), OTheme.light());
 
     await tester.ensureVisible(find.text('Stop subagent'));
     await tester.pump(const Duration(milliseconds: 400));
@@ -239,21 +308,24 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('renders at 320 dp with 200% text without overflow', (
+  testWidgets('renders at 320 dp with 200% text in light and dark', (
     tester,
   ) async {
-    await _pump(
-      tester,
-      SubagentPage(data: _data()),
-      OTheme.dark(),
-      size: const Size(320, 700),
-      textScale: 2,
-    );
+    for (final theme in [OTheme.light(), OTheme.dark()]) {
+      await _pump(
+        tester,
+        SubagentPage(data: _data()),
+        theme,
+        size: const Size(320, 700),
+        textScale: 2,
+      );
 
-    expect(tester.takeException(), isNull);
-    expect(find.text('Frontend builder'), findsOneWidget);
-    expect(find.text('Stop subagent'), findsOneWidget);
-    _expectNoTextPastEdge(tester, 320);
+      expect(tester.takeException(), isNull);
+      expect(find.text('Frontend builder'), findsOneWidget);
+      expect(find.text('JSON summary'), findsOneWidget);
+      expect(find.text('Stop subagent'), findsOneWidget);
+      _expectNoTextPastEdge(tester, 320);
+    }
   });
 
   testWidgets('long name and many files fit at 320 dp with 200% text', (
@@ -326,5 +398,40 @@ void main() {
     for (final fade in fades) {
       expect(fade.opacity.value, 1);
     }
+  });
+
+  testWidgets('the JSON summary block is the shared SubagentSummaryCard', (
+    tester,
+  ) async {
+    await _pump(tester, SubagentPage(data: _data()), OTheme.light());
+
+    final card = tester.widget<SubagentSummaryCard>(
+      find.byType(SubagentSummaryCard),
+    );
+    expect(card.status, V2SubagentSummaryStatus.ready);
+    expect(card.summary?.status, 'completed');
+    expect(card.summary?.filesModified, [
+      'Hero.tsx',
+      'Navbar.tsx',
+      'globals.css',
+    ]);
+    expect(card.summary?.artifactsCreated, ['preview-screenshot.png']);
+    expect(card.summary?.keyFindings, [
+      'Breakpoints hold at 320 dp and 200 % text.',
+    ]);
+    expect(card.summary?.errorIfAny, 'One test flaked once, then passed.');
+
+    // A subagent that has not reported yet shows the card's empty state.
+    await _pump(
+      tester,
+      SubagentPage(data: _data(withSummary: false)),
+      OTheme.dark(),
+    );
+    final empty = tester.widget<SubagentSummaryCard>(
+      find.byType(SubagentSummaryCard),
+    );
+    expect(empty.summary, isNull);
+    expect(empty.status, V2SubagentSummaryStatus.empty);
+    expect(find.text('No summary yet'), findsOneWidget);
   });
 }

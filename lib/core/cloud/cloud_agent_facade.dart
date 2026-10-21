@@ -122,6 +122,8 @@ class CloudAgentFacade extends ChangeNotifier
       state.projection.dispose();
     }
     _sessions.clear();
+    _subagentSessions.clear();
+    _drainAfterSend.clear();
     for (final notifier in _busyNotifiers.values) {
       notifier.dispose();
     }
@@ -187,6 +189,8 @@ class CloudAgentFacade extends ChangeNotifier
     // closes the multiplexer's stream; idempotent for a never-subscribed id).
     _ws.unsubscribe(id);
     _queues.remove(id);
+    _subagentSessions.remove(id);
+    _drainAfterSend.remove(id);
     unawaited(_persistQueues());
     _pendingRows.remove(id);
     _lastPrompts.remove(id);
@@ -211,6 +215,19 @@ class CloudAgentFacade extends ChangeNotifier
 
   final Map<String, _SessionCloudState> _sessions =
       <String, _SessionCloudState>{};
+
+  /// Child sessions the agent dispatched as subagents. They have their own
+  /// server runs: a Stop on the parent turn must never cancel them, and the
+  /// "stop everything" path skips them too (the Jobs list owns their kill).
+  final Set<String> _subagentSessions = <String>{};
+
+  /// Sessions with a prompt that arrived while a send held the double-send
+  /// guard. That row has no run of its own yet; the in-flight send drains the
+  /// queue when it settles (a refused send never terminalizes). Keeping this
+  /// explicit avoids re-dispatching on every settle — a failed queued send
+  /// must wait for the user, not spin.
+  final Set<String> _drainAfterSend = <String>{};
+
   final Map<String, ValueNotifier<bool>> _busyNotifiers =
       <String, ValueNotifier<bool>>{};
 
@@ -541,6 +558,7 @@ class CloudAgentFacade extends ChangeNotifier
                 // The live activity card reads the child's own events.
                 final child = event.payload['childSessionId'];
                 if (child is String && child.isNotEmpty) {
+                  _subagentSessions.add(child);
                   _watchChild(child);
                 }
                 break;
@@ -1655,6 +1673,9 @@ class CloudAgentFacade extends ChangeNotifier
         sessionRefs: sessionRefs,
         projectRefs: projectRefs,
       );
+      // The in-flight send owns the next drain: this row must not wait for a
+      // terminal that may never come if that send is refused.
+      _drainAfterSend.add(key);
       onQueued?.call();
       return;
     }
@@ -1744,6 +1765,16 @@ class CloudAgentFacade extends ChangeNotifier
       // is over and the composer falls back to run-tracking busy state.
       _sending.removeAll(guardKeys);
       _notify();
+      // A row that arrived while this POST held the double-send guard has
+      // no run of its own: dispatch it now that the window is closed. Only
+      // rows flagged by that guard are drained here — a queued send that
+      // fails must not be retried in a loop.
+      final drainKey = _serverId(localId) ?? key;
+      final requested = _drainAfterSend.remove(key) |
+          _drainAfterSend.remove(drainKey);
+      if (requested && _queues[drainKey]?.isNotEmpty == true) {
+        scheduleMicrotask(() => unawaited(_drainQueue(drainKey)));
+      }
     }
   }
 
@@ -1839,11 +1870,36 @@ class CloudAgentFacade extends ChangeNotifier
   void hardStopAll() {
     final ops = <Future<void>>[];
     for (final state in _sessions.values.toList(growable: false)) {
+      // Subagent runs belong to their own child sessions. Stopping the main
+      // turn never kills them — the Jobs list's kill is the only surface
+      // that does. "Stop everything" therefore skips them too.
+      if (_isSubagentSession(state.serverId)) continue;
       if (state.runState.runId != null && state.runState.busy) {
         ops.add(_cancelRun(state));
       }
     }
     _lastHardStop = ops.isEmpty ? Future<void>.value() : Future.wait(ops);
+  }
+
+  /// True when [serverId] is a subagent child session rather than a chat the
+  /// user drives. Known children are remembered when the parent reports
+  /// `subagent_started` (or the transcript is opened), and a child whose
+  /// parent event predates this process is recovered from the parent's
+  /// `dispatch_agent` cards.
+  bool _isSubagentSession(String serverId) {
+    if (_subagentSessions.contains(serverId)) return true;
+    for (final state in _sessions.values) {
+      if (state.serverId == serverId) continue;
+      for (final m in state.projection.messages) {
+        if (m.kind == MsgKind.tool &&
+            m.toolName == 'dispatch_agent' &&
+            m.toolSessionId == serverId) {
+          _subagentSessions.add(serverId);
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   Future<void> _cancelRun(
@@ -2208,6 +2264,8 @@ class CloudAgentFacade extends ChangeNotifier
     _queues.clear();
     _draining.clear();
     _sending.clear();
+    _drainAfterSend.clear();
+    _subagentSessions.clear();
     _notify();
   }
 
@@ -2315,6 +2373,7 @@ class CloudAgentFacade extends ChangeNotifier
   /// on first use while the child runs).
   void _watchChild(String childSessionId) {
     if (_disposed) return;
+    _subagentSessions.add(childSessionId);
     _stateFor(childSessionId, subscribe: true);
   }
 
@@ -2323,6 +2382,7 @@ class CloudAgentFacade extends ChangeNotifier
   /// work is readable after a reload.
   Future<void> openSubagentTranscript(String childSessionId) async {
     if (_disposed) return;
+    _subagentSessions.add(childSessionId);
     final existing = _sessions[childSessionId];
     _stateFor(childSessionId, subscribe: true);
     final store = _store;
@@ -2361,6 +2421,12 @@ class CloudAgentFacade extends ChangeNotifier
     if (queue == null || queue.isEmpty) return const [];
     return List.unmodifiable(queue.map((entry) => entry.id));
   }
+
+  /// How many prompts wait in [sessionId]'s composer queue. The queue is
+  /// keyed by server session id and never cleared by a foreground switch, so
+  /// a chat that is left mid-run keeps its rows and reports them here when
+  /// the user comes back.
+  int queuedCountFor(String sessionId) => _queueFor(sessionId)?.length ?? 0;
 
   @override
   void enqueueMessage(
@@ -2570,6 +2636,15 @@ class CloudAgentFacade extends ChangeNotifier
     // cancelled run (FIFO). Subagent runs are untouched.
     if (!force && busyFor(serverId)) return;
     if (_store?.offline ?? false) return;
+    // A send for this session is already in flight. Popping the head now
+    // would make `runTask` hit its double-send guard and append the row to
+    // the TAIL (reordering the queue) without dispatching. Flag the session
+    // so that send's settle path drains the queue instead — a refused send
+    // never terminalizes, so nothing else would.
+    if (_sending.contains(serverId)) {
+      _drainAfterSend.add(serverId);
+      return;
+    }
     if (!_draining.add(serverId)) return;
     var dispatched = false;
     try {
@@ -2884,6 +2959,9 @@ class CloudAgentFacade extends ChangeNotifier
           (_attachmentReservations[serverSessionId] ?? 0) + reservations;
     }
     if (_sending.remove(localSessionId)) _sending.add(serverSessionId);
+    if (_drainAfterSend.remove(localSessionId)) {
+      _drainAfterSend.add(serverSessionId);
+    }
     final ticks = _tickNotifiers.remove(localSessionId);
     if (ticks != null) {
       _tickNotifiers.putIfAbsent(serverSessionId, () => ticks);
@@ -3029,6 +3107,8 @@ class CloudAgentFacade extends ChangeNotifier
       state.projection.dispose();
     }
     _sessions.clear();
+    _subagentSessions.clear();
+    _drainAfterSend.clear();
     for (final notifier in _busyNotifiers.values) {
       notifier.dispose();
     }

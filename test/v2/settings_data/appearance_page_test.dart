@@ -32,6 +32,10 @@ const _preview = V2AppearancePreview(
 );
 
 V2AppearancePageData _data({
+  ThemeMode themeMode = ThemeMode.system,
+  bool memoryEnabled = true,
+  bool shareSessionMemory = false,
+  bool showReasoning = true,
   ValueChanged<ThemeMode>? onThemeModeChanged,
   ValueChanged<String>? onAccentChanged,
   ValueChanged<double>? onTextScaleChanged,
@@ -40,14 +44,21 @@ V2AppearancePageData _data({
   ValueChanged<String>? onDensityChanged,
   ValueChanged<String>? onCodeFontChanged,
   ValueChanged<String>? onVoiceLanguageChanged,
+  ValueChanged<bool>? onMemoryEnabledChanged,
+  ValueChanged<bool>? onShareSessionMemoryChanged,
+  ValueChanged<bool>? onShowReasoningChanged,
+  VoidCallback? onMemoryFilesTap,
   String voiceLanguageId = 'en',
   VoidCallback? onRefreshPreview,
 }) {
   return V2AppearancePageData(
-    themeMode: ThemeMode.system,
+    themeMode: themeMode,
     accentId: 'violet',
     textScale: 1,
     voiceLanguageId: voiceLanguageId,
+    memoryEnabled: memoryEnabled,
+    shareSessionMemory: shareSessionMemory,
+    showReasoning: showReasoning,
     preview: _preview,
     onThemeModeChanged: onThemeModeChanged,
     onAccentChanged: onAccentChanged,
@@ -57,12 +68,19 @@ V2AppearancePageData _data({
     onDensityChanged: onDensityChanged,
     onCodeFontChanged: onCodeFontChanged,
     onVoiceLanguageChanged: onVoiceLanguageChanged,
+    onMemoryEnabledChanged: onMemoryEnabledChanged,
+    onShareSessionMemoryChanged: onShareSessionMemoryChanged,
+    onShowReasoningChanged: onShowReasoningChanged,
+    onMemoryFilesTap: onMemoryFilesTap,
     onRefreshPreview: onRefreshPreview,
   );
 }
 
+Switch _switch(WidgetTester tester, String key) =>
+    tester.widget<Switch>(find.byKey(ValueKey<String>(key)));
+
 void main() {
-  testWidgets('renders theme controls and preview in light mode', (
+  testWidgets('renders the personalization controls in light mode', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -70,15 +88,18 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Appearance'), findsOneWidget);
+    expect(find.text('Personalization'), findsOneWidget);
     expect(find.text('System'), findsOneWidget);
     expect(find.text('Light'), findsOneWidget);
     expect(find.text('Dark'), findsOneWidget);
+    expect(find.text('MEMORY'), findsOneWidget);
+    expect(find.text('Global memory'), findsOneWidget);
+    expect(find.text('Share session memory'), findsOneWidget);
+    expect(find.text('Memory files'), findsOneWidget);
+    expect(find.text('CHAT'), findsOneWidget);
+    expect(find.text('Show reasoning'), findsOneWidget);
+    expect(find.text('Chat text size'), findsOneWidget);
     expect(find.text('Accent color'), findsOneWidget);
-    expect(find.text('Text size'), findsOneWidget);
-    expect(find.text('Density'), findsOneWidget);
-    expect(find.text('Code font'), findsOneWidget);
-    expect(find.text('Follow device setting'), findsOneWidget);
     expect(find.text('LIVE PREVIEW'), findsOneWidget);
     expect(find.text('Can you analyze this repo structure?'), findsOneWidget);
     expect(find.byType(Slider), findsOneWidget);
@@ -90,9 +111,128 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Appearance'), findsOneWidget);
+    expect(find.text('Personalization'), findsOneWidget);
+    expect(find.text('Global memory'), findsOneWidget);
+    expect(find.text('Show reasoning'), findsOneWidget);
     expect(find.text('Reduce motion'), findsOneWidget);
     expect(find.text('High contrast'), findsOneWidget);
+  });
+
+  testWidgets('defaults keep memory and reasoning on, sharing off', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(AppearancePage(data: _data()), theme: OTheme.light()),
+    );
+    await tester.pumpAndSettle();
+
+    expect(_switch(tester, 'global-memory-switch').value, isTrue);
+    expect(_switch(tester, 'share-session-memory-switch').value, isFalse);
+    expect(_switch(tester, 'show-reasoning-switch').value, isTrue);
+  });
+
+  testWidgets('global memory switch reports the new value', (tester) async {
+    bool? next;
+    await tester.pumpWidget(
+      _app(
+        AppearancePage(
+          data: _data(onMemoryEnabledChanged: (value) => next = value),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey<String>('global-memory-switch')),
+    );
+    await tester.tap(find.byKey(const ValueKey<String>('global-memory-switch')));
+    expect(next, isFalse);
+  });
+
+  testWidgets('share session memory switch reports the new value', (
+    tester,
+  ) async {
+    bool? next;
+    await tester.pumpWidget(
+      _app(
+        AppearancePage(
+          data: _data(onShareSessionMemoryChanged: (value) => next = value),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey<String>('share-session-memory-switch')),
+    );
+    await tester.tap(
+      find.byKey(const ValueKey<String>('share-session-memory-switch')),
+    );
+    expect(next, isTrue);
+  });
+
+  testWidgets('show reasoning switch reports the new value', (tester) async {
+    bool? next;
+    await tester.pumpWidget(
+      _app(
+        AppearancePage(
+          data: _data(onShowReasoningChanged: (value) => next = value),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey<String>('show-reasoning-switch')),
+    );
+    await tester.tap(find.byKey(const ValueKey<String>('show-reasoning-switch')));
+    expect(next, isFalse);
+  });
+
+  testWidgets('show reasoning off persists when the page rebuilds', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        AppearancePage(data: _data(showReasoning: false)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(_switch(tester, 'show-reasoning-switch').value, isFalse);
+
+    // Rebuilding with the saved value must keep the switch off.
+    await tester.pumpWidget(
+      _app(
+        AppearancePage(data: _data(showReasoning: false)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(_switch(tester, 'show-reasoning-switch').value, isFalse);
+  });
+
+  testWidgets('memory files row opens the files screen', (tester) async {
+    var opened = 0;
+    await tester.pumpWidget(
+      _app(
+        AppearancePage(data: _data(onMemoryFilesTap: () => opened++)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey<String>('memory-files-row'));
+    await tester.ensureVisible(row);
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+
+    expect(opened, 1);
   });
 
   testWidgets('empty preview offers a refresh action', (tester) async {
@@ -141,7 +281,7 @@ void main() {
     expect(next, 'green');
   });
 
-  testWidgets('text size slider covers 75 to 180 percent', (tester) async {
+  testWidgets('chat text size slider covers 75 to 180 percent', (tester) async {
     await tester.pumpWidget(
       _app(AppearancePage(data: _data()), theme: OTheme.light()),
     );
@@ -216,7 +356,7 @@ void main() {
       _app(
         AppearancePage(
           data: V2AppearancePageData(
-            errorMessage: 'Appearance settings could not load.',
+            errorMessage: 'Personalization settings could not load.',
             onRetry: () => retried = true,
           ),
         ),
@@ -225,7 +365,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Appearance settings could not load.'), findsOneWidget);
+    expect(
+      find.text('Personalization settings could not load.'),
+      findsOneWidget,
+    );
     await tester.tap(find.text('Try again'));
     expect(retried, isTrue);
   });
@@ -259,6 +402,10 @@ void main() {
               onHighContrastChanged: (_) {},
               onDensityChanged: (_) {},
               onCodeFontChanged: (_) {},
+              onMemoryEnabledChanged: (_) {},
+              onShareSessionMemoryChanged: (_) {},
+              onShowReasoningChanged: (_) {},
+              onMemoryFilesTap: () {},
               onPreviewSend: () {},
               onRefreshPreview: () {},
             ),
@@ -375,7 +522,8 @@ void main() {
 
     expect(find.text('THEME MODE'), findsOneWidget);
     expect(find.text('Accent color'), findsOneWidget);
-    expect(find.text('Text size'), findsOneWidget);
+    expect(find.text('MEMORY'), findsOneWidget);
+    expect(find.text('CHAT'), findsOneWidget);
     expect(find.text('CHAT LAYOUT'), findsOneWidget);
     expect(find.text('ACCESSIBILITY & MOTION'), findsOneWidget);
     expect(find.text('Can you analyze this repo structure?'), findsOneWidget);

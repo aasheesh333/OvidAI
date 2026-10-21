@@ -68,7 +68,10 @@ V2AccountHealthPageData _data({
   VoidCallback? onEnableTwoFactor,
   VoidCallback? onContactSupport,
   VoidCallback? onRunCheck,
+  VoidCallback? onCancelDeletion,
+  V2AccountStatus accountStatus = V2AccountStatus.active,
 }) {
+  final pending = accountStatus == V2AccountStatus.deletionPending;
   return V2AccountHealthPageData(
     statusTitle: 'All systems normal',
     statusMessage: 'No suspicious activity detected.',
@@ -79,6 +82,29 @@ V2AccountHealthPageData _data({
     emailVerified: true,
     emailLabel: 'aarav@gmail.com',
     regionLabel: 'Mumbai, India',
+    accountStatus: accountStatus,
+    usage: const [
+      V2AccountUsageMetric(
+        id: 'storage',
+        title: 'Storage left',
+        value: '2.1 GB',
+        detail: 'of 3 GB',
+      ),
+      V2AccountUsageMetric(
+        id: 'daily_usage',
+        title: 'Daily usage left',
+        value: '38M tokens',
+        detail: 'Resets in 6h 12m',
+      ),
+      V2AccountUsageMetric(
+        id: 'monthly_usage',
+        title: 'Monthly usage left',
+        value: '1.1B tokens',
+        detail: 'Resets on 1 Nov',
+      ),
+    ],
+    deletionRequestedLabel: pending ? '21 Oct 2026' : '',
+    deletionScheduledLabel: pending ? '20 Nov 2026' : '',
     services: const [
       V2ServiceStatus(name: 'Chat and sync', statusLabel: 'Operational'),
       V2ServiceStatus(name: 'Artifacts', statusLabel: 'Operational'),
@@ -112,6 +138,7 @@ V2AccountHealthPageData _data({
     onEnableTwoFactor: onEnableTwoFactor,
     onContactSupport: onContactSupport,
     onRunCheck: onRunCheck,
+    onCancelDeletion: onCancelDeletion,
   );
 }
 
@@ -145,6 +172,149 @@ void main() {
     expect(find.text('Account health'), findsOneWidget);
     expect(find.text('No suspicious activity detected.'), findsWidgets);
     expect(find.text('MacBook Air'), findsOneWidget);
+  });
+
+  testWidgets('summary shows storage and daily/monthly usage left', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(AccountHealthPage(data: _data()), theme: OTheme.light()),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('ACCOUNT SUMMARY'), findsOneWidget);
+    expect(find.text('Account status'), findsOneWidget);
+    expect(find.text('Active'), findsOneWidget);
+    expect(find.text('Your account is in good standing.'), findsOneWidget);
+    expect(find.text('Storage left'), findsOneWidget);
+    expect(find.text('2.1 GB · of 3 GB'), findsOneWidget);
+    expect(find.text('Daily usage left'), findsOneWidget);
+    expect(find.text('38M tokens · Resets in 6h 12m'), findsOneWidget);
+    expect(find.text('Monthly usage left'), findsOneWidget);
+    expect(find.text('1.1B tokens · Resets on 1 Nov'), findsOneWidget);
+  });
+
+  testWidgets('unmeasured usage is labelled instead of guessed', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        const AccountHealthPage(data: V2AccountHealthPageData()),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Storage left'), findsOneWidget);
+    expect(find.text('Daily usage left'), findsOneWidget);
+    expect(find.text('Monthly usage left'), findsOneWidget);
+    expect(find.text('Not measured yet'), findsNWidgets(3));
+  });
+
+  testWidgets('deletion pending shows its state and can be cancelled', (
+    tester,
+  ) async {
+    var cancelled = 0;
+    await tester.pumpWidget(
+      _app(
+        AccountHealthPage(
+          data: _data(
+            accountStatus: V2AccountStatus.deletionPending,
+            onCancelDeletion: () => cancelled++,
+          ),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Deletion pending'), findsOneWidget);
+    expect(find.text('DELETION REQUEST'), findsOneWidget);
+    expect(find.text('Deletion requested'), findsOneWidget);
+    expect(
+      find.text('Requested 21 Oct 2026 · Deletes on 20 Nov 2026'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('will be deleted on 20 Nov 2026'),
+      findsOneWidget,
+    );
+
+    final cancel = find.byKey(
+      const ValueKey<String>('account-health-cancel-deletion'),
+    );
+    await tester.ensureVisible(cancel);
+    await tester.tap(cancel);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Cancel account deletion?'), findsOneWidget);
+    expect(cancelled, 0);
+
+    await tester.tap(find.text('Keep deletion'));
+    await tester.pumpAndSettle();
+    expect(cancelled, 0);
+    expect(find.text('Cancel account deletion?'), findsNothing);
+
+    await tester.ensureVisible(cancel);
+    await tester.tap(cancel);
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(
+        const ValueKey<String>('account-health-confirm-cancel-deletion'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(cancelled, 1);
+  });
+
+  testWidgets('deletion card is absent for an active account', (tester) async {
+    await tester.pumpWidget(
+      _app(AccountHealthPage(data: _data()), theme: OTheme.light()),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('account-health-deletion-card')),
+      findsNothing,
+    );
+    expect(find.text('DELETION REQUEST'), findsNothing);
+  });
+
+  testWidgets('suspended accounts are named and can reach support', (
+    tester,
+  ) async {
+    var contacted = 0;
+    await tester.pumpWidget(
+      _app(
+        AccountHealthPage(
+          data: _data(
+            accountStatus: V2AccountStatus.suspendedForAbuse,
+            onContactSupport: () => contacted++,
+          ),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Suspended'), findsOneWidget);
+    expect(
+      find.text('Suspended for abuse. Contact support to appeal.'),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('account-health-suspended-notice')),
+      findsOneWidget,
+    );
+    expect(find.text('Suspended for abuse'), findsOneWidget);
+
+    final support = find.byKey(
+      const ValueKey<String>('account-health-suspended-support'),
+    );
+    await tester.ensureVisible(support);
+    await tester.tap(support);
+    expect(contacted, 1);
   });
 
   testWidgets('empty state offers to run a check', (tester) async {
@@ -481,5 +651,80 @@ void main() {
     await tester.tap(find.text('Revoke device'));
     await tester.pumpAndSettle();
     expect(revoked, 'mac');
+  });
+
+  testWidgets('deletion state fits 320 dp at 200 % text in both themes', (
+    tester,
+  ) async {
+    _setNarrowView(tester);
+    for (final theme in [OTheme.light(), OTheme.dark()]) {
+      var cancelled = 0;
+      await tester.pumpWidget(
+        _narrow(
+          AccountHealthPage(
+            data: _data(
+              accountStatus: V2AccountStatus.deletionPending,
+              onCancelDeletion: () => cancelled++,
+            ),
+          ),
+          theme: theme,
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+
+      expect(tester.takeException(), isNull);
+      _expectNoOverflow(tester);
+      expect(find.text('Deletion requested'), findsOneWidget);
+      expect(find.text('Storage left'), findsOneWidget);
+
+      final cancel = find.byKey(
+        const ValueKey<String>('account-health-cancel-deletion'),
+      );
+      await _centerOn(tester, cancel);
+      await tester.tap(cancel);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Cancel account deletion?'), findsOneWidget);
+      _expectNoOverflow(tester);
+      expect(tester.takeException(), isNull);
+
+      await tester.tap(
+        find.byKey(
+          const ValueKey<String>('account-health-confirm-cancel-deletion'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(cancelled, 1);
+    }
+  });
+
+  testWidgets('suspended state fits 320 dp at 200 % text in both themes', (
+    tester,
+  ) async {
+    _setNarrowView(tester);
+    for (final theme in [OTheme.light(), OTheme.dark()]) {
+      await tester.pumpWidget(
+        _narrow(
+          AccountHealthPage(
+            data: _data(
+              accountStatus: V2AccountStatus.suspendedForAbuse,
+              onContactSupport: () {},
+            ),
+          ),
+          theme: theme,
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+
+      expect(tester.takeException(), isNull);
+      _expectNoOverflow(tester);
+      expect(find.text('Suspended for abuse'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('account-health-suspended-notice')),
+        findsOneWidget,
+      );
+    }
   });
 }

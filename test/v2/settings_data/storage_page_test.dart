@@ -5,6 +5,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/v2/settings/storage_breakdown.dart';
 import 'package:ovid_ai/ui/v2/settings/storage_page.dart';
 
 Widget _app(
@@ -26,6 +27,9 @@ Widget _app(
 V2StoragePageData _data({
   String? offlineLabel =
       'Cached offline data uses 142 MB on this device. Cloud sync runs automatically.',
+  String planName = 'Free plan',
+  String quotaLabel = '3 GB included',
+  bool showCache = true,
   VoidCallback? onClearPreviews,
   VoidCallback? onClearCache,
   VoidCallback? onDeleteOldChats,
@@ -36,14 +40,17 @@ V2StoragePageData _data({
   return V2StoragePageData(
     usedGb: 1.2,
     totalGb: 3,
+    planName: planName,
+    quotaLabel: quotaLabel,
     slices: const [
-      V2StorageSlice(label: 'Chats', sizeLabel: '620 MB', valueGb: 0.62),
       V2StorageSlice(label: 'Artifacts', sizeLabel: '410 MB', valueGb: 0.41),
-      V2StorageSlice(label: 'Memory', sizeLabel: '90 MB', valueGb: 0.09),
-      V2StorageSlice(label: 'Previews', sizeLabel: '80 MB', valueGb: 0.08),
+      V2StorageSlice(label: 'Sessions', sizeLabel: '620 MB', valueGb: 0.62),
+      V2StorageSlice(label: 'Cache', sizeLabel: '170 MB', valueGb: 0.17),
     ],
+    cacheGb: 0.17,
+    cacheSizeLabel: '170 MB',
+    showCache: showCache,
     previewSizeLabel: '80 MB',
-    cacheSizeLabel: '60 MB',
     trashItems: 12,
     trashSizeLabel: '140 MB',
     largestItems: const [
@@ -87,7 +94,7 @@ Future<void> _pumpAt320(
 }
 
 void main() {
-  testWidgets('renders the storage donut and legend in light mode', (
+  testWidgets('renders the plan quota, breakdown and items in light mode', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -101,19 +108,71 @@ void main() {
       find.text('1.2 GB of 3.0 GB cloud storage used · 1.8 GB free'),
       findsOneWidget,
     );
-    expect(find.text('Chats'), findsOneWidget);
+    expect(find.text('Free plan'), findsOneWidget);
+    expect(find.text('3 GB included'), findsOneWidget);
+    expect(find.byKey(const ValueKey('storage-quota-bar')), findsOneWidget);
+    expect(
+      tester
+          .widget<OProgressBar>(find.byKey(const ValueKey('storage-quota-bar')))
+          .value,
+      closeTo(0.4, 0.001),
+    );
+
+    expect(find.text('WHAT USES SPACE'), findsOneWidget);
     expect(find.text('Artifacts'), findsOneWidget);
-    expect(find.text('Memory'), findsOneWidget);
-    expect(find.text('Previews'), findsOneWidget);
+    expect(find.text('Chats'), findsOneWidget);
+    expect(find.text('Cache'), findsOneWidget);
+    expect(find.text('410 MB'), findsOneWidget);
     expect(find.text('620 MB'), findsOneWidget);
-    expect(find.text('LARGEST ITEMS'), findsOneWidget);
+    expect(find.text('170 MB'), findsWidgets);
+
+    expect(find.text('ITEMS BY SIZE'), findsOneWidget);
     expect(find.text('Q3 launch plan'), findsOneWidget);
+    expect(find.text('180 MB'), findsOneWidget);
     expect(find.text('Need more room?'), findsOneWidget);
     expect(find.text('Trash · 12 items'), findsOneWidget);
     expect(
       find.text(
         'Cached offline data uses 142 MB on this device. Cloud sync runs automatically.',
       ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('renders the shared breakdown with the page slices', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(StoragePage(data: _data()), theme: OTheme.light()),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(StorageBreakdown), findsOneWidget);
+    final breakdown = tester.widget<StorageBreakdown>(
+      find.byType(StorageBreakdown),
+    );
+    expect(breakdown.data.amountLabel, '40%');
+    expect(breakdown.data.totalLabel, '3.0 GB');
+    expect(breakdown.data.entries.map((entry) => entry.category), [
+      V2StorageCategory.artifacts,
+      V2StorageCategory.chats,
+      V2StorageCategory.cache,
+    ]);
+    expect(breakdown.data.entries.map((entry) => entry.sizeLabel), [
+      '410 MB',
+      '620 MB',
+      '170 MB',
+    ]);
+    expect(
+      breakdown.data.entries.first.bytes,
+      closeTo(0.41 * 1024 * 1024 * 1024, 1),
+    );
+    expect(
+      find.byKey(const ValueKey('storage-breakdown-bar-chats')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('storage-breakdown-chart')),
       findsOneWidget,
     );
   });
@@ -127,6 +186,7 @@ void main() {
     expect(find.text('Storage'), findsOneWidget);
     expect(find.text('Clear previews'), findsOneWidget);
     expect(find.text('See plans'), findsOneWidget);
+    expect(find.text('Chats'), findsOneWidget);
   });
 
   testWidgets('shows a skeleton while loading', (tester) async {
@@ -204,7 +264,9 @@ void main() {
     expect(emptied, isTrue);
   });
 
-  testWidgets('clear cache fires its callback', (tester) async {
+  testWidgets('clear cache is available on mobile and fires its callback', (
+    tester,
+  ) async {
     var cleared = false;
     await tester.pumpWidget(
       _app(
@@ -214,9 +276,29 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(find.byKey(const ValueKey('clear-cache-row')), findsOneWidget);
+    expect(
+      find.textContaining('Temporary files on this phone'),
+      findsOneWidget,
+    );
+
     await tester.ensureVisible(find.text('Clear cache'));
     await tester.tap(find.text('Clear cache'));
     expect(cleared, isTrue);
+  });
+
+  testWidgets('clear cache is hidden when the device has no local cache', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(StoragePage(data: _data(showCache: false)), theme: OTheme.light()),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('clear-cache-row')), findsNothing);
+    expect(find.text('Clear cache'), findsNothing);
+    // The cache category still explains where the space went.
+    expect(find.text('Cache'), findsOneWidget);
   });
 
   testWidgets('delete old chats fires its callback', (tester) async {
@@ -234,7 +316,7 @@ void main() {
     expect(tapped, isTrue);
   });
 
-  testWidgets('tapping a largest item reports its id', (tester) async {
+  testWidgets('tapping an item reports its id', (tester) async {
     String? tapped;
     await tester.pumpWidget(
       _app(
@@ -295,6 +377,9 @@ void main() {
       expect(find.text('Clear'), findsOneWidget);
       expect(find.text('Empty'), findsOneWidget);
       expect(find.text('See plans'), findsOneWidget);
+      expect(find.text('Artifacts'), findsOneWidget);
+      expect(find.text('Chats'), findsOneWidget);
+      expect(find.text('Cache'), findsOneWidget);
     });
 
     testWidgets(
@@ -363,6 +448,7 @@ void main() {
     expect(find.text('Clear previews'), findsOneWidget);
     expect(find.text('Delete old chats'), findsOneWidget);
     expect(find.text('Need more room?'), findsOneWidget);
+    expect(find.text('WHAT USES SPACE'), findsOneWidget);
   });
 
   testWidgets('error state offers a retry', (tester) async {

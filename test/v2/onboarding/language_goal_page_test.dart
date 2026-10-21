@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/onboarding/language_goal_page.dart';
+import 'package:ovid_ai/ui/v2/onboarding/step_progress.dart';
 
 Future<void> _pump(
   WidgetTester tester, {
@@ -350,5 +351,52 @@ void main() {
     await tester.pump();
 
     expect(goals, isEmpty);
+  });
+
+  group('shared step frame', () {
+    testWidgets('the header is the shared onboarding step progress', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await _pump(tester);
+
+      expect(find.byType(OnboardingStepProgress), findsOneWidget);
+      expect(find.text('STEP 1 OF 3'), findsOneWidget);
+      expect(find.bySemanticsLabel('Step 1 of 3'), findsOneWidget);
+
+      handle.dispose();
+    });
+
+    testWidgets('host step data drives the label and the bar count', (
+      tester,
+    ) async {
+      Future<void> pumpWith(V2LanguageGoalData data) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: OTheme.light(),
+            home: LanguageGoalPage(data: data),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      await pumpWith(const V2LanguageGoalData(step: 2, totalSteps: 4));
+      expect(find.text('STEP 2 OF 4'), findsOneWidget);
+      expect(find.text('STEP 1 OF 3'), findsNothing);
+
+      await pumpWith(const V2LanguageGoalData(step: 9, totalSteps: 3));
+      expect(find.text('STEP 3 OF 3'), findsOneWidget);
+
+      await pumpWith(const V2LanguageGoalData(step: 0, totalSteps: 3));
+      expect(find.text('STEP 1 OF 3'), findsOneWidget);
+      expect(find.text('STEP 0 OF 3'), findsNothing);
+    });
+
+    testWidgets('step header fits 320 dp at 200 % text', (tester) async {
+      await _pumpSmall(tester);
+
+      expect(tester.takeException(), isNull);
+      expect(find.byType(OnboardingStepProgress), findsOneWidget);
+    });
   });
 }

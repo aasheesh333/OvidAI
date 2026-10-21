@@ -63,6 +63,29 @@ const _mixedModels = <V2ModelOption>[
   ),
 ];
 
+/// Manual models with no per-row lock, so the plan gate is the only thing
+/// standing between the user and a manual pick.
+const _manualModels = <V2ModelOption>[
+  V2ModelOption(
+    id: 'mini',
+    name: 'Ovid Mini 1.0',
+    subtitle: 'Short answers',
+    speed: 'Very fast',
+    costHint: 'Low token use',
+  ),
+  V2ModelOption(
+    id: 'pro',
+    name: 'Ovid Pro 1.5',
+    subtitle: 'Deep thinking · Coding & math',
+    speed: 'Moderate',
+    costHint: '2x tokens',
+  ),
+];
+
+const _upgradeHint =
+    'Upgrade to Plus or Pro to pick a model manually. '
+    'Auto is included on every plan.';
+
 Widget _sheet({
   V2ModelPickerData data = _data,
   ValueChanged<String>? onSelect,
@@ -215,7 +238,10 @@ void main() {
     await tester.pumpWidget(
       _app(
         _sheet(
-          data: const V2ModelPickerData(models: _mixedModels),
+          data: const V2ModelPickerData(
+            models: _mixedModels,
+            planLabel: 'Plus',
+          ),
           onSelect: (id) => selected = id,
         ),
       ),
@@ -227,6 +253,152 @@ void main() {
 
     await tester.tap(find.text('Ovid Mini 1.0'));
     expect(selected, 'standard');
+  });
+
+  for (final plan in ['Free plan', 'Go']) {
+    testWidgets('$plan keeps manual models visible but locked', (tester) async {
+      String? selected;
+      await tester.pumpWidget(
+        _app(
+          _sheet(
+            data: V2ModelPickerData(
+              models: _manualModels,
+              planLabel: plan,
+              manualModelsAllowed: false,
+              freePlanNote: '$plan uses Auto only.',
+            ),
+            onSelect: (id) => selected = id,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The upgrade explanation sits under the header.
+      expect(find.text(_upgradeHint), findsOneWidget);
+
+      // Manual models stay visible, greyed, with the plan they need.
+      expect(find.text('Ovid Mini 1.0'), findsOneWidget);
+      expect(find.text('Ovid Pro 1.5'), findsOneWidget);
+      expect(find.text('Plus plan'), findsNWidgets(2));
+      expect(find.byIcon(Icons.lock_outline_rounded), findsWidgets);
+
+      await tester.tap(find.text('Ovid Mini 1.0'));
+      await tester.pump();
+      expect(selected, isNull, reason: '$plan must not pick manual models');
+
+      // Auto is always selectable.
+      await tester.tap(find.text('Auto'));
+      await tester.pump();
+      expect(selected, 'auto');
+    });
+  }
+
+  for (final plan in ['Plus', 'Pro']) {
+    testWidgets('$plan allows every manual model', (tester) async {
+      final picks = <String>[];
+      await tester.pumpWidget(
+        _app(
+          _sheet(
+            data: V2ModelPickerData(
+              models: _manualModels,
+              planLabel: plan,
+              manualModelsAllowed: true,
+              freePlanNote: 'All models are available on your plan.',
+            ),
+            onSelect: picks.add,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text(_upgradeHint), findsNothing);
+      expect(find.text('Plus plan'), findsNothing);
+
+      await tester.tap(find.text('Ovid Mini 1.0'));
+      await tester.tap(find.text('Ovid Pro 1.5'));
+      expect(picks, ['mini', 'pro']);
+    });
+  }
+
+  testWidgets('a Free plan label alone forces Auto only', (tester) async {
+    String? selected;
+    await tester.pumpWidget(
+      _app(
+        _sheet(
+          data: const V2ModelPickerData(
+            models: _manualModels,
+            planLabel: 'Free plan',
+          ),
+          onSelect: (id) => selected = id,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text(_upgradeHint), findsOneWidget);
+    expect(find.text('Plus plan'), findsNWidgets(2));
+
+    await tester.tap(find.text('Ovid Mini 1.0'));
+    await tester.pump();
+    expect(selected, isNull);
+
+    await tester.tap(find.text('Auto'));
+    await tester.pump();
+    expect(selected, 'auto');
+  });
+
+  testWidgets('auto-only plan announces locked rows', (tester) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        _sheet(
+          data: const V2ModelPickerData(
+            models: _manualModels,
+            manualModelsAllowed: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final node = tester.getSemantics(find.text('Ovid Mini 1.0'));
+    expect(node.label, contains('locked, Plus plan'));
+    expect(node.flagsCollection.isEnabled, Tristate.isFalse);
+    handle.dispose();
+  });
+
+  testWidgets('auto-only picker fits 320 dp at 200 % text in light and dark', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    for (final dark in [false, true]) {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: dark ? OTheme.dark() : OTheme.light(),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(2)),
+            child: child!,
+          ),
+          home: _sheet(
+            data: const V2ModelPickerData(
+              models: _manualModels,
+              manualModelsAllowed: false,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull, reason: 'dark: $dark');
+      expect(find.text('Select model'), findsOneWidget);
+      expect(find.text('Ovid Mini 1.0'), findsOneWidget);
+      expect(find.text('Manage models'), findsOneWidget);
+    }
   });
 
   testWidgets('controls meet the 48 dp touch target', (tester) async {
@@ -267,6 +439,7 @@ void main() {
         _sheet(
           data: const V2ModelPickerData(
             models: _mixedModels,
+            planLabel: 'Plus',
             selectedId: 'standard',
           ),
         ),

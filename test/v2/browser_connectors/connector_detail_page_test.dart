@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/connectors/connector_detail_page.dart';
+import 'package:ovid_ai/ui/v2/connectors/connector_permissions.dart'
+    as permissions;
 
 Widget _app(Widget child, {ThemeData? theme}) =>
     MaterialApp(theme: theme ?? OTheme.light(), home: child);
@@ -45,6 +47,9 @@ V2ConnectorDetailData _data({
   bool connected = true,
   V2ConnectorUsage? usage,
   List<V2ConnectorActivity> activity = const <V2ConnectorActivity>[],
+  List<V2ConnectorTool> tools = const <V2ConnectorTool>[],
+  String safetyNote = '',
+  bool builtIn = true,
 }) {
   return V2ConnectorDetailData(
     id: 'github',
@@ -55,9 +60,12 @@ V2ConnectorDetailData _data({
     icon: Icons.code_rounded,
     connected: connected,
     permissions: _permissions,
+    tools: tools,
     agents: _agents,
     usage: usage,
     activity: activity,
+    safetyNote: safetyNote,
+    builtIn: builtIn,
     status: status,
   );
 }
@@ -93,6 +101,80 @@ void main() {
     expect(find.text('Subagents'), findsOneWidget);
     expect(find.text('Full access'), findsOneWidget);
     expect(find.text('Read-only'), findsOneWidget);
+  });
+
+  testWidgets('detail lists tools and shows a safety note', (tester) async {
+    await _pump(
+      tester,
+      ConnectorDetailPage(
+        data: _data(
+          tools: const [
+            V2ConnectorTool(
+              id: 'read_file',
+              name: 'read_file',
+              description: 'Read a file in the repository',
+            ),
+            V2ConnectorTool(
+              id: 'open_pull_request',
+              name: 'open_pull_request',
+              description: 'Open a pull request for review',
+              write: true,
+            ),
+          ],
+        ),
+      ),
+    );
+
+    expect(find.byKey(const Key('connector-safety-note')), findsOneWidget);
+    expect(find.text('Built-in safety'), findsOneWidget);
+
+    await tester.scrollUntilVisible(
+      find.text('Tools'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('2 available'), findsOneWidget);
+    expect(find.text('read_file'), findsOneWidget);
+    expect(find.text('Read only'), findsOneWidget);
+    expect(find.text('open_pull_request'), findsOneWidget);
+    expect(find.text('Can change'), findsOneWidget);
+  });
+
+  testWidgets('custom connectors carry the custom safety note', (tester) async {
+    await _pump(
+      tester,
+      ConnectorDetailPage(
+        data: _data(
+          builtIn: false,
+          safetyNote:
+              'Ovid never installs plugins from a chat message. Only add '
+              'servers you trust.',
+        ),
+      ),
+    );
+
+    expect(find.text('Custom connector safety'), findsOneWidget);
+    expect(
+      find.text(
+        'Ovid never installs plugins from a chat message. Only add '
+        'servers you trust.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('empty tools explain the gap', (tester) async {
+    await _pump(tester, ConnectorDetailPage(data: _data()));
+
+    await tester.scrollUntilVisible(
+      find.text('Tools'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(
+      find.text('No tools yet. Ovid will list them here.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('detail renders in dark theme', (tester) async {
@@ -246,6 +328,90 @@ void main() {
     expect(disconnects, 0);
   });
 
+  testWidgets('the permissions row opens the grouped permissions screen', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      ConnectorDetailPage(
+        data: V2ConnectorDetailData(
+          id: 'github',
+          name: 'GitHub',
+          description:
+              'Read repositories, open pull requests, and review code together.',
+          icon: Icons.code_rounded,
+          connected: true,
+          authLabel: 'OAuth',
+          risk: V2ConnectorPermissionRisk.high,
+          permissions: const [
+            V2ConnectorPermission(
+              id: 'read',
+              name: 'Read your repositories',
+              description: 'Lets Ovid clone code and inspect files',
+              scope: V2ConnectorPermissionScope.read,
+            ),
+            V2ConnectorPermission(
+              id: 'branches',
+              name: 'Create branches',
+              description: 'Lets Ovid make isolated feature branches',
+              scope: V2ConnectorPermissionScope.write,
+              risk: V2ConnectorPermissionRisk.medium,
+            ),
+          ],
+          tools: const [
+            V2ConnectorTool(
+              id: 'read_file',
+              name: 'read_file',
+              description: 'Read a file in the repository',
+            ),
+          ],
+          agents: _agents,
+        ),
+      ),
+    );
+
+    expect(
+      find.byKey(const Key('connector-permissions-entry')),
+      findsOneWidget,
+    );
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('connector-permissions-entry')),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.byKey(const Key('connector-permissions-entry')));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(permissions.ConnectorPermissionsPage), findsOneWidget);
+    expect(find.text('Permissions'), findsWidgets);
+    expect(find.text('2 of 2 granted'), findsOneWidget);
+    expect(find.text('Read'), findsOneWidget);
+    expect(find.text('Write'), findsOneWidget);
+    expect(find.text('High risk'), findsWidgets);
+    expect(find.text('Read your repositories'), findsWidgets);
+  });
+
+  testWidgets('the permissions row can be overridden by the wiring layer', (
+    tester,
+  ) async {
+    var opened = 0;
+    await _pump(
+      tester,
+      ConnectorDetailPage(data: _data(), onOpenPermissions: () => opened++),
+    );
+
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('connector-permissions-entry')),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.byKey(const Key('connector-permissions-entry')));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(opened, 1);
+    expect(find.byType(permissions.ConnectorPermissionsPage), findsNothing);
+  });
+
   testWidgets('a permission switch reports the new grant', (tester) async {
     String? permissionId;
     bool? granted;
@@ -260,6 +426,13 @@ void main() {
       ),
     );
 
+    await tester.scrollUntilVisible(
+      find.byType(Switch).first,
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.ensureVisible(find.byType(Switch).first);
+    await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(find.byType(Switch).first);
     await tester.pump(const Duration(milliseconds: 300));
     expect(permissionId, 'read');
@@ -382,6 +555,19 @@ void main() {
       syncedLabel: 'Synced 2 minutes ago',
       accessLabel: 'Read & Write',
       permissions: _permissions,
+      tools: const [
+        V2ConnectorTool(
+          id: 'read_file',
+          name: 'read_file',
+          description: 'Read a file in the repository',
+        ),
+        V2ConnectorTool(
+          id: 'open_pull_request',
+          name: 'open_pull_request',
+          description: 'Open a pull request for review',
+          write: true,
+        ),
+      ],
       agents: _agents,
       usage: const V2ConnectorUsage(
         calls: 120,

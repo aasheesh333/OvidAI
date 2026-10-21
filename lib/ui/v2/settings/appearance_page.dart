@@ -57,7 +57,11 @@ class V2AppearancePreview {
   final String composerHint;
 }
 
-/// Injected state for the Appearance screen.
+/// Injected state for the Personalization screen.
+///
+/// Personalization merges the old Appearance screen with the memory and
+/// reasoning controls that used to live on their own rows, so one page owns
+/// how Ovid looks, what it remembers and how much it shows.
 @immutable
 class V2AppearancePageData {
   const V2AppearancePageData({
@@ -70,6 +74,9 @@ class V2AppearancePageData {
     this.densityId = 'comfortable',
     this.codeFontId = 'jetbrains',
     this.voiceLanguageId = 'en',
+    this.memoryEnabled = true,
+    this.shareSessionMemory = false,
+    this.showReasoning = true,
     this.preview,
     this.loading = false,
     this.errorMessage,
@@ -82,6 +89,10 @@ class V2AppearancePageData {
     this.onDensityChanged,
     this.onCodeFontChanged,
     this.onVoiceLanguageChanged,
+    this.onMemoryEnabledChanged,
+    this.onShareSessionMemoryChanged,
+    this.onShowReasoningChanged,
+    this.onMemoryFilesTap,
     this.onPreviewSend,
     this.onRefreshPreview,
     this.onRetry,
@@ -99,6 +110,16 @@ class V2AppearancePageData {
   /// Voice input language id (`en`, `hi`, `hinglish`, `pa`, `ta`).
   final String voiceLanguageId;
 
+  /// Whether Ovid keeps facts between chats. On by default.
+  final bool memoryEnabled;
+
+  /// Whether this chat's memory may be reused by projects and shared chats.
+  /// Off by default: a new chat is private until the user opts in.
+  final bool shareSessionMemory;
+
+  /// Whether thinking steps are shown above answers. On by default.
+  final bool showReasoning;
+
   final V2AppearancePreview? preview;
   final bool loading;
   final String? errorMessage;
@@ -112,6 +133,12 @@ class V2AppearancePageData {
   final ValueChanged<String>? onDensityChanged;
   final ValueChanged<String>? onCodeFontChanged;
   final ValueChanged<String>? onVoiceLanguageChanged;
+  final ValueChanged<bool>? onMemoryEnabledChanged;
+  final ValueChanged<bool>? onShareSessionMemoryChanged;
+  final ValueChanged<bool>? onShowReasoningChanged;
+
+  /// Opens the Memory files screen, where each file can be edited.
+  final VoidCallback? onMemoryFilesTap;
   final VoidCallback? onPreviewSend;
   final VoidCallback? onRefreshPreview;
   final VoidCallback? onRetry;
@@ -131,7 +158,7 @@ class V2AppearancePageData {
       _voiceLanguageIds.contains(voiceLanguageId) ? voiceLanguageId : 'en';
 }
 
-/// Theme, accent, text size and accessibility settings with a live preview.
+/// Theme, memory, reasoning and text settings with a live preview.
 class AppearancePage extends StatelessWidget {
   const AppearancePage({super.key, required this.data});
 
@@ -140,7 +167,7 @@ class AppearancePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return OScaffold(
-      appBar: const OAppBar(title: 'Appearance'),
+      appBar: const OAppBar(title: 'Personalization'),
       body: _body(context),
     );
   }
@@ -164,7 +191,8 @@ class AppearancePage extends StatelessWidget {
           children: [
             _themeMode(context),
             _accentColor(context),
-            _textSize(context),
+            _memory(context),
+            _chat(context),
             _chatLayout(context),
             _voiceLanguage(context),
             _accessibility(context),
@@ -396,71 +424,156 @@ class AppearancePage extends StatelessWidget {
     );
   }
 
-  Widget _textSize(BuildContext context) {
+  Widget _memory(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.l),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          OSectionHeader(
+            label: 'Memory',
+            padding: const EdgeInsets.only(bottom: OSpace.s),
+          ),
+          OCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _toggleTile(
+                  context,
+                  title: 'Global memory',
+                  subtitle: data.memoryEnabled
+                      ? 'Ovid remembers useful details between chats.'
+                      : 'Ovid starts each chat fresh.',
+                  value: data.memoryEnabled,
+                  onChanged: data.onMemoryEnabledChanged,
+                  switchKey: const ValueKey<String>('global-memory-switch'),
+                ),
+                Divider(color: c.hairline, height: 1),
+                _toggleTile(
+                  context,
+                  title: 'Share session memory',
+                  subtitle: data.shareSessionMemory
+                      ? 'Projects and shared chats can reuse facts from this chat.'
+                      : 'This chat stays private. Its facts are not shared.',
+                  value: data.shareSessionMemory,
+                  onChanged: data.onShareSessionMemoryChanged,
+                  switchKey: const ValueKey<String>(
+                    'share-session-memory-switch',
+                  ),
+                ),
+                Divider(color: c.hairline, height: 1),
+                OListRow(
+                  key: const ValueKey<String>('memory-files-row'),
+                  icon: Icons.folder_outlined,
+                  title: 'Memory files',
+                  subtitle: 'Open and edit what Ovid remembers',
+                  onTap: data.onMemoryFilesTap,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _chat(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.l),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          OSectionHeader(
+            label: 'Chat',
+            padding: const EdgeInsets.only(bottom: OSpace.s),
+          ),
+          OCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _toggleTile(
+                  context,
+                  title: 'Show reasoning',
+                  subtitle: 'Show the thinking steps above each answer.',
+                  value: data.showReasoning,
+                  onChanged: data.onShowReasoningChanged,
+                  switchKey: const ValueKey<String>('show-reasoning-switch'),
+                ),
+                Divider(color: c.hairline, height: 1),
+                Padding(
+                  padding: const EdgeInsets.all(OSpace.l),
+                  child: _textSizeBody(context),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _textSizeBody(BuildContext context) {
     final c = OColors.of(context);
     final percent = (data.resolvedTextScale * 100).round();
     final label = percent == 100 ? 'Default (100%)' : '$percent%';
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.l),
-      child: OCard(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Text size',
-                    style: OType.bodyStrong.copyWith(color: c.text),
-                  ),
-                ),
-                const SizedBox(width: OSpace.s),
-                Flexible(
-                  child: Text(
-                    label,
-                    textAlign: TextAlign.end,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ),
-              ],
+            Expanded(
+              child: Text(
+                'Chat text size',
+                style: OType.bodyStrong.copyWith(color: c.text),
+              ),
             ),
-            const SizedBox(height: OSpace.s),
-            Row(
-              children: [
-                Text('A', style: OType.caption.copyWith(color: c.textMuted)),
-                Expanded(
-                  child: Semantics(
-                    label: 'Text size',
-                    value: '$percent%',
-                    child: SizedBox(
-                      height: OSpace.touch,
-                      child: Slider(
-                        value: data.resolvedTextScale,
-                        min: 0.75,
-                        max: 1.8,
-                        divisions: 21,
-                        label: '$percent%',
-                        activeColor: c.accentFill,
-                        inactiveColor: c.surfaceRaised,
-                        thumbColor: c.accentFill,
-                        onChanged: data.onTextScaleChanged,
-                      ),
-                    ),
-                  ),
-                ),
-                Text('A', style: OType.h2.copyWith(color: c.text)),
-              ],
-            ),
-            const SizedBox(height: OSpace.xs),
-            Text(
-              'Smaller 75% · Larger 180%',
-              style: OType.caption.copyWith(color: c.textFaint),
+            const SizedBox(width: OSpace.s),
+            Flexible(
+              child: Text(
+                label,
+                textAlign: TextAlign.end,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: OType.caption.copyWith(color: c.textMuted),
+              ),
             ),
           ],
         ),
-      ),
+        const SizedBox(height: OSpace.s),
+        Row(
+          children: [
+            Text('A', style: OType.caption.copyWith(color: c.textMuted)),
+            Expanded(
+              child: Semantics(
+                label: 'Chat text size',
+                value: '$percent%',
+                child: SizedBox(
+                  height: OSpace.touch,
+                  child: Slider(
+                    value: data.resolvedTextScale,
+                    min: 0.75,
+                    max: 1.8,
+                    divisions: 21,
+                    label: '$percent%',
+                    activeColor: c.accentFill,
+                    inactiveColor: c.surfaceRaised,
+                    thumbColor: c.accentFill,
+                    onChanged: data.onTextScaleChanged,
+                  ),
+                ),
+              ),
+            ),
+            Text('A', style: OType.h2.copyWith(color: c.text)),
+          ],
+        ),
+        const SizedBox(height: OSpace.xs),
+        Text(
+          'Smaller 75% · Larger 180%',
+          style: OType.caption.copyWith(color: c.textFaint),
+        ),
+      ],
     );
   }
 

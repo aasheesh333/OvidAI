@@ -11,6 +11,10 @@ const _schedules = <V2ScheduleItem>[
     description: 'Browses 5 top tech sites and writes a short summary.',
     rule: 'Every weekday at 9:00 AM',
     nextRun: 'Tomorrow, 9:00 AM',
+    sessionTitle: 'AI news research',
+    createdLabel: 'May 12, 2026',
+    completedRuns: 12,
+    totalRuns: 30,
   ),
   V2ScheduleItem(
     id: 's2',
@@ -29,10 +33,8 @@ const _schedules = <V2ScheduleItem>[
   ),
 ];
 
-Widget _app(Widget home, {bool dark = false}) => MaterialApp(
-  theme: dark ? OTheme.dark() : OTheme.light(),
-  home: home,
-);
+Widget _app(Widget home, {bool dark = false}) =>
+    MaterialApp(theme: dark ? OTheme.dark() : OTheme.light(), home: home);
 
 /// Fails when any laid-out text paints past the horizontal edges, which is the
 /// usual symptom of a squeezed row even when nothing throws.
@@ -72,11 +74,23 @@ void main() {
 
     expect(find.text('Schedules'), findsOneWidget);
     expect(find.text('Ovid can work while you sleep'), findsOneWidget);
+    expect(find.text('ACTIVE SCHEDULES (2)'), findsOneWidget);
     expect(find.text('Morning AI news briefing'), findsOneWidget);
     expect(find.text('Every weekday at 9:00 AM'), findsOneWidget);
-    expect(find.text('Tomorrow, 9:00 AM'), findsOneWidget);
-    expect(find.text('Paused'), findsOneWidget);
+    expect(find.text('Next: Tomorrow, 9:00 AM'), findsOneWidget);
+    expect(find.text('12 of 30 runs'), findsOneWidget);
+    expect(find.text('From AI news research'), findsOneWidget);
+    expect(find.text('Created May 12, 2026'), findsOneWidget);
     expect(find.text('Action needed'), findsOneWidget);
+
+    await tester.scrollUntilVisible(
+      find.text('Paused'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('PAUSED (1)'), findsOneWidget);
+    expect(find.text('Paused'), findsOneWidget);
   });
 
   testWidgets('renders schedules in dark mode', (tester) async {
@@ -182,7 +196,9 @@ void main() {
 
       // Walk the whole list: a lazy ListView only lays out what is visible, so
       // overflow in a lower card would otherwise go unnoticed.
-      final state = tester.state<ScrollableState>(find.byType(Scrollable).first);
+      final state = tester.state<ScrollableState>(
+        find.byType(Scrollable).first,
+      );
       for (var step = 1; step <= 24; step++) {
         state.position.jumpTo((step * 200).toDouble());
         await tester.pump();
@@ -205,7 +221,11 @@ void main() {
   testWidgets('shows the skeleton while loading', (tester) async {
     _phone(tester);
     await tester.pumpWidget(
-      _app(const SchedulesPage(data: V2SchedulesData(status: V2SchedulesStatus.loading))),
+      _app(
+        const SchedulesPage(
+          data: V2SchedulesData(status: V2SchedulesStatus.loading),
+        ),
+      ),
     );
     await tester.pump(const Duration(milliseconds: 300));
 
@@ -226,7 +246,12 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('We could not load your schedules. Check your connection and try again.'), findsOneWidget);
+    expect(
+      find.text(
+        'We could not load your schedules. Check your connection and try again.',
+      ),
+      findsOneWidget,
+    );
     await tester.tap(find.text('Try again'));
     expect(retried, 1);
   });
@@ -237,10 +262,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    for (final status in [
-      V2SchedulesStatus.empty,
-      V2SchedulesStatus.error,
-    ]) {
+    for (final status in [V2SchedulesStatus.empty, V2SchedulesStatus.error]) {
       await tester.pumpWidget(
         MaterialApp(
           theme: OTheme.light(),
@@ -263,7 +285,9 @@ void main() {
     }
   });
 
-  testWidgets('switch announces its state and card is labelled', (tester) async {
+  testWidgets('switch announces its state and card is labelled', (
+    tester,
+  ) async {
     _phone(tester);
     final handle = tester.ensureSemantics();
     await tester.pumpWidget(
@@ -304,9 +328,207 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.drag(find.byType(ListView), const Offset(0, -420));
+    await tester.scrollUntilVisible(
+      find.widgetWithText(OButton, 'Retry'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(OButton, 'Retry'));
     expect(retried?.id, 's3');
   });
+
+  testWidgets('card menu pauses a running schedule', (tester) async {
+    _phone(tester);
+    V2ScheduleItem? toggled;
+    bool? value;
+    await tester.pumpWidget(
+      _app(
+        SchedulesPage(
+          data: const V2SchedulesData(schedules: _schedules),
+          onToggle: (schedule, enabled) {
+            toggled = schedule;
+            value = enabled;
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(_menuButton('Morning AI news briefing'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Edit'), findsOneWidget);
+    expect(find.text('Pause'), findsOneWidget);
+    expect(find.text('Run now'), findsOneWidget);
+    expect(find.text('Delete'), findsOneWidget);
+
+    await tester.tap(find.text('Pause'));
+    await tester.pumpAndSettle();
+    expect(toggled?.id, 's1');
+    expect(value, isFalse);
+  });
+
+  testWidgets('card menu runs a schedule now', (tester) async {
+    _phone(tester);
+    V2ScheduleItem? ran;
+    await tester.pumpWidget(
+      _app(
+        SchedulesPage(
+          data: const V2SchedulesData(schedules: _schedules),
+          onRunNow: (schedule) => ran = schedule,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(_menuButton('Morning AI news briefing'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Run now'));
+    await tester.pumpAndSettle();
+
+    expect(ran?.id, 's1');
+  });
+
+  testWidgets('card menu edits and deletes', (tester) async {
+    _phone(tester);
+    V2ScheduleItem? edited;
+    V2ScheduleItem? deleted;
+    await tester.pumpWidget(
+      _app(
+        SchedulesPage(
+          data: const V2SchedulesData(schedules: _schedules),
+          onEdit: (schedule) => edited = schedule,
+          onDelete: (schedule) => deleted = schedule,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(_menuButton('Morning AI news briefing'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit'));
+    await tester.pumpAndSettle();
+    expect(edited?.id, 's1');
+
+    await tester.tap(_menuButton('Morning AI news briefing'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+    expect(deleted?.id, 's1');
+  });
+
+  testWidgets('paused schedule menu offers Resume', (tester) async {
+    _phone(tester);
+    V2ScheduleItem? toggled;
+    bool? value;
+    await tester.pumpWidget(
+      _app(
+        SchedulesPage(
+          data: const V2SchedulesData(schedules: _schedules),
+          onToggle: (schedule, enabled) {
+            toggled = schedule;
+            value = enabled;
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(
+      _menuButton('Nightly website check'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(_menuButton('Nightly website check'));
+    await tester.pumpAndSettle();
+    expect(find.text('Resume'), findsOneWidget);
+
+    await tester.tap(find.text('Resume'));
+    await tester.pumpAndSettle();
+    expect(toggled?.id, 's2');
+    expect(value, isTrue);
+  });
+
+  testWidgets('shows a completed count when no total is known', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        const SchedulesPage(
+          data: V2SchedulesData(
+            schedules: [
+              V2ScheduleItem(
+                id: 'only',
+                title: 'Weekly report',
+                description: 'Writes a short report.',
+                rule: 'Every Monday at 8:00 AM',
+                completedRuns: 7,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('7 runs completed'), findsOneWidget);
+  });
+
+  for (final dark in [false, true]) {
+    testWidgets(
+      'menu survives 320 dp and 200% text (${dark ? 'dark' : 'light'})',
+      (tester) async {
+        tester.view.physicalSize = const Size(320, 640);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: dark ? OTheme.dark() : OTheme.light(),
+            home: const MediaQuery(
+              data: MediaQueryData(
+                size: Size(320, 640),
+                textScaler: TextScaler.linear(2),
+              ),
+              child: SchedulesPage(
+                data: V2SchedulesData(schedules: _schedules),
+                onEdit: _ignore,
+                onToggle: _ignoreToggle,
+                onRunNow: _ignore,
+                onDelete: _ignore,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final menu = _menuButton('Morning AI news briefing');
+        var guard = 0;
+        while (menu.evaluate().isEmpty && guard < 20) {
+          await tester.dragFrom(const Offset(314, 320), const Offset(0, -240));
+          await tester.pumpAndSettle();
+          guard++;
+        }
+        await tester.ensureVisible(menu);
+        await tester.pumpAndSettle();
+        await tester.tap(menu);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(find.text('Run now'), findsOneWidget);
+        expect(find.text('Delete'), findsOneWidget);
+      },
+    );
+  }
 }
+
+void _ignore(V2ScheduleItem item) {}
+
+void _ignoreToggle(V2ScheduleItem item, bool enabled) {}
+
+Finder _menuButton(String title) => find.byWidgetPredicate(
+  (widget) =>
+      widget is OIconButton &&
+      widget.semanticLabel == 'More options for $title',
+);

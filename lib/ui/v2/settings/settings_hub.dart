@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'settings_search.dart';
 
 /// The four states every settings list can be in.
 enum V2SettingsHubStatus { loading, ready, empty, error }
@@ -64,7 +65,7 @@ class V2SettingsHubData {
     this.models = const V2SettingsSection(title: 'Models'),
     this.dataControl = const V2SettingsSection(title: 'Data control'),
     this.advanced = const V2SettingsSection(title: 'Advanced'),
-    this.showReasoning = false,
+    this.showReasoning = true,
     this.onReasoningChanged,
     this.onAddConnector,
     this.onProfileTap,
@@ -96,6 +97,8 @@ class SettingsHubPage extends StatelessWidget {
 
   final V2SettingsHubData data;
 
+  /// The one order every settings list uses. The Models card sits between Chat
+  /// and Data control and always starts with Connectors.
   static const _canonicalOrder = <String, List<String>>{
     'account': ['account', 'plan_billing', 'usage', 'credentials'],
     'chat': [
@@ -115,6 +118,16 @@ class SettingsHubPage extends StatelessWidget {
       'reset_memory',
     ],
     'advanced': ['notifications', 'app_lock', 'account_health', 'about'],
+  };
+
+  /// Older wiring layers use short row ids. They still land in the same slot
+  /// instead of drifting to the end of their card.
+  static const _rowAliases = <String, String>{
+    'presets': 'agent_presets',
+    'response_wait': 'response_wait_limit',
+    'export': 'export_import',
+    'crash': 'crash_reports',
+    'delete': 'delete_data',
   };
 
   @override
@@ -143,15 +156,66 @@ class SettingsHubPage extends StatelessWidget {
     }
 
     return OScaffold(
-      appBar: const OAppBar(title: 'Settings'),
+      appBar: OAppBar(
+        title: 'Settings',
+        actions: [
+          OIconButton(
+            key: const ValueKey('settings-search'),
+            icon: Icons.search_rounded,
+            semanticLabel: 'Search settings',
+            tooltip: 'Search settings',
+            onPressed: () => _openSearch(context, sections),
+          ),
+        ],
+      ),
       body: OFadeSlide(child: body),
+    );
+  }
+
+  /// Opens the shared settings search over this hub's own (already ordered)
+  /// sections, so the index can never drift from the rows on screen.
+  Future<void> _openSearch(
+    BuildContext context,
+    List<V2SettingsSection> sections,
+  ) {
+    final status = switch (data.status) {
+      V2SettingsHubStatus.loading => V2SettingsSearchStatus.loading,
+      V2SettingsHubStatus.error => V2SettingsSearchStatus.error,
+      V2SettingsHubStatus.ready ||
+      V2SettingsHubStatus.empty => V2SettingsSearchStatus.ready,
+    };
+    return Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (routeContext) => SettingsSearchPage(
+          data: V2SettingsSearchData(
+            sections: sections,
+            status: status,
+            errorMessage: data.errorMessage,
+          ),
+          onResultTap: (result) {
+            // Close search first, then activate the row exactly as the hub
+            // would. The reasoning switch is owned by the hub, not the model,
+            // so it is toggled through the same callback as the row.
+            Navigator.of(routeContext).maybePop();
+            if (!result.item.enabled) return;
+            if (result.item.id == 'show_reasoning') {
+              final changed = data.onReasoningChanged;
+              if (changed != null) changed(!data.showReasoning);
+              return;
+            }
+            result.item.onTap?.call();
+          },
+          onRetry: data.onRetry,
+        ),
+      ),
     );
   }
 
   V2SettingsSection _ordered(String key, V2SettingsSection section) {
     final order = _canonicalOrder[key] ?? const <String>[];
     int rank(String id) {
-      final index = order.indexOf(id);
+      final canonical = _rowAliases[id] ?? id;
+      final index = order.indexOf(canonical);
       return index == -1 ? order.length : index;
     }
 

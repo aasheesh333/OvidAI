@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'turn_banner.dart';
 
 // TODO(l10n): extract this screen's English copy during the ARB pass.
 
@@ -72,8 +73,10 @@ class V2CollabLivePageData {
     required this.turnHolderName,
     required this.turnTimeLeftLabel,
     this.queueLabel,
+    this.turnQueue = const [],
     this.messages = const [],
     required this.creatorPaysStorage,
+    this.isMyTurn = false,
     this.turnRequested = false,
     this.status = V2CollabLiveStatus.ready,
     this.errorMessage = 'We could not load this live chat.',
@@ -93,9 +96,20 @@ class V2CollabLivePageData {
 
   final String turnHolderName;
   final String turnTimeLeftLabel;
+
+  /// Human-readable queue position, for example "Queue position #3".
   final String? queueLabel;
+
+  /// Names waiting for the turn, in order. Empty hides the queue list.
+  final List<String> turnQueue;
+
   final List<V2CollabMessage> messages;
   final bool creatorPaysStorage;
+
+  /// True when this device holds the turn, so sending is allowed. While
+  /// another member's output runs every other send stays disabled.
+  final bool isMyTurn;
+
   final bool turnRequested;
   final V2CollabLiveStatus status;
   final String errorMessage;
@@ -108,6 +122,7 @@ class CollabLivePage extends StatelessWidget {
     required this.data,
     this.onOpenMembers,
     this.onRequestTurn,
+    this.onSend,
     this.onOpenArtifact,
     this.onRetry,
   });
@@ -115,6 +130,9 @@ class CollabLivePage extends StatelessWidget {
   final V2CollabLivePageData data;
   final VoidCallback? onOpenMembers;
   final VoidCallback? onRequestTurn;
+
+  /// Sends the draft. Only offered while [V2CollabLivePageData.isMyTurn].
+  final VoidCallback? onSend;
   final ValueChanged<String>? onOpenArtifact;
   final VoidCallback? onRetry;
 
@@ -154,8 +172,24 @@ class CollabLivePage extends StatelessWidget {
     );
   }
 
+  /// Maps the page's turn fields onto the shared banner. The page owns the
+  /// data; the banner owns how a turn, the queue and the request control look.
+  V2CollabTurnBannerData get _turnBannerData => V2CollabTurnBannerData(
+    holderName: data.turnHolderName,
+    timeLeftLabel: data.turnTimeLeftLabel,
+    isMyTurn: data.isMyTurn,
+    turnRequested: data.turnRequested,
+    queue: [
+      for (final name in data.turnQueue)
+        V2CollabTurnWaiter(
+          name: name,
+          isYou: data.selfName.isNotEmpty && name == data.selfName,
+        ),
+    ],
+    queueLabel: data.queueLabel,
+  );
+
   Widget _ready(BuildContext context) {
-    final c = OColors.of(context);
     final transcript = ListView(
       padding: const EdgeInsets.fromLTRB(
         OSpace.l,
@@ -167,13 +201,17 @@ class CollabLivePage extends StatelessWidget {
         OFadeSlide(
           child: OStagger(
             children: [
-              _SessionCard(data: data, onOpenMembers: onOpenMembers),
+              _MembersCard(data: data, onOpenMembers: onOpenMembers),
+              const SizedBox(height: OSpace.m),
+              CollabTurnBanner(
+                data: _turnBannerData,
+                onRequestTurn: onRequestTurn,
+                onViewQueue: onOpenMembers,
+              ),
               if (data.typingName != null) ...[
                 const SizedBox(height: OSpace.m),
                 _TypingBanner(name: data.typingName!),
               ],
-              const SizedBox(height: OSpace.l),
-              _PinnedRule(c: c),
               const SizedBox(height: OSpace.l),
               for (final message in data.messages) ...[
                 _MessageTile(message: message, onOpenArtifact: onOpenArtifact),
@@ -203,7 +241,7 @@ class CollabLivePage extends StatelessWidget {
                 maxHeight: constraints.maxHeight * 0.6,
               ),
               child: SingleChildScrollView(
-                child: _ComposerDock(data: data, onRequestTurn: onRequestTurn),
+                child: _ComposerDock(data: data, onSend: onSend),
               ),
             ),
           ],
@@ -213,8 +251,8 @@ class CollabLivePage extends StatelessWidget {
   }
 }
 
-class _SessionCard extends StatelessWidget {
-  const _SessionCard({required this.data, this.onOpenMembers});
+class _MembersCard extends StatelessWidget {
+  const _MembersCard({required this.data, this.onOpenMembers});
 
   final V2CollabLivePageData data;
   final VoidCallback? onOpenMembers;
@@ -252,7 +290,9 @@ class _SessionCard extends StatelessWidget {
         ),
         const SizedBox(height: OSpace.xs),
         Text(
-          'Turn floor: ${data.turnHolderName}',
+          '${data.totalMembers} members in this room',
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
           style: OType.bodySm.copyWith(
             color: c.text,
             fontWeight: FontWeight.w600,
@@ -421,42 +461,6 @@ class _TypingBanner extends StatelessWidget {
           ),
           const OPill(label: 'Live', tone: OPillTone.success, dot: true),
         ],
-      ),
-    );
-  }
-}
-
-class _PinnedRule extends StatelessWidget {
-  const _PinnedRule({required this.c});
-
-  final OColors c;
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: OSpace.m,
-          vertical: OSpace.s,
-        ),
-        decoration: BoxDecoration(
-          color: c.surfaceRaised,
-          borderRadius: BorderRadius.circular(ORadius.pill),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.lock_clock_rounded, size: 16, color: c.accent),
-            const SizedBox(width: OSpace.xs),
-            Flexible(
-              child: Text(
-                'Only one person can send at a time',
-                textAlign: TextAlign.center,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -757,14 +761,15 @@ class _StoragePill extends StatelessWidget {
 }
 
 class _ComposerDock extends StatelessWidget {
-  const _ComposerDock({required this.data, this.onRequestTurn});
+  const _ComposerDock({required this.data, this.onSend});
 
   final V2CollabLivePageData data;
-  final VoidCallback? onRequestTurn;
+  final VoidCallback? onSend;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final canSend = data.isMyTurn && onSend != null;
     return Container(
       padding: const EdgeInsets.fromLTRB(
         OSpace.l,
@@ -776,79 +781,38 @@ class _ComposerDock extends StatelessWidget {
         color: c.surface,
         border: Border(top: BorderSide(color: c.hairline)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: OSpace.s,
-            runSpacing: OSpace.s,
-            children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.hourglass_bottom_rounded, size: 18, color: c.warn),
-                  const SizedBox(width: OSpace.s),
-                  Flexible(
-                    child: Text(
-                      '${data.turnHolderName} is sending… '
-                      '(${data.turnTimeLeftLabel})',
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ),
-                ],
-              ),
-              OButton(
-                label: data.turnRequested ? 'Turn requested' : 'Request turn',
-                icon: data.turnRequested
-                    ? Icons.check_rounded
-                    : Icons.pan_tool_alt_rounded,
-                variant: data.turnRequested
-                    ? OButtonVariant.secondary
-                    : OButtonVariant.primary,
-                onPressed: onRequestTurn,
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.s),
-          Container(
-            padding: const EdgeInsets.all(OSpace.xs),
-            decoration: BoxDecoration(
-              color: c.surfaceAlt,
-              borderRadius: BorderRadius.circular(ORadius.m),
-              border: Border.all(color: c.hairline),
+      child: Container(
+        padding: const EdgeInsets.all(OSpace.xs),
+        decoration: BoxDecoration(
+          color: c.surfaceAlt,
+          borderRadius: BorderRadius.circular(ORadius.m),
+          border: Border.all(color: c.hairline),
+        ),
+        child: Row(
+          children: [
+            OAvatar(
+              initials: data.selfName.isEmpty ? 'You' : data.selfName,
+              size: 36,
+              semanticLabel: 'You',
             ),
-            child: Row(
-              children: [
-                OAvatar(
-                  initials: data.selfName.isEmpty ? 'You' : data.selfName,
-                  size: 36,
-                  semanticLabel: 'You',
+            const SizedBox(width: OSpace.s),
+            Expanded(
+              child: Text(
+                data.isMyTurn ? 'Write a message' : 'Wait for the turn',
+                style: OType.bodySm.copyWith(
+                  color: data.isMyTurn ? c.textMuted : c.textFaint,
                 ),
-                const SizedBox(width: OSpace.s),
-                Expanded(
-                  child: Text(
-                    'Wait for the turn',
-                    style: OType.bodySm.copyWith(color: c.textFaint),
-                  ),
-                ),
-                OIconButton(
-                  icon: Icons.send_rounded,
-                  semanticLabel: 'Send, wait for the turn',
-                  onPressed: null,
-                ),
-              ],
+              ),
             ),
-          ),
-          if (data.queueLabel != null) ...[
-            const SizedBox(height: OSpace.s),
-            Text(
-              data.queueLabel!,
-              style: OType.caption.copyWith(color: c.textFaint),
+            OIconButton(
+              icon: Icons.send_rounded,
+              semanticLabel: data.isMyTurn
+                  ? 'Send message'
+                  : 'Send, wait for the turn',
+              onPressed: canSend ? onSend : null,
             ),
           ],
-        ],
+        ),
       ),
     );
   }

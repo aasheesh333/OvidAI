@@ -17,17 +17,20 @@ import '../../../core/format.dart';
 import '../../../core/ovid_cloud_service.dart';
 import '../../../core/state.dart';
 import '../../design/o_tokens.dart';
+import '../chat/composer_mentions.dart';
+import '../chat/composer_voice.dart';
 import '../chat/chat_page.dart';
 import '../chat/composer_attachments.dart';
 import '../chat/live_chat_page.dart';
 import '../chat/model_picker_sheet.dart';
+import '../chat/permission_sheet.dart';
 import '../../design/o_components.dart';
 import '../settings/settings_hub.dart';
 import '../sidebar/projects_page.dart';
-import '../sidebar/search_page.dart';
 import '../share/share_sheet.dart';
 import '../sidebar/session_actions_sheet.dart';
 import '../sidebar/sidebar.dart';
+import 'mention_source_live.dart';
 import 'v2_settings_actions.dart';
 import 'v2_work_routes.dart';
 import 'v2_run_routes.dart';
@@ -66,10 +69,14 @@ class _V2AppShellState extends State<V2AppShell> {
       ConnectionService.I,
       _usage,
     ]);
+    v2DefaultMentionSource = const V2AppMentionSource();
+    v2SavedVoiceLanguage = AppState.I.voiceLanguage;
     unawaited(ChatPinsStore.I.bindCurrentAccount());
-    unawaited(ComposerDraftStore.I.load().then((_) {
-      if (mounted) setState(() {});
-    }));
+    unawaited(
+      ComposerDraftStore.I.load().then((_) {
+        if (mounted) setState(() {});
+      }),
+    );
     unawaited(ProjectsController.I.refresh());
   }
 
@@ -97,13 +104,11 @@ class _V2AppShellState extends State<V2AppShell> {
               data: _sidebarData(app),
               onProfile: () => _openSettings(context),
               onNewChat: () => _newChat(),
-              onSearch: () => _openSearch(context),
               onNewProject: () => _openProjects(context),
               onProjectTap: (project) => _openProject(context, project),
               onSessionTap: (row) => _selectSession(row.id),
               onSessionActions: (row) => _showSessionActions(context, row.id),
-              onSessionLongPress: (row) =>
-                  _showSessionActions(context, row.id),
+              onSessionLongPress: (row) => _showSessionActions(context, row.id),
               onSchedule: () => V2WorkRoutes.openSchedules(context, _settings),
               onArtifacts: () => V2WorkRoutes.openArtifacts(context, _settings),
               onSettings: () => _openSettings(context),
@@ -121,6 +126,8 @@ class _V2AppShellState extends State<V2AppShell> {
                   onMore: () => _chatMenu(context, session.id),
                   onSubmit: _submit,
                   onStop: _stop,
+                  onSendQueuedNow: _sendQueuedNow,
+                  onDismissQueued: () => _dismissQueued(session.id),
                   onDownload: (name) => _download(context, name),
                   onStartChat: _newChat,
                   onRetry: _retry,
@@ -139,7 +146,10 @@ class _V2AppShellState extends State<V2AppShell> {
                       : () => _chatMenu(context, session.id),
                   onSubmit: _submit,
                   onStop: _stop,
-                  onPermissionTap: _cyclePermission,
+                  onSendQueuedNow: _sendQueuedNow,
+                  onDismissQueued: () => _dismissQueued(app.activeSessionId),
+                  onPermissionTap: () =>
+                      unawaited(_openPermissionSheet(context)),
                   onRetry: _retry,
                   onSeePlans: () =>
                       V2SettingsRoutes.open(context, 'plan_billing', _settings),
@@ -167,13 +177,15 @@ class _V2AppShellState extends State<V2AppShell> {
     for (final session in app.rootSessionsByRecency) {
       final row = _sidebarSession(session);
       if (ChatPinsStore.I.isPinned(session.id)) {
-        pinned.add(V2SidebarSession(
-          id: row.id,
-          title: row.title,
-          modelLabel: row.modelLabel,
-          timeLabel: row.timeLabel,
-          pinned: true,
-        ));
+        pinned.add(
+          V2SidebarSession(
+            id: row.id,
+            title: row.title,
+            modelLabel: row.modelLabel,
+            timeLabel: row.timeLabel,
+            pinned: true,
+          ),
+        );
         continue;
       }
       final at = session.lastActivityAt.toLocal();
@@ -224,6 +236,11 @@ class _V2AppShellState extends State<V2AppShell> {
         : limited
         ? V2ChatState.planLimited
         : V2ChatState.empty;
+    final agent = CloudAgentFacade.I;
+    final sessionId = app.activeSessionId;
+    final queued = sessionId == null
+        ? const <String>[]
+        : agent.queuedMessagesFor(sessionId);
     return V2ChatPageData(
       title: 'Ovid Si',
       modelLabel: _modelLabel(app.activeSession),
@@ -232,9 +249,10 @@ class _V2AppShellState extends State<V2AppShell> {
       sessionId: app.activeSessionId,
       draft: _draftFor(app.activeSessionId),
       state: state,
-      queuedCount: 0,
+      queuedCount: sessionId == null ? 0 : agent.queuedCountFor(sessionId),
+      queuedPreview: queued.firstOrNull,
       limitResetLabel: _resetLabel(),
-      permissionLabel: CloudAgentFacade.I.mode.label,
+      permissionLabel: agent.mode.label,
       composerHint: 'Ask Ovid to do anything...',
       offlineTitle: "You're offline",
       offlineMessage: 'Messages will send when you reconnect.',
@@ -244,6 +262,7 @@ class _V2AppShellState extends State<V2AppShell> {
   V2LiveChatData _liveData(AppState app, ChatSession session) {
     final agent = CloudAgentFacade.I;
     final running = agent.busyFor(session.id);
+    final queued = agent.queuedMessagesFor(session.id);
     return V2LiveChatData(
       title: 'Ovid Si',
       sessionTitle: session.title,
@@ -257,6 +276,8 @@ class _V2AppShellState extends State<V2AppShell> {
           'Ovid is working...',
       draft: _draftFor(session.id),
       composerHint: 'Ask Ovid to do anything...',
+      queuedCount: agent.queuedCountFor(session.id),
+      queuedPreview: queued.firstOrNull,
     );
   }
 
@@ -380,6 +401,12 @@ class _V2AppShellState extends State<V2AppShell> {
             models: options,
             selectedId: selectedId,
             planLabel: _planLabel(tier),
+            manualModelsAllowed: !autoOnly,
+            // TODO(l10n): move the plan gate copy to ARB keys.
+            upgradeHint: autoOnly
+                ? 'Manual models need Plus or Pro. ${_planLabel(tier)} '
+                      'includes Auto and every subagent.'
+                : 'Every model is included on your plan.',
             freePlanNote: autoOnly
                 ? '${_planLabel(tier)} uses Auto only.'
                 : 'All models are available on your plan.',
@@ -439,16 +466,42 @@ class _V2AppShellState extends State<V2AppShell> {
     CloudAgentFacade.I.stopRequested(sessionId: id, dispatchQueued: true);
   }
 
+  /// "Send now" on the queue dock: cancel the active turn and dispatch the
+  /// queued head immediately. Dispatched subagents keep running.
+  void _sendQueuedNow() {
+    final id = AppState.I.activeSessionId;
+    if (id == null) return;
+    CloudAgentFacade.I.stopRequested(sessionId: id, dispatchQueued: true);
+  }
+
+  /// Dismiss removes only the first queued row, by its stable id.
+  void _dismissQueued(String? sessionId) {
+    if (sessionId == null) return;
+    final ids = CloudAgentFacade.I.queuedMessageIdsFor(sessionId);
+    if (ids.isEmpty) return;
+    CloudAgentFacade.I.removeQueuedMessageById(ids.first);
+  }
+
   void _retry() {
     final id = AppState.I.activeSessionId;
     if (id == null) return;
     CloudAgentFacade.I.retryLastPrompt(id);
   }
 
-  void _cyclePermission() {
-    final current = CloudAgentFacade.I.mode;
-    final next = AgentMode.values[(current.index + 1) % AgentMode.values.length];
-    CloudAgentFacade.I.setMode(next);
+  Future<void> _openPermissionSheet(BuildContext context) {
+    final agent = CloudAgentFacade.I;
+    return showV2PermissionSheet(
+      context,
+      data: V2PermissionSheetData(selectedId: agent.mode.name),
+      onSelect: (id) {
+        for (final mode in AgentMode.values) {
+          if (mode.name == id) {
+            agent.setMode(mode);
+            return;
+          }
+        }
+      },
+    );
   }
 
   Future<void> _chatMenu(BuildContext context, String id) async {
@@ -526,9 +579,7 @@ class _V2AppShellState extends State<V2AppShell> {
             : ProjectsController.I.byId(session.projectId!)?.name,
         pinned: ChatPinsStore.I.isPinned(id),
       ),
-      onTogglePin: (value) => unawaited(
-        ChatPinsStore.I.setPinned(id, value),
-      ),
+      onTogglePin: (value) => unawaited(ChatPinsStore.I.setPinned(id, value)),
       onRename: () => _rename(id),
       onMoveToProject: () => _moveToProject(context, id),
       onShare: () => _shareChat(context, id),
@@ -622,8 +673,10 @@ class _V2AppShellState extends State<V2AppShell> {
         final text = Uri.encodeComponent('${session.title}\n$link');
         final url = switch (target) {
           V2ShareTarget.whatsApp => 'https://wa.me/?text=$text',
-          V2ShareTarget.gmail => 'mailto:?subject=${Uri.encodeComponent(session.title)}&body=$text',
-          V2ShareTarget.slack => 'https://slack.com/openid/connect/authorize?$text',
+          V2ShareTarget.gmail =>
+            'mailto:?subject=${Uri.encodeComponent(session.title)}&body=$text',
+          V2ShareTarget.slack =>
+            'https://slack.com/openid/connect/authorize?$text',
           V2ShareTarget.more => null,
         };
         if (url == null) {
@@ -631,7 +684,9 @@ class _V2AppShellState extends State<V2AppShell> {
           _snack(context, 'Link copied.');
           return;
         }
-        unawaited(launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication));
+        unawaited(
+          launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication),
+        );
       },
       onStopSharing: () async {
         final share = _activeShares.remove(id);
@@ -662,9 +717,7 @@ class _V2AppShellState extends State<V2AppShell> {
         continue;
       }
       if (message.content.trim().isEmpty) continue;
-      buffer.writeln(
-        message.role == 'user' ? '## You\n\n' : '## Ovid Si\n\n',
-      );
+      buffer.writeln(message.role == 'user' ? '## You\n\n' : '## Ovid Si\n\n');
       buffer.writeln('${message.content.trim()}\n');
     }
     await Clipboard.setData(ClipboardData(text: buffer.toString()));
@@ -749,34 +802,6 @@ class _V2AppShellState extends State<V2AppShell> {
     await AppState.I.deleteSession(id);
   }
 
-  void _openSearch(BuildContext context) {
-    _scaffoldKey.currentState?.closeDrawer();
-    final sessions = AppState.I.rootSessionsByRecency;
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => SearchPage(
-          data: V2SearchData(
-            chats: [
-              for (final session in sessions)
-                V2SearchChat(
-                  id: session.id,
-                  title: session.title,
-                  modelLabel: _modelLabel(session),
-                  timeLabel: _timeLabel(session.lastActivityAt),
-                  snippet: _snippet(session),
-                ),
-            ],
-          ),
-          onChatTap: (row) {
-            Navigator.of(context).pop();
-            _selectSession(row.id);
-          },
-          onCancel: () => Navigator.of(context).pop(),
-        ),
-      ),
-    );
-  }
-
   void _openProjects(BuildContext context) {
     _scaffoldKey.currentState?.closeDrawer();
     final controller = ProjectsController.I;
@@ -814,10 +839,7 @@ class _V2AppShellState extends State<V2AppShell> {
     );
   }
 
-  Future<void> _projectActions(
-    BuildContext context,
-    V2Project project,
-  ) async {
+  Future<void> _projectActions(BuildContext context, V2Project project) async {
     final action = await showOSheet<String>(
       context,
       builder: (sheetContext) => SafeArea(
@@ -1194,16 +1216,6 @@ class _V2AppShellState extends State<V2AppShell> {
   String _draftFor(String? id) {
     if (id == null) return '';
     return ComposerDraftStore.I.draftFor(id) ?? '';
-  }
-
-  String _snippet(ChatSession session) {
-    for (final message in session.messages.reversed) {
-      final text = message.content.trim();
-      if (text.isNotEmpty) {
-        return text.length <= 90 ? text : '${text.substring(0, 90)}…';
-      }
-    }
-    return '';
   }
 
   String _bytes(int value) {

@@ -1,14 +1,47 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'subagent_summary.dart';
 
 // TODO(l10n): extract this screen's English copy during the ARB pass.
 
 enum V2SubagentStatus { loading, empty, error, ready }
 
 enum V2SubagentLogTone { normal, success, accent }
+
+/// The strict ≤300-token summary a subagent returns to the main agent.
+///
+/// The keys follow the runtime contract:
+/// `{status, files_modified, artifacts_created, key_findings, error_if_any}`.
+@immutable
+class V2SubagentSummary {
+  const V2SubagentSummary({
+    this.status = '',
+    this.filesModified = const [],
+    this.artifactsCreated = const [],
+    this.keyFindings = const [],
+    this.errorIfAny,
+  });
+
+  final String status;
+  final List<String> filesModified;
+  final List<String> artifactsCreated;
+  final List<String> keyFindings;
+  final String? errorIfAny;
+
+  /// The exact JSON the subagent returned, pretty-printed for display.
+  String get json => const JsonEncoder.withIndent('  ').convert({
+    'status': status,
+    'files_modified': filesModified,
+    'artifacts_created': artifactsCreated,
+    'key_findings': keyFindings,
+    'error_if_any': errorIfAny,
+  });
+}
 
 /// One line in the subagent log preview.
 @immutable
@@ -42,6 +75,8 @@ class V2SubagentPageData {
     this.progress = 0,
     this.files = const [],
     this.logLines = const [],
+    this.logPath = '',
+    this.summary,
     this.status = V2SubagentStatus.ready,
     this.errorMessage = 'We could not load this subagent.',
   });
@@ -60,6 +95,14 @@ class V2SubagentPageData {
   final String remainingLabel;
   final List<V2SubagentLogLine> logLines;
   final int totalLogLines;
+
+  /// Absolute path of the full log, e.g.
+  /// `/workspace/.ovid/logs/subagent_ab12.log`.
+  final String logPath;
+
+  /// The strict JSON summary the subagent returned, when it has finished.
+  final V2SubagentSummary? summary;
+
   final V2SubagentStatus status;
   final String errorMessage;
 }
@@ -71,6 +114,7 @@ class SubagentPage extends StatelessWidget {
     required this.data,
     this.onStop,
     this.onViewLog,
+    this.onReadFullLog,
     this.onFileTap,
     this.onBackToChat,
     this.onRetry,
@@ -79,6 +123,10 @@ class SubagentPage extends StatelessWidget {
   final V2SubagentPageData data;
   final VoidCallback? onStop;
   final VoidCallback? onViewLog;
+
+  /// Opens the full log at [V2SubagentPageData.logPath] in the device's
+  /// viewer or editor.
+  final ValueChanged<String>? onReadFullLog;
   final ValueChanged<String>? onFileTap;
   final VoidCallback? onBackToChat;
   final VoidCallback? onRetry;
@@ -134,7 +182,20 @@ class SubagentPage extends StatelessWidget {
               const SizedBox(height: OSpace.m),
               _DetailsCard(data: data, onFileTap: onFileTap),
               const SizedBox(height: OSpace.m),
-              _LogCard(data: data, onViewLog: onViewLog),
+              SubagentSummaryCard(
+                summary: _summaryData(data.summary),
+                status: data.summary == null
+                    ? V2SubagentSummaryStatus.empty
+                    : V2SubagentSummaryStatus.ready,
+                onFileTap: onFileTap,
+                onRetry: onRetry,
+              ),
+              const SizedBox(height: OSpace.m),
+              _LogCard(
+                data: data,
+                onViewLog: onViewLog,
+                onReadFullLog: onReadFullLog,
+              ),
               const SizedBox(height: OSpace.l),
               OButton(
                 label: 'Stop subagent',
@@ -161,6 +222,19 @@ class SubagentPage extends StatelessWidget {
       ],
     );
   }
+}
+
+/// Maps the page's summary onto the shared card, which owns the strict-key
+/// rendering and the raw-JSON reveal.
+V2SubagentSummaryData? _summaryData(V2SubagentSummary? summary) {
+  if (summary == null) return null;
+  return V2SubagentSummaryData(
+    status: summary.status,
+    filesModified: summary.filesModified,
+    artifactsCreated: summary.artifactsCreated,
+    keyFindings: summary.keyFindings,
+    errorIfAny: summary.errorIfAny,
+  );
 }
 
 class _HeroCard extends StatelessWidget {
@@ -546,10 +620,11 @@ class _MetricTile extends StatelessWidget {
 }
 
 class _LogCard extends StatelessWidget {
-  const _LogCard({required this.data, this.onViewLog});
+  const _LogCard({required this.data, this.onViewLog, this.onReadFullLog});
 
   final V2SubagentPageData data;
   final VoidCallback? onViewLog;
+  final ValueChanged<String>? onReadFullLog;
 
   @override
   Widget build(BuildContext context) {
@@ -609,12 +684,47 @@ class _LogCard extends StatelessWidget {
             ),
             Padding(
               padding: const EdgeInsets.all(OSpace.m),
-              child: OButton(
-                label: 'View full log (${data.totalLogLines} lines)',
-                icon: Icons.open_in_new_rounded,
-                variant: OButtonVariant.secondary,
-                expand: true,
-                onPressed: onViewLog,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (data.logPath.isNotEmpty) ...[
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          Icons.description_outlined,
+                          size: 14,
+                          color: c.textFaint,
+                        ),
+                        const SizedBox(width: OSpace.xs),
+                        Expanded(
+                          child: Text(
+                            data.logPath,
+                            style: OType.mono.copyWith(color: c.textFaint),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: OSpace.s),
+                  ],
+                  OButton(
+                    label: 'View full log (${data.totalLogLines} lines)',
+                    icon: Icons.open_in_new_rounded,
+                    variant: OButtonVariant.secondary,
+                    expand: true,
+                    onPressed: onViewLog,
+                  ),
+                  const SizedBox(height: OSpace.xs),
+                  OButton(
+                    label: 'Read full log',
+                    icon: Icons.article_outlined,
+                    variant: OButtonVariant.ghost,
+                    expand: true,
+                    onPressed: onReadFullLog == null
+                        ? null
+                        : () => onReadFullLog!(data.logPath),
+                  ),
+                ],
               ),
             ),
           ],
@@ -637,15 +747,34 @@ class _LogLine extends StatelessWidget {
       V2SubagentLogTone.success => c.success,
       V2SubagentLogTone.accent => c.accent,
     };
+    final time = Text(
+      '[${line.time}]',
+      style: OType.mono.copyWith(
+        color: c.textFaint,
+        fontSize: _largeText(context) ? 12 : null,
+      ),
+    );
+    final text = Text(line.text, style: OType.mono.copyWith(color: color));
+    // At 200 % text the timestamp alone fills the code block, so put it on its
+    // own line instead of squeezing the message.
+    if (_largeText(context)) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [time, const SizedBox(height: 2), text],
+      );
+    }
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('[${line.time}]', style: OType.mono.copyWith(color: c.textFaint)),
+        time,
         const SizedBox(width: OSpace.s),
-        Expanded(
-          child: Text(line.text, style: OType.mono.copyWith(color: color)),
-        ),
+        Expanded(child: text),
       ],
     );
   }
 }
+
+/// True once the user's text size is large enough that inline labels stop
+/// fitting beside their value.
+bool _largeText(BuildContext context) =>
+    MediaQuery.textScalerOf(context).scale(12) > 16;

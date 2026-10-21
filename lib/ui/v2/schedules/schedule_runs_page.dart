@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'run_timeline.dart';
 
 // TODO(l10n): extract this screen's English copy during the ARB pass.
 
@@ -50,15 +51,24 @@ class V2RunGroup {
 class V2ScheduleRunsData {
   const V2ScheduleRunsData({
     this.status = V2ScheduleRunsStatus.content,
+    this.scheduleTitle,
+    this.sessionTitle,
     this.total = 0,
     this.succeeded = 0,
     this.failed = 0,
     this.avgRuntimeLabel = '—',
     this.groups = const <V2RunGroup>[],
-    this.errorMessage = 'We could not load the run history. Check your connection and try again.',
+    this.errorMessage =
+        'We could not load the run history. Check your connection and try again.',
   });
 
   final V2ScheduleRunsStatus status;
+
+  /// The schedule these runs belong to, shown above the stats.
+  final String? scheduleTitle;
+
+  /// The chat the schedule runs in, shown for context.
+  final String? sessionTitle;
   final int total;
   final int succeeded;
   final int failed;
@@ -94,29 +104,46 @@ class ScheduleRunsPage extends StatefulWidget {
 
 class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
   V2RunsFilter _filter = V2RunsFilter.all;
-  final Set<String> _expanded = <String>{};
 
-  List<V2RunGroup> get _filteredGroups {
-    if (_filter == V2RunsFilter.all) return widget.data.groups;
+  List<V2ScheduleRun> get _filteredRuns {
+    if (_filter == V2RunsFilter.all) {
+      return [for (final group in widget.data.groups) ...group.runs];
+    }
     final wanted = _filter == V2RunsFilter.succeeded
         ? V2RunStatus.succeeded
         : V2RunStatus.failed;
     return [
       for (final group in widget.data.groups)
-        if (group.runs.any((run) => run.status == wanted))
-          V2RunGroup(
-            label: group.label,
-            runs: group.runs.where((run) => run.status == wanted).toList(),
-          ),
+        ...group.runs.where((run) => run.status == wanted),
     ];
+  }
+
+  /// The day label each run belongs to, keyed by run id, so the timeline keeps
+  /// the history's own grouping.
+  Map<String, String> get _dayLabels => {
+    for (final group in widget.data.groups)
+      for (final run in group.runs) run.id: group.label,
+  };
+
+  V2ScheduleRun? _runById(String id) {
+    for (final group in widget.data.groups) {
+      for (final run in group.runs) {
+        if (run.id == id) return run;
+      }
+    }
+    return null;
   }
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final session = widget.data.sessionTitle;
     return OScaffold(
       appBar: OAppBar(
         title: 'Schedule runs',
+        subtitle: session != null && session.trim().isNotEmpty
+            ? 'Source session: $session'
+            : null,
         actions: [
           OIconButton(
             icon: Icons.more_vert_rounded,
@@ -134,9 +161,8 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
               onRetry: widget.onRetry,
             ),
             V2ScheduleRunsStatus.empty => _empty(c),
-            V2ScheduleRunsStatus.content => widget.data.groups.isEmpty
-                ? _empty(c)
-                : _content(c),
+            V2ScheduleRunsStatus.content =>
+              widget.data.groups.isEmpty ? _empty(c) : _content(c),
           },
         ),
       ),
@@ -144,21 +170,11 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
   }
 
   Widget _empty(OColors c) {
-    return OEmptyState(
-      icon: Icons.history_rounded,
-      title: 'No runs yet',
-      message:
-          'When this schedule runs, you will see the result and any files it made right here.',
-      action: OButton(
-        label: 'Back to schedule',
-        icon: Icons.arrow_back_rounded,
-        onPressed: widget.onBackToSchedule,
-      ),
+    final empty = RunTimeline(
+      data: const V2RunTimelineData(status: V2RunTimelineStatus.empty),
+      onBackToSchedule: widget.onBackToSchedule,
     );
-  }
-
-  Widget _content(OColors c) {
-    final groups = _filteredGroups;
+    if (!_hasContext) return empty;
     return ListView(
       padding: const EdgeInsets.fromLTRB(
         OSpace.screen,
@@ -167,11 +183,80 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
         OSpace.xxl,
       ),
       children: [
+        _contextCard(c),
+        const SizedBox(height: OSpace.xl),
+        empty,
+      ],
+    );
+  }
+
+  bool get _hasContext {
+    final title = widget.data.scheduleTitle;
+    return title != null && title.trim().isNotEmpty;
+  }
+
+  /// The schedule these runs belong to, above the stats. The chat it runs in
+  /// is named in the app bar.
+  Widget _contextCard(OColors c) {
+    final title = widget.data.scheduleTitle!;
+    return OCard(
+      padding: const EdgeInsets.all(OSpace.m),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: c.accentSoft,
+              borderRadius: BorderRadius.circular(ORadius.m),
+            ),
+            child: Icon(
+              Icons.calendar_month_rounded,
+              size: 20,
+              color: c.accent,
+            ),
+          ),
+          const SizedBox(width: OSpace.m),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'SCHEDULE',
+                  style: OType.overline.copyWith(color: c.textMuted),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.bodyStrong.copyWith(color: c.text),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _content(OColors c) {
+    final runs = _filteredRuns;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(
+        OSpace.screen,
+        OSpace.s,
+        OSpace.screen,
+        OSpace.xxl,
+      ),
+      children: [
+        if (_hasContext) ...[_contextCard(c), const SizedBox(height: OSpace.m)],
         _summary(c),
         const SizedBox(height: OSpace.m),
         _filters(),
         const SizedBox(height: OSpace.l),
-        if (groups.isEmpty)
+        if (runs.isEmpty)
           OEmptyState(
             compact: true,
             icon: Icons.filter_alt_off_rounded,
@@ -186,29 +271,44 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
             ),
           )
         else
-          for (final group in groups) ...[
-            _groupHeader(c, group),
-            const SizedBox(height: OSpace.s),
-            OStagger(
-              children: [
-                for (final run in group.runs)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: OSpace.m),
-                    child: _runCard(c, run),
-                  ),
-              ],
-            ),
-            const SizedBox(height: OSpace.s),
-          ],
+          RunTimeline(
+            data: V2RunTimelineData(runs: _timelineRuns(runs)),
+            onOpenArtifact: (run) {
+              final source = _runById(run.id);
+              if (source != null) widget.onViewArtifact?.call(source);
+            },
+            onRetryRun: (run) {
+              final source = _runById(run.id);
+              if (source != null) widget.onRetryRun?.call(source);
+            },
+            onBackToSchedule: widget.onBackToSchedule,
+          ),
       ],
     );
   }
 
+  List<V2TimelineRun> _timelineRuns(List<V2ScheduleRun> runs) {
+    final labels = _dayLabels;
+    return [
+      for (final run in runs)
+        V2TimelineRun(
+          id: run.id,
+          dayLabel: labels[run.id] ?? '',
+          timeLabel: run.timeLabel,
+          durationLabel: run.durationLabel,
+          outcome: run.status == V2RunStatus.succeeded
+              ? V2RunOutcome.succeeded
+              : V2RunOutcome.failed,
+          summary: run.summary,
+          artifactName: run.artifactName,
+          failureDetail: run.failureDetail ?? run.failureTitle,
+        ),
+    ];
+  }
+
   Widget _summary(OColors c) {
     final data = widget.data;
-    final percent = data.total == 0
-        ? 0.0
-        : data.succeeded / data.total * 100;
+    final percent = data.total == 0 ? 0.0 : data.succeeded / data.total * 100;
     return OCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -287,269 +387,5 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
         ],
       ),
     );
-  }
-
-  Widget _groupHeader(OColors c, V2RunGroup group) {
-    return Row(
-      children: [
-        Expanded(
-          child: Text(
-            group.label.toUpperCase(),
-            style: OType.overline.copyWith(color: c.textMuted),
-          ),
-        ),
-        Text(
-          '${group.runs.length} ${group.runs.length == 1 ? 'run' : 'runs'}',
-          style: OType.caption.copyWith(color: c.textFaint),
-        ),
-      ],
-    );
-  }
-
-  Widget _runCard(OColors c, V2ScheduleRun run) {
-    final failed = run.status == V2RunStatus.failed;
-    final expanded = _expanded.contains(run.id);
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.m),
-      onTap: failed ? () => _toggle(run.id) : null,
-      semanticLabel: '${run.timeLabel}, ${failed ? 'failed' : 'completed'}. ${run.summary}',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Wrap(
-            spacing: OSpace.s,
-            runSpacing: OSpace.xs,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              Container(
-                width: 28,
-                height: 28,
-                decoration: BoxDecoration(
-                  color: failed
-                      ? c.danger.withValues(alpha: 0.12)
-                      : c.success.withValues(alpha: 0.12),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  failed ? Icons.close_rounded : Icons.check_rounded,
-                  size: 16,
-                  color: failed ? c.danger : c.success,
-                ),
-              ),
-              Text(
-                run.timeLabel,
-                style: OType.bodySm.copyWith(
-                  color: c.text,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              Text(
-                '•',
-                style: OType.caption.copyWith(color: c.textFaint),
-              ),
-              Text(
-                run.durationLabel,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-              OPill(
-                label: failed ? 'Failed' : 'Completed',
-                tone: failed ? OPillTone.danger : OPillTone.success,
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.s),
-          Text(
-            run.summary,
-            style: OType.bodySm.copyWith(color: c.textMuted),
-          ),
-          if (failed) ...[
-            const SizedBox(height: OSpace.xs),
-            Text(
-              run.failureTitle ?? 'Last run failed. Your rule is still saved.',
-              style: OType.caption.copyWith(
-                color: c.danger,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            if (expanded) ...[
-              const SizedBox(height: OSpace.s),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(OSpace.m),
-                decoration: BoxDecoration(
-                  color: c.danger.withValues(alpha: 0.10),
-                  borderRadius: BorderRadius.circular(ORadius.s),
-                  border: Border.all(
-                    color: c.danger.withValues(alpha: 0.30),
-                  ),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(
-                          Icons.info_outline_rounded,
-                          size: 15,
-                          color: c.danger,
-                        ),
-                        const SizedBox(width: OSpace.xs),
-                        Flexible(
-                          child: Text(
-                            'What happened',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: OType.caption.copyWith(
-                              color: c.danger,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: OSpace.xs),
-                    Text(
-                      run.failureDetail ??
-                          'Ovid could not finish this run. Your schedule is still saved and will try again.',
-                      style: OType.caption.copyWith(color: c.danger),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: OSpace.m),
-              Wrap(
-                spacing: OSpace.s,
-                runSpacing: OSpace.s,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  OButton(
-                    label: 'Retry now',
-                    icon: Icons.replay_rounded,
-                    onPressed: () => widget.onRetryRun?.call(run),
-                  ),
-                  TextButton(
-                    onPressed: () => _toggle(run.id),
-                    child: Text(
-                      'Hide details',
-                      style: OType.label.copyWith(color: c.textMuted),
-                    ),
-                  ),
-                ],
-              ),
-            ] else ...[
-              const SizedBox(height: OSpace.xs),
-              TextButton(
-                onPressed: () => _toggle(run.id),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Flexible(
-                      child: Text(
-                        'Show details',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.label.copyWith(color: c.danger),
-                      ),
-                    ),
-                    const SizedBox(width: OSpace.xs),
-                    Icon(
-                      Icons.expand_more_rounded,
-                      size: 18,
-                      color: c.danger,
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ],
-          if (!failed && run.resultPreview != null) ...[
-            const SizedBox(height: OSpace.s),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(OSpace.m),
-              decoration: BoxDecoration(
-                color: c.codeBg,
-                borderRadius: BorderRadius.circular(ORadius.s),
-                border: Border.all(color: c.hairline),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          'RESULT',
-                          style: OType.overline.copyWith(color: c.textFaint),
-                        ),
-                      ),
-                      Icon(
-                        Icons.terminal_rounded,
-                        size: 14,
-                        color: c.textFaint,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: OSpace.xs),
-                  Text(
-                    run.resultPreview!,
-                    style: OType.mono.copyWith(color: c.textMuted),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: OSpace.s),
-            _runActions(run),
-          ],
-        ],
-      ),
-    );
-  }
-
-  /// Open chat / view artifact. Side by side normally; one per row when the
-  /// text scale would otherwise squeeze each label to a few characters.
-  Widget _runActions(V2ScheduleRun run) {
-    final actions = <Widget>[
-      OButton(
-        label: 'Open chat',
-        icon: Icons.chat_bubble_outline_rounded,
-        expand: true,
-        onPressed: () => widget.onOpenChat?.call(run),
-      ),
-      if (run.artifactName != null)
-        OButton(
-          label: 'View artifact',
-          icon: Icons.description_outlined,
-          variant: OButtonVariant.secondary,
-          expand: true,
-          onPressed: () => widget.onViewArtifact?.call(run),
-        ),
-    ];
-    if (MediaQuery.textScalerOf(context).scale(1) > 1.3) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          for (var i = 0; i < actions.length; i++) ...[
-            if (i > 0) const SizedBox(height: OSpace.s),
-            actions[i],
-          ],
-        ],
-      );
-    }
-    return Row(
-      children: [
-        Expanded(child: actions.first),
-        if (actions.length > 1) ...[
-          const SizedBox(width: OSpace.s),
-          Expanded(child: actions[1]),
-        ],
-      ],
-    );
-  }
-
-  void _toggle(String id) {
-    setState(() {
-      if (!_expanded.add(id)) _expanded.remove(id);
-    });
   }
 }

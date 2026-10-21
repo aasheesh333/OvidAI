@@ -28,6 +28,7 @@ class V2MemoryFileEntry {
     required this.sizeLabel,
     required this.updatedLabel,
     required this.preview,
+    this.content = '',
   });
 
   final String id;
@@ -36,7 +37,26 @@ class V2MemoryFileEntry {
   final String sizeLabel;
   final String updatedLabel;
   final String preview;
+
+  /// Editable body of the file, shown in the editor sheet.
+  final String content;
+
+  /// Scope, size and last update, for the row and its screen-reader label.
+  String get metaLabel {
+    final parts = <String>[group.label, sizeLabel];
+    if (updatedLabel.isNotEmpty) parts.add('Updated $updatedLabel');
+    return parts.join(' · ');
+  }
+
+  String get semanticsLabel {
+    final parts = <String>[name, metaLabel];
+    if (preview.isNotEmpty) parts.add(preview);
+    return parts.join(', ');
+  }
 }
+
+/// Saves an edited memory file. [content] is the full new body.
+typedef V2MemoryFileSave = void Function(String id, String content);
 
 /// Injected state for the Memory files screen.
 @immutable
@@ -46,6 +66,7 @@ class V2MemoryFilesPageData {
     this.files = const <V2MemoryFileEntry>[],
     this.totalSizeLabel = '0 KB',
     this.onOpen,
+    this.onSave,
     this.onDelete,
     this.onExportAll,
     this.onRetry,
@@ -56,7 +77,11 @@ class V2MemoryFilesPageData {
   final List<V2MemoryFileEntry> files;
   final String totalSizeLabel;
 
+  /// Opens a file read-only. Used as the fallback when [onSave] is missing.
   final ValueChanged<String>? onOpen;
+
+  /// Persists an edited file. When set, tapping a row opens the editor.
+  final V2MemoryFileSave? onSave;
   final ValueChanged<String>? onDelete;
   final VoidCallback? onExportAll;
   final VoidCallback? onRetry;
@@ -155,7 +180,7 @@ class MemoryFilesPage extends StatelessWidget {
                   ),
                   const SizedBox(height: OSpace.xs),
                   Text(
-                    'Ovid saves small notes while it works. Open a file to see '
+                    'Ovid saves small notes while it works. Tap a file to edit '
                     'what it remembers, or remove one you no longer need.',
                     style: OType.bodySm.copyWith(color: c.textMuted),
                   ),
@@ -220,17 +245,15 @@ class MemoryFilesPage extends StatelessWidget {
 
   Widget _fileRow(BuildContext context, V2MemoryFileEntry file) {
     final c = OColors.of(context);
-    final canOpen = data.onOpen != null;
+    final canActivate = data.onSave != null || data.onOpen != null;
     return Semantics(
-      label:
-          '${file.name}, ${file.sizeLabel}, updated ${file.updatedLabel}, '
-          '${file.preview}',
-      button: canOpen,
-      enabled: canOpen,
+      label: file.semanticsLabel,
+      button: canActivate,
+      enabled: canActivate,
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          onTap: canOpen ? () => data.onOpen!(file.id) : null,
+          onTap: canActivate ? () => _activate(context, file) : null,
           child: Padding(
             padding: const EdgeInsets.symmetric(
               horizontal: OSpace.l,
@@ -273,7 +296,9 @@ class MemoryFilesPage extends StatelessWidget {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          '${file.sizeLabel} · Updated ${file.updatedLabel}',
+                          file.metaLabel,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
                           style: OType.caption.copyWith(color: c.textMuted),
                         ),
                         const SizedBox(height: OSpace.xs),
@@ -297,33 +322,65 @@ class MemoryFilesPage extends StatelessWidget {
     );
   }
 
+  void _activate(BuildContext context, V2MemoryFileEntry file) {
+    if (data.onSave != null) {
+      _openEditor(context, file);
+      return;
+    }
+    data.onOpen?.call(file.id);
+  }
+
+  Future<void> _openEditor(BuildContext context, V2MemoryFileEntry file) async {
+    final content = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: OColors.of(context).surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(ORadius.xl)),
+      ),
+      builder: (_) => _MemoryFileEditor(file: file),
+    );
+    if (content != null) {
+      data.onSave?.call(file.id, content);
+    }
+  }
+
   Widget _fileMenu(BuildContext context, V2MemoryFileEntry file) {
     final c = OColors.of(context);
+    final canEdit = data.onSave != null;
     final canOpen = data.onOpen != null;
+    final canActivate = canEdit || canOpen;
     final canDelete = data.onDelete != null;
     return SizedBox(
       width: OSpace.touch,
       height: OSpace.touch,
       child: PopupMenuButton<String>(
-        enabled: canOpen || canDelete,
+        enabled: canActivate || canDelete,
         tooltip: 'File options for ${file.name}',
         icon: Icon(Icons.more_vert_rounded, color: c.textMuted),
         onSelected: (value) {
-          if (value == 'open') {
-            data.onOpen?.call(file.id);
+          if (value == 'edit') {
+            _activate(context, file);
           } else if (value == 'delete') {
             _confirmDelete(context, file);
           }
         },
         itemBuilder: (context) => [
           PopupMenuItem<String>(
-            value: 'open',
-            enabled: canOpen,
+            value: 'edit',
+            enabled: canActivate,
             child: Row(
               children: [
-                Icon(Icons.open_in_new_rounded, size: 18, color: c.textMuted),
+                Icon(
+                  canEdit ? Icons.edit_rounded : Icons.open_in_new_rounded,
+                  size: 18,
+                  color: c.textMuted,
+                ),
                 const SizedBox(width: OSpace.m),
-                Text('Open', style: OType.bodySm.copyWith(color: c.text)),
+                Text(
+                  canEdit ? 'Edit' : 'Open',
+                  style: OType.bodySm.copyWith(color: c.text),
+                ),
               ],
             ),
           ),
@@ -433,5 +490,115 @@ class MemoryFilesPage extends StatelessWidget {
       V2MemoryFileGroup.project => Icons.folder_outlined,
       V2MemoryFileGroup.session => Icons.forum_outlined,
     };
+  }
+}
+
+/// Editor sheet for one memory file. Owns its controller so it is disposed
+/// with the route, not while the sheet is still animating out.
+class _MemoryFileEditor extends StatefulWidget {
+  const _MemoryFileEditor({required this.file});
+
+  final V2MemoryFileEntry file;
+
+  @override
+  State<_MemoryFileEditor> createState() => _MemoryFileEditorState();
+}
+
+class _MemoryFileEditorState extends State<_MemoryFileEditor> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.file.content,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final file = widget.file;
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      child: SafeArea(
+        top: false,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+          ),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(OSpace.l),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'Edit memory file',
+                  style: OType.h2.copyWith(color: c.text),
+                ),
+                const SizedBox(height: OSpace.xs),
+                Text(
+                  '${file.name} · ${file.group.label}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+                const SizedBox(height: OSpace.m),
+                TextField(
+                  key: const ValueKey<String>('memory-file-editor-field'),
+                  controller: _controller,
+                  minLines: 6,
+                  maxLines: 12,
+                  keyboardType: TextInputType.multiline,
+                  textCapitalization: TextCapitalization.sentences,
+                  style: OType.bodySm.copyWith(color: c.text),
+                  decoration: InputDecoration(
+                    hintText: 'Write what Ovid should remember…',
+                    hintStyle: OType.bodySm.copyWith(color: c.textFaint),
+                    filled: true,
+                    fillColor: c.surfaceAlt,
+                    contentPadding: const EdgeInsets.all(OSpace.m),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(ORadius.m),
+                      borderSide: BorderSide(color: c.hairline),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(ORadius.m),
+                      borderSide: BorderSide(color: c.hairline),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(ORadius.m),
+                      borderSide: BorderSide(color: c.accentFill),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: OSpace.m),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OButton(
+                        label: 'Cancel',
+                        variant: OButtonVariant.secondary,
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                    ),
+                    const SizedBox(width: OSpace.s),
+                    Expanded(
+                      child: OButton(
+                        label: 'Save',
+                        icon: Icons.check_rounded,
+                        onPressed: () =>
+                            Navigator.pop(context, _controller.text),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

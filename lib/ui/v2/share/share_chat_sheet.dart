@@ -13,6 +13,12 @@ import 'share_sheet.dart';
 class V2ShareChatSheetData {
   const V2ShareChatSheetData({
     required this.link,
+    this.mode = V2ShareMode.readOnly,
+    this.memberCount = 1,
+    this.capacity = v2ShareMemberLimit,
+    this.creatorPaysStorage = true,
+    this.viewerCanFork = false,
+    this.canChangeMode = true,
     this.anyoneCanView = true,
     this.showName = true,
     this.active = true,
@@ -20,9 +26,17 @@ class V2ShareChatSheetData {
     this.creatorName = '',
     this.status = V2ShareStatus.ready,
     this.errorMessage = 'We could not load the share link.',
-  });
+  }) : assert(capacity > 0, 'A shared room always has a capacity');
 
   final String link;
+
+  /// Collab (live, capped, one sender) or Read only (forkable snapshot).
+  final V2ShareMode mode;
+  final int memberCount;
+  final int capacity;
+  final bool creatorPaysStorage;
+  final bool viewerCanFork;
+  final bool canChangeMode;
   final bool anyoneCanView;
   final bool showName;
   final bool active;
@@ -38,6 +52,12 @@ class V2ShareChatSheetData {
 
   V2ShareSheetData toSheetData() => V2ShareSheetData(
     link: link,
+    mode: mode,
+    memberCount: memberCount,
+    capacity: capacity,
+    creatorPaysStorage: creatorPaysStorage,
+    viewerCanFork: viewerCanFork,
+    canChangeMode: canChangeMode,
     anyoneCanView: anyoneCanView,
     showName: showName,
     active: active,
@@ -55,6 +75,8 @@ class ShareChatSheet extends StatelessWidget {
     super.key,
     required this.data,
     this.onCopyLink,
+    this.onModeChanged,
+    this.onFork,
     this.onToggleAnyoneCanView,
     this.onToggleShowName,
     this.onShareTarget,
@@ -66,6 +88,8 @@ class ShareChatSheet extends StatelessWidget {
 
   final V2ShareChatSheetData data;
   final VoidCallback? onCopyLink;
+  final ValueChanged<V2ShareMode>? onModeChanged;
+  final VoidCallback? onFork;
   final ValueChanged<bool>? onToggleAnyoneCanView;
   final ValueChanged<bool>? onToggleShowName;
   final ValueChanged<V2ShareTarget>? onShareTarget;
@@ -79,6 +103,8 @@ class ShareChatSheet extends StatelessWidget {
     return ShareSheet(
       data: data.toSheetData(),
       onCopyLink: onCopyLink,
+      onModeChanged: onModeChanged,
+      onFork: onFork,
       onToggleAnyoneCanView: onToggleAnyoneCanView,
       onToggleShowName: onToggleShowName,
       onShareTarget: onShareTarget,
@@ -99,6 +125,8 @@ Future<void> showShareChatSheet(
   BuildContext context, {
   required V2ShareChatSheetData data,
   VoidCallback? onCopyLink,
+  ValueChanged<V2ShareMode>? onModeChanged,
+  VoidCallback? onFork,
   ValueChanged<bool>? onToggleAnyoneCanView,
   ValueChanged<bool>? onToggleShowName,
   ValueChanged<V2ShareTarget>? onShareTarget,
@@ -111,6 +139,8 @@ Future<void> showShareChatSheet(
     builder: (sheetContext) => ShareChatSheet(
       data: data,
       onCopyLink: onCopyLink,
+      onModeChanged: onModeChanged,
+      onFork: onFork,
       onToggleAnyoneCanView: onToggleAnyoneCanView,
       onToggleShowName: onToggleShowName,
       onShareTarget: onShareTarget,

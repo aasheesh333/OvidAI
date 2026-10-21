@@ -4,9 +4,14 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'artifact_filters.dart';
 
 /// The four artifact families shown by the filter chips.
 enum V2ArtifactKind { image, document, code, data }
+
+/// Where an artifact came from. The library holds both agent output and files
+/// the user uploaded; Studio drafts are deliberately not part of it.
+enum V2ArtifactSource { generated, uploaded }
 
 enum V2ArtifactsStatus { loading, content, empty, error }
 
@@ -18,6 +23,9 @@ class V2ArtifactItem {
     required this.kind,
     required this.createdAt,
     required this.sizeLabel,
+    this.sizeBytes = 0,
+    this.source = V2ArtifactSource.generated,
+    this.sessionTitle = '',
     this.thumbnail,
     this.badge,
     this.live = false,
@@ -28,6 +36,15 @@ class V2ArtifactItem {
   final V2ArtifactKind kind;
   final DateTime createdAt;
   final String sizeLabel;
+
+  /// Raw size for the library total. Optional so older wiring keeps working;
+  /// when it is zero the row still shows [sizeLabel].
+  final int sizeBytes;
+  final V2ArtifactSource source;
+
+  /// Title of the chat or run that produced the artifact. Empty for older
+  /// entries and for uploads that are not tied to a session.
+  final String sessionTitle;
   final ImageProvider? thumbnail;
   final String? badge;
   final bool live;
@@ -38,19 +55,26 @@ class V2ArtifactsData {
   const V2ArtifactsData({
     this.status = V2ArtifactsStatus.content,
     this.artifacts = const <V2ArtifactItem>[],
-    this.errorMessage = 'We could not load your artifacts. Check your connection and try again.',
+    this.totalSizeLabel,
+    this.errorMessage =
+        'We could not load your artifacts. Check your connection and try again.',
     this.now,
   });
 
   final V2ArtifactsStatus status;
   final List<V2ArtifactItem> artifacts;
+
+  /// Pre-formatted total supplied by the wiring layer. When null the page adds
+  /// up [V2ArtifactItem.sizeBytes] itself.
+  final String? totalSizeLabel;
   final String errorMessage;
 
   /// Injectable clock so relative dates stay stable in tests and previews.
   final DateTime? now;
 }
 
-/// Artifacts library: every file Ovid made, grouped by kind.
+/// Artifacts library: the user's lifetime library of agent-made files and
+/// uploads, searchable across every session.
 ///
 /// Presentational only. The wiring layer owns the list, loading, errors and
 /// every navigation callback.
@@ -83,18 +107,122 @@ class ArtifactsPage extends StatefulWidget {
 }
 
 class _ArtifactsPageState extends State<ArtifactsPage> {
-  V2ArtifactKind? _filter;
+  final TextEditingController _searchController = TextEditingController();
+  V2ArtifactFilters _filters = const V2ArtifactFilters();
+  String _query = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  bool get _filtering => _query.trim().isNotEmpty || _filters.isActive;
+
+  /// One filter option per chat title, with how many files it made.
+  List<V2ArtifactSession> get _sessions {
+    final counts = <String, int>{};
+    for (final artifact in widget.data.artifacts) {
+      final title = artifact.sessionTitle.trim();
+      if (title.isEmpty) continue;
+      counts[title] = (counts[title] ?? 0) + 1;
+    }
+    return [
+      for (final entry in counts.entries)
+        V2ArtifactSession(
+          id: _sessionId(entry.key),
+          title: entry.key,
+          count: entry.value,
+        ),
+    ];
+  }
+
+  String _sessionId(String title) => 'session:$title';
+
+  String? get _selectedSessionTitle {
+    final id = _filters.sessionId;
+    if (id == null) return null;
+    for (final session in _sessions) {
+      if (session.id == id) return session.title;
+    }
+    return null;
+  }
 
   List<V2ArtifactItem> get _visible {
-    final kind = _filter;
-    if (kind == null) return widget.data.artifacts;
-    return widget.data.artifacts.where((a) => a.kind == kind).toList();
+    final query = _query.trim().toLowerCase();
+    final sessionTitle = _selectedSessionTitle;
+    final items = widget.data.artifacts.where((artifact) {
+      if (_filters.source == V2ArtifactSourceFilter.generated &&
+          artifact.source != V2ArtifactSource.generated) {
+        return false;
+      }
+      if (_filters.source == V2ArtifactSourceFilter.uploaded &&
+          artifact.source != V2ArtifactSource.uploaded) {
+        return false;
+      }
+      if (_filters.type != V2ArtifactTypeFilter.all &&
+          artifact.kind != _kindFor(_filters.type)) {
+        return false;
+      }
+      if (sessionTitle != null &&
+          artifact.sessionTitle.trim() != sessionTitle) {
+        return false;
+      }
+      if (query.isEmpty) return true;
+      return artifact.name.toLowerCase().contains(query) ||
+          artifact.sessionTitle.toLowerCase().contains(query);
+    }).toList();
+    return _sorted(items);
+  }
+
+  List<V2ArtifactItem> _sorted(List<V2ArtifactItem> items) {
+    final sorted = [...items];
+    switch (_filters.sort) {
+      case V2ArtifactSort.newest:
+        sorted.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      case V2ArtifactSort.oldest:
+        sorted.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      case V2ArtifactSort.largest:
+        sorted.sort((a, b) {
+          final bySize = b.sizeBytes.compareTo(a.sizeBytes);
+          return bySize != 0 ? bySize : b.createdAt.compareTo(a.createdAt);
+        });
+      case V2ArtifactSort.name:
+        sorted.sort(
+          (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+        );
+    }
+    return sorted;
+  }
+
+  /// The artifact family that matches a filter chip. [V2ArtifactTypeFilter.page]
+  /// has no library kind, so it matches nothing.
+  V2ArtifactKind? _kindFor(V2ArtifactTypeFilter type) => switch (type) {
+    V2ArtifactTypeFilter.all => null,
+    V2ArtifactTypeFilter.image => V2ArtifactKind.image,
+    V2ArtifactTypeFilter.doc => V2ArtifactKind.document,
+    V2ArtifactTypeFilter.code => V2ArtifactKind.code,
+    V2ArtifactTypeFilter.other => V2ArtifactKind.data,
+    V2ArtifactTypeFilter.page => null,
+  };
+
+  void _setQuery(String value) {
+    setState(() => _query = value);
+  }
+
+  void _clearFilters() {
+    _searchController.clear();
+    setState(() {
+      _query = '';
+      _filters = const V2ArtifactFilters();
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final showFab = widget.data.status == V2ArtifactsStatus.content ||
+    final showFab =
+        widget.data.status == V2ArtifactsStatus.content ||
         widget.data.status == V2ArtifactsStatus.empty;
 
     return OScaffold(
@@ -151,7 +279,9 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
       icon: Icons.auto_awesome_rounded,
       title: 'Nothing here yet',
       message:
-          'Files Ovid makes in chats, Studio, or the browser show up here. Start something and it will appear.',
+          'Files Ovid makes in any chat, plus files you upload, show up here. '
+          'Studio drafts stay in Studio. Deleting an artifact frees its '
+          'storage right away.',
       action: OButton(
         label: 'See what Ovid can make',
         icon: Icons.arrow_forward_rounded,
@@ -192,13 +322,37 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         OSpace.huge + OSpace.huge,
       ),
       children: [
-        _filters(),
+        _librarySummary(c),
+        const SizedBox(height: OSpace.m),
+        OSearchField(
+          controller: _searchController,
+          hint: 'Search files and chats',
+          onChanged: _setQuery,
+          trailing: _query.isEmpty
+              ? null
+              : OIconButton(
+                  icon: Icons.close_rounded,
+                  semanticLabel: 'Clear search',
+                  size: 18,
+                  onPressed: () {
+                    _searchController.clear();
+                    _setQuery('');
+                  },
+                ),
+        ),
+        const SizedBox(height: OSpace.m),
+        ArtifactFilterBar(
+          filters: _filters,
+          summary: _sizeSummary(items),
+          sessions: _sessions,
+          onChanged: (next) => setState(() => _filters = next),
+        ),
         const SizedBox(height: OSpace.l),
         Row(
           children: [
             Expanded(
               child: OSectionHeader(
-                label: 'Recent artifacts',
+                label: _filtering ? 'Matching artifacts' : 'Recent artifacts',
                 padding: EdgeInsets.zero,
               ),
             ),
@@ -210,28 +364,31 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         ),
         const SizedBox(height: OSpace.m),
         if (items.isEmpty)
-          _filter == null
+          _filtering
               ? OEmptyState(
                   compact: true,
-                  icon: Icons.auto_awesome_rounded,
-                  title: 'Nothing here yet',
+                  icon: Icons.search_off_rounded,
+                  title: 'No matches',
                   message:
-                      'Files Ovid makes in chats, Studio, or the browser show up here.',
+                      'Try another search or filter. Deleting an artifact '
+                      'here frees its storage.',
                   action: OButton(
-                    label: 'New artifact',
-                    icon: Icons.add_rounded,
-                    onPressed: widget.onNewArtifact,
+                    label: 'Clear filters',
+                    variant: OButtonVariant.secondary,
+                    onPressed: _clearFilters,
                   ),
                 )
               : OEmptyState(
                   compact: true,
-                  icon: Icons.filter_alt_off_rounded,
-                  title: 'No ${_filterLabel(_filter).toLowerCase()} yet',
-                  message: 'Try another filter, or make something new with Ovid.',
+                  icon: Icons.auto_awesome_rounded,
+                  title: 'Nothing here yet',
+                  message:
+                      'Files from every chat and every upload show up here. '
+                      'Deleting an artifact frees its storage right away.',
                   action: OButton(
-                    label: 'Show all artifacts',
-                    variant: OButtonVariant.secondary,
-                    onPressed: () => setState(() => _filter = null),
+                    label: 'New artifact',
+                    icon: Icons.add_rounded,
+                    onPressed: widget.onNewArtifact,
                   ),
                 )
         else
@@ -242,40 +399,75 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     );
   }
 
-  Widget _filters() {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
+  Widget _librarySummary(OColors c) {
+    final all = widget.data.artifacts;
+    final total = widget.data.totalSizeLabel ?? _totalSize(all);
+    final count = '${all.length} ${all.length == 1 ? 'file' : 'files'}';
+    return OCard(
+      padding: const EdgeInsets.all(OSpace.m),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          OChip(
-            label: 'All',
-            icon: Icons.apps_rounded,
-            selected: _filter == null,
-            onTap: () => setState(() => _filter = null),
-          ),
-          const SizedBox(width: OSpace.s),
-          for (final kind in V2ArtifactKind.values) ...[
-            OChip(
-              label: _filterLabel(kind),
-              icon: _filterIcon(kind),
-              selected: _filter == kind,
-              onTap: () => setState(() => _filter = kind),
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: c.accentSoft,
+              borderRadius: BorderRadius.circular(ORadius.m),
             ),
-            if (kind != V2ArtifactKind.values.last)
-              const SizedBox(width: OSpace.s),
-          ],
+            child: Icon(Icons.folder_copy_outlined, size: 20, color: c.accent),
+          ),
+          const SizedBox(width: OSpace.m),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Your lifetime library',
+                  style: OType.bodyStrong.copyWith(color: c.text),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  total.isEmpty ? count : '$count · $total stored',
+                  style: OType.bodySm.copyWith(color: c.textMuted),
+                ),
+                const SizedBox(height: OSpace.xs),
+                Text(
+                  'Every chat file and upload, in one place. Studio drafts '
+                  'stay in Studio.',
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
   }
 
+  V2ArtifactSizeSummary _sizeSummary(List<V2ArtifactItem> visible) {
+    final all = widget.data.artifacts;
+    final bytes = all.fold<int>(0, (sum, item) => sum + item.sizeBytes);
+    return V2ArtifactSizeSummary(
+      totalBytes: bytes,
+      totalCount: all.length,
+      visibleCount: visible.length,
+      sizeLabel: widget.data.totalSizeLabel,
+    );
+  }
+
   Widget _card(OColors c, V2ArtifactItem item) {
     final ext = _extension(item.name);
+    final sourceLabel = item.source == V2ArtifactSource.uploaded
+        ? 'Uploaded'
+        : 'Generated';
     return OCard(
       padding: EdgeInsets.zero,
       onTap: () => widget.onArtifactTap?.call(item),
       semanticLabel:
-          '${item.name}, ${_filterLabel(item.kind)}, ${item.sizeLabel}, ${_dateLabel(item.createdAt, widget.data.now ?? DateTime.now())}',
+          '${item.name}, $sourceLabel, ${_filterLabel(item.kind)}, '
+          '${item.sizeLabel}, ${_dateLabel(item.createdAt, widget.data.now ?? DateTime.now())}'
+          '${item.sessionTitle.isEmpty ? '' : ', from ${item.sessionTitle}'}',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -358,14 +550,11 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
                 ),
                 Row(
                   children: [
-                    Icon(
-                      _filterIcon(item.kind),
-                      size: 14,
-                      color: c.accent,
-                    ),
+                    Icon(_filterIcon(item.kind), size: 14, color: c.accent),
                     const SizedBox(width: OSpace.xs),
                     Expanded(
                       child: Text(
+                        '${item.source == V2ArtifactSource.uploaded ? 'Uploaded · ' : ''}'
                         '$ext · ${item.sizeLabel} · '
                         '${_dateLabel(item.createdAt, widget.data.now ?? DateTime.now())}',
                         maxLines: 1,
@@ -375,6 +564,27 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
                     ),
                   ],
                 ),
+                if (item.sessionTitle.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.chat_bubble_outline_rounded,
+                        size: 13,
+                        color: c.textFaint,
+                      ),
+                      const SizedBox(width: OSpace.xs),
+                      Expanded(
+                        child: Text(
+                          'From ${item.sessionTitle}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.caption.copyWith(color: c.textMuted),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ],
             ),
           ),
@@ -406,9 +616,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
             decoration: BoxDecoration(
               color: c.accentSoft,
               borderRadius: BorderRadius.circular(ORadius.m),
-              border: Border.all(
-                color: c.accentFill.withValues(alpha: 0.35),
-              ),
+              border: Border.all(color: c.accentFill.withValues(alpha: 0.35)),
             ),
             child: Icon(Icons.landscape_rounded, size: 28, color: c.accent),
           ),
@@ -579,10 +787,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         borderRadius: BorderRadius.circular(ORadius.pill),
         border: Border.all(color: c.hairline),
       ),
-      child: Text(
-        ext,
-        style: OType.overline.copyWith(color: c.textMuted),
-      ),
+      child: Text(ext, style: OType.overline.copyWith(color: c.textMuted)),
     );
   }
 
@@ -601,7 +806,11 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
                   color: c.accentSoft,
                   shape: BoxShape.circle,
                 ),
-                child: Icon(Icons.auto_awesome_rounded, size: 20, color: c.accent),
+                child: Icon(
+                  Icons.auto_awesome_rounded,
+                  size: 20,
+                  color: c.accent,
+                ),
               ),
               const SizedBox(width: OSpace.m),
               Expanded(
@@ -609,12 +818,14 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Every output, organized',
+                      'Every output, in one library',
                       style: OType.bodyStrong.copyWith(color: c.text),
                     ),
                     const SizedBox(height: OSpace.xs),
                     Text(
-                      'Files Ovid makes in chats, Studio scripts, or browser runs land here automatically.',
+                      'Files from every chat and every upload live here. '
+                      'Studio drafts stay in Studio. Deleting an artifact '
+                      'frees its storage right away.',
                       style: OType.bodySm.copyWith(color: c.textMuted),
                     ),
                   ],
@@ -632,6 +843,23 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         ],
       ),
     );
+  }
+
+  String _totalSize(List<V2ArtifactItem> items) {
+    final bytes = items.fold<int>(0, (sum, item) => sum + item.sizeBytes);
+    if (bytes <= 0) return '';
+    return _formatBytes(bytes);
+  }
+
+  String _formatBytes(int bytes) {
+    const kilo = 1024;
+    if (bytes < kilo) return '$bytes B';
+    final kb = bytes / kilo;
+    if (kb < kilo) return '${kb.toStringAsFixed(kb < 10 ? 1 : 0)} KB';
+    final mb = kb / kilo;
+    if (mb < kilo) return '${mb.toStringAsFixed(mb < 10 ? 1 : 0)} MB';
+    final gb = mb / kilo;
+    return '${gb.toStringAsFixed(1)} GB';
   }
 
   String _filterLabel(V2ArtifactKind? kind) => switch (kind) {

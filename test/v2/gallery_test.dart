@@ -4,6 +4,7 @@ import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/v2_gallery.dart';
 import 'package:ovid_ai/ui/v2/v2_registry.dart';
+import 'package:ovid_ai/ui/v2/v2_screen_entry.dart';
 
 V2ScreenEntry _entry(String id, String title, String group) {
   return V2ScreenEntry(
@@ -32,7 +33,7 @@ void main() {
 
   Widget app() => MaterialApp(
     theme: OTheme.light(),
-    home: const V2GalleryPage(),
+    home: V2GalleryPage(screens: v2Screens),
   );
 
   testWidgets('gallery groups every registered screen', (tester) async {

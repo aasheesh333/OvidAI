@@ -60,6 +60,8 @@ class V2NotificationsPageData {
   const V2NotificationsPageData({
     this.status = V2NotificationsStatus.ready,
     this.notificationsBlocked = false,
+    this.masterEnabled = true,
+    this.showPermissionPrompt = false,
     this.activity = const <V2NotificationSetting>[
       V2NotificationSetting(
         id: 'run_finished',
@@ -113,6 +115,9 @@ class V2NotificationsPageData {
       ),
     ],
     this.onToggle,
+    this.onMasterChanged,
+    this.onAllowNotifications,
+    this.onDismissPermissionPrompt,
     this.onQuietHours,
     this.onQuietHoursEnabledChanged,
     this.onQuietHoursStartChanged,
@@ -125,6 +130,14 @@ class V2NotificationsPageData {
 
   final V2NotificationsStatus status;
   final bool notificationsBlocked;
+
+  /// The account-wide push switch. On by default: a new account should hear
+  /// about a finished run without hunting for this screen.
+  final bool masterEnabled;
+
+  /// True on the first visit, before Android has been asked. The page shows
+  /// the permission rationale instead of a bare switch.
+  final bool showPermissionPrompt;
   final List<V2NotificationSetting> activity;
   final List<V2NotificationSetting> security;
   final bool sound;
@@ -143,6 +156,15 @@ class V2NotificationsPageData {
 
   /// Called with the row id and the requested value.
   final void Function(String id, bool value)? onToggle;
+
+  /// Called with the new value of the account-wide switch.
+  final ValueChanged<bool>? onMasterChanged;
+
+  /// Accepts the first-run notification prompt.
+  final VoidCallback? onAllowNotifications;
+
+  /// Defers the first-run prompt; it comes back from Settings.
+  final VoidCallback? onDismissPermissionPrompt;
   final VoidCallback? onQuietHours;
   final ValueChanged<bool>? onQuietHoursEnabledChanged;
   final ValueChanged<TimeOfDay>? onQuietHoursStartChanged;
@@ -198,7 +220,10 @@ class NotificationsPage extends StatelessWidget {
             ),
             child: OStagger(
               children: [
+                if (data.showPermissionPrompt && !data.notificationsBlocked)
+                  _permissionPrompt(context),
                 if (data.notificationsBlocked) _blockedBanner(context),
+                _master(context),
                 _activity(context),
                 _security(context),
                 _delivery(context),
@@ -259,6 +284,86 @@ class NotificationsPage extends StatelessWidget {
     );
   }
 
+  /// First-run rationale. The onboarding step asks the same question with the
+  /// same copy; this card is the Settings-side version so a deferred prompt
+  /// still explains why the permission matters.
+  Widget _permissionPrompt(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: OSpace.l),
+      child: OCard(
+        key: const ValueKey<String>('notifications-permission-prompt'),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.notifications_active_outlined,
+                  size: 22,
+                  color: c.accent,
+                ),
+                const SizedBox(width: OSpace.m),
+                Expanded(
+                  child: Text(
+                    'Get notified when Ovid Si finishes',
+                    style: OType.h3.copyWith(color: c.text),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: OSpace.s),
+            Text(
+              'Ovid Si works in the cloud, so long tasks keep running after '
+              'you leave the app. Turn on notifications to hear when a run '
+              'finishes or needs your approval. You can change this in '
+              'Settings.',
+              style: OType.bodySm.copyWith(color: c.textMuted),
+            ),
+            const SizedBox(height: OSpace.m),
+            OButton(
+              key: const ValueKey<String>('notifications-permission-allow'),
+              label: 'Turn on',
+              icon: Icons.notifications_active_outlined,
+              expand: true,
+              onPressed: data.onAllowNotifications,
+            ),
+            const SizedBox(height: OSpace.s),
+            OButton(
+              key: const ValueKey<String>('notifications-permission-later'),
+              label: 'Not now',
+              variant: OButtonVariant.secondary,
+              expand: true,
+              onPressed: data.onDismissPermissionPrompt,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _master(BuildContext context) {
+    return _section(
+      context,
+      title: 'Push notifications',
+      rows: [
+        _toggleRow(
+          context,
+          id: 'master',
+          title: 'Push notifications',
+          description: data.masterEnabled
+              ? 'On: get notified when a cloud run finishes, fails or needs '
+                    'your approval.'
+              : 'Off: Ovid Cloud sends no notifications to your devices.',
+          value: data.masterEnabled,
+          onChanged: data.onMasterChanged,
+          switchKey: const ValueKey<String>('notifications-master-switch'),
+        ),
+      ],
+    );
+  }
+
   Widget _activity(BuildContext context) {
     return _section(
       context,
@@ -271,6 +376,10 @@ class NotificationsPage extends StatelessWidget {
             title: setting.title,
             description: setting.description,
             value: setting.value,
+            onChanged: data.onToggle == null
+                ? null
+                : (value) => data.onToggle!(setting.id, value),
+            enabled: data.masterEnabled,
           ),
       ],
     );
@@ -288,6 +397,10 @@ class NotificationsPage extends StatelessWidget {
             title: setting.title,
             description: setting.description,
             value: setting.value,
+            onChanged: data.onToggle == null
+                ? null
+                : (value) => data.onToggle!(setting.id, value),
+            enabled: data.masterEnabled,
           ),
       ],
     );
@@ -304,6 +417,10 @@ class NotificationsPage extends StatelessWidget {
           title: 'Sound',
           description: 'Play a sound for new alerts.',
           value: data.sound,
+          onChanged: data.onToggle == null
+              ? null
+              : (value) => data.onToggle!('sound', value),
+          enabled: data.masterEnabled,
         ),
         _toggleRow(
           context,
@@ -311,6 +428,10 @@ class NotificationsPage extends StatelessWidget {
           title: 'Vibration',
           description: 'Vibrate for new alerts.',
           value: data.vibration,
+          onChanged: data.onToggle == null
+              ? null
+              : (value) => data.onToggle!('vibration', value),
+          enabled: data.masterEnabled,
         ),
       ],
     );
@@ -327,7 +448,11 @@ class NotificationsPage extends StatelessWidget {
   Widget _soundRow(BuildContext context, V2ChannelSoundSetting setting) {
     final c = OColors.of(context);
     final channelOn = _channelEnabled(setting.id);
-    final enabled = data.onSoundChanged != null && channelOn;
+    final enabled =
+        data.onSoundChanged != null &&
+        channelOn &&
+        data.masterEnabled &&
+        data.sound;
     return Padding(
       key: ValueKey<String>('sound-row-${setting.id}'),
       padding: const EdgeInsets.symmetric(
@@ -346,9 +471,15 @@ class NotificationsPage extends StatelessWidget {
           ),
           const SizedBox(height: 2),
           Text(
-            channelOn
+            enabled
                 ? setting.description
-                : '${setting.description} Turn this channel on to pick a sound.',
+                : !data.masterEnabled
+                ? '${setting.description} Turn push notifications on to pick a '
+                      'sound.'
+                : !channelOn
+                ? '${setting.description} Turn this channel on to pick a sound.'
+                : '${setting.description} Turn sound on to pick a channel '
+                      'sound.',
             style: OType.caption.copyWith(color: c.textMuted),
           ),
           const SizedBox(height: OSpace.s),
@@ -657,10 +788,13 @@ class NotificationsPage extends StatelessWidget {
     required String title,
     required String description,
     required bool value,
+    ValueChanged<bool>? onChanged,
+    bool enabled = true,
+    Key? switchKey,
   }) {
     final c = OColors.of(context);
-    final enabled = data.onToggle != null;
-    final onChanged = enabled ? () => data.onToggle!(id, !value) : null;
+    final canChange = enabled && onChanged != null;
+    final handleChanged = canChange ? onChanged : null;
     return ConstrainedBox(
       constraints: const BoxConstraints(minHeight: OSpace.listRow),
       child: Padding(
@@ -678,7 +812,7 @@ class NotificationsPage extends StatelessWidget {
                   Text(
                     title,
                     style: OType.body.copyWith(
-                      color: c.text,
+                      color: enabled ? c.text : c.textFaint,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
@@ -694,18 +828,21 @@ class NotificationsPage extends StatelessWidget {
             Semantics(
               label: title,
               toggled: value,
-              enabled: enabled,
-              onTap: onChanged,
+              enabled: canChange,
+              onTap: handleChanged == null
+                  ? null
+                  : () => handleChanged(!value),
               child: ExcludeSemantics(
                 child: Switch(
+                  key:
+                      switchKey ??
+                      ValueKey<String>('notification-switch-$id'),
                   value: value,
-                  onChanged: enabled
-                      ? (next) => data.onToggle!(id, next)
-                      : null,
+                  onChanged: handleChanged,
                   // A disabled switch keeps the "on" position but must not
                   // look tappable, so it falls back to the muted palette.
-                  activeThumbColor: enabled ? c.onAccent : c.textFaint,
-                  activeTrackColor: enabled ? c.accentFill : c.surfaceRaised,
+                  activeThumbColor: canChange ? c.onAccent : c.textFaint,
+                  activeTrackColor: canChange ? c.accentFill : c.surfaceRaised,
                   inactiveThumbColor: c.textFaint,
                   inactiveTrackColor: c.surfaceRaised,
                   trackOutlineColor: WidgetStatePropertyAll(c.hairlineStrong),

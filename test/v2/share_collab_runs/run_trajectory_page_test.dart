@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/runs/run_trajectory_page.dart';
+import 'package:ovid_ai/ui/v2/runs/timeline.dart';
 
 const _steps = [
   V2RunStep(
@@ -52,9 +53,40 @@ const _steps = [
   ),
 ];
 
+final _launches = <V2SubagentLaunch>[
+  V2SubagentLaunch(
+    id: 'sub-a',
+    agentName: 'Frontend builder',
+    taskSummary: 'Built the responsive navbar and hero section.',
+    timeLabel: '10:41',
+    durationLabel: '4m 12s',
+    startedAt: DateTime(2026, 10, 21, 10, 41),
+    status: V2SubagentLaunchStatus.completed,
+  ),
+  V2SubagentLaunch(
+    id: 'sub-b',
+    agentName: 'Research scout',
+    taskSummary: 'Compared three component libraries for the hero.',
+    timeLabel: '10:43',
+    durationLabel: '2m 05s',
+    startedAt: DateTime(2026, 10, 21, 10, 43),
+    status: V2SubagentLaunchStatus.running,
+  ),
+  V2SubagentLaunch(
+    id: 'sub-c',
+    agentName: 'QA runner',
+    taskSummary: 'Checked the page at 320 dp and 200 % text.',
+    timeLabel: '10:45',
+    durationLabel: '1m 30s',
+    startedAt: DateTime(2026, 10, 21, 10, 45),
+    status: V2SubagentLaunchStatus.failed,
+  ),
+];
+
 V2RunTrajectoryPageData _data({
   V2RunTrajectoryStatus status = V2RunTrajectoryStatus.ready,
   List<V2RunStep> steps = _steps,
+  List<V2SubagentLaunch>? subagents,
 }) {
   return V2RunTrajectoryPageData(
     title: 'Landing page redesign & build',
@@ -64,6 +96,7 @@ V2RunTrajectoryPageData _data({
     tokensLabel: '18.4k tokens',
     durationLabel: '2m 14s',
     steps: steps,
+    subagents: subagents ?? _launches,
     status: status,
   );
 }
@@ -126,7 +159,131 @@ void main() {
       expect(find.text('Flash 2.5'), findsOneWidget);
       expect(find.text('18.4k tokens'), findsOneWidget);
       expect(find.text('Share run'), findsOneWidget);
+      expect(find.text('3 subagents'), findsOneWidget);
+      expect(find.text('Frontend builder'), findsOneWidget);
+      expect(find.text('Completed'), findsOneWidget);
+      expect(find.text('4m 12s'), findsOneWidget);
+      // Without an onOpenSubagent callback the rows are not tappable, so the
+      // "View details" hint is absent.
+      expect(find.text('View details'), findsNothing);
     }
+  });
+
+  test('orderedSubagents sorts dated launches and keeps undated order', () {
+    final data = V2RunTrajectoryPageData(
+      title: 'Run',
+      runLabel: '',
+      prompt: '',
+      model: 'Auto',
+      tokensLabel: '',
+      durationLabel: '',
+      subagents: [
+        V2SubagentLaunch(
+          id: 'late',
+          agentName: 'Late',
+          taskSummary: '',
+          timeLabel: '10:50',
+          durationLabel: '1m',
+          startedAt: DateTime(2026, 10, 21, 10, 50),
+        ),
+        V2SubagentLaunch(
+          id: 'undated-1',
+          agentName: 'Undated one',
+          taskSummary: '',
+          timeLabel: '10:40',
+          durationLabel: '1m',
+        ),
+        V2SubagentLaunch(
+          id: 'early',
+          agentName: 'Early',
+          taskSummary: '',
+          timeLabel: '10:30',
+          durationLabel: '1m',
+          startedAt: DateTime(2026, 10, 21, 10, 30),
+        ),
+        V2SubagentLaunch(
+          id: 'undated-2',
+          agentName: 'Undated two',
+          taskSummary: '',
+          timeLabel: '10:35',
+          durationLabel: '1m',
+        ),
+      ],
+    );
+
+    expect(
+      [for (final launch in data.orderedSubagents) launch.id],
+      ['early', 'late', 'undated-1', 'undated-2'],
+    );
+  });
+
+  testWidgets('subagent launches render oldest first on the timeline', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(500, 2600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    await _pump(
+      tester,
+      RunTrajectoryPage(
+        data: _data(
+          subagents: [
+            V2SubagentLaunch(
+              id: 'later',
+              agentName: 'Research scout',
+              taskSummary: 'Compared component libraries.',
+              timeLabel: '10:44',
+              durationLabel: '2m 05s',
+              startedAt: DateTime(2026, 10, 21, 10, 44),
+            ),
+            V2SubagentLaunch(
+              id: 'earlier',
+              agentName: 'Frontend builder',
+              taskSummary: 'Built the navbar.',
+              timeLabel: '10:41',
+              durationLabel: '4m 12s',
+              startedAt: DateTime(2026, 10, 21, 10, 41),
+            ),
+          ],
+        ),
+      ),
+      OTheme.light(),
+    );
+
+    final first = tester.getTopLeft(find.text('Frontend builder')).dy;
+    final second = tester.getTopLeft(find.text('Research scout')).dy;
+    expect(first, lessThan(second));
+    expect(find.text('10:41'), findsOneWidget);
+    expect(find.text('10:44'), findsOneWidget);
+  });
+
+  testWidgets('a subagent row opens the subagent detail', (tester) async {
+    String? opened;
+    await _pump(
+      tester,
+      RunTrajectoryPage(data: _data(), onOpenSubagent: (id) => opened = id),
+      OTheme.light(),
+    );
+
+    await tester.ensureVisible(find.text('Frontend builder'));
+    await tester.pump();
+    await tester.tap(find.text('Frontend builder'));
+    await tester.pump();
+    expect(opened, 'sub-a');
+  });
+
+  testWidgets('a run without subagents shows a zero count and no section', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      RunTrajectoryPage(data: _data(subagents: const [])),
+      OTheme.light(),
+    );
+
+    expect(find.text('0 subagents'), findsOneWidget);
+    expect(find.textContaining('SUBAGENTS'), findsNothing);
   });
 
   testWidgets('lays out at 320 dp with 200 % text without clipping', (
@@ -232,11 +389,15 @@ void main() {
     const detail = 'Opened 4 pages about responsive layout systems.';
     expect(find.text(detail), findsNothing);
 
+    await tester.ensureVisible(find.text('Searched the web'));
+    await tester.pump();
     await tester.tap(find.text('Searched the web'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.text(detail), findsOneWidget);
 
+    await tester.ensureVisible(find.text('Searched the web'));
+    await tester.pump();
     await tester.tap(find.text('Searched the web'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
@@ -278,5 +439,43 @@ void main() {
 
     expect(find.text('Read your message'), findsOneWidget);
     expect(find.text('Share run'), findsOneWidget);
+  });
+
+  testWidgets('the subagent launch list is the shared V2Timeline', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      RunTrajectoryPage(data: _data(), onOpenSubagent: (_) {}),
+      OTheme.light(),
+    );
+
+    final timeline = tester.widget<V2Timeline>(find.byType(V2Timeline));
+    expect(
+      [for (final item in timeline.items) item.id],
+      ['sub-a', 'sub-b', 'sub-c'],
+    );
+    expect(timeline.items.first.title, 'Frontend builder');
+    expect(
+      timeline.items.first.description,
+      'Built the responsive navbar and hero section.',
+    );
+    expect(timeline.items.first.timeLabel, '10:41');
+    expect(timeline.items.first.durationLabel, '4m 12s');
+    expect(
+      [for (final item in timeline.items) item.status],
+      [
+        V2TimelineStatus.success,
+        V2TimelineStatus.running,
+        V2TimelineStatus.danger,
+      ],
+    );
+    expect(
+      [for (final item in timeline.items) item.statusLabel],
+      ['Completed', 'Running', 'Failed'],
+    );
+    // Tapping a launch still reports the subagent id.
+    expect(timeline.onItemTap, isNotNull);
+    expect(find.text('View details'), findsNWidgets(3));
   });
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/collab/collab_live_page.dart';
+import 'package:ovid_ai/ui/v2/collab/turn_banner.dart';
 
 const _participants = [
   V2CollabParticipant(id: 'p1', name: 'Priya Patel'),
@@ -40,6 +41,9 @@ const _messages = [
 V2CollabLivePageData _data({
   V2CollabLiveStatus status = V2CollabLiveStatus.ready,
   List<V2CollabMessage> messages = _messages,
+  bool isMyTurn = false,
+  bool turnRequested = false,
+  List<String> turnQueue = const [],
 }) {
   return V2CollabLivePageData(
     subtitle: '3 agents here',
@@ -50,8 +54,11 @@ V2CollabLivePageData _data({
     turnHolderName: 'Rahul Verma',
     turnTimeLeftLabel: '24s left in turn',
     queueLabel: 'Queue position #3 · about 1m 12s',
+    turnQueue: turnQueue,
     messages: messages,
     creatorPaysStorage: true,
+    isMyTurn: isMyTurn,
+    turnRequested: turnRequested,
     status: status,
   );
 }
@@ -72,9 +79,9 @@ void main() {
       expect(find.text('Team chat'), findsOneWidget);
       expect(find.text('+46'), findsOneWidget);
       expect(find.text('Aarav is typing…'), findsOneWidget);
-      expect(find.text('Only one person can send at a time'), findsOneWidget);
+      expect(find.textContaining('One message at a time'), findsOneWidget);
       expect(find.text('Priya Patel'), findsOneWidget);
-      expect(find.text('Rahul Verma'), findsOneWidget);
+      expect(find.text('Rahul Verma'), findsWidgets);
       expect(find.text('Ovid'), findsOneWidget);
       expect(find.text('Wait for the turn'), findsOneWidget);
       expect(find.text('50 members · Creator pays storage'), findsOneWidget);
@@ -151,7 +158,7 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('request turn callback fires from the composer', (tester) async {
+  testWidgets('request turn callback fires from the banner', (tester) async {
     var requests = 0;
     await _pump(
       tester,
@@ -209,5 +216,168 @@ void main() {
     await tester.tap(find.text('payload_report_v2.json'));
     await tester.pump();
     expect(opened, 'payload_report_v2.json');
+  });
+
+  testWidgets('shows who holds the turn and the waiting queue', (tester) async {
+    await _pump(
+      tester,
+      CollabLivePage(
+        data: _data(turnQueue: const ['Priya Patel', 'Elena Chen']),
+      ),
+      OTheme.light(),
+    );
+
+    // The turn summary now comes from the shared CollabTurnBanner.
+    expect(find.text('Current turn'), findsOneWidget);
+    expect(find.text('Rahul Verma'), findsWidgets);
+    expect(find.text('24s left in turn'), findsWidgets);
+    expect(find.text('Queue position #3 · about 1m 12s'), findsOneWidget);
+    expect(find.text('Waiting'), findsOneWidget);
+    expect(find.text('2 people'), findsOneWidget);
+    // Priya also speaks in the transcript, so she shows up twice.
+    expect(find.text('Priya Patel'), findsNWidgets(2));
+    expect(find.text('Elena Chen'), findsOneWidget);
+    expect(find.text('Request turn'), findsOneWidget);
+  });
+
+  testWidgets('send stays disabled while another member sends', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    var sends = 0;
+    try {
+      await _pump(
+        tester,
+        CollabLivePage(data: _data(), onSend: () => sends++),
+        OTheme.light(),
+      );
+
+      expect(find.text('Wait for the turn'), findsOneWidget);
+      expect(find.text('Current turn'), findsOneWidget);
+      expect(
+        tester.getSemantics(find.bySemanticsLabel('Send, wait for the turn')),
+        isSemantics(
+          label: 'Send, wait for the turn',
+          isButton: true,
+          hasEnabledState: true,
+          isEnabled: false,
+        ),
+      );
+
+      await tester.tap(find.byIcon(Icons.send_rounded), warnIfMissed: false);
+      await tester.pump();
+      expect(sends, 0);
+    } finally {
+      semantics.dispose();
+    }
+  });
+
+  testWidgets('the turn holder can send and cannot request another turn', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    var sends = 0;
+    var requests = 0;
+    try {
+      await _pump(
+        tester,
+        CollabLivePage(
+          data: _data(isMyTurn: true),
+          onSend: () => sends++,
+          onRequestTurn: () => requests++,
+        ),
+        OTheme.light(),
+      );
+
+      expect(find.text('Your turn'), findsOneWidget);
+      expect(find.text('Write a message'), findsOneWidget);
+      expect(find.text('You have the turn'), findsOneWidget);
+      expect(
+        tester.getSemantics(find.bySemanticsLabel('Send message')),
+        isSemantics(label: 'Send message', isButton: true, isEnabled: true),
+      );
+
+      await tester.tap(find.byIcon(Icons.send_rounded));
+      await tester.pump();
+      expect(sends, 1);
+
+      await tester.tap(find.text('You have the turn'), warnIfMissed: false);
+      await tester.pump();
+      expect(requests, 0);
+    } finally {
+      semantics.dispose();
+    }
+  });
+
+  testWidgets('turn holder and queue fit 320 dp at 200 % text', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    for (final theme in [OTheme.light(), OTheme.dark()]) {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: theme,
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(2)),
+            child: child!,
+          ),
+          home: CollabLivePage(
+            data: _data(
+              isMyTurn: true,
+              turnQueue: const ['Priya Patel', 'Elena Chen', 'Marcus Vance'],
+            ),
+            onSend: () {},
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 900));
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Your turn'), findsOneWidget);
+      expect(find.text('Priya Patel'), findsNWidgets(2));
+    }
+  });
+
+  testWidgets('the turn summary is the shared CollabTurnBanner', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      CollabLivePage(
+        data: _data(turnQueue: const ['Priya Patel', 'Elena Chen']),
+      ),
+      OTheme.light(),
+    );
+
+    final banner = tester.widget<CollabTurnBanner>(
+      find.byType(CollabTurnBanner),
+    );
+    expect(banner.data.holderName, 'Rahul Verma');
+    expect(banner.data.timeLeftLabel, '24s left in turn');
+    expect(banner.data.isMyTurn, isFalse);
+    expect(banner.data.turnRequested, isFalse);
+    expect(
+      [for (final waiter in banner.data.queue) waiter.name],
+      ['Priya Patel', 'Elena Chen'],
+    );
+    expect(banner.data.queueLabel, 'Queue position #3 · about 1m 12s');
+    // One request control: the banner owns it, the composer does not repeat it.
+    expect(find.text('Request turn'), findsOneWidget);
+
+    await _pump(
+      tester,
+      CollabLivePage(data: _data(isMyTurn: true, turnRequested: true)),
+      OTheme.dark(),
+    );
+    final mine = tester.widget<CollabTurnBanner>(find.byType(CollabTurnBanner));
+    expect(mine.data.isMyTurn, isTrue);
+    expect(mine.data.turnRequested, isTrue);
+    expect(find.text('You have the turn'), findsOneWidget);
   });
 }

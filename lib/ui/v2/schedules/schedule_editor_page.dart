@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'cadence_picker.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
 
@@ -19,9 +20,11 @@ class V2ScheduleDraft {
     required this.days,
     required this.timezoneLabel,
     required this.notify,
+    this.description = '',
   });
 
   final String prompt;
+  final String description;
   final V2ScheduleFrequency frequency;
   final String timeLabel;
   final Set<int> days;
@@ -34,6 +37,7 @@ class V2ScheduleEditorData {
   const V2ScheduleEditorData({
     this.status = V2ScheduleEditorStatus.content,
     this.prompt = '',
+    this.description = '',
     this.frequency = V2ScheduleFrequency.weekly,
     this.timeLabel = '9:00 AM',
     this.days = const <int>{1, 2, 3, 4, 5},
@@ -41,12 +45,19 @@ class V2ScheduleEditorData {
     this.timezoneShort = 'IST',
     this.notify = true,
     this.modelLabel = 'Auto model · ~1.2k tokens',
+    this.sourceSessionTitle,
+    this.sourceSessionSubtitle = 'This schedule was created from this chat.',
     this.saving = false,
-    this.errorMessage = 'We could not open this schedule. Check your connection and try again.',
+    this.now,
+    this.errorMessage =
+        'We could not open this schedule. Check your connection and try again.',
   });
 
   final V2ScheduleEditorStatus status;
   final String prompt;
+
+  /// A short note about what the schedule does, shown on the schedule card.
+  final String description;
   final V2ScheduleFrequency frequency;
   final String timeLabel;
 
@@ -56,7 +67,14 @@ class V2ScheduleEditorData {
   final String timezoneShort;
   final bool notify;
   final String modelLabel;
+
+  /// The chat this schedule belongs to. Null when the schedule has no chat yet.
+  final String? sourceSessionTitle;
+  final String sourceSessionSubtitle;
   final bool saving;
+
+  /// Injectable clock for the cadence's next-run preview. Defaults to now.
+  final DateTime? now;
   final String errorMessage;
 }
 
@@ -68,6 +86,8 @@ class ScheduleEditorPage extends StatefulWidget {
     required this.data,
     this.onSave,
     this.onPromptChanged,
+    this.onDescriptionChanged,
+    this.onOpenSourceSession,
     this.onFrequencyChanged,
     this.onTimeTap,
     this.onDayToggle,
@@ -82,6 +102,8 @@ class ScheduleEditorPage extends StatefulWidget {
   final V2ScheduleEditorData data;
   final ValueChanged<V2ScheduleDraft>? onSave;
   final ValueChanged<String>? onPromptChanged;
+  final ValueChanged<String>? onDescriptionChanged;
+  final VoidCallback? onOpenSourceSession;
   final ValueChanged<V2ScheduleFrequency>? onFrequencyChanged;
   final VoidCallback? onTimeTap;
   final ValueChanged<int>? onDayToggle;
@@ -98,55 +120,106 @@ class ScheduleEditorPage extends StatefulWidget {
 
 class _ScheduleEditorPageState extends State<ScheduleEditorPage> {
   late final TextEditingController _prompt;
+  late final TextEditingController _description;
+  late V2CadenceDraft _cadence;
   late V2ScheduleFrequency _frequency;
-  late Set<int> _days;
   late bool _notify;
 
   @override
   void initState() {
     super.initState();
     _prompt = TextEditingController(text: widget.data.prompt);
+    _description = TextEditingController(text: widget.data.description);
     _frequency = widget.data.frequency;
-    _days = {...widget.data.days};
+    _cadence = _initialCadence(widget.data);
     _notify = widget.data.notify;
   }
 
   @override
   void dispose() {
     _prompt.dispose();
+    _description.dispose();
     super.dispose();
+  }
+
+  /// The cadence picker has no "once" option; a one-off schedule starts on a
+  /// daily cadence and only changes when the user picks another option.
+  V2CadenceDraft _initialCadence(V2ScheduleEditorData data) {
+    final time = _parseTime(data.timeLabel);
+    return V2CadenceDraft(
+      frequency: _cadenceFrequency(data.frequency),
+      hour: time.$1,
+      minute: time.$2,
+      days: data.days,
+      timezoneLabel: data.timezoneLabel,
+      timezoneShort: data.timezoneShort,
+    );
+  }
+
+  V2CadenceFrequency _cadenceFrequency(V2ScheduleFrequency frequency) =>
+      switch (frequency) {
+        V2ScheduleFrequency.once ||
+        V2ScheduleFrequency.daily => V2CadenceFrequency.daily,
+        V2ScheduleFrequency.weekly => V2CadenceFrequency.weekly,
+        V2ScheduleFrequency.custom => V2CadenceFrequency.custom,
+      };
+
+  V2ScheduleFrequency _scheduleFrequency(V2CadenceFrequency frequency) =>
+      switch (frequency) {
+        V2CadenceFrequency.daily => V2ScheduleFrequency.daily,
+        V2CadenceFrequency.weekly => V2ScheduleFrequency.weekly,
+        V2CadenceFrequency.custom => V2ScheduleFrequency.custom,
+      };
+
+  /// Parses "9:00 AM" into a 24-hour hour and minute. Falls back to 9:00.
+  (int, int) _parseTime(String label) {
+    final match = RegExp(
+      r'(\d{1,2}):(\d{2})\s*(AM|PM)',
+      caseSensitive: false,
+    ).firstMatch(label.trim());
+    if (match == null) return (9, 0);
+    var hour = int.tryParse(match.group(1)!) ?? 9;
+    final minute = int.tryParse(match.group(2)!) ?? 0;
+    final period = match.group(3)!.toUpperCase();
+    if (period == 'PM' && hour != 12) hour += 12;
+    if (period == 'AM' && hour == 12) hour = 0;
+    return (hour, minute);
   }
 
   bool get _canSave {
     if (_prompt.text.trim().isEmpty) return false;
-    if (_frequency == V2ScheduleFrequency.weekly && _days.isEmpty) return false;
-    return true;
+    return _cadence.isValid;
   }
 
-  void _setFrequency(V2ScheduleFrequency frequency) {
-    setState(() => _frequency = frequency);
-    widget.onFrequencyChanged?.call(frequency);
-  }
-
-  void _toggleDay(int day) {
+  void _onCadenceChanged(V2CadenceDraft next) {
+    final previous = _cadence;
     setState(() {
-      if (_days.contains(day)) {
-        _days.remove(day);
-      } else {
-        _days.add(day);
-      }
+      _cadence = next;
+      _frequency = _scheduleFrequency(next.frequency);
     });
-    widget.onDayToggle?.call(day);
+    if (next.frequency != previous.frequency) {
+      widget.onFrequencyChanged?.call(_frequency);
+    }
+    if (next.days != previous.days) {
+      final changed = <int>{
+        ...next.days.difference(previous.days),
+        ...previous.days.difference(next.days),
+      };
+      for (final day in changed) {
+        widget.onDayToggle?.call(day);
+      }
+    }
   }
 
   void _save() {
     widget.onSave?.call(
       V2ScheduleDraft(
         prompt: _prompt.text.trim(),
+        description: _description.text.trim(),
         frequency: _frequency,
-        timeLabel: widget.data.timeLabel,
-        days: Set<int>.unmodifiable(_days),
-        timezoneLabel: widget.data.timezoneLabel,
+        timeLabel: _cadence.timeLabel,
+        days: Set<int>.unmodifiable(_cadence.days),
+        timezoneLabel: _cadence.timezoneLabel,
         notify: _notify,
       ),
     );
@@ -225,24 +298,24 @@ class _ScheduleEditorPageState extends State<ScheduleEditorPage> {
         const SizedBox(height: OSpace.s),
         _promptCard(c),
         const SizedBox(height: OSpace.l),
-        Text(
-          'Frequency',
-          style: OType.label.copyWith(color: c.text),
-        ),
+        Text('Description', style: OType.label.copyWith(color: c.text)),
         const SizedBox(height: OSpace.s),
-        _frequencyControl(c),
+        _descriptionCard(c),
         const SizedBox(height: OSpace.m),
-        _timeRow(c),
-        if (_frequency == V2ScheduleFrequency.weekly) ...[
-          const SizedBox(height: OSpace.m),
-          _daysCard(c),
-        ],
-        const SizedBox(height: OSpace.m),
-        _timezoneRow(c),
+        _sourceSessionRow(c),
+        const SizedBox(height: OSpace.l),
+        Text('Frequency', style: OType.label.copyWith(color: c.text)),
+        const SizedBox(height: OSpace.s),
+        CadencePicker(
+          draft: _cadence,
+          now: widget.data.now ?? DateTime.now(),
+          onChanged: _onCadenceChanged,
+          onTimeTap: widget.onTimeTap,
+          onTimezoneTap: widget.onTimezoneTap,
+          enabled: !widget.data.saving,
+        ),
         const SizedBox(height: OSpace.m),
         _notifyRow(c),
-        const SizedBox(height: OSpace.m),
-        _preview(c),
         const SizedBox(height: OSpace.l),
         OButton(
           label: 'Save schedule',
@@ -250,12 +323,6 @@ class _ScheduleEditorPageState extends State<ScheduleEditorPage> {
           expand: true,
           loading: widget.data.saving,
           onPressed: _canSave && !widget.data.saving ? _save : null,
-        ),
-        const SizedBox(height: OSpace.m),
-        Text(
-          'Runs in the cloud, even when your phone is off.',
-          textAlign: TextAlign.center,
-          style: OType.caption.copyWith(color: c.textMuted),
         ),
       ],
     );
@@ -348,255 +415,67 @@ class _ScheduleEditorPageState extends State<ScheduleEditorPage> {
     );
   }
 
-  Widget _frequencyControl(OColors c) {
+  Widget _descriptionCard(OColors c) {
     return Container(
-      padding: const EdgeInsets.all(OSpace.xs),
+      padding: const EdgeInsets.all(OSpace.l),
       decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
+        color: c.surface,
+        borderRadius: BorderRadius.circular(ORadius.l),
         border: Border.all(color: c.hairline),
       ),
-      child: Row(
-        children: [
-          for (var i = 0; i < V2ScheduleFrequency.values.length; i++) ...[
-            if (i > 0) const SizedBox(width: OSpace.xs),
-            Expanded(
-              child: _frequencyButton(c, V2ScheduleFrequency.values[i]),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _frequencyButton(OColors c, V2ScheduleFrequency frequency) {
-    final selected = _frequency == frequency;
-    return MergeSemantics(
-      child: Semantics(
-        label: _frequencyLabel(frequency),
-        button: true,
-        selected: selected,
-        child: OPressable(
-          onTap: () => _setFrequency(frequency),
-          child: AnimatedContainer(
-            duration: OMotion.fast,
-            curve: OMotion.standard,
-            height: OSpace.touch,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: selected ? c.accentFill : Colors.transparent,
-              borderRadius: BorderRadius.circular(ORadius.s),
-            ),
-            child: ExcludeSemantics(
-              child: Text(
-                _frequencyLabel(frequency),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: OType.label.copyWith(
-                  color: selected ? c.onAccent : c.textMuted,
-                ),
-              ),
-            ),
-          ),
+      child: TextField(
+        key: const ValueKey('schedule-description'),
+        controller: _description,
+        minLines: 2,
+        maxLines: 4,
+        textCapitalization: TextCapitalization.sentences,
+        onChanged: (value) => widget.onDescriptionChanged?.call(value),
+        style: OType.bodySm.copyWith(color: c.text),
+        cursorColor: c.accent,
+        decoration: InputDecoration(
+          hintText: 'A short note about what this schedule does.',
+          hintStyle: OType.bodySm.copyWith(color: c.textFaint),
+          filled: false,
+          isDense: true,
+          contentPadding: EdgeInsets.zero,
+          border: InputBorder.none,
+          enabledBorder: InputBorder.none,
+          focusedBorder: InputBorder.none,
         ),
       ),
     );
   }
 
-  Widget _timeRow(OColors c) {
+  /// Read-only link to the chat this schedule belongs to. Tapping it opens that
+  /// chat; the chat itself is never edited here.
+  Widget _sourceSessionRow(OColors c) {
+    final title = widget.data.sourceSessionTitle;
+    final linked = title != null && title.trim().isNotEmpty;
     return OCard(
+      key: const ValueKey('schedule-source-session'),
       padding: const EdgeInsets.all(OSpace.m),
-      onTap: widget.onTimeTap,
-      semanticLabel: 'Run time, ${widget.data.timeLabel}. Change.',
-      child: ExcludeSemantics(
-        child: Wrap(
-          spacing: OSpace.m,
-          runSpacing: OSpace.s,
-          alignment: WrapAlignment.spaceBetween,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _rowIcon(c, Icons.schedule_rounded),
-                const SizedBox(width: OSpace.m),
-                Flexible(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Run time',
-                        style: OType.bodySm.copyWith(
-                          color: c.text,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      Text(
-                        'When it starts',
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: OSpace.m,
-                vertical: OSpace.s,
-              ),
-              decoration: BoxDecoration(
-                color: c.surfaceAlt,
-                borderRadius: BorderRadius.circular(ORadius.s),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Flexible(
-                    child: Text(
-                      widget.data.timeLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.bodySm.copyWith(
-                        color: c.text,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: OSpace.xs),
-                  Icon(
-                    Icons.expand_more_rounded,
-                    size: 18,
-                    color: c.textMuted,
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _daysCard(OColors c) {
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.m),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                flex: 2,
-                child: Text(
-                  'REPEAT DAYS',
-                  style: OType.overline.copyWith(color: c.textMuted),
-                ),
-              ),
-              Icon(Icons.event_repeat_rounded, size: 14, color: c.success),
-              const SizedBox(width: OSpace.xs),
-              Flexible(
-                child: Text(
-                  _daysHeadline(),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(
-                    color: c.success,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.m),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                for (final day in const [1, 2, 3, 4, 5, 6, 7]) ...[
-                  _dayChip(c, day),
-                  if (day != 7) const SizedBox(width: OSpace.s),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(height: OSpace.m),
-          Row(
-            children: [
-              Icon(Icons.info_outline_rounded, size: 15, color: c.accent),
-              const SizedBox(width: OSpace.xs),
-              Expanded(
-                child: Text(
-                  _daysSummary(),
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _dayChip(OColors c, int day) {
-    final selected = _days.contains(day);
-    return MergeSemantics(
-      child: Semantics(
-        label: _dayName(day),
-        button: true,
-        selected: selected,
-        child: OPressable(
-          onTap: () => _toggleDay(day),
-          child: AnimatedContainer(
-            duration: OMotion.fast,
-            curve: OMotion.standard,
-            width: OSpace.touch,
-            height: OSpace.touch,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: selected ? c.accentFill : c.surfaceAlt,
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: selected ? c.accentFill : c.hairline,
-              ),
-            ),
-            child: ExcludeSemantics(
-              child: Text(
-                _dayInitial(day),
-                style: OType.label.copyWith(
-                  color: selected ? c.onAccent : c.textMuted,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _timezoneRow(OColors c) {
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.m),
-      onTap: widget.onTimezoneTap,
-      semanticLabel: 'Timezone, ${widget.data.timezoneLabel}. Change.',
+      onTap: linked ? widget.onOpenSourceSession : null,
+      semanticLabel: linked
+          ? 'Source session, $title. Open chat.'
+          : 'Source session, no chat linked.',
       child: ExcludeSemantics(
         child: Row(
           children: [
-            _rowIcon(c, Icons.public_rounded),
+            _rowIcon(c, Icons.chat_bubble_outline_rounded),
             const SizedBox(width: OSpace.m),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Timezone',
+                    'Source session',
                     style: OType.bodySm.copyWith(
                       color: c.text,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
                   Text(
-                    widget.data.timezoneLabel,
+                    linked ? title : 'No chat linked.',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: OType.caption.copyWith(color: c.textMuted),
@@ -604,15 +483,10 @@ class _ScheduleEditorPageState extends State<ScheduleEditorPage> {
                 ],
               ),
             ),
-            Text(
-              widget.data.timezoneShort,
-              style: OType.caption.copyWith(
-                color: c.textMuted,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(width: OSpace.xs),
-            Icon(Icons.chevron_right_rounded, size: 20, color: c.textFaint),
+            if (linked) ...[
+              const SizedBox(width: OSpace.xs),
+              Icon(Icons.chevron_right_rounded, size: 20, color: c.textFaint),
+            ],
           ],
         ),
       ),
@@ -625,11 +499,7 @@ class _ScheduleEditorPageState extends State<ScheduleEditorPage> {
       child: MergeSemantics(
         child: Row(
           children: [
-            _rowIcon(
-              c,
-              Icons.notifications_active_rounded,
-              color: c.success,
-            ),
+            _rowIcon(c, Icons.notifications_active_rounded, color: c.success),
             const SizedBox(width: OSpace.m),
             Expanded(
               child: ExcludeSemantics(
@@ -685,131 +555,4 @@ class _ScheduleEditorPageState extends State<ScheduleEditorPage> {
       child: Icon(icon, size: 20, color: color ?? c.accent),
     );
   }
-
-  Widget _preview(OColors c) {
-    final base = OType.bodySm.copyWith(color: c.text);
-    final highlight = OType.bodySm.copyWith(
-      color: c.accent,
-      fontWeight: FontWeight.w600,
-    );
-    return OCard(
-      accent: true,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: c.accentSoft,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(Icons.auto_awesome_rounded, size: 17, color: c.accent),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'SCHEDULE PREVIEW',
-                  style: OType.overline.copyWith(color: c.accent),
-                ),
-                const SizedBox(height: OSpace.xs),
-                Text.rich(
-                  TextSpan(
-                    children: [
-                      TextSpan(text: 'Ovid will run this ', style: base),
-                      TextSpan(text: _frequencyPhrase(), style: highlight),
-                      TextSpan(text: ' at ', style: base),
-                      TextSpan(text: widget.data.timeLabel, style: highlight),
-                      TextSpan(
-                        text: ' and message you the result.',
-                        style: base,
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _frequencyPhrase() {
-    if (_frequency == V2ScheduleFrequency.once) return 'once';
-    if (_frequency == V2ScheduleFrequency.daily) return 'every day';
-    if (_frequency == V2ScheduleFrequency.custom) {
-      return 'on your custom schedule';
-    }
-    if (_days.isEmpty) return 'on the days you pick';
-    if (_days.length == 7) return 'every day';
-    if (_isWeekdays) return 'every weekday';
-    if (_isWeekend) return 'every weekend';
-    if (_days.length == 1) return 'every ${_dayName(_days.first)}';
-    return 'every ${_joinDayNames()}';
-  }
-
-  String _daysHeadline() {
-    if (_isWeekdays) return 'Runs Mon – Fri';
-    if (_isWeekend) return 'Runs Sat – Sun';
-    if (_days.length == 7) return 'Runs every day';
-    if (_days.isEmpty) return 'Pick at least one day';
-    return 'Runs ${_days.length} days a week';
-  }
-
-  String _daysSummary() {
-    if (_days.isEmpty) return 'Pick at least one day for this schedule to run.';
-    if (_isWeekdays) return 'Runs on weekdays (Mon – Fri).';
-    if (_isWeekend) return 'Runs on weekends (Sat – Sun).';
-    if (_days.length == 7) return 'Runs every day of the week.';
-    return 'Runs on ${_joinDayNames()}.';
-  }
-
-  bool get _isWeekdays =>
-      _days.length == 5 &&
-      _days.contains(1) &&
-      _days.contains(2) &&
-      _days.contains(3) &&
-      _days.contains(4) &&
-      _days.contains(5);
-
-  bool get _isWeekend => _days.length == 2 && _days.contains(6) && _days.contains(7);
-
-  String _joinDayNames() {
-    final names = _days.toList()..sort();
-    final labels = names.map(_dayName).toList();
-    if (labels.length == 1) return labels.first;
-    if (labels.length == 2) return '${labels[0]} and ${labels[1]}';
-    return '${labels.sublist(0, labels.length - 1).join(', ')} and ${labels.last}';
-  }
-
-  String _frequencyLabel(V2ScheduleFrequency frequency) => switch (frequency) {
-    V2ScheduleFrequency.once => 'Once',
-    V2ScheduleFrequency.daily => 'Daily',
-    V2ScheduleFrequency.weekly => 'Weekly',
-    V2ScheduleFrequency.custom => 'Custom',
-  };
-
-  String _dayName(int day) => switch (day) {
-    1 => 'Monday',
-    2 => 'Tuesday',
-    3 => 'Wednesday',
-    4 => 'Thursday',
-    5 => 'Friday',
-    6 => 'Saturday',
-    _ => 'Sunday',
-  };
-
-  String _dayInitial(int day) => switch (day) {
-    1 => 'M',
-    2 => 'T',
-    3 => 'W',
-    4 => 'T',
-    5 => 'F',
-    6 => 'S',
-    _ => 'S',
-  };
 }

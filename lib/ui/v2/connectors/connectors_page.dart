@@ -3,12 +3,17 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'catalog_data.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
 
-enum V2ConnectorsTab { installed, available }
-
 enum V2ConnectorsStatus { loading, content, error }
+
+/// A hosted connector, a plugin, and an MCP server share one row model,
+/// because the person sees one catalog. Plugins and MCP servers share the
+/// "Plugins & MCP" section but stay separate kinds so the filter can tell
+/// them apart.
+enum V2ConnectorKind { app, plugin, mcp }
 
 /// One connector in the catalog. Matches the shared connector contract
 /// (`id, name, description, connected, category`) plus display hints.
@@ -20,9 +25,14 @@ class V2Connector {
     required this.description,
     required this.connected,
     required this.category,
+    this.kind = V2ConnectorKind.app,
     this.icon = Icons.extension_outlined,
     this.enabled = true,
     this.popular = false,
+    this.builtIn = false,
+    this.tools = const <String>[],
+    this.auth = V2CatalogAuth.none,
+    this.risk = V2CatalogRisk.low,
   });
 
   final String id;
@@ -30,31 +40,127 @@ class V2Connector {
   final String description;
   final bool connected;
   final String category;
+  final V2ConnectorKind kind;
   final IconData icon;
   final bool enabled;
   final bool popular;
+  final bool builtIn;
+  final List<String> tools;
+
+  /// Primary credential the setup flow collects, when the row came from the
+  /// shared catalog. Detail screens use it to explain what a grant needs.
+  final V2CatalogAuth auth;
+
+  /// Blast radius of the integration. The detail page carries this into the
+  /// permissions screen so risk badges stay honest.
+  final V2CatalogRisk risk;
+
+  bool get isMcp => kind == V2ConnectorKind.mcp;
+
+  String get sectionTitle =>
+      kind == V2ConnectorKind.app ? 'Connectors' : 'Plugins & MCP';
 }
 
-/// Everything the connectors screen needs. The page filters and switches tabs
-/// locally; the wiring layer only supplies the catalog and persists changes.
+/// Maps a catalog category to the icon a row shows. Categories are shared
+/// across connectors, plugins, and MCP servers, so one map keeps the visual
+/// language consistent while [V2CatalogEntry] stays free of Flutter imports.
+IconData v2ConnectorIconFor(V2CatalogEntry entry) {
+  return switch (entry.category.toLowerCase()) {
+    'code' || 'developer' => Icons.code_rounded,
+    'quality' => Icons.rule_rounded,
+    'mail' => Icons.mail_outline_rounded,
+    'calendar' => Icons.calendar_month_outlined,
+    'files' || 'documents' => Icons.folder_outlined,
+    'chat' => Icons.forum_outlined,
+    'notes' => Icons.edit_note_rounded,
+    'project' => Icons.view_kanban_outlined,
+    'design' => Icons.draw_outlined,
+    'payments' || 'finance' => Icons.credit_card_rounded,
+    'commerce' => Icons.storefront_outlined,
+    'crm' || 'sales' => Icons.support_agent_rounded,
+    'marketing' => Icons.campaign_outlined,
+    'analytics' => Icons.insights_rounded,
+    'data' || 'database' => Icons.storage_rounded,
+    'search' || 'research' => Icons.search_rounded,
+    'media' => Icons.image_outlined,
+    'automation' => Icons.bolt_rounded,
+    'observability' => Icons.monitor_heart_outlined,
+    'infrastructure' || 'cloud' => Icons.cloud_outlined,
+    'productivity' => Icons.task_alt_rounded,
+    'content' => Icons.article_outlined,
+    'security' => Icons.security_rounded,
+    'browser' || 'web' => Icons.public_rounded,
+    'local' => Icons.computer_rounded,
+    'ai' => Icons.psychology_outlined,
+    'utilities' => Icons.schedule_rounded,
+    _ => switch (entry.kind) {
+      V2CatalogKind.connector => Icons.extension_outlined,
+      V2CatalogKind.plugin => Icons.widgets_outlined,
+      V2CatalogKind.mcp => Icons.dns_outlined,
+    },
+  };
+}
+
+/// Maps a catalog entry to the row model this screen renders.
+///
+/// Connection state is owned by the wiring layer; the built-in list is
+/// therefore all-disconnected and display truth only.
+V2Connector v2ConnectorFromCatalogEntry(
+  V2CatalogEntry entry, {
+  bool connected = false,
+  bool enabled = true,
+}) {
+  return V2Connector(
+    id: entry.id,
+    name: entry.name,
+    description: entry.description,
+    connected: connected,
+    category: entry.category,
+    kind: switch (entry.kind) {
+      V2CatalogKind.connector => V2ConnectorKind.app,
+      V2CatalogKind.plugin => V2ConnectorKind.plugin,
+      V2CatalogKind.mcp => V2ConnectorKind.mcp,
+    },
+    icon: v2ConnectorIconFor(entry),
+    enabled: enabled,
+    builtIn: entry.builtIn,
+    auth: entry.auth,
+    risk: entry.risk,
+  );
+}
+
+/// The full 168-entry catalog as row models.
+///
+/// This replaces the old hand-maintained `v2BuiltInApps` / `v2BuiltInPlugins`
+/// lists: the catalog data file is the single source of truth, and every
+/// connector, plugin, and MCP server comes through the same mapping.
+final List<V2Connector> v2BuiltInCatalog = List<V2Connector>.unmodifiable(
+  v2Catalog.map(v2ConnectorFromCatalogEntry),
+);
+
+/// Everything the connectors screen needs. The page filters and groups rows
+/// locally; the wiring layer supplies the catalog and persists changes.
 @immutable
 class V2ConnectorsData {
   const V2ConnectorsData({
     this.connectors = const <V2Connector>[],
+    this.useBuiltInCatalog = true,
     this.status = V2ConnectorsStatus.content,
-    this.tab = V2ConnectorsTab.installed,
     this.category = allCategories,
     this.availableTotal,
-    this.planNote = 'Free plan: 0 custom connectors. Go: 5.',
+    this.planNote = 'Custom connectors — Free: 0 · Go: 5 · Plus & Pro: 20.',
     this.errorMessage = 'The connector list did not load.',
   });
 
   /// Sentinel category that matches every connector.
   static const allCategories = 'All';
 
+  /// Rows the wiring layer supplies. Empty while a live catalog is still
+  /// loading, so [catalog] falls back to the built-in list unless the caller
+  /// opts out with [useBuiltInCatalog].
   final List<V2Connector> connectors;
+  final bool useBuiltInCatalog;
   final V2ConnectorsStatus status;
-  final V2ConnectorsTab tab;
   final String category;
 
   /// Size of the whole catalog. Defaults to the connectors supplied, so no
@@ -64,13 +170,37 @@ class V2ConnectorsData {
   final String planNote;
   final String errorMessage;
 
-  int get catalogTotal => availableTotal ?? available.length;
+  /// The rows the screen shows: the injected list, or the full 168-entry
+  /// catalog when the wiring layer has not supplied one yet.
+  List<V2Connector> get catalog => connectors.isNotEmpty || !useBuiltInCatalog
+      ? connectors
+      : v2BuiltInCatalog;
+
+  int get catalogTotal => availableTotal ?? catalog.length;
 
   List<V2Connector> get installed =>
-      connectors.where((connector) => connector.connected).toList();
+      catalog.where((connector) => connector.connected).toList();
 
   List<V2Connector> get available =>
-      connectors.where((connector) => !connector.connected).toList();
+      catalog.where((connector) => !connector.connected).toList();
+
+  List<V2Connector> get apps => catalog
+      .where((connector) => connector.kind == V2ConnectorKind.app)
+      .toList();
+
+  List<V2Connector> get plugins => catalog
+      .where((connector) => connector.kind == V2ConnectorKind.plugin)
+      .toList();
+
+  /// MCP server rows only.
+  List<V2Connector> get mcpServers => catalog
+      .where((connector) => connector.kind == V2ConnectorKind.mcp)
+      .toList();
+
+  /// Everything in the "Plugins & MCP" section: plugins and MCP servers.
+  List<V2Connector> get pluginsAndMcp => catalog
+      .where((connector) => connector.kind != V2ConnectorKind.app)
+      .toList();
 
   int get activeCount =>
       installed.where((connector) => connector.enabled).length;
@@ -79,7 +209,7 @@ class V2ConnectorsData {
   List<String> get categories {
     final seen = <String>{};
     final result = <String>[];
-    for (final connector in connectors) {
+    for (final connector in catalog) {
       if (connector.category.trim().isEmpty) continue;
       if (seen.add(connector.category)) result.add(connector.category);
     }
@@ -87,7 +217,7 @@ class V2ConnectorsData {
   }
 }
 
-/// Connector catalog with installed apps, a search field and popular picks.
+/// Connector catalog: built-in apps, then built-in plugins and MCP servers.
 class ConnectorsPage extends StatefulWidget {
   const ConnectorsPage({
     super.key,
@@ -100,7 +230,6 @@ class ConnectorsPage extends StatefulWidget {
     this.onUpgrade,
     this.onRetry,
     this.onSearchChanged,
-    this.onTabChanged,
     this.onCategoryChanged,
     this.onMenu,
   });
@@ -114,7 +243,6 @@ class ConnectorsPage extends StatefulWidget {
   final VoidCallback? onUpgrade;
   final VoidCallback? onRetry;
   final ValueChanged<String>? onSearchChanged;
-  final ValueChanged<V2ConnectorsTab>? onTabChanged;
   final ValueChanged<String>? onCategoryChanged;
   final VoidCallback? onMenu;
 
@@ -122,18 +250,20 @@ class ConnectorsPage extends StatefulWidget {
   State<ConnectorsPage> createState() => _ConnectorsPageState();
 }
 
+/// Kind filter across the one catalog: hosted connectors, plugins, and MCP
+/// servers. Plugins and MCP share the "Plugins & MCP" section, but the MCP tab
+/// keeps the third kind reachable without mixing them.
+enum _CatalogFilter { all, apps, plugins, mcp }
+
 class _ConnectorsPageState extends State<ConnectorsPage> {
-  late V2ConnectorsTab _tab = widget.data.tab;
   late String _category = widget.data.category;
+  late _CatalogFilter _kind = _CatalogFilter.all;
   final TextEditingController _search = TextEditingController();
   String _query = '';
 
   @override
   void didUpdateWidget(covariant ConnectorsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.data.tab != widget.data.tab) {
-      _tab = widget.data.tab;
-    }
     if (oldWidget.data.category != widget.data.category) {
       _category = widget.data.category;
     }
@@ -143,12 +273,6 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
   void dispose() {
     _search.dispose();
     super.dispose();
-  }
-
-  void _setTab(V2ConnectorsTab tab) {
-    if (_tab == tab) return;
-    setState(() => _tab = tab);
-    widget.onTabChanged?.call(tab);
   }
 
   void _onSearch(String value) {
@@ -166,6 +290,7 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
     setState(() {
       _query = '';
       _category = V2ConnectorsData.allCategories;
+      _kind = _CatalogFilter.all;
     });
     widget.onSearchChanged?.call('');
     widget.onCategoryChanged?.call(V2ConnectorsData.allCategories);
@@ -177,20 +302,29 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
     widget.onCategoryChanged?.call(category);
   }
 
+  void _setKind(_CatalogFilter kind) {
+    if (_kind == kind) return;
+    setState(() => _kind = kind);
+  }
+
+  bool _matchesKind(V2Connector connector) => switch (_kind) {
+    _CatalogFilter.all => true,
+    _CatalogFilter.apps => connector.kind == V2ConnectorKind.app,
+    _CatalogFilter.plugins => connector.kind == V2ConnectorKind.plugin,
+    _CatalogFilter.mcp => connector.kind == V2ConnectorKind.mcp,
+  };
+
   bool _matches(V2Connector connector) {
+    if (!_matchesKind(connector)) return false;
     final categoryMatches =
         _category == V2ConnectorsData.allCategories ||
         connector.category == _category;
     if (!categoryMatches) return false;
     if (_query.isEmpty) return true;
-    return connector.name.toLowerCase().contains(_query) ||
-        connector.description.toLowerCase().contains(_query) ||
-        connector.category.toLowerCase().contains(_query);
-  }
-
-  void _browse() {
-    _setTab(V2ConnectorsTab.available);
-    widget.onBrowseConnectors?.call();
+    if (connector.name.toLowerCase().contains(_query)) return true;
+    if (connector.description.toLowerCase().contains(_query)) return true;
+    if (connector.category.toLowerCase().contains(_query)) return true;
+    return connector.tools.any((tool) => tool.toLowerCase().contains(_query));
   }
 
   @override
@@ -198,7 +332,7 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
     return OScaffold(
       appBar: OAppBar(
         title: 'Connectors',
-        subtitle: 'Let Ovid use your apps',
+        subtitle: 'Apps and tools Ovid can use',
         actions: [
           // The pill label squeezes the title off a 320 dp screen, and at large
           // text sizes it no longer fits next to it at all. Fall back to the
@@ -242,11 +376,18 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
 
   Widget _content(BuildContext context) {
     final c = OColors.of(context);
-    final installed = widget.data.installed.where(_matches).toList();
-    final available = widget.data.available.where(_matches).toList();
-    final popular = widget.data.available
-        .where((connector) => connector.popular && _matches(connector))
-        .toList();
+    final filtered = widget.data.catalog.where(_matches).toList();
+    // Connected rows first inside each section, so the things the person
+    // already uses are not buried under the rest of the catalog.
+    final apps = _connectedFirst(
+      filtered.where((connector) => connector.kind == V2ConnectorKind.app),
+    );
+    // The "Plugins & MCP" section keeps plugins and MCP servers together, as
+    // the shared catalog contract defines; the MCP tab above narrows to just
+    // MCP servers.
+    final plugins = _connectedFirst(
+      filtered.where((connector) => connector.kind != V2ConnectorKind.app),
+    );
     final total = widget.data.catalogTotal;
 
     return ListView(
@@ -259,7 +400,9 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
       children: [
         OSearchField(
           controller: _search,
-          hint: total > 0 ? 'Search $total connectors…' : 'Search connectors…',
+          hint: total > 0
+              ? 'Search $total integrations…'
+              : 'Search integrations…',
           onChanged: _onSearch,
           trailing: _query.isEmpty
               ? null
@@ -269,91 +412,76 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
                   onPressed: _clearSearch,
                 ),
         ),
-        const SizedBox(height: OSpace.m),
-        _SegmentedTabs(
-          tab: _tab,
-          installedCount: widget.data.installed.length,
-          availableCount: total,
-          onChanged: _setTab,
-        ),
-        if (widget.data.categories.length > 1) ...[
+        if (widget.data.catalog.isNotEmpty) ...[
           const SizedBox(height: OSpace.m),
-          _CategoryStrip(
-            categories: widget.data.categories,
-            selected: _category,
-            onSelected: _setCategory,
-          ),
+          _KindStrip(selected: _kind, onSelected: _setKind),
+          if (widget.data.categories.length > 1) ...[
+            const SizedBox(height: OSpace.m),
+            _CategoryStrip(
+              categories: widget.data.categories,
+              selected: _category,
+              onSelected: _setCategory,
+            ),
+          ],
         ],
         const SizedBox(height: OSpace.l),
-        if (_tab == V2ConnectorsTab.installed) ...[
-          OSectionHeader(
-            label: 'Installed (${widget.data.installed.length})',
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 7,
-                  height: 7,
-                  decoration: BoxDecoration(
-                    color: c.success,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    '${widget.data.activeCount} active',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.caption.copyWith(color: c.success),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (widget.data.installed.isEmpty)
-            _installedEmpty()
-          else if (installed.isEmpty)
-            _searchEmpty('No installed connectors match')
-          else
-            ..._installedRows(installed),
-          if (popular.isNotEmpty) ...[
-            const SizedBox(height: OSpace.m),
+        if (widget.data.catalog.isEmpty)
+          _catalogEmpty()
+        else if (filtered.isEmpty)
+          _searchEmpty()
+        else ...[
+          if (apps.isNotEmpty) ...[
             OSectionHeader(
-              label: 'Popular connectors',
-              trailing: Text(
-                'View all $total',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: OType.caption.copyWith(color: c.accent),
+              label: 'Connectors',
+              padding: const EdgeInsets.fromLTRB(
+                OSpace.xs,
+                0,
+                OSpace.xs,
+                OSpace.s,
+              ),
+              trailing: _CountBadge(
+                key: const Key('connectors-count'),
+                count: apps.length,
+                semanticLabel: '${apps.length} connectors',
               ),
             ),
-            _PopularGrid(connectors: popular, onConnect: widget.onConnect),
+            ..._rows(apps),
           ],
-        ] else ...[
-          OSectionHeader(
-            label: 'Available ($total)',
-            trailing: Text(
-              '${widget.data.available.length} shown',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(color: c.textMuted),
+          if (plugins.isNotEmpty) ...[
+            if (apps.isNotEmpty) const SizedBox(height: OSpace.m),
+            OSectionHeader(
+              label: 'Plugins & MCP',
+              padding: const EdgeInsets.fromLTRB(
+                OSpace.xs,
+                0,
+                OSpace.xs,
+                OSpace.s,
+              ),
+              trailing: _CountBadge(
+                key: const Key('plugins-count'),
+                count: plugins.length,
+                semanticLabel: '${plugins.length} plugins and MCP servers',
+              ),
             ),
+            ..._rows(plugins),
+          ],
+          const SizedBox(height: OSpace.s),
+          Text(
+            '${widget.data.installed.length} installed · '
+            '${widget.data.activeCount} on',
+            style: OType.caption.copyWith(color: c.textMuted),
           ),
-          if (widget.data.connectors.isEmpty)
-            _catalogEmpty()
-          else if (available.isEmpty)
-            widget.data.available.isEmpty
-                ? _everythingConnected()
-                : _searchEmpty('No connectors match')
-          else
-            ..._availableRows(available),
         ],
         const SizedBox(height: OSpace.l),
         _PlanNote(note: widget.data.planNote, onUpgrade: widget.onUpgrade),
       ],
     );
   }
+
+  List<V2Connector> _connectedFirst(Iterable<V2Connector> connectors) => [
+    ...connectors.where((connector) => connector.connected),
+    ...connectors.where((connector) => !connector.connected),
+  ];
 
   Widget _catalogEmpty() {
     return OEmptyState(
@@ -369,27 +497,11 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
     );
   }
 
-  Widget _installedEmpty() {
-    return OEmptyState(
-      compact: true,
-      icon: Icons.hub_outlined,
-      title: 'No connectors yet',
-      message:
-          'Connect an app and Ovid can read, write, and act inside it '
-          'for you.',
-      action: OButton(
-        label: 'Browse connectors',
-        icon: Icons.search_rounded,
-        onPressed: _browse,
-      ),
-    );
-  }
-
-  Widget _searchEmpty(String title) {
+  Widget _searchEmpty() {
     return OEmptyState(
       compact: true,
       icon: Icons.search_off_rounded,
-      title: title,
+      title: 'No matches',
       message: 'Try a different search or category.',
       action: OButton(
         label: 'Clear filters',
@@ -399,26 +511,12 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
     );
   }
 
-  Widget _everythingConnected() {
-    return OEmptyState(
-      compact: true,
-      icon: Icons.check_circle_outline_rounded,
-      title: 'Everything is connected',
-      message: 'You have added every connector in the catalog.',
-      action: OButton(
-        label: 'See installed',
-        variant: OButtonVariant.secondary,
-        onPressed: () => _setTab(V2ConnectorsTab.installed),
-      ),
-    );
-  }
-
-  List<Widget> _installedRows(List<V2Connector> connectors) {
+  List<Widget> _rows(List<V2Connector> connectors) {
     final rows = <Widget>[
       for (final connector in connectors)
         Padding(
           padding: const EdgeInsets.only(bottom: OSpace.s),
-          child: _InstalledRow(
+          child: _CatalogRow(
             connector: connector,
             onTap: widget.onOpen == null
                 ? null
@@ -426,20 +524,6 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
             onToggle: widget.onToggle == null
                 ? null
                 : (value) => widget.onToggle!(connector.id, value),
-          ),
-        ),
-    ];
-    if (rows.length <= 8) return [OStagger(children: rows)];
-    return [OStagger(children: rows.take(8).toList()), ...rows.skip(8)];
-  }
-
-  List<Widget> _availableRows(List<V2Connector> connectors) {
-    final rows = <Widget>[
-      for (final connector in connectors)
-        Padding(
-          padding: const EdgeInsets.only(bottom: OSpace.s),
-          child: _AvailableRow(
-            connector: connector,
             onConnect: widget.onConnect == null
                 ? null
                 : () => widget.onConnect!(connector.id),
@@ -457,133 +541,21 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
 bool _stacksActions(BuildContext context) =>
     MediaQuery.textScalerOf(context).scale(14) >= 14 * 1.3;
 
-class _SegmentedTabs extends StatelessWidget {
-  const _SegmentedTabs({
-    required this.tab,
-    required this.installedCount,
-    required this.availableCount,
-    required this.onChanged,
-  });
-
-  final V2ConnectorsTab tab;
-  final int installedCount;
-  final int availableCount;
-  final ValueChanged<V2ConnectorsTab> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      padding: const EdgeInsets.all(2),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        children: [
-          _Segment(
-            label: 'Installed',
-            count: installedCount,
-            selected: tab == V2ConnectorsTab.installed,
-            onTap: () => onChanged(V2ConnectorsTab.installed),
-          ),
-          _Segment(
-            label: 'Available',
-            count: availableCount,
-            selected: tab == V2ConnectorsTab.available,
-            onTap: () => onChanged(V2ConnectorsTab.available),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Segment extends StatelessWidget {
-  const _Segment({
-    required this.label,
+class _CountBadge extends StatelessWidget {
+  const _CountBadge({
+    super.key,
     required this.count,
-    required this.selected,
-    required this.onTap,
+    required this.semanticLabel,
   });
 
-  final String label;
   final int count;
-  final bool selected;
-  final VoidCallback onTap;
+  final String semanticLabel;
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    // At large text the label and its count no longer fit side by side in half
-    // a 320 dp screen, so they stack and the bar grows instead of clipping.
-    final stacked = _stacksActions(context);
-    final labelText = Text(
-      label,
-      maxLines: stacked ? 2 : 1,
-      overflow: TextOverflow.ellipsis,
-      textAlign: TextAlign.center,
-      style: OType.label.copyWith(color: selected ? c.text : c.textMuted),
-    );
-    final countBadge = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-      decoration: BoxDecoration(
-        color: selected ? c.accentSoft : c.surface,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-      ),
-      child: Text(
-        '$count',
-        maxLines: 1,
-        style: OType.caption.copyWith(
-          color: selected ? c.accent : c.textMuted,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-    return Expanded(
-      child: OPressable(
-        onTap: onTap,
-        semanticLabel: '$label, $count',
-        child: Semantics(
-          selected: selected,
-          child: ExcludeSemantics(
-            child: AnimatedContainer(
-              duration: OMotion.fast,
-              curve: OMotion.standard,
-              constraints: const BoxConstraints(minHeight: OSpace.touch),
-              padding: const EdgeInsets.symmetric(
-                horizontal: OSpace.s,
-                vertical: OSpace.xs,
-              ),
-              decoration: BoxDecoration(
-                color: selected ? c.surface : c.surfaceAlt,
-                borderRadius: BorderRadius.circular(ORadius.pill),
-                border: Border.all(
-                  color: selected ? c.hairline : c.surfaceAlt,
-                ),
-              ),
-              child: stacked
-                  ? Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        labelText,
-                        const SizedBox(height: 2),
-                        countBadge,
-                      ],
-                    )
-                  : Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Flexible(child: labelText),
-                        const SizedBox(width: OSpace.xs),
-                        countBadge,
-                      ],
-                    ),
-            ),
-          ),
-        ),
-      ),
+    return Semantics(
+      label: semanticLabel,
+      child: ExcludeSemantics(child: OPill(label: '$count')),
     );
   }
 }
@@ -621,23 +593,62 @@ class _CategoryStrip extends StatelessWidget {
   }
 }
 
+class _KindStrip extends StatelessWidget {
+  const _KindStrip({required this.selected, required this.onSelected});
+
+  final _CatalogFilter selected;
+  final ValueChanged<_CatalogFilter> onSelected;
+
+  static const _options = <(_CatalogFilter, String, String)>[
+    (_CatalogFilter.all, 'All', 'Show all connectors, plugins and MCP servers'),
+    (_CatalogFilter.apps, 'Apps', 'Show hosted apps only'),
+    (_CatalogFilter.plugins, 'Plugins', 'Show plugins only'),
+    (_CatalogFilter.mcp, 'MCP', 'Show MCP servers only'),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: OSpace.touch,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: _options.length,
+        separatorBuilder: (_, _) => const SizedBox(width: OSpace.s),
+        itemBuilder: (context, index) {
+          final (kind, label, semanticLabel) = _options[index];
+          return _CategoryChip(
+            key: Key('kind-${kind.name}'),
+            label: label,
+            semanticLabel: semanticLabel,
+            selected: kind == selected,
+            onTap: () => onSelected(kind),
+          );
+        },
+      ),
+    );
+  }
+}
+
 class _CategoryChip extends StatelessWidget {
   const _CategoryChip({
+    super.key,
     required this.label,
     required this.selected,
     required this.onTap,
+    this.semanticLabel,
   });
 
   final String label;
   final bool selected;
   final VoidCallback onTap;
+  final String? semanticLabel;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return OPressable(
       onTap: onTap,
-      semanticLabel: '$label category',
+      semanticLabel: semanticLabel ?? '$label category',
       child: Semantics(
         selected: selected,
         child: ExcludeSemantics(
@@ -672,80 +683,77 @@ class _CategoryChip extends StatelessWidget {
   }
 }
 
-class _InstalledRow extends StatelessWidget {
-  const _InstalledRow({required this.connector, this.onTap, this.onToggle});
+class _CatalogRow extends StatelessWidget {
+  const _CatalogRow({
+    required this.connector,
+    this.onTap,
+    this.onToggle,
+    this.onConnect,
+  });
 
   final V2Connector connector;
   final VoidCallback? onTap;
   final ValueChanged<bool>? onToggle;
+  final VoidCallback? onConnect;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return OCard(
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.m,
-        vertical: OSpace.m,
-      ),
-      // The tap target is the text block rather than the whole card: OCard's
-      // tappable form excludes its subtree from semantics, which would hide the
-      // switch from screen readers.
-      child: Row(
-        children: [
-          Expanded(
-            child: OPressable(
-              onTap: onTap,
-              semanticLabel: '${connector.name}, ${connector.description}',
-              // The label above replaces the raw text nodes, so a reader hears
-              // the row once instead of once per line.
-              child: ExcludeSemantics(
-                child: Row(
-                  children: [
-                    _ConnectorIcon(icon: connector.icon),
-                    const SizedBox(width: OSpace.m),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Wrap(
-                            spacing: OSpace.s,
-                            runSpacing: 2,
-                            crossAxisAlignment: WrapCrossAlignment.center,
-                            children: [
-                              Text(
-                                connector.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: OType.bodyStrong.copyWith(color: c.text),
-                              ),
-                              OPill(
-                                label: connector.enabled
-                                    ? 'Connected'
-                                    : 'Paused',
-                                tone: connector.enabled
-                                    ? OPillTone.success
-                                    : OPillTone.neutral,
-                                dot: connector.enabled,
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            connector.description,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: OType.caption.copyWith(color: c.textMuted),
-                          ),
-                        ],
+    final details = OPressable(
+      onTap: onTap,
+      semanticLabel: '${connector.name}, ${connector.description}',
+      // The label above replaces the raw text nodes, so a reader hears the
+      // row once instead of once per line.
+      child: ExcludeSemantics(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _ConnectorIcon(icon: connector.icon),
+            const SizedBox(width: OSpace.m),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Wrap(
+                    spacing: OSpace.s,
+                    runSpacing: 2,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(
+                        connector.name,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.bodyStrong.copyWith(color: c.text),
                       ),
-                    ),
-                  ],
-                ),
+                      if (connector.builtIn)
+                        const OPill(label: 'Built in', tone: OPillTone.neutral),
+                      if (connector.connected)
+                        OPill(
+                          label: connector.enabled ? 'On' : 'Paused',
+                          tone: connector.enabled
+                              ? OPillTone.success
+                              : OPillTone.neutral,
+                          dot: connector.enabled,
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    connector.description,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  ),
+                ],
               ),
             ),
-          ),
-          const SizedBox(width: OSpace.s),
-          MergeSemantics(
+          ],
+        ),
+      ),
+    );
+
+    final action = connector.connected
+        ? MergeSemantics(
             child: Semantics(
               label: '${connector.name} connector',
               child: SizedBox(
@@ -753,64 +761,25 @@ class _InstalledRow extends StatelessWidget {
                 child: Switch(value: connector.enabled, onChanged: onToggle),
               ),
             ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+          )
+        : OButton(
+            label: connector.kind == V2ConnectorKind.app ? 'Connect' : 'Add',
+            semanticLabel:
+                '${connector.kind == V2ConnectorKind.app ? 'Connect' : 'Add'} '
+                '${connector.name}',
+            icon: Icons.add_rounded,
+            variant: OButtonVariant.secondary,
+            expand: _stacksActions(context),
+            onPressed: onConnect,
+          );
 
-class _AvailableRow extends StatelessWidget {
-  const _AvailableRow({required this.connector, this.onConnect});
-
-  final V2Connector connector;
-  final VoidCallback? onConnect;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final details = Row(
-      children: [
-        _ConnectorIcon(icon: connector.icon),
-        const SizedBox(width: OSpace.m),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                connector.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: OType.bodyStrong.copyWith(color: c.text),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                connector.description,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-    final stacked = _stacksActions(context);
-    final button = OButton(
-      label: 'Connect',
-      semanticLabel: 'Connect ${connector.name}',
-      icon: Icons.add_rounded,
-      variant: OButtonVariant.secondary,
-      onPressed: onConnect,
-      expand: stacked,
-    );
     const padding = EdgeInsets.symmetric(
       horizontal: OSpace.m,
       vertical: OSpace.m,
     );
     // At large text the button no longer fits beside the description, so it
     // takes its own full-width line instead of squeezing the text away.
-    if (stacked) {
+    if (!connector.connected && _stacksActions(context)) {
       return OCard(
         padding: padding,
         child: Column(
@@ -818,7 +787,7 @@ class _AvailableRow extends StatelessWidget {
           children: [
             details,
             const SizedBox(height: OSpace.m),
-            button,
+            action,
           ],
         ),
       );
@@ -828,84 +797,8 @@ class _AvailableRow extends StatelessWidget {
       child: Row(
         children: [
           Expanded(child: details),
-          const SizedBox(width: OSpace.m),
-          button,
-        ],
-      ),
-    );
-  }
-}
-
-class _PopularGrid extends StatelessWidget {
-  const _PopularGrid({required this.connectors, this.onConnect});
-
-  final List<V2Connector> connectors;
-  final ValueChanged<String>? onConnect;
-
-  @override
-  Widget build(BuildContext context) {
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      padding: EdgeInsets.zero,
-      itemCount: connectors.length,
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        mainAxisExtent: 220,
-        crossAxisSpacing: OSpace.m,
-        mainAxisSpacing: OSpace.m,
-      ),
-      itemBuilder: (context, index) {
-        final connector = connectors[index];
-        return _PopularCard(
-          connector: connector,
-          onConnect: onConnect == null ? null : () => onConnect!(connector.id),
-        );
-      },
-    );
-  }
-}
-
-class _PopularCard extends StatelessWidget {
-  const _PopularCard({required this.connector, this.onConnect});
-
-  final V2Connector connector;
-  final VoidCallback? onConnect;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.m),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _ConnectorIcon(icon: connector.icon, size: 36),
-          const SizedBox(height: OSpace.s),
-          Text(
-            connector.name,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: OType.bodyStrong.copyWith(color: c.text),
-          ),
-          const SizedBox(height: 2),
-          Expanded(
-            child: Text(
-              connector.description,
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-          const SizedBox(height: OSpace.s),
-          OButton(
-            label: 'Connect',
-            semanticLabel: 'Connect ${connector.name}',
-            icon: Icons.add_rounded,
-            variant: OButtonVariant.secondary,
-            expand: true,
-            onPressed: onConnect,
-          ),
+          const SizedBox(width: OSpace.s),
+          action,
         ],
       ),
     );
@@ -913,14 +806,14 @@ class _PopularCard extends StatelessWidget {
 }
 
 class _ConnectorIcon extends StatelessWidget {
-  const _ConnectorIcon({required this.icon, this.size = 40});
+  const _ConnectorIcon({required this.icon});
 
   final IconData icon;
-  final double size;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    const size = 40.0;
     return Container(
       width: size,
       height: size,
@@ -948,10 +841,7 @@ class _PlanNote extends StatelessWidget {
         Icon(Icons.info_outline_rounded, size: 18, color: c.textMuted),
         const SizedBox(width: OSpace.s),
         Expanded(
-          child: Text(
-            note,
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
+          child: Text(note, style: OType.caption.copyWith(color: c.textMuted)),
         ),
       ],
     );

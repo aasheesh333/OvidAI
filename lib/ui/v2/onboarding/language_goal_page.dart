@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'step_progress.dart';
 
 // TODO(l10n): move onboarding copy to the ARB files.
 
@@ -234,7 +235,12 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _StepHeader(step: data.step, total: data.totalSteps),
+            OnboardingStepProgress(
+              data: V2OnboardingStepData(
+                step: data.step,
+                totalSteps: data.totalSteps,
+              ),
+            ),
             const SizedBox(height: OSpace.l),
             _SetupBanner(c: c),
             const SizedBox(height: OSpace.xl),
@@ -335,61 +341,6 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _StepHeader extends StatelessWidget {
-  const _StepHeader({required this.step, required this.total});
-
-  final int step;
-  final int total;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final steps = total < 1 ? 1 : total;
-    final active = step.clamp(1, steps);
-    return Semantics(
-      label: 'Step $active of $steps',
-      child: ExcludeSemantics(
-        child: Column(
-          children: [
-            Wrap(
-              alignment: WrapAlignment.spaceBetween,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              spacing: OSpace.s,
-              children: [
-                Text(
-                  'STEP $active OF $steps',
-                  style: OType.overline.copyWith(color: c.textMuted),
-                ),
-                Text(
-                  'Setup',
-                  style: OType.bodySm.copyWith(color: c.textMuted),
-                ),
-              ],
-            ),
-            const SizedBox(height: OSpace.s),
-            Row(
-              children: [
-                for (var i = 0; i < steps; i++) ...[
-                  if (i > 0) const SizedBox(width: OSpace.s),
-                  Expanded(
-                    child: Container(
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: i < active ? c.accentFill : c.surfaceRaised,
-                        borderRadius: BorderRadius.circular(ORadius.pill),
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ],
         ),
       ),
     );

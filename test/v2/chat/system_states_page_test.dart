@@ -3,6 +3,7 @@ import 'dart:ui' show Tristate;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/v2/states/state_tiles.dart';
 import 'package:ovid_ai/ui/v2/states/system_states_page.dart';
 
 Widget _app(Widget home, {bool dark = false}) =>
@@ -166,5 +167,81 @@ void main() {
       ),
       findsOneWidget,
     );
+  });
+
+  testWidgets('renders the six state-tile variants plus the empty prompt', (
+    tester,
+  ) async {
+    await _tall(tester);
+    await tester.pumpWidget(_app(const V2SystemStatesPage()));
+    await tester.pumpAndSettle();
+
+    // One custom tile for the empty prompt and one for each of the six
+    // V2StateTile kinds.
+    expect(find.byType(V2StateTile), findsNWidgets(7));
+    expect(find.text('Try an example prompt'), findsOneWidget);
+    expect(find.text('Retry connection'), findsOneWidget);
+    expect(find.text('See plans'), findsOneWidget);
+    expect(find.text('Manage storage'), findsOneWidget);
+    expect(find.text('Get help'), findsOneWidget);
+    expect(find.text('Restore'), findsOneWidget);
+    expect(find.text('Try again'), findsOneWidget);
+  });
+
+  testWidgets('storage, suspension and deletion actions fire', (tester) async {
+    await _tall(tester);
+    var storage = 0;
+    var help = 0;
+    var restore = 0;
+    await tester.pumpWidget(
+      _app(
+        V2SystemStatesPage(
+          onManageStorage: () => storage++,
+          onGetHelp: () => help++,
+          onRestoreAccount: () => restore++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    for (final label in ['Manage storage', 'Get help', 'Restore']) {
+      await tester.ensureVisible(find.text(label));
+      await tester.pump();
+      await tester.tap(find.text(label));
+    }
+
+    expect(storage, 1);
+    expect(help, 1);
+    expect(restore, 1);
+  });
+
+  testWidgets('the newer state copy can be overridden', (tester) async {
+    await _tall(tester);
+    await tester.pumpWidget(
+      _app(
+        const V2SystemStatesPage(
+          data: V2SystemStatesData(
+            storageTitle: 'Workspace is full',
+            storageMessage: 'Delete a preview to free space.',
+            storageActionLabel: 'Clean up',
+            abuseTitle: 'Account on hold',
+            abuseMessage: 'Support is reviewing this account.',
+            abuseActionLabel: 'Contact support',
+            deletionTitle: 'Account closing',
+            deletionMessage: 'Sign in again within 24 hours to restore it.',
+            deletionActionLabel: 'Restore now',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Workspace is full'), findsOneWidget);
+    expect(find.text('Delete a preview to free space.'), findsOneWidget);
+    expect(find.text('Clean up'), findsOneWidget);
+    expect(find.text('Account on hold'), findsOneWidget);
+    expect(find.text('Contact support'), findsOneWidget);
+    expect(find.text('Account closing'), findsOneWidget);
+    expect(find.text('Restore now'), findsOneWidget);
   });
 }

@@ -19,6 +19,7 @@ import '../../../core/play_billing.dart';
 import '../../../core/revenuecat_billing.dart';
 import '../../../core/settings_backup_service.dart';
 import '../../../core/state.dart';
+import '../chat/composer_voice.dart';
 import '../settings_extra/notifications_page.dart';
 
 /// Live actions used by the settings destinations. Kept out of the screens so
@@ -272,6 +273,12 @@ class V2SettingsActions {
 
   Future<void> setTextScale(double value) =>
       AppState.I.setChatFontScale(value);
+
+  /// Persists the dictation language and mirrors it into the composer.
+  Future<void> setVoiceLanguage(String id) async {
+    await AppState.I.setVoiceLanguage(id);
+    v2SavedVoiceLanguage = AppState.I.voiceLanguage;
+  }
 
   Future<void> setResponseWait(int seconds) =>
       AppState.I.setResponseTimeout(seconds);

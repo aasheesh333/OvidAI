@@ -3,10 +3,26 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import 'connector_permissions.dart' as permissions;
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
 
 enum V2ConnectorDetailStatus { loading, content, error }
+
+/// How broadly a grant applies. Mirrors the permissions screen so the detail
+/// page can group grants without exposing that screen's model everywhere.
+enum V2ConnectorPermissionScope { read, write, admin }
+
+/// Blast radius of a grant if it is misused.
+enum V2ConnectorPermissionRisk {
+  low('Low'),
+  medium('Medium'),
+  high('High');
+
+  const V2ConnectorPermissionRisk(this.label);
+
+  final String label;
+}
 
 /// One permission the connector may use. `granted` is the live switch state.
 @immutable
@@ -16,12 +32,32 @@ class V2ConnectorPermission {
     required this.name,
     required this.description,
     this.granted = true,
+    this.scope = V2ConnectorPermissionScope.read,
+    this.risk = V2ConnectorPermissionRisk.low,
   });
 
   final String id;
   final String name;
   final String description;
   final bool granted;
+  final V2ConnectorPermissionScope scope;
+  final V2ConnectorPermissionRisk risk;
+}
+
+/// One tool the connector exposes. `write` tools can change data.
+@immutable
+class V2ConnectorTool {
+  const V2ConnectorTool({
+    required this.id,
+    required this.name,
+    this.description = '',
+    this.write = false,
+  });
+
+  final String id;
+  final String name;
+  final String description;
+  final bool write;
 }
 
 /// An agent that can use this connector.
@@ -91,10 +127,15 @@ class V2ConnectorDetailData {
     this.syncedLabel = '',
     this.accessLabel = '',
     this.permissions = const <V2ConnectorPermission>[],
+    this.tools = const <V2ConnectorTool>[],
     this.agents = const <V2ConnectorAgent>[],
     this.usage,
     this.activity = const <V2ConnectorActivity>[],
     this.autoSync = true,
+    this.builtIn = true,
+    this.safetyNote = '',
+    this.authLabel = '',
+    this.risk = V2ConnectorPermissionRisk.low,
     this.status = V2ConnectorDetailStatus.content,
     this.errorMessage = 'This connector did not load.',
     this.disconnectNote = '',
@@ -109,10 +150,21 @@ class V2ConnectorDetailData {
   final String syncedLabel;
   final String accessLabel;
   final List<V2ConnectorPermission> permissions;
+  final List<V2ConnectorTool> tools;
   final List<V2ConnectorAgent> agents;
   final V2ConnectorUsage? usage;
   final List<V2ConnectorActivity> activity;
   final bool autoSync;
+  final bool builtIn;
+  final String safetyNote;
+
+  /// Primary credential the catalog says this integration needs, e.g. OAuth.
+  final String authLabel;
+
+  /// Blast radius of the whole connector. Individual grants can be at least
+  /// this risky; the permissions screen shows the higher of the two.
+  final V2ConnectorPermissionRisk risk;
+
   final V2ConnectorDetailStatus status;
   final String errorMessage;
   final String disconnectNote;
@@ -128,6 +180,7 @@ class ConnectorDetailPage extends StatefulWidget {
     this.onDisconnect,
     this.onPermissionChanged,
     this.onAutoSyncChanged,
+    this.onOpenPermissions,
     this.onMenu,
     this.onRetry,
   });
@@ -138,6 +191,10 @@ class ConnectorDetailPage extends StatefulWidget {
   final VoidCallback? onDisconnect;
   final void Function(String permissionId, bool granted)? onPermissionChanged;
   final ValueChanged<bool>? onAutoSyncChanged;
+
+  /// Optional override for the wiring layer. When omitted the detail page
+  /// opens [permissions.ConnectorPermissionsPage] with mapped grants itself.
+  final VoidCallback? onOpenPermissions;
   final VoidCallback? onMenu;
   final VoidCallback? onRetry;
 
@@ -173,6 +230,142 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
   void _toggleAutoSync(bool value) {
     setState(() => _autoSync = value);
     widget.onAutoSyncChanged?.call(value);
+  }
+
+  bool _isGranted(V2ConnectorPermission permission) =>
+      _granted[permission.id] ?? permission.granted;
+
+  permissions.V2ConnectorPermissionScope _scopeOf(
+    V2ConnectorPermissionScope scope,
+  ) => switch (scope) {
+    V2ConnectorPermissionScope.read =>
+      permissions.V2ConnectorPermissionScope.read,
+    V2ConnectorPermissionScope.write =>
+      permissions.V2ConnectorPermissionScope.write,
+    V2ConnectorPermissionScope.admin =>
+      permissions.V2ConnectorPermissionScope.admin,
+  };
+
+  permissions.V2ConnectorPermissionRisk _riskOf(
+    V2ConnectorPermissionRisk risk,
+  ) => switch (risk) {
+    V2ConnectorPermissionRisk.low => permissions.V2ConnectorPermissionRisk.low,
+    V2ConnectorPermissionRisk.medium =>
+      permissions.V2ConnectorPermissionRisk.medium,
+    V2ConnectorPermissionRisk.high =>
+      permissions.V2ConnectorPermissionRisk.high,
+  };
+
+  V2ConnectorPermissionRisk _effectiveRisk(V2ConnectorPermission permission) =>
+      permission.risk.index >= widget.data.risk.index
+      ? permission.risk
+      : widget.data.risk;
+
+  String? _permissionIdFor(V2ConnectorTool tool) {
+    final wanted = tool.write
+        ? V2ConnectorPermissionScope.write
+        : V2ConnectorPermissionScope.read;
+    for (final permission in widget.data.permissions) {
+      if (permission.scope == wanted) return permission.id;
+    }
+    return widget.data.permissions.isEmpty
+        ? null
+        : widget.data.permissions.first.id;
+  }
+
+  /// The detail page owns the live switch state, so map it (plus the tool and
+  /// agent wiring) into the standalone permissions screen when the row opens.
+  permissions.V2ConnectorPermissionsData _permissionsScreenData() {
+    final data = widget.data;
+    final granted = data.permissions.where(_isGranted).toList();
+    final revoked = data.permissions
+        .where((permission) => !_isGranted(permission))
+        .toList();
+    return permissions.V2ConnectorPermissionsData(
+      connectorId: data.id,
+      connectorName: data.name,
+      connectorDescription: data.description,
+      connectorIcon: data.icon,
+      accountLabel: data.accountLabel,
+      permissions: [
+        for (final permission in data.permissions)
+          permissions.V2ConnectorPermissionItem(
+            id: permission.id,
+            name: permission.name,
+            scope: _scopeOf(permission.scope),
+            description: permission.description,
+            risk: _riskOf(_effectiveRisk(permission)),
+            granted: _isGranted(permission),
+            toolIds: [
+              for (final tool in data.tools)
+                if (_permissionIdFor(tool) == permission.id) tool.id,
+            ],
+          ),
+      ],
+      tools: [
+        for (final tool in data.tools)
+          permissions.V2ConnectorPermissionTool(
+            id: tool.id,
+            name: tool.name,
+            scope: tool.write
+                ? permissions.V2ConnectorPermissionScope.write
+                : permissions.V2ConnectorPermissionScope.read,
+            description: tool.description,
+            permissionId: _permissionIdFor(tool),
+          ),
+      ],
+      canDo: [
+        for (final permission in granted) permission.name,
+        if (granted.isNotEmpty && data.authLabel.isNotEmpty)
+          'Use the ${data.authLabel} you approved.',
+      ],
+      cannotDo: [
+        for (final permission in revoked)
+          '${permission.name} until you grant it again.',
+        if (!data.builtIn)
+          'Use an unreviewed third-party server without your say.',
+      ],
+      status: data.permissions.isEmpty
+          ? permissions.V2ConnectorPermissionsStatus.empty
+          : permissions.V2ConnectorPermissionsStatus.content,
+      revokeNote: data.disconnectNote,
+    );
+  }
+
+  Future<void> _openPermissions() async {
+    final external = widget.onOpenPermissions;
+    if (external != null) {
+      external();
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => permissions.ConnectorPermissionsPage(
+          data: _permissionsScreenData(),
+          onRevokePermission: _revokePermission,
+          onRevokeAll: _revokeAll,
+        ),
+      ),
+    );
+  }
+
+  void _revokePermission(String permissionId) {
+    if (!widget.data.permissions.any((item) => item.id == permissionId)) {
+      return;
+    }
+    setState(() => _granted[permissionId] = false);
+    widget.onPermissionChanged?.call(permissionId, false);
+  }
+
+  void _revokeAll() {
+    setState(() {
+      for (final permission in widget.data.permissions) {
+        _granted[permission.id] = false;
+      }
+    });
+    for (final permission in widget.data.permissions) {
+      widget.onPermissionChanged?.call(permission.id, false);
+    }
   }
 
   Future<void> _confirmDisconnect() async {
@@ -364,6 +557,15 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
           ),
         ),
         const SizedBox(height: OSpace.m),
+        _SafetyNote(note: data.safetyNote, builtIn: data.builtIn),
+        const SizedBox(height: OSpace.m),
+        _PermissionsEntry(
+          connectorName: data.name,
+          granted: data.permissions.where(_isGranted).length,
+          total: data.permissions.length,
+          onTap: _openPermissions,
+        ),
+        const SizedBox(height: OSpace.m),
         OCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -417,6 +619,8 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
             ],
           ),
         ),
+        const SizedBox(height: OSpace.m),
+        _ToolsCard(tools: data.tools),
         const SizedBox(height: OSpace.m),
         _UsageCard(usage: data.usage),
         const SizedBox(height: OSpace.m),
@@ -522,6 +726,232 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
           style: OType.caption.copyWith(color: c.textMuted),
         ),
       ],
+    );
+  }
+}
+
+/// Row that opens the grouped permissions screen. Kept separate from the
+/// compact switches below so the person can review risk, tools, and revoke
+/// every grant in one place.
+class _PermissionsEntry extends StatelessWidget {
+  const _PermissionsEntry({
+    required this.connectorName,
+    required this.granted,
+    required this.total,
+    required this.onTap,
+  });
+
+  final String connectorName;
+  final int granted;
+  final int total;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return OCard(
+      key: const Key('connector-permissions-entry'),
+      padding: const EdgeInsets.all(OSpace.m),
+      onTap: onTap,
+      semanticLabel: 'Review permissions for $connectorName',
+      child: Row(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: c.surfaceAlt,
+              borderRadius: BorderRadius.circular(ORadius.m),
+              border: Border.all(color: c.hairline),
+            ),
+            child: Icon(
+              Icons.verified_user_outlined,
+              size: 20,
+              color: c.textMuted,
+            ),
+          ),
+          const SizedBox(width: OSpace.m),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Permissions',
+                  style: OType.bodyStrong.copyWith(color: c.text),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  total == 0
+                      ? 'Review grants, tools and risk'
+                      : '$granted of $total granted · review tools and risk',
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: OSpace.s),
+          Icon(Icons.chevron_right_rounded, size: 22, color: c.textMuted),
+        ],
+      ),
+    );
+  }
+}
+
+class _SafetyNote extends StatelessWidget {
+  const _SafetyNote({required this.note, required this.builtIn});
+
+  final String note;
+  final bool builtIn;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final color = builtIn ? c.success : c.warn;
+    final text = note.isNotEmpty
+        ? note
+        : builtIn
+        ? 'This connector is built in and reviewed by Ovid. Ovid only uses '
+              'the permissions you turn on, and it never installs plugins '
+              'from a chat message.'
+        : 'This is a custom connector. Ovid did not review it, so only add '
+              'servers you trust. Ovid never installs plugins from a chat '
+              'message.';
+    return Container(
+      key: const Key('connector-safety-note'),
+      padding: const EdgeInsets.all(OSpace.m),
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(ORadius.l),
+        border: Border.all(color: c.hairline),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.12),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(Icons.shield_outlined, size: 18, color: color),
+          ),
+          const SizedBox(width: OSpace.m),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  builtIn ? 'Built-in safety' : 'Custom connector safety',
+                  style: OType.label.copyWith(color: c.text),
+                ),
+                const SizedBox(height: 2),
+                Text(text, style: OType.caption.copyWith(color: c.textMuted)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ToolsCard extends StatelessWidget {
+  const _ToolsCard({required this.tools});
+
+  final List<V2ConnectorTool> tools;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return OCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text('Tools', style: OType.h3.copyWith(color: c.text)),
+              ),
+              Flexible(
+                child: Text(
+                  '${tools.length} available',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: OSpace.s),
+          if (tools.isEmpty)
+            Text(
+              'No tools yet. Ovid will list them here.',
+              style: OType.caption.copyWith(color: c.textMuted),
+            )
+          else
+            OStagger(
+              children: [
+                for (var i = 0; i < tools.length; i++) ...[
+                  if (i > 0) Divider(color: c.hairline, height: 1),
+                  _ToolRow(tool: tools[i]),
+                ],
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ToolRow extends StatelessWidget {
+  const _ToolRow({required this.tool});
+
+  final V2ConnectorTool tool;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: OSpace.s),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: c.surfaceAlt,
+              borderRadius: BorderRadius.circular(ORadius.m),
+            ),
+            child: Icon(Icons.terminal_rounded, size: 17, color: c.textMuted),
+          ),
+          const SizedBox(width: OSpace.m),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  tool.name,
+                  style: OType.bodyStrong.copyWith(color: c.text),
+                ),
+                if (tool.description.isNotEmpty)
+                  Text(
+                    tool.description,
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: OSpace.s),
+          Flexible(
+            child: OPill(
+              label: tool.write ? 'Can change' : 'Read only',
+              tone: tool.write ? OPillTone.warn : OPillTone.neutral,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

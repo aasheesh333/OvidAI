@@ -9,6 +9,20 @@ import '../../design/o_tokens.dart';
 /// What the repo picker is doing right now.
 enum V2RepoPickerStatus { loading, content, empty, error }
 
+/// One branch the user can clone when binding a repository.
+@immutable
+class V2RepoBranch {
+  const V2RepoBranch({
+    required this.name,
+    this.lastCommitLabel = '',
+    this.isDefault = false,
+  });
+
+  final String name;
+  final String lastCommitLabel;
+  final bool isDefault;
+}
+
 /// One repository the user can open in Studio.
 @immutable
 class V2Repo {
@@ -20,6 +34,8 @@ class V2Repo {
     this.language,
     this.updatedLabel,
     this.isPrivate = false,
+    this.defaultBranch,
+    this.branches = const <V2RepoBranch>[],
   });
 
   final String id;
@@ -30,7 +46,26 @@ class V2Repo {
   final String? updatedLabel;
   final bool isPrivate;
 
+  /// Branch the picker preselects. When null, the first branch flagged
+  /// [V2RepoBranch.isDefault] is used instead.
+  final String? defaultBranch;
+
+  /// Branches available in this repository. Empty means the wiring layer could
+  /// not list them yet, so the user cannot continue past the branch step.
+  final List<V2RepoBranch> branches;
+
   String get fullName => owner.isEmpty ? name : '$owner/$name';
+
+  /// The branch to preselect in the "Choose branch" step, or null when the
+  /// user must pick one explicitly.
+  String? get preferredBranch {
+    final explicit = defaultBranch?.trim();
+    if (explicit != null && explicit.isNotEmpty) return explicit;
+    for (final branch in branches) {
+      if (branch.isDefault) return branch.name;
+    }
+    return null;
+  }
 }
 
 /// Everything the repo picker needs to render. Supplied by the wiring layer.
@@ -52,11 +87,16 @@ class V2RepoPickerData {
 }
 
 /// Pick a GitHub repository to copy into the private cloud workspace.
+///
+/// The picker is a two-step gate: the user first chooses a repository, then a
+/// branch. The primary action stays disabled until both are selected, so a
+/// Studio chat can never start without a folder binding.
 class V2RepoPickerPage extends StatefulWidget {
   const V2RepoPickerPage({
     super.key,
     required this.data,
     this.onSelectRepo,
+    this.onConfirm,
     this.onConnectGithub,
     this.onOpenToken,
     this.onOpenAdvanced,
@@ -65,7 +105,14 @@ class V2RepoPickerPage extends StatefulWidget {
   });
 
   final V2RepoPickerData data;
+
+  /// Fires when a repository row is tapped. Kept for callers that navigate as
+  /// soon as a repo is known; new wiring should use [onConfirm] instead.
   final ValueChanged<V2Repo>? onSelectRepo;
+
+  /// Fires when the user confirms a repository **and** a branch. This is the
+  /// only callback that should bind the folder for Studio mode.
+  final void Function(V2Repo repo, String branch)? onConfirm;
   final VoidCallback? onConnectGithub;
   final VoidCallback? onOpenToken;
   final VoidCallback? onOpenAdvanced;
@@ -79,6 +126,8 @@ class V2RepoPickerPage extends StatefulWidget {
 class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
   final TextEditingController _search = TextEditingController();
   String _query = '';
+  V2Repo? _selectedRepo;
+  String? _selectedBranch;
 
   @override
   void dispose() {
@@ -96,6 +145,49 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
     _onSearch('');
   }
 
+  void _selectRepo(V2Repo repo) {
+    final preferred = repo.preferredBranch;
+    final hasPreferred =
+        preferred != null && repo.branches.any((b) => b.name == preferred);
+    setState(() {
+      _selectedRepo = repo;
+      _selectedBranch = hasPreferred ? preferred : null;
+    });
+    widget.onSelectRepo?.call(repo);
+  }
+
+  void _changeRepo() {
+    setState(() {
+      _selectedRepo = null;
+      _selectedBranch = null;
+    });
+  }
+
+  void _selectBranch(String branch) {
+    setState(() => _selectedBranch = branch);
+  }
+
+  bool get _canConfirm =>
+      _selectedRepo != null && _selectedBranch != null;
+
+  void _confirm() {
+    final repo = _selectedRepo;
+    final branch = _selectedBranch;
+    if (repo == null || branch == null) return;
+    final confirm = widget.onConfirm;
+    if (confirm != null) {
+      confirm(repo, branch);
+      return;
+    }
+    widget.onSelectRepo?.call(repo);
+  }
+
+  String get _primaryLabel {
+    if (_selectedRepo == null) return 'Choose a repository';
+    if (_selectedBranch == null) return 'Choose a branch';
+    return 'Start coding';
+  }
+
   List<V2Repo> get _visibleRepos {
     if (_query.isEmpty) return widget.data.repos;
     return widget.data.repos
@@ -111,10 +203,13 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
   @override
   Widget build(BuildContext context) {
     final data = widget.data;
+    final showPrimary =
+        data.status == V2RepoPickerStatus.content ||
+        data.status == V2RepoPickerStatus.empty;
     return OScaffold(
       appBar: OAppBar(
         title: 'Studio',
-        subtitle: 'Pick a repository',
+        subtitle: _selectedRepo == null ? 'Pick a repository' : 'Choose a branch',
         actions: [
           if (!data.githubConnected)
             OIconButton(
@@ -125,6 +220,7 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
             ),
         ],
       ),
+      bottomNavigationBar: showPrimary ? _buildPrimaryBar(context) : null,
       body: switch (data.status) {
         V2RepoPickerStatus.loading => const OSkeletonList(rows: 5),
         V2RepoPickerStatus.error => OErrorState(
@@ -140,6 +236,8 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
   }
 
   Widget _buildContent(BuildContext context) {
+    final repo = _selectedRepo;
+    if (repo != null) return _buildBranchStep(context, repo);
     final data = widget.data;
     final repos = _visibleRepos;
     final showHero = !data.githubConnected;
@@ -217,6 +315,129 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
     );
   }
 
+  /// Step two: the branch list for the selected repository. The primary action
+  /// in the dock stays disabled until a branch is selected.
+  Widget _buildBranchStep(BuildContext context, V2Repo repo) {
+    final c = OColors.of(context);
+    final branches = repo.branches;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(
+        OSpace.screen,
+        OSpace.m,
+        OSpace.screen,
+        OSpace.xxl,
+      ),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560),
+          child: OFadeSlide(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: OButton(
+                    key: const Key('repo-picker-change-repo'),
+                    label: 'Change repository',
+                    icon: Icons.arrow_back_rounded,
+                    variant: OButtonVariant.ghost,
+                    size: OButtonSize.compact,
+                    onPressed: _changeRepo,
+                  ),
+                ),
+                const SizedBox(height: OSpace.s),
+                _SelectedRepoCard(repo: repo),
+                const SizedBox(height: OSpace.l),
+                Text(
+                  'Choose branch',
+                  style: OType.h2.copyWith(color: c.text),
+                ),
+                const SizedBox(height: OSpace.xs),
+                Text(
+                  'Pick the branch Ovid should work on. You can switch later.',
+                  style: OType.bodySm.copyWith(color: c.textMuted),
+                ),
+                const SizedBox(height: OSpace.m),
+                if (branches.isEmpty)
+                  OEmptyState(
+                    compact: true,
+                    icon: Icons.account_tree_outlined,
+                    title: 'No branches found',
+                    message:
+                        'We could not load branches for ${repo.fullName}. Go back and choose another repository.',
+                    action: OButton(
+                      label: 'Change repository',
+                      variant: OButtonVariant.secondary,
+                      onPressed: _changeRepo,
+                    ),
+                  )
+                else
+                  OStagger(
+                    children: [
+                      for (final branch in branches)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: OSpace.s),
+                          child: _BranchChoice(
+                            branch: branch,
+                            selected: branch.name == _selectedBranch,
+                            onTap: () => _selectBranch(branch.name),
+                          ),
+                        ),
+                    ],
+                  ),
+                const SizedBox(height: OSpace.l),
+                const _SecurityNote(),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPrimaryBar(BuildContext context) {
+    final c = OColors.of(context);
+    final ready = _canConfirm;
+    return SafeArea(
+      top: false,
+      child: Container(
+        decoration: BoxDecoration(
+          color: c.surface,
+          border: Border(top: BorderSide(color: c.hairline)),
+        ),
+        padding: const EdgeInsets.fromLTRB(
+          OSpace.l,
+          OSpace.m,
+          OSpace.l,
+          OSpace.m,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (!ready)
+              Padding(
+                padding: const EdgeInsets.only(bottom: OSpace.s),
+                child: Text(
+                  _selectedRepo == null
+                      ? 'Choose a repository to continue.'
+                      : 'Choose a branch to continue.',
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ),
+            OButton(
+              key: const Key('repo-picker-primary'),
+              label: _primaryLabel,
+              icon: ready ? Icons.play_arrow_rounded : null,
+              expand: true,
+              onPressed: ready ? _confirm : null,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// Repo rows, with entrance motion capped to the first eight as the contract
   /// asks. Long lists stay snappy because the stagger stops there.
   Widget _buildRepoList(List<V2Repo> repos) {
@@ -236,9 +457,144 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
   Widget _repoTile(V2Repo repo) {
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.s),
-      child: _RepoRow(
-        repo: repo,
-        onTap: () => widget.onSelectRepo?.call(repo),
+      child: _RepoRow(repo: repo, onTap: () => _selectRepo(repo)),
+    );
+  }
+}
+
+class _SelectedRepoCard extends StatelessWidget {
+  const _SelectedRepoCard({required this.repo});
+
+  final V2Repo repo;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      padding: const EdgeInsets.all(OSpace.m),
+      decoration: BoxDecoration(
+        color: c.surfaceAlt,
+        borderRadius: BorderRadius.circular(ORadius.l),
+        border: Border.all(color: c.hairline),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: c.accentSoft,
+              borderRadius: BorderRadius.circular(ORadius.m),
+            ),
+            child: Icon(Icons.folder_open_rounded, size: 20, color: c.accent),
+          ),
+          const SizedBox(width: OSpace.m),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  repo.fullName,
+                  style: OType.bodyStrong.copyWith(color: c.text),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Selected repository',
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BranchChoice extends StatelessWidget {
+  const _BranchChoice({
+    required this.branch,
+    required this.selected,
+    this.onTap,
+  });
+
+  final V2RepoBranch branch;
+  final bool selected;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final label = branch.isDefault
+        ? 'Branch ${branch.name}, default'
+        : 'Branch ${branch.name}';
+    return OPressable(
+      key: Key('repo-picker-branch-${branch.name}'),
+      onTap: onTap,
+      selected: selected,
+      semanticLabel: selected ? '$label, selected' : label,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: OSpace.listRow),
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: OSpace.m,
+            vertical: OSpace.s,
+          ),
+          decoration: BoxDecoration(
+            color: selected ? c.accentSoft : c.surface,
+            borderRadius: BorderRadius.circular(ORadius.l),
+            border: Border.all(
+              color: selected
+                  ? c.accentFill.withValues(alpha: 0.5)
+                  : c.hairline,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                selected
+                    ? Icons.radio_button_checked_rounded
+                    : Icons.radio_button_unchecked_rounded,
+                size: 20,
+                color: selected ? c.accent : c.textFaint,
+              ),
+              const SizedBox(width: OSpace.m),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      branch.name,
+                      style: OType.body.copyWith(
+                        color: selected ? c.accent : c.text,
+                        fontWeight: selected
+                            ? FontWeight.w600
+                            : FontWeight.w400,
+                      ),
+                    ),
+                    if (branch.lastCommitLabel.isNotEmpty)
+                      Text(
+                        branch.lastCommitLabel,
+                        style: OType.caption.copyWith(color: c.textMuted),
+                      ),
+                    if (branch.isDefault) ...[
+                      const SizedBox(height: OSpace.xs),
+                      _StatusBadge(
+                        label: 'Default',
+                        tone: _BadgeTone.success,
+                        dot: true,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (selected) ...[
+                const SizedBox(width: OSpace.s),
+                Icon(Icons.check_rounded, size: 20, color: c.accent),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }

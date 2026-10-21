@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/studio/changes_page.dart';
+import 'package:ovid_ai/ui/v2/studio/commit_sheet.dart';
 
 Widget _app(Widget child, {bool dark = false}) =>
     MaterialApp(theme: dark ? OTheme.dark() : OTheme.light(), home: child);
@@ -70,6 +71,15 @@ const _data = V2ChangesData(
   behindCount: 3,
 );
 
+const _openSheetKey = Key('studio-open-commit-sheet');
+const _submitKey = ValueKey('v2-commit-submit');
+const _messageKey = ValueKey('v2-commit-message');
+
+Future<void> _openCommitSheet(WidgetTester tester) async {
+  await tester.tap(find.byKey(_openSheetKey));
+  await tester.pumpAndSettle();
+}
+
 void main() {
   testWidgets('renders changes and diffs in light and dark', (tester) async {
     for (final dark in <bool>[false, true]) {
@@ -111,10 +121,14 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byType(TextField), 'fix: hero typography');
+    await _openCommitSheet(tester);
+    await tester.enterText(find.byKey(_messageKey), '  fix: hero typography  ');
     await tester.pump();
-    await tester.tap(find.text('Commit & push'));
+    await tester.tap(find.byKey(_submitKey));
+    await tester.pumpAndSettle();
+
     expect(message, 'fix: hero typography');
+    expect(find.byType(V2CommitSheet), findsNothing);
   });
 
   testWidgets('320 dp wide at 200 % text does not overflow', (tester) async {
@@ -183,22 +197,25 @@ void main() {
   });
 
   testWidgets('commit stays disabled until a message is typed', (tester) async {
+    final handle = tester.ensureSemantics();
+
     await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
     await tester.pumpAndSettle();
+    await _openCommitSheet(tester);
 
-    final button = find.text('Commit & push');
     expect(
-      tester.getSemantics(button),
+      tester.getSemantics(find.byKey(_submitKey)),
       isSemantics(isButton: true, isEnabled: false),
     );
 
-    await tester.enterText(find.byType(TextField), 'fix: hero typography');
+    await tester.enterText(find.byKey(_messageKey), 'fix: hero typography');
     await tester.pump();
 
     expect(
-      tester.getSemantics(button),
+      tester.getSemantics(find.byKey(_submitKey)),
       isSemantics(isButton: true, isEnabled: true),
     );
+    handle.dispose();
   });
 
   testWidgets('collapsed file expands to show its diff', (tester) async {
@@ -213,5 +230,66 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('@@ -1,4 +1,6 @@'), findsOneWidget);
+  });
+
+  testWidgets('the commit action opens the shared commit sheet', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
+    await tester.pumpAndSettle();
+
+    await _openCommitSheet(tester);
+
+    expect(find.byType(V2CommitSheet), findsOneWidget);
+    expect(find.text('Commit changes'), findsOneWidget);
+    expect(find.text('3 changed files'), findsWidgets);
+  });
+
+  testWidgets('the sheet maps changed files, branch and sync state', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_app(const V2ChangesPage(data: _data)));
+    await tester.pumpAndSettle();
+    await _openCommitSheet(tester);
+
+    // Directory + name are joined into the full path the sheet lists.
+    expect(find.text('src/pages/index.html'), findsOneWidget);
+    expect(find.text('src/theme/styles.css'), findsOneWidget);
+    expect(find.text('src/core/app.js'), findsOneWidget);
+    // The page's branch and behind count seed the sheet.
+    expect(find.text('main ← feature/hero-revamp'), findsWidgets);
+    expect(find.text('Sync first'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(V2CommitSheet),
+        matching: find.text('+48'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(V2CommitSheet),
+        matching: find.text('−12'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('closing the commit sheet returns without committing', (
+    tester,
+  ) async {
+    var commits = 0;
+    await tester.pumpWidget(
+      _app(V2ChangesPage(data: _data, onCommit: (_) => commits++)),
+    );
+    await tester.pumpAndSettle();
+    await _openCommitSheet(tester);
+
+    await tester.tap(find.byTooltip('Close'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(V2CommitSheet), findsNothing);
+    expect(commits, 0);
+    expect(find.text('Changes'), findsOneWidget);
   });
 }

@@ -8,11 +8,10 @@ import '../../design/o_tokens.dart';
 import 'composer_attachments.dart';
 import 'composer_mentions.dart';
 import 'composer_voice.dart';
+import 'model_chip.dart';
+import 'queue_dock.dart';
 
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
-
-/// Keeps a long model name from starving the screen title in the top bar.
-const double _modelChipMaxWidth = 120;
 
 /// A tappable starting point on the empty chat screen.
 @immutable
@@ -62,6 +61,9 @@ class V2ChatPageData {
       ),
     ],
     this.queuedCount = 0,
+    this.queuedPreview,
+    this.autoOnly = false,
+    this.subagentCount = 0,
     this.limitResetLabel = 'Resets in 6h 12m',
     this.errorMessage =
         'Ovid could not load this chat. Check your connection and try again.',
@@ -69,7 +71,7 @@ class V2ChatPageData {
     this.composerHint = 'Ask Ovid to do anything...',
     this.offlineTitle = "You're offline",
     this.offlineMessage = 'Messages will send when you reconnect.',
-  });
+  }) : assert(subagentCount >= 0, 'subagentCount cannot be negative');
 
   final String title;
   final String? sessionId;
@@ -82,6 +84,18 @@ class V2ChatPageData {
   final V2ChatState state;
   final List<V2ChatSuggestion> suggestions;
   final int queuedCount;
+
+  /// Text of the next queued message. When null or empty the dock still shows
+  /// the count but omits the preview line.
+  final String? queuedPreview;
+
+  /// Free and Go are Auto-only. The model chip shows a lock and speaks
+  /// "Auto only"; it stays tappable so the upgrade menu can open.
+  final bool autoOnly;
+
+  /// Subagents launched in this session, shown as a badge on the model chip.
+  final int subagentCount;
+
   final String limitResetLabel;
   final String errorMessage;
   final String permissionLabel;
@@ -104,11 +118,14 @@ class V2ChatPage extends StatefulWidget {
     this.onSend,
     this.onStop,
     this.onAttach,
+    this.onPlus,
     this.onPermissionTap,
     this.onMic,
     this.onRetry,
     this.onSeePlans,
     this.onDraftChanged,
+    this.onSendQueuedNow,
+    this.onDismissQueued,
     this.onSubmit,
     this.mentionSource,
     this.attachmentPicker,
@@ -126,11 +143,23 @@ class V2ChatPage extends StatefulWidget {
   final ValueChanged<String>? onSend;
   final VoidCallback? onStop;
   final VoidCallback? onAttach;
+
+  /// When supplied, the composer "+" opens the host's plus menu instead of
+  /// the file picker. Null keeps the default picker behaviour.
+  final VoidCallback? onPlus;
+
   final VoidCallback? onPermissionTap;
   final VoidCallback? onMic;
   final VoidCallback? onRetry;
   final VoidCallback? onSeePlans;
   final ValueChanged<String>? onDraftChanged;
+
+  /// Send the queued message immediately by cancelling the active run. This
+  /// is the same behaviour as [onStop]; when null the dock falls back to it.
+  final VoidCallback? onSendQueuedNow;
+
+  /// Remove the queued message without sending it.
+  final VoidCallback? onDismissQueued;
 
   /// Rich send callback: text, staged files and the ids the draft references.
   /// When provided it replaces [onSend].
@@ -213,7 +242,9 @@ class _V2ChatPageState extends State<V2ChatPage> {
   }
 
   V2MentionSource get _mentionSource =>
-      widget.mentionSource ?? const V2AppMentionSource();
+      widget.mentionSource ??
+      v2DefaultMentionSource ??
+      const V2EmptyMentionSource();
 
   void _handleControllerChanged() {
     if (_syncingDraft) return;
@@ -285,6 +316,10 @@ class _V2ChatPageState extends State<V2ChatPage> {
 
   Future<void> _attach() async {
     if (_locked || _running) return;
+    if (widget.onPlus != null) {
+      widget.onPlus!();
+      return;
+    }
     final picker = widget.attachmentPicker;
     if (picker == null && widget.onAttach != null) {
       widget.onAttach!();
@@ -387,6 +422,8 @@ class _V2ChatPageState extends State<V2ChatPage> {
       appBar: _ChatTopBar(
         title: data.title,
         modelLabel: data.modelLabel,
+        autoOnly: data.autoOnly,
+        subagentCount: data.subagentCount,
         onMenu: widget.onMenu,
         onModelChipTap: widget.onModelChipTap,
         onStudio: widget.onStudio,
@@ -431,6 +468,13 @@ class _V2ChatPageState extends State<V2ChatPage> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     _StatusRow(data: data),
+                    if (data.queuedCount > 0)
+                      V2QueueDock(
+                        count: data.queuedCount,
+                        preview: data.queuedPreview ?? '',
+                        onSendNow: widget.onSendQueuedNow ?? widget.onStop,
+                        onDismiss: widget.onDismissQueued,
+                      ),
                     _Composer(
                       data: data,
                       controller: _controller,
@@ -445,6 +489,7 @@ class _V2ChatPageState extends State<V2ChatPage> {
                       onSend: _send,
                       onStop: widget.onStop,
                       onAttach: _attach,
+                      onPlus: widget.onPlus,
                       onPermissionTap: widget.onPermissionTap,
                       onMic: _toggleVoice,
                     ),
@@ -498,6 +543,8 @@ class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
   const _ChatTopBar({
     required this.title,
     required this.modelLabel,
+    required this.autoOnly,
+    required this.subagentCount,
     required this.onMenu,
     required this.onModelChipTap,
     required this.onStudio,
@@ -507,6 +554,8 @@ class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
 
   final String title;
   final String modelLabel;
+  final bool autoOnly;
+  final int subagentCount;
   final VoidCallback? onMenu;
   final VoidCallback? onModelChipTap;
   final VoidCallback? onStudio;
@@ -530,12 +579,22 @@ class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
       ),
       title: Row(
         children: [
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: _modelChipMaxWidth),
-            child: _ModelChip(label: modelLabel, onTap: onModelChipTap),
+          // The chip and the title share the bar. Both are flexible so a
+          // 200 % text scale on a 320 dp screen ellipsizes them instead of
+          // overflowing the row.
+          Flexible(
+            flex: 3,
+            child: V2ModelChip(
+              label: modelLabel,
+              autoOnly: autoOnly,
+              subagentCount: subagentCount,
+              enabled: onModelChipTap != null,
+              onTap: onModelChipTap,
+            ),
           ),
           const SizedBox(width: OSpace.xs),
           Flexible(
+            flex: 2,
             child: Text(
               title,
               maxLines: 1,
@@ -566,63 +625,6 @@ class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
       bottom: PreferredSize(
         preferredSize: const Size.fromHeight(1),
         child: Divider(height: 1, color: c.hairline),
-      ),
-    );
-  }
-}
-
-class _ModelChip extends StatelessWidget {
-  const _ModelChip({required this.label, required this.onTap});
-
-  final String label;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OPressable(
-      onTap: onTap,
-      semanticLabel: 'Model: $label. Change model',
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: OSpace.touch),
-        child: Center(
-          child: Container(
-            constraints: const BoxConstraints(minHeight: 32),
-            padding: const EdgeInsets.symmetric(
-              horizontal: OSpace.s,
-              vertical: 5,
-            ),
-            decoration: BoxDecoration(
-              color: c.surfaceAlt,
-              borderRadius: BorderRadius.circular(ORadius.pill),
-              border: Border.all(color: c.hairline),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 6,
-                  height: 6,
-                  decoration: BoxDecoration(
-                    color: c.success,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.label.copyWith(color: c.text),
-                  ),
-                ),
-                const SizedBox(width: 2),
-                Icon(Icons.expand_more_rounded, size: 16, color: c.textMuted),
-              ],
-            ),
-          ),
-        ),
       ),
     );
   }
@@ -962,6 +964,7 @@ class _Composer extends StatelessWidget {
     required this.onSend,
     required this.onStop,
     required this.onAttach,
+    required this.onPlus,
     required this.onPermissionTap,
     required this.onMic,
   });
@@ -979,6 +982,7 @@ class _Composer extends StatelessWidget {
   final VoidCallback onSend;
   final VoidCallback? onStop;
   final VoidCallback? onAttach;
+  final VoidCallback? onPlus;
   final VoidCallback? onPermissionTap;
   final VoidCallback? onMic;
 
@@ -1012,7 +1016,9 @@ class _Composer extends StatelessWidget {
             children: [
               OIconButton(
                 icon: Icons.add_rounded,
-                semanticLabel: 'Attach a file',
+                semanticLabel: onPlus != null
+                    ? 'Add attachment or action'
+                    : 'Attach a file',
                 onPressed: enabled ? onAttach : null,
               ),
               Expanded(

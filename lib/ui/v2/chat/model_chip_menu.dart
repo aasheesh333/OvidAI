@@ -13,6 +13,11 @@ const double _menuMaxWidth = 336;
 /// spoken label can never drift apart.
 const String _lockedPlanLabel = 'Plus plan';
 
+/// Default explanation shown while the plan is Auto-only.
+const String _defaultUpgradeHint =
+    'Upgrade to Plus or Pro to pick a model manually. '
+    'Auto is included on every plan.';
+
 /// A locked model row in the compact chip menu.
 @immutable
 class V2ChipModel {
@@ -38,11 +43,14 @@ class V2ModelChipMenuData {
     this.autoName = 'Auto',
     this.autoSubtitle = 'Picks the best model for each task',
     this.autoTag = 'Included free',
-    this.autoSelected = true,
+    this.selectedId = 'auto',
     this.manageLabel = 'Manage models',
     this.compareLabel = 'Compare plans',
     this.comparePriceLabel = 'From \$18/mo',
     this.note = 'Free plan uses Auto only.',
+    this.manualModelsAllowed = false,
+    this.upgradeHint = _defaultUpgradeHint,
+    this.lockedPlanLabel = _lockedPlanLabel,
   });
 
   final List<V2ChipModel> lockedModels;
@@ -50,11 +58,36 @@ class V2ModelChipMenuData {
   final String autoName;
   final String autoSubtitle;
   final String autoTag;
-  final bool autoSelected;
+  final String selectedId;
   final String manageLabel;
   final String compareLabel;
   final String comparePriceLabel;
   final String note;
+
+  /// Whether the current plan may pick a manual model. Free and Go are
+  /// Auto-only; Plus and Pro allow every model. Defaults to false because
+  /// [lockedModels] only carries rows the caller expects to gate.
+  final bool manualModelsAllowed;
+
+  /// Short explanation shown under the header while the plan is Auto-only.
+  final String upgradeHint;
+
+  /// Plan a manual model requires, used by the locked-row tag and its spoken
+  /// label. Free and Go both need Plus.
+  final String lockedPlanLabel;
+
+  bool get autoSelected => selectedId == 'auto';
+
+  /// True when the plan can only use Auto. The explicit
+  /// [manualModelsAllowed] gate wins, and an Auto-only tier label is also
+  /// treated as such so a caller that forgets the flag cannot leak manual
+  /// models. `Starter` is the catalog's legacy name for the Go tier.
+  bool get autoOnly =>
+      !manualModelsAllowed ||
+      tierLabel == 'Free' ||
+      tierLabel == 'Free plan' ||
+      tierLabel == 'Go' ||
+      tierLabel == 'Starter';
 }
 
 /// Compact popover shown from the model chip in the chat app bar.
@@ -118,8 +151,29 @@ class V2ModelChipMenu extends StatelessWidget {
                 ],
               ),
             ),
+            if (data.autoOnly)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  OSpace.s,
+                  0,
+                  OSpace.s,
+                  OSpace.s,
+                ),
+                child: _UpgradeNotice(
+                  hint: data.upgradeHint,
+                  planLabel: data.lockedPlanLabel,
+                ),
+              ),
             _AutoRow(data: data, onTap: () => onSelect('auto')),
-            for (final model in data.lockedModels) _LockedRow(model: model),
+            for (final model in data.lockedModels)
+              if (data.autoOnly)
+                _LockedRow(model: model, planLabel: data.lockedPlanLabel)
+              else
+                _ManualRow(
+                  model: model,
+                  selected: data.selectedId == model.id,
+                  onTap: () => onSelect(model.id),
+                ),
             Padding(
               padding: const EdgeInsets.symmetric(vertical: OSpace.s),
               child: Divider(height: 1, color: c.hairline),
@@ -184,6 +238,38 @@ class _PlanTag extends StatelessWidget {
       child: Text(
         label,
         style: OType.caption.copyWith(color: fg, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+}
+
+class _UpgradeNotice extends StatelessWidget {
+  const _UpgradeNotice({required this.hint, required this.planLabel});
+
+  final String hint;
+  final String planLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      label: '$planLabel required. $hint',
+      child: Container(
+        padding: const EdgeInsets.all(OSpace.s),
+        decoration: BoxDecoration(
+          color: c.accentSoft,
+          borderRadius: BorderRadius.circular(ORadius.m),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.lock_outline_rounded, size: 18, color: c.accent),
+            const SizedBox(width: OSpace.s),
+            Expanded(
+              child: Text(hint, style: OType.caption.copyWith(color: c.text)),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -272,16 +358,94 @@ class _AutoRow extends StatelessWidget {
   }
 }
 
-class _LockedRow extends StatelessWidget {
-  const _LockedRow({required this.model});
+class _ManualRow extends StatelessWidget {
+  const _ManualRow({
+    required this.model,
+    required this.selected,
+    required this.onTap,
+  });
 
   final V2ChipModel model;
+  final bool selected;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return Semantics(
-      label: '${model.name}, ${model.subtitle}, locked, $_lockedPlanLabel',
+      label: '${model.name}, ${model.subtitle}',
+      button: true,
+      selected: selected,
+      onTap: onTap,
+      excludeSemantics: true,
+      child: OPressable(
+        onTap: onTap,
+        child: Container(
+          constraints: const BoxConstraints(minHeight: OSpace.listRow),
+          padding: const EdgeInsets.all(OSpace.s),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: c.surfaceAlt,
+                  borderRadius: BorderRadius.circular(ORadius.m),
+                ),
+                child: Icon(model.icon, size: 20, color: c.textMuted),
+              ),
+              const SizedBox(width: OSpace.s),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      model.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.label.copyWith(
+                        color: c.text,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      model.subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.caption.copyWith(color: c.textMuted),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: OSpace.s),
+              Icon(
+                selected
+                    ? Icons.check_circle_rounded
+                    : Icons.radio_button_unchecked_rounded,
+                size: 22,
+                color: selected ? c.accent : c.textFaint,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LockedRow extends StatelessWidget {
+  const _LockedRow({required this.model, required this.planLabel});
+
+  final V2ChipModel model;
+  final String planLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      label: '${model.name}, ${model.subtitle}, locked, $planLabel',
       enabled: false,
       excludeSemantics: true,
       child: Container(
@@ -329,10 +493,7 @@ class _LockedRow extends StatelessWidget {
               // wraps rather than pushing the row past the screen edge.
               ConstrainedBox(
                 constraints: BoxConstraints(maxWidth: constraints.maxWidth / 2),
-                child: const _PlanTag(
-                  label: _lockedPlanLabel,
-                  tone: OPillTone.accent,
-                ),
+                child: _PlanTag(label: planLabel, tone: OPillTone.accent),
               ),
               const SizedBox(width: OSpace.xs),
               Icon(Icons.lock_outline_rounded, size: 18, color: c.textFaint),

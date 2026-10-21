@@ -8,6 +8,10 @@ import 'package:ovid_ai/ui/v2/settings/data_control_page.dart';
 import 'package:ovid_ai/ui/v2/settings/memory_page.dart';
 import 'package:ovid_ai/ui/v2/settings/storage_page.dart';
 
+void _noop() {}
+
+void _toggle(String id, bool value) {}
+
 void main() {
   final screens = <String, Widget>{
     'memory': MemoryPage(
@@ -27,15 +31,52 @@ void main() {
     ),
     'data': DataControlPage(
       data: V2DataControlPageData(
+        totalDataSizeLabel: '1.2 GB across 42 chats',
+        exportSessions: const [
+          V2ExportSession(
+            id: 'a',
+            name: 'Q3 launch plan',
+            detail: '42 messages',
+            sizeBytes: 40 * 1024 * 1024,
+            sizeLabel: '40 MB',
+            heavyArtifacts: true,
+          ),
+          V2ExportSession(
+            id: 'b',
+            name: 'Market research',
+            detail: '18 messages',
+            sizeBytes: 30 * 1024 * 1024,
+            sizeLabel: '30 MB',
+          ),
+        ],
         importValidation: const V2ImportValidation(
           fileName: 'ovid-backup-2026-10-21.zip',
           message: 'Ready to import: 12 MB · 42 chats · 860 messages.',
           valid: true,
+          planQuotaLabel: 'Needs 12 MB · 1.8 GB free on your plan.',
         ),
+        onDeleteData: _noop,
+        onResetMemory: _noop,
+        onExportSessionToggled: _toggle,
       ),
     ),
     'storage': StoragePage(
       data: V2StoragePageData(
+        usedGb: 1.2,
+        totalGb: 3,
+        planName: 'Free plan',
+        quotaLabel: '3 GB included',
+        slices: const [
+          V2StorageSlice(
+            label: 'Artifacts',
+            sizeLabel: '410 MB',
+            valueGb: 0.41,
+          ),
+          V2StorageSlice(label: 'Sessions', sizeLabel: '620 MB', valueGb: 0.62),
+          V2StorageSlice(label: 'Cache', sizeLabel: '170 MB', valueGb: 0.17),
+        ],
+        cacheGb: 0.17,
+        cacheSizeLabel: '170 MB',
         largestItems: const [
           V2StorageItem(
             id: 'c1',
@@ -44,6 +85,7 @@ void main() {
             sizeLabel: '180 MB',
           ),
         ],
+        onClearCache: _noop,
       ),
     ),
     'appearance': AppearancePage(
