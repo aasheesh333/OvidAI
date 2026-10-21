@@ -6,7 +6,8 @@ import java.security.Signature
 import java.security.cert.X509Certificate
 import java.util.Base64
 
-val ovidMinSdk = 23
+// Google Play automatic protection requires API 24+; 23 uploads are rejected.
+val ovidMinSdk = 24
 
 // Google Play distribution switch. The single source of truth is the Dart
 // define `--dart-define=OVID_PLAY_BUILD=true` (Flutter forwards dart-defines
@@ -205,7 +206,7 @@ dependencies {
     // shared_preferences_android 2.4.16 at 1.1.7) ships
     // libdatastore_shared_counter.so with a GNU_RELRO end that is not 16 KB
     // aligned. 1.2.0 still has it; 1.2.1 is the first release with 16 KB clean
-    // arm64-v8a/armeabi-v7a/x86/x86_64 libraries. minSdk 23 matches ours.
+    // arm64-v8a/armeabi-v7a/x86/x86_64 libraries. minSdk 24 is at or below ours.
     constraints {
         for (artifact in listOf(
             "datastore", "datastore-core", "datastore-core-android", "datastore-core-okio",
