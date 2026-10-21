@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport"/><meta content="mobile_stack" name="shell-type"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/><style>@layer base{html,body{width:100vw;margin:0;padding:0;background-color:#131317;color:#e4e1e7;}body{overscroll-behavior:none;-webkit-tap-highlight-color:transparent;}.pb-safe{padding-bottom:env(safe-area-inset-bottom,0px);}.pt-safe{padding-top:env(safe-area-inset-top,0px);}main>:first-child{margin-top:0!important;}main>:last-child{margin-bottom:0!important;}}::-webkit-scrollbar{display:none;}</style><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config = { darkMode: "class", theme: { extend: { "colors": { "surface-variant": "#353439", "on-primary": "#31009a", "on-background": "#e4e1e7", "on-secondary-container": "#00452e", "on-surface": "#e4e1e7", "on-primary-fixed": "#1c0062", "surface-container-low": "#1b1b1f", "on-primary-container": "#2a0088", "inverse-primary": "#603ce2", "on-secondary-fixed": "#002114", "surface-container-lowest": "#0e0e12", "secondary-fixed-dim": "#45dfa4", "on-error": "#690005", "outline": "#938ea1", "secondary": "#45dfa4", "on-tertiary-fixed": "#410006", "primary-fixed-dim": "#cabeff", "on-tertiary-container": "#5b000d", "outline-variant": "#484555", "tertiary-container": "#ea6767", "surface-container-high": "#2a292e", "inverse-on-surface": "#303034", "surface": "#131317", "background": "#131317", "tertiary-fixed-dim": "#ffb3b0", "error": "#ffb4ab", "secondary-container": "#00bd85", "tertiary-fixed": "#ffdad8", "primary-container": "#947dff", "tertiary": "#ffb3b0", "surface-container": "#1f1f23", "inverse-surface": "#e4e1e7", "secondary-fixed": "#68fcbf", "primary": "#cabeff", "on-secondary-fixed-variant": "#005137", "surface-container-highest": "#353439", "primary-fixed": "#e6deff", "surface-dim": "#131317", "on-tertiary": "#670211", "error-container": "#93000a", "on-error-container": "#ffdad6", "on-tertiary-fixed-variant": "#881d24", "on-primary-fixed-variant": "#4816cb", "on-secondary": "#003825", "surface-tint": "#cabeff", "surface-bright": "#39393d", "on-surface-variant": "#c9c4d8" }, "borderRadius": { "DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px" }, "spacing": { "gutter": "1rem", "space-sm": "0.5rem", "space-xl": "2rem", "space-md": "1rem", "margin": "1.5rem", "space-xs": "0.25rem", "space-lg": "1.5rem" }, "fontFamily": { "headline-lg": ["Inter"], "body-sm": ["Inter"], "body-lg": ["Inter"], "headline-sm": ["Inter"], "caption": ["Inter"] }, "fontSize": { "headline-lg": ["28px", { "lineHeight": "39px", "letterSpacing": "-0.02em", "fontWeight": "600" }], "body-sm": ["14px", { "lineHeight": "19.6px", "letterSpacing": "0.01em", "fontWeight": "400" }], "body-lg": ["16px", { "lineHeight": "22.4px", "letterSpacing": "0em", "fontWeight": "400" }], "headline-sm": ["20px", { "lineHeight": "28px", "letterSpacing": "-0.01em", "fontWeight": "600" }], "caption": ["12px", { "lineHeight": "16.8px", "letterSpacing": "0.02em", "fontWeight": "500" }] } } } };</script></head><body class="bg-surface font-body-lg text-body-lg text-on-surface antialiased flex flex-col min-h-screen selection:bg-primary-container selection:text-on-primary-container"><header class="fixed top-0 inset-x-0 z-50 bg-surface/80 backdrop-blur-xl pt-safe shadow-[0_1px_8px_rgba(0,0,0,0.45)]"><div class="h-16 px-margin flex items-center justify-between"><div class="flex items-center gap-space-sm"><button aria-label="Go Back" class="w-12 h-12 rounded-full flex items-center justify-center text-on-surface hover:text-primary transition-colors" onclick="window.history.back()" type="button"><span class="material-symbols-outlined text-[24px]">arrow_back</span></button><h1 class="font-headline-sm text-headline-sm text-on-surface tracking-tight select-none">Share Chat Sheet</h1></div><div class="flex items-center gap-space-xs"><button aria-label="Close modal" class="w-12 h-12 rounded-full flex items-center justify-center text-on-surface-variant hover:text-on-surface transition-colors" type="button"><span class="material-symbols-outlined text-[24px]">close</span></button><div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center ml-space-xs"><span class="material-symbols-outlined text-on-primary text-[18px]">person</span></div></div></div></header><main class="flex flex-col relative w-full px-margin pt-16 pb-safe bg-surface min-h-screen"><div class="flex flex-col w-full relative">
+<!-- Backdrop Simulated Chat Context (Faint, gives bottom sheet authentic contextual presence) -->
+<div aria-hidden="true" class="w-full space-y-space-md opacity-20 pointer-events-none select-none pb-space-lg">
+<div class="flex items-start gap-space-sm max-w-[85%]">
+<div class="w-8 h-8 rounded-full bg-primary-container flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-[16px] text-on-primary-container">auto_awesome</span>
+</div>
+<div class="p-space-md rounded-xl bg-surface-container text-on-surface">
+<p class="font-body-sm text-body-sm">I've completed restructuring the tensor optimization loop in Rust. Memory allocation reduced by 34%.</p>
+</div>
+</div>
+<div class="flex items-end justify-end w-full">
+<div class="p-space-md rounded-xl bg-surface-container-high text-on-surface max-w-[80%]">
+<p class="font-body-sm text-body-sm">Generate the benchmark chart and export the link for Aarav.</p>
+</div>
+</div>
+</div>
+<!-- Bottom Sheet Overlay Card -->
+<div class="relative w-full rounded-t-xl bg-surface-container-low shadow-2xl pt-space-sm pb-space-xl px-space-md flex flex-col gap-space-lg animate-in slide-in-from-bottom duration-300">
+<!-- Top Grabber / Drag Handle -->
+<div class="w-full flex justify-center py-space-xs cursor-grab active:cursor-grabbing">
+<div class="w-10 h-1 rounded-full bg-surface-variant"></div>
+</div>
+<!-- Sheet Header -->
+<div class="flex flex-col gap-1">
+<div class="flex items-center justify-between">
+<h2 class="font-headline-sm text-headline-sm text-on-surface">Share this chat</h2>
+<span class="inline-flex items-center gap-space-xs px-2.5 py-1 rounded-full bg-secondary-container/20 text-secondary font-caption text-caption">
+<span class="w-1.5 h-1.5 rounded-full bg-secondary animate-pulse"></span>
+          Live Public Sync
+        </span>
+</div>
+<p class="font-body-sm text-body-sm text-on-surface-variant">Create a private link anyone can view or fork.</p>
+</div>
+<!-- Share Link Container -->
+<div class="w-full p-space-sm rounded-xl bg-surface-container-lowest flex items-center justify-between gap-space-sm shadow-md">
+<div class="flex items-center gap-space-sm pl-space-xs min-w-0">
+<div class="w-8 h-8 rounded-lg bg-surface-container flex items-center justify-center text-primary shrink-0">
+<span class="material-symbols-outlined text-[18px]">link</span>
+</div>
+<span class="font-caption text-caption text-on-surface truncate select-all" id="shareUrlText">https://ovid.si/c/8f92a10c</span>
+</div>
+<button class="shrink-0 h-10 px-space-md rounded-full bg-primary-container text-on-primary-container font-caption text-caption font-semibold flex items-center gap-space-xs active:scale-95 transition-transform hover:opacity-90" id="copyBtn" onclick="copyShareLink()" type="button">
+<span class="material-symbols-outlined text-[16px]" id="copyBtnIcon">content_copy</span>
+<span id="copyBtnLabel">Copy link</span>
+</button>
+</div>
+<!-- Quick Share Targets -->
+<div class="flex flex-col gap-space-xs">
+<span class="font-caption text-caption text-on-surface-variant uppercase tracking-wider pl-1">Instant send</span>
+<div class="flex items-center justify-between gap-space-xs pt-1">
+<!-- WhatsApp -->
+<button class="group flex flex-col items-center gap-1.5 flex-1 min-w-0 active:scale-95 transition-transform" type="button">
+<div class="w-12 h-12 rounded-full bg-secondary-container/20 text-secondary flex items-center justify-center group-hover:bg-secondary-container/30 transition-colors">
+<span class="material-symbols-outlined text-[24px]">chat</span>
+</div>
+<span class="font-caption text-caption text-on-surface-variant truncate w-full text-center">WhatsApp</span>
+</button>
+<!-- Gmail -->
+<button class="group flex flex-col items-center gap-1.5 flex-1 min-w-0 active:scale-95 transition-transform" type="button">
+<div class="w-12 h-12 rounded-full bg-tertiary-container/20 text-tertiary flex items-center justify-center group-hover:bg-tertiary-container/30 transition-colors">
+<span class="material-symbols-outlined text-[24px]">mail</span>
+</div>
+<span class="font-caption text-caption text-on-surface-variant truncate w-full text-center">Gmail</span>
+</button>
+<!-- Slack -->
+<button class="group flex flex-col items-center gap-1.5 flex-1 min-w-0 active:scale-95 transition-transform" type="button">
+<div class="w-12 h-12 rounded-full bg-primary-container/20 text-primary flex items-center justify-center group-hover:bg-primary-container/30 transition-colors">
+<span class="material-symbols-outlined text-[24px]">forum</span>
+</div>
+<span class="font-caption text-caption text-on-surface-variant truncate w-full text-center">Slack</span>
+</button>
+<!-- Telegram -->
+<button class="group flex flex-col items-center gap-1.5 flex-1 min-w-0 active:scale-95 transition-transform" type="button">
+<div class="w-12 h-12 rounded-full bg-primary/20 text-primary-fixed flex items-center justify-center group-hover:bg-primary/30 transition-colors">
+<span class="material-symbols-outlined text-[24px]">send</span>
+</div>
+<span class="font-caption text-caption text-on-surface-variant truncate w-full text-center">Telegram</span>
+</button>
+<!-- More -->
+<button class="group flex flex-col items-center gap-1.5 flex-1 min-w-0 active:scale-95 transition-transform" type="button">
+<div class="w-12 h-12 rounded-full bg-surface-variant text-on-surface-variant flex items-center justify-center group-hover:text-on-surface transition-colors">
+<span class="material-symbols-outlined text-[24px]">more_horiz</span>
+</div>
+<span class="font-caption text-caption text-on-surface-variant truncate w-full text-center">More</span>
+</button>
+</div>
+</div>
+<!-- Permissions / Toggles Section -->
+<div class="flex flex-col gap-space-sm">
+<span class="font-caption text-caption text-on-surface-variant uppercase tracking-wider pl-1">Link configuration</span>
+<!-- Toggle 1: Anyone with link -->
+<div class="p-space-md rounded-xl bg-surface-container flex items-center justify-between gap-space-md">
+<div class="flex items-start gap-space-sm min-w-0">
+<div class="w-7 h-7 rounded-full bg-surface-variant flex items-center justify-center text-on-surface-variant shrink-0 mt-0.5">
+<span class="material-symbols-outlined text-[16px]">public</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-sm text-body-sm text-on-surface font-semibold truncate">Anyone with the link can view</span>
+<span class="font-caption text-caption text-on-surface-variant leading-tight">Read-only. They can fork it into their own account.</span>
+</div>
+</div>
+<button aria-checked="true" class="w-12 h-7 rounded-full bg-primary-container p-0.5 flex items-center justify-end transition-colors shrink-0" onclick="toggleSwitch(this)" role="switch" type="button">
+<span class="w-6 h-6 rounded-full bg-on-primary-container flex items-center justify-center shadow-md">
+<span class="material-symbols-outlined text-[14px] text-primary-container">check</span>
+</span>
+</button>
+</div>
+<!-- Toggle 2: Show my name -->
+<div class="p-space-md rounded-xl bg-surface-container flex items-center justify-between gap-space-md">
+<div class="flex items-start gap-space-sm min-w-0">
+<div class="w-7 h-7 rounded-full bg-surface-variant flex items-center justify-center text-on-surface-variant shrink-0 mt-0.5">
+<span class="material-symbols-outlined text-[16px]">badge</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-sm text-body-sm text-on-surface font-semibold truncate">Show my name</span>
+<span class="font-caption text-caption text-on-surface-variant leading-tight">Displays "Shared by Aarav Sharma" on preview.</span>
+</div>
+</div>
+<button aria-checked="true" class="w-12 h-7 rounded-full bg-primary-container p-0.5 flex items-center justify-end transition-colors shrink-0" onclick="toggleSwitch(this)" role="switch" type="button">
+<span class="w-6 h-6 rounded-full bg-on-primary-container flex items-center justify-center shadow-md">
+<span class="material-symbols-outlined text-[14px] text-primary-container">check</span>
+</span>
+</button>
+</div>
+</div>
+<!-- Security Note -->
+<div class="p-space-md rounded-xl bg-surface-container-high/60 flex items-start gap-space-sm">
+<div class="w-7 h-7 rounded-full bg-secondary-container/20 text-secondary flex items-center justify-center shrink-0 mt-0.5">
+<span class="material-symbols-outlined text-[16px]">verified_user</span>
+</div>
+<p class="font-caption text-caption text-on-surface-variant leading-relaxed">
+<strong class="text-on-surface font-semibold">Zero-leak privacy:</strong> Shared chats never include your files, private API keys, or agent connectors.
+      </p>
+</div>
+<!-- Danger / Stop Action Button -->
+<div class="flex flex-col items-center pt-space-xs">
+<button class="inline-flex items-center gap-space-xs h-12 px-space-lg rounded-full text-tertiary-fixed-dim hover:bg-tertiary-container/10 active:scale-95 transition-all" onclick="confirmStopSharing(this)" type="button">
+<span class="material-symbols-outlined text-[18px]">link_off</span>
+<span class="font-body-sm text-body-sm font-semibold">Stop sharing</span>
+</button>
+</div>
+</div>
+</div>
+<script>
+  function toggleSwitch(btn) {
+    const isChecked = btn.getAttribute('aria-checked') === 'true';
+    const nextState = !isChecked;
+    btn.setAttribute('aria-checked', String(nextState));
+
+    const knob = btn.querySelector('span');
+    const checkIcon = knob.querySelector('span');
+
+    if (nextState) {
+      btn.className = 'w-12 h-7 rounded-full bg-primary-container p-0.5 flex items-center justify-end transition-colors shrink-0';
+      knob.className = 'w-6 h-6 rounded-full bg-on-primary-container flex items-center justify-center shadow-md';
+      checkIcon.style.display = 'block';
+    } else {
+      btn.className = 'w-12 h-7 rounded-full bg-surface-variant p-0.5 flex items-center justify-start transition-colors shrink-0';
+      knob.className = 'w-6 h-6 rounded-full bg-outline flex items-center justify-center shadow-md';
+      checkIcon.style.display = 'none';
+    }
+  }
+
+  function copyShareLink() {
+    const text = document.getElementById('shareUrlText').innerText;
+    navigator.clipboard?.writeText(text);
+    
+    const copyBtn = document.getElementById('copyBtn');
+    const copyLabel = document.getElementById('copyBtnLabel');
+    const copyIcon = document.getElementById('copyBtnIcon');
+
+    copyLabel.innerText = 'Copied!';
+    copyIcon.innerText = 'done';
+    copyBtn.classList.add('bg-secondary-container', 'text-on-secondary-container');
+    copyBtn.classList.remove('bg-primary-container', 'text-on-primary-container');
+
+    setTimeout(() => {
+      copyLabel.innerText = 'Copy link';
+      copyIcon.innerText = 'content_copy';
+      copyBtn.classList.remove('bg-secondary-container', 'text-on-secondary-container');
+      copyBtn.classList.add('bg-primary-container', 'text-on-primary-container');
+    }, 2000);
+  }
+
+  function confirmStopSharing(btn) {
+    const label = btn.querySelector('span:last-child');
+    if (label.innerText === 'Stop sharing') {
+      label.innerText = 'Tap again to revoke';
+      btn.classList.add('text-error');
+      setTimeout(() => {
+        label.innerText = 'Stop sharing';
+        btn.classList.remove('text-error');
+      }, 3000);
+    } else {
+      label.innerText = 'Link revoked';
+      btn.disabled = true;
+      btn.classList.add('opacity-50');
+      document.getElementById('shareUrlText').innerText = 'Access revoked';
+    }
+  }
+</script></main></body></html>

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport"/><meta content="mobile_stack" name="shell-type"/><link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/><style>@layer base{html,body{width:100%;margin:0;padding:0;background-color:#131317;color:#e4e1e7;font-family:'Inter',sans-serif;}body{overscroll-behavior:none;-webkit-tap-highlight-color:transparent;}.pb-safe{padding-bottom:env(safe-area-inset-bottom,0px);}.pt-safe{padding-top:env(safe-area-inset-top,0px);}main>:first-child{margin-top:0!important;}main>:last-child{margin-bottom:0!important;}}::-webkit-scrollbar{display:none;}</style><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config = { darkMode: "class", theme: { extend: { "colors": { "outline": "#938ea1", "on-primary-container": "#2a0088", "inverse-primary": "#603ce2", "surface-variant": "#353439", "surface": "#131317", "primary-fixed-dim": "#cabeff", "primary-fixed": "#e6deff", "on-surface-variant": "#c9c4d8", "secondary-container": "#00bd85", "on-tertiary": "#670211", "surface-tint": "#cabeff", "inverse-on-surface": "#303034", "background": "#131317", "inverse-surface": "#e4e1e7", "on-error-container": "#ffdad6", "on-secondary-fixed-variant": "#005137", "on-primary-fixed": "#1c0062", "on-tertiary-fixed": "#410006", "surface-container-highest": "#353439", "surface-container-high": "#2a292e", "surface-container": "#1f1f23", "on-secondary": "#003825", "error": "#ffb4ab", "tertiary-fixed-dim": "#ffb3b0", "on-tertiary-container": "#5b000d", "secondary-fixed": "#68fcbf", "tertiary-fixed": "#ffdad8", "on-surface": "#e4e1e7", "on-tertiary-fixed-variant": "#881d24", "primary-container": "#947dff", "surface-bright": "#39393d", "secondary-fixed-dim": "#45dfa4", "outline-variant": "#484555", "tertiary-container": "#ea6767", "surface-dim": "#131317", "surface-container-low": "#1b1b1f", "on-primary": "#31009a", "secondary": "#45dfa4", "surface-container-lowest": "#0e0e12", "on-background": "#e4e1e7", "on-secondary-fixed": "#002114", "tertiary": "#ffb3b0", "primary": "#cabeff", "on-error": "#690005", "error-container": "#93000a", "on-secondary-container": "#00452e", "on-primary-fixed-variant": "#4816cb" }, "borderRadius": { "DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px" }, "spacing": { "space-xs": "0.25rem", "space-lg": "1.5rem", "space-xl": "2rem", "margin": "1.5rem", "space-md": "1rem", "space-sm": "0.5rem", "gutter": "1rem" }, "fontFamily": { "headline-lg": ["Inter"], "headline-sm": ["Inter"], "body-lg": ["Inter"], "caption": ["Inter"], "body-sm": ["Inter"] }, "fontSize": { "headline-lg": ["28px", { "lineHeight": "39px", "letterSpacing": "-0.02em", "fontWeight": "600" }], "headline-sm": ["20px", { "lineHeight": "28px", "letterSpacing": "-0.01em", "fontWeight": "600" }], "body-lg": ["16px", { "lineHeight": "22.4px", "letterSpacing": "0em", "fontWeight": "400" }], "caption": ["12px", { "lineHeight": "16.8px", "letterSpacing": "0.02em", "fontWeight": "500" }], "body-sm": ["14px", { "lineHeight": "19.6px", "letterSpacing": "0.01em", "fontWeight": "400" }] } } } };</script></head><body class="bg-background text-on-surface antialiased flex flex-col min-h-screen"><header class="fixed top-0 inset-x-0 z-50 bg-surface/80 backdrop-blur-xl pt-safe shadow-[0_1px_8px_rgba(0,0,0,0.45)]"><div class="flex justify-between items-center px-margin pt-space-xs text-on-surface-variant font-caption text-caption select-none"><span>9:41</span><div class="flex items-center gap-space-xs"><span class="material-symbols-outlined text-[16px]">signal_cellular_4_bar</span><span class="material-symbols-outlined text-[16px]">wifi</span><span class="material-symbols-outlined text-[16px]">battery_full</span></div></div><div class="h-16 px-margin flex items-center justify-between"><div class="flex items-center gap-space-sm min-w-0 flex-1"><button aria-label="Go back" class="w-11 h-11 -ml-2 rounded-full flex items-center justify-center text-on-surface hover:bg-surface-container active:scale-95 transition-all" onclick="history.back()" type="button"><span class="material-symbols-outlined text-[24px]">arrow_back</span></button><h1 class="font-headline-sm text-headline-sm text-on-surface truncate pr-space-sm">Ovid Si Schedule Runs</h1></div><div class="flex items-center gap-space-xs shrink-0"><button aria-label="More options" class="w-11 h-11 rounded-full flex items-center justify-center text-on-surface-variant hover:text-on-surface hover:bg-surface-container active:scale-95 transition-all" type="button"><span class="material-symbols-outlined text-[22px]">more_vert</span></button><div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center"><span class="material-symbols-outlined text-on-primary text-[18px]">person</span></div></div></div></header><main class="flex flex-col relative w-full pt-16 pb-safe px-margin bg-background min-h-screen"><div class="flex flex-col w-full pb-space-xl">
+<!-- Metric Overview Card -->
+<section class="w-full bg-surface-container rounded-xl p-space-md mb-space-md shadow-sm">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-space-xs">
+<span class="font-headline-sm text-headline-sm text-on-surface">24</span>
+<span class="font-body-sm text-body-sm text-on-surface-variant">total runs logged</span>
+</div>
+<div class="flex items-center gap-space-sm bg-surface-container-high px-space-sm py-space-xs rounded-full">
+<span class="flex items-center gap-space-xs font-caption text-caption text-on-surface">
+<span class="w-2 h-2 rounded-full bg-secondary"></span>
+          23
+        </span>
+<span class="text-outline-variant font-caption text-caption">•</span>
+<span class="flex items-center gap-space-xs font-caption text-caption text-on-surface">
+<span class="w-2 h-2 rounded-full bg-tertiary-container"></span>
+          1
+        </span>
+</div>
+</div>
+<!-- Health Breakdown Bar -->
+<div class="w-full h-1.5 bg-surface-container-highest rounded-full mt-space-md overflow-hidden flex">
+<div class="h-full bg-secondary rounded-full" style="width: 95.8%;"></div>
+<div class="h-full bg-tertiary-container ml-0.5 rounded-full" style="width: 4.2%;"></div>
+</div>
+<div class="flex items-center justify-between mt-space-sm font-caption text-caption text-on-surface-variant">
+<span>95.8% success reliability</span>
+<span>Avg runtime 52s</span>
+</div>
+</section>
+<!-- Filter Chips Row -->
+<div aria-label="Run status filters" class="flex items-center gap-space-sm overflow-x-auto pb-space-sm mb-space-md" role="tablist">
+<button aria-selected="true" class="h-9 px-space-md rounded-xl bg-primary-container/20 text-primary font-caption text-caption flex items-center justify-center shrink-0 active:scale-95 transition-transform" type="button">
+      All (24)
+    </button>
+<button class="h-9 px-space-md rounded-xl bg-surface-container text-on-surface-variant font-caption text-caption flex items-center gap-1.5 shrink-0 active:scale-95 transition-transform" type="button">
+<span class="w-1.5 h-1.5 rounded-full bg-secondary"></span>
+      Succeeded (23)
+    </button>
+<button class="h-9 px-space-md rounded-xl bg-surface-container text-on-surface-variant font-caption text-caption flex items-center gap-1.5 shrink-0 active:scale-95 transition-transform" type="button">
+<span class="w-1.5 h-1.5 rounded-full bg-tertiary-container"></span>
+      Failed (1)
+    </button>
+</div>
+<!-- Run History List Grouped by Date -->
+<div class="flex flex-col gap-space-lg">
+<!-- Group: TODAY -->
+<div class="flex flex-col gap-space-sm">
+<div class="flex items-center justify-between px-space-xs">
+<span class="font-caption text-caption uppercase tracking-wider text-on-surface-variant">Today — May 18</span>
+<span class="font-caption text-caption text-outline">2 executions</span>
+</div>
+<!-- Run 1: Succeeded -->
+<article class="w-full bg-surface-container rounded-xl p-space-md flex flex-col gap-space-sm active:bg-surface-container-high transition-colors cursor-pointer">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-space-sm">
+<div class="w-7 h-7 rounded-full bg-secondary/15 flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-secondary text-[16px]">check</span>
+</div>
+<div class="flex items-center gap-space-xs">
+<span class="font-body-sm text-body-sm text-on-surface font-medium">9:00 AM</span>
+<span class="text-outline-variant font-caption text-caption">•</span>
+<span class="font-caption text-caption text-on-surface-variant">1m 12s</span>
+</div>
+</div>
+<span class="font-caption text-caption text-secondary bg-secondary-container/20 px-2 py-0.5 rounded-full">Completed</span>
+</div>
+<p class="font-body-sm text-body-sm text-on-surface-variant pl-9 leading-relaxed">
+          Summarized 12 news items from HackerNews and TechCrunch into <span class="text-on-surface font-mono text-[12px] bg-surface-container-highest px-1.5 py-0.5 rounded">daily-brief.md</span>
+</p>
+</article>
+<!-- Run 2: Failed (Expanded State) -->
+<article class="w-full bg-surface-container rounded-xl p-space-md flex flex-col gap-space-md shadow-sm">
+<div class="flex items-start justify-between">
+<div class="flex items-center gap-space-sm">
+<div class="w-7 h-7 rounded-full bg-error-container/30 flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-error text-[16px]">close</span>
+</div>
+<div class="flex flex-col">
+<div class="flex items-center gap-space-xs">
+<span class="font-body-sm text-body-sm text-on-surface font-medium">3:00 AM</span>
+<span class="text-outline-variant font-caption text-caption">•</span>
+<span class="font-caption text-caption text-on-surface-variant">18s</span>
+</div>
+<span class="font-caption text-caption text-error font-medium mt-0.5">Last run failed · Connector timeout</span>
+</div>
+</div>
+<span class="font-caption text-caption text-error bg-error-container/20 px-2 py-0.5 rounded-full">Failed</span>
+</div>
+<!-- Friendly Diagnostic Box -->
+<div class="w-full bg-error-container/15 rounded-lg p-space-sm flex flex-col gap-space-xs">
+<div class="flex items-center gap-1.5 text-error">
+<span class="material-symbols-outlined text-[15px]">info</span>
+<span class="font-caption text-caption font-semibold">Execution Diagnostic</span>
+</div>
+<p class="font-caption text-caption text-error leading-relaxed">
+            Could not fetch <span class="font-mono underline text-error">https://api.internal.company.com/v1</span>. The endpoint took longer than 15s to respond. Your schedule rules and configured triggers are intact.
+          </p>
+</div>
+<!-- Actions -->
+<div class="flex items-center justify-between pt-space-xs">
+<button class="h-11 px-space-md rounded-full bg-primary-container text-on-primary-container font-body-sm text-body-sm font-medium flex items-center gap-1.5 active:scale-95 transition-transform" type="button">
+<span class="material-symbols-outlined text-[18px]">replay</span>
+            Retry now
+          </button>
+<button class="h-11 px-space-sm rounded-full text-on-surface-variant hover:text-on-surface font-caption text-caption flex items-center gap-1" type="button">
+<span>Inspect log trace</span>
+<span class="material-symbols-outlined text-[16px]">chevron_right</span>
+</button>
+</div>
+</article>
+</div>
+<!-- Group: YESTERDAY -->
+<div class="flex flex-col gap-space-sm">
+<div class="flex items-center justify-between px-space-xs">
+<span class="font-caption text-caption uppercase tracking-wider text-on-surface-variant">Yesterday — May 17</span>
+<span class="font-caption text-caption text-outline">2 executions</span>
+</div>
+<!-- Run 3: Succeeded (Preview Card Variant) -->
+<article class="w-full bg-surface-container rounded-xl p-space-md flex flex-col gap-space-md">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-space-sm">
+<div class="w-7 h-7 rounded-full bg-secondary/15 flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-secondary text-[16px]">check</span>
+</div>
+<div class="flex items-center gap-space-xs">
+<span class="font-body-sm text-body-sm text-on-surface font-medium">9:00 AM</span>
+<span class="text-outline-variant font-caption text-caption">•</span>
+<span class="font-caption text-caption text-on-surface-variant">1m 08s</span>
+</div>
+</div>
+<span class="font-caption text-caption text-secondary bg-secondary-container/20 px-2 py-0.5 rounded-full">Completed</span>
+</div>
+<p class="font-body-sm text-body-sm text-on-surface-variant leading-relaxed">
+          Generated daily dependency vulnerability report.
+        </p>
+<!-- Monospace Output Card -->
+<div class="w-full bg-surface-container-lowest rounded-lg p-space-sm flex flex-col gap-space-xs">
+<div class="flex items-center justify-between text-outline">
+<span class="font-caption text-caption uppercase tracking-wider text-[10px]">Stdout summary</span>
+<span class="material-symbols-outlined text-[14px]">terminal</span>
+</div>
+<p class="font-mono text-caption text-caption text-secondary-fixed-dim">
+            &gt; Found 0 critical, 2 minor outdated packages. All audits passed clean.
+          </p>
+</div>
+<!-- Action Row -->
+<div class="flex items-center gap-space-sm pt-space-xs">
+<button class="h-10 px-space-md rounded-full bg-primary text-on-primary font-caption text-caption flex items-center gap-1.5 active:scale-95 transition-transform" type="button">
+<span class="material-symbols-outlined text-[16px]">chat</span>
+            Open chat
+          </button>
+<button class="h-10 px-space-md rounded-full bg-surface-container-high text-on-surface font-caption text-caption flex items-center gap-1.5 active:scale-95 transition-transform" type="button">
+<span class="material-symbols-outlined text-[16px]">article</span>
+            View artifact
+          </button>
+</div>
+</article>
+<!-- Run 4: Succeeded (Compact) -->
+<article class="w-full bg-surface-container rounded-xl p-space-md flex flex-col gap-space-sm active:bg-surface-container-high transition-colors cursor-pointer">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-space-sm">
+<div class="w-7 h-7 rounded-full bg-secondary/15 flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-secondary text-[16px]">check</span>
+</div>
+<div class="flex items-center gap-space-xs">
+<span class="font-body-sm text-body-sm text-on-surface font-medium">3:00 AM</span>
+<span class="text-outline-variant font-caption text-caption">•</span>
+<span class="font-caption text-caption text-on-surface-variant">44s</span>
+</div>
+</div>
+<span class="font-caption text-caption text-secondary bg-secondary-container/20 px-2 py-0.5 rounded-full">Completed</span>
+</div>
+<p class="font-body-sm text-body-sm text-on-surface-variant pl-9 leading-relaxed">
+          Nightly SQLite backup archived to S3 bucket <span class="text-on-surface font-mono text-[12px] bg-surface-container-highest px-1.5 py-0.5 rounded">s3://ovid-backups-iad</span>.
+        </p>
+</article>
+</div>
+<!-- Empty State Archetype Showcase (Collapsible / Bottom Preview) -->
+<div class="w-full bg-surface-container-low rounded-xl p-space-lg flex flex-col items-center text-center mt-space-md">
+<div class="w-12 h-12 rounded-full bg-surface-container-highest flex items-center justify-center mb-space-sm text-primary">
+<span class="material-symbols-outlined text-[24px]">more_time</span>
+</div>
+<h2 class="font-headline-sm text-headline-sm text-on-surface mb-space-xs">Upcoming scheduled queue</h2>
+<p class="font-body-sm text-body-sm text-on-surface-variant max-w-[280px] mb-space-md leading-relaxed">
+        Next run is programmed for tomorrow at 3:00 AM UTC.
+      </p>
+<div class="flex items-center gap-space-xs text-caption font-caption text-primary">
+<span class="material-symbols-outlined text-[16px]">sync</span>
+<span>Schedule frequency: Every 6 hours</span>
+</div>
+</div>
+</div>
+</div></main></body></html>

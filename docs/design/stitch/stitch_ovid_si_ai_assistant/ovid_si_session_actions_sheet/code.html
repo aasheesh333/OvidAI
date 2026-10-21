@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport"/><meta content="mobile_stack" name="shell-type"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/><link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config = { darkMode: "class", theme: { extend: { colors: { "on-error-container": "#ffdad6", "on-background": "#e4e1e7", "secondary-fixed-dim": "#45dfa4", "on-secondary-container": "#00452e", "secondary": "#45dfa4", "primary-container": "#947dff", "surface": "#131317", "surface-container": "#1f1f23", "outline-variant": "#484555", "surface-container-high": "#2a292e", "on-primary-fixed": "#1c0062", "surface-container-lowest": "#0e0e12", "secondary-container": "#00bd85", "outline": "#938ea1", "on-primary-container": "#2a0088", "on-surface-variant": "#c9c4d8", "on-error": "#690005", "error": "#ffb4ab", "inverse-primary": "#603ce2", "surface-variant": "#353439", "surface-bright": "#39393d", "on-tertiary-fixed": "#410006", "on-secondary-fixed": "#002114", "background": "#131317", "primary-fixed": "#e6deff", "on-secondary-fixed-variant": "#005137", "on-tertiary-fixed-variant": "#881d24", "on-primary-fixed-variant": "#4816cb", "surface-container-low": "#1b1b1f", "on-tertiary": "#670211", "surface-dim": "#131317", "error-container": "#93000a", "surface-container-highest": "#353439", "tertiary-fixed-dim": "#ffb3b0", "on-secondary": "#003825", "tertiary-fixed": "#ffdad8", "surface-tint": "#cabeff", "tertiary": "#ffb3b0", "secondary-fixed": "#68fcbf", "inverse-surface": "#e4e1e7", "primary-fixed-dim": "#cabeff", "on-surface": "#e4e1e7", "on-tertiary-container": "#5b000d", "inverse-on-surface": "#303034", "on-primary": "#31009a", "tertiary-container": "#ea6767", "primary": "#cabeff" }, borderRadius: { "DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px" }, spacing: { "space-sm": "0.5rem", "margin": "1.5rem", "space-xl": "2rem", "gutter": "1rem", "space-md": "1rem", "space-lg": "1.5rem", "space-xs": "0.25rem" }, fontFamily: { "caption": ["Inter"], "headline-sm": ["Inter"], "body-lg": ["Inter"], "headline-lg": ["Inter"], "body-sm": ["Inter"] }, fontSize: { "caption": ["12px", { lineHeight: "16.8px", letterSpacing: "0.02em", fontWeight: "500" }], "headline-sm": ["20px", { lineHeight: "28px", letterSpacing: "-0.01em", fontWeight: "600" }], "body-lg": ["16px", { lineHeight: "22.4px", letterSpacing: "0em", fontWeight: "400" }], "headline-lg": ["28px", { lineHeight: "39px", letterSpacing: "-0.02em", fontWeight: "600" }], "body-sm": ["14px", { lineHeight: "19.6px", letterSpacing: "0.01em", fontWeight: "400" }] } } } };</script><style>@layer base { html, body { width: 100vw; margin: 0; padding: 0; } body { overscroll-behavior: none; } .pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); } .pt-safe { padding-top: env(safe-area-inset-top, 0px); } main > :first-child { margin-top: 0 !important; } main > :last-child { margin-bottom: 0 !important; } } ::-webkit-scrollbar { display: none; } .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }</style><style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+</head><body class="bg-surface font-body-sm text-body-sm text-on-surface antialiased flex flex-col min-h-screen"><header class="fixed top-0 inset-x-0 z-50 bg-surface/80 backdrop-blur-xl pt-safe shadow-[0_1px_8px_rgba(0,0,0,0.04)]"><div class="h-6 px-margin flex items-center justify-between text-on-surface-variant font-caption text-caption select-none"><span>9:41</span><div class="flex items-center gap-space-xs"><span class="material-symbols-outlined text-[16px]">signal_cellular_4_bar</span><span class="material-symbols-outlined text-[16px]">wifi</span><span class="material-symbols-outlined text-[16px]">battery_full</span></div></div><div class="h-16 px-space-sm flex items-center justify-between"><div class="flex items-center gap-space-xs"><button aria-label="Back" class="w-12 h-12 flex items-center justify-center rounded-full text-on-surface hover:bg-surface-container-high transition-colors active:scale-95" onclick="history.back()" type="button"><span class="material-symbols-outlined text-[24px]">arrow_back</span></button><h1 class="font-headline-sm text-headline-sm text-on-surface tracking-tight font-semibold select-none">Screen 35: Session Actions Sheet</h1></div><div class="flex items-center gap-space-xs pr-space-xs"><button aria-label="Action" class="w-12 h-12 flex items-center justify-center rounded-full text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-colors" type="button"><span class="material-symbols-outlined text-[22px]">more_vert</span></button></div></div></header><main class="flex flex-col relative w-full px-margin pt-16 pb-safe bg-surface flex-1"><div class="flex flex-col w-full relative select-none pb-space-lg">
+<!-- Dimmed conversational stream backdrop for spatial continuity -->
+<div class="flex flex-col gap-space-md opacity-25 filter blur-[1px] pointer-events-none mb-space-md">
+<div class="flex items-start gap-space-sm max-w-[85%]">
+<div class="w-8 h-8 rounded-full bg-surface-container-high flex items-center justify-center text-primary shrink-0">
+<span class="material-symbols-outlined text-[18px]">neurology</span>
+</div>
+<div class="bg-surface-container rounded-xl p-space-md text-on-surface">
+<p class="font-body-sm text-body-sm leading-relaxed">
+          I've synthesized the hero value proposition and crafted two conversion-focused copy variants for the mobile onboarding funnel.
+        </p>
+</div>
+</div>
+<div class="flex items-end justify-end gap-space-sm self-end max-w-[85%]">
+<div class="bg-surface-container-highest rounded-xl p-space-md text-on-surface">
+<p class="font-body-sm text-body-sm leading-relaxed">
+          Looks pristine. Let's make sure the call to action aligns with the active sprint artifact before we pin this version.
+        </p>
+</div>
+</div>
+<div class="flex items-start gap-space-sm max-w-[85%]">
+<div class="w-8 h-8 rounded-full bg-surface-container-high flex items-center justify-center text-primary shrink-0">
+<span class="material-symbols-outlined text-[18px]">neurology</span>
+</div>
+<div class="bg-surface-container rounded-xl p-space-md text-on-surface">
+<p class="font-body-sm text-body-sm leading-relaxed">
+          Understood. Ready to export or organize into your dedicated workspace whenever you want.
+        </p>
+</div>
+</div>
+</div>
+<!-- Ambient Scrim Backdrop & Elevated Sheet Structure -->
+<div class="bg-surface-container-low rounded-xl shadow-2xl overflow-hidden flex flex-col w-full">
+<!-- Sheet Drag Handle -->
+<div class="w-full flex items-center justify-center pt-3 pb-1 cursor-grab active:cursor-grabbing">
+<div class="w-9 h-1 bg-outline-variant rounded-full opacity-60"></div>
+</div>
+<!-- Sheet Header -->
+<div class="flex items-start justify-between px-space-md pt-2 pb-space-md">
+<div class="flex flex-col gap-1 pr-space-sm min-w-0">
+<div class="flex items-center gap-2">
+<h2 class="font-headline-sm text-headline-sm text-on-surface font-semibold truncate tracking-tight">
+            Landing page redesign &amp; copy
+          </h2>
+<span class="w-2 h-2 rounded-full bg-secondary shrink-0 shadow-[0_0_8px_rgba(69,223,164,0.4)]"></span>
+</div>
+<p class="font-caption text-caption text-on-surface-variant flex items-center gap-1.5 flex-wrap">
+<span>Today at 10:24 AM</span>
+<span class="text-outline-variant font-bold">·</span>
+<span>14 messages</span>
+<span class="text-outline-variant font-bold">·</span>
+<span class="text-primary-fixed-dim">Auto model</span>
+</p>
+</div>
+<button aria-label="Dismiss sheet" class="w-12 h-12 shrink-0 rounded-full flex items-center justify-center text-on-surface-variant hover:text-on-surface bg-surface-container hover:bg-surface-container-high active:scale-95 transition-all" onclick="this.closest('.bg-surface-container-low').classList.add('opacity-40', 'scale-[0.99]')" type="button">
+<span class="material-symbols-outlined text-[20px]">close</span>
+</button>
+</div>
+<!-- Soft Structural Hairline Divider -->
+<div class="h-px w-full bg-surface-container-highest"></div>
+<!-- Actions List -->
+<div class="flex flex-col py-space-xs px-space-sm" id="session-action-group">
+<!-- Action 1: Pin Chat -->
+<button class="group w-full min-h-[52px] px-space-sm rounded-xl flex items-center justify-between text-left hover:bg-surface-container transition-colors active:scale-[0.99]" id="pin-action-toggle" type="button">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-10 h-10 rounded-xl bg-surface-container-high group-hover:bg-primary-container/20 flex items-center justify-center text-on-surface transition-colors shrink-0">
+<span class="material-symbols-outlined text-[20px] group-hover:text-primary" id="pin-icon">push_pin</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-sm text-body-sm text-on-surface font-medium truncate">Pin to top of drawer</span>
+<span class="font-caption text-caption text-on-surface-variant">Keep handy across all workspaces</span>
+</div>
+</div>
+<!-- Micro-switch interactive visual -->
+<div class="w-11 h-6 rounded-full bg-surface-container-highest p-0.5 flex items-center transition-colors shrink-0" id="pin-switch-track">
+<div class="w-5 h-5 rounded-full bg-outline transition-all transform" id="pin-switch-thumb"></div>
+</div>
+</button>
+<!-- Action 2: Rename -->
+<button class="group w-full min-h-[52px] px-space-sm rounded-xl flex items-center justify-between text-left hover:bg-surface-container transition-colors active:scale-[0.99]" type="button">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-10 h-10 rounded-xl bg-surface-container-high group-hover:bg-primary-container/20 flex items-center justify-center text-on-surface transition-colors shrink-0">
+<span class="material-symbols-outlined text-[20px] group-hover:text-primary">edit</span>
+</div>
+<span class="font-body-sm text-body-sm text-on-surface font-medium truncate">Rename conversation</span>
+</div>
+<span class="material-symbols-outlined text-outline text-[18px]">chevron_right</span>
+</button>
+<!-- Action 3: Move to project -->
+<button class="group w-full min-h-[52px] px-space-sm rounded-xl flex items-center justify-between text-left hover:bg-surface-container transition-colors active:scale-[0.99]" type="button">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-10 h-10 rounded-xl bg-surface-container-high group-hover:bg-primary-container/20 flex items-center justify-center text-on-surface transition-colors shrink-0">
+<span class="material-symbols-outlined text-[20px] group-hover:text-primary">folder</span>
+</div>
+<span class="font-body-sm text-body-sm text-on-surface font-medium truncate">Move to project</span>
+</div>
+<div class="flex items-center gap-1.5 shrink-0 max-w-[42%]">
+<span class="font-caption text-caption text-on-surface bg-surface-container-highest px-2.5 py-1 rounded-full truncate">
+            Mobile App Redesign
+          </span>
+<span class="material-symbols-outlined text-outline text-[18px]">chevron_right</span>
+</div>
+</button>
+<!-- Action 4: Share chat -->
+<button class="group w-full min-h-[52px] px-space-sm rounded-xl flex items-center justify-between text-left hover:bg-surface-container transition-colors active:scale-[0.99]" type="button">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-10 h-10 rounded-xl bg-surface-container-high group-hover:bg-primary-container/20 flex items-center justify-center text-on-surface transition-colors shrink-0">
+<span class="material-symbols-outlined text-[20px] group-hover:text-primary">share</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-sm text-body-sm text-on-surface font-medium truncate">Share chat</span>
+<span class="font-caption text-caption text-on-surface-variant">Share link or invite team members</span>
+</div>
+</div>
+<span class="material-symbols-outlined text-outline text-[18px]">open_in_new</span>
+</button>
+<!-- Action 5: Duplicate -->
+<button class="group w-full min-h-[52px] px-space-sm rounded-xl flex items-center justify-between text-left hover:bg-surface-container transition-colors active:scale-[0.99]" type="button">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-10 h-10 rounded-xl bg-surface-container-high group-hover:bg-primary-container/20 flex items-center justify-center text-on-surface transition-colors shrink-0">
+<span class="material-symbols-outlined text-[20px] group-hover:text-primary">content_copy</span>
+</div>
+<span class="font-body-sm text-body-sm text-on-surface font-medium truncate">Duplicate conversation</span>
+</div>
+<span class="font-caption text-caption text-on-surface-variant px-2 py-0.5 rounded bg-surface-container-high">Branch</span>
+</button>
+<!-- Action 6: Export markdown -->
+<button class="group w-full min-h-[52px] px-space-sm rounded-xl flex items-center justify-between text-left hover:bg-surface-container transition-colors active:scale-[0.99]" type="button">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-10 h-10 rounded-xl bg-surface-container-high group-hover:bg-primary-container/20 flex items-center justify-center text-on-surface transition-colors shrink-0">
+<span class="material-symbols-outlined text-[20px] group-hover:text-primary">download</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-sm text-body-sm text-on-surface font-medium truncate">Export as Markdown</span>
+<span class="font-caption text-caption text-on-surface-variant">.md formatted with code blocks</span>
+</div>
+</div>
+<span class="material-symbols-outlined text-outline text-[18px]">arrow_downward</span>
+</button>
+<!-- Soft Divider before Destructive Sector -->
+<div class="h-px w-full bg-surface-container-highest my-space-xs"></div>
+<!-- Action 7: Destructive Delete -->
+<button class="group w-full min-h-[52px] px-space-sm rounded-xl flex items-center justify-between text-left hover:bg-error-container/20 transition-colors active:scale-[0.99]" id="delete-action-trigger" type="button">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-10 h-10 rounded-xl bg-surface-container-high group-hover:bg-error-container/40 flex items-center justify-center text-error transition-colors shrink-0">
+<span class="material-symbols-outlined text-[20px]" style="font-variation-settings: 'FILL' 1;">delete</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-sm text-body-sm text-error font-medium truncate">Delete conversation</span>
+<span class="font-caption text-caption text-tertiary-fixed-dim">Irreversible action</span>
+</div>
+</div>
+<span class="material-symbols-outlined text-error text-[18px]">arrow_forward</span>
+</button>
+</div>
+<!-- Shield Alert Footnote -->
+<div class="mx-space-sm mb-space-md p-space-md rounded-xl bg-surface-container flex items-start gap-space-sm">
+<div class="w-6 h-6 rounded-full bg-surface-container-high flex items-center justify-center text-outline shrink-0 mt-0.5">
+<span class="material-symbols-outlined text-[15px]">security</span>
+</div>
+<p class="font-caption text-caption text-on-surface-variant leading-relaxed">
+        Deleting removes this chat's files, artifacts, and learned memory from your cloud account. This cannot be undone.
+      </p>
+</div>
+</div>
+</div>
+<script>
+  (function () {
+    const pinBtn = document.getElementById('pin-action-toggle');
+    const pinTrack = document.getElementById('pin-switch-track');
+    const pinThumb = document.getElementById('pin-switch-thumb');
+    const pinIcon = document.getElementById('pin-icon');
+    let isPinned = false;
+
+    if (pinBtn && pinTrack && pinThumb && pinIcon) {
+      pinBtn.addEventListener('click', function () {
+        isPinned = !isPinned;
+        if (isPinned) {
+          pinTrack.classList.remove('bg-surface-container-highest');
+          pinTrack.classList.add('bg-primary-container');
+          pinThumb.classList.remove('bg-outline');
+          pinThumb.classList.add('bg-surface-container-lowest', 'translate-x-5');
+          pinIcon.style.fontVariationSettings = "'FILL' 1";
+          pinIcon.classList.add('text-primary');
+        } else {
+          pinTrack.classList.add('bg-surface-container-highest');
+          pinTrack.classList.remove('bg-primary-container');
+          pinThumb.classList.add('bg-outline');
+          pinThumb.classList.remove('bg-surface-container-lowest', 'translate-x-5');
+          pinIcon.style.fontVariationSettings = "'FILL' 0";
+          pinIcon.classList.remove('text-primary');
+        }
+      });
+    }
+
+    const deleteBtn = document.getElementById('delete-action-trigger');
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', function () {
+        this.classList.add('scale-95');
+        setTimeout(() => {
+          this.classList.remove('scale-95');
+        }, 150);
+      });
+    }
+  })();
+</script></main></body></html>

@@ -1,0 +1,762 @@
+import 'package:flutter/material.dart';
+
+import '../../design/o_components.dart';
+import '../../design/o_motion.dart';
+import '../../design/o_tokens.dart';
+
+// TODO(l10n): move user-facing copy to the ARB files in the next wave.
+
+/// What the live preview is doing right now.
+enum V2PreviewStatus { loading, content, empty, error }
+
+/// One metric tile inside the previewed site.
+@immutable
+class V2PreviewMetric {
+  const V2PreviewMetric({
+    required this.value,
+    required this.label,
+    required this.caption,
+    this.icon = Icons.bolt_rounded,
+  });
+
+  final String value;
+  final String label;
+  final String caption;
+  final IconData icon;
+}
+
+/// Everything the live preview needs to render.
+///
+/// Every string defaults to empty: the copy belongs to the site being
+/// previewed, so the wiring layer supplies it. Nothing here is sample data.
+@immutable
+class V2LivePreviewData {
+  const V2LivePreviewData({
+    this.status = V2PreviewStatus.content,
+    this.siteName = '',
+    this.url = '',
+    this.version = '',
+    this.eyebrow = '',
+    this.headline = '',
+    this.description = '',
+    this.primaryCta = '',
+    this.secondaryCta = '',
+    this.metrics = const <V2PreviewMetric>[],
+    this.featureTitle = '',
+    this.featureBody = '',
+    this.featureBadge = '',
+    this.expiresLabel = '',
+    this.errorMessage,
+  });
+
+  final V2PreviewStatus status;
+  final String siteName;
+  final String url;
+  final String version;
+  final String eyebrow;
+  final String headline;
+  final String description;
+  final String primaryCta;
+  final String secondaryCta;
+  final List<V2PreviewMetric> metrics;
+  final String featureTitle;
+  final String featureBody;
+  final String featureBadge;
+  final String expiresLabel;
+  final String? errorMessage;
+}
+
+/// A phone-sized preview of the site in the workspace.
+class V2LivePreviewPage extends StatelessWidget {
+  const V2LivePreviewPage({
+    super.key,
+    required this.data,
+    this.onRefresh,
+    this.onOpenInBrowser,
+    this.onShareLink,
+    this.onStop,
+    this.onExtend,
+    this.onStart,
+    this.onRetry,
+  });
+
+  final V2LivePreviewData data;
+  final VoidCallback? onRefresh;
+  final VoidCallback? onOpenInBrowser;
+  final VoidCallback? onShareLink;
+  final VoidCallback? onStop;
+  final VoidCallback? onExtend;
+  final VoidCallback? onStart;
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasPreview = data.status == V2PreviewStatus.content;
+    return OScaffold(
+      appBar: OAppBar(
+        title: 'Live preview',
+        subtitle: hasPreview && data.siteName.isNotEmpty ? data.siteName : null,
+        actions: [
+          if (hasPreview) ...[
+            OIconButton(
+              icon: Icons.refresh_rounded,
+              semanticLabel: 'Refresh preview',
+              tooltip: 'Refresh preview',
+              onPressed: onRefresh,
+            ),
+            OIconButton(
+              icon: Icons.open_in_new_rounded,
+              semanticLabel: 'Open in browser',
+              tooltip: 'Open in browser',
+              onPressed: onOpenInBrowser,
+            ),
+          ],
+        ],
+      ),
+      body: switch (data.status) {
+        V2PreviewStatus.loading => _buildLoading(context),
+        V2PreviewStatus.error => OErrorState(
+          message:
+              data.errorMessage ??
+              'We could not start your preview. Check your connection and try again.',
+          onRetry: onRetry,
+        ),
+        V2PreviewStatus.empty => OEmptyState(
+          icon: Icons.play_circle_outline_rounded,
+          title: 'No preview running',
+          message: 'Start a preview to see your site on a phone.',
+          action: OButton(
+            label: 'Start preview',
+            icon: Icons.play_arrow_rounded,
+            onPressed: onStart,
+          ),
+        ),
+        V2PreviewStatus.content => _buildContent(context),
+      },
+    );
+  }
+
+  Widget _buildLoading(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(OSpace.screen),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: const Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              OSkeleton(height: 40, radius: ORadius.m),
+              SizedBox(height: OSpace.m),
+              OSkeleton(height: 420, radius: ORadius.xl),
+              SizedBox(height: OSpace.m),
+              OSkeleton(height: 80, radius: ORadius.l),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildContent(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(
+        OSpace.screen,
+        OSpace.s,
+        OSpace.screen,
+        OSpace.xxl,
+      ),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: OFadeSlide(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const _PreviewHeader(),
+                const SizedBox(height: OSpace.m),
+                _PhoneFrame(data: data),
+                if (data.expiresLabel.isNotEmpty) ...[
+                  const SizedBox(height: OSpace.m),
+                  _ExpiryCard(
+                    expiresLabel: data.expiresLabel,
+                    onExtend: onExtend,
+                  ),
+                ],
+                const SizedBox(height: OSpace.m),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final share = OButton(
+                      label: 'Share link',
+                      icon: Icons.share_rounded,
+                      variant: OButtonVariant.secondary,
+                      onPressed: onShareLink,
+                    );
+                    final stop = OButton(
+                      label: 'Stop preview',
+                      icon: Icons.stop_circle_outlined,
+                      variant: OButtonVariant.danger,
+                      onPressed: onStop,
+                    );
+                    // Two side-by-side labels ellipsize away on a narrow phone
+                    // or at a large text scale, so stack them instead.
+                    final tight =
+                        constraints.maxWidth < 300 ||
+                        MediaQuery.textScalerOf(context).scale(1) > 1.3;
+                    if (tight) {
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          share,
+                          const SizedBox(height: OSpace.s),
+                          stop,
+                        ],
+                      );
+                    }
+                    return Row(
+                      children: [
+                        Expanded(child: share),
+                        const SizedBox(width: OSpace.s),
+                        Expanded(child: stop),
+                      ],
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PreviewHeader extends StatelessWidget {
+  const _PreviewHeader();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Row(
+      children: [
+        const OPill(label: 'Online', tone: OPillTone.success, dot: true),
+        const SizedBox(width: OSpace.s),
+        Expanded(
+          child: Text(
+            'Changes show up here as you edit.',
+            style: OType.caption.copyWith(color: c.textMuted),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PhoneFrame extends StatelessWidget {
+  const _PhoneFrame({required this.data});
+
+  final V2LivePreviewData data;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(ORadius.xl),
+        border: Border.all(color: c.hairlineStrong),
+        boxShadow: OShadow.floating,
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _BrowserChrome(url: data.url),
+          // Both children sit in the stack so the live chip can grow with the
+          // text scale instead of being clipped by a fixed bottom inset.
+          Stack(
+            alignment: Alignment.bottomCenter,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  OSpace.l,
+                  OSpace.l,
+                  OSpace.l,
+                  OSpace.huge,
+                ),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: _SiteContent(data: data),
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.only(
+                  left: OSpace.m,
+                  right: OSpace.m,
+                  bottom: OSpace.m,
+                ),
+                child: _LiveChip(),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BrowserChrome extends StatelessWidget {
+  const _BrowserChrome({required this.url});
+
+  final String url;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      constraints: const BoxConstraints(minHeight: 44),
+      color: c.surfaceAlt,
+      padding: const EdgeInsets.symmetric(
+        horizontal: OSpace.m,
+        vertical: OSpace.xs,
+      ),
+      child: Row(
+        children: [
+          for (var i = 0; i < 3; i++) ...[
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: c.hairlineStrong,
+                shape: BoxShape.circle,
+              ),
+            ),
+            if (i < 2) const SizedBox(width: OSpace.xs),
+          ],
+          const SizedBox(width: OSpace.m),
+          Expanded(
+            child: Container(
+              constraints: const BoxConstraints(minHeight: 28),
+              padding: const EdgeInsets.symmetric(
+                horizontal: OSpace.s,
+                vertical: 2,
+              ),
+              decoration: BoxDecoration(
+                color: c.surface,
+                borderRadius: BorderRadius.circular(ORadius.pill),
+                border: Border.all(color: c.hairline),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.lock_outline_rounded, size: 12, color: c.success),
+                  const SizedBox(width: OSpace.xs),
+                  Flexible(
+                    child: Text(
+                      url,
+                      style: OType.caption.copyWith(color: c.textMuted),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: OSpace.m),
+          Icon(Icons.devices_rounded, size: 17, color: c.textMuted),
+        ],
+      ),
+    );
+  }
+}
+
+class _SiteContent extends StatelessWidget {
+  const _SiteContent({required this.data});
+
+  final V2LivePreviewData data;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final hasActions =
+        data.primaryCta.isNotEmpty || data.secondaryCta.isNotEmpty;
+    final hasFeature =
+        data.featureTitle.isNotEmpty ||
+        data.featureBody.isNotEmpty ||
+        data.featureBadge.isNotEmpty;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 30,
+              height: 30,
+              decoration: BoxDecoration(
+                color: c.accentFill,
+                borderRadius: BorderRadius.circular(ORadius.s),
+              ),
+              child: Icon(Icons.cloud_rounded, size: 18, color: c.onAccent),
+            ),
+            const SizedBox(width: OSpace.s),
+            Expanded(
+              child: Text(
+                data.siteName,
+                style: OType.h3.copyWith(color: c.text),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (data.version.isNotEmpty) OPill(label: data.version),
+          ],
+        ),
+        if (data.eyebrow.isNotEmpty) ...[
+          const SizedBox(height: OSpace.l),
+          Text(
+            data.eyebrow.toUpperCase(),
+            style: OType.overline.copyWith(color: c.accent),
+          ),
+        ],
+        if (data.headline.isNotEmpty) ...[
+          const SizedBox(height: OSpace.s),
+          Text(data.headline, style: OType.h1.copyWith(color: c.text)),
+        ],
+        if (data.description.isNotEmpty) ...[
+          const SizedBox(height: OSpace.s),
+          Text(
+            data.description,
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+        ],
+        if (hasActions) ...[
+          const SizedBox(height: OSpace.l),
+          Wrap(
+            spacing: OSpace.s,
+            runSpacing: OSpace.s,
+            children: [
+              if (data.primaryCta.isNotEmpty)
+                _SiteButton(label: data.primaryCta, primary: true),
+              if (data.secondaryCta.isNotEmpty)
+                _SiteButton(label: data.secondaryCta),
+            ],
+          ),
+        ],
+        if (data.metrics.isNotEmpty) ...[
+          const SizedBox(height: OSpace.l),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (var i = 0; i < data.metrics.length; i++) ...[
+                if (i > 0) const SizedBox(width: OSpace.s),
+                Expanded(child: _MetricTile(metric: data.metrics[i])),
+              ],
+            ],
+          ),
+        ],
+        if (hasFeature) ...[
+          const SizedBox(height: OSpace.l),
+          _FeatureCard(
+            title: data.featureTitle,
+            body: data.featureBody,
+            badge: data.featureBadge,
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _SiteButton extends StatelessWidget {
+  const _SiteButton({required this.label, this.primary = false});
+
+  final String label;
+  final bool primary;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      constraints: const BoxConstraints(minHeight: 44),
+      padding: const EdgeInsets.symmetric(
+        horizontal: OSpace.l,
+        vertical: OSpace.s,
+      ),
+      decoration: BoxDecoration(
+        color: primary ? c.accentFill : c.surfaceAlt,
+        borderRadius: BorderRadius.circular(ORadius.pill),
+        border: primary ? null : Border.all(color: c.hairline),
+      ),
+      alignment: Alignment.center,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: OType.label.copyWith(color: primary ? c.onAccent : c.text),
+            ),
+          ),
+          if (primary) ...[
+            const SizedBox(width: OSpace.xs),
+            Icon(Icons.arrow_forward_rounded, size: 16, color: c.onAccent),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _MetricTile extends StatelessWidget {
+  const _MetricTile({required this.metric});
+
+  final V2PreviewMetric metric;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      padding: const EdgeInsets.all(OSpace.m),
+      decoration: BoxDecoration(
+        color: c.surfaceAlt,
+        borderRadius: BorderRadius.circular(ORadius.m),
+        border: Border.all(color: c.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(metric.icon, size: 14, color: c.success),
+              const SizedBox(width: OSpace.xs),
+              Flexible(
+                child: Text(
+                  metric.value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.caption.copyWith(
+                    color: c.success,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: OSpace.xs),
+          Text(
+            metric.label,
+            style: OType.bodySm.copyWith(
+              color: c.text,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          Text(
+            metric.caption,
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FeatureCard extends StatelessWidget {
+  const _FeatureCard({
+    required this.title,
+    required this.body,
+    required this.badge,
+  });
+
+  final String title;
+  final String body;
+  final String badge;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        color: c.surfaceAlt,
+        borderRadius: BorderRadius.circular(ORadius.m),
+        border: Border.all(color: c.hairline),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            height: 96,
+            color: c.surfaceRaised,
+            alignment: Alignment.center,
+            child: Icon(Icons.hub_outlined, size: 38, color: c.accent),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(OSpace.m),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: OSpace.s,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: c.surface,
+                    borderRadius: BorderRadius.circular(ORadius.s),
+                    border: Border.all(color: c.hairline),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.tune_rounded, size: 12, color: c.success),
+                      const SizedBox(width: OSpace.xs),
+                      Flexible(
+                        child: Text(
+                          badge,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.caption.copyWith(color: c.text),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: OSpace.s),
+                Text(
+                  title,
+                  style: OType.bodySm.copyWith(
+                    color: c.text,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(body, style: OType.caption.copyWith(color: c.textMuted)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LiveChip extends StatelessWidget {
+  const _LiveChip();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: OSpace.m,
+        vertical: OSpace.s,
+      ),
+      decoration: BoxDecoration(
+        color: c.surfaceRaised,
+        borderRadius: BorderRadius.circular(ORadius.pill),
+        border: Border.all(color: c.hairlineStrong),
+        boxShadow: OShadow.floating,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(color: c.success, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: OSpace.s),
+          Flexible(
+            child: Text(
+              'Live · Preview from your workspace',
+              style: OType.caption.copyWith(color: c.text),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ExpiryCard extends StatelessWidget {
+  const _ExpiryCard({required this.expiresLabel, this.onExtend});
+
+  final String expiresLabel;
+  final VoidCallback? onExtend;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final info = Row(
+      children: [
+        Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: c.accentSoft,
+            shape: BoxShape.circle,
+          ),
+          child: Icon(Icons.schedule_rounded, size: 20, color: c.accent),
+        ),
+        const SizedBox(width: OSpace.m),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Expires in $expiresLabel',
+                style: OType.bodySm.copyWith(
+                  color: c.text,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              Text(
+                'Sandboxed cloud instance',
+                style: OType.caption.copyWith(color: c.textMuted),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+    final extend = OButton(
+      label: '+30 min',
+      variant: OButtonVariant.ghost,
+      onPressed: onExtend,
+    );
+    return OCard(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // A narrow phone or a large text scale leaves no room for the label
+          // beside the button, so the button moves under the text instead of
+          // squeezing it.
+          final tight =
+              constraints.maxWidth < 280 ||
+              MediaQuery.textScalerOf(context).scale(1) > 1.3;
+          if (!tight) {
+            return Row(
+              children: [
+                Expanded(child: info),
+                const SizedBox(width: OSpace.s),
+                extend,
+              ],
+            );
+          }
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              info,
+              const SizedBox(height: OSpace.s),
+              Align(alignment: Alignment.centerRight, child: extend),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}

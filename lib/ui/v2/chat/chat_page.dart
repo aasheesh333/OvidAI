@@ -1,0 +1,1199 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import '../../design/o_components.dart';
+import '../../design/o_motion.dart';
+import '../../design/o_tokens.dart';
+import 'composer_attachments.dart';
+import 'composer_mentions.dart';
+import 'composer_voice.dart';
+
+// TODO(l10n): move user-facing copy to ARB keys in the localization pass.
+
+/// Keeps a long model name from starving the screen title in the top bar.
+const double _modelChipMaxWidth = 120;
+
+/// A tappable starting point on the empty chat screen.
+@immutable
+class V2ChatSuggestion {
+  const V2ChatSuggestion({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+  });
+
+  final String title;
+  final String subtitle;
+  final IconData icon;
+}
+
+enum V2ChatState { empty, loading, running, planLimited, offline, error }
+
+/// Immutable view data for the home chat screen. The wiring owns the live
+/// session, network and model state.
+@immutable
+class V2ChatPageData {
+  const V2ChatPageData({
+    this.title = 'Ovid Si',
+    this.sessionId,
+    this.modelLabel = 'Auto',
+    this.tokensLabel = '50M tokens left today',
+    this.fastAgentLabel = 'Fast agent',
+    this.headline = 'What should we build today?',
+    this.subtitle = 'Ask anything. Ovid works in the background.',
+    this.draft = '',
+    this.state = V2ChatState.empty,
+    this.suggestions = const [
+      V2ChatSuggestion(
+        title: 'Build me a landing page',
+        subtitle: 'React & Tailwind components',
+        icon: Icons.web_rounded,
+      ),
+      V2ChatSuggestion(
+        title: 'Research a topic for me',
+        subtitle: 'Deep web synthesis & citations',
+        icon: Icons.auto_awesome_rounded,
+      ),
+      V2ChatSuggestion(
+        title: 'Fix a bug in my repo',
+        subtitle: 'Git branch integration',
+        icon: Icons.bug_report_rounded,
+      ),
+    ],
+    this.queuedCount = 0,
+    this.limitResetLabel = 'Resets in 6h 12m',
+    this.errorMessage =
+        'Ovid could not load this chat. Check your connection and try again.',
+    this.permissionLabel = 'General',
+    this.composerHint = 'Ask Ovid to do anything...',
+    this.offlineTitle = "You're offline",
+    this.offlineMessage = 'Messages will send when you reconnect.',
+  });
+
+  final String title;
+  final String? sessionId;
+  final String modelLabel;
+  final String tokensLabel;
+  final String fastAgentLabel;
+  final String headline;
+  final String subtitle;
+  final String draft;
+  final V2ChatState state;
+  final List<V2ChatSuggestion> suggestions;
+  final int queuedCount;
+  final String limitResetLabel;
+  final String errorMessage;
+  final String permissionLabel;
+  final String composerHint;
+  final String offlineTitle;
+  final String offlineMessage;
+}
+
+/// The core chat home screen: top bar, empty state, suggestions and composer.
+class V2ChatPage extends StatefulWidget {
+  const V2ChatPage({
+    super.key,
+    required this.data,
+    this.onMenu,
+    this.onModelChipTap,
+    this.onStudio,
+    this.onBrowser,
+    this.onMore,
+    this.onSuggestionTap,
+    this.onSend,
+    this.onStop,
+    this.onAttach,
+    this.onPermissionTap,
+    this.onMic,
+    this.onRetry,
+    this.onSeePlans,
+    this.onDraftChanged,
+    this.onSubmit,
+    this.mentionSource,
+    this.attachmentPicker,
+    this.voiceService,
+    this.voiceLanguage,
+  });
+
+  final V2ChatPageData data;
+  final VoidCallback? onMenu;
+  final VoidCallback? onModelChipTap;
+  final VoidCallback? onStudio;
+  final VoidCallback? onBrowser;
+  final VoidCallback? onMore;
+  final ValueChanged<V2ChatSuggestion>? onSuggestionTap;
+  final ValueChanged<String>? onSend;
+  final VoidCallback? onStop;
+  final VoidCallback? onAttach;
+  final VoidCallback? onPermissionTap;
+  final VoidCallback? onMic;
+  final VoidCallback? onRetry;
+  final VoidCallback? onSeePlans;
+  final ValueChanged<String>? onDraftChanged;
+
+  /// Rich send callback: text, staged files and the ids the draft references.
+  /// When provided it replaces [onSend].
+  final ValueChanged<V2ComposerSubmission>? onSubmit;
+
+  /// `@` suggestion source. Defaults to the live root chats and projects.
+  final V2MentionSource? mentionSource;
+
+  /// File picker seam. Defaults to the platform picker; when [onAttach] is
+  /// set and no picker is injected, the host keeps handling attachment
+  /// selection (legacy wiring).
+  final V2AttachmentPicker? attachmentPicker;
+
+  /// Voice seam. When set (or when [onMic] is null) the composer owns
+  /// dictation; otherwise [onMic] keeps the host in control.
+  final V2VoiceService? voiceService;
+
+  /// Voice-first language id (`hi`, `hinglish`, `pa`, `ta`). Defaults to the
+  /// device language, falling back to English.
+  final String? voiceLanguage;
+
+  @override
+  State<V2ChatPage> createState() => _V2ChatPageState();
+}
+
+class _V2ChatPageState extends State<V2ChatPage> {
+  late final TextEditingController _controller;
+  late final V2VoiceDictation _voice;
+
+  final List<V2ComposerAttachment> _attachments = [];
+  final Map<String, String> _pickedSessionIds = {};
+  final Set<String> _pickedProjectIds = {};
+
+  V2ActiveMention? _mention;
+  List<V2MentionCandidate> _mentionCandidates = const [];
+  String _lastDraft = '';
+  String? _attachmentError;
+  bool _syncingDraft = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.data.draft);
+    _lastDraft = _controller.text;
+    _controller.addListener(_handleControllerChanged);
+    _voice = V2VoiceDictation(
+      service: widget.voiceService,
+      localeId: V2VoiceLocales.localeFor(
+        widget.voiceLanguage ?? V2VoiceLocales.deviceLanguage(),
+      ),
+    )..onTranscript = _applyVoiceTranscript;
+    _voice.addListener(_handleVoiceChanged);
+    _refreshMentions();
+  }
+
+  @override
+  void didUpdateWidget(V2ChatPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.data.draft != oldWidget.data.draft &&
+        widget.data.draft != _controller.text) {
+      _syncingDraft = true;
+      _controller.text = widget.data.draft;
+      _controller.selection = TextSelection.collapsed(
+        offset: _controller.text.length,
+      );
+      _syncingDraft = false;
+      _lastDraft = _controller.text;
+      _refreshMentions();
+    }
+  }
+
+  @override
+  void dispose() {
+    if (_voice.listening) unawaited(_voice.cancel());
+    _voice
+      ..removeListener(_handleVoiceChanged)
+      ..dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  V2MentionSource get _mentionSource =>
+      widget.mentionSource ?? const V2AppMentionSource();
+
+  void _handleControllerChanged() {
+    if (_syncingDraft) return;
+    _refreshMentions();
+    final text = _controller.text;
+    if (text != _lastDraft) {
+      _lastDraft = text;
+      widget.onDraftChanged?.call(text);
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _refreshMentions() {
+    final active = v2ActiveMention(_controller.text, _controller.selection);
+    if (active == null) {
+      _mention = null;
+      _mentionCandidates = const [];
+      return;
+    }
+    _mention = active;
+    _mentionCandidates = _mentionSource.search(active.query, limit: 5);
+  }
+
+  void _handleVoiceChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _applyVoiceTranscript(String text) {
+    if (!mounted) return;
+    _controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+  }
+
+  void _setDraft(String value) {
+    _controller.value = TextEditingValue(
+      text: value,
+      selection: TextSelection.collapsed(offset: value.length),
+    );
+  }
+
+  void _insertMention(V2MentionCandidate candidate) {
+    final active = _mention;
+    if (active == null) return;
+    final text = _controller.text;
+    final start = active.start.clamp(0, text.length);
+    final end = active.end.clamp(start, text.length);
+    final next =
+        '${text.substring(0, start)}${candidate.token}${text.substring(end)}';
+    final caret = start + candidate.token.length;
+    if (candidate.isProject) {
+      _pickedProjectIds.add(candidate.id);
+    } else {
+      _pickedSessionIds[V2MentionTokens.sanitizeTitle(
+            candidate.title,
+          ).toLowerCase()] =
+          candidate.id;
+    }
+    _controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: caret),
+    );
+    setState(() {
+      _mention = null;
+      _mentionCandidates = const [];
+    });
+  }
+
+  Future<void> _attach() async {
+    if (_locked || _running) return;
+    final picker = widget.attachmentPicker;
+    if (picker == null && widget.onAttach != null) {
+      widget.onAttach!();
+      return;
+    }
+    List<V2ComposerAttachment>? picked;
+    try {
+      picked = await (picker ?? pickV2AttachmentFiles)();
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _attachmentError = 'Could not open the file picker. Try again.';
+        });
+      }
+      return;
+    }
+    if (!mounted || picked == null) return;
+    final batch = V2AttachmentRules.accept(
+      existing: _attachments,
+      incoming: picked,
+    );
+    setState(() {
+      _attachments.addAll(batch.accepted);
+      _attachmentError = batch.message;
+    });
+  }
+
+  void _removeAttachment(V2ComposerAttachment attachment) {
+    setState(() {
+      _attachments.removeWhere((row) => row.sameFile(attachment));
+      _attachmentError = null;
+    });
+  }
+
+  Future<void> _toggleVoice() async {
+    if (_locked || _running) return;
+    if (widget.voiceService == null && widget.onMic != null) {
+      widget.onMic!();
+      return;
+    }
+    _voice.clearError();
+    await _voice.toggle(_controller.text);
+  }
+
+  void _send() {
+    final text = _controller.text.trim();
+    if (text.isEmpty && _attachments.isEmpty) return;
+    if (text.isEmpty && widget.onSubmit == null) return;
+    if (_voice.listening) unawaited(_voice.stop());
+    final refs = v2MentionRefsIn(
+      text,
+      source: _mentionSource,
+      pickedSessionIds: _pickedSessionIds,
+      pickedProjectIds: _pickedProjectIds,
+      currentSessionId: widget.data.sessionId,
+    );
+    final submission = V2ComposerSubmission(
+      text: text,
+      attachments: List.unmodifiable(_attachments),
+      sessionRefs: refs.sessionRefs,
+      projectRefs: refs.projectRefs,
+    );
+    if (widget.onSubmit != null) {
+      widget.onSubmit!(submission);
+    } else {
+      widget.onSend?.call(text);
+    }
+    _clearComposer();
+  }
+
+  void _clearComposer() {
+    _syncingDraft = true;
+    _controller.clear();
+    _syncingDraft = false;
+    _lastDraft = '';
+    widget.onDraftChanged?.call('');
+    _voice.clearError();
+    setState(() {
+      _attachments.clear();
+      _attachmentError = null;
+      _pickedSessionIds.clear();
+      _pickedProjectIds.clear();
+      _mention = null;
+      _mentionCandidates = const [];
+    });
+  }
+
+  bool get _locked => widget.data.state == V2ChatState.planLimited;
+  bool get _running => widget.data.state == V2ChatState.running;
+  bool get _canSend =>
+      !_locked &&
+      !_running &&
+      (_controller.text.trim().isNotEmpty ||
+          (widget.onSubmit != null && _attachments.isNotEmpty));
+
+  @override
+  Widget build(BuildContext context) {
+    final data = widget.data;
+    return OScaffold(
+      appBar: _ChatTopBar(
+        title: data.title,
+        modelLabel: data.modelLabel,
+        onMenu: widget.onMenu,
+        onModelChipTap: widget.onModelChipTap,
+        onStudio: widget.onStudio,
+        onBrowser: widget.onBrowser,
+        onMore: widget.onMore,
+      ),
+      body: LayoutBuilder(
+        builder: (context, constraints) => Column(
+          children: [
+            Expanded(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  OAnimatedSwap(
+                    child: KeyedSubtree(
+                      key: ValueKey(data.state),
+                      child: _buildBody(context),
+                    ),
+                  ),
+                  if (_mention != null && !_locked && !_running)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: V2MentionSuggestions(
+                        candidates: _mentionCandidates,
+                        onSelect: _insertMention,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            // At 320 dp / 200 % text the composer plus chips and notices can
+            // be taller than the screen. Cap the dock and let it scroll
+            // instead of overflowing the transcript.
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: constraints.maxHeight * 0.62,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _StatusRow(data: data),
+                    _Composer(
+                      data: data,
+                      controller: _controller,
+                      canSend: _canSend,
+                      running: _running,
+                      locked: _locked,
+                      attachments: _attachments,
+                      attachmentError: _attachmentError,
+                      voiceError: _voice.error,
+                      listening: _voice.listening,
+                      onRemoveAttachment: _removeAttachment,
+                      onSend: _send,
+                      onStop: widget.onStop,
+                      onAttach: _attach,
+                      onPermissionTap: widget.onPermissionTap,
+                      onMic: _toggleVoice,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBody(BuildContext context) {
+    final data = widget.data;
+    switch (data.state) {
+      case V2ChatState.loading:
+        return const OSkeletonList(rows: 5);
+      case V2ChatState.error:
+        return OErrorState(message: data.errorMessage, onRetry: widget.onRetry);
+      case V2ChatState.planLimited:
+        return OEmptyState(
+          icon: Icons.hourglass_top_rounded,
+          title: 'Daily limit reached',
+          message:
+              "You've used all 50M free tokens for today. ${data.limitResetLabel}.",
+          action: OButton(
+            label: 'See plans',
+            icon: Icons.bolt_rounded,
+            onPressed: widget.onSeePlans,
+          ),
+        );
+      case V2ChatState.running:
+        return _RunningState(onStop: widget.onStop);
+      case V2ChatState.empty:
+      case V2ChatState.offline:
+        return _HomeContent(
+          data: data,
+          offline: data.state == V2ChatState.offline,
+          onSuggestionTap: (suggestion) {
+            _setDraft(suggestion.title);
+            widget.onSuggestionTap?.call(suggestion);
+          },
+          onRetry: widget.onRetry,
+        );
+    }
+  }
+}
+
+class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
+  const _ChatTopBar({
+    required this.title,
+    required this.modelLabel,
+    required this.onMenu,
+    required this.onModelChipTap,
+    required this.onStudio,
+    required this.onBrowser,
+    required this.onMore,
+  });
+
+  final String title;
+  final String modelLabel;
+  final VoidCallback? onMenu;
+  final VoidCallback? onModelChipTap;
+  final VoidCallback? onStudio;
+  final VoidCallback? onBrowser;
+  final VoidCallback? onMore;
+
+  @override
+  Size get preferredSize => const Size.fromHeight(57);
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return AppBar(
+      automaticallyImplyLeading: false,
+      titleSpacing: 0,
+      leadingWidth: OSpace.touch,
+      leading: OIconButton(
+        icon: Icons.menu_rounded,
+        semanticLabel: 'Open menu',
+        onPressed: onMenu,
+      ),
+      title: Row(
+        children: [
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: _modelChipMaxWidth),
+            child: _ModelChip(label: modelLabel, onTap: onModelChipTap),
+          ),
+          const SizedBox(width: OSpace.xs),
+          Flexible(
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: OType.h2.copyWith(color: c.text),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        OIconButton(
+          icon: Icons.terminal_rounded,
+          semanticLabel: 'Open Studio',
+          onPressed: onStudio,
+        ),
+        OIconButton(
+          icon: Icons.public_rounded,
+          semanticLabel: 'Open Browser',
+          onPressed: onBrowser,
+        ),
+        OIconButton(
+          icon: Icons.more_vert_rounded,
+          semanticLabel: 'More options',
+          onPressed: onMore,
+        ),
+        const SizedBox(width: OSpace.xs),
+      ],
+      bottom: PreferredSize(
+        preferredSize: const Size.fromHeight(1),
+        child: Divider(height: 1, color: c.hairline),
+      ),
+    );
+  }
+}
+
+class _ModelChip extends StatelessWidget {
+  const _ModelChip({required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return OPressable(
+      onTap: onTap,
+      semanticLabel: 'Model: $label. Change model',
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: OSpace.touch),
+        child: Center(
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 32),
+            padding: const EdgeInsets.symmetric(
+              horizontal: OSpace.s,
+              vertical: 5,
+            ),
+            decoration: BoxDecoration(
+              color: c.surfaceAlt,
+              borderRadius: BorderRadius.circular(ORadius.pill),
+              border: Border.all(color: c.hairline),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: c.success,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: OType.label.copyWith(color: c.text),
+                  ),
+                ),
+                const SizedBox(width: 2),
+                Icon(Icons.expand_more_rounded, size: 16, color: c.textMuted),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _HomeContent extends StatelessWidget {
+  const _HomeContent({
+    required this.data,
+    required this.offline,
+    required this.onSuggestionTap,
+    required this.onRetry,
+  });
+
+  final V2ChatPageData data;
+  final bool offline;
+  final ValueChanged<V2ChatSuggestion> onSuggestionTap;
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(
+        OSpace.screen,
+        OSpace.m,
+        OSpace.screen,
+        OSpace.l,
+      ),
+      child: OFadeSlide(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (offline) ...[
+              _OfflineBanner(data: data, onRetry: onRetry),
+              const SizedBox(height: OSpace.xl),
+            ],
+            Center(
+              child: Container(
+                width: 64,
+                height: 64,
+                decoration: BoxDecoration(
+                  color: c.surfaceAlt,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: c.hairline),
+                ),
+                child: Icon(
+                  Icons.auto_awesome_rounded,
+                  size: 30,
+                  color: c.accent,
+                ),
+              ),
+            ),
+            const SizedBox(height: OSpace.l),
+            Text(
+              data.headline,
+              textAlign: TextAlign.center,
+              style: OType.h1.copyWith(color: c.text),
+            ),
+            const SizedBox(height: OSpace.s),
+            Text(
+              data.subtitle,
+              textAlign: TextAlign.center,
+              style: OType.bodySm.copyWith(color: c.textMuted),
+            ),
+            const SizedBox(height: OSpace.xl),
+            OStagger(
+              children: [
+                for (var i = 0; i < data.suggestions.length; i++)
+                  Padding(
+                    padding: EdgeInsets.only(
+                      bottom: i == data.suggestions.length - 1 ? 0 : OSpace.s,
+                    ),
+                    child: _SuggestionCard(
+                      suggestion: data.suggestions[i],
+                      tone: i == 0
+                          ? c.accent
+                          : i == 1
+                          ? c.success
+                          : c.warn,
+                      onTap: () => onSuggestionTap(data.suggestions[i]),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SuggestionCard extends StatelessWidget {
+  const _SuggestionCard({
+    required this.suggestion,
+    required this.tone,
+    required this.onTap,
+  });
+
+  final V2ChatSuggestion suggestion;
+  final Color tone;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return OCard(
+      padding: const EdgeInsets.all(OSpace.m),
+      onTap: onTap,
+      semanticLabel: '${suggestion.title}, ${suggestion.subtitle}',
+      child: Row(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: c.surfaceAlt,
+              borderRadius: BorderRadius.circular(ORadius.m),
+            ),
+            child: Icon(suggestion.icon, size: 21, color: tone),
+          ),
+          const SizedBox(width: OSpace.m),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  suggestion.title,
+                  style: OType.bodySm.copyWith(
+                    color: c.text,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  suggestion.subtitle,
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: OSpace.s),
+          Icon(Icons.north_east_rounded, size: 18, color: c.textMuted),
+        ],
+      ),
+    );
+  }
+}
+
+class _OfflineBanner extends StatelessWidget {
+  const _OfflineBanner({required this.data, required this.onRetry});
+
+  final V2ChatPageData data;
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      padding: const EdgeInsets.all(OSpace.m),
+      decoration: BoxDecoration(
+        color: c.warn.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(ORadius.l),
+        border: Border.all(color: c.warn.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.cloud_off_rounded, size: 20, color: c.warn),
+          const SizedBox(width: OSpace.s),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  data.offlineTitle,
+                  style: OType.label.copyWith(color: c.text),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  data.offlineMessage,
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+                if (data.queuedCount > 0) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    data.queuedCount == 1
+                        ? '1 message is waiting to send.'
+                        : '${data.queuedCount} messages are waiting to send.',
+                    style: OType.caption.copyWith(color: c.warn),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: OSpace.s),
+          OButton(
+            label: 'Retry',
+            variant: OButtonVariant.ghost,
+            onPressed: onRetry,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RunningState extends StatelessWidget {
+  const _RunningState({required this.onStop});
+
+  final VoidCallback? onStop;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(OSpace.xl),
+        child: OFadeSlide(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              OPulse(
+                child: Container(
+                  width: 14,
+                  height: 14,
+                  decoration: BoxDecoration(
+                    color: c.accentFill,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+              const SizedBox(height: OSpace.l),
+              Text(
+                'Ovid is working',
+                textAlign: TextAlign.center,
+                style: OType.h2.copyWith(color: c.text),
+              ),
+              const SizedBox(height: OSpace.s),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 300),
+                child: Text(
+                  'Your chat will appear here as soon as it is ready.',
+                  textAlign: TextAlign.center,
+                  style: OType.bodySm.copyWith(color: c.textMuted),
+                ),
+              ),
+              const SizedBox(height: OSpace.l),
+              OButton(
+                label: 'Stop',
+                variant: OButtonVariant.danger,
+                onPressed: onStop,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusRow extends StatelessWidget {
+  const _StatusRow({required this.data});
+
+  final V2ChatPageData data;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        OSpace.screen + OSpace.xs,
+        OSpace.xs,
+        OSpace.screen + OSpace.xs,
+        OSpace.s,
+      ),
+      child: Wrap(
+        alignment: WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: OSpace.s,
+        runSpacing: OSpace.xs,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  color: c.success,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  '${data.modelLabel} · ${data.tokensLabel}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ),
+            ],
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.bolt_rounded, size: 14, color: c.textFaint),
+              const SizedBox(width: 2),
+              Text(
+                data.fastAgentLabel,
+                style: OType.caption.copyWith(
+                  color: c.textMuted,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Composer extends StatelessWidget {
+  const _Composer({
+    required this.data,
+    required this.controller,
+    required this.canSend,
+    required this.running,
+    required this.locked,
+    required this.attachments,
+    required this.attachmentError,
+    required this.voiceError,
+    required this.listening,
+    required this.onRemoveAttachment,
+    required this.onSend,
+    required this.onStop,
+    required this.onAttach,
+    required this.onPermissionTap,
+    required this.onMic,
+  });
+
+  final V2ChatPageData data;
+  final TextEditingController controller;
+  final bool canSend;
+  final bool running;
+  final bool locked;
+  final List<V2ComposerAttachment> attachments;
+  final String? attachmentError;
+  final String? voiceError;
+  final bool listening;
+  final ValueChanged<V2ComposerAttachment> onRemoveAttachment;
+  final VoidCallback onSend;
+  final VoidCallback? onStop;
+  final VoidCallback? onAttach;
+  final VoidCallback? onPermissionTap;
+  final VoidCallback? onMic;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final enabled = !locked && !running;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.s),
+      padding: const EdgeInsets.all(OSpace.s),
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(ORadius.xl),
+        border: Border.all(color: c.hairline),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (attachments.isNotEmpty)
+            V2AttachmentChips(
+              attachments: attachments,
+              enabled: enabled,
+              onRemove: onRemoveAttachment,
+            ),
+          if (attachmentError != null)
+            V2ComposerNotice(message: attachmentError!),
+          if (voiceError != null)
+            V2ComposerNotice(message: voiceError!, icon: Icons.mic_off_rounded),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              OIconButton(
+                icon: Icons.add_rounded,
+                semanticLabel: 'Attach a file',
+                onPressed: enabled ? onAttach : null,
+              ),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 3, right: OSpace.s),
+                  child: TextField(
+                    controller: controller,
+                    enabled: enabled,
+                    minLines: 1,
+                    maxLines: 4,
+                    keyboardType: TextInputType.multiline,
+                    textInputAction: TextInputAction.newline,
+                    style: OType.body.copyWith(color: c.text),
+                    decoration: InputDecoration(
+                      hintText: running
+                          ? 'Ovid is working...'
+                          : locked
+                          ? 'Upgrade to keep building'
+                          : data.composerHint,
+                      hintStyle: OType.body.copyWith(color: c.textFaint),
+                      filled: false,
+                      isDense: true,
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      disabledBorder: InputBorder.none,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: OSpace.xs),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: _PermissionChip(
+                      label: data.permissionLabel,
+                      onTap: onPermissionTap,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: OSpace.xs),
+                OIconButton(
+                  icon: listening ? Icons.mic_rounded : Icons.mic_none_rounded,
+                  semanticLabel: listening ? 'Stop voice input' : 'Voice input',
+                  active: listening,
+                  onPressed: enabled ? onMic : null,
+                ),
+                const SizedBox(width: OSpace.xs),
+                _RoundAction(
+                  icon: running
+                      ? Icons.stop_rounded
+                      : Icons.arrow_upward_rounded,
+                  label: running ? 'Stop' : 'Send',
+                  danger: running,
+                  onPressed: running
+                      ? onStop
+                      : canSend
+                      ? onSend
+                      : null,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PermissionChip extends StatelessWidget {
+  const _PermissionChip({required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      label: 'Permission: $label. Change',
+      button: true,
+      enabled: onTap != null,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(ORadius.pill),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: OSpace.touch),
+            child: Center(
+              child: Container(
+                constraints: const BoxConstraints(minHeight: 32),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: OSpace.s,
+                  vertical: 5,
+                ),
+                decoration: BoxDecoration(
+                  color: c.surfaceAlt,
+                  borderRadius: BorderRadius.circular(ORadius.pill),
+                  border: Border.all(color: c.hairline),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.shield_outlined, size: 16, color: c.accent),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.label.copyWith(color: c.textMuted),
+                      ),
+                    ),
+                    const SizedBox(width: 2),
+                    Icon(
+                      Icons.keyboard_arrow_down_rounded,
+                      size: 16,
+                      color: c.textFaint,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RoundAction extends StatelessWidget {
+  const _RoundAction({
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+    this.danger = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onPressed;
+  final bool danger;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final enabled = onPressed != null;
+    final background = !enabled
+        ? c.surfaceRaised
+        : danger
+        ? c.danger
+        : c.accentFill;
+    final foreground = !enabled
+        ? c.textFaint
+        : danger
+        ? c.onDanger
+        : c.onAccent;
+    return Semantics(
+      label: label,
+      button: true,
+      enabled: enabled,
+      child: SizedBox(
+        width: OSpace.touch,
+        height: OSpace.touch,
+        child: Material(
+          color: background,
+          shape: const CircleBorder(),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onPressed,
+            child: Icon(icon, size: 22, color: foreground),
+          ),
+        ),
+      ),
+    );
+  }
+}

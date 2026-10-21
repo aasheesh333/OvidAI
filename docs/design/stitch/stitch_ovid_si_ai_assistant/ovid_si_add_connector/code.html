@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport"/><meta content="mobile_stack" name="shell-type"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/><link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config = { darkMode: "class", theme: { extend: { colors: { "on-error-container": "#ffdad6", "on-background": "#e4e1e7", "secondary-fixed-dim": "#45dfa4", "on-secondary-container": "#00452e", "secondary": "#45dfa4", "primary-container": "#947dff", "surface": "#131317", "surface-container": "#1f1f23", "outline-variant": "#484555", "surface-container-high": "#2a292e", "on-primary-fixed": "#1c0062", "surface-container-lowest": "#0e0e12", "secondary-container": "#00bd85", "outline": "#938ea1", "on-primary-container": "#2a0088", "on-surface-variant": "#c9c4d8", "on-error": "#690005", "error": "#ffb4ab", "inverse-primary": "#603ce2", "surface-variant": "#353439", "surface-bright": "#39393d", "on-tertiary-fixed": "#410006", "on-secondary-fixed": "#002114", "background": "#131317", "primary-fixed": "#e6deff", "on-secondary-fixed-variant": "#005137", "on-tertiary-fixed-variant": "#881d24", "on-primary-fixed-variant": "#4816cb", "surface-container-low": "#1b1b1f", "on-tertiary": "#670211", "surface-dim": "#131317", "error-container": "#93000a", "surface-container-highest": "#353439", "tertiary-fixed-dim": "#ffb3b0", "on-secondary": "#003825", "tertiary-fixed": "#ffdad8", "surface-tint": "#cabeff", "tertiary": "#ffb3b0", "secondary-fixed": "#68fcbf", "inverse-surface": "#e4e1e7", "primary-fixed-dim": "#cabeff", "on-surface": "#e4e1e7", "on-tertiary-container": "#5b000d", "inverse-on-surface": "#303034", "on-primary": "#31009a", "tertiary-container": "#ea6767", "primary": "#cabeff" }, borderRadius: { "DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px" }, spacing: { "space-sm": "0.5rem", "margin": "1.5rem", "space-xl": "2rem", "gutter": "1rem", "space-md": "1rem", "space-lg": "1.5rem", "space-xs": "0.25rem" }, fontFamily: { "caption": ["Inter"], "headline-sm": ["Inter"], "body-lg": ["Inter"], "headline-lg": ["Inter"], "body-sm": ["Inter"] }, fontSize: { "caption": ["12px", { lineHeight: "16.8px", letterSpacing: "0.02em", fontWeight: "500" }], "headline-sm": ["20px", { lineHeight: "28px", letterSpacing: "-0.01em", fontWeight: "600" }], "body-lg": ["16px", { lineHeight: "22.4px", letterSpacing: "0em", fontWeight: "400" }], "headline-lg": ["28px", { lineHeight: "39px", letterSpacing: "-0.02em", fontWeight: "600" }], "body-sm": ["14px", { lineHeight: "19.6px", letterSpacing: "0.01em", fontWeight: "400" }] } } } };</script><style>@layer base { html, body { width: 100vw; margin: 0; padding: 0; } body { overscroll-behavior: none; } .pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); } .pt-safe { padding-top: env(safe-area-inset-top, 0px); } main > :first-child { margin-top: 0 !important; } main > :last-child { margin-bottom: 0 !important; } } ::-webkit-scrollbar { display: none; } .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; } body { min-height: max(884px, 100dvh); }</style></head><body class="bg-surface font-body-sm text-body-sm text-on-surface antialiased flex flex-col min-h-screen"><header class="fixed top-0 inset-x-0 z-50 bg-surface/80 backdrop-blur-xl pt-safe shadow-[0_1px_8px_rgba(0,0,0,0.04)]"><div class="h-6 px-margin flex items-center justify-between text-on-surface-variant font-caption text-caption select-none"><span>9:41</span><div class="flex items-center gap-space-xs"><span class="material-symbols-outlined text-[16px]">signal_cellular_4_bar</span><span class="material-symbols-outlined text-[16px]">wifi</span><span class="material-symbols-outlined text-[16px]">battery_full</span></div></div><div class="h-16 px-space-sm flex items-center justify-between"><div class="flex items-center gap-space-xs"><button aria-label="Back" class="w-12 h-12 flex items-center justify-center rounded-full text-on-surface hover:bg-surface-container-high transition-colors active:scale-95" onclick="history.back()" type="button"><span class="material-symbols-outlined text-[24px]">arrow_back</span></button><h1 class="font-headline-sm text-headline-sm text-on-surface tracking-tight font-semibold select-none">Ovid Si — Add Connector</h1></div><div class="flex items-center gap-space-xs pr-space-xs"><button aria-label="Action" class="w-12 h-12 flex items-center justify-center rounded-full text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-colors" type="button"><span class="material-symbols-outlined text-[22px]">more_vert</span></button></div></div></header><main class="flex flex-col relative w-full px-margin pt-16 pb-safe bg-surface flex-1"><div class="flex flex-col w-full pb-space-xl">
+<!-- Top Bar Controls -->
+<div class="flex items-center justify-between pb-space-lg">
+<button aria-label="Go back" class="min-h-[48px] min-w-[48px] -ml-space-sm flex items-center justify-center rounded-full text-on-surface hover:bg-surface-container-high transition-transform active:scale-95" onclick="history.back()" type="button">
+<span class="material-symbols-outlined text-[24px]">chevron_left</span>
+</button>
+<div class="flex items-center">
+<h2 class="font-headline-sm text-headline-sm text-on-surface">Add connector</h2>
+</div>
+<button class="min-h-[48px] px-space-md flex items-center justify-center rounded-full font-body-sm text-body-sm font-semibold text-primary hover:bg-surface-container-high active:scale-95 transition-all" id="btn-save" type="button">
+      Save
+    </button>
+</div>
+<!-- Section 1: From the Catalog -->
+<div class="flex flex-col gap-space-sm mb-space-lg">
+<span class="font-caption text-caption text-on-surface-variant uppercase tracking-wider px-space-xs font-semibold">
+      From the catalog
+    </span>
+<!-- Search Input -->
+<div class="relative flex items-center min-h-[48px] rounded-xl bg-surface-container-low px-space-md focus-within:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined text-outline text-[20px] select-none mr-space-sm">search</span>
+<input class="w-full bg-transparent text-on-surface placeholder-outline font-body-sm text-body-sm outline-none" placeholder="Search catalog (40+ integrations)..." type="search"/>
+</div>
+<!-- Suggested Quick-Add Rows -->
+<div class="flex flex-col bg-surface-container-low rounded-xl overflow-hidden mt-space-xs">
+<!-- Supabase Row -->
+<div class="min-h-[56px] flex items-center justify-between p-space-md hover:bg-surface-container-high/60 transition-colors">
+<div class="flex items-center gap-space-md min-w-0 pr-space-sm">
+<div class="w-10 h-10 rounded-lg bg-surface-container-highest flex items-center justify-center shrink-0 text-secondary">
+<span class="material-symbols-outlined text-[22px]">database</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-sm text-body-sm font-medium text-on-surface truncate">Supabase</span>
+<span class="font-caption text-caption text-on-surface-variant truncate">PostgreSQL database and auth</span>
+</div>
+</div>
+<button class="min-h-[48px] px-space-md py-space-xs rounded-full bg-surface-container-high text-on-surface hover:text-primary font-caption text-caption font-semibold active:scale-95 transition-all shrink-0" type="button">
+          + Add
+        </button>
+</div>
+<!-- Figma Row -->
+<div class="min-h-[56px] flex items-center justify-between p-space-md hover:bg-surface-container-high/60 transition-colors">
+<div class="flex items-center gap-space-md min-w-0 pr-space-sm">
+<div class="w-10 h-10 rounded-lg bg-surface-container-highest flex items-center justify-center shrink-0 text-primary">
+<span class="material-symbols-outlined text-[22px]">draw</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-sm text-body-sm font-medium text-on-surface truncate">Figma</span>
+<span class="font-caption text-caption text-on-surface-variant truncate">Inspect files and export components</span>
+</div>
+</div>
+<button class="min-h-[48px] px-space-md py-space-xs rounded-full bg-surface-container-high text-on-surface hover:text-primary font-caption text-caption font-semibold active:scale-95 transition-all shrink-0" type="button">
+          + Add
+        </button>
+</div>
+<!-- Discord Row -->
+<div class="min-h-[56px] flex items-center justify-between p-space-md hover:bg-surface-container-high/60 transition-colors">
+<div class="flex items-center gap-space-md min-w-0 pr-space-sm">
+<div class="w-10 h-10 rounded-lg bg-surface-container-highest flex items-center justify-center shrink-0 text-tertiary">
+<span class="material-symbols-outlined text-[22px]">forum</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-sm text-body-sm font-medium text-on-surface truncate">Discord</span>
+<span class="font-caption text-caption text-on-surface-variant truncate">Community agent webhook</span>
+</div>
+</div>
+<button class="min-h-[48px] px-space-md py-space-xs rounded-full bg-surface-container-high text-on-surface hover:text-primary font-caption text-caption font-semibold active:scale-95 transition-all shrink-0" type="button">
+          + Add
+        </button>
+</div>
+</div>
+</div>
+<!-- Section 2: Custom Connector -->
+<div class="flex flex-col gap-space-sm mb-space-lg">
+<span class="font-caption text-caption text-on-surface-variant uppercase tracking-wider px-space-xs font-semibold">
+      Custom connector
+    </span>
+<div class="bg-surface-container-low rounded-xl p-space-md flex flex-col gap-space-md">
+<!-- Field: Name -->
+<div class="flex flex-col gap-space-xs">
+<label class="font-caption text-caption text-on-surface-variant" for="custom-name">Name</label>
+<div class="flex items-center min-h-[48px] rounded-lg bg-surface-container px-space-md focus-within:bg-surface-container-high transition-colors">
+<input class="w-full bg-transparent text-on-surface placeholder-outline font-body-sm text-body-sm outline-none" id="custom-name" placeholder="e.g. Internal Analytics API" type="text"/>
+</div>
+</div>
+<!-- Field: Server URL -->
+<div class="flex flex-col gap-space-xs">
+<label class="font-caption text-caption text-on-surface-variant" for="custom-url">Server URL</label>
+<div class="flex items-center min-h-[48px] rounded-lg bg-surface-container px-space-md focus-within:bg-surface-container-high transition-colors">
+<input class="w-full bg-transparent text-on-surface placeholder-outline font-body-sm text-body-sm outline-none" id="custom-url" placeholder="https://api.internal.company.com/v1" type="url"/>
+</div>
+</div>
+<!-- Field: Authentication segmented chips -->
+<div class="flex flex-col gap-space-xs">
+<span class="font-caption text-caption text-on-surface-variant">Authentication</span>
+<div class="grid grid-cols-3 gap-space-xs p-space-xs bg-surface-container rounded-lg" id="auth-chips">
+<button class="auth-chip min-h-[40px] rounded-lg font-caption text-caption font-medium text-on-surface-variant transition-all hover:text-on-surface flex items-center justify-center" data-val="oauth" type="button">
+            OAuth
+          </button>
+<button class="auth-chip min-h-[40px] rounded-lg font-caption text-caption font-semibold bg-primary-container/20 text-primary transition-all flex items-center justify-center" data-val="api-key" type="button">
+            API key
+          </button>
+<button class="auth-chip min-h-[40px] rounded-lg font-caption text-caption font-medium text-on-surface-variant transition-all hover:text-on-surface flex items-center justify-center" data-val="none" type="button">
+            None
+          </button>
+</div>
+</div>
+<!-- Field: API Key input -->
+<div class="flex flex-col gap-space-xs">
+<label class="font-caption text-caption text-on-surface-variant" for="custom-api-key">API key</label>
+<div class="flex items-center min-h-[48px] rounded-lg bg-surface-container px-space-md gap-space-sm focus-within:bg-surface-container-high transition-colors">
+<input class="w-full bg-transparent text-on-surface placeholder-outline font-body-sm text-body-sm outline-none font-mono" id="custom-api-key" type="password" value="sk_live_94fa82c40ae1"/>
+<button aria-label="Toggle password visibility" class="w-8 h-8 flex items-center justify-center text-outline hover:text-on-surface rounded-full transition-colors shrink-0" id="toggle-pwd-btn" type="button">
+<span class="material-symbols-outlined text-[20px]" id="toggle-pwd-icon">visibility</span>
+</button>
+</div>
+</div>
+<!-- Test connection button -->
+<button class="min-h-[48px] w-full flex items-center justify-center gap-space-xs rounded-full bg-surface-container-high text-on-surface hover:text-primary font-body-sm text-body-sm font-semibold active:scale-98 transition-all mt-space-xs" id="test-conn-btn" type="button">
+<span class="material-symbols-outlined text-[18px]" id="test-conn-icon">sync</span>
+<span id="test-conn-label">Test connection</span>
+</button>
+</div>
+</div>
+<!-- Section 3: Permissions -->
+<div class="flex flex-col gap-space-sm mb-space-lg">
+<span class="font-caption text-caption text-on-surface-variant uppercase tracking-wider px-space-xs font-semibold">
+      Permissions
+    </span>
+<div class="bg-surface-container-low rounded-xl p-space-md flex flex-col gap-space-md">
+<!-- Row 1: Read data -->
+<div class="flex items-center justify-between min-h-[40px]">
+<div class="flex flex-col">
+<span class="font-body-sm text-body-sm text-on-surface font-medium">Read data</span>
+<span class="font-caption text-caption text-on-surface-variant">Query schemas, view records, inspect tables</span>
+</div>
+<button aria-checked="true" class="perm-toggle relative w-12 h-7 rounded-full bg-primary transition-colors flex items-center px-0.5 shrink-0 focus:outline-none" data-toggle="read" role="switch" type="button">
+<span class="w-6 h-6 rounded-full bg-on-primary transform translate-x-5 transition-transform duration-200 ease-in-out"></span>
+</button>
+</div>
+<!-- Row 2: Write & update -->
+<div class="flex items-center justify-between min-h-[40px]">
+<div class="flex flex-col">
+<span class="font-body-sm text-body-sm text-on-surface font-medium">Write &amp; update</span>
+<span class="font-caption text-caption text-on-surface-variant">Insert objects, update existing payload trees</span>
+</div>
+<button aria-checked="true" class="perm-toggle relative w-12 h-7 rounded-full bg-primary transition-colors flex items-center px-0.5 shrink-0 focus:outline-none" data-toggle="write" role="switch" type="button">
+<span class="w-6 h-6 rounded-full bg-on-primary transform translate-x-5 transition-transform duration-200 ease-in-out"></span>
+</button>
+</div>
+<!-- Row 3: Execute actions -->
+<div class="flex items-center justify-between min-h-[40px]">
+<div class="flex flex-col">
+<span class="font-body-sm text-body-sm text-on-surface font-medium">Execute actions</span>
+<span class="font-caption text-caption text-on-surface-variant">Trigger webhooks and invoke batch operations</span>
+</div>
+<button aria-checked="false" class="perm-toggle relative w-12 h-7 rounded-full bg-surface-container-highest transition-colors flex items-center px-0.5 shrink-0 focus:outline-none" data-toggle="exec" role="switch" type="button">
+<span class="w-6 h-6 rounded-full bg-on-surface-variant transform translate-x-0 transition-transform duration-200 ease-in-out"></span>
+</button>
+</div>
+</div>
+</div>
+<!-- Warning Card with Shield Icon -->
+<div class="bg-surface-container-low rounded-xl p-space-md flex items-start gap-space-md mb-space-md">
+<div class="w-9 h-9 rounded-full bg-tertiary-container/30 flex items-center justify-center shrink-0 text-tertiary mt-0.5">
+<span class="material-symbols-outlined text-[20px]" style="font-variation-settings: 'FILL' 1;">shield</span>
+</div>
+<p class="font-body-sm text-body-sm text-on-surface-variant leading-relaxed">
+      Custom connectors can act on your behalf. Only add servers you trust.
+    </p>
+</div>
+<!-- Footnote -->
+<div class="flex items-center justify-center gap-space-xs font-caption text-caption text-on-surface-variant text-center pt-space-xs">
+<span>Free plan: 0 custom · Go: 5.</span>
+<button class="text-primary font-semibold hover:underline min-h-[48px] px-space-xs flex items-center" type="button">
+      Upgrade
+    </button>
+</div>
+</div>
+<script>
+  // Auth chips selection toggle
+  const authChips = document.querySelectorAll('.auth-chip');
+  authChips.forEach(chip => {
+    chip.addEventListener('click', () => {
+      authChips.forEach(c => {
+        c.classList.remove('bg-primary-container/20', 'text-primary', 'font-semibold');
+        c.classList.add('text-on-surface-variant', 'font-medium');
+      });
+      chip.classList.add('bg-primary-container/20', 'text-primary', 'font-semibold');
+      chip.classList.remove('text-on-surface-variant', 'font-medium');
+    });
+  });
+
+  // Password visibility micro-interaction
+  const pwdInput = document.getElementById('custom-api-key');
+  const toggleBtn = document.getElementById('toggle-pwd-btn');
+  const toggleIcon = document.getElementById('toggle-pwd-icon');
+
+  if (toggleBtn && pwdInput && toggleIcon) {
+    toggleBtn.addEventListener('click', () => {
+      const isPwd = pwdInput.type === 'password';
+      pwdInput.type = isPwd ? 'text' : 'password';
+      toggleIcon.textContent = isPwd ? 'visibility_off' : 'visibility';
+    });
+  }
+
+  // Permission switches interaction
+  const toggles = document.querySelectorAll('.perm-toggle');
+  toggles.forEach(toggle => {
+    toggle.addEventListener('click', () => {
+      const isChecked = toggle.getAttribute('aria-checked') === 'true';
+      const knob = toggle.querySelector('span');
+      if (isChecked) {
+        toggle.setAttribute('aria-checked', 'false');
+        toggle.classList.remove('bg-primary');
+        toggle.classList.add('bg-surface-container-highest');
+        knob.classList.remove('translate-x-5', 'bg-on-primary');
+        knob.classList.add('translate-x-0', 'bg-on-surface-variant');
+      } else {
+        toggle.setAttribute('aria-checked', 'true');
+        toggle.classList.remove('bg-surface-container-highest');
+        toggle.classList.add('bg-primary');
+        knob.classList.remove('translate-x-0', 'bg-on-surface-variant');
+        knob.classList.add('translate-x-5', 'bg-on-primary');
+      }
+    });
+  });
+
+  // Test connection button interactive state
+  const testBtn = document.getElementById('test-conn-btn');
+  const testIcon = document.getElementById('test-conn-icon');
+  const testLabel = document.getElementById('test-conn-label');
+
+  if (testBtn && testIcon && testLabel) {
+    testBtn.addEventListener('click', () => {
+      testIcon.classList.add('animate-spin');
+      testLabel.textContent = 'Verifying host...';
+      
+      setTimeout(() => {
+        testIcon.classList.remove('animate-spin');
+        testIcon.textContent = 'check_circle';
+        testIcon.classList.add('text-secondary');
+        testLabel.textContent = 'Connected (200 OK)';
+        
+        setTimeout(() => {
+          testIcon.textContent = 'sync';
+          testIcon.classList.remove('text-secondary');
+          testLabel.textContent = 'Test connection';
+        }, 3000);
+      }, 1000);
+    });
+  }
+</script></main></body></html>

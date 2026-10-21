@@ -1,0 +1,686 @@
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../../core/auth_identity.dart';
+import '../../../core/auth_phone_flow.dart';
+import '../../../core/auth_providers.dart';
+import '../../../core/diag.dart';
+import '../../../core/firebase_service.dart';
+import '../../../core/revenuecat_billing.dart';
+import '../../../core/state.dart';
+import '../../auth_methods.dart' show AuthPhoneDialog;
+import '../../design/o_components.dart';
+import '../../design/o_tokens.dart';
+import '../onboarding/language_goal_page.dart';
+import '../onboarding/onboarding_welcome.dart';
+import '../onboarding/paywall_page.dart';
+import '../onboarding/sign_in_page.dart';
+import '../onboarding/splash_page.dart';
+
+// TODO(l10n): move the gate's status and error copy to the ARB files.
+
+/// The slice of Firebase auth the onboarding gate drives.
+///
+/// [FirebaseService] is the production implementation (through
+/// [_FirebaseOnboardingAuth]); tests provide a plain fake. Keeping the seam
+/// this small means the gate never reaches for a singleton directly, while
+/// `accountReady`/`isSignedIn` remain the single source of truth.
+abstract class V2OnboardingAuth implements Listenable {
+  /// Firebase is configured and initialized for this build.
+  bool get isAvailable;
+
+  /// A non-anonymous user is signed in.
+  bool get isSignedIn;
+
+  /// The signed-in account passed the server admission check.
+  bool get accountReady;
+
+  /// Why admission failed, if it did.
+  String? get accountError;
+
+  /// Display name / email / phone for the signed-in user.
+  String get accountLabel;
+
+  Future<void> initialize();
+
+  Future<void> retryAccountLogin();
+
+  /// Returns null on success, `'cancelled'` when the user dismissed the
+  /// provider, otherwise a human-readable error.
+  Future<String?> authenticateSocial(String providerId, AuthIntent intent);
+
+  PhoneAuthFlow createPhoneFlow(AuthIntent intent);
+}
+
+/// Production adapter over [FirebaseService.I].
+class _FirebaseOnboardingAuth implements V2OnboardingAuth {
+  _FirebaseOnboardingAuth(this._service);
+
+  final FirebaseService _service;
+
+  @override
+  bool get isAvailable => _service.isAvailable;
+
+  @override
+  bool get isSignedIn => _service.isSignedIn;
+
+  @override
+  bool get accountReady => _service.accountReady;
+
+  @override
+  String? get accountError => _service.accountError;
+
+  @override
+  String get accountLabel => _service.accountLabel;
+
+  @override
+  Future<void> initialize() => _service.initialize();
+
+  @override
+  Future<void> retryAccountLogin() => _service.retryAccountLogin();
+
+  @override
+  Future<String?> authenticateSocial(String providerId, AuthIntent intent) =>
+      _service.authenticateSocial(providerId, intent);
+
+  @override
+  PhoneAuthFlow createPhoneFlow(AuthIntent intent) =>
+      _service.createPhoneFlow(intent);
+
+  @override
+  void addListener(VoidCallback listener) => _service.addListener(listener);
+
+  @override
+  void removeListener(VoidCallback listener) =>
+      _service.removeListener(listener);
+}
+
+/// SharedPreferences key for the v2 onboarding welcome marker. It is separate
+/// from `AppState`'s in-app welcome notice (`ovid_welcome`) so finishing the
+/// onboarding tour never suppresses that unrelated notice, and vice versa.
+const String kV2WelcomeSeenPref = 'ovid_welcome_version_v2';
+
+/// Default onboarding welcome version. Bump to show the tour again.
+const String kV2OnboardingWelcomeVersion = '1';
+
+const String _kLocalePref = 'ovid_locale';
+const String _kFirstGoalPref = 'ovid_first_goal';
+
+const List<String> _languageIds = ['en', 'hi', 'pa', 'ta'];
+
+const Map<String, String> _languageNames = {
+  'en': 'English',
+  'hi': 'Hindi',
+  'pa': 'Punjabi',
+  'ta': 'Tamil',
+};
+
+const String _emailUnavailableMessage =
+    'Email sign-in is not available yet. Use Google or phone.';
+
+enum _Step { welcome, language, signIn, done }
+
+/// Production onboarding gate for the v2 shell.
+///
+/// Order: splash (startup pending) → welcome (first run) → language & goal →
+/// sign-in → paywall → [child]. A signed-in, admitted user skips straight to
+/// [child]. The live [LoginGate] is intentionally left untouched: the app
+/// router/flag owner decides which gate wraps the shell.
+///
+/// Nothing here fakes a result: email/password has no backend and says so,
+/// a declined purchase continues without an entitlement, and a failed social
+/// or phone attempt is surfaced instead of advancing.
+class V2OnboardingGate extends StatefulWidget {
+  const V2OnboardingGate({
+    super.key,
+    required this.child,
+    this.auth,
+    this.purchase,
+    this.welcomeVersion = kV2OnboardingWelcomeVersion,
+  });
+
+  /// The app shown once onboarding and account admission are complete.
+  final Widget child;
+
+  /// Test seam; production uses [FirebaseService.I].
+  final V2OnboardingAuth? auth;
+
+  /// Called when the user starts the trial for [planId]. Returns whether the
+  /// billing layer completed a purchase. The default returns false: the gate
+  /// continues without granting anything.
+  final Future<bool> Function(String planId)? purchase;
+
+  /// Marker value written to [kV2WelcomeSeenPref]. Overridable for tests.
+  final String welcomeVersion;
+
+  @override
+  State<V2OnboardingGate> createState() => _V2OnboardingGateState();
+}
+
+class _V2OnboardingGateState extends State<V2OnboardingGate> {
+  late final V2OnboardingAuth _auth =
+      widget.auth ?? _FirebaseOnboardingAuth(FirebaseService.I);
+  late final Future<bool> Function(String planId) _purchase =
+      widget.purchase ?? _declinePurchase;
+
+  static Future<bool> _declinePurchase(String planId) async => false;
+
+  bool _booting = true;
+  bool _booted = false;
+  String? _startupError;
+
+  _Step _step = _Step.welcome;
+
+  bool _welcomeBusy = false;
+  String? _welcomeError;
+
+  String _languageId = 'en';
+  Set<String> _goalIds = {'build'};
+  bool _savingChoices = false;
+  String? _choicesError;
+
+  bool _signInBusy = false;
+  String? _signInError;
+  Future<void> Function()? _lastSignInAction;
+
+  bool _paywallSeen = false;
+  bool _purchasing = false;
+  String? _paywallError;
+  String _selectedPlanId = 'plus';
+
+  bool _accountRetrying = false;
+  String? _accountRetryError;
+
+  @override
+  void initState() {
+    super.initState();
+    _auth.addListener(_onAuth);
+    _boot();
+  }
+
+  @override
+  void dispose() {
+    _auth.removeListener(_onAuth);
+    super.dispose();
+  }
+
+  Future<void> _boot() async {
+    if (!_booting) {
+      setState(() {
+        _booting = true;
+        _startupError = null;
+      });
+    }
+
+    Object? failure;
+    try {
+      await _auth.initialize();
+    } catch (error) {
+      failure = error;
+    }
+
+    SharedPreferences? prefs;
+    try {
+      prefs = await SharedPreferences.getInstance();
+    } catch (_) {
+      // Preferences are an enhancement here: without them the tour starts
+      // from the top instead of blocking the app.
+    }
+    if (!mounted) return;
+
+    final welcomeSeen =
+        prefs?.getString(kV2WelcomeSeenPref) == widget.welcomeVersion;
+    final locale = prefs?.getString(_kLocalePref) ?? '';
+    final goals = (prefs?.getString(_kFirstGoalPref) ?? '')
+        .split(',')
+        .where((id) => id.isNotEmpty)
+        .toSet();
+
+    setState(() {
+      _booting = false;
+      _booted = true;
+      _startupError = failure == null
+          ? null
+          : 'Ovid could not start. Check your connection and try again.';
+      _languageId = _languageIds.contains(locale) ? locale : 'en';
+      if (goals.isNotEmpty) _goalIds = goals;
+      if (_auth.isSignedIn) {
+        _step = _Step.done;
+      } else if (!welcomeSeen) {
+        _step = _Step.welcome;
+      } else if (locale.isEmpty) {
+        _step = _Step.language;
+      } else {
+        _step = _Step.signIn;
+      }
+    });
+  }
+
+  void _onAuth() {
+    if (!mounted) return;
+    setState(() {
+      // Losing the session from inside the app returns to sign-in rather than
+      // leaving a signed-out shell on screen.
+      if (_booted && !_auth.isSignedIn && _step == _Step.done) {
+        _step = _Step.signIn;
+        _paywallSeen = false;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_booting) return _splash();
+
+    final startupError =
+        _startupError ??
+        (!_auth.isAvailable
+            ? 'Sign-in is unavailable in this build. Retry to check again.'
+            : null);
+    if (startupError != null) return _splash(error: startupError);
+
+    if (_auth.isSignedIn) {
+      if (!_auth.accountReady) return _accountPending(context);
+      // Signing in during the tour lands on the paywall; an account that was
+      // already signed in at launch goes straight to the app.
+      if (_step != _Step.done) {
+        return _paywallSeen ? widget.child : _paywall();
+      }
+      return widget.child;
+    }
+
+    return switch (_step) {
+      _Step.welcome => _welcome(),
+      _Step.language => _language(),
+      _Step.signIn || _Step.done => _signIn(),
+    };
+  }
+
+  // ── Splash ───────────────────────────────────────────────────────────────
+
+  Widget _splash({String? error}) {
+    return SplashPage(
+      data: V2SplashData(
+        progress: 0,
+        statusLabel: 'Starting Ovid',
+        errorLabel: error,
+      ),
+      onRetry: _boot,
+    );
+  }
+
+  // ── Account admission ────────────────────────────────────────────────────
+
+  Widget _accountPending(BuildContext context) {
+    final c = OColors.of(context);
+    final error = _accountRetryError ?? _auth.accountError;
+    return OScaffold(
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(OSpace.screen),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: OCard(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Semantics(
+                      header: true,
+                      liveRegion: true,
+                      child: Text(
+                        'Confirming your account',
+                        style: OType.h2.copyWith(color: c.text),
+                      ),
+                    ),
+                    const SizedBox(height: OSpace.m),
+                    if (error == null)
+                      Row(
+                        children: [
+                          SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              semanticsLabel: 'Confirming your account',
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                c.accent,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: OSpace.m),
+                          Expanded(
+                            child: Text(
+                              'This usually takes a moment.',
+                              style: OType.bodySm.copyWith(color: c.textMuted),
+                            ),
+                          ),
+                        ],
+                      )
+                    else
+                      Semantics(
+                        liveRegion: true,
+                        child: Text(
+                          error,
+                          style: OType.bodySm.copyWith(color: c.danger),
+                        ),
+                      ),
+                    const SizedBox(height: OSpace.l),
+                    OButton(
+                      label: _accountRetrying ? 'Checking…' : 'Try again',
+                      loading: _accountRetrying,
+                      onPressed: _accountRetrying ? null : _retryAccount,
+                    ),
+                    const SizedBox(height: OSpace.s),
+                    Text(
+                      'Signed in as ${_auth.accountLabel}',
+                      textAlign: TextAlign.center,
+                      style: OType.caption.copyWith(color: c.textFaint),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _retryAccount() async {
+    setState(() {
+      _accountRetrying = true;
+      _accountRetryError = null;
+    });
+    try {
+      await _auth.retryAccountLogin();
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _accountRetryError =
+              'Could not confirm your account. Check your connection and '
+              'retry.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _accountRetrying = false);
+    }
+  }
+
+  // ── Welcome ──────────────────────────────────────────────────────────────
+
+  Widget _welcome() {
+    return OnboardingWelcomePage(
+      data: V2OnboardingWelcomeData(language: _languageNames[_languageId]!),
+      busy: _welcomeBusy,
+      error: _welcomeError,
+      onGetStarted: _welcomeBusy ? null : () => _leaveWelcome(toLanguage: true),
+      onSignIn: _welcomeBusy ? null : () => _leaveWelcome(toLanguage: false),
+      onLanguageTap: _welcomeBusy
+          ? null
+          : () => setState(() => _step = _Step.language),
+    );
+  }
+
+  Future<void> _leaveWelcome({required bool toLanguage}) async {
+    if (_welcomeBusy) return;
+    setState(() {
+      _welcomeBusy = true;
+      _welcomeError = null;
+    });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(kV2WelcomeSeenPref, widget.welcomeVersion);
+      // Keep the app-wide first-run notice in step with this tour. It uses its
+      // own key/version and must never block onboarding if it fails.
+      try {
+        await AppState.I.markWelcomeSeen();
+      } catch (e) {
+        Diag.swallow('onboarding.welcome_seen', e);
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _welcomeBusy = false;
+        _welcomeError = 'We could not save your choice. Try again.';
+      });
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _welcomeBusy = false;
+      _step = toLanguage ? _Step.language : _Step.signIn;
+    });
+  }
+
+  // ── Language & goal ──────────────────────────────────────────────────────
+
+  Widget _language() {
+    return LanguageGoalPage(
+      data: V2LanguageGoalData(
+        selectedLanguageId: _languageId,
+        selectedGoalIds: _goalIds,
+        loading: _savingChoices,
+        error: _choicesError,
+      ),
+      onLanguageSelected: (id) => setState(() => _languageId = id),
+      onGoalToggled: (id, selected) => setState(() {
+        if (selected) {
+          _goalIds.add(id);
+        } else {
+          _goalIds.remove(id);
+        }
+      }),
+      onContinue: _savingChoices ? null : _continueFromLanguage,
+      onRetry: _choicesError == null
+          ? null
+          : () => _continueFromLanguage(_languageId, _goalIds),
+    );
+  }
+
+  Future<void> _continueFromLanguage(
+    String languageId,
+    Set<String> goalIds,
+  ) async {
+    if (_savingChoices) return;
+    setState(() {
+      _savingChoices = true;
+      _choicesError = null;
+    });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kLocalePref, languageId);
+      final sorted = goalIds.toList()..sort();
+      await prefs.setString(_kFirstGoalPref, sorted.join(','));
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _savingChoices = false;
+        _choicesError = 'We could not save your choices. Try again.';
+      });
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _savingChoices = false;
+      _languageId = languageId;
+      _goalIds = Set.of(goalIds);
+      _step = _Step.signIn;
+    });
+  }
+
+  // ── Sign-in ──────────────────────────────────────────────────────────────
+
+  Widget _signIn() {
+    return SignInPage(
+      data: V2SignInData(
+        language: _languageNames[_languageId]!,
+        loading: _signInBusy,
+        error: _signInError,
+      ),
+      onSubmit: _signInBusy ? null : _submitEmail,
+      onGoogle: _signInBusy ? null : _signInWithGoogle,
+      onPhone: _signInBusy ? null : _startPhoneSignIn,
+      onForgotPassword: _signInBusy ? null : _showEmailUnavailable,
+      onCreateAccount: _signInBusy ? null : _showEmailUnavailable,
+      onLanguageTap: _signInBusy
+          ? null
+          : () => setState(() => _step = _Step.language),
+      onRetry: _signInBusy ? null : _retrySignIn,
+      onBack: _signInBusy ? null : () => setState(() => _step = _Step.language),
+    );
+  }
+
+  /// Email/password has no backend. Never fake a session: say what works.
+  void _submitEmail(String email, String password) {
+    if (_signInBusy) return;
+    setState(() {
+      _signInError = _emailUnavailableMessage;
+      _lastSignInAction = _clearSignInError;
+    });
+  }
+
+  void _showEmailUnavailable() {
+    if (_signInBusy) return;
+    setState(() {
+      _signInError = _emailUnavailableMessage;
+      _lastSignInAction = _clearSignInError;
+    });
+  }
+
+  Future<void> _clearSignInError() async {
+    if (!mounted) return;
+    setState(() => _signInError = null);
+  }
+
+  Future<void> _retrySignIn() async {
+    if (_signInBusy) return;
+    final action = _lastSignInAction;
+    if (action != null) await action();
+  }
+
+  Future<void> _signInWithGoogle() async {
+    if (_signInBusy) return;
+    setState(() {
+      _signInBusy = true;
+      _signInError = null;
+      _lastSignInAction = _signInWithGoogle;
+    });
+    String? error;
+    try {
+      error = await _auth.authenticateSocial('google.com', AuthIntent.signIn);
+    } catch (failure) {
+      error = authError(failure);
+    }
+    if (!mounted) return;
+    setState(() {
+      _signInBusy = false;
+      _signInError = (error == null || error == 'cancelled') ? null : error;
+    });
+  }
+
+  Future<void> _startPhoneSignIn() async {
+    if (_signInBusy) return;
+    setState(() {
+      _signInBusy = true;
+      _signInError = null;
+      _lastSignInAction = _startPhoneSignIn;
+    });
+
+    final PhoneAuthFlow flow;
+    try {
+      flow = _auth.createPhoneFlow(AuthIntent.signIn);
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() {
+        _signInBusy = false;
+        _signInError = authError(failure);
+      });
+      return;
+    }
+
+    bool? result;
+    try {
+      result = await Navigator.of(context, rootNavigator: true).push<bool>(
+        DialogRoute<bool>(
+          context: context,
+          barrierDismissible: false,
+          // The dialog owns and disposes the flow.
+          builder: (_) => AuthPhoneDialog(flow: flow),
+        ),
+      );
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() {
+        _signInBusy = false;
+        _signInError = authError(failure);
+      });
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _signInBusy = false;
+      if (result != true) _signInError = null;
+    });
+  }
+
+  // ── Paywall ──────────────────────────────────────────────────────────────
+
+  Widget _paywall() {
+    return PaywallPage(
+      data: V2PaywallData(
+        selectedPlanId: _selectedPlanId,
+        purchasing: _purchasing,
+        error: _paywallError,
+        testModeNote: kRevenueCatTestStore
+            ? 'Test mode: purchases are simulated and never charge you.'
+            : null,
+      ),
+      onPlanSelected: _purchasing
+          ? null
+          : (id) => setState(() => _selectedPlanId = id),
+      onStartTrial: _purchasing ? null : _startTrial,
+      onRetry: _purchasing || _paywallError == null
+          ? null
+          : () => _startTrial(_selectedPlanId),
+      onClose: _purchasing ? null : _finishPaywall,
+    );
+  }
+
+  Future<void> _startTrial(String planId) async {
+    if (_purchasing) return;
+    setState(() {
+      _purchasing = true;
+      _paywallError = null;
+    });
+    try {
+      // The result is intentionally not turned into a local entitlement: the
+      // billing layer owns that. Either way the user continues; nothing here
+      // claims a purchase happened.
+      await _purchase(planId);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _purchasing = false;
+        _paywallError =
+            'The purchase could not be completed. Try again, or continue '
+            'with the Free plan.';
+      });
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _purchasing = false;
+      _paywallSeen = true;
+      _step = _Step.done;
+    });
+  }
+
+  void _finishPaywall() {
+    setState(() {
+      _paywallSeen = true;
+      _step = _Step.done;
+    });
+  }
+}

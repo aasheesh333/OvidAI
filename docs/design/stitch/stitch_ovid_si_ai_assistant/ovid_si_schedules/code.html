@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport"/><meta content="mobile_stack" name="shell-type"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/><link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config = { darkMode: "class", theme: { extend: { colors: { "surface-bright": "#39393d", "surface": "#131317", "tertiary-fixed": "#ffdad8", "on-tertiary-container": "#5b000d", "on-primary-container": "#2a0088", "on-secondary-container": "#00452e", "surface-container-highest": "#353439", "outline-variant": "#484555", "on-tertiary-fixed": "#410006", "surface-container": "#1f1f23", "tertiary-container": "#ea6767", "surface-variant": "#353439", "on-primary-fixed": "#1c0062", "surface-container-lowest": "#0e0e12", "inverse-on-surface": "#303034", "on-surface-variant": "#c9c4d8", "inverse-surface": "#e4e1e7", "error-container": "#93000a", "on-secondary-fixed-variant": "#005137", "primary-container": "#947dff", "surface-dim": "#131317", "primary-fixed-dim": "#cabeff", "on-tertiary": "#670211", "outline": "#938ea1", "inverse-primary": "#603ce2", "secondary": "#45dfa4", "on-secondary-fixed": "#002114", "tertiary": "#ffb3b0", "surface-tint": "#cabeff", "on-primary-fixed-variant": "#4816cb", "on-tertiary-fixed-variant": "#881d24", "on-error-container": "#ffdad6", "background": "#131317", "on-secondary": "#003825", "on-primary": "#31009a", "on-surface": "#e4e1e7", "secondary-fixed-dim": "#45dfa4", "primary-fixed": "#e6deff", "secondary-container": "#00bd85", "on-background": "#e4e1e7", "surface-container-low": "#1b1b1f", "secondary-fixed": "#68fcbf", "on-error": "#690005", "primary": "#cabeff", "surface-container-high": "#2a292e", "error": "#ffb4ab", "tertiary-fixed-dim": "#ffb3b0" }, borderRadius: { "DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px" }, spacing: { "space-md": "1rem", "space-xl": "2rem", "space-xs": "0.25rem", "gutter": "1rem", "space-sm": "0.5rem", "space-lg": "1.5rem", "margin": "1.5rem" }, fontFamily: { "caption": ["Inter"], "body-sm": ["Inter"], "body-lg": ["Inter"], "headline-lg": ["Inter"], "headline-sm": ["Inter"] }, fontSize: { "caption": ["12px", { lineHeight: "16.8px", letterSpacing: "0.02em", fontWeight: "500" }], "body-sm": ["14px", { lineHeight: "19.6px", letterSpacing: "0.01em", fontWeight: "400" }], "body-lg": ["16px", { lineHeight: "22.4px", letterSpacing: "0em", fontWeight: "400" }], "headline-lg": ["28px", { lineHeight: "39px", letterSpacing: "-0.02em", fontWeight: "600" }], "headline-sm": ["20px", { lineHeight: "28px", letterSpacing: "-0.01em", fontWeight: "600" }] } } } };</script><style>@layer base { html, body { width: 100vw; margin: 0; padding: 0; } body { overscroll-behavior: none; } .pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); } .pt-safe { padding-top: env(safe-area-inset-top, 0px); } main > :first-child { margin-top: 0 !important; } main > :last-child { margin-bottom: 0 !important; } } ::-webkit-scrollbar { display: none; } .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; } body { min-height: max(884px, 100dvh); }</style></head><body class="bg-surface font-body-sm text-body-sm text-on-surface antialiased flex flex-col min-h-screen"><header class="fixed top-0 inset-x-0 z-50 bg-surface/85 backdrop-blur-xl shadow-[0_1px_8px_rgba(0,0,0,0.35)]"><div class="pt-safe"><div class="h-6 px-margin flex items-center justify-between text-on-surface-variant font-caption text-caption select-none"><span>9:41</span><div class="flex items-center gap-space-xs"><span class="material-symbols-outlined text-[16px]">signal_cellular_4_bar</span><span class="material-symbols-outlined text-[16px]">wifi</span><span class="material-symbols-outlined text-[16px]">battery_full</span></div></div><div class="h-16 px-space-sm flex items-center justify-between"><div class="flex items-center gap-space-xs"><button aria-label="Go back" class="w-12 h-12 flex items-center justify-center rounded-full text-on-surface hover:bg-surface-container-high transition-colors active:scale-95" onclick="history.back()" type="button"><span class="material-symbols-outlined text-[24px]">arrow_back</span></button><h1 class="font-headline-sm text-headline-sm text-on-surface tracking-tight font-semibold select-none">Schedules</h1></div><div class="flex items-center gap-space-xs pr-space-xs"><button aria-label="More actions" class="w-12 h-12 flex items-center justify-center rounded-full text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-colors" type="button"><span class="material-symbols-outlined text-[22px]">more_vert</span></button></div></div></div></header><main class="flex flex-col relative w-full px-margin pt-16 pb-safe bg-surface flex-1"><div class="flex flex-col w-full pb-8">
+<!-- Explainer Banner Card -->
+<div class="bg-surface-container rounded-xl p-space-md flex gap-3.5 items-start mb-space-md shadow-sm">
+<div class="w-10 h-10 rounded-lg bg-primary-container/20 text-primary flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-[20px]" style="font-variation-settings: 'FILL' 1;">notifications_active</span>
+</div>
+<div class="flex flex-col">
+<h2 class="font-headline-sm text-body-lg font-semibold text-on-surface">Ovid can work while you sleep</h2>
+<p class="font-body-sm text-body-sm text-on-surface-variant leading-relaxed mt-1">
+        Runs a task on a schedule, browses or generates code, and notifies you when finished.
+      </p>
+</div>
+</div>
+<!-- Section Header -->
+<div class="flex items-center justify-between mb-space-sm px-1">
+<span class="font-caption text-caption uppercase tracking-wider text-outline font-semibold">Active Schedules (2)</span>
+<span class="font-caption text-caption text-on-surface-variant">4 total rules</span>
+</div>
+<!-- List of Schedule Cards -->
+<div class="flex flex-col gap-3">
+<!-- Card 1: Active Morning Digest -->
+<div class="bg-surface-container rounded-xl p-space-md flex flex-col gap-2.5 shadow-sm transition-all" id="schedule-card-1">
+<div class="flex items-start justify-between gap-2">
+<div class="flex-1 min-w-0 pr-2">
+<div class="flex items-center gap-1.5 mb-1">
+<span class="w-2 h-2 rounded-full bg-secondary"></span>
+<span class="font-caption text-caption text-secondary font-medium">Running active</span>
+</div>
+<h3 class="font-body-lg text-body-lg font-semibold text-on-surface truncate">Morning AI News Briefing</h3>
+<p class="font-body-sm text-body-sm text-on-surface-variant line-clamp-1 mt-0.5">Browses 5 top tech publications and writes summary</p>
+</div>
+<!-- Controls: Toggle + Menu -->
+<div class="flex items-center gap-1 shrink-0">
+<button aria-checked="true" class="relative inline-flex h-7 w-12 items-center rounded-full bg-primary-container p-0.5 transition-colors focus:outline-none" onclick="toggleSwitch(this)" role="switch" type="button">
+<span class="inline-block h-6 w-6 transform rounded-full bg-on-primary shadow transition-transform translate-x-5"></span>
+</button>
+<button aria-label="More options for Morning Briefing" class="w-10 h-10 flex items-center justify-center rounded-full text-on-surface-variant hover:text-on-surface active:bg-surface-bright transition-colors" type="button">
+<span class="material-symbols-outlined text-[20px]">more_vert</span>
+</button>
+</div>
+</div>
+<!-- Schedule Meta Details -->
+<div class="flex flex-wrap items-center gap-y-2 gap-x-4 pt-2 mt-1 bg-surface-container-low rounded-lg px-3 py-2">
+<div class="flex items-center gap-1.5 text-on-surface">
+<span class="material-symbols-outlined text-[16px] text-primary">schedule</span>
+<span class="font-body-sm text-caption text-on-surface">Every weekday at 9:00 AM</span>
+</div>
+<div class="flex items-center gap-1.5 text-secondary">
+<span class="material-symbols-outlined text-[16px]">event_upcoming</span>
+<span class="font-caption text-caption font-semibold">Tomorrow, 9:00 AM</span>
+</div>
+</div>
+</div>
+<!-- Card 2: Git Repo Sync -->
+<div class="bg-surface-container rounded-xl p-space-md flex flex-col gap-2.5 shadow-sm transition-all" id="schedule-card-2">
+<div class="flex items-start justify-between gap-2">
+<div class="flex-1 min-w-0 pr-2">
+<div class="flex items-center gap-1.5 mb-1">
+<span class="w-2 h-2 rounded-full bg-secondary"></span>
+<span class="font-caption text-caption text-secondary font-medium">Running active</span>
+</div>
+<h3 class="font-body-lg text-body-lg font-semibold text-on-surface truncate">Audit PR dependencies &amp; vulnerabilities</h3>
+<p class="font-body-sm text-body-sm text-on-surface-variant line-clamp-1 mt-0.5">Scans open Pull Requests for security alerts</p>
+</div>
+<div class="flex items-center gap-1 shrink-0">
+<button aria-checked="true" class="relative inline-flex h-7 w-12 items-center rounded-full bg-primary-container p-0.5 transition-colors focus:outline-none" onclick="toggleSwitch(this)" role="switch" type="button">
+<span class="inline-block h-6 w-6 transform rounded-full bg-on-primary shadow transition-transform translate-x-5"></span>
+</button>
+<button aria-label="More options for Audit PR" class="w-10 h-10 flex items-center justify-center rounded-full text-on-surface-variant hover:text-on-surface active:bg-surface-bright transition-colors" type="button">
+<span class="material-symbols-outlined text-[20px]">more_vert</span>
+</button>
+</div>
+</div>
+<div class="flex flex-wrap items-center gap-y-2 gap-x-4 pt-2 mt-1 bg-surface-container-low rounded-lg px-3 py-2">
+<div class="flex items-center gap-1.5 text-on-surface">
+<span class="material-symbols-outlined text-[16px] text-primary">schedule</span>
+<span class="font-body-sm text-caption text-on-surface">Weekly on Sunday at 11:00 PM</span>
+</div>
+<div class="flex items-center gap-1.5 text-secondary">
+<span class="material-symbols-outlined text-[16px]">event_upcoming</span>
+<span class="font-caption text-caption font-semibold">Sunday, 11:00 PM</span>
+</div>
+</div>
+</div>
+<!-- Card 3: Paused Schedule -->
+<div class="bg-surface-container rounded-xl p-space-md flex flex-col gap-2.5 opacity-80 shadow-sm transition-all" id="schedule-card-3">
+<div class="flex items-start justify-between gap-2">
+<div class="flex-1 min-w-0 pr-2">
+<div class="flex items-center gap-2 mb-1">
+<span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-caption font-semibold bg-surface-container-high text-on-surface-variant">
+              Paused
+            </span>
+</div>
+<h3 class="font-body-lg text-body-lg font-semibold text-on-surface truncate">Nightly Website Performance Benchmark</h3>
+<p class="font-body-sm text-body-sm text-on-surface-variant line-clamp-1 mt-0.5">Captures Lighthouse scores and logs reports</p>
+</div>
+<div class="flex items-center gap-1 shrink-0">
+<button aria-checked="false" class="relative inline-flex h-7 w-12 items-center rounded-full bg-surface-container-highest p-0.5 transition-colors focus:outline-none" onclick="toggleSwitch(this)" role="switch" type="button">
+<span class="inline-block h-6 w-6 transform rounded-full bg-outline shadow transition-transform translate-x-0"></span>
+</button>
+<button aria-label="More options for Nightly Benchmark" class="w-10 h-10 flex items-center justify-center rounded-full text-on-surface-variant hover:text-on-surface active:bg-surface-bright transition-colors" type="button">
+<span class="material-symbols-outlined text-[20px]">more_vert</span>
+</button>
+</div>
+</div>
+<div class="flex items-center gap-1.5 bg-surface-container-low rounded-lg px-3 py-2 text-on-surface-variant">
+<span class="material-symbols-outlined text-[16px]">schedule</span>
+<span class="font-body-sm text-caption">Daily at 2:00 AM (Sleeping)</span>
+</div>
+</div>
+<!-- Card 4: Failed Schedule (Error state) -->
+<div class="bg-surface-container rounded-xl p-space-md flex flex-col gap-2.5 shadow-sm transition-all" id="schedule-card-4">
+<div class="flex items-start justify-between gap-2">
+<div class="flex-1 min-w-0 pr-2">
+<div class="flex items-center gap-1.5 mb-1">
+<span class="w-2 h-2 rounded-full bg-error animate-pulse"></span>
+<span class="font-caption text-caption text-error font-medium">Action needed</span>
+</div>
+<h3 class="font-body-lg text-body-lg font-semibold text-on-surface truncate">Backup Studio repos to Google Drive</h3>
+<p class="font-body-sm text-body-sm text-on-surface-variant line-clamp-1 mt-0.5">Packages daily snapshot artifacts to cloud</p>
+</div>
+<div class="flex items-center gap-1 shrink-0">
+<button aria-checked="true" class="relative inline-flex h-7 w-12 items-center rounded-full bg-primary-container p-0.5 transition-colors focus:outline-none" onclick="toggleSwitch(this)" role="switch" type="button">
+<span class="inline-block h-6 w-6 transform rounded-full bg-on-primary shadow transition-transform translate-x-5"></span>
+</button>
+<button aria-label="More options for Backup Studio" class="w-10 h-10 flex items-center justify-center rounded-full text-on-surface-variant hover:text-on-surface active:bg-surface-bright transition-colors" type="button">
+<span class="material-symbols-outlined text-[20px]">more_vert</span>
+</button>
+</div>
+</div>
+<!-- Error Callout Banner -->
+<div class="bg-error-container/30 text-on-surface rounded-lg p-3 flex items-center justify-between gap-2">
+<div class="flex items-center gap-2 min-w-0">
+<span class="material-symbols-outlined text-error text-[18px] shrink-0">error</span>
+<span class="font-caption text-caption text-on-surface truncate">Last run failed · Connector disconnected</span>
+</div>
+<button class="font-caption text-caption font-semibold text-error shrink-0 active:scale-95 transition-transform px-2 py-1 rounded bg-error-container/50" onclick="handleRetry(this)" type="button">
+          Retry now
+        </button>
+</div>
+<div class="flex items-center gap-1.5 px-1 text-on-surface-variant">
+<span class="material-symbols-outlined text-[16px]">schedule</span>
+<span class="font-body-sm text-caption">Every 6 hours</span>
+</div>
+</div>
+</div>
+<!-- Empty State Variant / Reference Preview -->
+<div class="mt-space-lg bg-surface-container-low rounded-xl p-space-lg text-center flex flex-col items-center justify-center relative overflow-hidden">
+<div class="w-14 h-14 rounded-full bg-surface-container-high flex items-center justify-center mb-3 text-primary shadow-inner">
+<span class="material-symbols-outlined text-[28px]">calendar_add_on</span>
+</div>
+<h4 class="font-headline-sm text-headline-sm text-on-surface font-semibold mb-1">No custom schedules yet?</h4>
+<p class="font-body-sm text-body-sm text-on-surface-variant max-w-[270px] mx-auto mb-space-md">
+      Automate repetitive prompts or background agent tasks in seconds.
+    </p>
+<button class="h-12 px-6 rounded-full bg-primary hover:bg-primary-fixed-dim text-on-primary-fixed font-semibold font-body-sm text-body-sm flex items-center justify-center gap-2 shadow-lg active:scale-95 transition-all" type="button">
+<span class="material-symbols-outlined text-[20px]">add</span>
+<span>Create a schedule</span>
+</button>
+</div>
+</div>
+<script>
+  function toggleSwitch(btn) {
+    const isChecked = btn.getAttribute('aria-checked') === 'true';
+    const thumb = btn.querySelector('span');
+    
+    if (isChecked) {
+      btn.setAttribute('aria-checked', 'false');
+      btn.classList.remove('bg-primary-container');
+      btn.classList.add('bg-surface-container-highest');
+      thumb.classList.remove('translate-x-5', 'bg-on-primary');
+      thumb.classList.add('translate-x-0', 'bg-outline');
+    } else {
+      btn.setAttribute('aria-checked', 'true');
+      btn.classList.remove('bg-surface-container-highest');
+      btn.classList.add('bg-primary-container');
+      thumb.classList.remove('translate-x-0', 'bg-outline');
+      thumb.classList.add('translate-x-5', 'bg-on-primary');
+    }
+  }
+
+  function handleRetry(btn) {
+    btn.textContent = 'Retrying...';
+    btn.classList.add('opacity-70');
+    setTimeout(() => {
+      btn.textContent = 'Scheduled';
+      btn.classList.remove('text-error', 'bg-error-container/50');
+      btn.classList.add('text-secondary', 'bg-secondary-container/20');
+    }, 1000);
+  }
+</script></main></body></html>

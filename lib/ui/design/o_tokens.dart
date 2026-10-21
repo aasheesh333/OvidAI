@@ -1,0 +1,325 @@
+import 'package:flutter/material.dart';
+
+/// Ovid Si design tokens.
+///
+/// The palette is the one approved in the Stitch reference (violet on
+/// obsidian) with a first-class light counterpart. The app follows the device
+/// theme by default and falls back to light when the platform reports nothing.
+@immutable
+class OColors extends ThemeExtension<OColors> {
+  const OColors({
+    required this.bg,
+    required this.surface,
+    required this.surfaceAlt,
+    required this.surfaceRaised,
+    required this.hairline,
+    required this.hairlineStrong,
+    required this.inputBorder,
+    required this.text,
+    required this.textMuted,
+    required this.textFaint,
+    required this.codeBg,
+    required this.accent,
+    required this.accentFill,
+    required this.onAccent,
+    required this.accentSoft,
+    required this.success,
+    required this.warn,
+    required this.danger,
+    required this.onDanger,
+    required this.scrim,
+  });
+
+  final Color bg;
+  final Color surface;
+  final Color surfaceAlt;
+  final Color surfaceRaised;
+  final Color hairline;
+  final Color hairlineStrong;
+  final Color inputBorder;
+  final Color text;
+  final Color textMuted;
+  final Color textFaint;
+  final Color codeBg;
+  final Color accent;
+  final Color accentFill;
+  final Color onAccent;
+  final Color accentSoft;
+  final Color success;
+  final Color warn;
+  final Color danger;
+  final Color onDanger;
+  final Color scrim;
+
+  static const light = OColors(
+    bg: Color(0xFFF7F7FA),
+    surface: Color(0xFFFFFFFF),
+    surfaceAlt: Color(0xFFF1F1F5),
+    surfaceRaised: Color(0xFFEAEAF0),
+    hairline: Color(0xFFE3E3EA),
+    hairlineStrong: Color(0xFFCFCFD9),
+    inputBorder: Color(0xFF8A8A99),
+    text: Color(0xFF121216),
+    textMuted: Color(0xFF5B5B66),
+    textFaint: Color(0xFF6B6B76),
+    codeBg: Color(0xFFF3F3F7),
+    accent: Color(0xFF5B3BE8),
+    accentFill: Color(0xFF6A45E8),
+    onAccent: Color(0xFFFFFFFF),
+    accentSoft: Color(0x146A45E8),
+    success: Color(0xFF0E9F6E),
+    warn: Color(0xFFB45309),
+    danger: Color(0xFFD92D20),
+    onDanger: Color(0xFFFFFFFF),
+    scrim: Color(0x99000000),
+  );
+
+  static const dark = OColors(
+    bg: Color(0xFF0E0E10),
+    surface: Color(0xFF16161A),
+    surfaceAlt: Color(0xFF1B1B22),
+    surfaceRaised: Color(0xFF232329),
+    hairline: Color(0xFF26262C),
+    hairlineStrong: Color(0xFF3A3A44),
+    inputBorder: Color(0xFF5A5A66),
+    text: Color(0xFFFFFFFF),
+    textMuted: Color(0xFF9CA3AF),
+    textFaint: Color(0xFF6B7280),
+    codeBg: Color(0xFF0B0B0E),
+    accent: Color(0xFFCABEFF),
+    accentFill: Color(0xFF7C5CFF),
+    onAccent: Color(0xFFFFFFFF),
+    accentSoft: Color(0x1F7C5CFF),
+    success: Color(0xFF34D399),
+    warn: Color(0xFFFBBF24),
+    danger: Color(0xFFF87171),
+    onDanger: Color(0xFF2A0A0A),
+    scrim: Color(0xA6000000),
+  );
+
+  static OColors of(BuildContext context) =>
+      Theme.of(context).extension<OColors>() ?? light;
+
+  static OColors resolve(Brightness brightness) =>
+      brightness == Brightness.dark ? dark : light;
+
+  @override
+  OColors copyWith({
+    Color? bg,
+    Color? surface,
+    Color? surfaceAlt,
+    Color? surfaceRaised,
+    Color? hairline,
+    Color? hairlineStrong,
+    Color? inputBorder,
+    Color? text,
+    Color? textMuted,
+    Color? textFaint,
+    Color? codeBg,
+    Color? accent,
+    Color? accentFill,
+    Color? onAccent,
+    Color? accentSoft,
+    Color? success,
+    Color? warn,
+    Color? danger,
+    Color? onDanger,
+    Color? scrim,
+  }) {
+    return OColors(
+      bg: bg ?? this.bg,
+      surface: surface ?? this.surface,
+      surfaceAlt: surfaceAlt ?? this.surfaceAlt,
+      surfaceRaised: surfaceRaised ?? this.surfaceRaised,
+      hairline: hairline ?? this.hairline,
+      hairlineStrong: hairlineStrong ?? this.hairlineStrong,
+      inputBorder: inputBorder ?? this.inputBorder,
+      text: text ?? this.text,
+      textMuted: textMuted ?? this.textMuted,
+      textFaint: textFaint ?? this.textFaint,
+      codeBg: codeBg ?? this.codeBg,
+      accent: accent ?? this.accent,
+      accentFill: accentFill ?? this.accentFill,
+      onAccent: onAccent ?? this.onAccent,
+      accentSoft: accentSoft ?? this.accentSoft,
+      success: success ?? this.success,
+      warn: warn ?? this.warn,
+      danger: danger ?? this.danger,
+      onDanger: onDanger ?? this.onDanger,
+      scrim: scrim ?? this.scrim,
+    );
+  }
+
+  @override
+  OColors lerp(ThemeExtension<OColors>? other, double t) {
+    if (other is! OColors) return this;
+    Color l(Color a, Color b) => Color.lerp(a, b, t) ?? a;
+    return OColors(
+      bg: l(bg, other.bg),
+      surface: l(surface, other.surface),
+      surfaceAlt: l(surfaceAlt, other.surfaceAlt),
+      surfaceRaised: l(surfaceRaised, other.surfaceRaised),
+      hairline: l(hairline, other.hairline),
+      hairlineStrong: l(hairlineStrong, other.hairlineStrong),
+      inputBorder: l(inputBorder, other.inputBorder),
+      text: l(text, other.text),
+      textMuted: l(textMuted, other.textMuted),
+      textFaint: l(textFaint, other.textFaint),
+      codeBg: l(codeBg, other.codeBg),
+      accent: l(accent, other.accent),
+      accentFill: l(accentFill, other.accentFill),
+      onAccent: l(onAccent, other.onAccent),
+      accentSoft: l(accentSoft, other.accentSoft),
+      success: l(success, other.success),
+      warn: l(warn, other.warn),
+      danger: l(danger, other.danger),
+      onDanger: l(onDanger, other.onDanger),
+      scrim: l(scrim, other.scrim),
+    );
+  }
+}
+
+/// Four-point spacing scale. Every gap in the app comes from here.
+abstract final class OSpace {
+  static const xs = 4.0;
+  static const s = 8.0;
+  static const m = 12.0;
+  static const l = 16.0;
+  static const xl = 24.0;
+  static const xxl = 32.0;
+  static const huge = 48.0;
+  static const screen = 24.0;
+  static const listRow = 56.0;
+  static const touch = 48.0;
+}
+
+abstract final class ORadius {
+  static const s = 8.0;
+  static const m = 12.0;
+  static const l = 16.0;
+  static const xl = 24.0;
+  static const pill = 999.0;
+}
+
+/// Inter type scale from the approved design (1.4 line height).
+abstract final class OType {
+  static const _family = 'Inter';
+
+  static const display = TextStyle(
+    fontFamily: _family,
+    fontSize: 34,
+    height: 1.18,
+    fontWeight: FontWeight.w600,
+    letterSpacing: -0.6,
+  );
+  static const h1 = TextStyle(
+    fontFamily: _family,
+    fontSize: 28,
+    height: 1.29,
+    fontWeight: FontWeight.w600,
+    letterSpacing: -0.5,
+  );
+  static const h2 = TextStyle(
+    fontFamily: _family,
+    fontSize: 20,
+    height: 1.4,
+    fontWeight: FontWeight.w600,
+    letterSpacing: -0.2,
+  );
+  static const h3 = TextStyle(
+    fontFamily: _family,
+    fontSize: 17,
+    height: 1.4,
+    fontWeight: FontWeight.w600,
+  );
+  static const body = TextStyle(
+    fontFamily: _family,
+    fontSize: 16,
+    height: 1.45,
+    fontWeight: FontWeight.w400,
+  );
+  static const bodyStrong = TextStyle(
+    fontFamily: _family,
+    fontSize: 16,
+    height: 1.45,
+    fontWeight: FontWeight.w600,
+  );
+  static const bodySm = TextStyle(
+    fontFamily: _family,
+    fontSize: 14,
+    height: 1.45,
+    fontWeight: FontWeight.w400,
+  );
+  static const label = TextStyle(
+    fontFamily: _family,
+    fontSize: 14,
+    height: 1.3,
+    fontWeight: FontWeight.w600,
+    letterSpacing: 0.1,
+  );
+  static const caption = TextStyle(
+    fontFamily: _family,
+    fontSize: 12,
+    height: 1.4,
+    fontWeight: FontWeight.w500,
+    letterSpacing: 0.2,
+  );
+  static const overline = TextStyle(
+    fontFamily: _family,
+    fontSize: 11,
+    height: 1.4,
+    fontWeight: FontWeight.w600,
+    letterSpacing: 1.1,
+  );
+  static const mono = TextStyle(
+    fontFamily: 'JetBrainsMono',
+    fontSize: 13,
+    height: 1.5,
+    fontWeight: FontWeight.w400,
+  );
+
+  static const all = <TextStyle>[
+    display,
+    h1,
+    h2,
+    h3,
+    body,
+    bodyStrong,
+    bodySm,
+    label,
+    caption,
+    overline,
+    mono,
+  ];
+}
+
+/// Motion is part of the product, not decoration: short, spring-like, never
+/// blocking input. Durations are deliberately short enough to feel instant.
+abstract final class OMotion {
+  static const instant = Duration(milliseconds: 90);
+  static const fast = Duration(milliseconds: 140);
+  static const base = Duration(milliseconds: 200);
+  static const medium = Duration(milliseconds: 260);
+  static const slow = Duration(milliseconds: 360);
+  static const ambient = Duration(milliseconds: 1200);
+
+  static const standard = Cubic(0.2, 0.8, 0.2, 1);
+  static const emphasized = Cubic(0.05, 0.7, 0.1, 1);
+  static const exit = Cubic(0.4, 0.0, 1.0, 1.0);
+  static const spring = Cubic(0.34, 1.56, 0.64, 1.0);
+
+  /// Stagger between list items. Capped by callers so long lists stay snappy.
+  static const stagger = Duration(milliseconds: 32);
+}
+
+abstract final class OShadow {
+  static const floating = <BoxShadow>[
+    BoxShadow(color: Color(0x73000000), blurRadius: 24, offset: Offset(0, 8)),
+  ];
+  static const sheet = <BoxShadow>[
+    BoxShadow(color: Color(0x99000000), blurRadius: 32, offset: Offset(0, 16)),
+  ];
+  static const glow = <BoxShadow>[
+    BoxShadow(color: Color(0x2E7C5CFF), blurRadius: 16, spreadRadius: 1),
+  ];
+}
