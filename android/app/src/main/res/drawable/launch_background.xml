@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Ovid Si splash: flat Paper background with the brand mark centred. -->
+<!-- Ovid Si splash: flat #0E0E10 (Paper) with the brand mark centred. The mark
+     is the vector drawable so it stays crisp at any density. -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:drawable="@color/paper" />
     <item
-        android:drawable="@drawable/ic_launcher_foreground"
-        android:gravity="center" />
+        android:width="176dp"
+        android:height="176dp"
+        android:gravity="center"
+        android:drawable="@drawable/ic_launcher_foreground" />
 </layer-list>

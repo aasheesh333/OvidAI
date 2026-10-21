@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Ovid Si UI v2 — every screen and component, light and dark, at phone and tablet width.">
+  <meta name="theme-color" content="#0E0E10">
+  <meta name="color-scheme" content="light dark">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Ovid Si UI v2">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Ovid Si — UI v2 preview</title>
+  <link rel="manifest" href="manifest.json">
+
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #0E0E10;
+      color: #FFFFFF;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+        Roboto, sans-serif;
+    }
+
+    /* Shown until Flutter paints its first frame, so the preview never
+       flashes a blank white page on a slow connection. */
+    #boot {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      background: #0E0E10;
+      color: #FFFFFF;
+      z-index: 1;
+    }
+
+    #boot .mark {
+      width: 56px;
+      height: 56px;
+      border-radius: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #7C5CFF;
+      color: #FFFFFF;
+      font-size: 28px;
+      font-weight: 600;
+      letter-spacing: -0.5px;
+    }
+
+    #boot .title {
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    #boot .sub {
+      font-size: 13px;
+      color: #9CA3AF;
+    }
+
+    #boot .bar {
+      width: 160px;
+      height: 3px;
+      margin-top: 8px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #232329;
+    }
+
+    #boot .bar span {
+      display: block;
+      width: 40%;
+      height: 100%;
+      border-radius: inherit;
+      background: #7C5CFF;
+      animation: boot-slide 1.2s ease-in-out infinite;
+    }
+
+    @keyframes boot-slide {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(350%); }
+    }
+
+    @media (prefers-color-scheme: light) {
+      html, body { background: #F7F7FA; color: #121216; }
+      #boot { background: #F7F7FA; color: #121216; }
+      #boot .sub { color: #5B5B66; }
+      #boot .bar { background: #EAEAF0; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #boot .bar span { animation: none; width: 100%; opacity: 0.6; }
+    }
+  </style>
+</head>
+<body>
+  <div id="boot" role="status" aria-live="polite">
+    <div class="mark" aria-hidden="true">O</div>
+    <div class="title">Ovid Si</div>
+    <div class="sub">UI v2 preview · loading</div>
+    <div class="bar" aria-hidden="true"><span></span></div>
+  </div>
+
+  <!--
+    You can customize the "flutter_bootstrap.js" script.
+    This is useful to provide a custom configuration to the Flutter loader
+    or to give the user feedback during the initialization process.
+
+    For more details:
+    * https://docs.flutter.dev/platform-integration/web/initialization
+  -->
+  <script src="flutter_bootstrap.js" async></script>
+  <script>
+    // Drop the boot splash once Flutter has painted; falls back to a timed
+    // removal for engines that do not emit the event.
+    function hideBoot() {
+      var boot = document.getElementById('boot');
+      if (boot) boot.remove();
+    }
+    window.addEventListener('flutter-first-frame', hideBoot);
+    window.setTimeout(hideBoot, 20000);
+  </script>
+  <noscript>
+    This preview needs JavaScript enabled to render the Flutter UI.
+  </noscript>
+</body>
+</html>
