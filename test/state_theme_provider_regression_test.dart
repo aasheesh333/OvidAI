@@ -40,6 +40,13 @@ void main() {
       expect(app.lightTheme, light);
     });
   }
+  test('unknown theme mode falls back to system and persists the fallback', () async {
+    final app = AppState.createForTest();
+    await app.setThemeMode('sepia');
+    expect(app.themeMode, 'system');
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('ovid_theme_mode'), 'system');
+  });
   test('explicit OpenAI wins over Anthropic URL hints', () {
     for (final url in ['https://api.anthropic.com/v1', 'https://proxy.test/anthropic.com/v1']) {
       final provider = ProviderConfig(name: 'Explicit', description: '', baseUrl: url, apiFormat: ApiFormat.openai);

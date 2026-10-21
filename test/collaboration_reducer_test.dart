@@ -180,37 +180,53 @@ void main() {
     expect(s.messages, isEmpty);
   });
 
-  test('server join admits a participant up to 10 active members', () {
-    final eight = [for (var i = 1; i <= 8; i++) 'p-$i'];
-    final s = reducer.apply(initial(participants: [local, ...eight.take(7)]), join(1, 'p-8'));
+  test('server join admits a participant up to maxActiveMembers', () {
+    // `initial` already contributes the owner, and `local` is listed
+    // explicitly, so one fewer filler is needed to reach max - 1.
+    final fillers = [
+      for (var i = 1; i <= maxActiveMembers - 3; i++) 'p-$i',
+    ];
+    final last = 'p-${maxActiveMembers - 1}';
+    final s = reducer.apply(
+      initial(participants: [local, ...fillers]),
+      join(1, last),
+    );
     expect(s.lastOutcome, ReduceOutcome.applied);
-    expect(s.activeMembers.length, 10);
+    expect(s.activeMembers.length, maxActiveMembers);
   });
 
-  test('11th member join is rejected and flagged but consumes its sequence', () {
-    final nine = [local, for (var i = 1; i <= 8; i++) 'p-$i'];
-    final full = initial(participants: nine);
-    expect(full.activeMembers.length, 10);
+  test('the next member join is rejected and flagged but consumes its sequence', () {
+    final full = initial(participants: [
+      local,
+      for (var i = 1; i <= maxActiveMembers - 2; i++) 'p-$i',
+    ]);
+    expect(full.activeMembers.length, maxActiveMembers);
     final s = reducer.apply(full, join(1, 'p-extra'));
     expect(s.lastOutcome, ReduceOutcome.rejectedCapacity);
     expect(s.capacityViolations, 1);
-    expect(s.activeMembers.length, 10);
+    expect(s.activeMembers.length, maxActiveMembers);
     expect(s.members.containsKey('p-extra'), isFalse);
     expect(s.lastSequence, 1);
     expect(reducer.apply(s, msg(2, 'ok')).lastOutcome, ReduceOutcome.applied);
   });
 
   test('reconnecting an already-active member does not consume a slot', () {
-    final nine = [local, for (var i = 1; i <= 8; i++) 'p-$i'];
-    final s = reducer.apply(initial(participants: nine), join(1, 'p-3'));
+    final full = initial(participants: [
+      local,
+      for (var i = 1; i <= maxActiveMembers - 2; i++) 'p-$i',
+    ]);
+    final s = reducer.apply(full, join(1, 'p-3'));
     expect(s.lastOutcome, ReduceOutcome.applied);
-    expect(s.activeMembers.length, 10);
+    expect(s.activeMembers.length, maxActiveMembers);
     expect(s.capacityViolations, 0);
   });
 
-  test('bootstrap with more than 10 active members is rejected', () {
+  test('bootstrap with more than maxActiveMembers is rejected', () {
     expect(
-      () => initial(participants: [local, for (var i = 1; i <= 9; i++) 'p-$i']),
+      () => initial(participants: [
+        local,
+        for (var i = 1; i <= maxActiveMembers; i++) 'p-$i',
+      ]),
       throwsArgumentError,
     );
   });
@@ -298,13 +314,16 @@ void main() {
   });
 
   test('member leave frees a slot', () {
-    final nine = [local, for (var i = 1; i <= 8; i++) 'p-$i'];
-    var s = reducer.apply(initial(participants: nine), leave(1, 'p-1'));
+    final full = initial(participants: [
+      local,
+      for (var i = 1; i <= maxActiveMembers - 2; i++) 'p-$i',
+    ]);
+    var s = reducer.apply(full, leave(1, 'p-1'));
     expect(s.members['p-1']!.status, MemberStatus.left);
-    expect(s.activeMembers.length, 9);
+    expect(s.activeMembers.length, maxActiveMembers - 1);
     s = reducer.apply(s, join(2, 'p-new'));
     expect(s.lastOutcome, ReduceOutcome.applied);
-    expect(s.activeMembers.length, 10);
+    expect(s.activeMembers.length, maxActiveMembers);
   });
 
   test('leave on behalf of another member is rejected', () {

@@ -14,7 +14,7 @@ import 'dart:convert';
 const int collaborationSchemaVersion = 1;
 
 /// Hard cap on active members, including the owner.
-const int maxActiveMembers = 10;
+const int maxActiveMembers = 50;
 
 /// Server-stamped author names are at most this many characters.
 const int maxDisplayNameLength = 64;

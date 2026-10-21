@@ -281,6 +281,9 @@ class NotificationSettings {
   NotificationSettings({
     Map<OvidChannel, bool>? enabled,
     Map<OvidChannel, NotificationSound>? sounds,
+    this.quietHoursEnabled = false,
+    this.quietHoursStartMinutes = 22 * 60,
+    this.quietHoursEndMinutes = 8 * 60,
   }) : enabled = {for (final c in OvidChannel.values) c: enabled?[c] ?? true},
        sounds = {
          for (final c in OvidChannel.values)
@@ -291,6 +294,28 @@ class NotificationSettings {
 
   final Map<OvidChannel, bool> enabled;
   final Map<OvidChannel, NotificationSound> sounds;
+
+  /// Quiet hours suppress SYSTEM notifications only; in-app notices still
+  /// appear because the user is already looking at the app.
+  bool quietHoursEnabled;
+  int quietHoursStartMinutes;
+  int quietHoursEndMinutes;
+
+  static const quietHoursEnabledKey = 'ovid_notify_quiet_enabled';
+  static const quietHoursStartKey = 'ovid_notify_quiet_start';
+  static const quietHoursEndKey = 'ovid_notify_quiet_end';
+
+  /// True when [now] falls inside the window. Handles a window that wraps
+  /// midnight (22:00–08:00).
+  bool inQuietHours(DateTime now) {
+    if (!quietHoursEnabled) return false;
+    final minute = now.hour * 60 + now.minute;
+    final start = quietHoursStartMinutes.clamp(0, 1439);
+    final end = quietHoursEndMinutes.clamp(0, 1439);
+    if (start == end) return false;
+    if (start < end) return minute >= start && minute < end;
+    return minute >= start || minute < end;
+  }
 
   static String enabledKey(OvidChannel c) => 'ovid_notify_enabled_${c.key}';
   static String soundKey(OvidChannel c) => 'ovid_notify_sound_${c.key}';
@@ -309,6 +334,9 @@ class NotificationSettings {
                     .firstOrNull ??
                 c.defaultSound,
         },
+        quietHoursEnabled: p.getBool(quietHoursEnabledKey) ?? false,
+        quietHoursStartMinutes: p.getInt(quietHoursStartKey) ?? 22 * 60,
+        quietHoursEndMinutes: p.getInt(quietHoursEndKey) ?? 8 * 60,
       );
 
   Future<void> save(SharedPreferences p) async {
@@ -316,6 +344,9 @@ class NotificationSettings {
       await p.setBool(enabledKey(c), enabled[c]!);
       await p.setString(soundKey(c), sounds[c]!.name);
     }
+    await p.setBool(quietHoursEnabledKey, quietHoursEnabled);
+    await p.setInt(quietHoursStartKey, quietHoursStartMinutes);
+    await p.setInt(quietHoursEndKey, quietHoursEndMinutes);
   }
 
   /// The channel ids that should exist for these settings.
@@ -417,6 +448,23 @@ class BackgroundNotifier extends ChangeNotifier {
     await _persistAndConfigure();
   }
 
+  /// Quiet hours suppress system notifications only. Minutes are from
+  /// midnight; the window may wrap past midnight.
+  Future<void> setQuietHours({
+    required bool enabled,
+    int? startMinutes,
+    int? endMinutes,
+  }) async {
+    settings.quietHoursEnabled = enabled;
+    if (startMinutes != null) {
+      settings.quietHoursStartMinutes = startMinutes.clamp(0, 1439);
+    }
+    if (endMinutes != null) {
+      settings.quietHoursEndMinutes = endMinutes.clamp(0, 1439);
+    }
+    await _persistAndConfigure();
+  }
+
   Future<void> _persistAndConfigure() async {
     notifyListeners();
     try {
@@ -457,13 +505,17 @@ class BackgroundNotifier extends ChangeNotifier {
       master = true;
       visible = null;
     }
-    final delivery = decideDelivery(
+    var delivery = decideDelivery(
       notification: n,
       masterEnabled: master,
       channelEnabled: settings.enabled[n.channel] ?? true,
       appInForeground: appInForeground,
       visibleSessionId: visible,
     );
+    if (delivery == NotificationDelivery.system &&
+        settings.inQuietHours(DateTime.now())) {
+      delivery = NotificationDelivery.suppressed;
+    }
     switch (delivery) {
       case NotificationDelivery.suppressed:
         break;

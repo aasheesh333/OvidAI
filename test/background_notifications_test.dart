@@ -199,6 +199,56 @@ void main() {
     });
   });
 
+  group('quiet hours', () {
+    test('a window that wraps midnight is handled', () {
+      final s = NotificationSettings(
+        quietHoursEnabled: true,
+        quietHoursStartMinutes: 22 * 60,
+        quietHoursEndMinutes: 8 * 60,
+      );
+      expect(s.inQuietHours(DateTime(2026, 10, 21, 23, 30)), isTrue);
+      expect(s.inQuietHours(DateTime(2026, 10, 21, 3, 0)), isTrue);
+      expect(s.inQuietHours(DateTime(2026, 10, 21, 8, 0)), isFalse);
+      expect(s.inQuietHours(DateTime(2026, 10, 21, 12, 0)), isFalse);
+    });
+
+    test('a same-day window is handled and disabled means never quiet', () {
+      final s = NotificationSettings(
+        quietHoursEnabled: true,
+        quietHoursStartMinutes: 13 * 60,
+        quietHoursEndMinutes: 14 * 60,
+      );
+      expect(s.inQuietHours(DateTime(2026, 10, 21, 13, 30)), isTrue);
+      expect(s.inQuietHours(DateTime(2026, 10, 21, 14, 30)), isFalse);
+      s.quietHoursEnabled = false;
+      expect(s.inQuietHours(DateTime(2026, 10, 21, 13, 30)), isFalse);
+    });
+
+    test('quiet hours persist with the other notification settings', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final saved = NotificationSettings(
+        quietHoursEnabled: true,
+        quietHoursStartMinutes: 21 * 60 + 30,
+        quietHoursEndMinutes: 7 * 60 + 15,
+      );
+      await saved.save(prefs);
+      final restored = NotificationSettings.fromPrefs(prefs);
+      expect(restored.quietHoursEnabled, isTrue);
+      expect(restored.quietHoursStartMinutes, 21 * 60 + 30);
+      expect(restored.quietHoursEndMinutes, 7 * 60 + 15);
+    });
+
+    test('an empty window never suppresses', () {
+      final s = NotificationSettings(
+        quietHoursEnabled: true,
+        quietHoursStartMinutes: 9 * 60,
+        quietHoursEndMinutes: 9 * 60,
+      );
+      expect(s.inQuietHours(DateTime(2026, 10, 21, 9, 0)), isFalse);
+    });
+  });
+
   group('delivery decision (no duplicates in the foreground)', () {
     final n = OvidNotification.agentFinished(
       sessionId: 's1',

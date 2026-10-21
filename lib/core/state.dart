@@ -2011,6 +2011,8 @@ class AppState extends ChangeNotifier {
         chatFontScaleMin,
         chatFontScaleMax,
       );
+      final voice = prefs.getString(_kVoiceLanguage) ?? '';
+      _voiceLanguage = voiceLanguageIds.contains(voice) ? voice : '';
     } catch (e) {
       Diag.swallow('state', e);
     }
@@ -3718,6 +3720,42 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  // ── Voice input language ──
+  // The dictation language id chosen in Settings. Empty means "follow the
+  // device language"; the composer resolves that fallback. Persisted.
+  static const _kVoiceLanguage = 'ovid_voice_language';
+
+  /// Supported voice language ids (`en`, `hi`, `hinglish`, `pa`, `ta`).
+  static const Set<String> voiceLanguageIds = {
+    'en',
+    'hi',
+    'hinglish',
+    'pa',
+    'ta',
+  };
+
+  String _voiceLanguage = '';
+
+  /// Saved voice language id, or an empty string when the user has not picked
+  /// one (the composer then follows the device language).
+  String get voiceLanguage => _voiceLanguage;
+
+  /// Persists the chosen dictation language. Unknown ids are ignored so a
+  /// corrupt preference can never strand dictation on an unsupported locale.
+  Future<void> setVoiceLanguage(String id) async {
+    final wanted = id.trim().toLowerCase();
+    if (!voiceLanguageIds.contains(wanted)) return;
+    if (_voiceLanguage == wanted) return;
+    _voiceLanguage = wanted;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kVoiceLanguage, wanted);
+    } catch (e) {
+      Diag.swallow('state', e);
+    }
+  }
+
   /// Toggle and persist. The app shell listens and rebuilds the whole
   /// tree so every Aether.* getter resolves to the new palette.
   Future<void> setLightTheme(bool v) async {
@@ -3735,8 +3773,12 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Set the theme mode: 'system', 'light', or 'dark'.
+  /// Set the theme mode: 'system', 'light', or 'dark'. Unknown values fall
+  /// back to 'system' so a corrupt preference can never strand the app.
   Future<void> setThemeMode(String mode) async {
+    if (mode != 'system' && mode != 'light' && mode != 'dark') {
+      mode = 'system';
+    }
     themeMode = mode;
     if (mode == 'system') {
       // Resolve from platform brightness.
@@ -4619,6 +4661,47 @@ class AppState extends ChangeNotifier {
     CloudAgentFacade.renameSessionIfInstalled(id, title);
     notifyListeners();
     persistSessions();
+  }
+
+  /// Branch this chat into a new local chat with the same visible transcript.
+  ///
+  /// Only text turns are copied (never tool rows, pending rows or subagent
+  /// state), each with a fresh id, so the copy is a clean starting point and
+  /// cannot inherit a half-finished run. Returns null when the source is gone.
+  ChatSession? duplicateSession(String id) {
+    final src = sessionById(id);
+    if (src == null) return null;
+    final copy = ChatSession(
+      id: 'local-${DateTime.now().microsecondsSinceEpoch}',
+      title: '${src.title} (copy)',
+      model: src.model,
+      providerId: src.providerId,
+      mode: src.mode,
+      projectId: src.projectId,
+      presetId: src.presetId,
+      customPresetId: src.customPresetId,
+    );
+    for (final message in src.messages) {
+      if (message.kind != MsgKind.text && message.kind != MsgKind.streaming) {
+        continue;
+      }
+      if (message.thinking || message.toolName != null) continue;
+      if (message.content.trim().isEmpty) continue;
+      copy.messages.add(
+        Message(
+          role: message.role,
+          content: message.content,
+          kind: MsgKind.text,
+          attachments: message.attachments,
+        ),
+      );
+    }
+    sessions.insert(0, copy);
+    activeSessionId = copy.id;
+    _markSessionDirty(copy.id);
+    notifyListeners();
+    persistSessions();
+    return copy;
   }
 
   void sendMessage(String text) {

@@ -181,10 +181,14 @@ class CollaborationClient {
       'cursor',
       if (data.containsKey('initialMembers')) 'initialMembers',
       if (data.containsKey('replayThroughSequence')) 'replayThroughSequence',
+      // Server-owned sender turn (single-sender contract). Parsed by the
+      // reducer from events; the bootstrap state only needs to tolerate it.
+      if (data.containsKey('turn')) 'turn',
     });
     _version(data);
     final members = _list(data, 'members');
-    if (members.length > 10) _invalidResponse();
+    // Server cap is 50 active members (owner included).
+    if (members.length > 50) _invalidResponse();
     final through = data['replayThroughSequence'] ?? 0;
     if (through is! int || through < 0 ||
         data.containsKey('initialMembers') != data.containsKey('replayThroughSequence')) {
