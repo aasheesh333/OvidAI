@@ -11,11 +11,19 @@ from server.security.ip_hop import (
     IpHopBlocked,
     IpHopGuard,
     MaxMindGeoResolver,
+    RequestHeaders,
     SqliteIpHopStore,
     StaticGeoResolver,
     build_geo_resolver,
     geo_from_maxmind,
 )
+
+def trusted(headers):
+    """Header view for a request that arrived through a trusted proxy."""
+    return RequestHeaders(headers, peer_trusted=True)
+def untrusted(headers):
+    """Header view for a request that arrived directly from the client."""
+    return RequestHeaders(headers, peer_trusted=False)
 
 
 class FakeReader:
@@ -155,46 +163,70 @@ class CountryOnlyModeTests(unittest.TestCase):
 
     def test_header_resolver_defaults_to_country_without_coordinates(self):
         resolver = HeaderGeoResolver()
-        geo = resolver.resolve('1.2.3.4', {'cf-ipcountry': 'gb'})
+        geo = resolver.resolve('1.2.3.4', trusted({'cf-ipcountry': 'gb'}))
         self.assertEqual(geo, GeoInfo('GB'))
         self.assertIsNone(geo.latitude)
         self.assertIsNone(geo.longitude)
 
     def test_trusted_headers_add_coordinates_when_enabled(self):
         resolver = HeaderGeoResolver(trust_geo_headers=True)
-        geo = resolver.resolve('1.2.3.4', {
+        geo = resolver.resolve('1.2.3.4', trusted({
             'cf-ipcountry': 'GB', 'x-ovid-latitude': '51.5',
             'x-ovid-longitude': '-0.12', 'x-ovid-asn': '64500',
-            'x-ovid-city': 'London'})
+            'x-ovid-city': 'London'}))
         self.assertEqual(geo, GeoInfo('GB', 'AS64500', 'London', 51.5, -0.12))
+
+    def test_geo_headers_from_an_untrusted_peer_are_ignored(self):
+        resolver = HeaderGeoResolver(trust_geo_headers=True)
+        spoofed = {'cf-ipcountry': 'JP', 'x-ovid-latitude': '35.6',
+                   'x-ovid-longitude': '139.6', 'x-ovid-city': 'Tokyo'}
+        self.assertIsNone(resolver.resolve('1.2.3.4', untrusted(spoofed)))
+        # A bare mapping has no verified peer either.
+        self.assertIsNone(HeaderGeoResolver().resolve('1.2.3.4',
+                                                      {'cf-ipcountry': 'JP'}))
+
+    def test_unknown_country_headers_are_dropped_behind_a_trusted_peer(self):
+        resolver = HeaderGeoResolver()
+        self.assertIsNone(resolver.resolve('1.2.3.4', trusted({'cf-ipcountry': 'XX'})))
 
     def test_build_without_database_is_country_only(self):
         resolver = build_geo_resolver()
         self.assertIsInstance(resolver, HeaderGeoResolver)
-        self.assertEqual(resolver.resolve('1.2.3.4', {'cf-ipcountry': 'FR'}),
-                         GeoInfo('FR'))
+        self.assertEqual(
+            resolver.resolve('1.2.3.4', trusted({'cf-ipcountry': 'FR'})),
+            GeoInfo('FR'))
+        self.assertIsNone(resolver.resolve('1.2.3.4', {'cf-ipcountry': 'FR'}))
 
     def test_country_only_mode_still_detects_country_bursts(self):
         guard = IpHopGuard(self.store, resolver=HeaderGeoResolver())
         guard.observe('alice', 'session-aaaa', '1.2.3.4',
-                      headers={'cf-ipcountry': 'GB'}, now=1000)
+                      headers=trusted({'cf-ipcountry': 'GB'}), now=1000)
         guard.observe('alice', 'session-bbbb', '1.2.4.5',
-                      headers={'cf-ipcountry': 'FR'}, now=1100)
+                      headers=trusted({'cf-ipcountry': 'FR'}), now=1100)
         guard.observe('alice', 'session-cccc', '10.0.0.1',
-                      headers={'cf-ipcountry': 'DE'}, now=1200)
+                      headers=trusted({'cf-ipcountry': 'DE'}), now=1200)
         with self.assertRaises(IpHopBlocked):
             guard.observe('alice', 'session-dddd', '9.9.9.9',
-                          headers={'cf-ipcountry': 'JP'}, now=1300)
+                          headers=trusted({'cf-ipcountry': 'JP'}), now=1300)
         audit = self.store.audit_rows('alice')[0]
         self.assertEqual(audit['reason'], 'country_burst')
         self.assertEqual(audit['session_id'], 'session-dddd')
 
+    def test_spoofed_country_headers_cannot_fake_a_burst(self):
+        guard = IpHopGuard(self.store, resolver=HeaderGeoResolver())
+        for index, session in enumerate(('session-aaaa', 'session-bbbb',
+                                         'session-cccc', 'session-dddd')):
+            guard.observe('alice', session, f'10.0.0.{index + 1}',
+                          headers=untrusted({'cf-ipcountry': 'GB'}),
+                          now=1000 + index)
+        self.assertEqual(self.store.active_blocks('alice', 1400), [])
+
     def test_country_only_mode_does_not_invent_travel_distance(self):
         guard = IpHopGuard(self.store, resolver=HeaderGeoResolver())
         guard.observe('alice', 'session-aaaa', '1.2.3.4',
-                      headers={'cf-ipcountry': 'GB'}, now=1000)
+                      headers=trusted({'cf-ipcountry': 'GB'}), now=1000)
         decision = guard.observe('alice', 'session-bbbb', '5.6.7.8',
-                                 headers={'cf-ipcountry': 'GB'}, now=1100)
+                                 headers=trusted({'cf-ipcountry': 'GB'}), now=1100)
         self.assertIsNone(decision.reason)
         self.assertEqual(self.store.active_blocks('alice', 1100), [])
 
@@ -205,15 +237,23 @@ class ResolverChainTests(unittest.TestCase):
         resolver = build_geo_resolver(
             database_path='/geo/city.mmdb', reader_factory=lambda path: reader)
         self.assertIsInstance(resolver, ChainGeoResolver)
-        geo = resolver.resolve('1.2.3.4', {'cf-ipcountry': 'GB'})
+        geo = resolver.resolve('1.2.3.4', trusted({'cf-ipcountry': 'GB'}))
         self.assertEqual(geo, GeoInfo('GB', None, 'London', 51.5074, -0.1278))
+
+    def test_database_coordinates_ignore_an_untrusted_header_country(self):
+        reader = FakeReader({'1.2.3.4': city_record(country=None)})
+        resolver = build_geo_resolver(
+            database_path='/geo/city.mmdb', reader_factory=lambda path: reader)
+        geo = resolver.resolve('1.2.3.4', untrusted({'cf-ipcountry': 'GB'}))
+        self.assertEqual(geo, GeoInfo(None, None, 'London', 51.5074, -0.1278))
 
     def test_database_country_wins_over_header(self):
         reader = FakeReader({'1.2.3.4': city_record(country='DE')})
         resolver = build_geo_resolver(
             database_path='/geo/city.mmdb', reader_factory=lambda path: reader)
         self.assertEqual(
-            resolver.resolve('1.2.3.4', {'cf-ipcountry': 'GB'}).country, 'DE')
+            resolver.resolve('1.2.3.4', trusted({'cf-ipcountry': 'GB'})).country,
+            'DE')
 
     def test_failing_resolver_does_not_discard_the_next_one(self):
         class Broken:
@@ -221,8 +261,17 @@ class ResolverChainTests(unittest.TestCase):
                 raise RuntimeError('database unavailable')
 
         chain = ChainGeoResolver(Broken(), HeaderGeoResolver())
-        self.assertEqual(chain.resolve('1.2.3.4', {'cf-ipcountry': 'FR'}),
+        self.assertEqual(chain.resolve('1.2.3.4', trusted({'cf-ipcountry': 'FR'})),
                          GeoInfo('FR'))
+
+    def test_all_resolvers_failing_is_an_error_not_a_silent_none(self):
+        class Broken:
+            def resolve(self, ip, headers):
+                raise RuntimeError('database unavailable')
+
+        chain = ChainGeoResolver(Broken(), Broken())
+        with self.assertRaises(RuntimeError):
+            chain.resolve('1.2.3.4', trusted({'cf-ipcountry': 'FR'}))
 
     def test_asn_database_requires_a_city_database(self):
         with self.assertRaises(ValueError):

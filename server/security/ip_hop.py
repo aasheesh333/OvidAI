@@ -7,9 +7,17 @@ when more than ``country_burst_limit`` countries appear inside the country
 window.  A flag blocks the newer session, keeps the older one, writes an audit
 row and claims exactly one alert per account/window.
 
-No raw bearer token is accepted or stored here.  Callers either pass an opaque
-client session id or derive one with :func:`session_from_token`, which stores
-only a SHA-256 prefix.
+No raw bearer token is accepted or stored here.  :func:`request_context`
+derives the session id from the bearer token with :func:`session_from_token`,
+which stores only a SHA-256 prefix; a client-supplied ``X-Session-Id`` is
+ignored so rotating it cannot escape a block or hide its evidence.
+
+Proxy and geo headers are attacker-controlled on a direct connection.  The
+client address and ``CF-IPCountry``/``X-Ovid-*`` are therefore used only when
+the socket peer is a trusted proxy listed in ``IP_HOP_TRUSTED_PROXIES``
+(default: loopback and private CIDRs for a co-located Caddy/Cloudflare edge).
+Every other peer gets direct-deployment behaviour: the socket address wins and
+geo headers are ignored.
 
 Two durable stores implement the same :class:`LocationStore` surface:
 :class:`SqliteIpHopStore` for local/development use and
@@ -51,6 +59,17 @@ BLOCK_SECONDS = 24 * 60 * 60
 OVERRIDE_SECONDS = 60 * 60
 AUDIT_RETENTION_SECONDS = 90 * 24 * 60 * 60
 MIN_DISTANCE_KM = 50.0
+
+#: Environment variable holding a comma-separated list of proxy CIDRs/IPs whose
+#: forwarding and geo headers may be believed.  Unset uses the loopback/private
+#: defaults below (a co-located Caddy or a Docker/private edge); set it to an
+#: empty string for a pure direct deployment where every header is ignored.
+TRUSTED_PROXIES_ENV = 'IP_HOP_TRUSTED_PROXIES'
+DEFAULT_TRUSTED_PROXIES = (
+    '127.0.0.0/8', '::1/128',
+    '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
+    'fc00::/7',
+)
 
 SESSION_ID_RE = re.compile(r'[A-Za-z0-9_-]{8,128}')
 COUNTRY_RE = re.compile(r'[A-Z]{2}')
@@ -191,12 +210,19 @@ class HeaderGeoResolver:
     With the default settings this is the country-only mode: no coordinates are
     produced, so impossible-travel detection is skipped while country bursts
     are still detected.
+
+    Geo headers are trusted only for a :class:`RequestHeaders` view whose socket
+    peer passed the trusted-proxy check.  A plain mapping (or an untrusted
+    peer) yields no location, so a client that talks to the service directly
+    cannot forge a country, city or coordinates.
     """
 
     def __init__(self, *, trust_geo_headers: bool = False):
         self.trust_geo_headers = trust_geo_headers
 
     def resolve(self, ip: str, headers: Any) -> GeoInfo | None:
+        if not _geo_headers_trusted(headers):
+            return None
         country = _header(headers, 'cf-ipcountry')
         asn = city = latitude = longitude = None
         if self.trust_geo_headers:
@@ -253,7 +279,9 @@ class ChainGeoResolver:
     The intended order is GeoIP first, edge headers second: the database
     supplies coordinates and the header can still fill a missing country.
     A resolver that raises is skipped so one failing data source cannot discard
-    location data from the others.
+    location data from the others.  If *every* resolver raises the failure is
+    propagated, so a fail-closed guard rejects instead of silently running
+    without location data.
     """
 
     def __init__(self, *resolvers: GeoResolver):
@@ -263,16 +291,22 @@ class ChainGeoResolver:
 
     def resolve(self, ip: str, headers: Any) -> GeoInfo | None:
         merged: dict[str, Any] = {}
+        succeeded = False
+        failed = False
         for resolver in self.resolvers:
             try:
                 geo = _normalize_geo(resolver.resolve(ip, headers))
             except Exception:
+                failed = True
                 continue
+            succeeded = True
             if geo is None:
                 continue
             for field in ('country', 'asn', 'city', 'latitude', 'longitude'):
                 if merged.get(field) is None:
                     merged[field] = getattr(geo, field, None)
+        if failed and not succeeded:
+            raise RuntimeError('all geo resolvers failed')
         return _normalize_geo(GeoInfo(**merged))
 
 
@@ -1055,6 +1089,11 @@ class IpHopGuard:
         # Enforce an existing block even when the request has no usable IP.
         existing = self.store.blocked(uid, session_id, now)
         if existing is not None:
+            # Keep the blocked request's location in the observation store so
+            # the evidence stays queryable (audit, incident review).  It is
+            # filtered out of detection below, and a failed evidence write
+            # must never change the block decision.
+            self._record_blocked_evidence(uid, session_id, ip, headers, now)
             raise IpHopBlocked(session_id, existing.get('event_id'))
 
         try:
@@ -1075,6 +1114,9 @@ class IpHopGuard:
         active_blocks = getattr(self.store, 'active_blocks', None)
         blocked_sessions = ({item['session_id'] for item in active_blocks(uid, now)}
                             if active_blocks else set())
+        # A blocked session's observations stay in the store (queryable
+        # evidence) but are excluded from detection so they cannot make a
+        # fresh session from the older location look like another hop.
         recent = [item for item in self.store.recent(uid, now - self.hop_window_seconds)
                   if item.session_id not in blocked_sessions]
         current = _with_id(current, self.store.record(current))
@@ -1126,13 +1168,37 @@ class IpHopGuard:
         return self.admin_unblock(uid, session_id, actor=actor, reason=reason,
                                   now=now, override_seconds=override_seconds)
 
+    def _record_blocked_evidence(self, uid: str, session_id: str, ip: str,
+                                 headers: Any, now: float) -> None:
+        """Best-effort observation for a blocked request.
+
+        The guard already decided to reject; recording where the rejected
+        request came from must never fail the request differently (``403``
+        stays ``403``) but keeps the evidence available for review.
+        """
+        try:
+            self._maybe_prune(now)
+            geo = self._resolve(ip, headers)
+            self.store.record(Observation(
+                uid=uid, session_id=session_id, ip_prefix=coarse_prefix(ip),
+                seen_at=now, country=geo.country if geo else None,
+                asn=geo.asn if geo else None, city=geo.city if geo else None,
+                latitude=geo.latitude if geo else None,
+                longitude=geo.longitude if geo else None))
+        except Exception:
+            pass
+
     def _resolve(self, ip: str, headers: Any) -> GeoInfo | None:
         if self.resolver is None:
             return None
         try:
             return _normalize_geo(self.resolver.resolve(ip, headers))
-        except Exception:
-            # A location lookup failure must not take down authentication.
+        except Exception as error:
+            # Fail-open: a location lookup failure must not take down
+            # authentication.  Fail-closed: silently skipping the lookup would
+            # disable travel detection, so reject instead.
+            if self.fail_closed:
+                raise IpHopUnavailable() from error
             return None
 
     def _detect(self, current: Observation, recent: list[Observation]):
@@ -1288,30 +1354,156 @@ def bearer_token(headers: Any) -> str:
     return value[7:].strip()
 
 
-def client_ip(headers: Any) -> str:
-    # Cloudflare's connecting IP is authoritative at that edge. Fall back to
-    # X-Forwarded-For only for deployments that explicitly terminate there.
-    return (_header(headers, 'cf-connecting-ip') or
-            _header(headers, 'x-real-ip') or
-            ((_header(headers, 'x-forwarded-for') or '').split(',')[0].strip()))
+def client_ip(headers: Any, peer: str | None = None) -> str:
+    """Return the client address for a request received from ``peer``.
+
+    ``peer`` is the socket peer.  ``CF-Connecting-IP``, ``X-Real-IP`` and
+    ``X-Forwarded-For`` are set by whoever sent the request, so they are
+    believed only when the peer is a configured trusted proxy (see
+    :func:`trusted_proxy_networks`).  For every other peer the socket address
+    is authoritative, which is the direct-deployment behaviour; ``''`` means
+    there is no usable address.
+
+    Behind a trusted proxy ``X-Forwarded-For`` wins: the proxy appends the
+    address it actually saw, so the rightmost untrusted hop is the real client
+    and a forged left-hand entry cannot win.  ``CF-Connecting-IP`` and
+    ``X-Real-IP`` are fallbacks for a proxy that does not emit
+    ``X-Forwarded-For`` (a proxy that forwards either header must overwrite
+    any client-supplied value).
+    """
+    address = _address_text(peer or '')
+    if address is None or not _peer_is_trusted(address):
+        return address or ''
+    forwarded = _forwarded_client(headers)
+    if forwarded:
+        return forwarded
+    for name in ('cf-connecting-ip', 'x-real-ip'):
+        candidate = _address_text(_header(headers, name) or '')
+        if candidate:
+            return candidate
+    return address
+
+
+def trusted_proxy_networks() -> tuple[ipaddress.IPv4Network |
+                                      ipaddress.IPv6Network, ...]:
+    """Proxy networks from ``IP_HOP_TRUSTED_PROXIES``.
+
+    Unset keeps the loopback/private defaults (a co-located Caddy or a
+    Docker/private edge).  An empty value trusts no proxy, so every request
+    behaves like a direct deployment.  Entries may be CIDRs or bare addresses;
+    an invalid entry raises :class:`ValueError` instead of silently widening
+    trust.
+    """
+    raw = os.environ.get(TRUSTED_PROXIES_ENV)
+    if raw is None:
+        raw = ','.join(DEFAULT_TRUSTED_PROXIES)
+    networks = []
+    for entry in raw.split(','):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            raise ValueError(
+                f'Invalid {TRUSTED_PROXIES_ENV} entry: {entry!r}') from None
+    return tuple(networks)
+
+
+def _peer_is_trusted(peer: str | None) -> bool:
+    address = _address(peer or '')
+    if address is None:
+        return False
+    for network in trusted_proxy_networks():
+        if address.version == network.version and address in network:
+            return True
+    return False
+
+
+def _forwarded_client(headers: Any) -> str | None:
+    """Rightmost untrusted hop of ``X-Forwarded-For``: the real client."""
+    value = _header(headers, 'x-forwarded-for') or ''
+    hops = [part.strip() for part in value.split(',') if part.strip()]
+    for hop in reversed(hops):
+        address = _address_text(hop)
+        if address is not None and not _peer_is_trusted(address):
+            return address
+    return None
+
+
+def peer_address(request: Any) -> str:
+    """Return the socket peer host of a Starlette-like request, or ``''``."""
+    client = getattr(request, 'client', None)
+    if client is None and isinstance(request, Mapping):
+        client = request.get('client')
+    host = getattr(client, 'host', None)
+    if host is None and isinstance(client, Mapping):
+        host = client.get('host')
+    return host if isinstance(host, str) else ''
+
+
+class RequestHeaders(Mapping):
+    """Read-only header view that carries the trusted-proxy decision.
+
+    :func:`request_context` verifies the socket peer once and records the
+    result here.  :class:`HeaderGeoResolver` accepts ``CF-IPCountry`` and
+    ``X-Ovid-*`` only from an instance with ``peer_trusted=True``; a bare
+    mapping has no verified peer and is therefore untrusted.
+    """
+
+    def __init__(self, headers: Any, *, peer_trusted: bool):
+        self._items = list(headers.items()) if headers is not None else []
+        self.peer_trusted = bool(peer_trusted)
+
+    def __getitem__(self, key: str) -> str:
+        for name, value in self._items:
+            if isinstance(name, str) and name.lower() == str(key).lower():
+                if isinstance(value, str):
+                    return value
+                break
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter([name for name, _ in self._items])
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def items(self):
+        return list(self._items)
+
+
+def _geo_headers_trusted(headers: Any) -> bool:
+    """True only when ``headers`` proves the socket peer was a trusted proxy."""
+    return bool(getattr(headers, 'peer_trusted', False))
 
 
 def request_context(request: Any):
-    """Extract (ip, opaque session id, headers) from a Starlette-like request."""
+    """Extract (ip, opaque session id, headers) from a Starlette-like request.
+
+    The session id is derived only from the authenticated bearer token.  A
+    client-supplied ``X-Session-Id`` is ignored entirely: honouring it let an
+    attacker rotate the id to evade impossible-travel/country-burst blocks and
+    to hide which session was blocked.  The returned headers remember whether
+    the socket peer is a trusted proxy so geo headers are never trusted from an
+    untrusted caller.
+    """
     headers = getattr(request, 'headers', None)
     if headers is None and isinstance(request, Mapping):
         headers = request
     if headers is None:
         headers = {}
-    ip = client_ip(headers)
-    session_id = _header(headers, 'x-session-id') or ''
-    if SESSION_ID_RE.fullmatch(session_id) is None:
-        token = bearer_token(headers)
-        session_id = session_from_token(token) if token else ''
+    peer = peer_address(request)
+    ip = client_ip(headers, peer)
+    token = bearer_token(headers)
+    session_id = session_from_token(token) if token else ''
     if not session_id:
+        # No token (non-HTTP callers): a stable identity from the verified
+        # peer address, never from a request header.
         session_id = 'sess_' + hashlib.sha256(
             (ip or 'unknown').encode('utf-8')).hexdigest()[:16]
-    return ip, session_id, headers
+    return ip, session_id, RequestHeaders(headers,
+                                          peer_trusted=_peer_is_trusted(peer))
 
 
 def set_request_context(value: tuple[str, str, Any]):

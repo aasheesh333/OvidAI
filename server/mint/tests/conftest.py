@@ -9,6 +9,7 @@ import importlib
 import json
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -16,6 +17,23 @@ import pytest
 
 MINT_DIR = Path(__file__).resolve().parents[1]
 MASTER = "test-master-key"
+
+
+class FakeLifecycle:
+    """Account admission double: records calls and can fence a uid."""
+
+    def __init__(self):
+        self.blocked = set()
+        self.accessed = []
+
+    @contextmanager
+    def access(self, claims, request=None):
+        uid = claims.get("sub")
+        self.accessed.append(uid)
+        if uid in self.blocked:
+            from server.account.domain import AccountError
+            raise AccountError("account_deletion_pending", 403)
+        yield uid
 
 
 class MemoryRedis:
@@ -260,20 +278,31 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("USAGE_CACHE_S", "0")
     monkeypatch.setenv("MINT_STATE_DIR", str(tmp_path))
     for k in ("BASE_DAILY_USD", "FREE_MONTHLY_CAP_USD", "PAID_WINDOW",
-              "M1_ALERT_WEBHOOK_URL", "OVID_PAID_MODELS_KILL_SWITCH"):
+              "M1_ALERT_WEBHOOK_URL", "OVID_PAID_MODELS_KILL_SWITCH",
+              "ALLOW_TEST_UPGRADE", "OVID_ADMIN_KEY", "ACCOUNT_ACTIVATED",
+              "OVID_PLAY_SERVICE_ACCOUNT_FILE", "OVID_BILLING_DB",
+              "OVID_PLAY_PRODUCTS", "OVID_RTDN_SHARED_SECRET",
+              "OVID_RTDN_AUDIENCE", "OVID_RTDN_SERVICE_ACCOUNT"):
         monkeypatch.delenv(k, raising=False)
     if str(MINT_DIR) not in sys.path:
         sys.path.insert(0, str(MINT_DIR))
     monkeypatch.setenv("MINT_SWEEP_S", "3600")
     sys.modules.pop("mint", None)
     mint = importlib.import_module("mint")
+    # Tests inject the account lifecycle; production builds it when
+    # ACCOUNT_ACTIVATED=true and fails closed without one.
+    mint.ACCOUNT_LIFECYCLE = FakeLifecycle()
     fake = FakeLiteLLM()
     mint.rds = make_redis()
     mint.litellm_client = lambda timeout=20: httpx.Client(
         base_url="http://litellm", transport=httpx.MockTransport(fake.handler))
+    original_verify_app_check = mint.verify_app_check
     monkeypatch.setattr(mint, "verify_app_check", lambda token: "android")
+    # Keep the real App Check verifier so its own regression test is reachable.
+    mint.ORIGINAL_VERIFY_APP_CHECK = original_verify_app_check
     monkeypatch.setattr(mint, "verify_google_id_token",
-                        lambda token: {"sub": token, "email": f"{token}@example.com"})
+                        lambda token: {"sub": token, "email": f"{token}@example.com",
+                                       "firebase": {"sign_in_provider": "google.com"}})
     yield mint, fake, tmp_path
     sys.modules.pop("mint", None)
 

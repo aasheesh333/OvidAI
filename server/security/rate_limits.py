@@ -37,6 +37,12 @@ race).  If Redis is unavailable the limiter fails open by default so an outage
 does not take the API down; construct it with ``fail_open=False`` to reject with
 ``503 rate_limit_unavailable`` instead.
 
+Route handlers call :func:`enforce_route`; a process-wide registry
+(:func:`register_limiter`) lets the application factory install one limiter at
+startup without every route module importing the store classes.  With no
+limiter registered :func:`enforce_route` allows the request and reports
+``degraded=True``, so a missing wiring step never blocks authentication.
+
 No request bodies, tokens or IP addresses are stored here: a bucket key is the
 route plus the opaque user id, and override rows keep only the admin's actor id
 and the reason text.
@@ -51,7 +57,7 @@ import threading
 import time
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping, Protocol
+from typing import Iterable, Mapping, Protocol
 
 ROUTE_MINT = "mint"
 ROUTE_USAGE = "usage"
@@ -565,6 +571,80 @@ class RateLimiter:
     def overrides(self, *, now: float | None = None) -> list[dict]:
         now = self.clock() if now is None else float(now)
         return self.store.list_overrides(now)
+
+
+# ── process-wide wiring ──────────────────────────────────────────────────
+#
+# WIRED-BY: server/mint/mint.py (/mint and /usage), server/shares/api.py
+# (POST/PUT/DELETE /shares*), server/collaboration/api.py (POST "" to join and
+# POST /{session_token}/files for artifact upload).  Those route modules own
+# the request lifecycle and are outside this change's scope.  Their handlers
+# call ``enforce_route(uid, ROUTE_*, ...)`` before doing work and translate
+# ``RateLimited.headers`` / ``RateLimitUnavailable`` onto the error response
+# (``429`` with ``Retry-After`` / ``503``).
+
+_LIMITERS: dict[str, RateLimiter] = {}
+_LIMITERS_LOCK = threading.Lock()
+
+
+def register_limiter(limiter: RateLimiter | None,
+                     routes: Iterable[str] | None = None) -> None:
+    """Install the process-wide limiter that :func:`enforce_route` uses.
+
+    ``routes`` selects the routes to wire and defaults to every route the
+    limiter knows about.  ``None`` removes every registration, which makes
+    :func:`enforce_route` allow requests.  Registering again replaces the
+    limiter for the affected routes.
+    """
+    if limiter is not None and not isinstance(limiter, RateLimiter):
+        raise TypeError("limiter must be a RateLimiter or None")
+    if routes is not None and isinstance(routes, str):
+        raise TypeError("routes must be an iterable of route names")
+    if limiter is None:
+        with _LIMITERS_LOCK:
+            _LIMITERS.clear()
+        return
+    selected = tuple(limiter.limits if routes is None else routes)
+    for route in selected:
+        limiter.limit_for(route)  # reject an unknown route name loudly
+    with _LIMITERS_LOCK:
+        for route in selected:
+            _LIMITERS[route] = limiter
+
+
+def route_limiter(route: str) -> RateLimiter | None:
+    """Return the registered limiter for ``route``, if any."""
+    with _LIMITERS_LOCK:
+        return _LIMITERS.get(route)
+
+
+def registered_routes() -> tuple[str, ...]:
+    """Routes currently wired through :func:`enforce_route`."""
+    with _LIMITERS_LOCK:
+        return tuple(sorted(_LIMITERS))
+
+
+def enforce_route(uid: str, route: str, *, cost: float = 1.0,
+                  now: float | None = None) -> RateLimitDecision:
+    """Enforce the registered limiter for ``route`` for one user.
+
+    Raises :class:`RateLimited` when the bucket is exhausted and
+    :class:`RateLimitUnavailable` when a fail-closed store is down.  With no
+    limiter registered (control disabled) the request is allowed with
+    ``degraded=True``; that keeps a missing registration from rejecting traffic.
+    """
+    limiter = route_limiter(route)
+    if limiter is None:
+        limit = DEFAULT_LIMITS.get(route)
+        if limit is None:
+            raise ValueError(f"Unknown rate-limit route: {route}")
+        uid = _uid(uid)
+        now = time.time() if now is None else float(now)
+        return RateLimitDecision(
+            route=route, uid=uid, allowed=True, limit=limit.capacity,
+            remaining=limit.capacity, retry_after=0, reset_at=now,
+            degraded=True)
+    return limiter.enforce(uid, route, cost=cost, now=now)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────

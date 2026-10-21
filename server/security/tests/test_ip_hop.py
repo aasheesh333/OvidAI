@@ -1,6 +1,9 @@
 import json
+import os
 import unittest
 from contextlib import contextmanager
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -8,14 +11,21 @@ from fastapi.testclient import TestClient
 from server.account.api import router
 from server.account.domain import AccountError, Lifecycle
 from server.security.ip_hop import (
+    ChainGeoResolver,
     GeoInfo,
+    HeaderGeoResolver,
     IpHopBlocked,
     IpHopGuard,
     IpHopUnavailable,
+    RequestHeaders,
     SqliteIpHopStore,
     StaticGeoResolver,
+    client_ip,
     coarse_prefix,
+    peer_address,
+    request_context,
     session_from_token,
+    trusted_proxy_networks,
 )
 
 LONDON = GeoInfo(country='GB', asn='AS1', city='London',
@@ -268,14 +278,44 @@ class FailClosedTests(unittest.TestCase):
             guard.observe('alice', 'session-bbbb', '1.2.3.4', now=1000)
         self.assertEqual(caught.exception.event_id, 'event-1')
 
-    def test_resolver_failure_alone_does_not_fail_closed(self):
+    def test_resolver_failure_fails_open_by_default_and_still_records(self):
         store = SqliteIpHopStore()
         self.addCleanup(store.close)
-        guard = IpHopGuard(store, resolver=ExplodingResolver(), fail_closed=True)
+        guard = IpHopGuard(store, resolver=ExplodingResolver())
         decision = guard.observe('alice', 'session-aaaa', '1.2.3.4', now=1000)
         self.assertTrue(decision.recorded)
         self.assertIsNone(decision.reason)
         self.assertEqual(len(store.recent('alice', 0)), 1)
+
+    def test_resolver_failure_fails_closed(self):
+        store = SqliteIpHopStore()
+        self.addCleanup(store.close)
+        guard = IpHopGuard(store, resolver=ExplodingResolver(), fail_closed=True)
+        with self.assertRaises(IpHopUnavailable) as caught:
+            guard.observe('alice', 'session-aaaa', '1.2.3.4', now=1000)
+        self.assertEqual(caught.exception.code, 'ip_hop_unavailable')
+        self.assertEqual(caught.exception.status, 503)
+        # Rejected before the observation was written: no silent, geo-less row.
+        self.assertEqual(store.recent('alice', 0), [])
+
+    def test_fail_closed_rejects_when_every_resolver_in_the_chain_is_down(self):
+        store = SqliteIpHopStore()
+        self.addCleanup(store.close)
+        guard = IpHopGuard(
+            store, resolver=ChainGeoResolver(ExplodingResolver(),
+                                             ExplodingResolver()),
+            fail_closed=True)
+        with self.assertRaises(IpHopUnavailable):
+            guard.observe('alice', 'session-aaaa', '1.2.3.4', now=1000)
+
+    def test_fail_closed_still_blocks_when_evidence_lookup_is_unavailable(self):
+        self.store.block('alice', 'session-bbbb', 'impossible_travel', 'event-1',
+                         900, 2000)
+        guard = IpHopGuard(self.store, resolver=ExplodingResolver(),
+                           fail_closed=True)
+        with self.assertRaises(IpHopBlocked) as caught:
+            guard.observe('alice', 'session-bbbb', '1.2.3.4', now=1000)
+        self.assertEqual(caught.exception.event_id, 'event-1')
 
 
 class AccountIntegrationTests(unittest.TestCase):
@@ -299,41 +339,56 @@ class AccountIntegrationTests(unittest.TestCase):
             if token == 'admin':
                 return {'uid': 'admin', 'admin': True, 'auth_time': self.now,
                         'firebase': {'sign_in_provider': 'google.com'}}
-            if token != 'valid':
+            if token not in ('valid-a', 'valid-b'):
                 raise AccountError('invalid_token', 401)
             return {'uid': 'alice', 'auth_time': self.now,
                     'firebase': {'sign_in_provider': 'google.com'}}
 
         app = FastAPI()
         app.include_router(router(service, verify))
-        self.client = TestClient(app)
+        # The peer is the co-located Caddy that terminates the connection, so
+        # CF-Connecting-IP is honoured (a default trusted loopback proxy).
+        self.client = TestClient(app, client=('127.0.0.1', 50000))
 
     def tearDown(self):
         self.store.close()
 
-    def headers(self, session, ip):
-        return {'Authorization': 'Bearer valid', 'X-Firebase-AppCheck': 'attested',
-                'X-Session-Id': session, 'CF-Connecting-IP': ip}
+    def headers(self, token, ip, session=None):
+        headers = {'Authorization': 'Bearer ' + token,
+                   'X-Firebase-AppCheck': 'attested',
+                   'CF-Connecting-IP': ip}
+        if session is not None:
+            # Kept in the request to prove the spoofable header is ignored.
+            headers['X-Session-Id'] = session
+        return headers
 
     def test_authenticated_route_returns_session_blocked_ip_hop(self):
-        self.assertEqual(self.client.get('/account/deletion',
-                         headers=self.headers('session-aaaa', '1.2.3.4')).status_code, 200)
+        self.assertEqual(self.client.get(
+            '/account/deletion',
+            headers=self.headers('valid-a', '1.2.3.4',
+                                 session='session-aaaa')).status_code, 200)
         self.now = 1100
-        response = self.client.get('/account/deletion',
-                                   headers=self.headers('session-bbbb', '5.6.7.8'))
+        response = self.client.get(
+            '/account/deletion',
+            headers=self.headers('valid-b', '5.6.7.8',
+                                 session='session-bbbb'))
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()['detail'], 'session_blocked_ip_hop')
         self.now = 1200
-        self.assertEqual(self.client.get('/account/deletion',
-                         headers=self.headers('session-aaaa', '1.2.3.4')).status_code, 200)
+        self.assertEqual(self.client.get(
+            '/account/deletion',
+            headers=self.headers('valid-a', '1.2.3.4',
+                                 session='session-aaaa')).status_code, 200)
         self.assertEqual(len(self.emails), 1)
 
     def test_admin_unblock_route_requires_admin_claim_and_audits(self):
         self.client.get('/account/deletion',
-                        headers=self.headers('session-aaaa', '1.2.3.4'))
+                        headers=self.headers('valid-a', '1.2.3.4'))
         self.now = 1100
-        self.assertEqual(self.client.get('/account/deletion',
-                         headers=self.headers('session-bbbb', '5.6.7.8')).status_code, 403)
+        self.assertEqual(self.client.get(
+            '/account/deletion',
+            headers=self.headers('valid-b', '5.6.7.8')).status_code, 403)
+        blocked_session = session_from_token('valid-b')
 
         self.now = 5000
         admin_headers = {'Authorization': 'Bearer admin',
@@ -341,18 +396,18 @@ class AccountIntegrationTests(unittest.TestCase):
                          'X-Session-Id': 'session-admin',
                          'CF-Connecting-IP': '5.6.7.8'}
         denied = self.client.post(
-            '/account/security/alice/sessions/session-bbbb/unblock',
-            headers=self.headers('session-aaaa', '1.2.3.4'),
+            f'/account/security/alice/sessions/{blocked_session}/unblock',
+            headers=self.headers('valid-a', '1.2.3.4'),
             json={'reason': 'verified travel'})
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(denied.json()['detail'], 'admin_required')
 
         response = self.client.post(
-            '/account/security/alice/sessions/session-bbbb/unblock',
+            f'/account/security/alice/sessions/{blocked_session}/unblock',
             headers=admin_headers, json={'reason': 'verified travel'})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), 1)
-        self.assertIsNone(self.store.blocked('alice', 'session-bbbb', 5000))
+        self.assertIsNone(self.store.blocked('alice', blocked_session, 5000))
         self.assertEqual(
             [row['action'] for row in self.store.audit_rows('alice')][0], 'unblock')
 
@@ -361,8 +416,10 @@ class AccountIntegrationTests(unittest.TestCase):
                                             set_request_context)
 
         class Request:
-            headers = {'authorization': 'Bearer valid', 'cf-connecting-ip': '1.2.3.4',
+            headers = {'authorization': 'Bearer valid-a',
+                       'cf-connecting-ip': '1.2.3.4',
                        'x-session-id': 'session-aaaa'}
+            client = SimpleNamespace(host='127.0.0.1')
 
         token = set_request_context(request_context(Request()))
         try:
@@ -371,7 +428,9 @@ class AccountIntegrationTests(unittest.TestCase):
                 pass
         finally:
             reset_request_context(token)
-        self.assertEqual(len(self.store.recent('alice', 0)), 1)
+        observed = self.store.recent('alice', 0)
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0].session_id, session_from_token('valid-a'))
 
     def test_fail_closed_guard_returns_ip_hop_unavailable(self):
         store = BrokenStore()
@@ -381,18 +440,173 @@ class AccountIntegrationTests(unittest.TestCase):
                             ip_hop=guard)
 
         def verify(token, appcheck, allow_disabled=False):
-            if token != 'valid' or appcheck != 'attested':
+            if token != 'valid-a' or appcheck != 'attested':
                 raise AccountError('invalid_token', 401)
             return {'uid': 'alice', 'auth_time': self.now,
                     'firebase': {'sign_in_provider': 'google.com'}}
 
         app = FastAPI()
         app.include_router(router(service, verify))
-        client = TestClient(app)
+        client = TestClient(app, client=('127.0.0.1', 50000))
         response = client.get('/account/deletion',
-                              headers=self.headers('session-aaaa', '1.2.3.4'))
+                              headers=self.headers('valid-a', '1.2.3.4'))
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()['detail'], 'ip_hop_unavailable')
+
+
+class FakeRequest:
+    def __init__(self, headers, peer='127.0.0.1'):
+        self.headers = headers
+        self.client = SimpleNamespace(host=peer) if peer is not None else None
+
+
+class ClientIdentityTests(unittest.TestCase):
+    """Proxy headers, geo headers and session ids are never client-controlled."""
+
+    def test_spoofed_proxy_headers_are_ignored_from_an_untrusted_peer(self):
+        headers = {'cf-connecting-ip': '5.6.7.8', 'x-real-ip': '9.9.9.9',
+                   'x-forwarded-for': '8.8.8.8'}
+        self.assertEqual(client_ip(headers, peer='203.0.113.9'), '203.0.113.9')
+        self.assertEqual(client_ip(headers, peer=''), '')
+        self.assertEqual(client_ip(headers), '')
+
+    def test_trusted_proxy_headers_are_honoured(self):
+        self.assertEqual(
+            client_ip({'cf-connecting-ip': '5.6.7.8'}, peer='127.0.0.1'),
+            '5.6.7.8')
+        self.assertEqual(
+            client_ip({'x-real-ip': '5.6.7.8'}, peer='10.1.2.3'), '5.6.7.8')
+        # A private/Docker edge and an IPv4-mapped loopback use the defaults.
+        self.assertEqual(
+            client_ip({'cf-connecting-ip': '5.6.7.8'},
+                      peer='::ffff:127.0.0.1'), '5.6.7.8')
+        self.assertEqual(
+            client_ip({'cf-connecting-ip': '5.6.7.8'}, peer='192.168.1.10'),
+            '5.6.7.8')
+
+    def test_x_forwarded_for_uses_the_rightmost_untrusted_hop(self):
+        headers = {'x-forwarded-for': '1.1.1.1, 5.6.7.8, 10.0.0.2'}
+        self.assertEqual(client_ip(headers, peer='127.0.0.1'), '5.6.7.8')
+        self.assertEqual(client_ip({'x-forwarded-for': '5.6.7.8'},
+                                   peer='127.0.0.1'), '5.6.7.8')
+
+    def test_proxy_appended_x_forwarded_for_beats_a_forged_cf_header(self):
+        # A generic trusted proxy (Caddy) forwards a client-supplied
+        # CF-Connecting-IP untouched but appends the real address to
+        # X-Forwarded-For.  The appended hop must win.
+        headers = {'cf-connecting-ip': '9.9.9.9',
+                   'x-forwarded-for': '1.1.1.1, 5.6.7.8'}
+        self.assertEqual(client_ip(headers, peer='127.0.0.1'), '5.6.7.8')
+
+    def test_invalid_forwarded_address_falls_back_to_the_socket_peer(self):
+        self.assertEqual(
+            client_ip({'cf-connecting-ip': 'not-an-ip'}, peer='127.0.0.1'),
+            '127.0.0.1')
+        self.assertEqual(
+            client_ip({'x-forwarded-for': 'garbage'}, peer='127.0.0.1'),
+            '127.0.0.1')
+
+    def test_trusted_proxy_list_is_configurable(self):
+        with patch.dict(os.environ,
+                        {'IP_HOP_TRUSTED_PROXIES': '203.0.113.0/24'}):
+            self.assertEqual(
+                client_ip({'cf-connecting-ip': '5.6.7.8'},
+                          peer='203.0.113.9'), '5.6.7.8')
+            # The defaults no longer apply once the list is configured.
+            self.assertEqual(
+                client_ip({'cf-connecting-ip': '5.6.7.8'},
+                          peer='127.0.0.1'), '127.0.0.1')
+
+    def test_empty_trusted_proxy_list_is_a_direct_deployment(self):
+        with patch.dict(os.environ, {'IP_HOP_TRUSTED_PROXIES': ''}):
+            self.assertEqual(trusted_proxy_networks(), ())
+            self.assertEqual(
+                client_ip({'cf-connecting-ip': '5.6.7.8'},
+                          peer='127.0.0.1'), '127.0.0.1')
+
+    def test_invalid_trusted_proxy_entry_is_rejected(self):
+        with patch.dict(os.environ,
+                        {'IP_HOP_TRUSTED_PROXIES': '127.0.0.1,not-a-cidr'}):
+            with self.assertRaises(ValueError):
+                trusted_proxy_networks()
+
+    def test_peer_address_reads_the_socket_client(self):
+        self.assertEqual(peer_address(FakeRequest({}, peer='127.0.0.1')),
+                         '127.0.0.1')
+        self.assertEqual(peer_address(FakeRequest({}, peer=None)), '')
+        self.assertEqual(peer_address({'client': {'host': '10.0.0.1'}}),
+                         '10.0.0.1')
+        self.assertEqual(peer_address({}), '')
+
+    def test_session_id_comes_only_from_the_token(self):
+        base = {'authorization': 'Bearer token-a'}
+        _, first, _ = request_context(FakeRequest(
+            {**base, 'x-session-id': 'session-aaaa'}))
+        _, second, _ = request_context(FakeRequest(
+            {**base, 'x-session-id': 'session-bbbb'}))
+        self.assertEqual(first, session_from_token('token-a'))
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, 'session-aaaa')
+
+    def test_no_token_falls_back_to_the_verified_peer_not_the_header(self):
+        headers = {'x-session-id': 'session-aaaa'}
+        _, first, _ = request_context(FakeRequest(headers, peer='127.0.0.1'))
+        _, second, _ = request_context(FakeRequest(
+            {**headers, 'x-session-id': 'session-bbbb'}, peer='127.0.0.1'))
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith('sess_'))
+
+    def test_request_context_marks_headers_with_peer_trust(self):
+        _, _, trusted_headers = request_context(FakeRequest(
+            {'authorization': 'Bearer token-a'}, peer='127.0.0.1'))
+        _, _, untrusted_headers = request_context(FakeRequest(
+            {'authorization': 'Bearer token-a'}, peer='203.0.113.9'))
+        self.assertIsInstance(trusted_headers, RequestHeaders)
+        self.assertTrue(trusted_headers.peer_trusted)
+        self.assertFalse(untrusted_headers.peer_trusted)
+
+    def test_direct_peer_gets_no_forwarded_or_geo_trust(self):
+        ip, _, headers = request_context(FakeRequest(
+            {'authorization': 'Bearer token-a',
+             'cf-connecting-ip': '1.2.3.4', 'cf-ipcountry': 'GB',
+             'x-ovid-latitude': '51.5', 'x-ovid-longitude': '-0.12'},
+            peer='203.0.113.9'))
+        self.assertEqual(ip, '203.0.113.9')
+        self.assertFalse(headers.peer_trusted)
+        self.assertIsNone(
+            HeaderGeoResolver(trust_geo_headers=True).resolve(ip, headers))
+
+    def test_rotating_the_session_header_cannot_evade_a_block(self):
+        store = SqliteIpHopStore()
+        self.addCleanup(store.close)
+        guard = IpHopGuard(
+            store,
+            resolver=StaticGeoResolver({'1.2.3.4': LONDON, '5.6.7.8': NEW_YORK}))
+
+        ip_a, session_a, headers_a = request_context(FakeRequest(
+            {'authorization': 'Bearer token-a', 'cf-connecting-ip': '1.2.3.4'}))
+        guard.observe('alice', session_a, ip_a, headers=headers_a, now=1000)
+
+        ip_b, session_b, headers_b = request_context(FakeRequest(
+            {'authorization': 'Bearer token-b', 'cf-connecting-ip': '5.6.7.8'}))
+        with self.assertRaises(IpHopBlocked):
+            guard.observe('alice', session_b, ip_b, headers=headers_b, now=1100)
+
+        # The attacker rotates the spoofable session header but keeps the
+        # token, so the derived session id — and the block — are unchanged.
+        ip_c, session_c, headers_c = request_context(FakeRequest(
+            {'authorization': 'Bearer token-b', 'cf-connecting-ip': '9.9.9.9',
+             'x-session-id': 'session-rotated'}))
+        self.assertEqual(session_c, session_b)
+        with self.assertRaises(IpHopBlocked):
+            guard.observe('alice', session_c, ip_c, headers=headers_c, now=1200)
+
+        # Both rejected requests remain queryable as evidence even though the
+        # blocked session is excluded from detection.
+        observed = store.recent('alice', 0)
+        self.assertEqual(len(observed), 3)
+        self.assertIn('9.9.9.0/24', {item.ip_prefix for item in observed})
+        self.assertEqual(len(store.audit_rows('alice')), 1)
 
 
 class FingerprintTests(unittest.TestCase):

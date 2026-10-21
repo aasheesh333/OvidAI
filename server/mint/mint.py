@@ -20,8 +20,10 @@ import math
 import hmac
 import hashlib
 import datetime
+import ipaddress
 import re
 import urllib.request
+from contextlib import contextmanager
 
 import jwt  # PyJWT
 from jwt import PyJWKClient
@@ -81,6 +83,15 @@ ALERT_SINK = m1_alerts.AlertSink(webhook_url=M1_ALERT_WEBHOOK_URL)
 DAILY_SPEND_ALERT_USD = float(os.environ.get("DAILY_SPEND_ALERT_USD", "20"))
 LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://litellm:4000")
 LITELLM_MASTER_KEY = os.environ["LITELLM_MASTER_KEY"]
+# Admin console credential. Every LiteLLM client holds the master key, so it
+# must NOT be the only way into /admin/*. OVID_ADMIN_KEY takes precedence; the
+# master key is accepted only when the dedicated key is unset (with a boot
+# warning, so a deployment cannot quietly keep the old shared credential).
+OVID_ADMIN_KEY = os.environ.get("OVID_ADMIN_KEY", "").strip()
+if not OVID_ADMIN_KEY:
+    print("[mint] WARNING: OVID_ADMIN_KEY is unset; /admin/* falls back to "
+          "LITELLM_MASTER_KEY, which every LiteLLM client holds. Set "
+          "OVID_ADMIN_KEY to a dedicated admin secret.", flush=True)
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/2")
 FREE_MONTHLY_CAP_USD = float(os.environ.get("FREE_MONTHLY_CAP_USD", "10"))
 
@@ -412,9 +423,19 @@ _appcheck_jwk_client = PyJWKClient(APPCHECK_JWKS)
 def verify_app_check(token: str) -> str:
     """Verify a Firebase App Check token; return the client platform
     ("android", "web", ...). Play Integrity on Android, reCAPTCHA Enterprise
-    on web — both arrive as the same signed App Check JWT."""
+    on web — both arrive as the same signed App Check JWT.
+
+    Fail closed: an explicit ``OVID_APPCHECK_APPS`` allowlist is required (an
+    app id is never guessed from its string shape), and the project-number
+    ``iss`` claim is verified like every other JWT claim.
+    """
     if not APPCHECK_ENABLED:
         return "android"
+    if not APPCHECK_APPS:
+        raise HTTPException(503, "app check app allowlist is not configured")
+    project_number = _project_number()
+    if not project_number:
+        raise HTTPException(503, "app check project number is not configured")
     try:
         signing_key = _appcheck_jwk_client.get_signing_key_from_jwt(token)
         claims = jwt.decode(
@@ -422,18 +443,15 @@ def verify_app_check(token: str) -> str:
             signing_key.key,
             algorithms=["RS256"],
             audience=[f"projects/{FIREBASE_PROJECT}"],
-            issuer=f"https://firebaseappcheck.googleapis.com/{_project_number()}",
-            options={"verify_iss": False},  # project-number issuer; aud is the strong check
+            issuer=f"https://firebaseappcheck.googleapis.com/{project_number}",
         )
     except jwt.PyJWTError as e:
         raise HTTPException(401, f"invalid app check token: {e}")
     app_id = str(claims.get("sub", ""))
-    if APPCHECK_APPS:
-        platform = APPCHECK_APPS.get(app_id)
-        if not platform:
-            raise HTTPException(403, "unknown app")
-        return platform
-    return "web" if ":web:" in app_id else "android"
+    platform = APPCHECK_APPS.get(app_id)
+    if not platform:
+        raise HTTPException(403, "unknown app")
+    return platform
 
 
 
@@ -566,6 +584,68 @@ def _spend_monitor() -> None:
 
 def _project_number() -> str:
     return os.environ.get("FIREBASE_PROJECT_NUMBER", "")
+
+
+# ── account lifecycle admission (disabled / revoked / fenced accounts) ──
+# A Firebase ID token stays valid until it expires, so token verification alone
+# cannot see a disabled user or a deletion fence. Every tier/key mutation must
+# pass the account lifecycle first. Composition or tests inject a Lifecycle
+# instance here; with ACCOUNT_ACTIVATED=true it is built lazily from the account
+# service environment. Without one, mint fails closed.
+ACCOUNT_LIFECYCLE = None
+_ACCOUNT_LIFECYCLE_INIT = False
+
+
+def account_lifecycle():
+    """Return the configured account Lifecycle (or None when unavailable)."""
+    global ACCOUNT_LIFECYCLE, _ACCOUNT_LIFECYCLE_INIT
+    if ACCOUNT_LIFECYCLE is not None:
+        return ACCOUNT_LIFECYCLE
+    if _ACCOUNT_LIFECYCLE_INIT:
+        return None
+    _ACCOUNT_LIFECYCLE_INIT = True
+    if os.environ.get("ACCOUNT_ACTIVATED", "").strip().lower() != "true":
+        return None
+    try:
+        from server.account.runtime import build
+        ACCOUNT_LIFECYCLE, _admin = build()
+    except Exception as e:  # noqa: BLE001 - fail closed below
+        print(f"[mint] account lifecycle init failed: {type(e).__name__}", flush=True)
+    return ACCOUNT_LIFECYCLE
+
+
+def _reject_unavailable_claims(claims: dict) -> None:
+    """Reject tokens explicitly marked disabled/revoked by the verifier."""
+    if (claims.get("_account_disabled") or claims.get("disabled") is True
+            or claims.get("revoked") is True):
+        raise HTTPException(403, "account unavailable")
+
+
+@contextmanager
+def account_access(claims: dict, request: Request | None = None):
+    """Admission check for a UID-owned mutation (mint/upgrade).
+
+    Runs ``lifecycle.access`` (the deletion fence and UID lock). Fails closed
+    with 503 when no lifecycle is wired, because a fenced/deleted account could
+    otherwise mint a fresh key until its ID token expires.
+    """
+    _reject_unavailable_claims(claims)
+    lifecycle = account_lifecycle()
+    if lifecycle is None:
+        raise HTTPException(503, "account lifecycle unavailable")
+    try:
+        with lifecycle.access(claims, request=request) as uid:
+            if uid != claims.get("sub"):
+                raise HTTPException(403, "account mismatch")
+            yield uid
+    except HTTPException:
+        raise
+    except Exception as e:  # AccountError carries (code, status)
+        code, status = getattr(e, "code", None), getattr(e, "status", None)
+        if isinstance(code, str) and isinstance(status, int):
+            raise HTTPException(status, code) from None
+        print(f"[mint] account lifecycle error: {type(e).__name__}", flush=True)
+        raise HTTPException(503, "account lifecycle unavailable") from None
 
 
 
@@ -931,17 +1011,115 @@ def remember_email(uid: str, email) -> None:
 # An IP ban is reserved for extreme, corroborated cases (App Check failing AND
 # crazy signup velocity AND many abuse strikes) and is always TTL'd, or set by
 # an admin by hand.
-def client_ip(x_forwarded_for: str, x_real_ip: str) -> str:
-    # Behind Cloudflare → Caddy, the real client is the first XFF hop.
-    if x_forwarded_for:
-        return x_forwarded_for.split(",")[0].strip()
-    return (x_real_ip or "unknown").strip()
+# Trusted reverse proxies. X-Forwarded-For is client-controlled, so a hop is
+# believed only when every proxy to its right is trusted. The list is shared
+# with server/security/ip_hop.py through the same env name: unset keeps the
+# loopback/private (co-located Caddy or Docker edge) defaults, an empty value
+# trusts no proxy at all (pure direct deployment).
+TRUSTED_PROXIES_ENV = "IP_HOP_TRUSTED_PROXIES"
+DEFAULT_TRUSTED_PROXIES = (
+    "127.0.0.0/8", "::1/128",
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+    "fc00::/7",
+)
+# Shared bucket for requests whose client address cannot be resolved. The
+# throttles must still apply (fail closed) instead of being skipped entirely.
+UNRESOLVED_IP_BUCKET = "ip:unresolved"
+
+
+def trusted_proxy_networks() -> tuple:
+    """Proxy networks from ``IP_HOP_TRUSTED_PROXIES`` (shared with ip_hop)."""
+    try:
+        from server.security.ip_hop import trusted_proxy_networks as _shared
+        return _shared()
+    except Exception:  # pragma: no cover - single-file deploy fallback
+        raw = os.environ.get(TRUSTED_PROXIES_ENV)
+        if raw is None:
+            raw = ",".join(DEFAULT_TRUSTED_PROXIES)
+        networks = []
+        for entry in raw.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                networks.append(ipaddress.ip_network(entry, strict=False))
+            except ValueError:
+                raise ValueError(
+                    f"Invalid {TRUSTED_PROXIES_ENV} entry: {entry!r}") from None
+        return tuple(networks)
+
+
+def _ip_address(value):
+    """Parse an address, unwrapping IPv4-mapped IPv6; None when invalid."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        address = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return None
+    if address.version == 6 and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address
+
+
+def _as_address(value):
+    if isinstance(value, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+        return value
+    return _ip_address(value)
+
+
+def _is_trusted_proxy(value) -> bool:
+    address = _as_address(value)
+    if address is None:
+        return False
+    return any(address.version == network.version and address in network
+               for network in trusted_proxy_networks())
+
+
+def ip_bucket(ip: str) -> str:
+    """Key suffix for an IP; unresolved addresses share one fail-closed bucket."""
+    return ip if ip and ip != "unknown" else UNRESOLVED_IP_BUCKET
+
+
+def client_ip(x_forwarded_for: str, x_real_ip: str = "", peer_ip: str = "",
+              cf_connecting_ip: str = "") -> str:
+    """Resolve the client address without trusting attacker-supplied hops.
+
+    Walk ``X-Forwarded-For`` from the RIGHT, skipping entries that are trusted
+    proxies; the first untrusted hop is the client. The socket peer is treated
+    as the final hop, so a direct connection always wins over a spoofed XFF.
+    ``CF-Connecting-IP``/``X-Real-IP`` are used only when the peer is itself a
+    trusted proxy (the edge has already validated them).
+    """
+    trusted = trusted_proxy_networks()
+
+    def is_trusted(value) -> bool:
+        address = _as_address(value)
+        return address is not None and any(
+            address.version == network.version and address in network
+            for network in trusted)
+
+    peer = _ip_address(peer_ip)
+    if peer is not None and is_trusted(peer):
+        for edge_value in (cf_connecting_ip, x_real_ip):
+            edge_address = _ip_address(edge_value)
+            if edge_address is not None and not is_trusted(edge_address):
+                return str(edge_address)
+
+    hops = [part.strip() for part in (x_forwarded_for or "").split(",") if part.strip()]
+    chain = hops + ([str(peer)] if peer is not None else [])
+    for hop in reversed(chain):
+        address = _ip_address(hop)
+        if address is None or is_trusted(address):
+            continue
+        return str(address)
+    return "unknown"
 
 
 def is_banned(uid: str, ip: str) -> bool:
     if rds.get(f"user:{uid}:banned"):
         return True
-    if ip and ip != "unknown" and rds.get(f"ban:ip:{ip}"):
+    if rds.get(f"ban:ip:{ip_bucket(ip)}"):
         return True
     return False
 
@@ -957,9 +1135,9 @@ def record_strike(uid: str, ip: str) -> None:
         rds.set(f"user:{uid}:banned", "auto")  # ban the account, not the IP
         alert("auto_ban", f"uid {uid[:6]}… auto-banned after {n} abuse strikes", 600)
     # advisory IP signal (for admin review / corroboration only)
-    m = rds.incr(f"abuse:ip:{ip}")
+    m = rds.incr(f"abuse:ip:{ip_bucket(ip)}")
     if m == 1:
-        rds.expire(f"abuse:ip:{ip}", ABUSE_WINDOW_S)
+        rds.expire(f"abuse:ip:{ip_bucket(ip)}", ABUSE_WINDOW_S)
 
 
 def enforce_ip_signup_quota(uid: str, ip: str) -> None:
@@ -971,20 +1149,22 @@ def enforce_ip_signup_quota(uid: str, ip: str) -> None:
     a burst of brand-new signups, never ban the IP. A college/CGNAT IP making
     a few new accounts organically stays fine; a farmer spinning up dozens in
     minutes gets 429'd on the NEW ones only.
+
+    An unresolved address uses the shared ``ip:unresolved`` bucket, so the
+    limit still applies instead of being skipped.
     """
-    if not ip or ip == "unknown":
-        return
-    seen_key = f"ipacct:{ip}"
+    bucket = ip_bucket(ip)
+    seen_key = f"ipacct:{bucket}"
     # Returning user on this IP → never throttled.
     if rds.sismember(seen_key, uid):
         return
     # Short-window NEW-signup velocity (the farmer tell).
-    vel_key = f"ipnew:{ip}:{int(time.time() // SIGNUP_VELOCITY_WINDOW_S)}"
+    vel_key = f"ipnew:{bucket}:{int(time.time() // SIGNUP_VELOCITY_WINDOW_S)}"
     vel = rds.incr(vel_key)
     if vel == 1:
         rds.expire(vel_key, SIGNUP_VELOCITY_WINDOW_S)
     if vel > NEW_ACCOUNTS_PER_IP_PER_WINDOW:
-        alert("signup_velocity", f"IP {ip} exceeded {NEW_ACCOUNTS_PER_IP_PER_WINDOW} new accounts / window", 1800)
+        alert("signup_velocity", f"IP {bucket} exceeded {NEW_ACCOUNTS_PER_IP_PER_WINDOW} new accounts / window", 1800)
         # Throttle the NEW signup only — existing users unaffected, IP NOT banned.
         raise HTTPException(
             429,
@@ -1139,6 +1319,7 @@ def _response_secrets(uid: str | None = None) -> set[str]:
     """Values that must never appear in a non-mint response."""
     secrets = {
         LITELLM_MASTER_KEY,
+        OVID_ADMIN_KEY,
         LITELLM_BASE,
         os.environ.get("PUBLIC_BASE_URL", "https://cloud.dhanuksoftwares.com/v1"),
     }
@@ -1328,7 +1509,24 @@ def healthz():
 # OFF in production — a real payment webhook replaces this later. When enabled,
 # a signed-in user can set their own paid tier WITHOUT real payment, for
 # end-to-end plan testing only.
+_PROD_ENV_NAMES = ("OVID_ENV", "APP_ENV", "ENVIRONMENT", "ENV", "NODE_ENV")
+
+
+def is_production(environ=None) -> bool:
+    """True when any recognised deployment env names a production mode."""
+    environ = os.environ if environ is None else environ
+    return any(str(environ.get(name, "")).strip().lower() in ("production", "prod")
+               for name in _PROD_ENV_NAMES)
+
+
+def validate_boot_env(allow_test_upgrade: bool, environ=None) -> None:
+    """Refuse the test-upgrade hatch in production (mirrors TS env.ts)."""
+    if allow_test_upgrade and is_production(environ):
+        raise RuntimeError("ALLOW_TEST_UPGRADE is forbidden when the environment is production")
+
+
 ALLOW_TEST_UPGRADE = os.environ.get("ALLOW_TEST_UPGRADE", "false").lower() == "true"
+validate_boot_env(ALLOW_TEST_UPGRADE, os.environ)
 
 
 class UpgradeReq(BaseModel):
@@ -1343,6 +1541,7 @@ class UpgradeResp(BaseModel):
 @app.post("/upgrade", response_model=UpgradeResp)
 def upgrade(
     body: UpgradeReq,
+    request: Request,
     authorization: str = Header(...),
     x_firebase_appcheck: str = Header(default=""),
 ):
@@ -1356,24 +1555,26 @@ def upgrade(
     platform = verify_app_check(x_firebase_appcheck)
     claims = verify_google_id_token(id_token)
     uid = claims["sub"]
-    s = get_settings()
-    plan = plans.find_plan(s, body.tier)
-    if not plan["enabled"] or (body.tier != plan["id"] and body.tier not in plan["aliases"]):
-        plan = plans.find_plan(s, "free")
-    tier = plans.stored_tier(plan)
-    rds.set(f"user:{uid}:tier", tier)
-    # Re-apply the new tier's budget to the live keys (android + web) now.
-    try:
-        with litellm_client(15) as c:
-            reapply_user(c, uid)
-    except Exception as e:  # noqa: BLE001
-        print(f"upgrade reapply error: {type(e).__name__}")
+    with account_access(claims, request):
+        s = get_settings()
+        plan = plans.find_plan(s, body.tier)
+        if not plan["enabled"] or (body.tier != plan["id"] and body.tier not in plan["aliases"]):
+            plan = plans.find_plan(s, "free")
+        tier = plans.stored_tier(plan)
+        rds.set(f"user:{uid}:tier", tier)
+        # Re-apply the new tier's budget to the live keys (android + web) now.
+        try:
+            with litellm_client(15) as c:
+                reapply_user(c, uid)
+        except Exception as e:  # noqa: BLE001
+            print(f"upgrade reapply error: {type(e).__name__}")
     return UpgradeResp(ok=True, tier=tier)
 
 
 
 @app.post("/mint", response_model=MintResp)
 def mint(
+    request: Request,
     response: Response,
     authorization: str = Header(...),
     x_firebase_appcheck: str = Header(default=""),
@@ -1392,55 +1593,63 @@ def mint(
     # quota-limited key — never a master key, never another user's key.
     claims = verify_google_id_token(id_token)
     uid = claims["sub"]
-    remember_email(uid, claims.get("email"))
-    ip = client_ip(x_forwarded_for, x_real_ip)
+    ip = client_ip(
+        x_forwarded_for, x_real_ip,
+        request.client.host if request.client else "",
+        request.headers.get("cf-connecting-ip", ""),
+    )
 
-    if is_banned(uid, ip):
-        raise HTTPException(403, "account suspended")
+    # Disabled/revoked accounts and deletion fences are invisible in the ID
+    # token, so the account lifecycle must authorize every key/tier mutation.
+    with account_access(claims, request):
+        remember_email(uid, claims.get("email"))
 
-    # Per-IP mint-call rate limit (even with valid tokens): a scripted attacker
-    # hammering /mint from one IP is throttled. Shared-IP-safe: the limit is
-    # generous and only caps mint CALLS, not usage.
-    if ip and ip != "unknown":
-        mkey = f"mintrate:{ip}:{int(time.time() // MINT_WINDOW_S)}"
+        if is_banned(uid, ip):
+            raise HTTPException(403, "account suspended")
+
+        # Per-IP mint-call rate limit (even with valid tokens): a scripted
+        # attacker hammering /mint from one IP is throttled. Shared-IP-safe:
+        # the limit is generous and only caps mint CALLS, not usage. An
+        # unresolved address uses the shared fail-closed bucket.
+        mkey = f"mintrate:{ip_bucket(ip)}:{int(time.time() // MINT_WINDOW_S)}"
         mc = rds.incr(mkey)
         if mc == 1:
             rds.expire(mkey, MINT_WINDOW_S)
         if mc > MINT_CALLS_PER_IP:
             raise HTTPException(429, "too many requests from this network — retry later")
 
-    # Spam-signup defense: cap new free accounts per IP per window.
-    enforce_ip_signup_quota(uid, ip)
+        # Spam-signup defense: cap new free accounts per IP per window.
+        enforce_ip_signup_quota(uid, ip)
 
-    # A key already blocked for IP fan-out must not be handed back to the app.
-    ns = _key_namespace(platform)
-    _enforce_key_block(rds.get(f"user:{uid}:{ns}keyid"))
+        # A key already blocked for IP fan-out must not be handed back to the app.
+        ns = _key_namespace(platform)
+        _enforce_key_block(rds.get(f"user:{uid}:{ns}keyid"))
 
-    tier = effective_tier(uid)
-    # M1 kill switch + free-plan token ceilings (50M/24h, 1.5B/30d), decided
-    # before any model call. The kill switch is a distinct 503 code.
-    tkeys = plans.token_keys(uid)
-    is_free = tier == "free"
-    decision = plans.decide_request(
-        tier,
-        rds.hgetall(tkeys["day"]) if is_free else None,
-        rds.hgetall(tkeys["month"]) if is_free else None,
-        time.time(),
-        kill_switch=kill_switch_state()["active"])
-    if decision.reason == "paid_models_disabled":
-        alert("kill_switch",
-              "OVID_PAID_MODELS_KILL_SWITCH is on: all model calls are denied", 3600)
-    if not decision.allow:
-        raise limit_http_exception(decision)
-    # Free tier: stop at the $10/month ceiling.
-    if tier == "free" and free_cap_remaining(uid) <= 0:
-        raise HTTPException(402, "monthly free limit reached")
+        tier = effective_tier(uid)
+        # M1 kill switch + free-plan token ceilings (50M/24h, 1.5B/30d),
+        # decided before any model call. The kill switch is a distinct 503 code.
+        tkeys = plans.token_keys(uid)
+        is_free = tier == "free"
+        decision = plans.decide_request(
+            tier,
+            rds.hgetall(tkeys["day"]) if is_free else None,
+            rds.hgetall(tkeys["month"]) if is_free else None,
+            time.time(),
+            kill_switch=kill_switch_state()["active"])
+        if decision.reason == "paid_models_disabled":
+            alert("kill_switch",
+                  "OVID_PAID_MODELS_KILL_SWITCH is on: all model calls are denied", 3600)
+        if not decision.allow:
+            raise limit_http_exception(decision)
+        # Free tier: stop at the $10/month ceiling.
+        if tier == "free" and free_cap_remaining(uid) <= 0:
+            raise HTTPException(402, "monthly free limit reached")
 
-    key = litellm_mint_or_get(uid, tier, platform)
-    # Record this key's network. The 403 is returned before the app can use a
-    # key that just crossed the fan-out limit.
-    _observe_key_ip(uid, ns, rds.get(f"user:{uid}:{ns}keyid") or key, ip,
-                    platform=platform)
+        key = litellm_mint_or_get(uid, tier, platform)
+        # Record this key's network. The 403 is returned before the app can use
+        # a key that just crossed the fan-out limit.
+        _observe_key_ip(uid, ns, rds.get(f"user:{uid}:{ns}keyid") or key, ip,
+                        platform=platform)
     response.headers["Cache-Control"] = "no-store"
     return MintResp(
         key=key,
@@ -2006,6 +2215,7 @@ class UsageResp(BaseModel):
 
 @app.post("/usage", response_model=UsageResp)
 def usage(
+    request: Request,
     response: Response,
     authorization: str = Header(...),
     x_firebase_appcheck: str = Header(default=""),
@@ -2033,7 +2243,11 @@ def usage(
     # A blocked key cannot continue; answer with the machine code before any
     # spend-log work (and before the cache, which must not mask a block).
     _enforce_key_block(key_id)
-    ip = client_ip(x_forwarded_for, x_real_ip)
+    ip = client_ip(
+        x_forwarded_for, x_real_ip,
+        request.client.host if request.client else "",
+        request.headers.get("cf-connecting-ip", ""),
+    )
     _observe_key_ip(uid, ns, key_id, ip, platform=platform)
     if USAGE_CACHE_S > 0:
         cached = rds.get(f"usagecache:{uid}")
@@ -2065,22 +2279,29 @@ def _drop_usage_cache(uids) -> None:
 
 
 
-# ── admin (master-key protected; console is localhost / SSH-tunnel only) ──
+# ── admin (dedicated admin key; console is localhost / SSH-tunnel only) ──
+def _admin_key() -> str:
+    """Dedicated admin secret, falling back to the master key only when unset."""
+    return OVID_ADMIN_KEY or LITELLM_MASTER_KEY
+
+
 def _require_admin(authorization: str) -> None:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "missing admin key")
     token = authorization.split(" ", 1)[1]
-    if not hmac.compare_digest(token.encode(), LITELLM_MASTER_KEY.encode()):
+    if not hmac.compare_digest(token.encode(), _admin_key().encode()):
         raise HTTPException(403, "not admin")
 
 
 def _request_ip(request: Request | None) -> str:
     if request is None:
         return "unknown"
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    return client_ip(
+        request.headers.get("x-forwarded-for", ""),
+        request.headers.get("x-real-ip", ""),
+        request.client.host if request.client else "",
+        request.headers.get("cf-connecting-ip", ""),
+    )
 
 
 def audit(request: Request | None, action: str, target=None, before=None, after=None,
@@ -2244,23 +2465,31 @@ def admin_unblock_key(body: UnblockKeyAction, request: Request,
             "reason": reason, "upstream_unblocked": upstream}
 
 
+def _log_admin_validation(detail: str) -> None:
+    # The client gets a stable code; the actionable detail stays in the log.
+    print(f"[mint] admin validation rejected: {detail}", flush=True)
+
+
 def _validate_pool_override(p: dict) -> dict:
     out = {}
     for f, v in p.items():
         if f not in plans.OVERRIDE_FIELDS:
-            raise HTTPException(400, f"unknown override field {f!r}")
+            _log_admin_validation(f"unknown override field {f!r}")
+            raise HTTPException(400, "invalid_request")
         if v is None:
             continue
         if f in plans.BOOL_FIELDS:
             if not isinstance(v, bool):
-                raise HTTPException(400, f"{f} must be true or false")
+                _log_admin_validation(f"{f} must be true or false")
+                raise HTTPException(400, "invalid_request")
             out[f] = v
             continue
         lo, hi, _default = plans.PLAN_NUMBERS[f]
         try:
             out[f] = plans._bounded(f, v, lo, hi)
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            _log_admin_validation(f"{f}: {e}")
+            raise HTTPException(400, "invalid_request") from None
     if "window_hours" in out:
         out["window_hours"] = int(out["window_hours"])
     return out
@@ -2270,7 +2499,8 @@ def _bad_request(fn, *a):
     try:
         return fn(*a)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        _log_admin_validation(str(e))
+        raise HTTPException(400, "invalid_request") from None
 
 
 @app.post("/admin/set-tier")
@@ -2905,6 +3135,33 @@ def admin_ui():
         "Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline'; "
                                    "style-src 'unsafe-inline'; frame-ancestors 'none'",
     })
+
+
+# ── Google Play billing routes (mounted on this mint app) ──
+# /billing/verify and /billing/rtdn ship with mint. When billing is not
+# configured (no Play service account / store) the service is inactive and
+# every purchase/notification fails closed with `billing_unavailable`.
+BILLING_SERVICE = None
+
+
+def _mount_billing_routes() -> None:
+    global BILLING_SERVICE
+    try:
+        from server.billing.api import mount_billing
+        BILLING_SERVICE = mount_billing(sys.modules[__name__])
+    except Exception as e:  # noqa: BLE001 - never start without a fail-closed route
+        print(f"[mint] billing mount skipped: {type(e).__name__}", flush=True)
+        BILLING_SERVICE = None
+
+        @app.post("/billing/verify")
+        @app.post("/billing/rtdn")
+        def _billing_unavailable():
+            return JSONResponse(
+                {"ok": False, "error": {"code": "billing_unavailable"}},
+                status_code=503, headers={"Cache-Control": "no-store"})
+
+
+_mount_billing_routes()
 
 
 # ── Ovid image routes (mounted on this mint app; no separate service) ──

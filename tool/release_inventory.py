@@ -353,7 +353,10 @@ def main():
                              'play (OVID_PLAY_BUILD=true) additionally pins the Play target')
     parser.add_argument('--expected-abis', default=','.join(ABIS))
     parser.add_argument('--expected-target', type=int, required=True)
-    parser.add_argument('--expected-min', type=int, default=23)
+    # Must track `ovidMinSdk` in android/app/build.gradle.kts. Play's automatic
+    # protection requirement forced 23 -> 24; leaving this at 23 made every
+    # release run fail the inventory gate.
+    parser.add_argument('--expected-min', type=int, default=24)
     parser.add_argument('--certificate-sha256', default=os.environ.get('ANDROID_SIGNING_CERT_SHA256', ''))
     parser.add_argument('--build-tools', type=Path, default=Path(os.environ.get('ANDROID_HOME', '/opt/android-sdk')) / 'build-tools/36.0.0')
     parser.add_argument('--output', type=Path, required=True)

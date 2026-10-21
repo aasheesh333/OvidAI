@@ -23,14 +23,17 @@ from .ip_hop import (  # noqa: F401
     MaxMindGeoResolver,
     Observation,
     PostgresIpHopStore,
+    RequestHeaders,
     SqliteIpHopStore,
     StaticGeoResolver,
     build_geo_resolver,
     client_ip,
     coarse_prefix,
     geo_from_maxmind,
+    peer_address,
     request_context,
     session_from_token,
+    trusted_proxy_networks,
 )
 
 SessionBlocked = IpHopBlocked
@@ -43,7 +46,8 @@ __all__ = [
     'ChainGeoResolver', 'FakeGeoResolver', 'GeoInfo', 'HeaderGeoResolver',
     'IpHopBlocked', 'IpHopGuard', 'IpHopUnavailable',
     'LocationFingerprint', 'MaxMindGeoResolver', 'Observation',
-    'PostgresIpHopStore', 'SessionBlocked', 'SqliteIpHopStore',
+    'PostgresIpHopStore', 'RequestHeaders', 'SessionBlocked', 'SqliteIpHopStore',
     'StaticGeoResolver', 'build_geo_resolver', 'client_ip', 'coarse_prefix',
-    'geo_from_maxmind', 'request_context', 'session_from_token',
+    'geo_from_maxmind', 'peer_address', 'request_context', 'session_from_token',
+    'trusted_proxy_networks',
 ]

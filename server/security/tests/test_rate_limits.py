@@ -21,6 +21,10 @@ from server.security.rate_limits import (
     RateLimitUnavailable,
     RedisTokenBucketStore,
     RouteLimit,
+    enforce_route,
+    register_limiter,
+    registered_routes,
+    route_limiter,
 )
 
 T0 = 1_000.0
@@ -276,3 +280,87 @@ def test_fail_open_by_default_and_fail_closed_when_configured():
         closed_limiter.enforce("u", ROUTE_MINT, now=T0)
     assert caught.value.status == 503
     assert caught.value.code == "rate_limit_unavailable"
+
+
+# ── process-wide wiring ──────────────────────────────────────────────────
+#
+# These cover the surface route modules call: register one limiter at startup,
+# then enforce a named route per authenticated request.
+
+@pytest.fixture(autouse=True)
+def clear_limiter_registry():
+    register_limiter(None)
+    yield
+    register_limiter(None)
+
+
+def test_enforce_route_allows_when_no_limiter_is_registered():
+    decision = enforce_route("user-1", ROUTE_MINT, now=T0)
+    assert decision.allowed is True
+    assert decision.degraded is True
+    assert decision.limit == 20  # DEFAULT_LIMITS[ROUTE_MINT].capacity
+    assert int(decision.remaining) == 20
+
+
+def test_registered_limiter_enforces_the_named_route():
+    limiter = RateLimiter(MemoryTokenBucketStore(),
+                          limits={ROUTE_MINT: (2, 1.0)}, clock=lambda: T0)
+    register_limiter(limiter, routes=[ROUTE_MINT])
+    assert registered_routes() == (ROUTE_MINT,)
+    assert route_limiter(ROUTE_MINT) is limiter
+    assert route_limiter(ROUTE_USAGE) is None
+
+    assert enforce_route("user-1", ROUTE_MINT, now=T0).allowed
+    assert enforce_route("user-1", ROUTE_MINT, now=T0).allowed
+    with pytest.raises(RateLimited) as caught:
+        enforce_route("user-1", ROUTE_MINT, now=T0)
+    assert caught.value.status == 429
+    assert caught.value.headers["Retry-After"] == "1"
+
+
+def test_registering_defaults_to_every_route_the_limiter_knows():
+    limiter = RateLimiter(MemoryTokenBucketStore(), clock=lambda: T0)
+    register_limiter(limiter)
+    assert set(registered_routes()) == set(limiter.limits)
+
+
+def test_wiring_rejects_unknown_routes_and_bad_arguments():
+    limiter = RateLimiter(MemoryTokenBucketStore(), clock=lambda: T0)
+    with pytest.raises(ValueError):
+        register_limiter(limiter, routes=["not_a_route"])
+    with pytest.raises(TypeError):
+        register_limiter(limiter, routes="mint")
+    with pytest.raises(TypeError):
+        register_limiter(object())
+    with pytest.raises(ValueError):
+        enforce_route("user-1", "not_a_route", now=T0)
+    with pytest.raises(ValueError):
+        enforce_route("bad user", ROUTE_MINT, now=T0)
+
+
+def test_clearing_the_registry_restores_allow_all():
+    limiter = RateLimiter(MemoryTokenBucketStore(),
+                          limits={ROUTE_MINT: (1, 1.0)}, clock=lambda: T0)
+    register_limiter(limiter)
+    assert enforce_route("u", ROUTE_MINT, now=T0).allowed
+    with pytest.raises(RateLimited):
+        enforce_route("u", ROUTE_MINT, now=T0)
+
+    register_limiter(None)
+    assert registered_routes() == ()
+    assert enforce_route("u", ROUTE_MINT, now=T0).allowed
+
+
+def test_registering_again_replaces_the_limiter_for_that_route():
+    first = RateLimiter(MemoryTokenBucketStore(),
+                        limits={ROUTE_MINT: (1, 1.0)}, clock=lambda: T0)
+    second = RateLimiter(MemoryTokenBucketStore(),
+                         limits={ROUTE_MINT: (5, 1.0)}, clock=lambda: T0)
+    register_limiter(first)
+    register_limiter(second, routes=[ROUTE_MINT])
+    assert route_limiter(ROUTE_MINT) is second
+    assert route_limiter(ROUTE_USAGE) is first
+    for expected in (4, 3, 2, 1, 0):
+        assert int(enforce_route("u", ROUTE_MINT, now=T0).remaining) == expected
+    with pytest.raises(RateLimited):
+        enforce_route("u", ROUTE_MINT, now=T0)
