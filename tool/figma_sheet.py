@@ -753,7 +753,18 @@ def build_screens(p: Palette) -> list[Screen]:
         yy += 58
     out.append(s)
 
-    return out
+    return out + _extra_screens(p)
+
+
+def _extra_screens(p: Palette) -> list[Screen]:
+    # Imported lazily so the module can be run as a script from anywhere.
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    import figma_screens_extra
+
+    return figma_screens_extra.remaining(p)
 
 
 # --------------------------------------------------------------------------
