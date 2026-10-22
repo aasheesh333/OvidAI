@@ -62,103 +62,51 @@ void _setNarrowView(WidgetTester tester) {
 }
 
 V2AccountHealthPageData _data({
-  ValueChanged<String>? onDeviceTap,
-  ValueChanged<String>? onRevokeDevice,
-  VoidCallback? onEnableTwoFactor,
-  VoidCallback? onVerifyEmail,
   VoidCallback? onContactSupport,
-  VoidCallback? onRunCheck,
   VoidCallback? onCancelDeletion,
+  VoidCallback? onRetry,
   V2AccountStatus? accountStatus = V2AccountStatus.active,
-  bool? twoFactorEnabled = false,
   bool emailVerified = true,
-  bool? healthy = true,
-  String lastCheckLabel = '2 hours ago',
-  String lastCheckDetail = 'Automated audit passed.',
-  List<V2SignInDevice> devices = const [
-    V2SignInDevice(
-      id: 'pixel',
-      name: 'Pixel 9 Pro',
-      detail: 'Signed in now',
-      current: true,
-    ),
-    V2SignInDevice(
-      id: 'mac',
-      name: 'MacBook Air',
-      detail: 'Last active yesterday',
-    ),
-  ],
+  String emailLabel = 'aarav@gmail.com',
+  String deletionScheduledLabel = '',
+  bool hasData = true,
 }) {
   return V2AccountHealthPageData(
-    statusTitle: 'All systems normal',
-    statusMessage: 'No suspicious activity detected.',
-    healthy: healthy,
-    score: 92,
-    lastCheckLabel: lastCheckLabel,
-    lastCheckDetail: lastCheckDetail,
-    twoFactorEnabled: twoFactorEnabled,
     emailVerified: emailVerified,
-    emailLabel: 'aarav@gmail.com',
-    regionLabel: 'Mumbai, India',
+    emailLabel: emailLabel,
     accountStatus: accountStatus,
-    usage: const [
-      V2AccountUsageMetric(
-        id: 'storage',
-        title: 'Storage left',
-        value: '2.1 GB',
-        detail: 'of 3 GB',
-      ),
-    ],
-    deletionRequestedLabel: '21 Oct 2026',
-    deletionScheduledLabel: '20 Nov 2026',
-    services: const [
-      V2ServiceStatus(name: 'Chat and sync', statusLabel: 'Operational'),
-    ],
-    devices: devices,
-    recentSignIns: const [
-      V2SignInEvent(
-        id: 'sign-1',
-        device: 'Pixel 9 Pro',
-        location: 'Mumbai, India',
-        timeLabel: 'Today at 9:12 AM',
-        current: true,
-      ),
-    ],
-    onDeviceTap: onDeviceTap,
-    onRevokeDevice: onRevokeDevice ?? (_) {},
-    onEnableTwoFactor: onEnableTwoFactor,
-    onVerifyEmail: onVerifyEmail,
+    deletionScheduledLabel: deletionScheduledLabel,
+    hasData: hasData,
     onContactSupport: onContactSupport,
-    onRunCheck: onRunCheck,
     onCancelDeletion: onCancelDeletion,
+    onRetry: onRetry,
   );
 }
 
 void main() {
-  testWidgets('renders one status line and a short list in light mode', (
+  testWidgets('renders status, sign-in method and support in light mode', (
     tester,
   ) async {
     await tester.pumpWidget(
-      _app(AccountHealthPage(data: _data()), theme: OTheme.light()),
+      _app(
+        AccountHealthPage(data: _data(onContactSupport: () {})),
+        theme: OTheme.light(),
+      ),
     );
     await tester.pumpAndSettle();
 
     expect(find.text('Account health'), findsOneWidget);
-    expect(find.text('Healthy'), findsOneWidget);
+    // The pill leads the page and the status row repeats the same fact.
+    expect(find.text('Active'), findsNWidgets(2));
     expect(
-      find.text('2 hours ago · Automated audit passed.'),
+      find.text('Your account is in good standing.'),
       findsOneWidget,
     );
     expect(find.text('Account status'), findsOneWidget);
-    expect(find.text('Active'), findsOneWidget);
     expect(find.text('Email'), findsOneWidget);
+    expect(find.text('aarav@gmail.com'), findsOneWidget);
     expect(find.text('Verified'), findsOneWidget);
-    expect(find.text('Two-step sign-in'), findsOneWidget);
-    expect(find.text('Off'), findsOneWidget);
-    expect(find.text('Pixel 9 Pro'), findsOneWidget);
-    expect(find.text('This device'), findsOneWidget);
-    expect(find.text('MacBook Air'), findsOneWidget);
-    expect(find.text('Revoke'), findsOneWidget);
+    expect(find.text('Contact support'), findsOneWidget);
   });
 
   testWidgets('renders in dark mode', (tester) async {
@@ -168,75 +116,32 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Account health'), findsOneWidget);
-    expect(find.text('Healthy'), findsOneWidget);
+    expect(find.text('Active'), findsNWidgets(2));
   });
 
-  testWidgets('deleted summary sections are gone', (tester) async {
+  testWidgets('device and two-step sections are gone', (tester) async {
     await tester.pumpWidget(
       _app(AccountHealthPage(data: _data()), theme: OTheme.light()),
     );
     await tester.pumpAndSettle();
 
+    // No device management: there is no device endpoint, so the page does not
+    // imply one with rows or a Review action.
+    expect(find.text('Two-step sign-in'), findsNothing);
+    expect(find.text('Turn on'), findsNothing);
+    expect(find.text('Pixel 9 Pro'), findsNothing);
+    expect(find.text('MacBook Air'), findsNothing);
+    expect(find.text('This device'), findsNothing);
+    expect(find.text('Revoke'), findsNothing);
+    expect(find.text('Review'), findsNothing);
+    // No health-check score or service list either.
     expect(find.text('Security score'), findsNothing);
     expect(find.text('92/100'), findsNothing);
-    expect(find.text('ACCOUNT SUMMARY'), findsNothing);
     expect(find.text('Storage left'), findsNothing);
-    expect(find.text('Daily usage left'), findsNothing);
-    expect(find.text('SERVICE STATUS'), findsNothing);
     expect(find.text('Chat and sync'), findsNothing);
-    expect(find.text('ACTIVE SIGN-INS'), findsNothing);
-    expect(find.text('Mumbai, India'), findsNothing);
-    expect(find.text('DELETION REQUEST'), findsNothing);
-    expect(find.text('Deletion requested'), findsNothing);
-    expect(find.text('Review'), findsNothing);
-  });
-
-  testWidgets('no check result never claims a healthy account', (tester) async {
-    await tester.pumpWidget(
-      _app(
-        AccountHealthPage(
-          data: _data(healthy: null, lastCheckLabel: '', lastCheckDetail: ''),
-        ),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Not checked yet'), findsOneWidget);
-    expect(find.text('No check has run yet.'), findsOneWidget);
-    expect(find.text('Healthy'), findsNothing);
-    expect(find.byIcon(Icons.check_circle_outline_rounded), findsNothing);
-  });
-
-  testWidgets('a failing check is reported instead of a healthy claim', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      _app(
-        AccountHealthPage(data: _data(healthy: false)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Needs attention'), findsOneWidget);
-    expect(find.text('Healthy'), findsNothing);
-  });
-
-  testWidgets('a check without a verdict is not turned into Healthy', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      _app(
-        AccountHealthPage(data: _data(healthy: null)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Not verified'), findsOneWidget);
-    expect(find.text('Healthy'), findsNothing);
-    expect(find.byIcon(Icons.check_circle_outline_rounded), findsNothing);
+    expect(find.text('Run check'), findsNothing);
+    expect(find.byTooltip('Run check'), findsNothing);
+    expect(find.byTooltip('Run again'), findsNothing);
   });
 
   testWidgets('a missing account status is not rendered as Active', (
@@ -251,11 +156,15 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Account status'), findsOneWidget);
-    expect(find.text('Not checked'), findsOneWidget);
+    expect(find.text('Not checked'), findsNWidgets(2));
     expect(find.text('Active'), findsNothing);
+    expect(
+      find.text('No account status has been reported yet.'),
+      findsOneWidget,
+    );
   });
 
-  testWidgets('deletion pending shows its state and can be cancelled', (
+  testWidgets('deletion pending shows its date and can be cancelled', (
     tester,
   ) async {
     var cancelled = false;
@@ -264,6 +173,7 @@ void main() {
         AccountHealthPage(
           data: _data(
             accountStatus: V2AccountStatus.deletionPending,
+            deletionScheduledLabel: '20 Nov 2026',
             onCancelDeletion: () => cancelled = true,
           ),
         ),
@@ -272,7 +182,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Deletion pending'), findsOneWidget);
+    expect(find.text('Deletion pending'), findsNWidgets(2));
+    expect(
+      find.text('Your account is scheduled for deletion.'),
+      findsOneWidget,
+    );
+    expect(find.text('Deletion'), findsOneWidget);
+    expect(find.text('Deletes on 20 Nov 2026'), findsOneWidget);
     expect(find.text('Cancel deletion'), findsOneWidget);
 
     await _centerOn(tester, find.text('Cancel deletion'));
@@ -296,6 +212,23 @@ void main() {
     expect(cancelled, isTrue);
   });
 
+  testWidgets('a pending deletion without a handler offers no button', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        AccountHealthPage(
+          data: _data(accountStatus: V2AccountStatus.deletionPending),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Deletion pending'), findsNWidgets(2));
+    expect(find.text('Cancel deletion'), findsNothing);
+  });
+
   testWidgets('suspended accounts are named and can reach support', (
     tester,
   ) async {
@@ -313,7 +246,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Suspended'), findsOneWidget);
+    expect(find.text('Suspended'), findsNWidgets(2));
     // One contact action, in the list, not a second full-width button.
     expect(find.text('Contact support'), findsOneWidget);
 
@@ -322,54 +255,9 @@ void main() {
     expect(contacted, isTrue);
   });
 
-  testWidgets('two-step sign-in turns on from its row', (tester) async {
-    var enabled = false;
-    await tester.pumpWidget(
-      _app(
-        AccountHealthPage(
-          data: _data(onEnableTwoFactor: () => enabled = true),
-        ),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await _centerOn(tester, find.text('Turn on'));
-    await tester.tap(find.text('Turn on'));
-    expect(enabled, isTrue);
-  });
-
-  testWidgets('an unknown two-step state is not rendered', (tester) async {
-    await tester.pumpWidget(
-      _app(
-        AccountHealthPage(data: _data(twoFactorEnabled: null)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Two-step sign-in'), findsNothing);
-    expect(find.text('On'), findsNothing);
-  });
-
-  testWidgets('an unverified email offers Verify when wired', (tester) async {
-    var verified = false;
-    await tester.pumpWidget(
-      _app(
-        AccountHealthPage(
-          data: _data(emailVerified: false, onVerifyEmail: () => verified = true),
-        ),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await _centerOn(tester, find.text('Verify'));
-    await tester.tap(find.text('Verify'));
-    expect(verified, isTrue);
-  });
-
-  testWidgets('an unverified email without a handler says so', (tester) async {
+  testWidgets('an unverified email is named without a dead Verify action', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       _app(
         AccountHealthPage(data: _data(emailVerified: false)),
@@ -379,81 +267,20 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Not verified'), findsOneWidget);
+    expect(find.text('Verified'), findsNothing);
+    // There is no verification sender behind this page.
     expect(find.text('Verify'), findsNothing);
   });
 
-  testWidgets('active sign-ins are listed without a redundant Review button', (
-    tester,
-  ) async {
+  testWidgets('empty state offers no dead action', (tester) async {
     await tester.pumpWidget(
-      _app(
-        AccountHealthPage(data: _data(onDeviceTap: (_) {})),
-        theme: OTheme.light(),
-      ),
+      _app(AccountHealthPage(data: _data(hasData: false)), theme: OTheme.light()),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Pixel 9 Pro'), findsOneWidget);
-    expect(find.text('MacBook Air'), findsOneWidget);
-    expect(find.text('Review'), findsNothing);
-  });
-
-  testWidgets('revoking a device asks for confirmation first', (tester) async {
-    String? revoked;
-    await tester.pumpWidget(
-      _app(
-        AccountHealthPage(
-          data: _data(onRevokeDevice: (id) => revoked = id),
-        ),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await _centerOn(tester, find.text('Revoke'));
-    await tester.tap(find.text('Revoke'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Revoke this device?'), findsOneWidget);
-    expect(revoked, isNull);
-
-    await tester.tap(find.text('Revoke device'));
-    await tester.pumpAndSettle();
-    expect(revoked, 'mac');
-  });
-
-  testWidgets('run check is a single header action', (tester) async {
-    var ran = false;
-    await tester.pumpWidget(
-      _app(
-        AccountHealthPage(data: _data(onRunCheck: () => ran = true)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('Run again'));
-    expect(ran, isTrue);
-  });
-
-  testWidgets('empty state offers to run a check', (tester) async {
-    var ran = false;
-    await tester.pumpWidget(
-      _app(
-        AccountHealthPage(
-          data: V2AccountHealthPageData(
-            hasData: false,
-            onRunCheck: () => ran = true,
-          ),
-        ),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('No health data yet'), findsOneWidget);
-    await tester.tap(find.text('Run a check'));
-    expect(ran, isTrue);
+    expect(find.text('No account data'), findsOneWidget);
+    expect(find.text('Sign in to see your account status.'), findsOneWidget);
+    expect(find.byType(OButton), findsNothing);
   });
 
   testWidgets('error state offers a retry', (tester) async {
@@ -478,10 +305,7 @@ void main() {
 
   testWidgets('loading state renders skeletons', (tester) async {
     await tester.pumpWidget(
-      _app(
-        AccountHealthPage(data: const V2AccountHealthPageData(loading: true)),
-        theme: OTheme.light(),
-      ),
+      _app(AccountHealthPage(data: const V2AccountHealthPageData(loading: true)), theme: OTheme.light()),
     );
     await tester.pump();
 
@@ -497,7 +321,7 @@ void main() {
       await tester.pumpWidget(
         _narrow(
           AccountHealthPage(
-            data: _data(onRunCheck: () {}, onContactSupport: () {}),
+            data: _data(onContactSupport: () {}),
           ),
           theme: dark ? OTheme.dark() : OTheme.light(),
         ),
@@ -517,6 +341,7 @@ void main() {
             AccountHealthPage(
               data: _data(
                 accountStatus: V2AccountStatus.deletionPending,
+                deletionScheduledLabel: '20 Nov 2026',
                 onCancelDeletion: () {},
               ),
             ),
@@ -553,7 +378,7 @@ void main() {
     );
   }
 
-  testWidgets('reduced motion keeps every section visible', (tester) async {
+  testWidgets('reduced motion keeps every row visible', (tester) async {
     _setNarrowView(tester);
     await tester.pumpWidget(
       _narrow(

@@ -89,10 +89,12 @@ void main() {
     expect(find.text('Terms of service'), findsOneWidget);
     expect(find.text('Open-source licences'), findsOneWidget);
 
-    // No hero, tagline, footer or duplicate account action.
+    // No hero, tagline, footer, section chrome or duplicate account action.
     expect(find.text('Ovid Si'), findsNothing);
     expect(find.text('Chat. Code. Create.'), findsNothing);
     expect(find.text('Made for Android'), findsNothing);
+    expect(find.text('BUILD'), findsNothing);
+    expect(find.text('LEGAL'), findsNothing);
     expect(find.text('Delete account'), findsNothing);
     expect(find.text('Contact support'), findsNothing);
   });
@@ -206,7 +208,9 @@ void main() {
     expect(copies, 1);
   });
 
-  testWidgets('shows a status row only when it is real', (tester) async {
+  testWidgets('shows no status row: About is the build plus legal', (
+    tester,
+  ) async {
     var opened = 0;
     await _pump(
       tester,
@@ -216,46 +220,9 @@ void main() {
       ),
     );
 
-    expect(find.text('System status'), findsOneWidget);
-    expect(find.text('Operational'), findsOneWidget);
-
-    await tester.tap(find.text('System status'));
-    await tester.pumpAndSettle();
-
-    expect(opened, 1);
-  });
-
-  testWidgets('a failed status check retries', (tester) async {
-    var retries = 0;
-    var opened = 0;
-    await _pump(
-      tester,
-      V2AboutPageData(
-        systemStatus: V2SystemStatus.error,
-        onRetrySystemStatus: () => retries++,
-        onSystemStatus: () => opened++,
-      ),
-    );
-
-    expect(find.text('System status'), findsOneWidget);
-    expect(find.text('Could not check'), findsOneWidget);
-
-    await tester.tap(find.text('System status'));
-    await tester.pumpAndSettle();
-
-    expect(retries, 1);
+    expect(find.text('System status'), findsNothing);
+    expect(find.text('Operational'), findsNothing);
     expect(opened, 0);
-  });
-
-  testWidgets('a status row with no handler is not shown', (tester) async {
-    await _pump(tester, const V2AboutPageData());
-    expect(find.text('System status'), findsNothing);
-
-    await _pump(
-      tester,
-      const V2AboutPageData(systemStatus: V2SystemStatus.degraded),
-    );
-    expect(find.text('System status'), findsNothing);
   });
 
   testWidgets('the minimal About has no support row', (tester) async {
@@ -304,13 +271,13 @@ void main() {
     testWidgets('content is centred and capped at $width dp', (tester) async {
       await _pump(tester, _versioned, size: Size(width, 1600));
 
-      final card = tester.getRect(find.byType(OCard).first);
+      final row = tester.getRect(find.byType(OListRow).first);
       final limit = width >= 900 ? 720.0 : 640.0;
 
-      expect(card.width, lessThanOrEqualTo(limit));
-      expect(card.width, lessThan(width), reason: 'rows must not stretch');
+      expect(row.width, lessThanOrEqualTo(limit));
+      expect(row.width, lessThan(width), reason: 'rows must not stretch');
       expect(
-        card.center.dx,
+        row.center.dx,
         moreOrLessEquals(width / 2, epsilon: 1),
         reason: 'content must be centred, not left aligned',
       );
@@ -318,22 +285,12 @@ void main() {
   }
 
   testWidgets('reduced motion keeps every row', (tester) async {
-    await _pump(
-      tester,
-      V2AboutPageData(
-        version: '2.4.1',
-        build: '418',
-        systemStatus: V2SystemStatus.operational,
-        onSystemStatus: () {},
-      ),
-      reduceMotion: true,
-    );
+    await _pump(tester, _versioned, reduceMotion: true);
 
     expect(find.text('Version'), findsOneWidget);
     expect(find.text('Privacy policy'), findsOneWidget);
     expect(find.text('Terms of service'), findsOneWidget);
     expect(find.text('Open-source licences'), findsOneWidget);
-    expect(find.text('System status'), findsOneWidget);
   });
 
   test('the standard documents carry the published policy and terms', () {

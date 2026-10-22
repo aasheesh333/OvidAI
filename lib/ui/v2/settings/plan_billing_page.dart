@@ -1,11 +1,13 @@
 // TODO(l10n): move the English copy in this screen to the ARB files.
 import 'package:flutter/material.dart';
 
+import '../../../core/play_billing.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'plan_compare_table.dart';
+import 'settings_rows.dart';
 
 enum V2PlanBillingStatus { loading, ready, empty, error }
 
@@ -286,22 +288,18 @@ class V2Plan {
 
 /// The store products each plan is sold as, per billing period.
 ///
-/// The monthly ids are the ones the Play/RevenueCat layer already verifies
-/// (`kOvidPlayProducts`): Go → `ovid_plus_monthly`, Plus → `ovid_pro_monthly`,
-/// Pro → `ovid_max_monthly`. The yearly ids follow the same naming so the
-/// purchase request names a distinct product for the yearly toggle.
+/// Both maps are derived from the billing layer's [kOvidPlayProductIds], so a
+/// period that has no product configured (a missing Play base plan or a plan
+/// the store does not sell) resolves to null and the card disables its CTA
+/// instead of buying a different SKU.
 abstract final class V2PlanProducts {
-  static const monthly = <String, String>{
-    'go': 'ovid_plus_monthly',
-    'plus': 'ovid_pro_monthly',
-    'pro': 'ovid_max_monthly',
-  };
+  static final Map<String, String> monthly = _productsFor(
+    OvidBillingPeriod.monthly,
+  );
 
-  static const yearly = <String, String>{
-    'go': 'ovid_plus_yearly',
-    'plus': 'ovid_pro_yearly',
-    'pro': 'ovid_max_yearly',
-  };
+  static final Map<String, String> yearly = _productsFor(
+    OvidBillingPeriod.yearly,
+  );
 
   /// Canonical plan id → server/RevenueCat tier id.
   static const tiers = <String, String>{
@@ -311,11 +309,26 @@ abstract final class V2PlanProducts {
     'pro': '15x',
   };
 
+  static Map<String, String> _productsFor(OvidBillingPeriod period) {
+    final out = <String, String>{};
+    for (final entry in tiers.entries) {
+      final productId = ovidPlayProductId(entry.value, period);
+      if (productId != null) out[entry.key] = productId;
+    }
+    return out;
+  }
+
   static String? forPlan(String planId, V2BillingPeriod period) =>
       (period == V2BillingPeriod.yearly ? yearly : monthly)[planId];
 
   static String tierForPlan(String planId) => tiers[planId] ?? planId;
 }
+
+/// Maps the screen's period onto the billing layer's period.
+OvidBillingPeriod ovidPeriodFor(V2BillingPeriod period) =>
+    period == V2BillingPeriod.yearly
+    ? OvidBillingPeriod.yearly
+    : OvidBillingPeriod.monthly;
 
 /// One purchase request from a plan card: which plan, which product and which
 /// billing period. The page never picks a tier on the user's behalf.
@@ -555,19 +568,11 @@ class PlanBillingPage extends StatelessWidget {
               ),
             )
           else
-            OCard(
-              padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (var index = 0; index < data.history.length; index++) ...[
-                    if (index > 0) Divider(height: 1, color: c.hairline),
-                    _HistoryRow(
-                      entry: data.history[index],
-                      onTap: data.onHistoryTap,
-                    ),
-                  ],
-                ],
-              ),
+            V2SettingsRowList(
+              rows: [
+                for (final entry in data.history)
+                  _HistoryRow(entry: entry, onTap: data.onHistoryTap),
+              ],
             ),
         ],
       ),
@@ -783,10 +788,31 @@ class _PlanCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final canBuy = !current && onPurchase != null;
-    return OCard(
+    final productId = plan.productIdFor(period);
+    // Free is a Play management action, not a product: it has no SKU by design.
+    // Every other plan must have a product for the selected period; without
+    // one the CTA is disabled instead of charging a different period's SKU.
+    final missingProduct =
+        !current && plan.canonicalId != 'free' && productId == null;
+    final canBuy = !current && onPurchase != null && !missingProduct;
+    final periodWord = period == V2BillingPeriod.yearly ? 'yearly' : 'monthly';
+    // The current plan is marked with a 2 dp accent edge; the popular plan
+    // keeps the soft accent tint. They never compete: current wins.
+    final decoration = BoxDecoration(
+      color: !current && plan.popular ? c.accentSoft : c.surface,
+      borderRadius: BorderRadius.circular(ORadius.l),
+      border: Border.all(
+        color: current
+            ? c.accentFill
+            : plan.popular
+            ? c.accentFill.withValues(alpha: 0.35)
+            : c.hairline,
+        width: current ? 2 : 1,
+      ),
+    );
+    return Container(
       key: ValueKey<String>('plan-card-${plan.id}'),
-      accent: plan.popular || current,
+      decoration: decoration,
       padding: const EdgeInsets.all(OSpace.l),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -836,7 +862,11 @@ class _PlanCard extends StatelessWidget {
           const SizedBox(height: OSpace.l),
           OButton(
             key: ValueKey<String>('plan-cta-${plan.id}'),
-            label: current ? 'Current plan' : plan.actionLabel,
+            label: current
+                ? 'Current plan'
+                : missingProduct
+                ? 'Not available'
+                : plan.actionLabel,
             variant: plan.popular
                 ? OButtonVariant.primary
                 : OButtonVariant.secondary,
@@ -848,6 +878,15 @@ class _PlanCard extends StatelessWidget {
                 ? () => onPurchase!(V2PlanPurchase(plan: plan, period: period))
                 : null,
           ),
+          if (missingProduct) ...[
+            const SizedBox(height: OSpace.xs),
+            Text(
+              '${plan.name} is not sold with $periodWord billing right now.',
+              key: ValueKey<String>('plan-unavailable-${plan.id}'),
+              textAlign: TextAlign.center,
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
+          ],
         ],
       ),
     );
@@ -870,7 +909,7 @@ class _HistoryRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return OListRow(
+    return V2SettingsRow(
       icon: Icons.receipt_long_outlined,
       title: entry.title,
       subtitle: entry.dateLabel,

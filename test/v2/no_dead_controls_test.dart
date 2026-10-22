@@ -215,7 +215,7 @@ void main() {
       handle.dispose();
     });
 
-    testWidgets('sign-in Continue is disabled without onSubmit', (tester) async {
+    testWidgets('sign-in primary is disabled without onGoogle', (tester) async {
       final handle = tester.ensureSemantics();
       await _pump(tester, const SignInPage());
       final button = find.byKey(const Key('sign-in-submit'));

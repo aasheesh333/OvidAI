@@ -8,6 +8,7 @@ import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
+import '../settings/settings_rows.dart';
 import 'legal_page.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
@@ -83,7 +84,7 @@ class V2AboutLegalDocuments {
         bullets: <String>[
           'Account and sign-in: email address or phone number, Firebase user ID '
               'and the display name or photo your provider shares.',
-          'Chats and memory: prompts, replies, agent activity, session and '
+          'Chats and memory: prompts, replies, agent activity, chat and '
               'project memory, titles and the search index.',
           'Files and workspace: attachments, generated images, code, Studio '
               'repository files, downloads and artifacts.',
@@ -154,7 +155,7 @@ class V2AboutLegalDocuments {
             'Share links are public snapshots at an unguessable URL for up to 30 '
             'days, or until you revoke them. A recipient can fork a snapshot into '
             'their own account and that copy belongs to them. Collab members can '
-            'see the session messages and included files; the creator pays for '
+            'see the chat messages and included files; the creator pays for '
             'storage and the owner can remove members. We cannot delete a copy '
             'someone else has already saved.',
       ),
@@ -321,16 +322,16 @@ class V2AboutLegalDocuments {
             'not on your phone. Depending on what you ask and the permissions you '
             'choose, it can:',
         bullets: <String>[
-          'Chat and remember useful context in session, project and global '
+          'Chat and remember useful context in chat, project and global '
               'memory.',
-          'Run an agent with up to 50 subagents in a session, each with its full '
-              'log in the session workspace.',
+          'Run an agent with up to 50 subagents in a chat, each with its full '
+              'log in the chat workspace.',
           'Work in a cloud workspace connected to a GitHub repository, edit '
               'files, run commands, show a live preview and commit or push.',
           'Browse the web in a cloud browser, including live view, take control, '
               'uploads and downloads.',
           'Create schedules, images, documents, code and other artifacts.',
-          'Share a read-only snapshot or run a Collab session with other people.',
+          'Share a read-only snapshot or run a Collab chat with other people.',
         ],
       ),
       V2LegalSection(
@@ -378,11 +379,11 @@ class V2AboutLegalDocuments {
         body:
             'A share link is viewable by anyone with the link for up to 30 days '
             'unless revoked. A recipient can fork a snapshot into their own '
-            'account. Collab members can see session messages and included files; '
+            'account. Collab members can see chat messages and included files; '
             'the owner can remove members and members can leave, but messages '
             'already sent may remain. The creator pays for storage. You must have '
             'permission to share the content you put into a share link or Collab '
-            'session. We may remove a share or end a session that distributes '
+            'chat. We may remove a share or end a chat that distributes '
             'objectionable content.',
       ),
       V2LegalSection(
@@ -390,9 +391,9 @@ class V2AboutLegalDocuments {
         body:
             'We do not tolerate objectionable content or abusive users. Where the '
             'app shows a Report action, use it. You can also email '
-            'support@ovidsi.com with a link or description and the session ID if '
+            'support@ovidsi.com with a link or description and the chat ID if '
             'you have it. We aim to review reports within 24 to 48 hours and may '
-            'remove content, end a share or Collab session, limit features, '
+            'remove content, end a share or Collab chat, limit features, '
             'suspend or terminate an account, preserve evidence, report illegal '
             'content, or block one account from another. If you think we made a '
             'mistake, email us and we will review it.',
@@ -582,8 +583,8 @@ class V2AboutPageData {
       build.trim().isEmpty ? version : '$version · build $build';
 }
 
-/// About Ovid Si: the build and the legal documents. No hero, no support row,
-/// and no status tile unless the caller wired a real status.
+/// About Ovid Si: the build and the three legal documents. No hero, no
+/// support row, no status tile.
 class AboutPage extends StatelessWidget {
   const AboutPage({super.key, required this.data});
 
@@ -591,51 +592,19 @@ class AboutPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final statusTap = _statusTap;
     return OScreen(
       title: 'About',
       child: OFadeSlide(
         child: ListView(
           padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
-          children: [
-            if (data.hasVersion) _build(context),
-            _legal(context),
-            if (statusTap != null) _status(context, statusTap),
-          ],
+          children: [_rows(context)],
         ),
       ),
     );
   }
 
-  /// The real version and build of this app, with the one copy action.
-  Widget _build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: OSpace.xl),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const OSectionTitle(title: 'Build'),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: OListRow(
-              icon: Icons.info_outline_rounded,
-              title: 'Version',
-              subtitle: data.buildLabel,
-              showChevron: false,
-              trailing: OIconButton(
-                icon: Icons.copy_rounded,
-                semanticLabel: 'Copy version info',
-                tooltip: 'Copy version info',
-                onPressed: () => _copyVersion(context),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _legal(BuildContext context) {
+  /// Version + build, then the three legal links. Nothing else.
+  Widget _rows(BuildContext context) {
     final docs = data.legalDocuments;
     final privacyTap = _legalTap(
       context,
@@ -661,33 +630,35 @@ class AboutPage extends StatelessWidget {
         applicationVersion: data.buildLabel,
       ),
     );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const OSectionTitle(title: 'Legal'),
-        OCard(
-          padding: EdgeInsets.zero,
-          child: Column(
-            children: [
-              _legalRow(
-                icon: Icons.shield_outlined,
-                title: 'Privacy policy',
-                onTap: privacyTap,
-              ),
-              const Divider(height: 1, thickness: 1),
-              _legalRow(
-                icon: Icons.description_outlined,
-                title: 'Terms of service',
-                onTap: termsTap,
-              ),
-              const Divider(height: 1, thickness: 1),
-              _legalRow(
-                icon: Icons.code_rounded,
-                title: 'Open-source licences',
-                onTap: licencesTap,
-              ),
-            ],
+    return V2SettingsRowList(
+      rows: [
+        if (data.hasVersion)
+          V2SettingsRow(
+            icon: Icons.info_outline_rounded,
+            title: 'Version',
+            subtitle: data.buildLabel,
+            showChevron: false,
+            trailing: OIconButton(
+              icon: Icons.copy_rounded,
+              semanticLabel: 'Copy version info',
+              tooltip: 'Copy version info',
+              onPressed: () => _copyVersion(context),
+            ),
           ),
+        _legalRow(
+          icon: Icons.shield_outlined,
+          title: 'Privacy policy',
+          onTap: privacyTap,
+        ),
+        _legalRow(
+          icon: Icons.description_outlined,
+          title: 'Terms of service',
+          onTap: termsTap,
+        ),
+        _legalRow(
+          icon: Icons.code_rounded,
+          title: 'Open-source licences',
+          onTap: licencesTap,
         ),
       ],
     );
@@ -703,7 +674,7 @@ class AboutPage extends StatelessWidget {
     return Semantics(
       container: true,
       enabled: true,
-      child: OListRow(icon: icon, title: title, onTap: onTap),
+      child: V2SettingsRow(icon: icon, title: title, onTap: onTap),
     );
   }
 
@@ -769,39 +740,5 @@ class AboutPage extends StatelessWidget {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(const SnackBar(content: Text('Version copied.')));
-  }
-
-  String get _statusLabel => switch (data.systemStatus) {
-    V2SystemStatus.unknown => '',
-    V2SystemStatus.checking => 'Checking…',
-    V2SystemStatus.operational => 'Operational',
-    V2SystemStatus.degraded => 'Some issues',
-    V2SystemStatus.error => 'Could not check',
-  };
-
-  /// A failed check retries; otherwise the row opens the status page. With no
-  /// handler at all there is no row: a status tile that cannot do anything is
-  /// chrome.
-  VoidCallback? get _statusTap {
-    if (data.systemStatus == V2SystemStatus.error) {
-      return data.onRetrySystemStatus ?? data.onSystemStatus;
-    }
-    return data.onSystemStatus;
-  }
-
-  Widget _status(BuildContext context, VoidCallback? onTap) {
-    return Padding(
-      padding: const EdgeInsets.only(top: OSpace.xl),
-      child: OCard(
-        padding: EdgeInsets.zero,
-        child: OListRow(
-          icon: Icons.monitor_heart_outlined,
-          title: 'System status',
-          subtitle: _statusLabel.isEmpty ? null : _statusLabel,
-          showChevron: onTap != null,
-          onTap: onTap,
-        ),
-      ),
-    );
   }
 }

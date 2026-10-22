@@ -126,7 +126,7 @@ void main() {
       );
       expect(inBar, findsNWidgets(3));
       expect(find.byTooltip('Share chat'), findsNothing);
-      expect(find.byTooltip('New session'), findsNothing);
+      expect(find.byTooltip('New chat'), findsNothing);
       expect(find.byTooltip('Background jobs'), findsNothing);
     });
 
@@ -261,7 +261,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('chat-menu-rename')));
       await tester.pumpAndSettle();
-      expect(find.text('Rename session'), findsOneWidget);
+      expect(find.text('Rename chat'), findsOneWidget);
       await tester.enterText(find.byType(TextField).last, 'Renamed chat');
       await tester.tap(find.text('Save'));
       await tester.pumpAndSettle();

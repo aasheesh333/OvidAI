@@ -22,7 +22,7 @@ class V2ConfirmTypedSheetData {
     this.removals = const <String>[
       'Every chat and message',
       'Workspace files and generated artifacts',
-      'Global, project and per-session memory',
+      'Global, project and per-chat memory',
       'Connectors and saved cloud keys',
       'Drafts, scheduled runs and shared links',
     ],
@@ -182,7 +182,7 @@ class _V2ConfirmTypedSheetState extends State<V2ConfirmTypedSheet> {
                 height: 4,
                 decoration: BoxDecoration(
                   color: c.hairlineStrong,
-                  borderRadius: BorderRadius.circular(2),
+                  borderRadius: BorderRadius.circular(ORadius.xs),
                 ),
               ),
             ],

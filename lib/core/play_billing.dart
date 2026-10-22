@@ -12,14 +12,41 @@ import 'diag.dart';
 import 'firebase_service.dart';
 import 'ovid_cloud_service.dart';
 
+/// The billing period a plan is sold for.
+///
+/// Monthly is the default everywhere: an existing caller that passes no period
+/// keeps buying the monthly product.
+enum OvidBillingPeriod { monthly, yearly }
+
 /// PRODUCT DECISION PLACEHOLDERS: Play Console subscription product IDs per
-/// Ovid Cloud tier. Must match `server/billing/products.py` (or the server's
-/// `OVID_PLAY_PRODUCTS`). Each product has one auto-renewing monthly base plan.
-const Map<String, String> kOvidPlayProducts = {
-  '3x': 'ovid_plus_monthly',
-  '7x': 'ovid_pro_monthly',
-  '15x': 'ovid_max_monthly',
+/// Ovid Cloud tier and billing period. The monthly ids must match
+/// `server/billing/products.py` (or the server's `OVID_PLAY_PRODUCTS`).
+///
+/// A yearly request must resolve its own product: falling back to the monthly
+/// product would charge the wrong period at the wrong price.
+const Map<(String, OvidBillingPeriod), String> kOvidPlayProductIds = {
+  ('3x', OvidBillingPeriod.monthly): 'ovid_plus_monthly',
+  ('3x', OvidBillingPeriod.yearly): 'ovid_plus_yearly',
+  ('7x', OvidBillingPeriod.monthly): 'ovid_pro_monthly',
+  ('7x', OvidBillingPeriod.yearly): 'ovid_pro_yearly',
+  ('15x', OvidBillingPeriod.monthly): 'ovid_max_monthly',
+  ('15x', OvidBillingPeriod.yearly): 'ovid_max_yearly',
 };
+
+/// Monthly product per tier. Kept for callers that only need the default
+/// period (the subscription centre, the legacy billing screen); it is derived
+/// from [kOvidPlayProductIds] so the two can never drift.
+final Map<String, String> kOvidPlayProducts = {
+  for (final entry in kOvidPlayProductIds.entries)
+    if (entry.key.$2 == OvidBillingPeriod.monthly) entry.key.$1: entry.value,
+};
+
+/// The Play product for [tier] and [period], or null when that combination is
+/// not configured. Callers must never substitute another period's product.
+String? ovidPlayProductId(
+  String tier, [
+  OvidBillingPeriod period = OvidBillingPeriod.monthly,
+]) => kOvidPlayProductIds[(tier, period)];
 
 /// Android application ID (also the server's `OVID_PLAY_PACKAGE`).
 const String kOvidPlayPackage = 'com.dhanuk.ovidai';
@@ -40,8 +67,16 @@ Uri playSubscriptionCenterUri({String? productId}) => Uri.https(
 
 /// Tier for a Play product ID, or null when it is not an Ovid plan.
 String? ovidTierForProduct(String productId) {
-  for (final entry in kOvidPlayProducts.entries) {
-    if (entry.value == productId) return entry.key;
+  for (final entry in kOvidPlayProductIds.entries) {
+    if (entry.value == productId) return entry.key.$1;
+  }
+  return null;
+}
+
+/// Billing period for a Play product ID, or null when it is not an Ovid plan.
+OvidBillingPeriod? ovidPeriodForProduct(String productId) {
+  for (final entry in kOvidPlayProductIds.entries) {
+    if (entry.value == productId) return entry.key.$2;
   }
   return null;
 }
@@ -159,7 +194,7 @@ class PlayBillingService extends ChangeNotifier {
   Future<void>? _loading;
   bool _available = false;
   bool _loaded = false;
-  final Map<String, ProductDetails> _products = {};
+  final Map<(String, OvidBillingPeriod), ProductDetails> _products = {};
   PurchaseDetails? _owned;
   String? _ownedTier;
   DateTime? _expiresAt;
@@ -167,12 +202,27 @@ class PlayBillingService extends ChangeNotifier {
   final Map<String, Completer<UpgradeOutcome>> _waiting = {};
   Completer<UpgradeOutcome>? _restoreWaiter;
 
+  /// Why the last [buy] could not start, when it could not. The UI shows this
+  /// instead of the generic "not available" copy (e.g. a yearly product that
+  /// Play does not sell yet).
+  String? lastPurchaseError;
+
   /// Google Play is reachable and the plan products were found.
   bool get available => _available && _products.isNotEmpty;
   bool get loaded => _loaded;
 
-  /// Localised Play product (price in the user's currency) for [tier].
-  ProductDetails? productFor(String tier) => _products[tier];
+  /// Localised Play product (price in the user's currency) for [tier] and
+  /// [period]. Defaults to monthly for callers that predate yearly billing.
+  ProductDetails? productFor(
+    String tier, {
+    OvidBillingPeriod period = OvidBillingPeriod.monthly,
+  }) => _products[(tier, period)];
+
+  /// True when Play returned a product for [tier] in [period].
+  bool hasProduct(
+    String tier, {
+    OvidBillingPeriod period = OvidBillingPeriod.monthly,
+  }) => _products.containsKey((tier, period));
 
   /// The verified, owned plan purchase on this device, if any.
   String? get ownedTier => _ownedTier;
@@ -181,8 +231,11 @@ class PlayBillingService extends ChangeNotifier {
   bool? get autoRenewing => _autoRenewing;
 
   /// "/ month" style suffix from the Play base plan's billing period.
-  String periodLabel(String tier) {
-    final product = _products[tier];
+  String periodLabel(
+    String tier, {
+    OvidBillingPeriod period = OvidBillingPeriod.monthly,
+  }) {
+    final product = _products[(tier, period)];
     if (product is GooglePlayProductDetails) {
       final index = product.subscriptionIndex;
       final offers = product.productDetails.subscriptionOfferDetails;
@@ -220,8 +273,7 @@ class PlayBillingService extends ChangeNotifier {
   /// "Manage subscription". The Play connection and product catalogue are
   /// device-wide and kept. The next [ensureLoaded] re-reads B's purchases.
   void resetForAccount() {
-    final hadState =
-        _owned != null || _ownedTier != null || _expiresAt != null;
+    final hadState = _owned != null || _ownedTier != null || _expiresAt != null;
     _owned = null;
     _ownedTier = null;
     _expiresAt = null;
@@ -250,7 +302,7 @@ class PlayBillingService extends ChangeNotifier {
       _available = await _platform.isAvailable();
       if (_available) {
         final response = await _platform.queryProductDetails(
-          kOvidPlayProducts.values.toSet(),
+          kOvidPlayProductIds.values.toSet(),
         );
         _products
           ..clear()
@@ -276,11 +328,15 @@ class PlayBillingService extends ChangeNotifier {
   }
 
   /// Prefer each subscription's base plan (no offer ID, i.e. no trial/promo).
-  static Map<String, ProductDetails> _pickBasePlans(List<ProductDetails> all) {
-    final out = <String, ProductDetails>{};
+  static Map<(String, OvidBillingPeriod), ProductDetails> _pickBasePlans(
+    List<ProductDetails> all,
+  ) {
+    final out = <(String, OvidBillingPeriod), ProductDetails>{};
     for (final product in all) {
       final tier = ovidTierForProduct(product.id);
-      if (tier == null) continue;
+      final period = ovidPeriodForProduct(product.id);
+      if (tier == null || period == null) continue;
+      final key = (tier, period);
       final isBase =
           product is! GooglePlayProductDetails ||
           product.subscriptionIndex == null ||
@@ -289,17 +345,30 @@ class PlayBillingService extends ChangeNotifier {
                   .subscriptionOfferDetails?[product.subscriptionIndex!]
                   .offerId ==
               null;
-      if (!out.containsKey(tier) || isBase) out[tier] = product;
+      if (!out.containsKey(key) || isBase) out[key] = product;
     }
     return out;
   }
 
-  /// Buys (or upgrades to) [tier]. Completes after the server verified the
-  /// purchase, or with the reason it did not.
-  Future<UpgradeOutcome> buy(String tier) async {
+  /// Buys (or upgrades to) [tier] for [period]. Completes after the server
+  /// verified the purchase, or with the reason it did not.
+  ///
+  /// A yearly request never falls back to the monthly product: that would
+  /// charge the wrong period at the wrong price.
+  Future<UpgradeOutcome> buy(
+    String tier, {
+    OvidBillingPeriod period = OvidBillingPeriod.monthly,
+  }) async {
+    lastPurchaseError = null;
     await ensureLoaded();
-    final product = _products[tier];
+    final configured = ovidPlayProductId(tier, period);
+    if (configured == null) {
+      lastPurchaseError = _periodUnavailableMessage(period);
+      return const UpgradeOutcome(UpgradeResult.notAvailable);
+    }
+    final product = _products[(tier, period)];
     if (!_available || product == null) {
+      lastPurchaseError = _periodUnavailableMessage(period);
       return const UpgradeOutcome(UpgradeResult.notAvailable);
     }
     final uid = _uid();
@@ -334,6 +403,12 @@ class PlayBillingService extends ChangeNotifier {
     );
   }
 
+  /// The honest reason a period cannot be bought here.
+  static String _periodUnavailableMessage(OvidBillingPeriod period) =>
+      period == OvidBillingPeriod.yearly
+      ? 'Yearly billing is not available for this plan yet.'
+      : 'Monthly billing is not available for this plan right now.';
+
   /// App resume: silently re-reads owned purchases so a payment that could
   /// not be confirmed earlier ([UpgradeResult.confirming]) is re-verified
   /// before Play's 3-day refund window closes. No-op until loaded.
@@ -351,8 +426,11 @@ class PlayBillingService extends ChangeNotifier {
   /// Abandons a purchase sheet that Play never answered (the sheet's Cancel
   /// after ~30 s). A late Play delivery is still verified by the stream
   /// listener and re-verified on the next launch.
-  void abandonPurchase(String tier) {
-    final product = _products[tier];
+  void abandonPurchase(
+    String tier, {
+    OvidBillingPeriod period = OvidBillingPeriod.monthly,
+  }) {
+    final product = _products[(tier, period)];
     if (product == null) return;
     _resolve(product.id, const UpgradeOutcome(UpgradeResult.unknown));
   }

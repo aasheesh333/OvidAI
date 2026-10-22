@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -9,6 +12,7 @@ import 'package:ovid_ai/core/cloud/cloud_ws.dart';
 import 'package:ovid_ai/core/cloud/models.dart';
 import 'package:ovid_ai/core/cloud/projects.dart';
 import 'package:ovid_ai/core/composer_drafts.dart';
+import 'package:ovid_ai/core/html_artifact.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/app/bottom_nav.dart';
@@ -16,6 +20,8 @@ import 'package:ovid_ai/ui/v2/app/v2_app_shell.dart';
 import 'package:ovid_ai/ui/v2/chat/chat_page.dart';
 import 'package:ovid_ai/ui/v2/chat/composer_mentions.dart';
 import 'package:ovid_ai/ui/v2/chat/live_chat_page.dart';
+import 'package:ovid_ai/ui/v2/chat/transcript_actions.dart';
+import 'package:ovid_ai/ui/v2/library/artifact_detail_page.dart';
 import 'package:ovid_ai/ui/v2/settings/settings_hub.dart';
 
 /// The shell owns the bottom bar and the live status line. These assertions
@@ -53,6 +59,37 @@ class _ShellFacade extends CloudAgentFacade {
 class _SilentProjects extends ProjectsController {
   @override
   Future<void> refresh() async {}
+}
+
+/// The multiplexer's socket seam: no network, frames pushed by the test.
+class _StallSocket implements CloudSocket {
+  final StreamController<Object> _frames = StreamController<Object>.broadcast();
+  final StreamController<void> _closed = StreamController<void>.broadcast();
+  int? _closeCode;
+
+  @override
+  Stream<Object> get frames => _frames.stream;
+
+  @override
+  Stream<void> get closed => _closed.stream;
+
+  @override
+  int? get closeCode => _closeCode;
+
+  @override
+  void sendText(String frame) {}
+
+  @override
+  Future<void> close([int? code, String? reason]) async {
+    if (_closed.isClosed) return;
+    _closeCode = code;
+    if (!_frames.isClosed) await _frames.close();
+    _closed.add(null);
+    await _closed.close();
+  }
+
+  void server(Object frame) =>
+      _frames.add(frame is String ? frame : jsonEncode(frame));
 }
 
 void main() {
@@ -183,6 +220,72 @@ void main() {
     expect(find.byType(V2ChatPage), findsNothing);
   });
 
+  testWidgets('a chat artifact opens the library detail route', (tester) async {
+    final session = liveSession();
+    session.messages.add(
+      Message(
+        role: 'assistant',
+        kind: MsgKind.htmlArtifact,
+        htmlArtifact: HtmlArtifact.create(session.id, {
+          'title': 'Receipt',
+          'html': '<h1>Real heading</h1>',
+        }),
+        time: DateTime(2026, 10, 21, 10, 1),
+      ),
+    );
+    app.refresh();
+
+    await tester.pumpWidget(
+      MaterialApp(theme: OTheme.light(), home: const V2AppShell()),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('Receipt'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.byType(ArtifactDetailPage), findsOneWidget);
+    // The inline page's real source, not a synthesized placeholder.
+    expect(
+      find.textContaining('Real heading', findRichText: true),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a URL-backed artifact no longer launches a bare URL', (
+    tester,
+  ) async {
+    final session = liveSession();
+    session.messages.add(
+      Message(
+        role: 'assistant',
+        kind: MsgKind.imageGen,
+        imageUrl: 'https://files.example.com/hero.png',
+        time: DateTime(2026, 10, 21, 10, 1),
+      ),
+    );
+    app.refresh();
+
+    Uri? launched;
+    V2TranscriptIo.debugOpenOverride = (uri) async {
+      launched = uri;
+      return true;
+    };
+    addTearDown(V2TranscriptIo.reset);
+
+    await tester.pumpWidget(
+      MaterialApp(theme: OTheme.light(), home: const V2AppShell()),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('hero.png'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(launched, isNull, reason: 'the detail route replaces the launch');
+    expect(find.byType(ArtifactDetailPage), findsOneWidget);
+  });
+
   testWidgets('the stalled watchdog drives the live status label', (
     tester,
   ) async {
@@ -196,6 +299,67 @@ void main() {
     await tester.pump();
 
     expect(find.text('Still working…'), findsOneWidget);
+  });
+
+  testWidgets('the Response wait setting drives stalledFor to the label', (
+    tester,
+  ) async {
+    final session = liveSession();
+
+    // A REAL facade with no injected stall window: the watchdog reads the
+    // user's setting through AppState exactly as production does.
+    final socket = _StallSocket();
+    final stallWs = WsMultiplexer(
+      mintTicket: () async => 'ticket',
+      socketFactory: (_) async => socket,
+      heartbeatInterval: const Duration(hours: 1),
+      pongTimeout: const Duration(hours: 1),
+      jitterMs: () => 0,
+    );
+    final real = CloudAgentFacade(rest: _ShellRest(), ws: stallWs, store: null);
+    CloudAgentFacade.installForTest(real);
+
+    // Settings → Response wait → `ovid_response_timeout_sec`.
+    await app.setResponseTimeout(AppState.minResponseTimeoutSec);
+    expect(
+      (await SharedPreferences.getInstance()).getInt(
+        'ovid_response_timeout_sec',
+      ),
+      AppState.minResponseTimeoutSec,
+    );
+
+    real.subscribeForTest(session.id);
+    await tester.pumpWidget(
+      MaterialApp(theme: OTheme.light(), home: const V2AppShell()),
+    );
+    await tester.pump(const Duration(milliseconds: 50));
+
+    socket.server(<String, dynamic>{
+      'op': 'event',
+      'event': <String, dynamic>{
+        'sessionId': session.id,
+        'seq': '1-0',
+        'type': 'run_started',
+        'payload': <String, dynamic>{'runId': 'run-1'},
+        'ts': '2026-10-17T10:00:00.000Z',
+      },
+    });
+    await tester.pump();
+
+    expect(real.busyFor(session.id), isTrue);
+    expect(real.stalledFor(session.id), isFalse);
+    expect(find.text('Still working…'), findsNothing);
+
+    // One second past the configured window, with no event of any kind.
+    await tester.pump(Duration(seconds: AppState.minResponseTimeoutSec + 1));
+
+    expect(real.stalledFor(session.id), isTrue);
+    expect(find.text('Still working…'), findsOneWidget);
+
+    // No timer may outlive the tree: the watchdog and the socket both stop.
+    real.dispose();
+    await stallWs.disconnect();
+    await tester.pump();
   });
 
   testWidgets('the shell installs the @-ref server-id resolver', (

@@ -4,6 +4,7 @@ import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import '../settings/memory_page.dart';
+import '../settings/settings_rows.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
 
@@ -12,7 +13,7 @@ enum V2MemoryFilesStatus { loading, ready, empty, error }
 enum V2MemoryFileGroup {
   global('Global'),
   project('Project'),
-  session('Session');
+  session('Chat');
 
   const V2MemoryFileGroup(this.label);
 
@@ -157,16 +158,8 @@ class _MemoryFilesPageState extends State<MemoryFilesPage> {
               ),
             )
           else
-            OCard(
-              padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (var i = 0; i < files.length; i++) ...[
-                    if (i > 0) Divider(color: c.hairline, height: 1),
-                    _fileRow(context, files[i]),
-                  ],
-                ],
-              ),
+            V2SettingsRowList(
+              rows: [for (final file in files) _fileRow(context, file)],
             ),
           if (data.onExportAll != null) ...[
             const SizedBox(height: OSpace.l),
@@ -202,7 +195,7 @@ class _MemoryFilesPageState extends State<MemoryFilesPage> {
   Widget _fileRow(BuildContext context, V2MemoryFileEntry file) {
     final canActivate =
         data.onSave != null || data.onOpen != null || _hasContent(file);
-    return OListRow(
+    return V2SettingsRow(
       key: ValueKey<String>('memory-file-${file.id}'),
       icon: _groupIcon(file.group),
       title: file.name,

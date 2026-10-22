@@ -152,7 +152,7 @@ void main() {
         reason: 'Footer must be reachable before scrolling through sessions',
       );
       expect(search.hitTestable(), findsOneWidget);
-      expect(find.text('New session').hitTestable(), findsOneWidget);
+      expect(find.text('New chat').hitTestable(), findsOneWidget);
       final viewport = tester.getRect(sessionScroll);
       expect(viewport.height, greaterThanOrEqualTo(48));
       expect(find.text('Session 0').hitTestable(), findsOneWidget);
@@ -245,7 +245,7 @@ void main() {
       expect(tester.widget<IconButton>(button).onPressed, isNotNull);
     }
     final count = AppState.I.sessions.length;
-    await tester.tap(find.text('New session'));
+    await tester.tap(find.text('New chat'));
     await tester.pumpAndSettle();
     expect(AppState.I.sessions.length, count + 1);
     expect(find.byType(SessionsSidebar), findsOneWidget);

@@ -120,7 +120,10 @@ Finder _inTable(String text) => find.descendant(
 );
 
 Widget _app(ThemeData theme, V2PlanBillingData data) {
-  return MaterialApp(theme: theme, home: PlanBillingPage(data: data));
+  return MaterialApp(
+    theme: theme,
+    home: PlanBillingPage(data: data),
+  );
 }
 
 void _phoneSize(WidgetTester tester) {
@@ -138,20 +141,23 @@ void _size(WidgetTester tester, Size size) {
 }
 
 void main() {
-  test('model access matches the real Auto-only gate (free/go vs plus/pro)', () {
-    // The shell gate is `autoOnly = tier == 'free' || tier == '3x'`
-    // (v2_app_shell.dart). Server tier ids must resolve the same way here.
-    for (final tier in ['free', '3x']) {
-      final limits = V2PlanLimits.forIdOrFree(tier);
-      expect(limits.manualModels, isFalse, reason: '$tier is Auto only');
-      expect(limits.modelAccessLabel, 'Auto only');
-    }
-    for (final tier in ['7x', '15x']) {
-      final limits = V2PlanLimits.forIdOrFree(tier);
-      expect(limits.manualModels, isTrue, reason: '$tier allows manual');
-      expect(limits.modelAccessLabel, 'Auto + manual models');
-    }
-  });
+  test(
+    'model access matches the real Auto-only gate (free/go vs plus/pro)',
+    () {
+      // The shell gate is `autoOnly = tier == 'free' || tier == '3x'`
+      // (v2_app_shell.dart). Server tier ids must resolve the same way here.
+      for (final tier in ['free', '3x']) {
+        final limits = V2PlanLimits.forIdOrFree(tier);
+        expect(limits.manualModels, isFalse, reason: '$tier is Auto only');
+        expect(limits.modelAccessLabel, 'Auto only');
+      }
+      for (final tier in ['7x', '15x']) {
+        final limits = V2PlanLimits.forIdOrFree(tier);
+        expect(limits.manualModels, isTrue, reason: '$tier allows manual');
+        expect(limits.modelAccessLabel, 'Auto + manual models');
+      }
+    },
+  );
 
   testWidgets('one header and four cards: name, price, one line, one CTA', (
     tester,
@@ -241,6 +247,19 @@ void main() {
     expect(find.text('Current plan'), findsOneWidget);
     expect(find.text('Select Plus'), findsNothing);
     expect(purchases, isEmpty);
+
+    // The current card carries the 2 dp accent edge.
+    final card = tester.widget<Container>(
+      find.byKey(const ValueKey<String>('plan-card-plus')),
+    );
+    final border = (card.decoration! as BoxDecoration).border! as Border;
+    expect(border.top.width, 2);
+    // Another card keeps the hairline edge.
+    final other = tester.widget<Container>(
+      find.byKey(const ValueKey<String>('plan-card-go')),
+    );
+    final otherBorder = (other.decoration! as BoxDecoration).border! as Border;
+    expect(otherBorder.top.width, 1);
   });
 
   testWidgets('each plan CTA buys that plan with its own store product', (
@@ -276,6 +295,40 @@ void main() {
       expect(purchase.period, V2BillingPeriod.monthly);
     }
     expect(purchases, hasLength(3));
+  });
+
+  testWidgets('a period with no product disables the CTA with a reason', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    final purchases = <V2PlanPurchase>[];
+    const unsold = V2Plan(
+      id: 'team',
+      name: 'Team',
+      tagline: 'For bigger teams',
+      priceUsd: 30,
+      priceInr: 2999,
+      storageGb: 20,
+    );
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _billingData(plans: [unsold], onPurchase: purchases.add),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final cta = tester.widget<OButton>(
+      find.byKey(const ValueKey<String>('plan-cta-team')),
+    );
+    expect(cta.onPressed, isNull);
+    expect(cta.label, 'Not available');
+    expect(
+      find.text('Team is not sold with monthly billing right now.'),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('plan-unavailable-team')), findsOneWidget);
+    expect(purchases, isEmpty);
   });
 
   testWidgets('the Free card is a Play management action, not a purchase', (
@@ -318,8 +371,7 @@ void main() {
               data: _billingData(
                 period: period,
                 onPurchase: purchases.add,
-                onPeriodChanged: (value) =>
-                    setState(() => period = value),
+                onPeriodChanged: (value) => setState(() => period = value),
               ),
             );
           },
@@ -364,8 +416,11 @@ void main() {
     await tester.pumpWidget(
       _app(
         OTheme.light(),
-        _billingData(currentPlanId: 'free', plans: serverPlans,
-            onPurchase: purchases.add),
+        _billingData(
+          currentPlanId: 'free',
+          plans: serverPlans,
+          onPurchase: purchases.add,
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -621,7 +676,10 @@ void main() {
     // Same row: the second card starts to the right of the first.
     expect(
       tester.getTopLeft(find.byKey(const ValueKey('plan-card-go'))).dy,
-      closeTo(tester.getTopLeft(find.byKey(const ValueKey('plan-card-free'))).dy, 0.5),
+      closeTo(
+        tester.getTopLeft(find.byKey(const ValueKey('plan-card-free'))).dy,
+        0.5,
+      ),
     );
     // Content is capped at 640 dp and centred.
     final table = tester.getSize(
@@ -647,11 +705,12 @@ void main() {
     expect(table.width, lessThanOrEqualTo(720));
     expect(table.width, greaterThan(600));
 
-    final card = tester.getTopLeft(
-      find.byKey(const ValueKey('plan-card-free')),
-    ).dx;
-    final right =
-        tester.getTopRight(find.byKey(const ValueKey('plan-card-pro'))).dx;
+    final card = tester
+        .getTopLeft(find.byKey(const ValueKey('plan-card-free')))
+        .dx;
+    final right = tester
+        .getTopRight(find.byKey(const ValueKey('plan-card-pro')))
+        .dx;
     // Left and right margins match: the block is centred.
     expect(card, closeTo(1200 - right, 1));
     // Still four cards with one action each, never a stretched single card.

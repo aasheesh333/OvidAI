@@ -10,8 +10,8 @@ import 'package:flutter/foundation.dart';
 /// section in the catalog, but the distinction still matters for setup.
 enum V2CatalogKind {
   connector('Connector', 'Connectors'),
-  plugin('Plugin', 'Plugins & MCP'),
-  mcp('MCP server', 'Plugins & MCP');
+  plugin('Plugin', 'Plugins & add-ons'),
+  mcp('Add-on', 'Plugins & add-ons');
 
   const V2CatalogKind(this.label, this.sectionTitle);
 
@@ -1553,8 +1553,8 @@ const v2Catalog = <V2CatalogEntry>[
   ),
   V2CatalogEntry(
     id: 'github-mcp',
-    name: 'GitHub MCP',
-    description: 'Issues, pull requests, and code search over MCP.',
+    name: 'GitHub tools',
+    description: 'Issues, pull requests, and code search.',
     category: 'Code',
     kind: V2CatalogKind.mcp,
     auth: V2CatalogAuth.personalAccessToken,
@@ -1572,8 +1572,8 @@ const v2Catalog = <V2CatalogEntry>[
   ),
   V2CatalogEntry(
     id: 'brave-search-mcp',
-    name: 'Brave Search MCP',
-    description: 'Web search through a local MCP server.',
+    name: 'Brave Search tools',
+    description: 'Web search from a local add-on.',
     category: 'Search',
     kind: V2CatalogKind.mcp,
     auth: V2CatalogAuth.apiKey,
@@ -1592,7 +1592,7 @@ const v2Catalog = <V2CatalogEntry>[
   ),
   V2CatalogEntry(
     id: 'slack-mcp',
-    name: 'Slack MCP',
+    name: 'Slack tools',
     description: 'Read channels and post updates as a bot.',
     category: 'Chat',
     kind: V2CatalogKind.mcp,
@@ -1602,8 +1602,8 @@ const v2Catalog = <V2CatalogEntry>[
   ),
   V2CatalogEntry(
     id: 'notion-mcp',
-    name: 'Notion MCP',
-    description: 'Search pages and append blocks through MCP.',
+    name: 'Notion tools',
+    description: 'Search pages and append blocks.',
     category: 'Notes',
     kind: V2CatalogKind.mcp,
     auth: V2CatalogAuth.apiKey,
@@ -1612,7 +1612,7 @@ const v2Catalog = <V2CatalogEntry>[
   ),
   V2CatalogEntry(
     id: 'sentry-mcp',
-    name: 'Sentry MCP',
+    name: 'Sentry tools',
     description: 'Pull issues, events, and release health.',
     category: 'Observability',
     kind: V2CatalogKind.mcp,
@@ -1622,8 +1622,8 @@ const v2Catalog = <V2CatalogEntry>[
   ),
   V2CatalogEntry(
     id: 'stripe-mcp',
-    name: 'Stripe MCP',
-    description: 'Inspect payments and customers over MCP.',
+    name: 'Stripe tools',
+    description: 'Inspect payments and customers.',
     category: 'Payments',
     kind: V2CatalogKind.mcp,
     auth: V2CatalogAuth.apiKey,

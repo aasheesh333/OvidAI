@@ -112,11 +112,14 @@ class V2BrowserData {
 
 /// The live browser view.
 ///
-/// One header (back, address pill, menu), a tab strip only when there is more
-/// than one tab, the picture, and one row of controls. This widget is
-/// presentational and deliberately has no fallback handlers: a control whose
-/// callback is null is not rendered, so an un-wired build shows fewer buttons
-/// instead of dead ones. The live wiring lives in `BrowserLivePage`.
+/// The page is the picture: one header (back, address pill, menu), a tab
+/// strip only when there is more than one tab, and the frame filling all the
+/// remaining space. Watching shows one take-control pill over the picture;
+/// controlling swaps it for the icon-only dock at the bottom of the frame.
+/// This widget is presentational and deliberately has no fallback handlers:
+/// a control whose callback is null is not rendered, so an un-wired build
+/// shows fewer buttons instead of dead ones. The live wiring lives in
+/// `BrowserLivePage`.
 class BrowserPage extends StatelessWidget {
   const BrowserPage({
     super.key,
@@ -250,65 +253,64 @@ class BrowserPage extends StatelessWidget {
           onPageTap: onPageTap,
           frameAspectRatio: data.viewportAspectRatio,
         );
-    return Column(
-      children: [
-        Expanded(
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(r.gutter, 0, r.gutter, 0),
-            child: _viewportBox(context, viewport),
-          ),
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(r.gutter, 0, r.gutter, OSpace.m),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            _frame(context, viewport),
+            if (!data.controlling && onTakeControl != null)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: OSpace.m,
+                child: Center(
+                  child: BrowserTakeControlPill(onPressed: onTakeControl),
+                ),
+              ),
+            if (data.controlling)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: OSpace.m,
+                child: Center(
+                  child: BrowserControlBar(
+                    controlling: true,
+                    keyboard: data.keyboard,
+                    canGoBack: data.canGoBack,
+                    canGoForward: data.canGoForward,
+                    onTakeControl: onTakeControl,
+                    onReleaseControl: onReleaseControl,
+                    onToggleKeyboard: onToggleKeyboard,
+                    onBack: onBack,
+                    onForward: onForward,
+                  ),
+                ),
+              ),
+          ],
         ),
-        BrowserControlBar(
-          controlling: data.controlling,
-          keyboard: data.keyboard,
-          canGoBack: data.canGoBack,
-          canGoForward: data.canGoForward,
-          onTakeControl: onTakeControl,
-          onReleaseControl: onReleaseControl,
-          onToggleKeyboard: onToggleKeyboard,
-          onBack: onBack,
-          onForward: onForward,
-        ),
-      ],
+      ),
     );
   }
 
-  /// Fills the available space but never gets wider than 16:10, so a short,
-  /// wide window letterboxes the picture instead of stretching it. The box is
-  /// centred, which is what keeps tablet layouts calm.
-  Widget _viewportBox(BuildContext context, Widget child) {
+  /// The frame fills its whole area; the screencast letterboxes itself with
+  /// `BoxFit.contain` inside the viewport, so the window never crops a page.
+  Widget _frame(BuildContext context, Widget child) {
     final c = OColors.of(context);
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final maxWidth = constraints.maxWidth;
-        final maxHeight = constraints.maxHeight;
-        if (!maxWidth.isFinite || !maxHeight.isFinite || maxHeight <= 0) {
-          return child;
-        }
-        const maxAspect = 16 / 10;
-        final width = maxWidth / maxHeight > maxAspect
-            ? maxHeight * maxAspect
-            : maxWidth;
-        return Center(
-          child: SizedBox(
-            width: width,
-            height: maxHeight,
-            child: DecoratedBox(
-              // Foreground: a border that insets would shave 2 dp off the
-              // width and break the 16:10 ratio the frame promises.
-              position: DecorationPosition.foreground,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(ORadius.l),
-                border: Border.all(color: c.hairline),
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(ORadius.l),
-                child: child,
-              ),
-            ),
-          ),
-        );
-      },
+    return DecoratedBox(
+      // Foreground: a border drawn as decoration would shave 2 dp off the
+      // picture's width.
+      position: DecorationPosition.foreground,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(ORadius.l),
+        border: Border.all(color: c.hairline),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(ORadius.l),
+        child: child,
+      ),
     );
   }
 }

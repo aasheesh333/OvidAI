@@ -120,30 +120,12 @@ void main() {
         ),
       ),
     ),
-    'health': AccountHealthPage(
+    'health': const AccountHealthPage(
       data: V2AccountHealthPageData(
-        twoFactorEnabled: false,
-        devices: const [
-          V2SignInDevice(
-            id: 'p',
-            name: 'Pixel 9 Pro',
-            detail: 'Signed in now',
-            current: true,
-          ),
-          V2SignInDevice(
-            id: 'm',
-            name: 'MacBook Air',
-            detail: 'Last active yesterday',
-          ),
-        ],
-        recentSignIns: const [
-          V2SignInEvent(
-            id: 's',
-            device: 'Pixel 9 Pro',
-            location: 'Mumbai, India',
-            timeLabel: 'Today at 9:12 AM',
-          ),
-        ],
+        emailVerified: false,
+        emailLabel: 'aarav@gmail.com',
+        accountStatus: V2AccountStatus.deletionPending,
+        deletionScheduledLabel: '20 Nov 2026',
       ),
     ),
   };

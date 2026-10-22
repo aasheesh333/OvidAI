@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
+import '../settings/settings_rows.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
 
@@ -484,59 +485,22 @@ class _NotificationsPageState extends State<NotificationsPage> {
         onChanged: _data.onMasterChanged == null ? null : _setMaster,
         switchKey: const ValueKey<String>('notifications-master-switch'),
       ),
+      // A channel the product cannot honour yet is removed, not shown as a
+      // switch that would only pretend to store the change.
       for (final setting in _activity)
         if (setting.available)
           _toggleRow(
             context,
             id: setting.id,
             title: setting.title,
-            description: setting.description,
             value: setting.value,
             onChanged: _data.onToggle == null
                 ? null
                 : (value) => _setSetting(setting.id, value),
             enabled: _master,
-          )
-        else
-          _infoRow(context, setting),
+          ),
     ];
-    return _card(context, rows);
-  }
-
-  /// A channel the product cannot honour yet: readable, but with no switch
-  /// that would only pretend to store the change.
-  Widget _infoRow(BuildContext context, V2NotificationSetting setting) {
-    final c = OColors.of(context);
-    return ConstrainedBox(
-      key: ValueKey<String>('notification-unavailable-${setting.id}'),
-      constraints: const BoxConstraints(minHeight: OSpace.listRow),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: OSpace.l,
-          vertical: OSpace.m,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              setting.title,
-              style: OType.body.copyWith(
-                color: c.textMuted,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            const SizedBox(height: OSpace.xxs),
-            Text(
-              setting.description,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ],
-        ),
-      ),
-    );
+    return V2SettingsRowList(rows: rows);
   }
 
   void _setMaster(bool value) {
@@ -571,8 +535,8 @@ class _NotificationsPageState extends State<NotificationsPage> {
         ? window.label((time) => _formatTime(context, time))
         : 'Off';
 
-    return _card(context, [
-      OListRow(
+    return V2SettingsRowList(rows: [
+      V2SettingsRow(
         key: const ValueKey<String>('notifications-quiet-hours-row'),
         icon: Icons.dark_mode_outlined,
         title: 'Quiet hours',
@@ -728,8 +692,8 @@ class _NotificationsPageState extends State<NotificationsPage> {
   Widget _soundCard(BuildContext context) {
     final canPick =
         _master && _data.onSoundChanged != null && _sounds.isNotEmpty;
-    return _card(context, [
-      OListRow(
+    return V2SettingsRowList(rows: [
+      V2SettingsRow(
         key: const ValueKey<String>('notifications-sound-row'),
         icon: Icons.volume_up_outlined,
         title: 'Sound',
@@ -781,26 +745,10 @@ class _NotificationsPageState extends State<NotificationsPage> {
     }
   }
 
-  Widget _card(BuildContext context, List<Widget> rows) {
-    final c = OColors.of(context);
-    return OCard(
-      padding: EdgeInsets.zero,
-      child: Column(
-        children: [
-          for (var i = 0; i < rows.length; i++) ...[
-            if (i > 0) Divider(color: c.hairline, height: 1),
-            rows[i],
-          ],
-        ],
-      ),
-    );
-  }
-
   Widget _toggleRow(
     BuildContext context, {
     required String id,
     required String title,
-    String? description,
     required bool value,
     ValueChanged<bool>? onChanged,
     bool enabled = true,
@@ -812,34 +760,18 @@ class _NotificationsPageState extends State<NotificationsPage> {
     return ConstrainedBox(
       constraints: const BoxConstraints(minHeight: OSpace.listRow),
       child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: OSpace.l,
-          vertical: OSpace.m,
-        ),
+        padding: const EdgeInsets.symmetric(vertical: OSpace.m),
         child: Row(
           children: [
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    title,
-                    style: OType.body.copyWith(
-                      color: enabled ? c.text : c.textFaint,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  if (description != null) ...[
-                    const SizedBox(height: OSpace.xxs),
-                    Text(
-                      description,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                  ],
-                ],
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: OType.body.copyWith(
+                  color: enabled ? c.text : c.textFaint,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
             ),
             const SizedBox(width: OSpace.s),

@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:ovid_ai/core/format.dart';
 
 /// P1: long counts are shortened everywhere (usage, time, chat stats).
@@ -78,6 +79,44 @@ void main() {
       final at = DateTime(2026, 10, 19, 13, 45);
       expect(formatResetLabel(at, now: now), 'Resets in 5 h 45 m · Oct 19, 1:45 PM');
       expect(formatDeadline(at, now: now), 'Oct 19, 1:45 PM (in 5 h 45 m)');
+    });
+
+    test('month names and day periods follow the requested locale', () async {
+      await initializeDateFormatting('fr_FR');
+      expect(
+        formatLocalDay(DateTime(2026, 10, 18), now: now, locale: 'fr_FR'),
+        '18 oct.',
+      );
+      expect(
+        formatLocalDateTime(
+          DateTime(2026, 10, 19, 13, 45),
+          now: now,
+          locale: 'fr_FR',
+        ),
+        '19 oct., 13:45',
+      );
+    });
+
+    test('relative-time words can be supplied by a translation pass', () {
+      const translated = FormatStrings(
+        now: 'maintenant',
+        underAMinute: 'dans moins d’une minute',
+        resets: 'Réinitialisation',
+        inPrefix: 'dans',
+        day: 'j',
+        hour: 'h',
+        minute: 'min',
+      );
+      expect(
+        formatTimeUntil(now.subtract(const Duration(minutes: 1)),
+            now: now, strings: translated),
+        'maintenant',
+      );
+      expect(
+        formatTimeUntil(now.add(const Duration(minutes: 12)),
+            now: now, strings: translated),
+        'dans 12 min',
+      );
     });
   });
 }

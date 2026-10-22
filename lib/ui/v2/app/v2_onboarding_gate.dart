@@ -1,12 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/auth_identity.dart';
 import '../../../core/auth_phone_flow.dart';
 import '../../../core/auth_providers.dart';
 import '../../../core/diag.dart';
 import '../../../core/firebase_service.dart';
-import '../../../core/legal_links.dart';
 import '../../../core/revenuecat_billing.dart';
 import '../../../core/state.dart';
 import '../../auth_methods.dart' show AuthPhoneDialog;
@@ -117,16 +115,6 @@ class _FirebaseOnboardingAuth implements V2OnboardingAuth {
 /// separate from `AppState`'s in-app welcome notice (`ovid_welcome`) so
 /// finishing the onboarding tour never suppresses that unrelated notice.
 
-const Map<String, String> _languageNames = {
-  'en': 'English',
-  'hi': 'Hindi',
-  'hinglish': 'Hinglish',
-  'pa': 'Punjabi',
-  'ta': 'Tamil',
-};
-
-const String _emailUnavailableMessage = 'Use Google or phone to sign in.';
-
 enum _Step { welcome, language, signIn, done }
 
 /// Production onboarding gate for the v2 shell.
@@ -136,9 +124,9 @@ enum _Step { welcome, language, signIn, done }
 /// [child]. The live [LoginGate] is intentionally left untouched: the app
 /// router/flag owner decides which gate wraps the shell.
 ///
-/// Nothing here fakes a result: email/password has no backend and says so,
-/// a declined purchase continues without an entitlement, and a failed social
-/// or phone attempt is surfaced instead of advancing.
+/// Nothing here fakes a result: Google and phone are the only providers, a
+/// declined purchase continues without an entitlement, and a failed social or
+/// phone attempt is surfaced instead of advancing.
 class V2OnboardingGate extends StatefulWidget {
   const V2OnboardingGate({
     super.key,
@@ -147,7 +135,6 @@ class V2OnboardingGate extends StatefulWidget {
     this.purchase,
     this.store,
     this.testStore,
-    this.openUrl,
     this.welcomeVersion = kV2OnboardingWelcomeVersion,
   });
 
@@ -171,10 +158,6 @@ class V2OnboardingGate extends StatefulWidget {
   /// note appears only in a Test Store build.
   final bool? testStore;
 
-  /// Opens a legal document. Defaults to the platform browser; overridable so
-  /// tests can prove the links reach a real destination.
-  final Future<bool> Function(Uri uri)? openUrl;
-
   /// Marker value written to [kV2WelcomeSeenPref]. Overridable for tests.
   final String welcomeVersion;
 
@@ -189,14 +172,9 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       widget.purchase ?? _declinePurchase;
   late final V2OnboardingStore _store =
       widget.store ?? const V2OnboardingStore();
-  late final Future<bool> Function(Uri uri) _openUrl =
-      widget.openUrl ?? _launchExternal;
   late final bool _testStore = widget.testStore ?? kRevenueCatTestStore;
 
   static Future<bool> _declinePurchase(String planId) async => false;
-
-  static Future<bool> _launchExternal(Uri uri) =>
-      launchUrl(uri, mode: LaunchMode.externalApplication);
 
   bool _booting = true;
   bool _booted = false;
@@ -304,6 +282,12 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
         _step = _Step.signIn;
       }
     });
+    // The tour's language choice is the voice/assistant language, not the
+    // app-UI locale (the UI ships English only). Apply it when the person has
+    // not already picked a voice language in Settings.
+    if (language != null && AppState.I.voiceLanguage.isEmpty) {
+      await AppState.I.setVoiceLanguage(language);
+    }
   }
 
   void _onAuth() {
@@ -504,18 +488,13 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
 
   Widget _welcome() {
     return OnboardingWelcomePage(
-      data: V2OnboardingWelcomeData(language: _languageNames[_languageId]!),
       busy: _welcomeBusy,
       error: _welcomeError,
-      onGetStarted: _welcomeBusy ? null : () => _leaveWelcome(toLanguage: true),
-      onSignIn: _welcomeBusy ? null : () => _leaveWelcome(toLanguage: false),
-      onLanguageTap: _welcomeBusy
-          ? null
-          : () => _openLanguage(from: _Step.welcome),
+      onGetStarted: _welcomeBusy ? null : _leaveWelcome,
     );
   }
 
-  Future<void> _leaveWelcome({required bool toLanguage}) async {
+  Future<void> _leaveWelcome() async {
     if (_welcomeBusy) return;
     setState(() {
       _welcomeBusy = true;
@@ -541,24 +520,12 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
     if (!mounted) return;
     setState(() {
       _welcomeBusy = false;
-      if (toLanguage) {
-        _languageReturn = _Step.welcome;
-        _step = _Step.language;
-      } else {
-        _step = _Step.signIn;
-      }
+      _languageReturn = _Step.welcome;
+      _step = _Step.language;
     });
   }
 
   // ── Language & goal ──────────────────────────────────────────────────────
-
-  /// Opens the language step and remembers where Back should return to.
-  void _openLanguage({required _Step from}) {
-    setState(() {
-      _languageReturn = from;
-      _step = _Step.language;
-    });
-  }
 
   Widget _language() {
     return LanguageGoalPage(
@@ -612,29 +579,20 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
       _goalIds = Set.of(goalIds);
       _step = _Step.signIn;
     });
+    // Persist the choice as the voice/assistant language too, so the picker is
+    // a real preference rather than a label.
+    await AppState.I.setVoiceLanguage(languageId);
   }
 
   // ── Sign-in ──────────────────────────────────────────────────────────────
 
   Widget _signIn() {
     return SignInPage(
-      data: V2SignInData(
-        language: _languageNames[_languageId]!,
-        loading: _signInBusy,
-        error: _signInError,
-      ),
-      onSubmit: _signInBusy ? null : _submitEmail,
+      data: V2SignInData(loading: _signInBusy, error: _signInError),
       onGoogle: _signInBusy ? null : _signInWithGoogle,
       onPhone: _signInBusy ? null : _startPhoneSignIn,
-      onForgotPassword: _signInBusy ? null : _showEmailUnavailable,
-      onCreateAccount: _signInBusy ? null : _showEmailUnavailable,
-      onLanguageTap: _signInBusy
-          ? null
-          : () => _openLanguage(from: _Step.signIn),
       // Retry only exists when there is an attempt to repeat.
       onRetry: _signInBusy || _lastSignInAction == null ? null : _retrySignIn,
-      onTerms: () => _openLegal(LegalLinks.terms),
-      onPrivacy: () => _openLegal(LegalLinks.privacyPolicy),
       onBack: _signInBusy ? null : () => _setLanguageBackToSignIn(),
     );
   }
@@ -644,43 +602,6 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
     setState(() {
       _languageReturn = _Step.signIn;
       _step = _Step.language;
-    });
-  }
-
-  Future<void> _openLegal(String url) async {
-    final uri = Uri.tryParse(url);
-    if (uri == null) return;
-    try {
-      final opened = await _openUrl(uri);
-      if (!opened && mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(content: Text('Could not open the link.')),
-        );
-      }
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(content: Text('Could not open the link.')),
-      );
-    }
-  }
-
-  /// Email/password has no backend. Never fake a session: say what works.
-  void _submitEmail(String email, String password) {
-    if (_signInBusy) return;
-    setState(() {
-      _signInError = _emailUnavailableMessage;
-      // Nothing to retry: the next step is Google or phone, not this form.
-      _lastSignInAction = null;
-    });
-  }
-
-  void _showEmailUnavailable() {
-    if (_signInBusy) return;
-    setState(() {
-      _signInError = _emailUnavailableMessage;
-      // Nothing to retry: the next step is Google or phone, not this form.
-      _lastSignInAction = null;
     });
   }
 

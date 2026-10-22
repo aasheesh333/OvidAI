@@ -1,42 +1,35 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'phone_auth_sheet.dart';
 import 'step_progress.dart';
 
 // TODO(l10n): move sign-in copy to the ARB files.
 
-/// Injected state for the sign-in form. The screen never reads a session or a
+/// Injected state for the sign-in step. The screen never reads a session or a
 /// network client; the wiring layer supplies values and receives callbacks.
 @immutable
 class V2SignInData {
-  const V2SignInData({
-    this.email = '',
-    this.password = '',
-    this.language = 'English',
-    this.loading = false,
-    this.error,
-  });
+  const V2SignInData({this.loading = false, this.error});
 
-  final String email;
-  final String password;
-  final String language;
   final bool loading;
   final String? error;
 }
 
 /// Third step of the tour. Same shell as every other step: one header, the
-/// step indicator, a scrolling form and the primary action pinned at the
-/// bottom.
+/// step indicator, a scrolling body and the primary action pinned at the
+/// bottom. The body is the shared identity, one line, and the secondary
+/// provider; Google is the filled primary on the bottom edge.
+///
+/// The product has exactly two auth providers: Google and phone. There is no
+/// email/password backend, so the step renders no email form and no Apple
+/// button — a control that cannot reach a real service is removed, not
+/// disabled (MINIMAL_UI_CONTRACT §8).
 class SignInPage extends StatefulWidget {
   const SignInPage({
     super.key,
     this.data = const V2SignInData(),
-    this.onEmailChanged,
-    this.onPasswordChanged,
-    this.onSubmit,
     this.onGoogle,
     this.onPhone,
     this.phoneData,
@@ -46,12 +39,6 @@ class SignInPage extends StatefulWidget {
     this.onVerifyPhoneCode,
     this.onResendPhoneCode,
     this.onChangePhoneNumber,
-    this.onApple,
-    this.onForgotPassword,
-    this.onCreateAccount,
-    this.onLanguageTap,
-    this.onTerms,
-    this.onPrivacy,
     this.onRetry,
     this.onBack,
     this.step = const V2OnboardingStepData(
@@ -62,9 +49,6 @@ class SignInPage extends StatefulWidget {
   });
 
   final V2SignInData data;
-  final ValueChanged<String>? onEmailChanged;
-  final ValueChanged<String>? onPasswordChanged;
-  final void Function(String email, String password)? onSubmit;
   final VoidCallback? onGoogle;
 
   /// Opens [V2PhoneAuthSheet]. Null disables the phone action.
@@ -95,16 +79,6 @@ class SignInPage extends StatefulWidget {
   /// callback is wired the sheet clears the code locally.
   final VoidCallback? onChangePhoneNumber;
 
-  final VoidCallback? onApple;
-  final VoidCallback? onForgotPassword;
-  final VoidCallback? onCreateAccount;
-  final VoidCallback? onLanguageTap;
-
-  /// Opens the legal documents. When null the labels stay plain text instead
-  /// of looking like links that do nothing.
-  final VoidCallback? onTerms;
-  final VoidCallback? onPrivacy;
-
   /// Re-runs the failed attempt. Only supplied when there is something to
   /// retry: a generic message with no recovery path shows no "Try again".
   final VoidCallback? onRetry;
@@ -120,14 +94,6 @@ class SignInPage extends StatefulWidget {
 }
 
 class _SignInPageState extends State<SignInPage> {
-  late final TextEditingController _email = TextEditingController(
-    text: widget.data.email,
-  );
-  late final TextEditingController _password = TextEditingController(
-    text: widget.data.password,
-  );
-  bool _obscure = true;
-
   /// Mirrors the host's [SignInPage.phoneData] into the open sheet route. A
   /// modal bottom sheet does not rebuild with its opener, so the page pushes
   /// later host updates through this notifier.
@@ -139,14 +105,6 @@ class _SignInPageState extends State<SignInPage> {
   @override
   void didUpdateWidget(covariant SignInPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.data.email != oldWidget.data.email &&
-        widget.data.email != _email.text) {
-      _email.text = widget.data.email;
-    }
-    if (widget.data.password != oldWidget.data.password &&
-        widget.data.password != _password.text) {
-      _password.text = widget.data.password;
-    }
     if (_phoneSheetOpen) {
       final next = widget.phoneData ?? const V2PhoneAuthData();
       final previous = oldWidget.phoneData ?? const V2PhoneAuthData();
@@ -164,14 +122,8 @@ class _SignInPageState extends State<SignInPage> {
 
   @override
   void dispose() {
-    _email.dispose();
-    _password.dispose();
     _phoneSheet.dispose();
     super.dispose();
-  }
-
-  void _submit() {
-    widget.onSubmit?.call(_email.text.trim(), _password.text);
   }
 
   Future<void> _openPhoneSheet() async {
@@ -224,47 +176,31 @@ class _SignInPageState extends State<SignInPage> {
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
     final data = widget.data;
     return OnboardingStepScaffold(
       step: widget.step,
       title: 'Sign in',
-      subtitle: 'Welcome back',
       onBack: widget.onBack,
       backKey: const Key('sign-in-back'),
-      dismissKeyboard: true,
       primaryKey: const Key('sign-in-submit'),
-      // The header already says "Sign in"; repeating it on the button would
-      // be the same string twice on one screen.
-      primaryLabel: 'Continue',
-      onPrimary: data.loading || widget.onSubmit == null ? null : _submit,
+      // Google is the filled action, pinned to the same bottom edge as every
+      // other step's primary action. The header already says "Sign in", so the
+      // label names the provider instead of repeating the title.
+      primaryLabel: 'Continue with Google',
+      primaryIcon: Icons.g_mobiledata_rounded,
+      onPrimary: data.loading || widget.onGoogle == null
+          ? null
+          : widget.onGoogle,
       primaryLoading: data.loading,
-      secondaryActions: [
-        OTextAction(
-          label: 'Create an account',
-          onPressed: data.loading ? null : widget.onCreateAccount,
-        ),
-      ],
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: OnboardingLanguagePill(
-              key: const Key('sign-in-language'),
-              label: data.language,
-              onTap: data.loading ? null : widget.onLanguageTap,
+          const Center(
+            child: Padding(
+              padding: EdgeInsets.only(top: OSpace.m, bottom: OSpace.xl),
+              child: OnboardingIdentity(line: 'Welcome back'),
             ),
           ),
-          const SizedBox(height: OSpace.l),
-          OButton(
-            label: 'Continue with Google',
-            variant: OButtonVariant.secondary,
-            icon: Icons.g_mobiledata_rounded,
-            expand: true,
-            onPressed: data.loading ? null : widget.onGoogle,
-          ),
-          const SizedBox(height: OSpace.m),
           OButton(
             key: const Key('sign-in-phone'),
             label: 'Continue with phone',
@@ -275,105 +211,10 @@ class _SignInPageState extends State<SignInPage> {
                 ? null
                 : _openPhoneSheet,
           ),
-          const SizedBox(height: OSpace.m),
-          // Apple is only rendered when a real handler exists. A provider this
-          // build cannot complete is not offered at all.
-          if (widget.onApple != null) ...[
-            OButton(
-              label: 'Continue with Apple',
-              variant: OButtonVariant.secondary,
-              icon: Icons.apple_rounded,
-              expand: true,
-              onPressed: data.loading ? null : widget.onApple,
-            ),
-            const SizedBox(height: OSpace.m),
-          ],
-          const SizedBox(height: OSpace.l),
-          const ODivider(label: 'OR'),
-          const SizedBox(height: OSpace.l),
-          _FieldLabel(label: 'Email address', color: c.textMuted),
-          const SizedBox(height: OSpace.s),
-          Semantics(
-            label: 'Email address',
-            textField: true,
-            child: TextField(
-              key: const Key('sign-in-email'),
-              controller: _email,
-              enabled: !data.loading,
-              keyboardType: TextInputType.emailAddress,
-              textInputAction: TextInputAction.next,
-              autofillHints: const [AutofillHints.email],
-              onChanged: widget.onEmailChanged,
-              style: OType.body.copyWith(color: c.text),
-              decoration: const InputDecoration(hintText: 'you@domain.com'),
-            ),
-          ),
-          const SizedBox(height: OSpace.l),
-          Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: OSpace.s,
-            runSpacing: OSpace.xs,
-            children: [
-              _FieldLabel(label: 'Password', color: c.textMuted),
-              OButton(
-                label: 'Forgot password?',
-                variant: OButtonVariant.ghost,
-                onPressed: data.loading ? null : widget.onForgotPassword,
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.s),
-          Semantics(
-            label: 'Password',
-            textField: true,
-            child: TextField(
-              key: const Key('sign-in-password'),
-              controller: _password,
-              enabled: !data.loading,
-              obscureText: _obscure,
-              textInputAction: TextInputAction.done,
-              autofillHints: const [AutofillHints.password],
-              onChanged: widget.onPasswordChanged,
-              onSubmitted: (_) => _submit(),
-              style: OType.body.copyWith(color: c.text),
-              decoration: InputDecoration(
-                hintText: 'Your password',
-                suffixIcon: OIconButton(
-                  key: const Key('sign-in-password-toggle'),
-                  icon: _obscure
-                      ? Icons.visibility_rounded
-                      : Icons.visibility_off_rounded,
-                  semanticLabel: _obscure ? 'Show password' : 'Hide password',
-                  tooltip: _obscure ? 'Show password' : 'Hide password',
-                  onPressed: data.loading
-                      ? null
-                      : () => setState(() => _obscure = !_obscure),
-                ),
-              ),
-            ),
-          ),
           if (data.error != null) ...[
             const SizedBox(height: OSpace.l),
             _InlineError(message: data.error!, onRetry: widget.onRetry),
           ],
-          const SizedBox(height: OSpace.l),
-          // Underlining is a promise of a tap. Without a handler the sentence
-          // stays plain text instead of faking a link.
-          Wrap(
-            alignment: WrapAlignment.center,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              Text(
-                'By signing in, you agree to our ',
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-              _LegalLink(label: 'Terms', onTap: widget.onTerms),
-              Text(' and ', style: OType.caption.copyWith(color: c.textMuted)),
-              _LegalLink(label: 'Privacy Policy', onTap: widget.onPrivacy),
-              Text('.', style: OType.caption.copyWith(color: c.textMuted)),
-            ],
-          ),
         ],
       ),
     );
@@ -403,18 +244,6 @@ bool _samePhoneData(V2PhoneAuthData a, V2PhoneAuthData b) {
     }
   }
   return true;
-}
-
-class _FieldLabel extends StatelessWidget {
-  const _FieldLabel({required this.label, required this.color});
-
-  final String label;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(label, style: OType.label.copyWith(color: color));
-  }
 }
 
 class _InlineError extends StatelessWidget {
@@ -469,45 +298,6 @@ class _InlineError extends StatelessWidget {
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Inline legal link with a 48 dp tap target. Without [onTap] it degrades to
-/// plain text, never a dead underline.
-class _LegalLink extends StatelessWidget {
-  const _LegalLink({required this.label, this.onTap});
-
-  final String label;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final text = Text(
-      label,
-      style: OType.caption.copyWith(
-        color: onTap == null ? c.textMuted : c.text,
-        decoration: onTap == null ? null : TextDecoration.underline,
-        decorationColor: c.textMuted,
-      ),
-    );
-    if (onTap == null) return text;
-    return Semantics(
-      container: true,
-      label: label,
-      button: true,
-      onTap: onTap,
-      child: ExcludeSemantics(
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: onTap,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: OSpace.touch),
-            child: Center(widthFactor: 1, heightFactor: 1, child: text),
-          ),
         ),
       ),
     );

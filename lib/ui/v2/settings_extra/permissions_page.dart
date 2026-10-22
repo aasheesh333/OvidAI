@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
+import '../settings/settings_rows.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
 
@@ -135,17 +136,22 @@ class _PermissionsPageState extends State<PermissionsPage>
       onEmptyAction: data.onOpenSettings,
       skeletonRows: 5,
       child: ListView.separated(
-        padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
+        padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
         itemCount: data.permissions.length,
-        separatorBuilder: (_, _) => const SizedBox(height: OSpace.s),
+        separatorBuilder: (_, _) => Divider(
+          height: 1,
+          indent: v2SettingsRowDividerIndent,
+          color: OColors.of(context).hairline,
+        ),
         itemBuilder: (context, index) =>
             _permissionRow(context, data.permissions[index]),
       ),
     );
   }
 
+  /// One permission, one action. A not-asked permission asks; anything else
+  /// opens its Android settings page. The status pill is the row's value.
   Widget _permissionRow(BuildContext context, V2PermissionItem item) {
-    final c = OColors.of(context);
     final (statusLabel, tone) = switch (item.status) {
       V2PermissionAccess.granted => ('Granted', OPillTone.success),
       V2PermissionAccess.notAsked => ('Not asked', OPillTone.neutral),
@@ -153,87 +159,25 @@ class _PermissionsPageState extends State<PermissionsPage>
     };
     final canOpen =
         data.onOpenSettingsFor != null || data.onOpenSettings != null;
-    final action = item.status == V2PermissionAccess.notAsked
-        ? OButton(
-            key: ValueKey<String>('permission-request-${item.id}'),
-            label: 'Allow',
-            semanticLabel: 'Allow ${item.name}',
-            variant: OButtonVariant.ghost,
-            size: OButtonSize.compact,
-            onPressed: data.onRequest == null ? null : () => _request(item.id),
-          )
-        : OButton(
-            key: ValueKey<String>('permission-settings-${item.id}'),
-            label: 'Settings',
-            semanticLabel: 'Open settings for ${item.name}',
-            variant: OButtonVariant.ghost,
-            size: OButtonSize.compact,
-            onPressed: canOpen ? () => _openSettings(item.id) : null,
-          );
+    final notAsked = item.status == V2PermissionAccess.notAsked;
+    final onTap = notAsked
+        ? (data.onRequest == null ? null : () => _request(item.id))
+        : (canOpen ? () => _openSettings(item.id) : null);
 
-    return OCard(
-      padding: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: OSpace.l,
-          vertical: OSpace.m,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: OSpace.iconTile,
-                  height: OSpace.iconTile,
-                  decoration: BoxDecoration(
-                    color: c.surfaceAlt,
-                    borderRadius: BorderRadius.circular(ORadius.m),
-                  ),
-                  child: Icon(
-                    item.icon,
-                    size: 19,
-                    color: item.status == V2PermissionAccess.blocked
-                        ? c.danger
-                        : c.textMuted,
-                  ),
-                ),
-                const SizedBox(width: OSpace.m),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        item.name,
-                        style: OType.bodyStrong.copyWith(color: c.text),
-                      ),
-                      const SizedBox(height: OSpace.xxs),
-                      Text(
-                        item.reason,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: OSpace.s),
-            Wrap(
-              alignment: WrapAlignment.spaceBetween,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              spacing: OSpace.s,
-              runSpacing: OSpace.s,
-              children: [
-                OPill(label: statusLabel, tone: tone, dot: true),
-                action,
-              ],
-            ),
-          ],
-        ),
+    return V2SettingsRow(
+      key: ValueKey<String>(
+        notAsked
+            ? 'permission-request-${item.id}'
+            : 'permission-settings-${item.id}',
       ),
+      icon: item.icon,
+      danger: item.status == V2PermissionAccess.blocked,
+      title: item.name,
+      showChevron: false,
+      stacksTrailing: true,
+      enabled: onTap != null || item.status == V2PermissionAccess.granted,
+      onTap: onTap,
+      trailing: OPill(label: statusLabel, tone: tone, dot: true),
     );
   }
 

@@ -365,12 +365,24 @@ class CloudAgentFacade extends ChangeNotifier
     if (_stalled.remove(serverId)) _notify();
   }
 
-  /// Arms the watchdog for [serverId] (idempotent while armed).
+  /// Arms the watchdog for [serverId] (idempotent while armed) and restarts
+  /// its silence clock — a fresh `run_started` begins a fresh window.
   void _armStallWatchdog(String serverId) {
     _noteStallEvent(serverId);
-    _stallTimers.putIfAbsent(
-      serverId,
-      () => Timer.periodic(_stallTickInterval, (_) => _checkStall(serverId)),
+    _ensureStallWatchdog(serverId);
+  }
+
+  /// Arms the periodic check without touching the silence clock. Used by
+  /// paths that learn about an ALREADY-running run (a rich transcript seed,
+  /// a reconnect replay, a reopened mid-run chat): no `run_started` will
+  /// arrive for them, so the tick must be started here or the Settings
+  /// "Response wait limit" would never surface for that run.
+  void _ensureStallWatchdog(String serverId) {
+    if (_stallTimers.containsKey(serverId)) return;
+    _stallTicks.putIfAbsent(serverId, () => 0);
+    _stallTimers[serverId] = Timer.periodic(
+      _stallTickInterval,
+      (_) => _checkStall(serverId),
     );
   }
 
@@ -854,6 +866,12 @@ class CloudAgentFacade extends ChangeNotifier
           runId: active ?? state.runState.runId,
           busy: true,
         );
+        // A run that is already live when this state is built (rich seed,
+        // replay, reopened chat) never emits run_started here, so the
+        // response-timeout watchdog is armed from the fold itself. The
+        // silence clock is left alone: every event re-stamps it in the
+        // stream listener.
+        _ensureStallWatchdog(serverId);
       }
     }
     // Terminal clearing is runId-matched in [_onTerminalEvent]; this

@@ -619,7 +619,7 @@ class V2ArtifactPreview extends StatelessWidget {
         height: 5,
         decoration: BoxDecoration(
           color: c.surfaceRaised,
-          borderRadius: BorderRadius.circular(2),
+          borderRadius: BorderRadius.circular(ORadius.xs),
         ),
       ),
     );

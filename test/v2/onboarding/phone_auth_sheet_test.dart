@@ -355,6 +355,21 @@ void main() {
       expect(resends, 1);
     });
 
+    testWidgets('resend is absent when no handler is wired', (tester) async {
+      await _pump(
+        tester,
+        data: const V2PhoneAuthData(
+          step: V2PhoneAuthStep.code,
+          phone: '98765 43210',
+        ),
+        onVerify: (_) {},
+      );
+
+      // A button with no handler is a dead control, so it is not rendered.
+      expect(find.byKey(const Key('phone-auth-resend')), findsNothing);
+      expect(find.byKey(const Key('phone-auth-resend-timer')), findsNothing);
+    });
+
     testWidgets('long waits format as minutes and seconds', (tester) async {
       await _pump(
         tester,

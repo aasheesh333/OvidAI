@@ -57,7 +57,6 @@ enum V2StorageBreakdownStatus { loading, content, empty, error }
 @immutable
 class V2StorageBreakdownData {
   const V2StorageBreakdownData({
-    this.title = 'Storage',
     this.usedBytes = 0,
     this.totalBytes = 0,
     this.amountLabel = '',
@@ -76,9 +75,6 @@ class V2StorageBreakdownData {
     this.onRetry,
     this.onCategoryTap,
   });
-
-  /// Section header above the card.
-  final String title;
 
   /// Total bytes in use. When zero, the sum of [entries] is used instead.
   final int usedBytes;
@@ -218,8 +214,9 @@ List<int> storagePercentageSplit(List<int> bytes) {
   return result;
 }
 
-/// One stacked bar plus a text legend. The widget is presentational: it
-/// renders [data] and exposes only the retry / empty-state callbacks it is
+/// One stacked bar plus a text legend on the page background — no card, no
+/// header chrome: the legend is the breakdown. The widget is presentational:
+/// it renders [data] and exposes only the retry / empty-state callbacks it is
 /// given. It owns no timers or streams.
 class StorageBreakdown extends StatelessWidget {
   const StorageBreakdown({super.key, required this.data});
@@ -228,27 +225,17 @@ class StorageBreakdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        OSectionHeader(
-          label: data.title,
-          padding: const EdgeInsets.only(bottom: OSpace.s),
-        ),
-        switch (data.status) {
-          V2StorageBreakdownStatus.loading => const _BreakdownSkeleton(),
-          V2StorageBreakdownStatus.error => OErrorState(
-            title: 'Storage unavailable',
-            message: data.errorMessage,
-            onRetry: data.onRetry,
-          ),
-          V2StorageBreakdownStatus.empty => _empty(),
-          V2StorageBreakdownStatus.content =>
-            _hasUsage ? _content(context) : _empty(),
-        },
-      ],
-    );
+    return switch (data.status) {
+      V2StorageBreakdownStatus.loading => const _BreakdownSkeleton(),
+      V2StorageBreakdownStatus.error => OErrorState(
+        title: 'Storage unavailable',
+        message: data.errorMessage,
+        onRetry: data.onRetry,
+      ),
+      V2StorageBreakdownStatus.empty => _empty(),
+      V2StorageBreakdownStatus.content =>
+        _hasUsage ? _content(context) : _empty(),
+    };
   }
 
   bool get _hasUsage {
@@ -300,67 +287,52 @@ class StorageBreakdown extends StatelessWidget {
       for (final entry in entries) entry.safeBytes,
     ]);
 
-    return OCard(
-      padding: EdgeInsets.zero,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              OSpace.l,
-              OSpace.l,
-              OSpace.l,
-              OSpace.m,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: Text(
+                amount,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: OType.h2.copyWith(color: c.text),
+              ),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Expanded(
-                      child: Text(
-                        amount,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.h2.copyWith(color: c.text),
-                      ),
-                    ),
-                    if (total.isNotEmpty) ...[
-                      const SizedBox(width: OSpace.s),
-                      Text(
-                        'of $total',
-                        maxLines: 1,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
-                  ],
-                ),
-                const SizedBox(height: OSpace.s),
-                _StorageBar(
-                  entries: entries,
-                  percentages: percentages,
-                  amount: amount,
-                  total: total,
-                ),
-              ],
-            ),
-          ),
-          Divider(height: 1, color: c.hairline),
-          for (var i = 0; i < entries.length; i++) ...[
-            if (i > 0) Divider(height: 1, color: c.hairline),
-            _LegendRow(
-              entry: entries[i],
-              percentage: percentages[i],
-              color: _categoryColor(c, entries[i].category),
-              selected: entries[i].category == data.selectedCategory,
-              onTap: data.onCategoryTap == null
-                  ? null
-                  : () => data.onCategoryTap!(entries[i].category),
-            ),
+            if (total.isNotEmpty) ...[
+              const SizedBox(width: OSpace.s),
+              Text(
+                'of $total',
+                maxLines: 1,
+                style: OType.caption.copyWith(color: c.textMuted),
+              ),
+            ],
           ],
+        ),
+        const SizedBox(height: OSpace.s),
+        _StorageBar(
+          entries: entries,
+          percentages: percentages,
+          amount: amount,
+          total: total,
+        ),
+        const SizedBox(height: OSpace.s),
+        for (var i = 0; i < entries.length; i++) ...[
+          if (i > 0) Divider(height: 1, color: c.hairline),
+          _LegendRow(
+            entry: entries[i],
+            percentage: percentages[i],
+            color: _categoryColor(c, entries[i].category),
+            selected: entries[i].category == data.selectedCategory,
+            onTap: data.onCategoryTap == null
+                ? null
+                : () => data.onCategoryTap!(entries[i].category),
+          ),
         ],
-      ),
+      ],
     );
   }
 }
@@ -494,10 +466,7 @@ class _LegendRow extends StatelessWidget {
       child: ConstrainedBox(
         constraints: const BoxConstraints(minHeight: OSpace.touch),
         child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: OSpace.l,
-            vertical: OSpace.s,
-          ),
+          padding: const EdgeInsets.symmetric(vertical: OSpace.s),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
@@ -558,27 +527,24 @@ class _BreakdownSkeleton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return OCard(
+    return Column(
       key: const ValueKey('storage-breakdown-loading'),
-      padding: const EdgeInsets.all(OSpace.l),
-      child: Column(
-        children: [
-          const OSkeleton(height: 12, radius: ORadius.s),
-          const SizedBox(height: OSpace.l),
-          for (var i = 0; i < 4; i++) ...[
-            if (i > 0) const SizedBox(height: OSpace.m),
-            const Row(
-              children: [
-                OSkeleton(width: 10, height: 10, radius: 5),
-                SizedBox(width: OSpace.m),
-                Expanded(child: OSkeleton(height: 14)),
-                SizedBox(width: OSpace.m),
-                OSkeleton(width: 56, height: 14),
-              ],
-            ),
-          ],
+      children: [
+        const OSkeleton(height: 12, radius: ORadius.s),
+        const SizedBox(height: OSpace.l),
+        for (var i = 0; i < 4; i++) ...[
+          if (i > 0) const SizedBox(height: OSpace.m),
+          const Row(
+            children: [
+              OSkeleton(width: 10, height: 10, radius: 5),
+              SizedBox(width: OSpace.m),
+              Expanded(child: OSkeleton(height: 14)),
+              SizedBox(width: OSpace.m),
+              OSkeleton(width: 56, height: 14),
+            ],
+          ),
         ],
-      ),
+      ],
     );
   }
 }

@@ -36,11 +36,7 @@ class _Step {
 final _steps = <_Step>[
   _Step(
     name: 'welcome',
-    screen: () => OnboardingWelcomePage(
-      onGetStarted: () {},
-      onSignIn: () {},
-      onLanguageTap: () {},
-    ),
+    screen: () => OnboardingWelcomePage(onGetStarted: () {}),
     primaryKey: const Key('welcome-get-started'),
     stepLabel: 'STEP 1 OF 4',
   ),
@@ -57,8 +53,6 @@ final _steps = <_Step>[
       onBack: () {},
       onGoogle: () {},
       onPhone: () {},
-      onForgotPassword: () {},
-      onCreateAccount: () {},
     ),
     primaryKey: const Key('sign-in-submit'),
     stepLabel: 'STEP 3 OF 4',
@@ -117,13 +111,14 @@ Rect _contentRuler(WidgetTester tester, {required bool splash}) => splash
 
 void main() {
   group('responsive shell', () {
-    // width, left edge, content width. 16 dp gutter on a phone; the content
-    // centres to 640 at 600 dp and 720 at 900 dp.
+    // width, left edge, content width. 16 dp gutter on a phone; the onboarding
+    // column centres tighter than the app-wide cap: 480 at 600 dp and 640 at
+    // 900 dp, with a 24 dp gutter inside the cap.
     const bands = <(double, double, double)>[
       (320, OSpace.l, 320 - 2 * OSpace.l),
-      (600, OSpace.xl, 600 - 2 * OSpace.xl),
-      (900, 90 + OSpace.xl, 720 - 2 * OSpace.xl),
-      (1200, 240 + OSpace.xl, 720 - 2 * OSpace.xl),
+      (600, 60 + OSpace.xl, 480 - 2 * OSpace.xl),
+      (900, 130 + OSpace.xl, 640 - 2 * OSpace.xl),
+      (1200, 280 + OSpace.xl, 640 - 2 * OSpace.xl),
     ];
 
     for (final band in bands) {
@@ -203,9 +198,37 @@ void main() {
       expect(tabletFree.top, tabletGo.top);
       expect(tabletFree.left, lessThan(tabletGo.left));
     });
+
+    testWidgets('every step keeps its CTA on screen at 320 dp and 200 % text', (
+      tester,
+    ) async {
+      for (final step in _steps) {
+        await _pump(tester, step.screen(), width: 320, height: 640, textScale: 2);
+
+        expect(tester.takeException(), isNull, reason: step.name);
+        final cta = tester.getRect(find.byKey(step.primaryKey));
+        expect(
+          cta.bottom,
+          lessThanOrEqualTo(640),
+          reason: '${step.name} primary action scrolled off screen',
+        );
+      }
+    });
   });
 
   group('header', () {
+    testWidgets('every tour step shares the one step scaffold', (tester) async {
+      for (final step in _steps) {
+        await _pump(tester, step.screen());
+
+        expect(
+          find.byType(OnboardingStepScaffold),
+          findsOneWidget,
+          reason: '${step.name} must render through OnboardingStepScaffold',
+        );
+      }
+    });
+
     testWidgets('welcome is the first step: no back, no close', (tester) async {
       await _pump(tester, _steps[0].screen());
 

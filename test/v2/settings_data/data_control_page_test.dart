@@ -18,15 +18,6 @@ Widget _narrowApp(Widget home, {required ThemeData theme}) => MaterialApp(
   home: home,
 );
 
-Future<void> _reveal(WidgetTester tester, Finder finder) async {
-  await tester.scrollUntilVisible(
-    finder,
-    200,
-    scrollable: find.byType(Scrollable).first,
-  );
-  await tester.pumpAndSettle();
-}
-
 void _useNarrowPhone(WidgetTester tester) {
   tester.view.physicalSize = const Size(320, 640);
   tester.view.devicePixelRatio = 1.0;
@@ -37,12 +28,12 @@ V2DataControlPageData _data({
   bool hasData = true,
   VoidCallback? onExportImport,
   VoidCallback? onExport,
+  V2ExportFileWriter? onSaveExport,
   VoidCallback? onChooseImport,
-  VoidCallback? onPermissions,
-  ValueChanged<bool>? onCrashReportsChanged,
-  VoidCallback? onStorage,
+  VoidCallback? onImport,
   VoidCallback? onDeleteData,
-  VoidCallback? onResetMemory,
+  VoidCallback? onClearCache,
+  Future<int> Function()? onClearCacheAndReport,
   VoidCallback? onRetry,
   String? errorMessage,
   bool loading = false,
@@ -53,28 +44,25 @@ V2DataControlPageData _data({
     errorMessage: errorMessage,
     onExportImport: onExportImport,
     onExport: onExport,
+    onSaveExport: onSaveExport,
     onChooseImport: onChooseImport,
-    onPermissions: onPermissions,
-    onCrashReportsChanged: onCrashReportsChanged,
-    onStorage: onStorage,
+    onImport: onImport,
     onDeleteData: onDeleteData,
-    onResetMemory: onResetMemory,
+    onClearCache: onClearCache,
+    onClearCacheAndReport: onClearCacheAndReport,
     onRetry: onRetry,
   );
 }
 
 void main() {
-  testWidgets('renders one header and action-only sections', (tester) async {
+  testWidgets('renders one header and the four rows', (tester) async {
     await tester.pumpWidget(
       _app(
         DataControlPage(
           data: _data(
             onExport: () {},
             onChooseImport: () {},
-            onStorage: () {},
-            onPermissions: () {},
             onDeleteData: () {},
-            onResetMemory: () {},
           ),
         ),
         theme: OTheme.light(),
@@ -83,18 +71,24 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Data control'), findsOneWidget);
-    expect(find.text('BACKUP'), findsOneWidget);
-    expect(find.text('ACCOUNT'), findsOneWidget);
-    expect(find.text('DANGER'), findsOneWidget);
-    expect(find.text('Save to device'), findsOneWidget);
-    expect(find.text('Choose backup'), findsOneWidget);
-    expect(find.text('Storage'), findsOneWidget);
-    expect(find.text('Permissions'), findsOneWidget);
-    expect(find.text('Crash reports'), findsOneWidget);
-    expect(find.text('Delete your data'), findsOneWidget);
-    expect(find.text('Reset memory'), findsOneWidget);
-    await _reveal(tester, find.text('Export data'));
-    expect(find.text('Export data'), findsOneWidget);
+    expect(find.text('Export backup'), findsOneWidget);
+    expect(find.text('Import'), findsOneWidget);
+    expect(find.text('Clear cache'), findsOneWidget);
+    expect(find.text('Delete data'), findsOneWidget);
+
+    // The section cards, the account rows and the bottom button are gone.
+    expect(find.text('BACKUP'), findsNothing);
+    expect(find.text('ACCOUNT'), findsNothing);
+    expect(find.text('DANGER'), findsNothing);
+    expect(find.text('Save to device'), findsNothing);
+    expect(find.text('Choose backup'), findsNothing);
+    expect(find.text('Storage'), findsNothing);
+    expect(find.text('Permissions'), findsNothing);
+    expect(find.text('Crash reports'), findsNothing);
+    expect(find.text('Reset memory'), findsNothing);
+    expect(find.text('Delete your data'), findsNothing);
+    expect(find.text('Export data'), findsNothing);
+    expect(find.byType(Switch), findsNothing);
   });
 
   testWidgets('deleted explanatory blocks are gone', (tester) async {
@@ -112,7 +106,59 @@ void main() {
     expect(find.textContaining('Encrypted'), findsNothing);
   });
 
-  testWidgets('choose backup runs the import callback', (tester) async {
+  testWidgets('export backup runs the export callback', (tester) async {
+    var exports = 0;
+    await tester.pumpWidget(
+      _app(
+        DataControlPage(data: _data(onExport: () => exports++)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Export backup'));
+    expect(exports, 1);
+  });
+
+  testWidgets('a host that only saves files still gets an export row', (
+    tester,
+  ) async {
+    var saves = 0;
+    await tester.pumpWidget(
+      _app(
+        DataControlPage(
+          data: _data(onSaveExport: () async {
+            saves++;
+            return null;
+          }),
+        ),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Export backup'));
+    await tester.pumpAndSettle();
+    expect(saves, 1);
+  });
+
+  testWidgets('without an export path the export row is omitted', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(DataControlPage(data: _data()), theme: OTheme.light()),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Export backup'), findsNothing);
+    expect(find.text('Import'), findsNothing);
+    // The cache row always works: the page owns the temp-directory clear.
+    expect(find.text('Clear cache'), findsOneWidget);
+    // A delete row without a deletion service is removed, not disabled.
+    expect(find.text('Delete data'), findsNothing);
+  });
+
+  testWidgets('import runs the choose callback', (tester) async {
     var picked = 0;
     await tester.pumpWidget(
       _app(
@@ -122,48 +168,40 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Choose backup'));
+    await tester.tap(find.text('Import'));
     expect(picked, 1);
   });
 
-  testWidgets('storage and permissions rows run their callbacks', (
-    tester,
-  ) async {
-    var storage = 0;
-    var permissions = 0;
+  testWidgets('clear cache fires the injected callback', (tester) async {
+    var cleared = 0;
     await tester.pumpWidget(
       _app(
-        DataControlPage(
-          data: _data(
-            onStorage: () => storage++,
-            onPermissions: () => permissions++,
-          ),
-        ),
+        DataControlPage(data: _data(onClearCache: () => cleared++)),
         theme: OTheme.light(),
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Storage'));
-    await tester.tap(find.text('Permissions'));
-    expect(storage, 1);
-    expect(permissions, 1);
+    await tester.tap(find.text('Clear cache'));
+    await tester.pump();
+    expect(cleared, 1);
+    expect(find.text('Cache cleared.'), findsOneWidget);
   });
 
-  testWidgets('crash reports switch reports the new value', (tester) async {
-    bool? next;
+  testWidgets('clear cache reports the bytes actually freed', (tester) async {
     await tester.pumpWidget(
       _app(
         DataControlPage(
-          data: _data(onCrashReportsChanged: (value) => next = value),
+          data: _data(onClearCacheAndReport: () async => 142 * 1024 * 1024),
         ),
         theme: OTheme.light(),
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byType(Switch));
-    expect(next, isFalse);
+    await tester.tap(find.text('Clear cache'));
+    await tester.pump();
+    expect(find.text('Freed 142 MB of cache.'), findsOneWidget);
   });
 
   testWidgets('delete asks for confirmation before running', (tester) async {
@@ -176,8 +214,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await _reveal(tester, find.text('Delete your data'));
-    await tester.tap(find.text('Delete your data'));
+    await tester.tap(find.text('Delete data'));
     await tester.pumpAndSettle();
 
     expect(find.text('Delete all your data?'), findsOneWidget);
@@ -188,26 +225,36 @@ void main() {
     expect(deleted, 0);
   });
 
-  testWidgets('reset memory confirms, then runs the callback', (tester) async {
-    var resets = 0;
+  testWidgets('the checked backup keeps its import action under the row', (
+    tester,
+  ) async {
+    var imported = 0;
     await tester.pumpWidget(
       _app(
-        DataControlPage(data: _data(onResetMemory: () => resets++)),
+        DataControlPage(
+          data: V2DataControlPageData(
+            importValidation: const V2ImportValidation(
+              fileName: 'ovid-backup-2026-10-21.zip',
+              message: 'Ready to import: 12 MB · 42 chats · 860 messages.',
+              valid: true,
+              planQuotaLabel: 'Needs 12 MB · 1.8 GB free on your plan.',
+            ),
+            onImport: () => imported++,
+            onChooseImport: () {},
+          ),
+        ),
         theme: OTheme.light(),
       ),
     );
     await tester.pumpAndSettle();
 
-    await _reveal(tester, find.text('Reset memory'));
-    await tester.tap(find.text('Reset memory'));
-    await tester.pumpAndSettle();
+    expect(find.text('ovid-backup-2026-10-21.zip'), findsOneWidget);
+    // The Import row and the import action share the label.
+    expect(find.text('Import'), findsNWidgets(2));
 
-    expect(find.text('Reset all memory?'), findsOneWidget);
-    expect(resets, 0);
-
-    await tester.tap(find.byKey(const ValueKey('reset-memory-confirm')));
-    await tester.pumpAndSettle();
-    expect(resets, 1);
+    await tester.tap(find.byType(OButton));
+    await tester.pump();
+    expect(imported, 1);
   });
 
   testWidgets('loading state renders skeletons', (tester) async {
@@ -217,7 +264,7 @@ void main() {
     await tester.pump();
 
     expect(find.byType(OSkeletonList), findsOneWidget);
-    expect(find.text('Save to device'), findsNothing);
+    expect(find.text('Export backup'), findsNothing);
   });
 
   testWidgets('error state offers a retry', (tester) async {
@@ -266,10 +313,7 @@ void main() {
             data: _data(
               onExport: () {},
               onChooseImport: () {},
-              onStorage: () {},
-              onPermissions: () {},
               onDeleteData: () {},
-              onResetMemory: () {},
             ),
           ),
           theme: theme,
@@ -305,8 +349,8 @@ void main() {
     // The action used to sit beside the long file name and overflowed the
     // row by 11 px at 200 % text; it now sits below the text.
     expect(tester.takeException(), isNull);
-    await _reveal(tester, find.text('Import'));
-    expect(find.text('Import'), findsOneWidget);
+    expect(find.byType(OButton), findsOneWidget);
+    expect(find.text('Import'), findsNWidgets(2));
   });
 
   testWidgets('content is centred and capped at 600 dp', (tester) async {
@@ -316,16 +360,16 @@ void main() {
 
     await tester.pumpWidget(
       _app(
-        DataControlPage(data: _data(onExport: () {})),
+        DataControlPage(data: _data(onExport: () {}, onDeleteData: () {})),
         theme: OTheme.light(),
       ),
     );
     await tester.pumpAndSettle();
 
-    final card = tester.getRect(find.byType(OCard).first);
-    expect(card.width, lessThanOrEqualTo(640));
-    expect(card.left, greaterThan(0));
-    expect(card.right, lessThan(600));
+    final row = tester.getRect(find.byKey(const ValueKey('export-backup-row')));
+    expect(row.width, lessThanOrEqualTo(640));
+    expect(row.left, greaterThan(0));
+    expect(row.right, lessThan(600));
   });
 
   testWidgets('content is centred and capped at 900 dp', (tester) async {
@@ -335,15 +379,15 @@ void main() {
 
     await tester.pumpWidget(
       _app(
-        DataControlPage(data: _data(onExport: () {})),
+        DataControlPage(data: _data(onExport: () {}, onDeleteData: () {})),
         theme: OTheme.light(),
       ),
     );
     await tester.pumpAndSettle();
 
-    final card = tester.getRect(find.byType(OCard).first);
-    expect(card.width, lessThanOrEqualTo(720));
-    expect(card.left, greaterThan(0));
-    expect(card.right, lessThan(900));
+    final row = tester.getRect(find.byKey(const ValueKey('export-backup-row')));
+    expect(row.width, lessThanOrEqualTo(720));
+    expect(row.left, greaterThan(0));
+    expect(row.right, lessThan(900));
   });
 }

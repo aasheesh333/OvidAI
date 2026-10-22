@@ -871,13 +871,15 @@ void main() {
       await tester.pumpWidget(_app(OTheme.light(), _hubData(taps: <String>[])));
       await tester.pumpAndSettle();
 
-      final card = tester.getRect(find.byType(OCard).first);
+      final row = tester.getRect(
+        find.byKey(const ValueKey('settings-row-plan_billing')),
+      );
       final limit = width >= 900 ? 720.0 : 640.0;
 
-      expect(card.width, lessThanOrEqualTo(limit));
-      expect(card.width, lessThan(width), reason: 'rows must not stretch');
+      expect(row.width, lessThanOrEqualTo(limit));
+      expect(row.width, lessThan(width), reason: 'rows must not stretch');
       expect(
-        card.center.dx,
+        row.center.dx,
         moreOrLessEquals(width / 2, epsilon: 1),
         reason: 'content must be centred, not left aligned',
       );

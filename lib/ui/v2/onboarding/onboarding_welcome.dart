@@ -1,28 +1,19 @@
 import 'package:flutter/material.dart';
 
-import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'step_progress.dart';
 
 // TODO(l10n): move welcome copy to the ARB files.
 
-@immutable
-class V2OnboardingWelcomeData {
-  const V2OnboardingWelcomeData({this.language = 'English'});
-
-  final String language;
-}
-
-/// First step of the tour: the identity, the language the app will speak, and
-/// the one action that starts setup. No back arrow (there is nothing before
-/// it); close only when the host can dismiss the whole flow.
+/// First step of the tour: the identity, one line about what Ovid does, and
+/// the one action that starts setup. No feature bullets, no cards, no second
+/// action — a returning user reaches sign-in two steps later, so a shortcut
+/// here would only be a second thing to read. No back arrow (there is nothing
+/// before it); close only when the host can dismiss the whole flow.
 class OnboardingWelcomePage extends StatelessWidget {
   const OnboardingWelcomePage({
     super.key,
-    this.data = const V2OnboardingWelcomeData(),
     this.onGetStarted,
-    this.onSignIn,
-    this.onLanguageTap,
     this.onClose,
     this.busy = false,
     this.error,
@@ -33,10 +24,7 @@ class OnboardingWelcomePage extends StatelessWidget {
     ),
   });
 
-  final V2OnboardingWelcomeData data;
   final VoidCallback? onGetStarted;
-  final VoidCallback? onSignIn;
-  final VoidCallback? onLanguageTap;
   final VoidCallback? onClose;
 
   /// True while the gate is persisting the first-run choice. The primary is
@@ -54,34 +42,15 @@ class OnboardingWelcomePage extends StatelessWidget {
     return OnboardingStepScaffold(
       step: step,
       title: 'Welcome',
-      subtitle: 'Your always-on personal agent.',
       onClose: onClose,
       primaryKey: const Key('welcome-get-started'),
       primaryLabel: 'Get started',
       onPrimary: busy ? null : onGetStarted,
       primaryLoading: busy,
       error: error,
-      secondaryActions: [
-        OTextAction(
-          key: const Key('welcome-sign-in'),
-          label: 'Sign in',
-          onPressed: busy ? null : onSignIn,
-        ),
-      ],
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: OnboardingLanguagePill(
-              key: const Key('welcome-language'),
-              label: data.language,
-              onTap: busy ? null : onLanguageTap,
-            ),
-          ),
-          const SizedBox(height: OSpace.xxl),
-          const Center(child: OnboardingMark(size: 96)),
-        ],
+      child: const Padding(
+        padding: EdgeInsets.only(top: OSpace.xxl),
+        child: OnboardingIdentity(line: 'Ovid builds, ships and answers.'),
       ),
     );
   }

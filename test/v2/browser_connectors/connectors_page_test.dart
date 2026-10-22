@@ -213,7 +213,7 @@ void main() {
     );
 
     await _openFilter(tester);
-    await tester.tap(find.text('MCP'));
+    await tester.tap(find.text('Add-ons'));
     await tester.pumpAndSettle();
 
     expect(find.text('Context7'), findsOneWidget);

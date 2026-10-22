@@ -10,9 +10,6 @@ Future<void> _pump(
   bool dark = false,
   bool settle = true,
   V2SignInData data = const V2SignInData(),
-  ValueChanged<String>? onEmailChanged,
-  ValueChanged<String>? onPasswordChanged,
-  void Function(String email, String password)? onSubmit,
   VoidCallback? onGoogle,
   VoidCallback? onPhone,
   V2PhoneAuthData? phoneData,
@@ -22,12 +19,6 @@ Future<void> _pump(
   ValueChanged<String>? onVerifyPhoneCode,
   VoidCallback? onResendPhoneCode,
   VoidCallback? onChangePhoneNumber,
-  VoidCallback? onApple,
-  VoidCallback? onForgotPassword,
-  VoidCallback? onCreateAccount,
-  VoidCallback? onLanguageTap,
-  VoidCallback? onTerms,
-  VoidCallback? onPrivacy,
   VoidCallback? onRetry,
   double width = 400,
   double textScale = 1,
@@ -47,9 +38,6 @@ Future<void> _pump(
       ),
       home: SignInPage(
         data: data,
-        onEmailChanged: onEmailChanged,
-        onPasswordChanged: onPasswordChanged,
-        onSubmit: onSubmit,
         onGoogle: onGoogle,
         onPhone: onPhone,
         phoneData: phoneData,
@@ -59,12 +47,6 @@ Future<void> _pump(
         onVerifyPhoneCode: onVerifyPhoneCode,
         onResendPhoneCode: onResendPhoneCode,
         onChangePhoneNumber: onChangePhoneNumber,
-        onApple: onApple,
-        onForgotPassword: onForgotPassword,
-        onCreateAccount: onCreateAccount,
-        onLanguageTap: onLanguageTap,
-        onTerms: onTerms,
-        onPrivacy: onPrivacy,
         onRetry: onRetry,
       ),
     ),
@@ -77,118 +59,92 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('sign in renders all providers and the form in light', (
+  testWidgets('sign in offers exactly Google and phone in light', (
     tester,
   ) async {
-    await _pump(tester, onApple: () {});
+    await _pump(tester, onGoogle: () {}, onPhone: () {});
 
+    // The shared identity opens the step, then the two providers.
+    expect(find.text('Ovid Si'), findsOneWidget);
+    expect(find.bySemanticsLabel('Ovid Si logo'), findsOneWidget);
     expect(find.text('Welcome back'), findsOneWidget);
     expect(find.text('Continue with Google'), findsOneWidget);
-    expect(find.text('Continue with Apple'), findsOneWidget);
-    expect(find.text('Email address'), findsOneWidget);
-    expect(find.text('Password'), findsOneWidget);
-    expect(find.text('Forgot password?'), findsOneWidget);
-    expect(find.text('Create an account'), findsOneWidget);
-    expect(find.text('English'), findsOneWidget);
+    expect(find.text('Continue with phone'), findsOneWidget);
     expect(find.byKey(const Key('sign-in-submit')), findsOneWidget);
   });
 
-  testWidgets('an unwired Apple provider is not offered at all', (
+  testWidgets('the step renders no email form and no Apple control', (
     tester,
   ) async {
-    await _pump(tester);
+    await _pump(tester, onGoogle: () {}, onPhone: () {});
 
-    expect(find.text('Continue with Google'), findsOneWidget);
-    expect(find.text('Continue with phone'), findsOneWidget);
-    // No dead button for a provider this build cannot complete.
+    // Email/password has no backend, so there is no form to fill in: a field
+    // that cannot submit is a dead control (MINIMAL_UI_CONTRACT §8).
+    expect(find.byType(TextField), findsNothing);
+    expect(find.text('Email address'), findsNothing);
+    expect(find.text('Password'), findsNothing);
+    expect(find.text('Forgot password?'), findsNothing);
+    expect(find.text('Create an account'), findsNothing);
+    expect(find.byKey(const Key('sign-in-email')), findsNothing);
+    expect(find.byKey(const Key('sign-in-password')), findsNothing);
+    // Apple has no handler anywhere in the app, so it is never offered.
     expect(find.text('Continue with Apple'), findsNothing);
   });
 
+  testWidgets('Google is the filled primary and phone is outlined', (
+    tester,
+  ) async {
+    await _pump(tester, onGoogle: () {}, onPhone: () {});
+
+    final google = tester.widget<OButton>(
+      find.byKey(const Key('sign-in-submit')),
+    );
+    expect(google.variant, OButtonVariant.primary);
+    final phone = tester.widget<OButton>(
+      find.byKey(const Key('sign-in-phone')),
+    );
+    expect(phone.variant, OButtonVariant.secondary);
+  });
+
   testWidgets('sign in renders correctly in dark', (tester) async {
-    await _pump(tester, dark: true, onApple: () {});
+    await _pump(tester, dark: true, onGoogle: () {}, onPhone: () {});
 
     expect(find.text('Welcome back'), findsOneWidget);
     expect(find.text('Continue with Google'), findsOneWidget);
-    expect(find.text('Continue with Apple'), findsOneWidget);
+    expect(find.text('Continue with phone'), findsOneWidget);
     expect(find.byKey(const Key('sign-in-submit')), findsOneWidget);
   });
 
-  testWidgets('sign in submits the typed email and password', (tester) async {
-    String? submittedEmail;
-    String? submittedPassword;
-    await _pump(
-      tester,
-      onSubmit: (email, password) {
-        submittedEmail = email;
-        submittedPassword = password;
-      },
-    );
+  testWidgets('Google calls back', (tester) async {
+    var googleTaps = 0;
+    await _pump(tester, onGoogle: () => googleTaps++, onPhone: () {});
 
-    await tester.enterText(
-      find.byKey(const Key('sign-in-email')),
-      'ada@example.com',
-    );
-    await tester.enterText(
-      find.byKey(const Key('sign-in-password')),
-      'secret-pass',
-    );
-    await tester.ensureVisible(find.byKey(const Key('sign-in-submit')));
-    await tester.tap(find.byKey(const Key('sign-in-submit')));
+    await tester.tap(find.text('Continue with Google'));
     await tester.pump();
 
-    expect(submittedEmail, 'ada@example.com');
-    expect(submittedPassword, 'secret-pass');
+    expect(googleTaps, 1);
   });
 
-  testWidgets('password visibility toggles', (tester) async {
-    await _pump(tester);
-
-    final passwordField = find.byKey(const Key('sign-in-password'));
-    expect(tester.widget<TextField>(passwordField).obscureText, isTrue);
-
-    await tester.ensureVisible(
-      find.byKey(const Key('sign-in-password-toggle')),
-    );
-    await tester.tap(find.byKey(const Key('sign-in-password-toggle')));
-    await tester.pump();
-
-    expect(tester.widget<TextField>(passwordField).obscureText, isFalse);
-    expect(find.byTooltip('Hide password'), findsOneWidget);
-  });
-
-  testWidgets('language selector and social providers call back', (
+  testWidgets('loading disables both actions and shows a spinner', (
     tester,
   ) async {
-    var languageTaps = 0;
-    var googleTaps = 0;
-    var appleTaps = 0;
     await _pump(
       tester,
-      onLanguageTap: () => languageTaps++,
-      onGoogle: () => googleTaps++,
-      onApple: () => appleTaps++,
+      data: const V2SignInData(loading: true),
+      onGoogle: () {},
+      onPhone: () {},
+      settle: false,
     );
-
-    await tester.tap(find.byKey(const Key('sign-in-language')));
-    await tester.tap(find.text('Continue with Google'));
-    await tester.tap(find.text('Continue with Apple'));
-    await tester.pump();
-
-    expect(languageTaps, 1);
-    expect(googleTaps, 1);
-    expect(appleTaps, 1);
-  });
-
-  testWidgets('loading disables the form and shows a spinner', (tester) async {
-    await _pump(tester, data: const V2SignInData(loading: true), settle: false);
 
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    final submit = tester.widget<FilledButton>(find.byType(FilledButton));
-    expect(submit.onPressed, isNull);
-    final email = tester.widget<TextField>(
-      find.byKey(const Key('sign-in-email')),
+    final google = tester.widget<OButton>(
+      find.byKey(const Key('sign-in-submit')),
     );
-    expect(email.enabled, isFalse);
+    expect(google.onPressed, isNull);
+    final phone = tester.widget<OButton>(
+      find.byKey(const Key('sign-in-phone')),
+    );
+    expect(phone.onPressed, isNull);
   });
 
   testWidgets('error state explains the problem and retries', (tester) async {
@@ -196,13 +152,13 @@ void main() {
     await _pump(
       tester,
       data: const V2SignInData(
-        error: 'We could not sign you in. Check your email and password.',
+        error: 'Sign-in failed. Check your connection and retry.',
       ),
       onRetry: () => retries++,
     );
 
     expect(
-      find.text('We could not sign you in. Check your email and password.'),
+      find.text('Sign-in failed. Check your connection and retry.'),
       findsOneWidget,
     );
     await tester.ensureVisible(find.text('Try again'));
@@ -217,43 +173,35 @@ void main() {
   ) async {
     await _pump(
       tester,
-      data: const V2SignInData(error: 'Use Google or phone to sign in.'),
+      data: const V2SignInData(error: 'Sign-in is unavailable right now.'),
     );
 
-    expect(find.text('Use Google or phone to sign in.'), findsOneWidget);
+    expect(find.text('Sign-in is unavailable right now.'), findsOneWidget);
     expect(find.text('Try again'), findsNothing);
   });
 
-  testWidgets('legal links only look like links when they open something', (
+  testWidgets('legal links live in settings, not on this step', (
     tester,
   ) async {
-    var terms = 0;
-    var privacy = 0;
-    await _pump(tester, onTerms: () => terms++, onPrivacy: () => privacy++);
+    await _pump(tester, onGoogle: () {}, onPhone: () {});
 
-    await tester.ensureVisible(find.text('Terms'));
-    await tester.tap(find.text('Terms'));
-    await tester.ensureVisible(find.text('Privacy Policy'));
-    await tester.tap(find.text('Privacy Policy'));
-    await tester.pump();
-
-    expect(terms, 1);
-    expect(privacy, 1);
-  });
-
-  testWidgets('unwired legal labels are plain text, not dead links', (
-    tester,
-  ) async {
-    await _pump(tester);
-
-    final terms = tester.widget<Text>(find.text('Terms'));
-    expect(terms.style?.decoration, isNot(TextDecoration.underline));
+    // The step is wordmark, one line and two providers; the documents are
+    // reachable from Settings → About instead of a fifth body element here.
+    expect(find.text('Terms'), findsNothing);
+    expect(find.text('Privacy Policy'), findsNothing);
+    expect(find.textContaining('By signing in'), findsNothing);
   });
 
   testWidgets('narrow phone at 200% text does not overflow in light', (
     tester,
   ) async {
-    await _pump(tester, width: 320, textScale: 2);
+    await _pump(
+      tester,
+      width: 320,
+      textScale: 2,
+      onGoogle: () {},
+      onPhone: () {},
+    );
 
     expect(tester.takeException(), isNull);
     expect(find.text('Welcome back'), findsOneWidget);
@@ -269,7 +217,7 @@ void main() {
       width: 320,
       textScale: 2,
       data: const V2SignInData(
-        error: 'We could not sign you in. Check your email and password.',
+        error: 'Sign-in failed. Check your connection and retry.',
       ),
       onRetry: () {},
     );
@@ -279,75 +227,39 @@ void main() {
   });
 
   testWidgets('reduced motion still shows every control', (tester) async {
-    await _pump(tester, disableAnimations: true);
+    await _pump(
+      tester,
+      disableAnimations: true,
+      onGoogle: () {},
+      onPhone: () {},
+    );
 
     expect(find.text('Welcome back'), findsOneWidget);
     expect(find.text('Continue with Google'), findsOneWidget);
     expect(find.byKey(const Key('sign-in-submit')), findsOneWidget);
-    expect(find.byKey(const Key('sign-in-language')), findsOneWidget);
+    expect(find.byKey(const Key('sign-in-phone')), findsOneWidget);
   });
 
   testWidgets('disabled controls are announced while loading', (tester) async {
     final handle = tester.ensureSemantics();
-    await _pump(tester, data: const V2SignInData(loading: true), settle: false);
+    await _pump(
+      tester,
+      data: const V2SignInData(loading: true),
+      onGoogle: () {},
+      onPhone: () {},
+      settle: false,
+    );
 
     expect(
       tester.getSemantics(find.byKey(const Key('sign-in-submit'))),
       matchesSemantics(
-        label: 'Continue, loading',
+        label: 'Continue with Google, loading',
         isButton: true,
         hasEnabledState: true,
         isEnabled: false,
         hasTapAction: false,
       ),
     );
-    handle.dispose();
-  });
-
-  testWidgets(
-    'language selector is labelled and reports disabled while loading',
-    (tester) async {
-      final handle = tester.ensureSemantics();
-      await _pump(
-        tester,
-        data: const V2SignInData(loading: true),
-        settle: false,
-      );
-
-      expect(
-        tester.getSemantics(find.byKey(const Key('sign-in-language'))),
-        matchesSemantics(
-          label: 'Language, English',
-          isButton: true,
-          hasEnabledState: true,
-          isEnabled: false,
-          hasTapAction: false,
-        ),
-      );
-      handle.dispose();
-    },
-  );
-
-  testWidgets('a long language name does not overflow at 320 dp', (
-    tester,
-  ) async {
-    await _pump(
-      tester,
-      width: 320,
-      textScale: 2,
-      data: const V2SignInData(language: 'ਪੰਜਾਬੀ (India)'),
-      onLanguageTap: () {},
-    );
-
-    expect(tester.takeException(), isNull);
-    expect(find.text('ਪੰਜਾਬੀ (India)'), findsOneWidget);
-  });
-
-  testWidgets('language selector announces the language once', (tester) async {
-    final handle = tester.ensureSemantics();
-    await _pump(tester, onLanguageTap: () {});
-
-    expect(find.bySemanticsLabel('Language, English'), findsOneWidget);
     handle.dispose();
   });
 

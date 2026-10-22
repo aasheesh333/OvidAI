@@ -1,16 +1,18 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
+import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the next wave.
 
-/// The bottom control bar of the live browser.
+/// The browser's floating control dock, shown over the bottom of the frame
+/// while the person holds the page.
 ///
-/// It is presentational and deliberately small: one row of icon controls, no
-/// captions, no status chips. The page passes only the callbacks this build
-/// can really perform, and the bar renders only those controls — a history
-/// arrow appears when there is history, never as a disabled placeholder.
+/// Icon-only: back / forward / keyboard / return control. The page passes
+/// only the callbacks this build can really perform, and the dock renders
+/// only those controls — a history arrow appears when there is history,
+/// never as a disabled placeholder.
 class BrowserControlBar extends StatelessWidget {
   const BrowserControlBar({
     super.key,
@@ -25,15 +27,16 @@ class BrowserControlBar extends StatelessWidget {
     this.onForward,
   });
 
-  /// Stable keys for integration tests and a11y probes.
+  /// Stable keys for integration tests and a11y probes. [takeControlKey]
+  /// marks whichever hand-over control is on screen: the pill while watching,
+  /// the return-control button while controlling.
   static const barKey = ValueKey<String>('browser-control-bar');
   static const takeControlKey = ValueKey<String>('browser-control-take');
   static const keyboardKey = ValueKey<String>('browser-control-keyboard');
   static const backKey = ValueKey<String>('browser-control-back');
   static const forwardKey = ValueKey<String>('browser-control-forward');
 
-  /// True while this person holds the page. The hand-over control then
-  /// becomes "Return control".
+  /// True while this person holds the page. The dock is only mounted then.
   final bool controlling;
 
   final bool keyboard;
@@ -77,45 +80,90 @@ class BrowserControlBar extends StatelessWidget {
           active: keyboard,
           onPressed: onToggleKeyboard,
         ),
-      if ((controlling ? onReleaseControl : onTakeControl) != null)
+      if (onReleaseControl != null)
         OIconButton(
           key: takeControlKey,
-          icon: controlling
-              ? Icons.front_hand_rounded
-              : Icons.front_hand_outlined,
-          semanticLabel: controlling ? 'Return control' : 'Take control',
-          tooltip: controlling ? 'Return control' : 'Take control',
-          active: controlling,
-          onPressed: controlling ? onReleaseControl : onTakeControl,
+          icon: Icons.front_hand_rounded,
+          semanticLabel: 'Return control',
+          tooltip: 'Return control',
+          active: true,
+          onPressed: onReleaseControl,
         ),
     ];
 
-    // Nothing this build can do: no bar at all, rather than an empty strip.
+    // Nothing this build can do: no dock at all, rather than an empty strip.
     if (children.isEmpty) return const SizedBox.shrink();
 
     return Semantics(
       key: barKey,
       container: true,
       label: 'Browser controls',
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: c.surface,
-          border: Border(top: BorderSide(color: c.hairline)),
-        ),
-        child: SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: OSpace.m,
-              vertical: OSpace.s,
-            ),
+      child: Container(
+        decoration: _overlayDecoration(c),
+        child: Row(mainAxisSize: MainAxisSize.min, children: children),
+      ),
+    );
+  }
+}
+
+/// The one pill over the picture: the way to take the page while watching.
+/// Once the server hands control over, the dock replaces it.
+class BrowserTakeControlPill extends StatelessWidget {
+  const BrowserTakeControlPill({super.key, this.onPressed});
+
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    // Chrome over the picture, not content: clamp the label the same way the
+    // address pill is clamped, so a 200 % text scale can never push the pill
+    // past the frame.
+    return MediaQuery.withClampedTextScaling(
+      maxScaleFactor: 1.3,
+      child: Tooltip(
+        message: 'Take control',
+        child: OPressable(
+          key: BrowserControlBar.takeControlKey,
+          onTap: onPressed,
+          semanticLabel: 'Take control',
+          child: Container(
+            height: OSpace.touch,
+            padding: const EdgeInsets.symmetric(horizontal: OSpace.l),
+            decoration: _overlayDecoration(c),
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: children,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.front_hand_outlined, size: 18, color: c.text),
+                const SizedBox(width: OSpace.s),
+                Text(
+                  'Take control',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.label.copyWith(color: c.text),
+                ),
+              ],
             ),
           ),
         ),
       ),
     );
   }
+}
+
+/// One shared floating-chrome treatment: a raised pill that stays readable
+/// over any page the stream paints.
+BoxDecoration _overlayDecoration(OColors c) {
+  return BoxDecoration(
+    color: c.surface,
+    borderRadius: BorderRadius.circular(ORadius.pill),
+    border: Border.all(color: c.hairlineStrong),
+    boxShadow: [
+      BoxShadow(
+        color: c.scrim.withValues(alpha: 0.16),
+        blurRadius: 16,
+        offset: const Offset(0, 4),
+      ),
+    ],
+  );
 }

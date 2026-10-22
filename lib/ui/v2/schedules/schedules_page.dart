@@ -210,13 +210,17 @@ class SchedulesPage extends StatelessWidget {
     final menuEnabled =
         onScheduleMenu != null ||
         onEdit != null ||
-        onToggle != null ||
         onRunNow != null ||
         onDelete != null;
     final prompt = schedule.description.trim().isEmpty
         ? schedule.title
         : schedule.description.trim();
     final nextRun = schedule.nextRunLabel(data.now ?? DateTime.now());
+    // One line carries the cadence and, when the schedule is on, its next run.
+    final meta = [
+      if (schedule.ruleLabel.isNotEmpty) schedule.ruleLabel,
+      ?nextRun,
+    ].join(' · ');
 
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.m),
@@ -275,24 +279,9 @@ class SchedulesPage extends StatelessWidget {
                   ),
               ],
             ),
-            if (schedule.ruleLabel.isNotEmpty) ...[
+            if (meta.isNotEmpty) ...[
               const SizedBox(height: OSpace.s),
-              _metaRow(
-                c,
-                Icons.schedule_rounded,
-                schedule.ruleLabel,
-                color: c.accent,
-              ),
-            ],
-            if (nextRun != null) ...[
-              const SizedBox(height: OSpace.xs),
-              _metaRow(
-                c,
-                Icons.update_rounded,
-                'Next $nextRun',
-                color: c.success,
-                strong: true,
-              ),
+              _metaRow(c, Icons.schedule_rounded, meta),
             ],
           ],
         ),
@@ -300,32 +289,25 @@ class SchedulesPage extends StatelessWidget {
     );
   }
 
-  Widget _metaRow(
-    OColors c,
-    IconData icon,
-    String text, {
-    Color? color,
-    bool strong = false,
-  }) {
+  Widget _metaRow(OColors c, IconData icon, String text) {
     return Row(
       children: [
-        Icon(icon, size: 16, color: color ?? c.textMuted),
+        Icon(icon, size: 16, color: c.textMuted),
         const SizedBox(width: OSpace.s),
         Expanded(
           child: Text(
             text,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: (strong ? OType.caption : OType.bodySm).copyWith(
-              color: color ?? c.text,
-              fontWeight: strong ? FontWeight.w600 : null,
-            ),
+            style: OType.bodySm.copyWith(color: c.textMuted),
           ),
         ),
       ],
     );
   }
 
+  /// The card menu holds edit, run-now and delete — the switch on the card
+  /// already owns pausing, and a row without a handler is never offered.
   Future<void> _openMenu(BuildContext context, V2ScheduleItem schedule) async {
     final override = onScheduleMenu;
     if (override != null) {
@@ -341,45 +323,28 @@ class SchedulesPage extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              OListRow(
-                icon: Icons.edit_outlined,
-                title: 'Edit',
-                showChevron: false,
-                enabled: onEdit != null,
-                onTap: onEdit == null
-                    ? null
-                    : () => Navigator.of(sheetContext).pop('edit'),
-              ),
-              OListRow(
-                icon: schedule.enabled
-                    ? Icons.pause_circle_outline_rounded
-                    : Icons.play_circle_outline_rounded,
-                title: schedule.enabled ? 'Pause' : 'Resume',
-                showChevron: false,
-                enabled: onToggle != null,
-                onTap: onToggle == null
-                    ? null
-                    : () => Navigator.of(sheetContext).pop('toggle'),
-              ),
-              OListRow(
-                icon: Icons.play_arrow_rounded,
-                title: 'Run now',
-                showChevron: false,
-                enabled: onRunNow != null,
-                onTap: onRunNow == null
-                    ? null
-                    : () => Navigator.of(sheetContext).pop('run'),
-              ),
-              OListRow(
-                icon: Icons.delete_outline_rounded,
-                title: 'Delete',
-                danger: true,
-                showChevron: false,
-                enabled: onDelete != null,
-                onTap: onDelete == null
-                    ? null
-                    : () => Navigator.of(sheetContext).pop('delete'),
-              ),
+              if (onEdit != null)
+                OListRow(
+                  icon: Icons.edit_outlined,
+                  title: 'Edit',
+                  showChevron: false,
+                  onTap: () => Navigator.of(sheetContext).pop('edit'),
+                ),
+              if (onRunNow != null)
+                OListRow(
+                  icon: Icons.play_arrow_rounded,
+                  title: 'Run now',
+                  showChevron: false,
+                  onTap: () => Navigator.of(sheetContext).pop('run'),
+                ),
+              if (onDelete != null)
+                OListRow(
+                  icon: Icons.delete_outline_rounded,
+                  title: 'Delete',
+                  danger: true,
+                  showChevron: false,
+                  onTap: () => Navigator.of(sheetContext).pop('delete'),
+                ),
             ],
           ),
         );
@@ -389,8 +354,6 @@ class SchedulesPage extends StatelessWidget {
     switch (action) {
       case 'edit':
         onEdit?.call(schedule);
-      case 'toggle':
-        onToggle?.call(schedule, !schedule.enabled);
       case 'run':
         onRunNow?.call(schedule);
       case 'delete':

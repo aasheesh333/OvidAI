@@ -4,6 +4,8 @@
 # app_en.arb is the template: add every new user-facing string there first,
 # with an @description for translators. Strings migrate file by file as each
 # screen is edited; test/l10n_literal_ratchet_test.dart stops new literals.
+# The UI ships English only; see lib/l10n/README.md for what that means for
+# the Hindi/Hinglish/Punjabi/Tamil pickers.
 arb-dir: lib/l10n
 template-arb-file: app_en.arb
 output-localization-file: app_localizations.dart

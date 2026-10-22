@@ -73,7 +73,7 @@ class TakeControlSheet extends StatelessWidget {
                   height: 4,
                   decoration: BoxDecoration(
                     color: c.hairlineStrong,
-                    borderRadius: BorderRadius.circular(2),
+                    borderRadius: BorderRadius.circular(ORadius.xs),
                   ),
                 ),
                 const SizedBox(height: OSpace.l),
@@ -139,7 +139,7 @@ class _PanelBody extends StatelessWidget {
         child: OLoadingState(label: 'Pausing Ovid…'),
       ),
       V2TakeControlStatus.ended => _Message(
-        title: 'Session ended',
+        title: 'Control ended',
         body: 'Ovid is watching this tab again.',
         action: onStayWatching == null
             ? null

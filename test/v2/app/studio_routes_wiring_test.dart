@@ -397,7 +397,12 @@ void main() {
     ) async {
       await _openWorkspace(tester, sessionId: 'studio-session');
 
-      await tester.tap(find.byKey(const Key('studio-open-preview')));
+      // The workspace keeps Changes/Preview off its chrome; the route opens
+      // through the host callback the same way the shell wires it.
+      final page = tester.widget<V2StudioWorkspacePage>(
+        find.byType(V2StudioWorkspacePage),
+      );
+      page.onPreview!();
       await tester.pumpAndSettle();
 
       expect(find.text('No preview running'), findsOneWidget);
@@ -410,7 +415,12 @@ void main() {
     testWidgets('the changes route stays honestly empty', (tester) async {
       await _openWorkspace(tester, sessionId: 'studio-session');
 
-      await tester.tap(find.byKey(const Key('studio-open-changes')));
+      // Changes lives on a pushed page opened through the host callback; the
+      // workspace body itself draws no control for it.
+      final page = tester.widget<V2StudioWorkspacePage>(
+        find.byType(V2StudioWorkspacePage),
+      );
+      page.onCommit!();
       await tester.pumpAndSettle();
 
       expect(find.text('No changes to review'), findsOneWidget);

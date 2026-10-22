@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
+import 'settings_rows.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
 
@@ -67,7 +68,7 @@ enum V2MemoryScope {
   all('All'),
   global('Global'),
   project('Project'),
-  session('Session');
+  session('Chat');
 
   const V2MemoryScope(this.label);
 
@@ -301,17 +302,7 @@ class _MemoryPageState extends State<MemoryPage> {
               ),
             )
           else
-            OCard(
-              padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (var index = 0; index < rows.length; index++) ...[
-                    if (index > 0) Divider(height: 1, color: c.hairline),
-                    _row(context, rows[index]),
-                  ],
-                ],
-              ),
-            ),
+            V2SettingsRowList(rows: [for (final row in rows) _row(context, row)]),
           if (data.onResetAll != null) ...[
             const SizedBox(height: OSpace.l),
             OButton(
@@ -366,7 +357,7 @@ class _MemoryPageState extends State<MemoryPage> {
 
   Widget _row(BuildContext context, _MemoryRow row) {
     final canForget = data.onForgetMemory != null;
-    return OListRow(
+    return V2SettingsRow(
       icon: row.icon,
       title: row.title,
       subtitle: row.subtitle,

@@ -35,11 +35,16 @@ class V2SidebarData {
     this.scheduleNextRun,
     this.status = V2SidebarStatus.content,
     this.errorMessage,
+    this.activeSessionId,
   });
 
   final String name;
   final String? initials;
   final String planLabel;
+
+  /// The session the user is currently reading. Its row carries a 2 dp
+  /// accent left edge instead of a filled pill.
+  final String? activeSessionId;
   final List<V2SidebarSession> pinned;
   final List<V2SidebarProject> projects;
   final List<V2SidebarSession> today;
@@ -77,25 +82,13 @@ class V2SidebarSession {
   final String timeLabel;
   final bool pinned;
 
-  /// Project the chat belongs to, when it has one.
+  /// Project the chat belongs to, when it has one. Never drawn on the row —
+  /// a row is title and time — but search matches on it so a project name
+  /// finds the chats filed under it.
   final String? projectName;
 
-  /// The one meta line a row is allowed. Time wins over project so a row never
-  /// stacks two lines of secondary text.
-  String? get rowMeta {
-    if (timeLabel.isNotEmpty) return timeLabel;
-    final project = projectName?.trim();
-    if (project != null && project.isNotEmpty) return project;
-    return null;
-  }
-
-  String get meta {
-    final parts = <String>[
-      if (modelLabel.isNotEmpty) modelLabel,
-      if (timeLabel.isNotEmpty) timeLabel,
-    ];
-    return parts.join(' · ');
-  }
+  /// The one meta line a row is allowed. Empty when there is no time.
+  String? get rowMeta => timeLabel.isEmpty ? null : timeLabel;
 }
 
 @immutable
@@ -121,20 +114,9 @@ class V2SidebarProject {
 
   String get chatLabel => chatCount == 1 ? '1 chat' : '$chatCount chats';
 
-  /// The single line under a project name: chat count, then memory when it
-  /// exists. Zero memory is omitted rather than spelled out.
-  String get metaLabel {
-    final chats = chatCount == 0 ? 'No chats' : chatLabel;
-    if (memoryFileCount <= 0) return chats;
-    final files = memoryFileCount == 1 ? '1 file' : '$memoryFileCount files';
-    return '$chats · $files';
-  }
-
-  String get memoryLabel => switch (memoryFileCount) {
-    0 => 'No memory',
-    1 => '1 file',
-    final count => '$count files',
-  };
+  /// The single line under a project name: the chat count. Memory stays on
+  /// the memory control's spoken label; the row draws nothing else.
+  String get countLabel => chatCount == 0 ? 'No chats' : chatLabel;
 
   String get memorySemanticLabel => switch (memoryFileCount) {
     0 => 'No memory files',
@@ -158,7 +140,6 @@ class Sidebar extends StatefulWidget {
     this.onProjectMemory,
     this.onSessionTap,
     this.onSessionActions,
-    this.onSessionDelete,
     this.onSessionLongPress,
     this.onSchedule,
     this.onArtifacts,
@@ -195,11 +176,10 @@ class Sidebar extends StatefulWidget {
   final ValueChanged<V2SidebarSession>? onSessionTap;
 
   /// Fired by the three-dot control and, when [onSessionLongPress] is null,
-  /// by a long press on the row.
+  /// by a long press on the row. Delete lives in that sheet, never on the
+  /// row itself.
   final ValueChanged<V2SidebarSession>? onSessionActions;
 
-  /// Fired by the inline delete control on a chat row.
-  final ValueChanged<V2SidebarSession>? onSessionDelete;
   final ValueChanged<V2SidebarSession>? onSessionLongPress;
   final VoidCallback? onSchedule;
   final VoidCallback? onArtifacts;
@@ -248,12 +228,12 @@ class _SidebarState extends State<Sidebar> {
                 children: [
                   _ProfileHeader(data: _w.data, onTap: _w.onProfile),
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: OSpace.m),
+                    padding: const EdgeInsets.symmetric(horizontal: OSpace.l),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         OButton(
-                          label: 'New session',
+                          label: 'New chat',
                           icon: Icons.add_rounded,
                           expand: true,
                           onPressed: _w.onNewChat,
@@ -283,7 +263,10 @@ class _SidebarState extends State<Sidebar> {
                       ],
                     ),
                   ),
-                  const SizedBox(height: OSpace.xs),
+                  const SizedBox(height: OSpace.m),
+                  // The fixed block ends with a hairline; the scrolling list
+                  // begins below it.
+                  Container(height: 1, color: c.hairline),
                   Expanded(child: _buildBody(context)),
                   SidebarFooter(
                     onSchedule: _w.onSchedule,
@@ -330,28 +313,31 @@ class _SidebarState extends State<Sidebar> {
     }
 
     final data = _w.data;
-    // Flatten sections into one lazy list: a drawer with hundreds of chats
-    // builds only the rows near the viewport instead of every row.
+    final sessions = <V2SidebarSession>[
+      ...data.pinned,
+      ...data.today,
+      ...data.yesterday,
+      ...data.earlier,
+    ];
+    // Two sections, one lazy list: a drawer with hundreds of chats builds
+    // only the rows near the viewport instead of every row.
     final entries = <_SidebarEntry>[
       if (data.projects.isNotEmpty)
         _SectionEntry(
           'Projects',
-          trailing: OIconButton(
-            icon: Icons.add_rounded,
-            semanticLabel: 'New project',
-            size: 18,
-            onPressed: _w.onNewProject,
-          ),
+          // Hidden, never disabled, when nothing can create a project.
+          trailing: _w.onNewProject == null
+              ? null
+              : OIconButton(
+                  icon: Icons.add_rounded,
+                  semanticLabel: 'New project',
+                  size: 18,
+                  onPressed: _w.onNewProject,
+                ),
         ),
       for (final project in data.projects) _ProjectEntry(project),
-      if (data.pinned.isNotEmpty) const _SectionEntry('Pinned'),
-      for (final session in data.pinned) _SessionEntry(session),
-      if (data.today.isNotEmpty) const _SectionEntry('Today'),
-      for (final session in data.today) _SessionEntry(session),
-      if (data.yesterday.isNotEmpty) const _SectionEntry('Yesterday'),
-      for (final session in data.yesterday) _SessionEntry(session),
-      if (data.earlier.isNotEmpty) const _SectionEntry('Earlier'),
-      for (final session in data.earlier) _SessionEntry(session),
+      if (sessions.isNotEmpty) const _SectionEntry('Sessions'),
+      for (final session in sessions) _SessionEntry(session),
     ];
     return OFadeSlide(child: _sidebarList(entries));
   }
@@ -362,13 +348,19 @@ class _SidebarState extends State<Sidebar> {
       // Keep a screenful of slack so a row that is one flick away still
       // exists for accessibility focus.
       scrollCacheExtent: const ScrollCacheExtent.pixels(1200),
-      padding: const EdgeInsets.fromLTRB(OSpace.m, 0, OSpace.m, OSpace.m),
+      padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.m),
       itemCount: entries.length,
-      itemBuilder: (context, index) => _entry(entries[index], index),
+      itemBuilder: (context, index) {
+        // A row ends with a hairline only when another row follows; a
+        // section label is separation enough.
+        final followedByRow =
+            index + 1 < entries.length && entries[index + 1] is! _SectionEntry;
+        return _entry(entries[index], index, showDivider: followedByRow);
+      },
     );
   }
 
-  Widget _entry(_SidebarEntry entry, int index) {
+  Widget _entry(_SidebarEntry entry, int index, {required bool showDivider}) {
     final row = switch (entry) {
       _SectionEntry e => OSectionHeader(
         label: e.label,
@@ -380,9 +372,10 @@ class _SidebarState extends State<Sidebar> {
           OSpace.xs,
         ),
       ),
-      _SessionEntry e => _sessionRow(e.session),
+      _SessionEntry e => _sessionRow(e.session, showDivider: showDivider),
       _ProjectEntry e => _ProjectRow(
         project: e.project,
+        showDivider: showDivider,
         onTap: _w.onProjectTap,
         onMemory: _w.onProjectMemory,
       ),
@@ -398,13 +391,15 @@ class _SidebarState extends State<Sidebar> {
     );
   }
 
-  Widget _sessionRow(V2SidebarSession session) => _SessionRow(
-    session: session,
-    onTap: _w.onSessionTap,
-    onActions: _w.onSessionActions,
-    onDelete: _w.onSessionDelete,
-    onLongPress: _w.onSessionLongPress,
-  );
+  Widget _sessionRow(V2SidebarSession session, {required bool showDivider}) =>
+      _SessionRow(
+        session: session,
+        active: session.id == _w.data.activeSessionId,
+        showDivider: showDivider,
+        onTap: _w.onSessionTap,
+        onActions: _w.onSessionActions,
+        onLongPress: _w.onSessionLongPress,
+      );
 
   /// Inline search: every chat and project in the drawer index, filtered by
   /// title (or the project a chat belongs to). No second screen — the drawer is
@@ -441,16 +436,12 @@ class _SidebarState extends State<Sidebar> {
       );
     }
 
+    // The same two labels as the unfiltered list: a count next to "Sessions"
+    // changes no decision, so the section carries none.
     final entries = <_SidebarEntry>[
-      if (sessions.isNotEmpty)
-        _SectionEntry(
-          sessions.length == 1 ? '1 chat' : '${sessions.length} chats',
-        ),
+      if (sessions.isNotEmpty) const _SectionEntry('Sessions'),
       for (final session in sessions) _SessionEntry(session),
-      if (projects.isNotEmpty)
-        _SectionEntry(
-          projects.length == 1 ? '1 project' : '${projects.length} projects',
-        ),
+      if (projects.isNotEmpty) const _SectionEntry('Projects'),
       for (final project in projects) _ProjectEntry(project),
     ];
     return OFadeSlide(child: _sidebarList(entries));
@@ -474,12 +465,14 @@ class _ProfileHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    // One row: avatar, name, plan pill. No presence dot (it never changes)
+    // and no chevron (the tap opens the profile, not a menu).
     return Padding(
       padding: const EdgeInsets.fromLTRB(
+        OSpace.l,
         OSpace.m,
-        OSpace.s,
+        OSpace.l,
         OSpace.m,
-        OSpace.xs,
       ),
       child: OPressable(
         onTap: onTap,
@@ -488,28 +481,10 @@ class _ProfileHeader extends StatelessWidget {
           constraints: const BoxConstraints(minHeight: OSpace.listRow),
           child: Row(
             children: [
-              Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  OAvatar(
-                    initials: data.initials ?? data.name,
-                    size: 40,
-                    semanticLabel: data.name,
-                  ),
-                  Positioned(
-                    right: 0,
-                    bottom: 0,
-                    child: Container(
-                      width: 10,
-                      height: 10,
-                      decoration: BoxDecoration(
-                        color: c.success,
-                        shape: BoxShape.circle,
-                        border: Border.all(color: c.surface, width: 2),
-                      ),
-                    ),
-                  ),
-                ],
+              OAvatar(
+                initials: data.initials ?? data.name,
+                size: 40,
+                semanticLabel: data.name,
               ),
               const SizedBox(width: OSpace.m),
               Expanded(
@@ -530,7 +505,6 @@ class _ProfileHeader extends StatelessWidget {
                   ),
                 ),
               ),
-              Icon(Icons.expand_more_rounded, size: 20, color: c.textMuted),
             ],
           ),
         ),
@@ -566,16 +540,23 @@ final class _ProjectEntry extends _SidebarEntry {
 class _SessionRow extends StatelessWidget {
   const _SessionRow({
     required this.session,
+    required this.active,
+    required this.showDivider,
     this.onTap,
     this.onActions,
-    this.onDelete,
     this.onLongPress,
   });
 
   final V2SidebarSession session;
+
+  /// The active chat is marked by a 2 dp accent edge on the left of the row,
+  /// not a filled pill: every other row keeps the bare surface.
+  final bool active;
+
+  /// Hairline under the row when another row follows it.
+  final bool showDivider;
   final ValueChanged<V2SidebarSession>? onTap;
   final ValueChanged<V2SidebarSession>? onActions;
-  final ValueChanged<V2SidebarSession>? onDelete;
   final ValueChanged<V2SidebarSession>? onLongPress;
 
   String get _semanticLabel {
@@ -592,32 +573,34 @@ class _SessionRow extends StatelessWidget {
     final c = OColors.of(context);
     final longPress = onLongPress ?? onActions;
     final meta = session.rowMeta;
-    return Row(
-      children: [
-        Expanded(
-          child: OPressable(
-            onTap: onTap == null ? null : () => onTap!(session),
-            onLongPress: longPress == null ? null : () => longPress(session),
-            semanticLabel: _semanticLabel,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: OSpace.listRow),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: OSpace.s,
-                  vertical: OSpace.s,
-                ),
-                child: Row(
-                  children: [
-                    if (session.pinned) ...[
-                      Icon(
-                        Icons.push_pin_rounded,
-                        key: ValueKey<String>('v2-session-pin-${session.id}'),
-                        size: 18,
-                        color: c.accent,
+    return Container(
+      decoration: showDivider
+          ? BoxDecoration(
+              border: Border(bottom: BorderSide(color: c.hairline)),
+            )
+          : null,
+      child: Stack(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: OPressable(
+                  onTap: onTap == null ? null : () => onTap!(session),
+                  onLongPress: longPress == null
+                      ? null
+                      : () => longPress(session),
+                  semanticLabel: _semanticLabel,
+                  selected: active,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(
+                      minHeight: OSpace.listRow,
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: OSpace.s,
+                        vertical: OSpace.s,
                       ),
-                      const SizedBox(width: OSpace.s),
-                    ],
-                    Expanded(
+                      // Title and time. Nothing else earns a place on the row.
                       child: ExcludeSemantics(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -632,8 +615,6 @@ class _SessionRow extends StatelessWidget {
                                 fontWeight: FontWeight.w500,
                               ),
                             ),
-                            // One meta line only: time when there is one,
-                            // otherwise the project. Never both.
                             if (meta != null) ...[
                               const SizedBox(height: OSpace.xxs),
                               Text(
@@ -649,34 +630,48 @@ class _SessionRow extends StatelessWidget {
                         ),
                       ),
                     ),
-                  ],
+                  ),
                 ),
               ),
+              OIconButton(
+                icon: Icons.more_vert_rounded,
+                semanticLabel: 'Chat options for ${session.title}',
+                size: 18,
+                onPressed: onActions == null ? null : () => onActions!(session),
+              ),
+            ],
+          ),
+          // The accent edge overlays the row's padding, so an active row and
+          // an idle row share the same text start.
+          if (active)
+            Positioned(
+              left: 0,
+              top: 0,
+              bottom: 0,
+              child: Container(
+                key: ValueKey<String>('v2-session-active-${session.id}'),
+                width: OSpace.xxs,
+                color: c.accent,
+              ),
             ),
-          ),
-        ),
-        if (onDelete != null)
-          OIconButton(
-            icon: Icons.delete_outline_rounded,
-            semanticLabel: 'Delete chat ${session.title}',
-            size: 18,
-            onPressed: () => onDelete!(session),
-          ),
-        OIconButton(
-          icon: Icons.more_vert_rounded,
-          semanticLabel: 'Chat options for ${session.title}',
-          size: 18,
-          onPressed: onActions == null ? null : () => onActions!(session),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
 
 class _ProjectRow extends StatelessWidget {
-  const _ProjectRow({required this.project, this.onTap, this.onMemory});
+  const _ProjectRow({
+    required this.project,
+    required this.showDivider,
+    this.onTap,
+    this.onMemory,
+  });
 
   final V2SidebarProject project;
+
+  /// Hairline under the row when another row follows it.
+  final bool showDivider;
   final ValueChanged<V2SidebarProject>? onTap;
   final ValueChanged<V2SidebarProject>? onMemory;
 
@@ -693,54 +688,61 @@ class _ProjectRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final canOpenMemory = onMemory != null || project.detail != null;
-    return OPressable(
-      onTap: onTap == null ? null : () => onTap!(project),
-      semanticLabel:
-          '${project.name}, ${project.chatLabel}, ${project.memorySemanticLabel}',
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: OSpace.listRow),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: OSpace.s,
-            vertical: OSpace.s,
-          ),
-          child: Row(
-            children: [
-              Icon(Icons.folder_rounded, size: 20, color: c.accent),
-              const SizedBox(width: OSpace.s),
-              Expanded(
-                child: ExcludeSemantics(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        project.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.bodySm.copyWith(
-                          color: c.text,
-                          fontWeight: FontWeight.w500,
+    // Name and chat count. The only trailing control is the one that opens
+    // project memory; there is no decorative folder glyph.
+    return Container(
+      decoration: showDivider
+          ? BoxDecoration(
+              border: Border(bottom: BorderSide(color: c.hairline)),
+            )
+          : null,
+      child: OPressable(
+        onTap: onTap == null ? null : () => onTap!(project),
+        semanticLabel:
+            '${project.name}, ${project.countLabel}'
+            '${canOpenMemory ? ', ${project.memorySemanticLabel}' : ''}',
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: OSpace.listRow),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: OSpace.s,
+              vertical: OSpace.s,
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: ExcludeSemantics(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          project.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.bodySm.copyWith(
+                            color: c.text,
+                            fontWeight: FontWeight.w500,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: OSpace.xxs),
-                      // One line: chats, plus memory when it exists.
-                      Text(
-                        project.metaLabel,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.caption.copyWith(color: c.textMuted),
-                      ),
-                    ],
+                        const SizedBox(height: OSpace.xxs),
+                        Text(
+                          project.countLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.caption.copyWith(color: c.textMuted),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-              if (canOpenMemory)
-                _ProjectMemoryButton(
-                  project: project,
-                  onTap: () => _openMemory(context),
-                ),
-            ],
+                if (canOpenMemory)
+                  _ProjectMemoryButton(
+                    project: project,
+                    onTap: () => _openMemory(context),
+                  ),
+              ],
+            ),
           ),
         ),
       ),

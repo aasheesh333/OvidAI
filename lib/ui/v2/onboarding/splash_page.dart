@@ -63,13 +63,16 @@ class SplashPage extends StatelessWidget {
             child: ConstrainedBox(
               constraints: BoxConstraints(minHeight: constraints.maxHeight),
               child: OContent(
+                maxWidth: onboardingContentMaxWidth(
+                  MediaQuery.sizeOf(context).width,
+                ),
                 child: ConstrainedBox(
                   constraints: BoxConstraints(minHeight: constraints.maxHeight),
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       const SizedBox.shrink(),
-                      const OFadeSlide(child: _SplashIdentity()),
+                      const OFadeSlide(child: OnboardingIdentity()),
                       Padding(
                         padding: const EdgeInsets.only(bottom: OSpace.m),
                         child: OFadeSlide(
@@ -92,33 +95,6 @@ class SplashPage extends StatelessWidget {
           );
         },
       ),
-    );
-  }
-}
-
-/// The identity block shared with the welcome step: mark plus wordmark, no
-/// tagline. A slogan would be a second thing to read before the app starts.
-class _SplashIdentity extends StatelessWidget {
-  const _SplashIdentity();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const OnboardingMark(size: 96),
-        const SizedBox(height: OSpace.xl),
-        Semantics(
-          container: true,
-          header: true,
-          child: Text(
-            'Ovid Si',
-            textAlign: TextAlign.center,
-            style: OType.display.copyWith(color: c.text),
-          ),
-        ),
-      ],
     );
   }
 }

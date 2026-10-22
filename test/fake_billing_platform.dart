@@ -14,6 +14,7 @@ class FakeBillingPlatform implements BillingPlatform {
   final controller = StreamController<List<PurchaseDetails>>.broadcast();
   final completed = <PurchaseDetails>[];
   final bought = <({String product, String accountId, String? replacing})>[];
+  final queriedIds = <String>[];
   int restores = 0;
   List<PurchaseDetails> owned = [];
 
@@ -24,21 +25,23 @@ class FakeBillingPlatform implements BillingPlatform {
   Stream<List<PurchaseDetails>> get purchaseStream => controller.stream;
 
   @override
-  Future<ProductDetailsResponse> queryProductDetails(Set<String> ids) async =>
-      ProductDetailsResponse(
-        productDetails: [
-          for (final id in ids)
-            ProductDetails(
-              id: id,
-              title: id,
-              description: id,
-              price: '€4.99',
-              rawPrice: 4.99,
-              currencyCode: 'EUR',
-            ),
-        ],
-        notFoundIDs: const [],
-      );
+  Future<ProductDetailsResponse> queryProductDetails(Set<String> ids) async {
+    queriedIds.addAll(ids);
+    return ProductDetailsResponse(
+      productDetails: [
+        for (final id in ids)
+          ProductDetails(
+            id: id,
+            title: id,
+            description: id,
+            price: '€4.99',
+            rawPrice: 4.99,
+            currencyCode: 'EUR',
+          ),
+      ],
+      notFoundIDs: const [],
+    );
+  }
 
   @override
   Future<bool> buy({

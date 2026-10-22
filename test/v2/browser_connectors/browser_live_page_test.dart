@@ -148,17 +148,17 @@ void main() {
     await emitState(tester);
     await emitFrame(tester);
 
-    // Tabs come from browser_state: two agent tabs, the active one first.
-    expect(find.text('Example page'), findsOneWidget);
-    expect(find.text('Docs'), findsOneWidget);
+    // Tabs come from browser_state: two agent tabs, icon-only.
+    expect(find.byKey(const ValueKey('v2-browser-tab-0')), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-1')), findsOneWidget);
     expect(find.text('https://example.test/page'), findsOneWidget);
 
     // The viewport paints the decoded frame through an ImageProvider.
     final images = tester.widgetList<Image>(find.byType(Image)).toList();
     expect(images, isNotEmpty);
     expect(images.first.image, isA<MemoryImage>());
-    expect(find.text('Live'), findsOneWidget);
-    // No stream size and no frame-rate explainer.
+    // The picture is the status: no Live pill, no stream size, no fps note.
+    expect(find.text('Live'), findsNothing);
     expect(find.text('1280×800'), findsNothing);
     expect(find.textContaining('fps'), findsNothing);
   });
@@ -185,7 +185,7 @@ void main() {
     await pumpPage(tester);
     await emitState(tester);
 
-    await tester.tap(find.text('Docs'));
+    await tester.tap(find.byKey(const ValueKey('v2-browser-tab-1')));
     await tester.pump();
 
     final switches = opsOf('browser_switch_tab');
@@ -221,8 +221,8 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    // Controlled state: the bar offers the way back and the pill stays Live.
-    expect(find.text('Live'), findsOneWidget);
+    // Controlled state: the dock offers the way back over the picture.
+    expect(find.byType(BrowserControlBar), findsOneWidget);
     expect(find.byTooltip('Return control'), findsOneWidget);
 
     // A tap on the picture reaches the page in CSS pixels.
@@ -336,9 +336,8 @@ void main() {
 
     await tester.pump(const Duration(seconds: 6));
 
-    // …then the honest waiting state, not a spinner forever.
-    expect(find.text('No picture yet'), findsWidgets);
-    expect(find.text('Waiting'), findsOneWidget);
+    // …then one centred line and a real retry, not a spinner forever.
+    expect(find.text('Waiting for the page…'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.text('Live'), findsNothing);
 
@@ -355,12 +354,11 @@ void main() {
     await pumpPage(tester);
     await emitState(tester);
     await emitFrame(tester);
-    expect(find.text('Live'), findsOneWidget);
+    expect(find.byType(Image), findsWidgets);
 
     await tester.pump(const Duration(seconds: 8));
 
     expect(find.text('Stream lost'), findsOneWidget);
-    expect(find.text('Lost'), findsOneWidget);
     expect(find.byKey(BrowserViewport.retryKey), findsOneWidget);
   });
 
@@ -412,7 +410,7 @@ void main() {
       await emitFrame(tester);
 
       expect(tester.takeException(), isNull);
-      expect(find.text('Live'), findsOneWidget);
+      expect(find.byType(Image), findsWidgets);
       expect(find.byTooltip('Return control'), findsOneWidget);
     });
   }

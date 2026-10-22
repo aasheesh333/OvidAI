@@ -101,7 +101,7 @@ void main() {
       ),
     );
 
-    expect(find.text('Session ended'), findsOneWidget);
+    expect(find.text('Control ended'), findsOneWidget);
     expect(find.text('Ovid is watching this tab again.'), findsOneWidget);
 
     await tester.tap(find.text('Back to browser'));

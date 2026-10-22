@@ -86,14 +86,19 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('renders one list of presets in light', (tester) async {
+  testWidgets('renders one list of preset rows in light', (tester) async {
     await _pump(tester, _data(onCreate: () {}));
 
     expect(find.text('Agent presets'), findsOneWidget);
     expect(find.text('General'), findsOneWidget);
     expect(find.text('Coder'), findsOneWidget);
     expect(find.text('Code reviewer'), findsOneWidget);
-    // The descriptive paragraph and the built-in/custom split are gone.
+    // The model is the row's value.
+    expect(find.text('Ovid Auto'), findsOneWidget);
+    expect(find.text('Ovid Pro'), findsNWidgets(2));
+    // The per-card descriptions and the built-in/custom split are gone.
+    expect(find.text('Balanced help for everyday tasks.'), findsNothing);
+    expect(find.text('Writes and reviews code with care.'), findsNothing);
     expect(
       find.text('Presets change how Ovid approaches a task.'),
       findsNothing,
@@ -247,9 +252,9 @@ void main() {
   testWidgets('centres the list at 600 dp', (tester) async {
     await _pump(tester, _data(), size: const Size(600, 1000));
 
-    final card = find.byType(OCard).first;
-    expect(tester.getSize(card).width, lessThanOrEqualTo(640));
-    expect(tester.getCenter(card).dx, closeTo(300, 0.5));
+    final row = find.byKey(const ValueKey<String>('preset-general'));
+    expect(tester.getSize(row).width, lessThanOrEqualTo(640));
+    expect(tester.getCenter(row).dx, closeTo(300, 0.5));
   });
 
   testWidgets('reduced motion still shows every preset', (tester) async {
@@ -271,15 +276,14 @@ void main() {
     expect(size.height, greaterThanOrEqualTo(48));
   });
 
-  testWidgets('announces the selected preset', (tester) async {
-    final handle = tester.ensureSemantics();
+  testWidgets('marks the selected preset', (tester) async {
     await _pump(tester, _data(onSelect: (_) {}));
 
+    final row = find.byKey(const ValueKey<String>('preset-general'));
     expect(
-      find.bySemanticsLabel(RegExp(r'^General preset, selected\.')),
+      find.descendant(of: row, matching: find.byIcon(Icons.check_circle_rounded)),
       findsOneWidget,
     );
-    handle.dispose();
   });
 
   testWidgets('hides menu actions that have no callback', (tester) async {
@@ -292,11 +296,12 @@ void main() {
   testWidgets('selecting a preset shows the new selection at once', (
     tester,
   ) async {
-    final handle = tester.ensureSemantics();
     await _pump(tester, _data(onSelect: (_) {}));
 
+    final general = find.byKey(const ValueKey<String>('preset-general'));
+    final coder = find.byKey(const ValueKey<String>('preset-coder'));
     expect(
-      find.bySemanticsLabel(RegExp(r'^General preset, selected\.')),
+      find.descendant(of: general, matching: find.byIcon(Icons.check_circle_rounded)),
       findsOneWidget,
     );
 
@@ -304,14 +309,13 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.bySemanticsLabel(RegExp(r'^Coder preset, selected\.')),
+      find.descendant(of: coder, matching: find.byIcon(Icons.check_circle_rounded)),
       findsOneWidget,
     );
     expect(
-      find.bySemanticsLabel(RegExp(r'^General preset, selected\.')),
+      find.descendant(of: general, matching: find.byIcon(Icons.check_circle_rounded)),
       findsNothing,
     );
-    handle.dispose();
   });
 
   testWidgets('deleting a preset removes it at once', (tester) async {

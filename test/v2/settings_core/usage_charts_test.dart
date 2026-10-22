@@ -125,29 +125,29 @@ void _small(WidgetTester tester) {
 }
 
 void main() {
-  testWidgets('daily chart paints bars, total and sparse axis labels', (
+  testWidgets('daily chart paints bars with the range switch, no labels', (
     tester,
   ) async {
     _phone(tester);
     await tester.pumpWidget(_app(const V2DailyTokensChart(points: _tokens7)));
     await tester.pumpAndSettle();
 
-    expect(find.text('Daily tokens'), findsOneWidget);
-    expect(find.text('Last 7 days'), findsOneWidget);
-    expect(find.text('74.2M'), findsOneWidget);
-    expect(find.text('tokens'), findsOneWidget);
-    expect(find.text('7 days'), findsOneWidget);
-    expect(find.text('30 days'), findsOneWidget);
     expect(
       find.byKey(const ValueKey<String>('usage-chart-daily')),
       findsOneWidget,
     );
-    // Only the first, middle and last labels are drawn, so 30 points stay
-    // legible at 320 dp / 200 %.
-    expect(find.text('Mon'), findsOneWidget);
-    expect(find.text('Thu'), findsOneWidget);
-    expect(find.text('Sun'), findsOneWidget);
-    expect(find.text('Tue'), findsNothing);
+    expect(find.text('7 days'), findsOneWidget);
+    expect(find.text('30 days'), findsOneWidget);
+
+    // No card chrome: no title, no total, no axis labels, no legend.
+    expect(find.text('Daily tokens'), findsNothing);
+    expect(find.text('Last 7 days'), findsNothing);
+    expect(find.text('74.2M'), findsNothing);
+    expect(find.text('tokens'), findsNothing);
+    expect(find.text('Mon'), findsNothing);
+    expect(find.text('Thu'), findsNothing);
+    expect(find.text('Sun'), findsNothing);
+    expect(find.byType(OCard), findsNothing);
   });
 
   testWidgets('range tabs report the selected window', (tester) async {
@@ -191,9 +191,10 @@ void main() {
     expect(node.label, contains('Daily tokens chart, last 30 days'));
     expect(node.label, contains('Peak Day 30'));
     expect(node.label, contains('Lowest Day 1'));
-    expect(find.text('Day 1'), findsOneWidget);
-    expect(find.text('Day 16'), findsOneWidget);
-    expect(find.text('Day 30'), findsOneWidget);
+    // The axis labels are gone; the painted bars carry the semantics summary.
+    expect(find.text('Day 1'), findsNothing);
+    expect(find.text('Day 16'), findsNothing);
+    expect(find.text('Day 30'), findsNothing);
     handle.dispose();
   });
 
@@ -388,7 +389,9 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(tester.takeException(), isNull);
-      expect(find.text('Daily tokens'), findsOneWidget);
+      // The daily chart keeps only its range switch; the other two charts
+      // keep their headers because they render standalone in previews.
+      expect(find.text('Daily tokens'), findsNothing);
       expect(find.text('Usage by model'), findsOneWidget);
       expect(find.text('Images generated'), findsOneWidget);
       expect(find.text('7 days'), findsOneWidget);

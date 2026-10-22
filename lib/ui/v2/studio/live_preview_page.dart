@@ -29,7 +29,8 @@ String formatPreviewCountdown(Duration remaining) {
 /// What the live preview is doing right now.
 enum V2PreviewStatus { loading, content, empty, error }
 
-/// One metric tile inside the previewed site.
+/// One metric the previewed site reports. Kept for the data contract; the
+/// frame shows the site itself, never a dashboard of tiles.
 @immutable
 class V2PreviewMetric {
   const V2PreviewMetric({
@@ -99,27 +100,26 @@ class V2LivePreviewData {
   bool get hasFrame => frame != null;
 
   /// Real copy for the previewed site. A lone [siteName] is not enough: the
-  /// header alone must not be presented as a loaded preview.
+  /// header alone must not be presented as a loaded preview. Metrics and the
+  /// feature card are data only — the frame never renders them.
   bool get hasSiteCopy =>
       eyebrow.trim().isNotEmpty ||
       headline.trim().isNotEmpty ||
       description.trim().isNotEmpty ||
       primaryCta.trim().isNotEmpty ||
-      secondaryCta.trim().isNotEmpty ||
-      metrics.isNotEmpty ||
-      featureTitle.trim().isNotEmpty ||
-      featureBody.trim().isNotEmpty ||
-      featureBadge.trim().isNotEmpty;
+      secondaryCta.trim().isNotEmpty;
 
   /// True only when there is something real to show. Drives the status pill so
   /// it can never describe an empty box.
   bool get hasPreviewContent => hasFrame || hasSiteCopy;
 }
 
-/// A viewer for the site running in the workspace: url, status, one frame.
+/// A viewer for the site running in the workspace: header, one frame, one
+/// status pill over it.
 ///
 /// It owns no primary action. Share, open and stop are compact secondary
-/// controls and only appear when the wiring layer supplies them.
+/// controls below the frame and only appear when the wiring layer supplies
+/// them.
 class V2LivePreviewPage extends StatelessWidget {
   const V2LivePreviewPage({
     super.key,
@@ -158,7 +158,7 @@ class V2LivePreviewPage extends StatelessWidget {
           ),
       ],
       child: switch (data.status) {
-        V2PreviewStatus.loading => _buildLoading(),
+        V2PreviewStatus.loading => _buildLoading(context),
         V2PreviewStatus.error => OErrorState(
           message: data.errorMessage ?? 'This preview did not start.',
           onRetry: onRetry,
@@ -180,21 +180,12 @@ class V2LivePreviewPage extends StatelessWidget {
     );
   }
 
-  Widget _buildLoading() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(OSpace.l),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 960),
-          child: const Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              OSkeleton(height: 24, radius: ORadius.m),
-              SizedBox(height: OSpace.m),
-              OSkeleton(height: 420, radius: ORadius.xl),
-            ],
-          ),
-        ),
+  Widget _buildLoading(BuildContext context) {
+    final r = OResponsive.of(context);
+    return Padding(
+      padding: EdgeInsets.fromLTRB(r.gutter, OSpace.s, r.gutter, OSpace.l),
+      child: const _FrameArea(
+        child: OSkeleton(height: double.infinity, radius: ORadius.xl),
       ),
     );
   }
@@ -204,84 +195,71 @@ class V2LivePreviewPage extends StatelessWidget {
         onShareLink != null || onOpenInBrowser != null || onStop != null;
     final expiresLabel = data.expiresLabel.trim();
     final hasExpiry = expiresLabel.isNotEmpty || data.expiresAt != null;
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.l,
-        OSpace.s,
-        OSpace.l,
-        OSpace.xl,
-      ),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 960),
-          child: OFadeIn(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _StatusRow(url: data.url, live: data.hasPreviewContent),
-                const SizedBox(height: OSpace.m),
-                _Frame(data: data, onRetry: onRetry),
-                if (hasExpiry) ...[
-                  const SizedBox(height: OSpace.s),
-                  _ExpiryLine(
-                    expiresLabel: expiresLabel,
-                    expiresAt: data.expiresAt,
-                  ),
-                ],
-                if (hasActions) ...[
-                  const SizedBox(height: OSpace.m),
-                  _SecondaryActions(
-                    onShare: onShareLink,
-                    onOpenInBrowser: onOpenInBrowser,
-                    onStop: onStop,
-                  ),
-                ],
-              ],
+    final url = data.url.trim();
+    final r = OResponsive.of(context);
+    return Padding(
+      padding: EdgeInsets.fromLTRB(r.gutter, OSpace.s, r.gutter, OSpace.l),
+      child: OFadeIn(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: _FrameArea(
+                child: _Frame(data: data, onRetry: onRetry),
+              ),
             ),
-          ),
+            if (url.isNotEmpty || hasExpiry) ...[
+              const SizedBox(height: OSpace.s),
+              _MetaLine(
+                url: url,
+                expiresLabel: expiresLabel,
+                expiresAt: data.expiresAt,
+              ),
+            ],
+            if (hasActions) ...[
+              const SizedBox(height: OSpace.xs),
+              _SecondaryActions(
+                onShare: onShareLink,
+                onOpenInBrowser: onOpenInBrowser,
+                onStop: onStop,
+              ),
+            ],
+          ],
         ),
       ),
     );
   }
 }
 
-/// The one line above the frame: the real url and the live status.
-class _StatusRow extends StatelessWidget {
-  const _StatusRow({required this.url, required this.live});
+/// The frame's footprint: all the space under the header, centred, never
+/// wider than 16:10 so a wide window letterboxes instead of stretching.
+class _FrameArea extends StatelessWidget {
+  const _FrameArea({required this.child});
 
-  final String url;
-  final bool live;
+  final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final label = url.trim();
-    return Row(
-      children: [
-        if (label.isNotEmpty) ...[
-          Icon(Icons.lock_outline_rounded, size: 14, color: c.success),
-          const SizedBox(width: OSpace.xs),
-          Expanded(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ),
-          const SizedBox(width: OSpace.s),
-        ] else
-          const Spacer(),
-        OPill(
-          label: live ? 'Online' : 'Starting',
-          tone: live ? OPillTone.success : OPillTone.neutral,
-          dot: true,
-        ),
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxWidth = constraints.maxWidth;
+        final maxHeight = constraints.maxHeight;
+        if (!maxWidth.isFinite || !maxHeight.isFinite || maxHeight <= 0) {
+          return child;
+        }
+        const maxAspect = 16 / 10;
+        final width = maxWidth / maxHeight > maxAspect
+            ? maxHeight * maxAspect
+            : maxWidth;
+        return Center(
+          child: SizedBox(width: width, height: maxHeight, child: child),
+        );
+      },
     );
   }
 }
 
+/// The previewed site and the one status pill over its corner.
 class _Frame extends StatelessWidget {
   const _Frame({required this.data, this.onRetry});
 
@@ -291,12 +269,14 @@ class _Frame extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    final live = data.hasPreviewContent;
     final Widget content;
     if (data.frame != null) {
       content = Image(
         image: data.frame!,
         fit: BoxFit.cover,
         width: double.infinity,
+        height: double.infinity,
         gaplessPlayback: true,
         semanticLabel: data.siteName.isEmpty
             ? 'Live preview'
@@ -304,7 +284,7 @@ class _Frame extends StatelessWidget {
         errorBuilder: (context, error, stack) => _FrameError(onRetry: onRetry),
       );
     } else if (data.hasSiteCopy) {
-      content = Padding(
+      content = SingleChildScrollView(
         padding: const EdgeInsets.all(OSpace.l),
         child: _SiteContent(data: data),
       );
@@ -319,7 +299,21 @@ class _Frame extends StatelessWidget {
         border: Border.all(color: c.hairlineStrong),
       ),
       clipBehavior: Clip.antiAlias,
-      child: content,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          content,
+          Positioned(
+            left: OSpace.s,
+            top: OSpace.s,
+            child: OPill(
+              label: live ? 'Online' : 'Starting',
+              tone: live ? OPillTone.success : OPillTone.neutral,
+              dot: true,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -396,6 +390,9 @@ class _WaitingFrame extends StatelessWidget {
   }
 }
 
+/// The site itself when no screenshot has arrived yet: name, headline and
+/// its own calls to action. Metrics and feature cards are not re-drawn here —
+/// the frame is the preview, not a dashboard about it.
 class _SiteContent extends StatelessWidget {
   const _SiteContent({required this.data});
 
@@ -406,10 +403,6 @@ class _SiteContent extends StatelessWidget {
     final c = OColors.of(context);
     final hasActions =
         data.primaryCta.isNotEmpty || data.secondaryCta.isNotEmpty;
-    final hasFeature =
-        data.featureTitle.isNotEmpty ||
-        data.featureBody.isNotEmpty ||
-        data.featureBadge.isNotEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -470,26 +463,6 @@ class _SiteContent extends StatelessWidget {
             ],
           ),
         ],
-        if (data.metrics.isNotEmpty) ...[
-          const SizedBox(height: OSpace.l),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              for (var i = 0; i < data.metrics.length; i++) ...[
-                if (i > 0) const SizedBox(width: OSpace.s),
-                Expanded(child: _MetricTile(metric: data.metrics[i])),
-              ],
-            ],
-          ),
-        ],
-        if (hasFeature) ...[
-          const SizedBox(height: OSpace.l),
-          _FeatureCard(
-            title: data.featureTitle,
-            body: data.featureBody,
-            badge: data.featureBadge,
-          ),
-        ],
       ],
     );
   }
@@ -537,140 +510,52 @@ class _SiteButton extends StatelessWidget {
   }
 }
 
-class _MetricTile extends StatelessWidget {
-  const _MetricTile({required this.metric});
-
-  final V2PreviewMetric metric;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      padding: const EdgeInsets.all(OSpace.m),
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(metric.icon, size: 14, color: c.success),
-              const SizedBox(width: OSpace.xs),
-              Flexible(
-                child: Text(
-                  metric.value,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(
-                    color: c.success,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: OSpace.xs),
-          Text(
-            metric.label,
-            style: OType.bodySm.copyWith(
-              color: c.text,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          Text(
-            metric.caption,
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _FeatureCard extends StatelessWidget {
-  const _FeatureCard({
-    required this.title,
-    required this.body,
-    required this.badge,
+/// The one line under the frame: the real url on the left, the expiry on the
+/// right. No card, no explainer.
+class _MetaLine extends StatelessWidget {
+  const _MetaLine({
+    required this.url,
+    required this.expiresLabel,
+    this.expiresAt,
   });
 
-  final String title;
-  final String body;
-  final String badge;
+  final String url;
+  final String expiresLabel;
+  final DateTime? expiresAt;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    return Container(
-      decoration: BoxDecoration(
-        color: c.surfaceAlt,
-        borderRadius: BorderRadius.circular(ORadius.m),
-        border: Border.all(color: c.hairline),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Container(
-            height: 96,
-            color: c.surfaceRaised,
-            alignment: Alignment.center,
-            child: Icon(Icons.hub_outlined, size: 38, color: c.accent),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(OSpace.m),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: OSpace.s,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    color: c.surface,
-                    borderRadius: BorderRadius.circular(ORadius.s),
-                    border: Border.all(color: c.hairline),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.tune_rounded, size: 12, color: c.success),
-                      const SizedBox(width: OSpace.xs),
-                      Flexible(
-                        child: Text(
-                          badge,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: OType.caption.copyWith(color: c.text),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: OSpace.s),
-                Text(
-                  title,
-                  style: OType.bodySm.copyWith(
-                    color: c.text,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(body, style: OType.caption.copyWith(color: c.textMuted)),
-              ],
+    final hasExpiry = expiresLabel.isNotEmpty || expiresAt != null;
+    return Row(
+      children: [
+        if (url.isNotEmpty) ...[
+          Icon(Icons.lock_outline_rounded, size: 14, color: c.success),
+          const SizedBox(width: OSpace.xs),
+          Flexible(
+            child: Text(
+              url,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: OType.caption.copyWith(color: c.textMuted),
             ),
           ),
-        ],
-      ),
+          const SizedBox(width: OSpace.m),
+        ] else
+          const Spacer(),
+        if (hasExpiry)
+          Flexible(
+            child: _ExpiryLine(
+              expiresLabel: expiresLabel,
+              expiresAt: expiresAt,
+            ),
+          ),
+      ],
     );
   }
 }
 
-/// One line: when the preview expires. No button, no card.
+/// One compact expiry readout. No button, no card.
 class _ExpiryLine extends StatelessWidget {
   const _ExpiryLine({required this.expiresLabel, this.expiresAt});
 
@@ -681,10 +566,11 @@ class _ExpiryLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
         Icon(Icons.schedule_rounded, size: 16, color: c.textMuted),
         const SizedBox(width: OSpace.xs),
-        Expanded(
+        Flexible(
           child: expiresAt != null
               ? _CountdownLabel(expiresAt: expiresAt!)
               : Text(

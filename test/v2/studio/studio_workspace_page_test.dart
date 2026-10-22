@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui' show Tristate;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -81,10 +80,14 @@ void main() {
 
       expect(find.text('acme/landing-page'), findsOneWidget);
       expect(find.text('main'), findsOneWidget);
-      expect(find.text('3 changes'), findsOneWidget);
-      expect(find.text('+42 −12'), findsOneWidget);
       expect(find.text('Hero.tsx'), findsWidgets);
       expect(find.text("import React from 'react';"), findsOneWidget);
+
+      // No status bar: the workspace is the tree and the editor, nothing else.
+      expect(find.byKey(const Key('studio-open-changes')), findsNothing);
+      expect(find.byKey(const Key('studio-open-preview')), findsNothing);
+      expect(find.text('3 changes'), findsNothing);
+      expect(find.text('+42 −12'), findsNothing);
     }
   });
 
@@ -176,25 +179,26 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('the status bar opens changes and preview', (tester) async {
-    var changes = 0;
-    var previews = 0;
+  testWidgets('there is no status bar, even with the callbacks wired', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       _app(
         V2StudioWorkspacePage(
           data: _data,
-          onCommit: () => changes++,
-          onPreview: () => previews++,
+          onCommit: () {},
+          onPreview: () {},
         ),
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const Key('studio-open-changes')));
-    expect(changes, 1);
-
-    await tester.tap(find.byKey(const Key('studio-open-preview')));
-    expect(previews, 1);
+    // Changes and preview are separate pushed pages; the workspace spends no
+    // chrome on them.
+    expect(find.byKey(const Key('studio-open-changes')), findsNothing);
+    expect(find.byKey(const Key('studio-open-preview')), findsNothing);
+    expect(find.text('Preview'), findsNothing);
+    expect(find.text('3 changes'), findsNothing);
   });
 
   testWidgets('sync and file taps report their callbacks', (tester) async {
@@ -275,22 +279,6 @@ void main() {
     await tester.tap(find.text('src'));
     await tester.pumpAndSettle();
     expect(find.text('components'), findsOneWidget);
-  });
-
-  testWidgets('a missing changes callback is announced as disabled', (
-    tester,
-  ) async {
-    final handle = tester.ensureSemantics();
-
-    await tester.pumpWidget(_app(const V2StudioWorkspacePage(data: _data)));
-    await tester.pumpAndSettle();
-
-    final flags = tester
-        .getSemantics(find.byKey(const Key('studio-open-changes')))
-        .flagsCollection;
-    expect(flags.isEnabled, Tristate.isFalse);
-
-    handle.dispose();
   });
 
   testWidgets('600 dp and 900 dp keep the tree beside the editor', (

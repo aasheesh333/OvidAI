@@ -108,14 +108,16 @@ void main() {
   });
 
   test('tier and entitlement maps stay aligned with the Play products', () {
-    expect(kRevenueCatEntitlements, {
-      '3x': 'go',
-      '7x': 'plus',
-      '15x': 'pro',
-    });
+    expect(kRevenueCatEntitlements, {'3x': 'go', '7x': 'plus', '15x': 'pro'});
     for (final entry in kRevenueCatEntitlements.entries) {
       expect(ovidTierForEntitlement(entry.value), entry.key);
       expect(kOvidPlayProducts.containsKey(entry.key), isTrue);
+      for (final period in OvidBillingPeriod.values) {
+        final productId = ovidPlayProductId(entry.key, period);
+        expect(productId, isNotNull, reason: '${entry.key} $period');
+        expect(ovidTierForProduct(productId!), entry.key);
+        expect(ovidPeriodForProduct(productId), period);
+      }
     }
     expect(ovidTierForEntitlement('unknown'), isNull);
   });
@@ -246,6 +248,78 @@ void main() {
     expect(fake.purchasedIdentifier, 'pkg_max');
   });
 
+  test('buying yearly resolves the yearly package', () async {
+    final fake = _FakePlatform(
+      offeredPackages: [
+        _pkg('ovid_plus_monthly', identifier: 'pkg_go_monthly'),
+        _pkg('ovid_plus_yearly', identifier: 'pkg_go_yearly'),
+        _pkg('ovid_pro_yearly', identifier: 'pkg_plus_yearly'),
+      ],
+      purchaseResult: const RevenueCatResult(ok: true, tier: '3x'),
+    );
+    final billing = _billing(fake);
+    final outcome = await billing.buy('3x', period: OvidBillingPeriod.yearly);
+    expect(outcome.result, UpgradeResult.ok);
+    expect(fake.purchasedIdentifier, 'pkg_go_yearly');
+    expect(billing.lastPurchaseError, isNull);
+  });
+
+  test('a missing yearly package never falls back to monthly', () async {
+    // The offering only has monthly packages, including RevenueCat's
+    // conventional monthly one. A yearly request must not buy any of them.
+    final fake = _FakePlatform(
+      offeredPackages: [
+        _pkg('ovid_plus_monthly', identifier: r'$rc_monthly'),
+        _pkg('ovid_pro_monthly', identifier: 'pkg_plus'),
+      ],
+    );
+    final billing = _billing(fake);
+    final outcome = await billing.buy('3x', period: OvidBillingPeriod.yearly);
+    expect(outcome.result, UpgradeResult.notAvailable);
+    expect(fake.purchasedIdentifier, isNull);
+    expect(billing.lastPurchaseWasDemo, isFalse);
+    expect(billing.lastPurchaseError, contains('Yearly'));
+  });
+
+  test('monthly still buys the monthly package when yearly exists', () async {
+    final fake = _FakePlatform(
+      offeredPackages: [
+        _pkg('ovid_plus_yearly', identifier: 'pkg_go_yearly'),
+        _pkg('ovid_plus_monthly', identifier: 'pkg_go_monthly'),
+      ],
+      purchaseResult: const RevenueCatResult(ok: true, tier: '3x'),
+    );
+    final outcome = await _billing(fake).buy('3x');
+    expect(outcome.result, UpgradeResult.ok);
+    expect(fake.purchasedIdentifier, 'pkg_go_monthly');
+  });
+
+  test(
+    'a missing monthly product may use the monthly package, not yearly',
+    () async {
+      final fake = _FakePlatform(
+        offeredPackages: [
+          _pkg('ovid_plus_yearly', identifier: 'pkg_go_yearly'),
+          _pkg('legacy_go_monthly', identifier: r'$rc_monthly'),
+        ],
+        purchaseResult: const RevenueCatResult(ok: true, tier: '3x'),
+      );
+      final outcome = await _billing(fake).buy('3x');
+      expect(outcome.result, UpgradeResult.ok);
+      expect(fake.purchasedIdentifier, r'$rc_monthly');
+    },
+  );
+
+  test('the monthly fallback refuses a package from another tier', () async {
+    final fake = _FakePlatform(
+      offeredPackages: [_pkg('ovid_max_monthly', identifier: r'$rc_monthly')],
+    );
+    final billing = _billing(fake);
+    final outcome = await billing.buy('3x');
+    expect(outcome.result, UpgradeResult.notAvailable);
+    expect(fake.purchasedIdentifier, isNull);
+  });
+
   test('buy without an offered package is not available', () async {
     final fake = _FakePlatform(offeredPackages: [_pkg('some_other')]);
     final billing = _billing(fake);
@@ -255,15 +329,18 @@ void main() {
     expect(billing.lastPurchaseWasDemo, isFalse);
   });
 
-  test('test store with no offering grants a labelled demo entitlement', () async {
-    final fake = _FakePlatform(offeredPackages: const []);
-    final billing = _billing(fake, testStore: true);
-    expect(billing.usingTestStore, isTrue);
-    final outcome = await billing.buy('7x');
-    expect(outcome.result, UpgradeResult.ok);
-    expect(outcome.tier, '7x');
-    expect(billing.lastPurchaseWasDemo, isTrue);
-  });
+  test(
+    'test store with no offering grants a labelled demo entitlement',
+    () async {
+      final fake = _FakePlatform(offeredPackages: const []);
+      final billing = _billing(fake, testStore: true);
+      expect(billing.usingTestStore, isTrue);
+      final outcome = await billing.buy('7x');
+      expect(outcome.result, UpgradeResult.ok);
+      expect(outcome.tier, '7x');
+      expect(billing.lastPurchaseWasDemo, isTrue);
+    },
+  );
 
   test('a demo build works from the define alone (no key shipped)', () async {
     final fake = _FakePlatform(offeredPackages: const []);
@@ -286,10 +363,7 @@ void main() {
     );
     final billing = _billing(
       fake,
-      config: const RevenueCatConfig(
-        apiKey: 'test_debug',
-        testStore: true,
-      ),
+      config: const RevenueCatConfig(apiKey: 'test_debug', testStore: true),
     );
     final outcome = await billing.buy('7x');
     expect(outcome.result, UpgradeResult.ok);
@@ -374,9 +448,7 @@ void main() {
       tester,
     ) async {
       final applied = <String>[];
-      final fake = _FakePlatform(
-        infoResult: const RevenueCatResult(ok: false),
-      );
+      final fake = _FakePlatform(infoResult: const RevenueCatResult(ok: false));
       final billing = _billing(fake, applyTier: applied.add);
 
       billing.start();
@@ -449,7 +521,10 @@ void main() {
     });
 
     test('a server that still says free does not unlock', () async {
-      expect(await applyPurchasedPlan('15x', fetch: () async => 'free'), isFalse);
+      expect(
+        await applyPurchasedPlan('15x', fetch: () async => 'free'),
+        isFalse,
+      );
       expect(AppState.I.ovidCloudTier, 'free');
       expect(isServerConfirmed('15x'), isFalse);
     });

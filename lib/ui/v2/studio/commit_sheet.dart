@@ -184,7 +184,7 @@ class _V2CommitSheetState extends State<V2CommitSheet> {
                     height: 4,
                     decoration: BoxDecoration(
                       color: c.hairlineStrong,
-                      borderRadius: BorderRadius.circular(2),
+                      borderRadius: BorderRadius.circular(ORadius.xs),
                     ),
                   ),
                 ],
@@ -483,7 +483,7 @@ class _FileRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
+      padding: const EdgeInsets.symmetric(vertical: OSpace.xs),
       child: Row(
         children: [
           Expanded(

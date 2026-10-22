@@ -338,7 +338,7 @@ class _V2PhoneAuthSheetState extends State<V2PhoneAuthSheet> {
             height: 4,
             decoration: BoxDecoration(
               color: c.hairlineStrong,
-              borderRadius: BorderRadius.circular(2),
+              borderRadius: BorderRadius.circular(ORadius.xs),
             ),
           ),
         ],
@@ -812,6 +812,9 @@ class _ResendRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     if (data.canResend) {
+      // No handler means no resend service: render nothing rather than a
+      // button that can never fire (MINIMAL_UI_CONTRACT §8).
+      if (onResend == null) return const SizedBox.shrink();
       return Align(
         alignment: Alignment.centerLeft,
         child: OButton(

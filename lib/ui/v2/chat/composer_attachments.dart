@@ -213,7 +213,7 @@ class V2AttachmentBatch {
   }
 }
 
-/// Staged-file chips with name, size and a 48 dp remove target.
+/// Staged files above the composer row: one line each, name, size, ✕.
 class V2AttachmentChips extends StatelessWidget {
   const V2AttachmentChips({
     super.key,
@@ -231,25 +231,29 @@ class V2AttachmentChips extends StatelessWidget {
     if (attachments.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: OSpace.xs),
-      child: Wrap(
-        spacing: OSpace.xs,
-        runSpacing: OSpace.xs,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          for (final attachment in attachments)
-            _AttachmentChip(
-              key: ValueKey('attachment-${attachment.path}-${attachment.name}'),
-              attachment: attachment,
+          for (var i = 0; i < attachments.length; i++) ...[
+            if (i > 0) const SizedBox(height: OSpace.xs),
+            _AttachmentRow(
+              key: ValueKey(
+                'attachment-${attachments[i].path}-${attachments[i].name}',
+              ),
+              attachment: attachments[i],
               enabled: enabled,
-              onRemove: () => onRemove(attachment),
+              onRemove: () => onRemove(attachments[i]),
             ),
+          ],
         ],
       ),
     );
   }
 }
 
-class _AttachmentChip extends StatelessWidget {
-  const _AttachmentChip({
+class _AttachmentRow extends StatelessWidget {
+  const _AttachmentRow({
     super.key,
     required this.attachment,
     required this.enabled,
@@ -263,55 +267,46 @@ class _AttachmentChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final maxWidth = MediaQuery.sizeOf(context).width - 2 * OSpace.l;
-    return ConstrainedBox(
-      constraints: BoxConstraints(maxWidth: maxWidth),
-      child: Semantics(
-        container: true,
-        label: 'Attachment ${attachment.name}, ${attachment.sizeLabel}',
-        child: Container(
-          constraints: const BoxConstraints(minHeight: OSpace.touch),
-          decoration: BoxDecoration(
-            color: c.surfaceAlt,
-            borderRadius: BorderRadius.circular(ORadius.m),
-            border: Border.all(color: c.hairline),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(width: OSpace.s),
-              Icon(Icons.attach_file_rounded, size: 18, color: c.accent),
-              const SizedBox(width: OSpace.xs),
-              Flexible(
-                child: Text(
-                  attachment.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.label.copyWith(color: c.text),
-                ),
+    return Semantics(
+      container: true,
+      label: 'Attachment ${attachment.name}, ${attachment.sizeLabel}',
+      child: Container(
+        constraints: const BoxConstraints(minHeight: OSpace.touch),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(ORadius.m),
+          border: Border.all(color: c.hairline),
+        ),
+        child: Row(
+          children: [
+            const SizedBox(width: OSpace.m),
+            Icon(Icons.attach_file_rounded, size: 18, color: c.accent),
+            const SizedBox(width: OSpace.s),
+            Expanded(
+              child: Text(
+                attachment.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: OType.label.copyWith(color: c.text),
               ),
-              const SizedBox(width: OSpace.xs),
-              Flexible(
-                child: Text(
-                  attachment.sizeLabel,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
+            ),
+            const SizedBox(width: OSpace.s),
+            Text(
+              attachment.sizeLabel,
+              maxLines: 1,
+              style: OType.caption.copyWith(color: c.textMuted),
+            ),
+            IconButton(
+              onPressed: enabled ? onRemove : null,
+              tooltip: 'Remove ${attachment.name}',
+              iconSize: 18,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(
+                minWidth: OSpace.touch,
+                minHeight: OSpace.touch,
               ),
-              IconButton(
-                onPressed: enabled ? onRemove : null,
-                tooltip: 'Remove ${attachment.name}',
-                iconSize: 18,
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(
-                  minWidth: OSpace.touch,
-                  minHeight: OSpace.touch,
-                ),
-                icon: Icon(Icons.close_rounded, color: c.textMuted),
-              ),
-            ],
-          ),
+              icon: Icon(Icons.close_rounded, color: c.textMuted),
+            ),
+          ],
         ),
       ),
     );

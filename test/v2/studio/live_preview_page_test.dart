@@ -91,6 +91,12 @@ void main() {
       expect(find.text('Online'), findsOneWidget);
       expect(find.text('acme-cloud.ovid.app'), findsOneWidget);
       expect(find.text('Expires in 55 min'), findsOneWidget);
+
+      // The frame shows the site itself: no metrics tiles, no feature card.
+      expect(find.text('99.99%'), findsNothing);
+      expect(find.text('Uptime SLA'), findsNothing);
+      expect(find.text('Real-time routing engine'), findsNothing);
+      expect(find.text('Auto-balancing live'), findsNothing);
     }
   });
 

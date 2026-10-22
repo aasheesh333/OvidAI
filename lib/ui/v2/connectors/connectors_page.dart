@@ -92,7 +92,7 @@ enum _Filter {
   connected('Connected'),
   apps('Apps'),
   plugins('Plugins'),
-  mcp('MCP');
+  mcp('Add-ons');
 
   const _Filter(this.label);
 

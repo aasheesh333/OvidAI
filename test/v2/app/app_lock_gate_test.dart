@@ -146,7 +146,10 @@ void main() {
     await tester.pumpWidget(app(lock: lock));
     await tester.pump();
 
+    // The mark, the title, the one PIN line — no security explainer.
+    expect(find.bySemanticsLabel('Ovid Si logo'), findsOneWidget);
     expect(find.text('App locked'), findsOneWidget);
+    expect(find.text('Enter your PIN'), findsOneWidget);
     expect(find.text('Secret chat'), findsNothing);
 
     await enterPin(tester, '123456');

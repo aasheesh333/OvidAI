@@ -327,7 +327,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get promptCacheExtendedSubtitle =>
-      'For long 24/7 sessions with pauses over 5 minutes. Cache writes cost 2x input instead of 1.25x; reads stay 0.1x. Claude only.';
+      'For long 24/7 chats with pauses over 5 minutes. Cache writes cost 2x input instead of 1.25x; reads stay 0.1x. Claude only.';
 
   @override
   String get promptCacheProviderHelp =>
@@ -1014,10 +1014,10 @@ class AppLocalizationsEn extends AppLocalizations {
       'This file belongs to a different account. Sign back in to open it.';
 
   @override
-  String get sessionRenameTitle => 'Rename session';
+  String get sessionRenameTitle => 'Rename chat';
 
   @override
-  String get sessionRenameEmpty => 'Session name cannot be empty';
+  String get sessionRenameEmpty => 'Chat name cannot be empty';
 
   @override
   String sessionDeleteTitle(String title) {
@@ -1038,8 +1038,8 @@ class AppLocalizationsEn extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: '$count child sessions',
-      one: '1 child session',
+      other: '$count subagent chats',
+      one: '1 subagent chat',
     );
     return '$_temp0';
   }
@@ -2045,10 +2045,10 @@ class AppLocalizationsEn extends AppLocalizations {
       'Diagnostics copied. Paste them into your message to support.';
 
   @override
-  String get sessionPinned => 'Session pinned';
+  String get sessionPinned => 'Chat pinned';
 
   @override
-  String get sessionUnpinned => 'Session unpinned';
+  String get sessionUnpinned => 'Chat unpinned';
 
   @override
   String get pinUpdateFailed => 'Could not update the pin. Please try again.';

@@ -577,6 +577,42 @@ void main() {
         h.ws.disconnect();
       });
     });
+
+    test('a run already live when the transcript is seeded arms the watchdog '
+        '(reopened mid-run chat: no second run_started)', () async {
+      final prefs = await SharedPreferences.getInstance();
+      fakeAsync((async) {
+        final h = buildInZone(async, prefs);
+
+        // The history page carries the run_started that this socket never
+        // saw: the fold is busy, but the stream listener never fires.
+        h.facade.seedRichTranscript(
+          's1',
+          rows: const [],
+          events: [
+            CloudSessionEvent(
+              sessionId: 's1',
+              seq: '1-0',
+              type: 'run_started',
+              payload: const {'runId': 'run-1'},
+              ts: DateTime.utc(2026, 10, 17, 10),
+            ),
+          ],
+          watermark: '1-0',
+          activeRunId: 'run-1',
+        );
+        async.elapse(const Duration(milliseconds: 50));
+        expect(h.facade.busyFor('s1'), isTrue);
+        expect(h.facade.stalledFor('s1'), isFalse);
+
+        // The Settings window still runs out on a seeded live run.
+        async.elapse(const Duration(seconds: 5, milliseconds: 200));
+        expect(h.facade.stalledFor('s1'), isTrue);
+
+        h.facade.dispose();
+        h.ws.disconnect();
+      });
+    });
   });
 
   group('projection', () {

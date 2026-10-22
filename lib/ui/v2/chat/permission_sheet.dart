@@ -183,20 +183,19 @@ class V2PermissionSheet extends StatelessWidget {
     }
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        OSpace.s,
-        OSpace.xs,
-        OSpace.s,
-        OSpace.xs,
-      ),
+      padding: const EdgeInsets.symmetric(vertical: OSpace.xs),
       child: OStagger(
         children: [
-          for (final mode in data.modes)
+          for (var i = 0; i < data.modes.length; i++) ...[
+            // One hairline between rows, indented to the label. Rows
+            // themselves sit on the sheet surface — no filled cards.
+            if (i > 0) const ODivider(indent: OSpace.huge),
             _ModeRow(
-              mode: mode,
-              selected: data.selectedId == mode.id,
-              onTap: () => onSelect(mode.id),
+              mode: data.modes[i],
+              selected: data.selectedId == data.modes[i].id,
+              onTap: () => onSelect(data.modes[i].id),
             ),
+          ],
         ],
       ),
     );
@@ -218,55 +217,6 @@ class _ModeRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final danger = mode.danger;
-    final tint = danger ? c.danger : c.accentFill;
-
-    final row = Container(
-      constraints: const BoxConstraints(minHeight: OSpace.touch),
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.m,
-        vertical: OSpace.s,
-      ),
-      decoration: BoxDecoration(
-        color: danger
-            ? c.danger.withValues(alpha: selected ? 0.10 : 0.05)
-            : selected
-            ? c.accentSoft
-            : c.surface,
-        borderRadius: BorderRadius.circular(ORadius.l),
-        border: Border.all(
-          color: selected
-              ? tint
-              : danger
-              ? c.danger.withValues(alpha: 0.35)
-              : c.hairline,
-          width: selected ? 1.5 : 1,
-        ),
-      ),
-      child: Row(
-        children: [
-          ExcludeSemantics(
-            child: Icon(
-              mode.icon,
-              size: 20,
-              color: danger ? c.danger : c.textMuted,
-            ),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Text(
-              mode.label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.bodyStrong.copyWith(
-                color: danger ? c.danger : c.text,
-              ),
-            ),
-          ),
-          const SizedBox(width: OSpace.s),
-          _SelectionMark(selected: selected, danger: danger),
-        ],
-      ),
-    );
 
     final spoken = StringBuffer('${mode.label}. ${mode.description}');
     if (danger) spoken.write(' No confirmation prompts.');
@@ -274,41 +224,46 @@ class _ModeRow extends StatelessWidget {
       onTap: onTap,
       selected: selected,
       semanticLabel: spoken.toString(),
-      child: row,
-    );
-  }
-}
-
-class _SelectionMark extends StatelessWidget {
-  const _SelectionMark({required this.selected, required this.danger});
-
-  final bool selected;
-  final bool danger;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      width: 22,
-      height: 22,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: selected
-            ? (danger ? c.danger : c.accentFill)
-            : Colors.transparent,
-        border: Border.all(
-          color: selected
-              ? (danger ? c.danger : c.accentFill)
-              : c.hairlineStrong,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: OSpace.touch),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: OSpace.l,
+            vertical: OSpace.s,
+          ),
+          child: Row(
+            children: [
+              ExcludeSemantics(
+                child: Icon(
+                  mode.icon,
+                  size: 20,
+                  color: danger ? c.danger : c.textMuted,
+                ),
+              ),
+              const SizedBox(width: OSpace.m),
+              Expanded(
+                child: Text(
+                  mode.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.bodyStrong.copyWith(
+                    color: danger ? c.danger : c.text,
+                  ),
+                ),
+              ),
+              // The pick is a bare check, not a filled radio circle.
+              if (selected) ...[
+                const SizedBox(width: OSpace.s),
+                Icon(
+                  Icons.check_rounded,
+                  size: 20,
+                  color: danger ? c.danger : c.accent,
+                ),
+              ],
+            ],
+          ),
         ),
       ),
-      child: selected
-          ? Icon(
-              Icons.check_rounded,
-              size: 14,
-              color: danger ? c.onDanger : c.onAccent,
-            )
-          : null,
     );
   }
 }

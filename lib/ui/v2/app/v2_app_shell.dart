@@ -21,6 +21,7 @@ import '../../../core/firebase_service.dart';
 import '../../../core/format.dart';
 import '../../../core/native_share.dart';
 import '../../../core/ovid_cloud_service.dart';
+import '../../../core/session_artifacts.dart';
 import '../../../core/state.dart';
 import '../../../core/voice_reply_service.dart';
 import '../../design/o_screen.dart';
@@ -242,7 +243,16 @@ class _V2AppShellState extends State<V2AppShell> {
       builder: (context, _) {
         final app = AppState.I;
         final session = app.activeSession;
-        final hasMessages = session != null && session.messages.isNotEmpty;
+        // The cloud fold writes into the facade's projection, never into
+        // ChatSession.messages (the same resolution the share sheet uses).
+        // Reading the session row here would pin a cloud chat on the empty
+        // page forever: the prompt and the answer would never paint.
+        final messages = session == null
+            ? const <Message>[]
+            : CloudAgentFacade.I.transcriptFor(session.id) ??
+                  session.messages;
+        final hasMessages = messages.isNotEmpty;
+        final sessionId = session?.id;
         if (!hasMessages) {
           return V2ChatPage(
             key: ValueKey('empty-${session?.id ?? 'new'}'),
@@ -270,17 +280,17 @@ class _V2AppShellState extends State<V2AppShell> {
           );
         }
         return V2LiveChatPage(
-          key: ValueKey('live-${session.id}'),
-          data: _liveData(app, session),
+          key: ValueKey('live-${sessionId ?? 'new'}'),
+          data: _liveData(app, session!),
           onMenu: _usesDrawer(routeContext) ? _openDrawer : null,
           onModelChipTap: () => _openModelPicker(routeContext),
           onStudio: () => V2WorkRoutes.openStudio(_navContext, _settings),
           onBrowser: () => V2WorkRoutes.openBrowser(_navContext, _settings),
-          onMore: () => _chatMenu(routeContext, session.id),
+          onMore: () => _chatMenu(routeContext, sessionId!),
           onSubmit: _submit,
           onStop: _stop,
           onSendQueuedNow: _sendQueuedNow,
-          onDismissQueued: () => _dismissQueued(session.id),
+          onDismissQueued: () => _dismissQueued(sessionId!),
           onDownload: (id) => _download(routeContext, id),
           onArtifactTap: (id) => _openArtifact(routeContext, id),
           onOpenLink: (url) =>
@@ -294,7 +304,7 @@ class _V2AppShellState extends State<V2AppShell> {
           voiceService: const V2PlatformVoiceService(),
           voiceLanguage: app.voiceLanguage,
           onVoicePlay: _playVoiceReply,
-          onDraftChanged: (text) => ComposerDraftStore.I.put(session.id, text),
+          onDraftChanged: (text) => ComposerDraftStore.I.put(sessionId!, text),
         );
       },
     );
@@ -523,7 +533,9 @@ class _V2AppShellState extends State<V2AppShell> {
 
   List<V2LiveChatItem> _items(ChatSession session) {
     final items = <V2LiveChatItem>[];
-    for (final message in session.messages) {
+    final messages =
+        CloudAgentFacade.I.transcriptFor(session.id) ?? session.messages;
+    for (final message in messages) {
       switch (message.kind) {
         case MsgKind.tool:
           items.add(
@@ -550,14 +562,23 @@ class _V2AppShellState extends State<V2AppShell> {
           );
         case MsgKind.imageGen:
         case MsgKind.htmlArtifact:
+          // The same artifact row the library derives, so the transcript's tap
+          // opens the library's real detail route with the real file.
+          final artifact = _artifactFor(session, message);
+          final link = _artifactLinkOf(artifact) ?? _artifactHref(message);
           items.add(
             V2LiveArtifact(
               id: message.privateSyncId,
-              fileName: _artifactName(message),
-              meta: message.kind == MsgKind.imageGen ? 'Image' : 'Web page',
+              fileName: artifact?.name ?? _artifactName(message),
+              meta: _artifactMeta(artifact, message),
               statusLabel: _artifactStatus(message),
               previewLabel: 'Open',
-              href: _artifactHref(message),
+              href: link,
+              kind: artifact?.kind,
+              sizeBytes: artifact?.size,
+              downloadUrl: link,
+              thumbnail: _artifactThumbnail(artifact),
+              content: _artifactContent(artifact, message),
               icon: message.kind == MsgKind.imageGen
                   ? Icons.image_outlined
                   : Icons.code_rounded,
@@ -791,7 +812,7 @@ class _V2AppShellState extends State<V2AppShell> {
               ),
             if (collabHere)
               OListRow(
-                title: 'Live session',
+                title: 'Live chat',
                 subtitle: 'Open the live room',
                 icon: Icons.forum_outlined,
                 showChevron: false,
@@ -955,9 +976,20 @@ class _V2AppShellState extends State<V2AppShell> {
   }
 
   /// Opens an artifact from the transcript by its message id.
+  ///
+  /// The transcript's artifact is the same row the library derives, so the tap
+  /// pushes the library's detail host (mint, preview fetch, Download, Copy
+  /// link). Only an artifact with no id falls back to launching its URL, and
+  /// only one with neither falls back to the transcript's local detail.
   Future<void> _openArtifact(BuildContext context, String id) async {
     final message = _messageById(id);
     if (message == null) return;
+    final session = AppState.I.activeSession;
+    final artifact = session == null ? null : _artifactFor(session, message);
+    if (artifact != null) {
+      await V2WorkRoutes.openArtifactDetail(context, artifact);
+      return;
+    }
     final url = _artifactHref(message);
     if (url != null) {
       await v2OpenTranscriptLink(context, url);
@@ -1005,7 +1037,12 @@ class _V2AppShellState extends State<V2AppShell> {
   }
 
   Message? _messageById(String id) {
-    for (final message in AppState.I.activeSession?.messages ?? const []) {
+    final session = AppState.I.activeSession;
+    if (session == null) return null;
+    // The same transcript the live page renders (facade projection first).
+    final messages =
+        CloudAgentFacade.I.transcriptFor(session.id) ?? session.messages;
+    for (final message in messages) {
       if (message.privateSyncId == id) return message;
     }
     return null;
@@ -1459,7 +1496,7 @@ class _V2AppShellState extends State<V2AppShell> {
                   'account_health',
                   'Account health',
                   Icons.health_and_safety_outlined,
-                  'Security and devices',
+                  'Sign-in and deletion',
                 ),
                 _settingsRow(
                   'about',
@@ -1613,6 +1650,88 @@ class _V2AppShellState extends State<V2AppShell> {
     if (path != null && path.isNotEmpty) return path.split('/').last;
     return message.htmlArtifact != null ? 'preview.html' : 'Artifact';
   }
+
+  /// The artifact row a message projects onto, built the way the library
+  /// derives its list (`collectSessionArtifacts`), so the transcript and the
+  /// library open the same file with the same identity.
+  SessionArtifact? _artifactFor(ChatSession session, Message message) {
+    switch (message.kind) {
+      case MsgKind.imageGen:
+        final url = message.imageUrl?.trim() ?? '';
+        final path = message.imagePath?.trim() ?? '';
+        if (url.isEmpty && path.isEmpty) return null;
+        final cloudId = cloudArtifactIdOf(url);
+        return SessionArtifact(
+          id: '${session.id}:img:${message.privateSyncId}',
+          name: _artifactName(message),
+          path: path.isEmpty ? null : path,
+          url: url.isEmpty ? null : url,
+          sessionId: session.id,
+          sessionTitle: session.title,
+          time: message.time,
+          origin: ArtifactOrigin.generated,
+          kind: ArtifactKind.image,
+          // Only a row with a cloud identity can be re-minted; a local file
+          // keeps its own path and the detail says so.
+          cloudArtifactId: cloudId,
+          cloudAccountId: cloudId == null
+              ? null
+              : V2WorkRoutes.artifactAccountId,
+        );
+      case MsgKind.htmlArtifact:
+        final html = message.htmlArtifact;
+        if (html == null) return null;
+        return SessionArtifact(
+          id: '${session.id}:html:${html.id}',
+          name: html.title,
+          sessionId: session.id,
+          sessionTitle: session.title,
+          time: message.time,
+          origin: ArtifactOrigin.generated,
+          kind: ArtifactKind.html,
+          size: html.payloadBytes,
+          html: html,
+        );
+      default:
+        return null;
+    }
+  }
+
+  /// The artifact's real download URL, or null when it has none.
+  String? _artifactLinkOf(SessionArtifact? artifact) {
+    final url = artifact?.url?.trim();
+    return url == null || url.isEmpty ? null : url;
+  }
+
+  /// One meta line: the artifact's type, plus its real size when known.
+  String _artifactMeta(SessionArtifact? artifact, Message message) {
+    final type = message.kind == MsgKind.imageGen ? 'Image' : 'Web page';
+    final size = v2ArtifactSizeLabel(artifact?.size);
+    return size.isEmpty ? type : '$type · $size';
+  }
+
+  /// Real pixels for an image artifact that has a URL. A local path or a page
+  /// has no thumbnail here, so the row keeps its type glyph.
+  ImageProvider? _artifactThumbnail(SessionArtifact? artifact) {
+    if (artifact == null || artifact.kind != ArtifactKind.image) return null;
+    final url = _artifactLinkOf(artifact);
+    return url == null ? null : NetworkImage(url);
+  }
+
+  /// The inline page's source, so the detail preview and Copy have real text
+  /// without a fetch. URL-backed files are fetched on demand instead.
+  String? _artifactContent(SessionArtifact? artifact, Message message) {
+    final html = artifact?.html ?? message.htmlArtifact;
+    if (html == null) return null;
+    final buffer = StringBuffer(html.html);
+    if (html.css.trim().isNotEmpty) {
+      buffer.write('\n<style>\n${html.css}\n</style>');
+    }
+    if (html.javascript.trim().isNotEmpty) {
+      buffer.write('\n<script>\n${html.javascript}\n</script>');
+    }
+    return buffer.toString();
+  }
 }
 
 /// Owns the share sheet's real state.
@@ -1705,7 +1824,7 @@ class _ChatShareHostState extends State<_ChatShareHost> {
       if (!mounted) return;
       setState(() {
         _status = V2ShareStatus.error;
-        _error = 'Live sessions are unavailable in this build.';
+        _error = 'Live chats are unavailable in this build.';
       });
       return;
     }
@@ -1788,12 +1907,12 @@ class _ChatShareHostState extends State<_ChatShareHost> {
   Future<void> _createCollab() async {
     if (!FirebaseService.I.isSignedIn) {
       throw const ConversationShareException(
-        'Sign in to start a live session.',
+        'Sign in to start a live chat.',
       );
     }
     final collab = AppState.I.collaboration;
     if (collab == null) {
-      throw StateError('Live sessions are unavailable in this build.');
+      throw StateError('Live chats are unavailable in this build.');
     }
     final snapshot = ConversationSnapshot.fromSession(
       _session,

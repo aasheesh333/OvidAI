@@ -302,37 +302,36 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
     );
 
     // Grouped by tier so the labels always read Standard then Advanced, even
-    // when the caller interleaves the two.
+    // when the caller interleaves the two. Rows sit on the sheet surface with
+    // one hairline between them, indented to the name.
     final standard = models.where((model) => !model.locked).toList();
     final advanced = models.where((model) => model.locked).toList();
-    if (standard.isNotEmpty) {
+    void addGroup(String label, List<V2ModelOption> group) {
+      if (group.isEmpty) return;
       rows.add(
         OSectionHeader(
-          label: data.standardLabel,
+          label: label,
           padding: const EdgeInsets.fromLTRB(
-            OSpace.xs,
+            OSpace.s,
             OSpace.m,
-            OSpace.xs,
+            OSpace.s,
             OSpace.xs,
           ),
         ),
       );
-      rows.addAll(standard.map(row));
+      for (var i = 0; i < group.length; i++) {
+        // Indented to the model name: row padding, icon tile, icon gap.
+        if (i > 0) {
+          rows.add(
+            const ODivider(indent: OSpace.s + OSpace.iconTile + OSpace.m),
+          );
+        }
+        rows.add(row(group[i]));
+      }
     }
-    if (advanced.isNotEmpty) {
-      rows.add(
-        OSectionHeader(
-          label: data.advancedLabel,
-          padding: const EdgeInsets.fromLTRB(
-            OSpace.xs,
-            OSpace.m,
-            OSpace.xs,
-            OSpace.xs,
-          ),
-        ),
-      );
-      rows.addAll(advanced.map(row));
-    }
+
+    addGroup(data.standardLabel, standard);
+    addGroup(data.advancedLabel, advanced);
 
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
@@ -356,52 +355,64 @@ class _AutoCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final selected = data.autoSelected;
+    // A row like the models below it: the recommendation shows as the accent
+    // tile and the check, not as a filled card on the sheet's surface.
     return Semantics(
       selected: selected,
-      child: OCard(
-        accent: selected,
+      child: OPressable(
         onTap: onTap,
         semanticLabel: '${data.autoName}, ${data.autoSubtitle}',
-        child: Row(
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: c.accentSoft,
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                Icons.auto_awesome_rounded,
-                size: 20,
-                color: c.accent,
-              ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: OSpace.listRow),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: OSpace.s,
+              vertical: OSpace.s,
             ),
-            const SizedBox(width: OSpace.m),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    data.autoName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.bodyStrong.copyWith(color: c.text),
+            child: Row(
+              children: [
+                ExcludeSemantics(
+                  child: Container(
+                    width: OSpace.iconTile,
+                    height: OSpace.iconTile,
+                    decoration: BoxDecoration(
+                      color: c.accentSoft,
+                      borderRadius: BorderRadius.circular(ORadius.m),
+                    ),
+                    child: Icon(
+                      Icons.auto_awesome_rounded,
+                      size: 19,
+                      color: c.accent,
+                    ),
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    data.autoSubtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.caption.copyWith(color: c.textMuted),
+                ),
+                const SizedBox(width: OSpace.m),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        data.autoName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.bodyStrong.copyWith(color: c.text),
+                      ),
+                      const SizedBox(height: OSpace.xxs),
+                      Text(
+                        data.autoSubtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.caption.copyWith(color: c.textMuted),
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+                const SizedBox(width: OSpace.s),
+                _SelectionMark(selected: selected),
+              ],
             ),
-            const SizedBox(width: OSpace.s),
-            _SelectionMark(selected: selected),
-          ],
+          ),
         ),
       ),
     );
@@ -429,95 +440,83 @@ class _ModelRow extends StatelessWidget {
     // One meta line, then the cost. A locked row carries the plan gate as its
     // only tag; the caller's tag is dropped when it would repeat the gate.
     final gateTag = locked ? planLabel : null;
-    final row = Container(
+    final row = ConstrainedBox(
       constraints: const BoxConstraints(minHeight: OSpace.listRow),
-      padding: const EdgeInsets.symmetric(
-        horizontal: OSpace.m,
-        vertical: OSpace.s,
-      ),
-      decoration: BoxDecoration(
-        color: locked ? c.surfaceAlt.withValues(alpha: 0.55) : c.surface,
-        borderRadius: BorderRadius.circular(ORadius.l),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        children: [
-          ExcludeSemantics(
-            child: Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: c.surfaceAlt,
-                borderRadius: BorderRadius.circular(ORadius.m),
-              ),
-              child: Icon(
-                locked ? Icons.lock_outline_rounded : model.icon,
-                size: 19,
-                color: locked ? c.textFaint : c.textMuted,
-              ),
-            ),
-          ),
-          const SizedBox(width: OSpace.m),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Wrap(
-                  spacing: OSpace.s,
-                  runSpacing: OSpace.xs,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Text(
-                      model.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.body.copyWith(
-                        color: locked ? c.textMuted : c.text,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    if (gateTag != null)
-                      OPill(label: gateTag, tone: OPillTone.accent),
-                  ],
-                ),
-                const SizedBox(height: 2),
-                // Wrap, not Row: at 200 % text the meta line and the cost each
-                // get a full line instead of overflowing the row.
-                Wrap(
-                  spacing: OSpace.s,
-                  runSpacing: OSpace.xxs,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Text(
-                      model.subtitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.caption.copyWith(color: c.textMuted),
-                    ),
-                    Text(
-                      model.costHint,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: OType.caption.copyWith(color: c.textFaint),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: OSpace.xs),
-          if (locked)
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: OSpace.s,
+          vertical: OSpace.s,
+        ),
+        child: Row(
+          children: [
             ExcludeSemantics(
-              child: Icon(
-                Icons.lock_outline_rounded,
-                size: 18,
-                color: c.textFaint,
+              child: Container(
+                width: OSpace.iconTile,
+                height: OSpace.iconTile,
+                decoration: BoxDecoration(
+                  color: c.surfaceAlt,
+                  borderRadius: BorderRadius.circular(ORadius.m),
+                ),
+                child: Icon(
+                  locked ? Icons.lock_outline_rounded : model.icon,
+                  size: 19,
+                  color: locked ? c.textFaint : c.textMuted,
+                ),
               ),
-            )
-          else
-            _SelectionMark(selected: selected),
-        ],
+            ),
+            const SizedBox(width: OSpace.m),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Wrap(
+                    spacing: OSpace.s,
+                    runSpacing: OSpace.xs,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(
+                        model.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.body.copyWith(
+                          color: locked ? c.textMuted : c.text,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      if (gateTag != null)
+                        OPill(label: gateTag, tone: OPillTone.accent),
+                    ],
+                  ),
+                  const SizedBox(height: OSpace.xxs),
+                  // Wrap, not Row: at 200 % text the meta line and the cost
+                  // each get a full line instead of overflowing the row.
+                  Wrap(
+                    spacing: OSpace.s,
+                    runSpacing: OSpace.xxs,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(
+                        model.subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.caption.copyWith(color: c.textMuted),
+                      ),
+                      Text(
+                        model.costHint,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.caption.copyWith(color: c.textFaint),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: OSpace.xs),
+            if (!locked) _SelectionMark(selected: selected),
+          ],
+        ),
       ),
     );
 

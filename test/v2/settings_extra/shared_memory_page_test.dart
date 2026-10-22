@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/v2/settings/settings_rows.dart';
 import 'package:ovid_ai/ui/v2/settings_extra/shared_memory_page.dart';
 
 Future<void> _pump(
@@ -330,9 +331,9 @@ void main() {
   testWidgets('centres the content at 600 dp', (tester) async {
     await _pump(tester, _ready(), size: const Size(600, 1000));
 
-    final card = find.byType(OCard).first;
-    expect(tester.getSize(card).width, lessThanOrEqualTo(640));
-    expect(tester.getCenter(card).dx, closeTo(300, 0.5));
+    final list = find.byType(V2SettingsRowList).first;
+    expect(tester.getSize(list).width, lessThanOrEqualTo(640));
+    expect(tester.getCenter(list).dx, closeTo(300, 0.5));
   });
 
   testWidgets('reduced motion keeps every row', (tester) async {

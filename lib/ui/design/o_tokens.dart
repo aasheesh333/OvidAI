@@ -355,17 +355,13 @@ abstract final class OMotion {
 ///
 /// The system is flat: cards, rows and sheets use a hairline border and a
 /// surface step, never a shadow. [floating] and [sheet] are for popovers,
-/// menus and frames that overlap content; [glow] is a decorative violet halo
-/// inherited from the Stitch references and should not be used for new work
-/// (the browser viewport's take-control badge is its only remaining caller).
+/// menus and frames that overlap content. There is deliberately no decorative
+/// glow: the contract bans it, and the browser viewport is flat.
 abstract final class OShadow {
   static const floating = <BoxShadow>[
     BoxShadow(color: Color(0x73000000), blurRadius: 24, offset: Offset(0, 8)),
   ];
   static const sheet = <BoxShadow>[
     BoxShadow(color: Color(0x99000000), blurRadius: 32, offset: Offset(0, 16)),
-  ];
-  static const glow = <BoxShadow>[
-    BoxShadow(color: Color(0x2E7C5CFF), blurRadius: 16, spreadRadius: 1),
   ];
 }

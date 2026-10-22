@@ -6,6 +6,7 @@ import '../../../core/secure_store.dart';
 import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
+import 'settings_rows.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
 
@@ -450,24 +451,13 @@ class _CredentialsPageState extends State<CredentialsPage> {
       );
     }
 
-    final c = OColors.of(context);
     final rows = _rows(context);
     return SingleChildScrollView(
-      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
+      padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                for (var index = 0; index < rows.length; index++) ...[
-                  if (index > 0) Divider(height: 1, color: c.hairline),
-                  rows[index],
-                ],
-              ],
-            ),
-          ),
+          V2SettingsRowList(rows: rows),
           if (data.onRevokeAll != null) ...[
             const SizedBox(height: OSpace.l),
             OButton(
@@ -495,7 +485,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
     final google = data.google;
     final googleOn = google?.connected ?? false;
     add(
-      OListRow(
+      V2SettingsRow(
         icon: Icons.mail_outline_rounded,
         title: 'Google',
         subtitle: googleOn ? google!.subtitle : 'Not connected',
@@ -510,7 +500,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
 
     final oauth = data.githubOAuthActive;
     add(
-      OListRow(
+      V2SettingsRow(
         icon: Icons.terminal_rounded,
         title: 'GitHub',
         subtitle: oauth ? 'Connected' : 'Not connected',
@@ -520,7 +510,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
     );
 
     add(
-      OListRow(
+      V2SettingsRow(
         icon: Icons.key_rounded,
         title: 'GitHub token',
         subtitle: _githubPatSaved
@@ -540,7 +530,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
     );
 
     add(
-      OListRow(
+      V2SettingsRow(
         icon: Icons.vpn_key_outlined,
         title: 'Provider key',
         subtitle: _tokenSubtitle,
@@ -550,7 +540,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
     );
 
     add(
-      OListRow(
+      V2SettingsRow(
         icon: Icons.cloud_outlined,
         title: 'Cloud key',
         subtitle: data.cloudKeyActive ? 'Active' : 'Off',
@@ -571,7 +561,7 @@ class _CredentialsPageState extends State<CredentialsPage> {
           ? null
           : () => _editBrowserCredential(context, existing: credential);
       add(
-        OListRow(
+        V2SettingsRow(
           icon: Icons.language_rounded,
           title: credential.site,
           subtitle:

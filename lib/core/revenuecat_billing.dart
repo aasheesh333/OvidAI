@@ -352,6 +352,11 @@ class RevenueCatBilling with WidgetsBindingObserver {
   /// than by the store. The UI must label it "Test mode — no charge".
   bool lastPurchaseWasDemo = false;
 
+  /// Why the last [buy] could not start, when it could not. The UI shows this
+  /// instead of the generic "not available" copy (for example a yearly
+  /// package that the current offering does not contain).
+  String? lastPurchaseError;
+
   /// True when this build talks to the RevenueCat Test Store.
   bool get usingTestStore => _config.testStore && !_releaseMode;
 
@@ -428,12 +433,28 @@ class RevenueCatBilling with WidgetsBindingObserver {
     }
   }
 
-  /// Buys [tier] by matching the Play product id from [kOvidPlayProducts].
-  Future<UpgradeOutcome> buy(String tier) async {
+  /// Buys [tier] for [period] by matching the Play product id from
+  /// [kOvidPlayProductIds].
+  ///
+  /// A yearly request never falls back to the monthly package: buying the
+  /// monthly SKU for a yearly selection would charge the wrong period. A
+  /// missing yearly package is reported as [UpgradeResult.notAvailable] with
+  /// [lastPurchaseError] explaining why.
+  Future<UpgradeOutcome> buy(
+    String tier, {
+    OvidBillingPeriod period = OvidBillingPeriod.monthly,
+  }) async {
     lastPurchaseWasDemo = false;
-    final productId = kOvidPlayProducts[tier];
+    lastPurchaseError = null;
+    final productId = ovidPlayProductId(tier, period);
     if (productId == null) {
-      return const UpgradeOutcome(UpgradeResult.rejected);
+      // A tier that is not an Ovid plan is a caller bug, not a missing store
+      // product; keep the historical "rejected" answer for it.
+      if (!kOvidPlayProducts.containsKey(tier)) {
+        return const UpgradeOutcome(UpgradeResult.rejected);
+      }
+      lastPurchaseError = _periodUnavailableMessage(period);
+      return const UpgradeOutcome(UpgradeResult.notAvailable);
     }
     final demoAllowed = demoGrantAllowed(
       releaseMode: _releaseMode,
@@ -445,19 +466,25 @@ class RevenueCatBilling with WidgetsBindingObserver {
       lastPurchaseWasDemo = true;
       return UpgradeOutcome(UpgradeResult.ok, tier: tier);
     }
-    if (!available) return const UpgradeOutcome(UpgradeResult.notAvailable);
+    if (!available) {
+      lastPurchaseError = _periodUnavailableMessage(period);
+      return const UpgradeOutcome(UpgradeResult.notAvailable);
+    }
     if (!await configure()) {
       return const UpgradeOutcome(UpgradeResult.rejected);
     }
     try {
       final offered = await _platform.packages();
-      final match = offered.where((p) => p.productId == productId).firstOrNull;
+      final match = _packageFor(offered, productId, tier: tier, period: period);
       if (match == null) {
-        // Test Store without an offering yet: grant a clearly-labelled demo
-        // entitlement so the paywall can be exercised end to end. Never in a
-        // release build (demoAllowed is false there).
-        if (demoAllowed) {
+        lastPurchaseError = _periodUnavailableMessage(period);
+        // Test Store without a monthly offering yet: grant a clearly-labelled
+        // demo entitlement so the paywall can be exercised end to end. Never
+        // in a release build (demoAllowed is false there), and never for a
+        // yearly selection — that would hide a missing yearly package.
+        if (demoAllowed && period == OvidBillingPeriod.monthly) {
           lastPurchaseWasDemo = true;
+          lastPurchaseError = null;
           return UpgradeOutcome(UpgradeResult.ok, tier: tier);
         }
         return const UpgradeOutcome(UpgradeResult.notAvailable);
@@ -473,6 +500,37 @@ class RevenueCatBilling with WidgetsBindingObserver {
       return const UpgradeOutcome(UpgradeResult.unknown);
     }
   }
+
+  /// The package to purchase for [productId].
+  ///
+  /// The offering is matched by product id first. Only a *monthly* request may
+  /// use RevenueCat's conventional monthly package when the product id is not
+  /// found, and never when that package belongs to a different Ovid tier. A
+  /// yearly request never falls back.
+  static RevenueCatPackage? _packageFor(
+    List<RevenueCatPackage> offered,
+    String productId, {
+    required String tier,
+    required OvidBillingPeriod period,
+  }) {
+    final exact = offered.where((p) => p.productId == productId).firstOrNull;
+    if (exact != null) return exact;
+    if (period == OvidBillingPeriod.yearly) return null;
+    return offered.where((p) {
+      if (p.identifier != r'$rc_monthly' && p.identifier != 'monthly') {
+        return false;
+      }
+      // A legacy monthly product id is acceptable; a known product that
+      // belongs to another tier is not (that would buy the wrong plan).
+      final owner = ovidTierForProduct(p.productId);
+      return owner == null || owner == tier;
+    }).firstOrNull;
+  }
+
+  static String _periodUnavailableMessage(OvidBillingPeriod period) =>
+      period == OvidBillingPeriod.yearly
+      ? 'Yearly billing is not available for this plan yet.'
+      : 'Monthly billing is not available for this plan right now.';
 
   Future<UpgradeOutcome> restore() async {
     lastPurchaseWasDemo = false;

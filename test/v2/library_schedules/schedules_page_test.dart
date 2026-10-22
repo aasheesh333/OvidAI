@@ -79,8 +79,12 @@ void main() {
       find.text('Browses 5 top tech sites and writes a short summary.'),
       findsOneWidget,
     );
-    expect(find.text('Every weekday at 9:00 AM'), findsOneWidget);
-    expect(find.text('Next Tomorrow, 9:00 AM'), findsOneWidget);
+    // Cadence and next run share one line.
+    expect(
+      find.text('Every weekday at 9:00 AM · Tomorrow, 9:00 AM'),
+      findsOneWidget,
+    );
+    expect(find.text('Next Tomorrow, 9:00 AM'), findsNothing);
 
     // Removed copy: explainer, section headers, run counts and status lines.
     expect(find.text('Ovid can work while you sleep'), findsNothing);
@@ -368,18 +372,16 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('card menu pauses a running schedule', (tester) async {
+  testWidgets('card menu holds edit, run now and delete', (tester) async {
     _phone(tester);
-    V2ScheduleItem? toggled;
-    bool? value;
     await tester.pumpWidget(
       _app(
         SchedulesPage(
           data: const V2SchedulesData(schedules: _schedules),
-          onToggle: (schedule, enabled) {
-            toggled = schedule;
-            value = enabled;
-          },
+          onEdit: _ignore,
+          onToggle: _ignoreToggle,
+          onRunNow: _ignore,
+          onDelete: _ignore,
         ),
       ),
     );
@@ -389,14 +391,26 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Edit'), findsOneWidget);
-    expect(find.text('Pause'), findsOneWidget);
     expect(find.text('Run now'), findsOneWidget);
     expect(find.text('Delete'), findsOneWidget);
+    // The card's switch owns pausing; the menu does not repeat it.
+    expect(find.text('Pause'), findsNothing);
+    expect(find.text('Resume'), findsNothing);
+  });
 
-    await tester.tap(find.text('Pause'));
+  testWidgets('a menu without handlers is not offered', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        const SchedulesPage(
+          data: V2SchedulesData(schedules: _schedules),
+          onToggle: _ignoreToggle,
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
-    expect(toggled?.id, 's1');
-    expect(value, isFalse);
+
+    expect(_menuButton('Morning AI news briefing'), findsNothing);
   });
 
   testWidgets('card menu runs a schedule now', (tester) async {
@@ -460,39 +474,6 @@ void main() {
     await tester.tap(find.widgetWithText(TextButton, 'Delete'));
     await tester.pumpAndSettle();
     expect(deleted?.id, 's1');
-  });
-
-  testWidgets('paused schedule menu offers Resume', (tester) async {
-    _phone(tester);
-    V2ScheduleItem? toggled;
-    bool? value;
-    await tester.pumpWidget(
-      _app(
-        SchedulesPage(
-          data: const V2SchedulesData(schedules: _schedules),
-          onToggle: (schedule, enabled) {
-            toggled = schedule;
-            value = enabled;
-          },
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.scrollUntilVisible(
-      _menuButton('Nightly website check'),
-      200,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(_menuButton('Nightly website check'));
-    await tester.pumpAndSettle();
-    expect(find.text('Resume'), findsOneWidget);
-
-    await tester.tap(find.text('Resume'));
-    await tester.pumpAndSettle();
-    expect(toggled?.id, 's2');
-    expect(value, isTrue);
   });
 
   for (final dark in [false, true]) {

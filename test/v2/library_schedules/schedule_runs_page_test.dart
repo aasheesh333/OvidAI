@@ -91,8 +91,12 @@ void main() {
     // The header is the schedule itself, not a generic page name.
     expect(find.text('Morning AI news briefing'), findsOneWidget);
     expect(find.text('Schedule runs'), findsNothing);
-    expect(find.text('24 runs · 23 succeeded · 1 failed'), findsOneWidget);
-    expect(find.text('95.8% success'), findsOneWidget);
+    // One summary line; the card, the bar and the filter chips are gone.
+    expect(find.text('95.8 % · 24 runs'), findsOneWidget);
+    expect(find.text('24 runs · 23 succeeded · 1 failed'), findsNothing);
+    expect(find.text('95.8% success'), findsNothing);
+    expect(find.text('Avg runtime 52s'), findsNothing);
+    expect(find.text('Failed (1)'), findsNothing);
     expect(find.text('TODAY — MAY 18'), findsOneWidget);
     expect(find.text('YESTERDAY — MAY 17'), findsOneWidget);
     expect(find.text('daily-brief.md'), findsOneWidget);
@@ -127,7 +131,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Morning AI news briefing'), findsOneWidget);
-    expect(find.text('24 runs · 23 succeeded · 1 failed'), findsOneWidget);
+    expect(find.text('95.8 % · 24 runs'), findsOneWidget);
     expect(find.text('Today — May 18'), findsNothing);
     expect(find.text('TODAY — MAY 18'), findsOneWidget);
   });
@@ -206,20 +210,6 @@ void main() {
     expect(retried?.id, 'r2');
   });
 
-  testWidgets('filter chips show only failed runs', (tester) async {
-    _phone(tester);
-    await tester.pumpWidget(_app(const ScheduleRunsPage(data: _data)));
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(find.text('Failed (1)'));
-    await tester.tap(find.text('Failed (1)'));
-    await tester.pumpAndSettle();
-
-    expect(find.textContaining('Nightly backup'), findsOneWidget);
-    expect(find.text('daily-brief.md'), findsNothing);
-    expect(find.text('Failed (1)'), findsOneWidget);
-  });
-
   testWidgets('history is rendered by the shared run timeline', (tester) async {
     _phone(tester);
     await tester.pumpWidget(_app(const ScheduleRunsPage(data: _data)));
@@ -284,7 +274,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Morning AI news briefing'), findsOneWidget);
-    expect(find.text('95.8% success'), findsOneWidget);
+    expect(find.text('95.8 % · 24 runs'), findsOneWidget);
     expect(find.text('TODAY — MAY 18'), findsOneWidget);
     expect(find.text('daily-brief.md'), findsOneWidget);
   });
@@ -321,14 +311,12 @@ void main() {
       expect(find.textContaining('storage connector'), findsOneWidget);
       expect(tester.takeException(), isNull);
 
-      // Filter chips and their empty state also have to survive.
+      // The one summary line also has to survive.
       await tester.scrollUntilVisible(
-        find.text('Failed (1)'),
+        find.text('95.8 % · 24 runs'),
         -160,
         scrollable: find.byType(Scrollable).first,
       );
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Failed (1)'));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
     });

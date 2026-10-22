@@ -390,7 +390,7 @@ class _VoiceWaveform extends StatelessWidget {
                             color: (i + 0.5) / _bars.length <= progress
                                 ? c.accentFill
                                 : c.surfaceRaised,
-                            borderRadius: BorderRadius.circular(2),
+                            borderRadius: BorderRadius.circular(ORadius.xs),
                           ),
                         ),
                       ),

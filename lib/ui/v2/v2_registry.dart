@@ -65,7 +65,7 @@ List<V2ScreenEntry> v2Screens = <V2ScreenEntry>[
     id: 'sign_in',
     title: 'Sign in',
     group: 'Identity',
-    summary: 'Email, password, Google, Apple and inline errors',
+    summary: 'Google and phone sign-in with inline errors',
     builder: (_) => const SignInPage(),
   ),
   V2ScreenEntry(

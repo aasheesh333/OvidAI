@@ -12,6 +12,13 @@ import 'run_timeline.dart';
 
 enum V2ScheduleRunsStatus { loading, content, empty, error }
 
+/// The one summary line above the timeline: "66.7 % · 3 runs".
+String scheduleRunsSummaryLine({required int succeeded, required int total}) {
+  final percent = total == 0 ? 0.0 : succeeded / total * 100;
+  final runs = total == 1 ? '1 run' : '$total runs';
+  return '${percent.toStringAsFixed(1)} % · $runs';
+}
+
 /// The wire status of one scheduled occurrence, plus [unknown] for a value this
 /// build does not recognise (which must never be shown as a success).
 enum V2RunStatus {
@@ -22,8 +29,6 @@ enum V2RunStatus {
   skipped,
   unknown,
 }
-
-enum V2RunsFilter { all, succeeded, failed }
 
 /// "1m 12s", "18s", "2h 3m". Negative or zero spans read as "<1s".
 String formatRunDuration(Duration duration) {
@@ -279,8 +284,8 @@ class V2ScheduleRunsData {
   final String errorMessage;
 }
 
-/// The run history for one schedule, grouped by day.
-class ScheduleRunsPage extends StatefulWidget {
+/// The run history for one schedule: one summary line, then the timeline.
+class ScheduleRunsPage extends StatelessWidget {
   const ScheduleRunsPage({
     super.key,
     required this.data,
@@ -298,35 +303,15 @@ class ScheduleRunsPage extends StatefulWidget {
   final VoidCallback? onMore;
   final VoidCallback? onRetry;
 
-  @override
-  State<ScheduleRunsPage> createState() => _ScheduleRunsPageState();
-}
-
-class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
-  V2RunsFilter _filter = V2RunsFilter.all;
-
-  List<V2ScheduleRun> get _filteredRuns {
-    if (_filter == V2RunsFilter.all) {
-      return [for (final group in widget.data.groups) ...group.runs];
-    }
-    final wanted = _filter == V2RunsFilter.succeeded
-        ? V2RunStatus.succeeded
-        : V2RunStatus.failed;
-    return [
-      for (final group in widget.data.groups)
-        ...group.runs.where((run) => run.status == wanted),
-    ];
-  }
-
   /// The day label each run belongs to, keyed by run id, so the timeline keeps
   /// the history's own grouping.
   Map<String, String> get _dayLabels => {
-    for (final group in widget.data.groups)
+    for (final group in data.groups)
       for (final run in group.runs) run.id: group.label,
   };
 
   V2ScheduleRun? _runById(String id) {
-    for (final group in widget.data.groups) {
+    for (final group in data.groups) {
       for (final run in group.runs) {
         if (run.id == id) return run;
       }
@@ -337,37 +322,37 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final name = widget.data.scheduleTitle?.trim() ?? '';
+    final name = data.scheduleTitle?.trim() ?? '';
     return OScreen(
       title: name.isEmpty ? 'Schedule runs' : name,
       showBack: true,
       actions: [
-        if (widget.onMore != null)
+        if (onMore != null)
           OIconButton(
             icon: Icons.more_vert_rounded,
             semanticLabel: 'More options',
-            onPressed: widget.onMore,
+            onPressed: onMore,
           ),
       ],
       child: OFadeSlide(
         child: OAnimatedSwap(
-          child: switch (widget.data.status) {
+          child: switch (data.status) {
             V2ScheduleRunsStatus.loading => const OSkeletonList(rows: 6),
             V2ScheduleRunsStatus.error => OErrorState(
-              message: widget.data.errorMessage,
-              onRetry: widget.onRetry,
+              message: data.errorMessage,
+              onRetry: onRetry,
             ),
             V2ScheduleRunsStatus.empty => RunTimeline(
               data: const V2RunTimelineData(status: V2RunTimelineStatus.empty),
-              onBackToSchedule: widget.onBackToSchedule,
+              onBackToSchedule: onBackToSchedule,
             ),
             V2ScheduleRunsStatus.content =>
-              widget.data.groups.isEmpty
+              data.groups.isEmpty
                   ? RunTimeline(
                       data: const V2RunTimelineData(
                         status: V2RunTimelineStatus.empty,
                       ),
-                      onBackToSchedule: widget.onBackToSchedule,
+                      onBackToSchedule: onBackToSchedule,
                     )
                   : _content(c),
           },
@@ -377,52 +362,43 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
   }
 
   Widget _content(OColors c) {
-    final runs = _filteredRuns;
+    final runs = [for (final group in data.groups) ...group.runs];
     return ListView(
       padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
       children: [
-        _summary(c),
-        const SizedBox(height: OSpace.m),
-        _filters(),
-        const SizedBox(height: OSpace.l),
-        if (runs.isEmpty)
-          OEmptyState(
-            compact: true,
-            icon: Icons.filter_alt_off_rounded,
-            title: _filter == V2RunsFilter.failed
-                ? 'No failed runs'
-                : 'No succeeded runs',
-            message: 'Try another filter.',
-            action: OButton(
-              label: 'Show all runs',
-              variant: OButtonVariant.secondary,
-              onPressed: () => setState(() => _filter = V2RunsFilter.all),
-            ),
-          )
-        else
-          RunTimeline(
-            data: V2RunTimelineData(runs: _timelineRuns(runs)),
-            onOpenArtifact: widget.onViewArtifact == null
-                ? null
-                : (run) {
-                    final source = _runById(run.id);
-                    if (source != null) widget.onViewArtifact!(source);
-                  },
-            onRetryRun: widget.onRetryRun == null
-                ? null
-                : (run) {
-                    final source = _runById(run.id);
-                    if (source != null) widget.onRetryRun!(source);
-                  },
-            onBackToSchedule: widget.onBackToSchedule,
+        Text(
+          scheduleRunsSummaryLine(
+            succeeded: data.succeeded,
+            total: data.total,
           ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: OType.bodySm.copyWith(color: c.textMuted),
+        ),
+        const SizedBox(height: OSpace.l),
+        RunTimeline(
+          data: V2RunTimelineData(runs: _timelineRuns(runs)),
+          onOpenArtifact: onViewArtifact == null
+              ? null
+              : (run) {
+                  final source = _runById(run.id);
+                  if (source != null) onViewArtifact!(source);
+                },
+          onRetryRun: onRetryRun == null
+              ? null
+              : (run) {
+                  final source = _runById(run.id);
+                  if (source != null) onRetryRun!(source);
+                },
+          onBackToSchedule: onBackToSchedule,
+        ),
       ],
     );
   }
 
   List<V2TimelineRun> _timelineRuns(List<V2ScheduleRun> runs) {
     final labels = _dayLabels;
-    final now = widget.data.now ?? DateTime.now();
+    final now = data.now ?? DateTime.now();
     return [
       for (final run in runs)
         V2TimelineRun(
@@ -451,87 +427,4 @@ class _ScheduleRunsPageState extends State<ScheduleRunsPage> {
     V2RunStatus.skipped => V2RunOutcome.skipped,
     V2RunStatus.unknown => V2RunOutcome.unknown,
   };
-
-  Widget _summary(OColors c) {
-    final data = widget.data;
-    final percent = data.total == 0 ? 0.0 : data.succeeded / data.total * 100;
-    return OCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '${data.total} runs · ${data.succeeded} succeeded · ${data.failed} failed',
-            style: OType.h3.copyWith(color: c.text),
-          ),
-          const SizedBox(height: OSpace.m),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(3),
-            child: Container(
-              height: 6,
-              color: c.surfaceRaised,
-              child: Row(
-                children: [
-                  if (data.succeeded > 0)
-                    Expanded(
-                      flex: data.succeeded,
-                      child: Container(color: c.success),
-                    ),
-                  if (data.failed > 0)
-                    Expanded(
-                      flex: data.failed,
-                      child: Container(color: c.danger),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: OSpace.s),
-          Wrap(
-            spacing: OSpace.m,
-            runSpacing: OSpace.xs,
-            children: [
-              Text(
-                '${percent.toStringAsFixed(1)}% success',
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-              Text(
-                'Avg runtime ${data.avgRuntimeLabel}',
-                style: OType.caption.copyWith(color: c.textMuted),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _filters() {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: [
-          OChip(
-            label: 'All (${widget.data.total})',
-            icon: Icons.apps_rounded,
-            selected: _filter == V2RunsFilter.all,
-            onTap: () => setState(() => _filter = V2RunsFilter.all),
-          ),
-          const SizedBox(width: OSpace.s),
-          OChip(
-            label: 'Succeeded (${widget.data.succeeded})',
-            icon: Icons.check_circle_outline_rounded,
-            selected: _filter == V2RunsFilter.succeeded,
-            onTap: () => setState(() => _filter = V2RunsFilter.succeeded),
-          ),
-          const SizedBox(width: OSpace.s),
-          OChip(
-            label: 'Failed (${widget.data.failed})',
-            icon: Icons.error_outline_rounded,
-            selected: _filter == V2RunsFilter.failed,
-            onTap: () => setState(() => _filter = V2RunsFilter.failed),
-          ),
-        ],
-      ),
-    );
-  }
 }

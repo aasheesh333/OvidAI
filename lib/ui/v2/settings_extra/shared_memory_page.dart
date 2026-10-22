@@ -4,6 +4,7 @@ import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import '../settings/memory_page.dart';
+import '../settings/settings_rows.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
 
@@ -210,7 +211,6 @@ class _SharedMemoryPageState extends State<SharedMemoryPage> {
   }
 
   Widget _content(BuildContext context) {
-    final c = OColors.of(context);
     final scopes = _visibleScopes;
     final canToggle = data.onEnabledChanged != null;
     return SingleChildScrollView(
@@ -220,48 +220,43 @@ class _SharedMemoryPageState extends State<SharedMemoryPage> {
         children: [
           _scopeFilter(),
           const SizedBox(height: OSpace.s),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                OListRow(
-                  icon: Icons.share_rounded,
-                  title: 'Share memory',
+          V2SettingsRowList(
+            rows: [
+              V2SettingsRow(
+                icon: Icons.share_rounded,
+                title: 'Share memory',
+                showChevron: false,
+                onTap: canToggle ? () => _setEnabled(!_enabled) : null,
+                enabled: canToggle,
+                trailing: _switch(
+                  key: const ValueKey<String>('shared-memory-master-switch'),
+                  label: 'Share memory',
+                  value: _enabled,
+                  onChanged: canToggle ? _setEnabled : null,
+                ),
+              ),
+              for (final scope in scopes)
+                V2SettingsRow(
+                  icon: _scopeIcon(scope.kind),
+                  title: scope.title,
+                  subtitle: scope.audience,
                   showChevron: false,
-                  onTap: canToggle ? () => _setEnabled(!_enabled) : null,
-                  enabled: canToggle,
+                  enabled: _enabled,
+                  onTap: data.onScopeChanged == null || !_enabled
+                      ? null
+                      : () => _setScope(scope.id, !scope.shared),
                   trailing: _switch(
-                    key: const ValueKey<String>('shared-memory-master-switch'),
-                    label: 'Share memory',
-                    value: _enabled,
-                    onChanged: canToggle ? _setEnabled : null,
+                    key: ValueKey<String>(
+                      'shared-memory-scope-${scope.id}-switch',
+                    ),
+                    label: scope.title,
+                    value: scope.shared,
+                    onChanged: data.onScopeChanged == null || !_enabled
+                        ? null
+                        : (next) => _setScope(scope.id, next),
                   ),
                 ),
-                for (final scope in scopes) ...[
-                  Divider(color: c.hairline, height: 1),
-                  OListRow(
-                    icon: _scopeIcon(scope.kind),
-                    title: scope.title,
-                    subtitle: scope.audience,
-                    showChevron: false,
-                    enabled: _enabled,
-                    onTap: data.onScopeChanged == null || !_enabled
-                        ? null
-                        : () => _setScope(scope.id, !scope.shared),
-                    trailing: _switch(
-                      key: ValueKey<String>(
-                        'shared-memory-scope-${scope.id}-switch',
-                      ),
-                      label: scope.title,
-                      value: scope.shared,
-                      onChanged: data.onScopeChanged == null || !_enabled
-                          ? null
-                          : (next) => _setScope(scope.id, next),
-                    ),
-                  ),
-                ],
-              ],
-            ),
+            ],
           ),
           if (data.onForget != null) ...[
             const SizedBox(height: OSpace.l),

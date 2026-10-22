@@ -8,8 +8,6 @@ Future<void> _pump(
   WidgetTester tester, {
   bool dark = false,
   VoidCallback? onGetStarted,
-  VoidCallback? onSignIn,
-  VoidCallback? onLanguageTap,
   VoidCallback? onClose,
 }) async {
   await tester.pumpWidget(
@@ -17,8 +15,6 @@ Future<void> _pump(
       theme: dark ? OTheme.dark() : OTheme.light(),
       home: OnboardingWelcomePage(
         onGetStarted: onGetStarted,
-        onSignIn: onSignIn,
-        onLanguageTap: onLanguageTap,
         onClose: onClose,
       ),
     ),
@@ -27,19 +23,23 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets(
-    'welcome renders the header, identity and both actions in light',
-    (tester) async {
-      await _pump(tester);
+  testWidgets('welcome renders the header, identity and one action in light', (
+    tester,
+  ) async {
+    await _pump(tester);
 
-      expect(find.text('Welcome'), findsOneWidget);
-      expect(find.text('Your always-on personal agent.'), findsOneWidget);
-      expect(find.text('STEP 1 OF 4'), findsOneWidget);
-      expect(find.text('Get started'), findsOneWidget);
-      expect(find.text('Sign in'), findsOneWidget);
-      expect(find.byKey(const Key('welcome-language')), findsOneWidget);
-    },
-  );
+    expect(find.text('Welcome'), findsOneWidget);
+    expect(find.text('Ovid Si'), findsOneWidget);
+    expect(find.bySemanticsLabel('Ovid Si logo'), findsOneWidget);
+    expect(find.text('Ovid builds, ships and answers.'), findsOneWidget);
+    expect(find.text('STEP 1 OF 4'), findsOneWidget);
+    expect(find.text('Get started'), findsOneWidget);
+    // One primary action: no sign-in shortcut, no language pill — both are
+    // real steps later in the same tour.
+    expect(find.text('Sign in'), findsNothing);
+    expect(find.byKey(const Key('welcome-sign-in')), findsNothing);
+    expect(find.byKey(const Key('welcome-language')), findsNothing);
+  });
 
   testWidgets('no hardcoded version pill is shown', (tester) async {
     await _pump(tester);
@@ -53,39 +53,18 @@ void main() {
   testWidgets('welcome renders correctly in dark', (tester) async {
     await _pump(tester, dark: true);
 
-    expect(find.text('Your always-on personal agent.'), findsOneWidget);
+    expect(find.text('Ovid builds, ships and answers.'), findsOneWidget);
     expect(find.text('Get started'), findsOneWidget);
-    expect(find.text('Sign in'), findsOneWidget);
   });
 
-  testWidgets('get started and sign in call their callbacks', (tester) async {
+  testWidgets('get started calls its callback', (tester) async {
     var started = 0;
-    var signedIn = 0;
-    await _pump(
-      tester,
-      onGetStarted: () => started++,
-      onSignIn: () => signedIn++,
-    );
+    await _pump(tester, onGetStarted: () => started++);
 
     await tester.ensureVisible(find.byKey(const Key('welcome-get-started')));
     await tester.tap(find.byKey(const Key('welcome-get-started')));
     await tester.pump();
     expect(started, 1);
-
-    await tester.ensureVisible(find.byKey(const Key('welcome-sign-in')));
-    await tester.tap(find.byKey(const Key('welcome-sign-in')));
-    await tester.pump();
-    expect(signedIn, 1);
-  });
-
-  testWidgets('language selector calls back', (tester) async {
-    var taps = 0;
-    await _pump(tester, onLanguageTap: () => taps++);
-
-    await tester.tap(find.byKey(const Key('welcome-language')));
-    await tester.pump();
-
-    expect(taps, 1);
   });
 
   testWidgets('close action is shown only when wired', (tester) async {
@@ -111,58 +90,38 @@ void main() {
             size: Size(320, 640),
             textScaler: TextScaler.linear(2),
           ),
-          child: OnboardingWelcomePage(
-            onGetStarted: () {},
-            onSignIn: () {},
-            onLanguageTap: () {},
-          ),
+          child: OnboardingWelcomePage(onGetStarted: () {}),
         ),
       ),
     );
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Your always-on personal agent.'), findsOneWidget);
-    // The language pill keeps its 48 dp target and grows with the text
-    // instead of clipping the label.
-    final pill = tester.getSize(find.byKey(const Key('welcome-language')));
-    expect(pill.height, greaterThanOrEqualTo(48));
-    expect(tester.getSize(find.text('English')).height, greaterThan(24));
-    expect(find.byKey(const Key('welcome-get-started')), findsOneWidget);
+    expect(find.text('Ovid builds, ships and answers.'), findsOneWidget);
+    expect(find.text('Ovid Si'), findsOneWidget);
+    // The primary action stays pinned to the bottom edge: the scrollable body
+    // above it may clip, the CTA may not leave the screen.
+    final cta = tester.getRect(find.byKey(const Key('welcome-get-started')));
+    expect(cta.bottom, lessThanOrEqualTo(640));
+    expect(cta.height, greaterThanOrEqualTo(48));
   });
 
-  testWidgets('controls meet the 48 dp target and carry labels', (
+  testWidgets('the control meets the 48 dp target and carries a label', (
     tester,
   ) async {
     final semantics = tester.ensureSemantics();
-    await _pump(
-      tester,
-      onGetStarted: () {},
-      onSignIn: () {},
-      onLanguageTap: () {},
-      onClose: () {},
+    await _pump(tester, onGetStarted: () {}, onClose: () {});
+
+    expect(
+      tester.getSize(find.byKey(const Key('welcome-get-started'))).height,
+      greaterThanOrEqualTo(48),
     );
-
-    for (final key in const [
-      Key('welcome-get-started'),
-      Key('welcome-sign-in'),
-      Key('welcome-language'),
-    ]) {
-      expect(
-        tester.getSize(find.byKey(key)).height,
-        greaterThanOrEqualTo(48),
-        reason: '$key must be at least 48 dp tall',
-      );
-    }
-
     expect(find.bySemanticsLabel('Close'), findsOneWidget);
-    expect(find.bySemanticsLabel('Language, English'), findsOneWidget);
     expect(find.bySemanticsLabel('Get started'), findsWidgets);
-    expect(find.bySemanticsLabel('Sign in'), findsWidgets);
     semantics.dispose();
   });
 
-  testWidgets('unwired actions report a disabled state', (tester) async {
+  testWidgets('an unwired action reports a disabled state', (tester) async {
     final semantics = tester.ensureSemantics();
     await _pump(tester);
 

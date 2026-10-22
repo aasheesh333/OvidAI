@@ -12,6 +12,7 @@ import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'confirm_typed_sheet.dart';
+import 'settings_rows.dart';
 
 enum V2AccountStatus { loading, ready, empty, error }
 
@@ -84,6 +85,7 @@ class V2AccountData {
     this.onAccountTap,
     this.onLinkAccount,
     this.onOpenCredentials,
+    this.onDataControl,
     this.onTeamSupport,
     this.onSignOut,
     this.onDeleteAccount,
@@ -111,7 +113,13 @@ class V2AccountData {
   final VoidCallback? onLinkAccount;
 
   /// Opens the Credentials screen (browser logins, GitHub, tokens).
+  ///
+  /// Retained for hosts that still pass it; the minimal Account page does not
+  /// render a Credentials row.
   final VoidCallback? onOpenCredentials;
+
+  /// Opens Data control (export, import, cache, deletion).
+  final VoidCallback? onDataControl;
 
   /// Opens team/shared-session and support destinations.
   final VoidCallback? onTeamSupport;
@@ -212,7 +220,6 @@ class _AccountPageState extends State<AccountPage> {
   }
 
   Widget _content(BuildContext context, V2AccountProfile profile) {
-    final c = OColors.of(context);
     final rows = _rows(context);
     return SingleChildScrollView(
       padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
@@ -224,24 +231,7 @@ class _AccountPageState extends State<AccountPage> {
             onChangePhoto: data.onChangePhoto,
           ),
           const SizedBox(height: OSpace.xl),
-          if (rows.isNotEmpty)
-            OCard(
-              padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (var index = 0; index < rows.length; index++) ...[
-                    if (index > 0)
-                      Divider(
-                        height: 1,
-                        thickness: 1,
-                        indent: 64,
-                        color: c.hairline,
-                      ),
-                    rows[index],
-                  ],
-                ],
-              ),
-            ),
+          if (rows.isNotEmpty) V2SettingsRowList(rows: rows),
           if (_deletionError != null) ...[
             const SizedBox(height: OSpace.l),
             _DeletionError(message: _deletionError!),
@@ -257,47 +247,20 @@ class _AccountPageState extends State<AccountPage> {
                   : _restoreAccount,
             ),
           ],
-          if (data.onSignOut != null) ...[
-            const SizedBox(height: OSpace.xl),
-            OButton(
-              label: 'Sign out',
-              icon: Icons.logout_rounded,
-              variant: OButtonVariant.secondary,
-              expand: true,
-              loading: data.signOutLoading,
-              onPressed: data.onSignOut,
-            ),
-          ],
-          if (!_deletionPending && _canDelete) ...[
-            const SizedBox(height: OSpace.l),
-            OButton(
-              label: 'Delete account',
-              icon: Icons.warning_amber_rounded,
-              variant: OButtonVariant.danger,
-              expand: true,
-              loading: _deleting,
-              onPressed: () => _confirmDelete(context),
-            ),
-            const SizedBox(height: OSpace.s),
-            Text(
-              'Deletes after 24 hours. You can restore until then.',
-              textAlign: TextAlign.center,
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ],
         ],
       ),
     );
   }
 
-  /// At most five destinations. The profile-detail grid is gone: editable
-  /// fields live behind the one "Edit profile" action.
+  /// Four destinations at most: the profile editor, the sign-in sheet, data
+  /// control and the destructive delete. Profile details, credentials and
+  /// support live behind those rows, not on the page.
   List<Widget> _rows(BuildContext context) {
     final rows = <Widget>[];
     final edit = _editProfileAction();
     if (edit != null) {
       rows.add(
-        OListRow(
+        V2SettingsRow(
           icon: Icons.edit_outlined,
           title: 'Edit profile',
           onTap: edit,
@@ -310,7 +273,7 @@ class _AccountPageState extends State<AccountPage> {
     // A dead "None linked" row is noise.
     if (canManageSignIn || data.connectedAccounts.isNotEmpty) {
       rows.add(
-        OListRow(
+        V2SettingsRow(
           icon: Icons.login_rounded,
           title: 'Sign-in methods',
           subtitle: _linkedLabel(),
@@ -319,21 +282,25 @@ class _AccountPageState extends State<AccountPage> {
         ),
       );
     }
-    if (data.onOpenCredentials != null) {
+    if (data.onDataControl != null) {
       rows.add(
-        OListRow(
-          icon: Icons.key_rounded,
-          title: 'Credentials',
-          onTap: data.onOpenCredentials,
+        V2SettingsRow(
+          key: const ValueKey<String>('account-data-control-row'),
+          icon: Icons.shield_outlined,
+          title: 'Data control',
+          onTap: data.onDataControl,
         ),
       );
     }
-    if (data.onTeamSupport != null) {
+    if (_canDelete && !_deletionPending) {
       rows.add(
-        OListRow(
-          icon: Icons.groups_outlined,
-          title: 'Team & support',
-          onTap: data.onTeamSupport,
+        V2SettingsRow(
+          key: const ValueKey<String>('account-delete-row'),
+          icon: Icons.warning_amber_rounded,
+          title: 'Delete account',
+          danger: true,
+          showChevron: false,
+          onTap: _deleting ? null : () => _confirmDelete(context),
         ),
       );
     }
@@ -375,44 +342,44 @@ class _AccountPageState extends State<AccountPage> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const OSectionTitle(title: 'Sign-in methods'),
-                  OCard(
-                    padding: EdgeInsets.zero,
-                    child: Column(
-                      children: [
-                        for (
-                          var index = 0;
-                          index < data.connectedAccounts.length;
-                          index++
-                        ) ...[
-                          if (index > 0)
-                            Divider(
-                              height: 1,
-                              thickness: 1,
-                              color: c.hairline,
-                            ),
-                          _signInRow(
-                            sheetContext,
-                            data.connectedAccounts[index],
+                  Column(
+                    children: [
+                      for (
+                        var index = 0;
+                        index < data.connectedAccounts.length;
+                        index++
+                      ) ...[
+                        if (index > 0)
+                          Divider(
+                            height: 1,
+                            thickness: 1,
+                            color: c.hairline,
                           ),
-                        ],
-                        if (data.onLinkAccount != null) ...[
-                          if (data.connectedAccounts.isNotEmpty)
-                            Divider(
-                              height: 1,
-                              thickness: 1,
-                              color: c.hairline,
-                            ),
-                          OListRow(
-                            icon: Icons.add_link_rounded,
-                            title: 'Link account',
-                            onTap: () {
-                              Navigator.of(sheetContext).pop();
-                              data.onLinkAccount?.call();
-                            },
-                          ),
-                        ],
+                        _signInRow(
+                          sheetContext,
+                          data.connectedAccounts[index],
+                        ),
                       ],
-                    ),
+                      if (data.onLinkAccount != null) ...[
+                        if (data.connectedAccounts.isNotEmpty)
+                          Divider(
+                            height: 1,
+                            thickness: 1,
+                            color: c.hairline,
+                          ),
+                        OListRow(
+                          icon: Icons.add_link_rounded,
+                          title: 'Link account',
+                          padding: const EdgeInsets.symmetric(
+                            vertical: OSpace.m,
+                          ),
+                          onTap: () {
+                            Navigator.of(sheetContext).pop();
+                            data.onLinkAccount?.call();
+                          },
+                        ),
+                      ],
+                    ],
                   ),
                 ],
               ),
@@ -438,6 +405,7 @@ class _AccountPageState extends State<AccountPage> {
         tone: account.connected ? OPillTone.success : OPillTone.neutral,
       ),
       showChevron: false,
+      padding: const EdgeInsets.symmetric(vertical: OSpace.m),
       onTap: tap == null ? null : () => tap(account),
     );
   }

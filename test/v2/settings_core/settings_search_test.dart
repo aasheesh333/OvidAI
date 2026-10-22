@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/settings/settings_hub.dart';
+import 'package:ovid_ai/ui/v2/settings/settings_rows.dart';
 import 'package:ovid_ai/ui/v2/settings/settings_search.dart';
 
 V2SettingsSearchData _data({
@@ -611,6 +612,6 @@ void main() {
     await tester.pump();
 
     expect(find.text('Plan & billing'), findsOneWidget);
-    expect(find.byType(OCard), findsWidgets);
+    expect(find.byType(V2SettingsRowList), findsWidgets);
   });
 }

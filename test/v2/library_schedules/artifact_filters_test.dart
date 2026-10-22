@@ -124,9 +124,18 @@ Future<void> _tapChip(WidgetTester tester, String name) async {
   await tester.pumpAndSettle();
 }
 
+/// The bar is one scrolling row, so a picker may start off-screen.
+Future<void> _tapPicker(WidgetTester tester, ValueKey<String> key) async {
+  final finder = find.byKey(key);
+  await tester.ensureVisible(finder);
+  await tester.pumpAndSettle();
+  await tester.tap(finder);
+  await tester.pumpAndSettle();
+}
+
 void main() {
   group('renders', () {
-    testWidgets('type chips, controls and size summary', (tester) async {
+    testWidgets('one row: type chips then the pickers', (tester) async {
       await _pump(tester);
 
       for (final label in ['All', 'Image', 'Page', 'Code', 'Doc', 'Other']) {
@@ -134,10 +143,22 @@ void main() {
       }
       expect(find.byKey(_sourceKey), findsOneWidget);
       expect(find.text('Any source'), findsOneWidget);
-      expect(find.text('All sessions'), findsOneWidget);
+      expect(find.text('All chats'), findsOneWidget);
       expect(find.text('Any time'), findsOneWidget);
       expect(find.text('Newest first'), findsOneWidget);
-      expect(find.text('4 files · 2.4 MB'), findsOneWidget);
+
+      // The count summary is gone.
+      expect(find.text('4 files · 2.4 MB'), findsNothing);
+
+      // Every chip and picker shares one row.
+      final chip = tester.getTopLeft(find.byKey(_typeKey('image')));
+      for (final key in [_sourceKey, _sessionKey, _dateKey, _sortKey]) {
+        expect(
+          tester.getTopLeft(find.byKey(key)).dy,
+          closeTo(chip.dy, 1),
+          reason: '$key sits on the chip row',
+        );
+      }
 
       // Nothing is filtered yet, so there is nothing to clear.
       expect(find.byKey(_clearKey), findsNothing);
@@ -148,7 +169,7 @@ void main() {
 
       expect(find.text('Image'), findsOneWidget);
       expect(find.text('Any source'), findsOneWidget);
-      expect(find.text('4 files · 2.4 MB'), findsOneWidget);
+      expect(find.text('4 files · 2.4 MB'), findsNothing);
       expect(tester.takeException(), isNull);
     });
 
@@ -213,7 +234,7 @@ void main() {
     ) async {
       final key = await _pump(tester);
 
-      await tester.tap(find.byKey(_sourceKey));
+      await _tapPicker(tester, _sourceKey);
       await tester.pumpAndSettle();
 
       expect(find.text('Source'), findsOneWidget);
@@ -237,7 +258,7 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byKey(_sourceKey));
+      await _tapPicker(tester, _sourceKey);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Any source').last);
       await tester.pumpAndSettle();
@@ -253,10 +274,10 @@ void main() {
     ) async {
       final key = await _pump(tester);
 
-      await tester.tap(find.byKey(_sessionKey));
+      await _tapPicker(tester, _sessionKey);
       await tester.pumpAndSettle();
 
-      expect(find.text('Session'), findsOneWidget);
+      expect(find.text('Chat'), findsOneWidget);
       expect(find.text('Every chat and upload'), findsOneWidget);
       expect(find.text('Landing page redesign'), findsOneWidget);
       expect(find.text('2 files'), findsOneWidget);
@@ -269,19 +290,19 @@ void main() {
       expect(find.text('Landing page redesign'), findsOneWidget);
     });
 
-    testWidgets('All sessions clears the session filter', (tester) async {
+    testWidgets('All chats clears the chat filter', (tester) async {
       final key = await _pump(
         tester,
         initial: const V2ArtifactFilters(sessionId: 's2'),
       );
 
-      await tester.tap(find.byKey(_sessionKey));
+      await _tapPicker(tester, _sessionKey);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('All sessions').last);
+      await tester.tap(find.text('All chats').last);
       await tester.pumpAndSettle();
 
       expect(key.currentState!.filters.sessionId, isNull);
-      expect(find.text('All sessions'), findsOneWidget);
+      expect(find.text('All chats'), findsOneWidget);
     });
 
     testWidgets('an unknown session id falls back to a neutral label', (
@@ -289,7 +310,7 @@ void main() {
     ) async {
       await _pump(tester, initial: const V2ArtifactFilters(sessionId: 'gone'));
 
-      expect(find.text('Session'), findsOneWidget);
+      expect(find.text('Chat'), findsOneWidget);
     });
   });
 
@@ -297,7 +318,7 @@ void main() {
     testWidgets('sheet lists every range and applies Today', (tester) async {
       final key = await _pump(tester);
 
-      await tester.tap(find.byKey(_dateKey));
+      await _tapPicker(tester, _dateKey);
       await tester.pumpAndSettle();
 
       expect(find.text('Added'), findsOneWidget);
@@ -311,7 +332,11 @@ void main() {
 
       expect(key.currentState!.last?.date, V2ArtifactDateFilter.today);
       expect(find.text('Today'), findsOneWidget);
-      expect(find.byKey(_clearKey), findsOneWidget);
+
+      final clear = find.byKey(_clearKey);
+      await tester.ensureVisible(clear);
+      await tester.pumpAndSettle();
+      expect(clear, findsOneWidget);
     });
 
     testWidgets('Any time clears the date filter', (tester) async {
@@ -320,7 +345,7 @@ void main() {
         initial: const V2ArtifactFilters(date: V2ArtifactDateFilter.week),
       );
 
-      await tester.tap(find.byKey(_dateKey));
+      await _tapPicker(tester, _dateKey);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Any time').last);
       await tester.pumpAndSettle();
@@ -336,7 +361,7 @@ void main() {
     ) async {
       final key = await _pump(tester);
 
-      await tester.tap(find.byKey(_sortKey));
+      await _tapPicker(tester, _sortKey);
       await tester.pumpAndSettle();
 
       expect(find.text('Sort by'), findsOneWidget);
@@ -354,7 +379,7 @@ void main() {
     testWidgets('name sort is reported', (tester) async {
       final key = await _pump(tester);
 
-      await tester.tap(find.byKey(_sortKey));
+      await _tapPicker(tester, _sortKey);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Name A–Z'));
       await tester.pumpAndSettle();
@@ -365,54 +390,24 @@ void main() {
   });
 
   group('size summary', () {
-    testWidgets('uses the filtered count when the page supplies one', (
-      tester,
-    ) async {
+    // The bar no longer renders the count: a host may still pass the totals,
+    // but nothing shows them.
+    testWidgets('a supplied summary is not rendered', (tester) async {
       await _pump(
         tester,
         summary: const V2ArtifactSizeSummary(
           totalBytes: 2481561,
           totalCount: 4,
           visibleCount: 1,
-        ),
-      );
-
-      expect(find.text('1 of 4 files · 2.4 MB'), findsOneWidget);
-    });
-
-    testWidgets('prefers a label from the wiring layer and can show a limit', (
-      tester,
-    ) async {
-      await _pump(
-        tester,
-        summary: const V2ArtifactSizeSummary(
-          totalCount: 4,
           sizeLabel: '3.1 GB',
           storageLimitLabel: '5 GB',
         ),
       );
 
-      expect(find.text('4 files · 3.1 GB of 5 GB'), findsOneWidget);
-    });
-
-    testWidgets('hides the size when it is unknown', (tester) async {
-      await _pump(
-        tester,
-        summary: const V2ArtifactSizeSummary(totalBytes: 0, totalCount: 1),
-      );
-
-      expect(find.text('1 file'), findsOneWidget);
-    });
-
-    testWidgets('summary is announced as a live region', (tester) async {
-      final handle = tester.ensureSemantics();
-      await _pump(tester);
-
-      expect(
-        find.bySemanticsLabel('Size summary: 4 files · 2.4 MB'),
-        findsOneWidget,
-      );
-      handle.dispose();
+      expect(find.textContaining('files'), findsNothing);
+      expect(find.textContaining('GB'), findsNothing);
+      expect(find.bySemanticsLabel('Size summary: 4 files · 2.4 MB'),
+          findsNothing);
     });
   });
 
@@ -431,16 +426,19 @@ void main() {
         ),
       );
 
-      expect(find.byKey(_clearKey), findsOneWidget);
+      final clear = find.byKey(_clearKey);
+      await tester.ensureVisible(clear);
+      await tester.pumpAndSettle();
+      expect(clear, findsOneWidget);
 
-      await tester.tap(find.byKey(_clearKey));
+      await tester.tap(clear);
       await tester.pumpAndSettle();
 
       expect(key.currentState!.filters, const V2ArtifactFilters());
       expect(key.currentState!.last, const V2ArtifactFilters());
       expect(find.byKey(_clearKey), findsNothing);
       expect(find.text('Any source'), findsOneWidget);
-      expect(find.text('All sessions'), findsOneWidget);
+      expect(find.text('All chats'), findsOneWidget);
       expect(find.text('Any time'), findsOneWidget);
       expect(find.text('Newest first'), findsOneWidget);
     });
@@ -465,9 +463,13 @@ void main() {
       );
 
       final source = find.byKey(_sourceKey);
+      // The row scrolls: the key resolves to the scroll view's semantics node
+      // from below, so the flags check goes through the picker's label node.
+      final sourceNode = find.bySemanticsLabel('Source: Any source');
+      expect(sourceNode, findsOneWidget);
       expect(
         tester
-            .getSemantics(source)
+            .getSemantics(sourceNode)
             .getSemanticsData()
             .flagsCollection
             .isEnabled,
@@ -504,8 +506,9 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.text('Any source'), findsOneWidget);
-      expect(find.text('4 files · 2.4 MB'), findsOneWidget);
       expect(find.text('Other'), findsOneWidget);
+      // One scrolling row: nothing overflows even when it runs off the edge.
+      expect(find.text('4 files · 2.4 MB'), findsNothing);
     });
 
     testWidgets('fits 320 dp at 200 % text in dark', (tester) async {
@@ -534,9 +537,10 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.textContaining('A very long session name'), findsOneWidget);
+      // The picker caps at the page's content width (320 − 2×16 gutter).
       expect(
         tester.getSize(find.byKey(_sessionKey)).width,
-        lessThanOrEqualTo(272),
+        lessThanOrEqualTo(288),
       );
     });
 
@@ -545,7 +549,7 @@ void main() {
     ) async {
       await _pump(tester, size: const Size(320, 640), textScale: 2);
 
-      await tester.tap(find.byKey(_sourceKey));
+      await _tapPicker(tester, _sourceKey);
       await tester.pumpAndSettle();
 
       expect(tester.takeException(), isNull);

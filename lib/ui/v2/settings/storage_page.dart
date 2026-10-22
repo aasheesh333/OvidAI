@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
+import 'settings_rows.dart';
 import 'storage_breakdown.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
@@ -157,8 +158,8 @@ class V2StoragePageData {
       artifactsGb + sessionsGb + cacheGb <= 0;
 }
 
-/// Storage overview with a plan quota bar, a category breakdown, ways to free
-/// up room and a per-item size list.
+/// Storage overview: one bar, its legend (the breakdown) and one clean-up
+/// row.
 class StoragePage extends StatelessWidget {
   const StoragePage({super.key, required this.data});
 
@@ -213,7 +214,7 @@ class StoragePage extends StatelessWidget {
         children: [
           _storageBreakdown(context),
           const SizedBox(height: OSpace.l),
-          _freeUpSpace(context),
+          _cleanUpRow(context),
         ],
       ),
     );
@@ -229,7 +230,6 @@ class StoragePage extends StatelessWidget {
       child: StorageBreakdown(
         key: const ValueKey('storage-breakdown'),
         data: V2StorageBreakdownData(
-          title: 'What uses space',
           usedBytes: reconciled.usedBytes,
           totalBytes: _toBytes(_totalGb),
           totalLabel: _totalGb > 0 ? '${_gb(_totalGb)} GB' : '',
@@ -314,83 +314,22 @@ class StoragePage extends StatelessWidget {
     return V2StorageCategory.chats;
   }
 
-  /// One bar plus the legend lives in [StorageBreakdown]; this section is the
-  /// only place that frees space, one action per row.
-  Widget _freeUpSpace(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      padding: EdgeInsets.zero,
-      child: Column(
-        children: [
-          _actionRow(
-            context,
-            icon: Icons.layers_clear_outlined,
-            title: 'Clear previews',
-            subtitle: data.previewSizeLabel,
-            action: OButton(
-              label: 'Clear',
-              variant: OButtonVariant.secondary,
-              onPressed: () => _clearPreviews(context),
-            ),
-          ),
-          if (data.showCache) ...[
-            Divider(color: c.hairline, height: 1),
-            _actionRow(
-              context,
-              icon: Icons.cleaning_services_outlined,
-              title: 'Clear cache',
-              subtitle: data.cacheSizeLabel,
-              action: OButton(
-                label: 'Clear',
-                variant: OButtonVariant.secondary,
-                onPressed: () => _clearCache(context),
-              ),
-            ),
-          ],
-          Divider(color: c.hairline, height: 1),
-          OListRow(
-            icon: Icons.forum_outlined,
-            title: 'Delete old chats',
-            subtitle: 'Older than 60 days',
-            onTap: data.onDeleteOldChats,
-          ),
-          Divider(color: c.hairline, height: 1),
-          _actionRow(
-            context,
-            icon: Icons.delete_sweep_outlined,
-            title: 'Trash',
-            subtitle: data.trashSizeLabel,
-            danger: true,
-            action: OButton(
-              label: 'Empty',
-              variant: OButtonVariant.danger,
-              onPressed: data.onEmptyTrash,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Clears the render cache. When the owner supplies a callback it owns the
-  /// real work; otherwise the in-memory image cache is dropped here, which is
-  /// the preview data this build actually keeps.
-  void _clearPreviews(BuildContext context) {
-    final callback = data.onClearPreviews;
-    if (callback != null) {
-      callback();
-      return;
-    }
-    PaintingBinding.instance.imageCache.clear();
-    PaintingBinding.instance.imageCache.clearLiveImages();
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        const SnackBar(
-          key: ValueKey('clear-previews-result'),
-          content: Text('Previews cleared.'),
+  /// One bar plus the legend live in [StorageBreakdown]; this is the page's
+  /// only clean-up row. It always works: a host callback wins, otherwise the
+  /// page clears the app's own temporary directory and reports the real bytes.
+  Widget _cleanUpRow(BuildContext context) {
+    return V2SettingsRowList(
+      rows: [
+        V2SettingsRow(
+          key: const ValueKey<String>('storage-clear-cache-row'),
+          icon: Icons.cleaning_services_outlined,
+          title: 'Clear cache',
+          value: data.showCache ? data.cacheSizeLabel : null,
+          showChevron: false,
+          onTap: () => _clearCache(context),
         ),
-      );
+      ],
+    );
   }
 
   /// Clears the on-device cache and reports the bytes that were actually
@@ -407,6 +346,7 @@ class StoragePage extends StatelessWidget {
     }
     if (data.onClearCache != null) {
       data.onClearCache!();
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
@@ -448,38 +388,6 @@ class StoragePage extends StatelessWidget {
       );
   }
 
-  /// A row whose action button sits beside the text normally and under it when
-  /// the user's text size is large. Keeping the button in the trailing slot at
-  /// 200 % squeezes the title to a few pixels wide.
-  Widget _actionRow(
-    BuildContext context, {
-    required IconData icon,
-    required String title,
-    required String subtitle,
-    required OButton action,
-    bool danger = false,
-  }) {
-    OListRow row({Widget? trailing}) => OListRow(
-      icon: icon,
-      title: title,
-      subtitle: subtitle,
-      danger: danger,
-      showChevron: false,
-      trailing: trailing,
-    );
-    if (!_stacksActions(context)) return row(trailing: action);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        row(),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.m),
-          child: SizedBox(width: double.infinity, child: action),
-        ),
-      ],
-    );
-  }
-
   _CategorySize _category(
     String key, {
     required String explicitLabel,
@@ -518,9 +426,8 @@ String _gb(double value) => value.toStringAsFixed(1);
 int _toBytes(double gb) => (gb <= 0 ? 0 : gb * _bytesPerGb).round();
 
 /// Deletes everything inside the app's temporary directory and returns the
-/// bytes actually freed. Visible so the clear-cache row can be tested without
-/// a platform plugin.
-@visibleForTesting
+/// bytes actually freed. Shared by the Storage and Data control clean-up
+/// rows, and visible so a test can drive the row without a platform plugin.
 Future<int> clearTemporaryCache() async {
   final dir = await getTemporaryDirectory();
   if (!await dir.exists()) return 0;
@@ -559,9 +466,3 @@ Future<int> _dirBytes(Directory dir) async {
   }
   return bytes;
 }
-
-/// True when the text scale is large enough that a row's action must move to
-/// its own line. 1.5× is the point where a trailing 48 dp button leaves less
-/// than half the row for the label at 320 dp.
-bool _stacksActions(BuildContext context) =>
-    MediaQuery.textScalerOf(context).scale(14) >= 14 * 1.5;

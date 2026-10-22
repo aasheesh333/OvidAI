@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/background_notifications.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/v2/settings/settings_rows.dart';
 import 'package:ovid_ai/ui/v2/settings_extra/notifications_page.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -41,8 +42,8 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('renders one master switch, four channels, quiet hours and one '
-      'sound row', (tester) async {
+  testWidgets('renders one master switch, the wired channels, quiet hours and '
+      'one sound row', (tester) async {
     await _pump(tester, const V2NotificationsPageData());
 
     expect(find.text('Notifications'), findsOneWidget);
@@ -52,8 +53,6 @@ void main() {
     );
     expect(find.text('Run finished'), findsOneWidget);
     expect(find.text('Schedule results'), findsOneWidget);
-    expect(find.text('Shares and invites'), findsOneWidget);
-    expect(find.text('Collaboration'), findsOneWidget);
     expect(find.text('Quiet hours'), findsOneWidget);
     expect(
       find.text('22:00–08:00'),
@@ -65,6 +64,15 @@ void main() {
     );
     // One sound for every channel, not a chip row per channel.
     expect(find.text('Ovid chime'), findsOneWidget);
+
+    // Channels with no backend are removed, and switch rows carry no
+    // description line.
+    expect(find.text('Shares and invites'), findsNothing);
+    expect(find.text('Collaboration'), findsNothing);
+    expect(find.text('New sign-ins'), findsNothing);
+    expect(find.text('Billing'), findsNothing);
+    expect(find.text('When Ovid completes a task.'), findsNothing);
+    expect(find.text('When a scheduled run finishes.'), findsNothing);
   });
 
   testWidgets('renders in dark', (tester) async {
@@ -249,7 +257,7 @@ void main() {
     expect(find.text('Notifications are blocked'), findsNothing);
   });
 
-  testWidgets('a channel with no backend is information, not a fake switch', (
+  testWidgets('a channel with no backend is removed, not a fake switch', (
     tester,
   ) async {
     var toggles = 0;
@@ -264,8 +272,9 @@ void main() {
     );
     expect(
       find.byKey(const ValueKey<String>('notification-unavailable-shares_invites')),
-      findsOneWidget,
+      findsNothing,
     );
+    expect(find.text('Shares and invites'), findsNothing);
     // The contract bans the "not available yet" placeholder.
     expect(find.textContaining('Not available'), findsNothing);
     expect(toggles, 0);
@@ -565,9 +574,9 @@ void main() {
       size: const Size(600, 1000),
     );
 
-    final card = find.byType(OCard).first;
-    expect(tester.getSize(card).width, lessThanOrEqualTo(640));
-    expect(tester.getCenter(card).dx, closeTo(300, 0.5));
+    final list = find.byType(V2SettingsRowList).first;
+    expect(tester.getSize(list).width, lessThanOrEqualTo(640));
+    expect(tester.getCenter(list).dx, closeTo(300, 0.5));
     expect(tester.takeException(), isNull);
   });
 

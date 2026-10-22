@@ -25,7 +25,7 @@ import '../../../core/presets.dart';
 import '../../../core/revenuecat_billing.dart';
 import '../../../core/state.dart' hide ServiceStatus;
 import '../../github_login_sheet.dart';
-import '../settings/account_health_page.dart';
+import '../settings/account_health_page.dart' as health;
 import '../settings/account_page.dart';
 import '../settings/appearance_page.dart';
 import '../settings/credentials_page.dart';
@@ -103,7 +103,7 @@ class V2SettingsRoutes {
       case 'credentials':
         return _CredentialsLoader(actions: actions);
       case 'account_health':
-        return AccountHealthPage(data: _health(context, actions));
+        return _AccountHealthLoader(actions: actions);
       case 'notifications':
         return _NotificationsLoader(actions: actions);
       case 'presets':
@@ -241,7 +241,11 @@ class V2SettingsRoutes {
           );
           return;
         }
-        actions.buyPlan(context, purchase.tier);
+        actions.buyPlan(
+          context,
+          purchase.tier,
+          period: ovidPeriodFor(purchase.period),
+        );
       },
       onRestorePurchases: () => actions.restorePurchases(context),
       onRetry: actions.refreshUsage,
@@ -739,34 +743,33 @@ class V2SettingsRoutes {
     );
   }
 
-  static V2AccountHealthPageData _health(
+  /// The account's real standing: the deletion receipt the account service
+  /// returned for this session. Nothing here is guessed — with no receipt the
+  /// status stays null and the page says so.
+  static health.V2AccountHealthPageData _health(
     BuildContext context,
-    V2SettingsActions actions,
-  ) {
+    V2SettingsActions actions, {
+    VoidCallback? onCancelDeletion,
+  }) {
     final firebase = FirebaseService.I;
-    return V2AccountHealthPageData(
-      statusTitle: firebase.emailVerified
-          ? 'Your account is protected'
-          : 'Verify your email',
-      statusMessage: firebase.emailVerified
-          ? 'Email verified. Review devices if you see something unfamiliar.'
-          : 'Verifying your email helps us recover your account.',
-      healthy: firebase.emailVerified,
+    final receipt = firebase.lastDeletionReceipt;
+    final pending = receipt?.isPending == true;
+    final deadline = receipt?.deleteAfter;
+    return health.V2AccountHealthPageData(
       emailVerified: firebase.emailVerified,
-      emailLabel: firebase.email ?? 'No email',
-      regionLabel: 'Asia Pacific',
-      devices: [
-        V2SignInDevice(
-          id: 'current',
-          name: 'This device',
-          detail: 'Android · active now',
-          current: true,
-        ),
-      ],
-      // Two-step sign-in and device review have no service behind them yet;
-      // the rows stay hidden rather than offering a dead action.
-      onReviewDevices: null,
-      onEnableTwoFactor: null,
+      emailLabel: firebase.email ?? '',
+      accountStatus: receipt == null
+          ? null
+          : pending
+          ? health.V2AccountStatus.deletionPending
+          : health.V2AccountStatus.active,
+      deletionScheduledLabel: pending && deadline != null
+          ? formatLocalDateTime(deadline)
+          : '',
+      // The same support inbox the About screen opens.
+      onContactSupport: () =>
+          actions.openUrl(context, 'mailto:${LegalLinks.supportEmail}'),
+      onCancelDeletion: onCancelDeletion,
     );
   }
 
@@ -1361,6 +1364,58 @@ class _NotificationsLoaderState extends State<_NotificationsLoader>
         widget.actions,
         notificationsBlocked: _blocked,
         onOpenSystem: _openSystem,
+      ),
+    );
+  }
+}
+
+/// Keeps the Account health screen on the live account state: the deletion
+/// receipt is a `FirebaseService` property, so a cancel updates the page
+/// instead of leaving a button that appears to do nothing.
+class _AccountHealthLoader extends StatefulWidget {
+  const _AccountHealthLoader({required this.actions});
+
+  final V2SettingsActions actions;
+
+  @override
+  State<_AccountHealthLoader> createState() => _AccountHealthLoaderState();
+}
+
+class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
+  @override
+  void initState() {
+    super.initState();
+    FirebaseService.I.addListener(_onChange);
+  }
+
+  @override
+  void dispose() {
+    FirebaseService.I.removeListener(_onChange);
+    super.dispose();
+  }
+
+  void _onChange() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _cancelDeletion() async {
+    try {
+      await widget.actions.restoreAccount();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not cancel deletion.')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return health.AccountHealthPage(
+      data: V2SettingsRoutes._health(
+        context,
+        widget.actions,
+        onCancelDeletion: _cancelDeletion,
       ),
     );
   }

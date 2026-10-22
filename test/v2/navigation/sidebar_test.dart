@@ -1,7 +1,10 @@
+import 'dart:ui' show Tristate;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/design/o_tokens.dart';
 import 'package:ovid_ai/ui/v2/sidebar/project_detail_page.dart';
 import 'package:ovid_ai/ui/v2/sidebar/sidebar.dart';
 import 'package:ovid_ai/ui/v2/sidebar/sidebar_footer.dart';
@@ -129,16 +132,17 @@ void main() {
 
     expect(find.text('Alex Rivera'), findsOneWidget);
     expect(find.text('Free plan'), findsOneWidget);
-    expect(find.text('New session'), findsOneWidget);
+    expect(find.text('New chat'), findsOneWidget);
     expect(find.text('Search'), findsOneWidget);
-    expect(find.text('PINNED'), findsOneWidget);
     expect(find.text('PROJECTS'), findsOneWidget);
-    expect(find.text('TODAY'), findsOneWidget);
-    expect(find.text('YESTERDAY'), findsOneWidget);
+    expect(find.text('SESSIONS'), findsOneWidget);
+    expect(find.text('PINNED'), findsNothing);
+    expect(find.text('TODAY'), findsNothing);
+    expect(find.text('YESTERDAY'), findsNothing);
     expect(find.text('Next.js Portfolio Setup'), findsOneWidget);
     expect(find.text('Landing page copy review'), findsOneWidget);
     expect(find.text('Mobile App Redesign'), findsOneWidget);
-    expect(find.text('3 chats · 3 files'), findsOneWidget);
+    expect(find.text('3 chats'), findsOneWidget);
     expect(find.text('Schedule'), findsOneWidget);
     expect(find.text('Next run 9:00 AM'), findsOneWidget);
     expect(find.text('Artifacts'), findsOneWidget);
@@ -156,7 +160,7 @@ void main() {
     expect(find.text('Schedule'), findsOneWidget);
   });
 
-  testWidgets('sidebar empty state is one line and keeps one New session', (
+  testWidgets('sidebar empty state is one line and keeps one New chat', (
     tester,
   ) async {
     var newChats = 0;
@@ -171,8 +175,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('No chats yet'), findsOneWidget);
-    expect(find.text('New session'), findsOneWidget);
-    await tester.tap(find.text('New session'));
+    expect(find.text('New chat'), findsOneWidget);
+    await tester.tap(find.text('New chat'));
     expect(newChats, 1);
   });
 
@@ -303,9 +307,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      tester.getSemantics(find.text('New session')),
+      tester.getSemantics(find.text('New chat')),
       isSemantics(
-        label: 'New session',
+        label: 'New chat',
         isButton: true,
         hasEnabledState: true,
         isEnabled: false,
@@ -395,27 +399,22 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('PINNED'), findsOneWidget);
+    expect(find.text('PROJECTS'), findsOneWidget);
+    expect(find.text('SESSIONS'), findsOneWidget);
+
+    // The drawer list is lazy, so later rows mount as they scroll in.
     await tester.scrollUntilVisible(
       find.text('Next.js Portfolio Setup'),
       100,
       scrollable: _sidebarScrollable,
     );
     expect(find.text('Next.js Portfolio Setup'), findsOneWidget);
-
-    // The drawer list is lazy, so later sections mount as they scroll in.
     await tester.scrollUntilVisible(
-      find.text('TODAY'),
+      find.text('Synthesize research PDF'),
       100,
       scrollable: _sidebarScrollable,
     );
-    expect(find.text('TODAY'), findsOneWidget);
-    await tester.scrollUntilVisible(
-      find.text('YESTERDAY'),
-      100,
-      scrollable: _sidebarScrollable,
-    );
-    expect(find.text('YESTERDAY'), findsOneWidget);
+    expect(find.text('Synthesize research PDF'), findsOneWidget);
   });
 
   testWidgets('project memory chip opens the project detail sheet', (
@@ -456,7 +455,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('2 chats · 2 files'), findsOneWidget);
+    expect(find.text('2 chats'), findsOneWidget);
     await tester.tap(find.byIcon(Icons.memory_rounded));
     await tester.pumpAndSettle();
 
@@ -483,6 +482,21 @@ void main() {
     expect(memory?.id, 'pr1');
   });
 
+  testWidgets('project memory control keeps a 48 dp hit area', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        Sidebar(data: _contentData(), onProjectMemory: (_) {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final target = find.byKey(const ValueKey<String>('v2-sidebar-memory-pr1'));
+    expect(target, findsOneWidget);
+    final size = tester.getSize(target);
+    expect(size.width, greaterThanOrEqualTo(OSpace.touch));
+    expect(size.height, greaterThanOrEqualTo(OSpace.touch));
+  });
+
   testWidgets('projects without memory show only the chat count', (
     tester,
   ) async {
@@ -504,7 +518,9 @@ void main() {
     expect(find.byIcon(Icons.memory_rounded), findsNothing);
   });
 
-  testWidgets('pinned rows carry a pin glyph and project name', (tester) async {
+  testWidgets('pinned chats lead Sessions with no glyph on the row', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       _app(
         const Sidebar(
@@ -525,21 +541,26 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    // One section, pinned first; the pin is ordering, not a glyph.
+    expect(find.text('SESSIONS'), findsOneWidget);
+    expect(find.text('PINNED'), findsNothing);
     expect(
       find.byKey(const ValueKey<String>('v2-session-pin-p1')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey<String>('v2-session-pin-t2')),
       findsNothing,
     );
-    expect(find.text('Brand Voice'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('Next.js Portfolio Setup')).dy,
+      lessThan(tester.getTopLeft(find.text('Brand colours')).dy),
+    );
+
+    // The project stays off the row; search still matches on it.
+    expect(find.text('Brand Voice'), findsNothing);
   });
 
-  testWidgets('inline delete reports the chat and only shows when wired', (
+  testWidgets('delete lives in the actions sheet, never on the row', (
     tester,
   ) async {
-    V2SidebarSession? deleted;
+    V2SidebarSession? actioned;
     await tester.pumpWidget(
       _app(
         Sidebar(
@@ -547,28 +568,18 @@ void main() {
             name: 'Alex Rivera',
             today: <V2SidebarSession>[_today],
           ),
-          onSessionDelete: (session) => deleted = session,
+          onSessionActions: (session) => actioned = session,
         ),
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byIcon(Icons.delete_outline_rounded));
-    expect(deleted?.id, 't1');
-
-    // Without the callback the row does not show a dead control.
-    await tester.pumpWidget(
-      _app(
-        const Sidebar(
-          data: V2SidebarData(
-            name: 'Alex Rivera',
-            today: <V2SidebarSession>[_today],
-          ),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
+    // Even with every row callback wired, the row is title, time and the
+    // three-dot menu — no inline delete next to the title.
     expect(find.byIcon(Icons.delete_outline_rounded), findsNothing);
+
+    await tester.tap(find.byIcon(Icons.more_vert_rounded));
+    expect(actioned?.id, 't1');
   });
 
   testWidgets('schedule subtitle is announced with the footer item', (
@@ -657,17 +668,17 @@ void main() {
     }
   });
 
-  testWidgets('drawer keeps the profile → new session → search → projects → '
+  testWidgets('drawer keeps the profile → new chat → search → projects → '
       'sessions → footer order', (tester) async {
     await tester.pumpWidget(_app(Sidebar(data: _contentData())));
     await tester.pumpAndSettle();
 
     final order = <(String, Finder)>[
       ('profile', find.text('Alex Rivera')),
-      ('new session', find.text('New session')),
+      ('new chat', find.text('New chat')),
       ('search', find.byKey(const Key('v2-sidebar-search'))),
       ('projects', find.text('PROJECTS')),
-      ('sessions', find.text('TODAY')),
+      ('sessions', find.text('SESSIONS')),
       (
         'footer',
         find.byKey(const ValueKey<String>('v2-sidebar-footer-settings')),
@@ -717,7 +728,7 @@ void main() {
       );
       // A rail is a column, not a page: no app bar, same content order.
       expect(find.byType(AppBar), findsNothing);
-      expect(find.text('New session'), findsOneWidget);
+      expect(find.text('New chat'), findsOneWidget);
       expect(find.text('PROJECTS'), findsOneWidget);
       expect(find.text('Schedule'), findsOneWidget);
     }
@@ -746,7 +757,9 @@ void main() {
     );
   });
 
-  testWidgets('a chat row shows time or project, never both', (tester) async {
+  testWidgets('a chat row is title and time, never a stack of meta', (
+    tester,
+  ) async {
     const withTime = V2SidebarSession(
       id: 's1',
       title: 'Brand colours',
@@ -772,11 +785,56 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // Time wins; the project is not stacked under it.
+    // Time is the only meta line; the project and the model stay off the row.
     expect(find.text('2h ago'), findsOneWidget);
-    // The project-only row still gets its one meta line.
-    expect(find.text('Brand Voice'), findsOneWidget);
+    expect(find.text('Brand Voice'), findsNothing);
     expect(find.text('Auto'), findsNothing);
+  });
+
+  testWidgets('the active chat carries a 2 dp accent edge, not a fill', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        const Sidebar(
+          data: V2SidebarData(
+            name: 'Alex Rivera',
+            today: <V2SidebarSession>[_today, _yesterday],
+            activeSessionId: 't1',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final edge = find.byKey(const ValueKey<String>('v2-session-active-t1'));
+    expect(edge, findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('v2-session-active-y1')),
+      findsNothing,
+    );
+    final bar = tester.widget<Container>(edge);
+    expect(bar.constraints?.maxWidth ?? tester.getSize(edge).width,
+        OSpace.xxs);
+    expect(bar.color, OColors.light.accent);
+
+    // Selection is announced; the row itself stays on the bare surface.
+    expect(
+      tester
+          .getSemantics(find.text('Landing page copy review'))
+          .flagsCollection
+          .isSelected,
+      Tristate.isTrue,
+    );
+    expect(
+      tester
+          .getSemantics(find.text('Synthesize research PDF'))
+          .flagsCollection
+          .isSelected,
+      Tristate.isFalse,
+    );
+    handle.dispose();
   });
 
   testWidgets('inline search filters chats and projects, then clears', (
@@ -811,15 +869,16 @@ void main() {
     expect(find.text('Landing page copy review'), findsOneWidget);
     expect(find.text('Synthesize research PDF'), findsNothing);
     expect(find.text('Mobile App Redesign'), findsNothing);
-    expect(find.text('1 CHAT'), findsOneWidget);
+    expect(find.text('SESSIONS'), findsOneWidget);
+    expect(find.text('PROJECTS'), findsNothing);
 
     // A project name, which also matches the chat filed under it.
     await tester.enterText(find.byKey(const Key('v2-sidebar-search')), 'brand');
     await tester.pumpAndSettle();
     expect(find.text('Tone notes'), findsOneWidget);
-    expect(find.text('Brand Voice'), findsOneWidget);
     expect(find.text('Mobile App Redesign'), findsNothing);
-    expect(find.text('1 CHAT'), findsOneWidget);
+    expect(find.text('SESSIONS'), findsOneWidget);
+    expect(find.text('PROJECTS'), findsNothing);
 
     // A project name on its own.
     await tester.enterText(
@@ -916,7 +975,7 @@ void main() {
         findsNothing,
         reason: status.name,
       );
-      expect(find.text('New session'), findsOneWidget);
+      expect(find.text('New chat'), findsOneWidget);
     }
   });
 
@@ -984,7 +1043,7 @@ void main() {
     expect(find.byIcon(Icons.memory_rounded), findsNothing);
 
     // The tap falls through to the project row.
-    await tester.tap(find.text('3 chats · 3 files'));
+    await tester.tap(find.text('3 chats'));
     expect(opened?.id, 'pr1');
     handle.dispose();
   });

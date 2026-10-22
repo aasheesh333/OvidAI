@@ -391,8 +391,12 @@ class _ConnectorPermissionsPageState extends State<ConnectorPermissionsPage> {
           _group(context, scope),
           const SizedBox(height: OSpace.m),
         ],
-        _toolsCard(context),
-        const SizedBox(height: OSpace.m),
+        // No tool manifest means no tool section: a card that only ever says
+        // "No tools exposed" is chrome, not information.
+        if (_data.tools.isNotEmpty) ...[
+          _toolsCard(context),
+          const SizedBox(height: OSpace.m),
+        ],
         _abilityCards(context),
         const SizedBox(height: OSpace.m),
         _revokeAllCard(context),

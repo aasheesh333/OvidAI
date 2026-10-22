@@ -85,6 +85,9 @@ class V2ChatPageData {
   final String tokensLabel;
   final String fastAgentLabel;
   final String headline;
+
+  /// Kept for hosts that compose their own empty state. The page renders one
+  /// short line under the wordmark ([headline]) and no paragraph.
   final String subtitle;
   final String draft;
   final V2ChatState state;
@@ -629,7 +632,8 @@ class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
   final VoidCallback? onMore;
 
   @override
-  Size get preferredSize => const Size.fromHeight(57);
+  // One quiet bar: no hairline under it.
+  Size get preferredSize => const Size.fromHeight(56);
 
   @override
   Widget build(BuildContext context) {
@@ -717,10 +721,6 @@ class _ChatTopBar extends StatelessWidget implements PreferredSizeWidget {
             ),
           const SizedBox(width: OSpace.xs),
         ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(1),
-          child: Divider(height: 1, color: c.hairline),
-        ),
       ),
     );
   }
@@ -743,7 +743,7 @@ class _HomeContent extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     // Same capped column as the transcript, so the home state centres on a
-    // tablet instead of stretching the headline and chips. The cap comes from
+    // tablet instead of stretching the wordmark and chips. The cap comes from
     // the breakpoint (640 at 600 dp, 720 at 900 dp), never a fixed number.
     return OContent(
       alignment: Alignment.topCenter,
@@ -758,18 +758,16 @@ class _HomeContent extends StatelessWidget {
                 _OfflineBanner(data: data, onRetry: onRetry),
                 const SizedBox(height: OSpace.xl),
               ],
-              Semantics(
-                container: true,
-                header: true,
-                child: Text(
-                  data.headline,
-                  textAlign: TextAlign.center,
-                  style: OType.h2.copyWith(color: c.text),
-                ),
+              // The empty state is the brand: the wordmark, one short line and
+              // three starting points. No icon circle, no paragraph.
+              Text(
+                data.title,
+                textAlign: TextAlign.center,
+                style: OType.h2.copyWith(color: c.text),
               ),
               const SizedBox(height: OSpace.s),
               Text(
-                data.subtitle,
+                data.headline,
                 textAlign: TextAlign.center,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,

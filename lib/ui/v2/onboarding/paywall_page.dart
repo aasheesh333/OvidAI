@@ -624,7 +624,7 @@ class _CurrencyTab extends StatelessWidget {
       child: OPressable(
         onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.all(3),
+          padding: const EdgeInsets.all(OSpace.xs),
           child: Container(
             constraints: const BoxConstraints(minHeight: 42),
             padding: const EdgeInsets.symmetric(

@@ -54,9 +54,10 @@ class V2BrowserTabItem {
 
 /// The tab strip above the live browser view.
 ///
-/// The page only mounts it when there is more than one tab, so a single-tab
-/// session reads as one clean window. It is presentational: the page supplies
-/// the tabs, the active id and the callbacks.
+/// Icon-only: the favicon is the tab. The page only mounts the strip when
+/// there is more than one tab, so a single-tab session reads as one clean
+/// window. It is presentational: the page supplies the tabs, the active id
+/// and the callbacks.
 class BrowserTabStrip extends StatelessWidget {
   const BrowserTabStrip({
     super.key,
@@ -127,16 +128,19 @@ class _Tab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final foreground = selected ? c.text : c.textMuted;
-    // A tab is a switch target and a close target. The whole body selects;
-    // the close control keeps its own 48 dp target and callbacks.
+    // A tab is a switch target and a close target. The icon body selects; the
+    // close control keeps its own 48 dp target and callbacks. No title text:
+    // the favicon is the tab, and the semantics label carries the name.
     return OPressable(
       key: ValueKey('v2-browser-tab-${tab.id}'),
       onTap: onSelect == null ? null : () => onSelect!(tab.id),
       semanticLabel: _semanticsLabel,
       selected: selected,
       child: Container(
-        constraints: const BoxConstraints(minHeight: OSpace.touch),
+        constraints: const BoxConstraints(
+          minWidth: OSpace.touch,
+          minHeight: OSpace.touch,
+        ),
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
           color: selected ? c.surfaceRaised : c.surfaceAlt,
@@ -159,35 +163,15 @@ class _Tab extends StatelessWidget {
                   : null,
             ),
             Padding(
-              padding: EdgeInsets.only(
-                left: OSpace.m,
-                right: tab.closable && onClose != null ? 0 : OSpace.s,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: OSpace.s),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  ExcludeSemantics(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _Favicon(tab: tab, selected: selected),
-                        const SizedBox(width: OSpace.s),
-                        ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 160),
-                          child: Text(
-                            tab.label,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: OType.label.copyWith(color: foreground),
-                          ),
-                        ),
-                        if (tab.headless) ...[
-                          const SizedBox(width: OSpace.xs),
-                          _HeadlessMark(tabId: tab.id),
-                        ],
-                      ],
-                    ),
-                  ),
+                  ExcludeSemantics(child: _Favicon(tab: tab, selected: selected)),
+                  if (tab.headless) ...[
+                    const SizedBox(width: OSpace.xxs),
+                    ExcludeSemantics(child: _HeadlessMark(tabId: tab.id)),
+                  ],
                   // Only a wired close control is shown.
                   if (tab.closable && onClose != null)
                     OIconButton(

@@ -8,7 +8,7 @@ Regenerate this file from the registry, not from memory: the id, title and summa
 
 ## Identity
 - `splash` — Splash — Mark, tagline, startup progress and a retry path
-- `sign_in` — Sign in — Email, password, Google, Apple and inline errors
+- `sign_in` — Sign in — Google and phone sign-in with inline errors
 - `welcome` — Welcome — First-run introduction with language choice
 - `language_goal` — Language & goal — Hindi, Hinglish, Punjabi, Tamil plus what to build first
 - `paywall` — Paywall — Free, Go, Plus and Pro with monthly/yearly and INR
@@ -89,10 +89,7 @@ minimal-UI contract a control with no backing service is removed, not disabled.
 ## Registry summary vs app wiring
 
 The summaries above describe what each screen's builder can render; they are not
-a claim that the app wires every option. One known mismatch, tracked in
-`TODO.md`:
-
-- `sign_in` — the builder can render an Apple button, but `onApple` is never
-  passed, so the app shows Google and phone only. The email/password field and
-  its two links do render, and each only reports "Use Google or phone to sign
-  in." rather than signing anyone in.
+a claim that the app wires every option. There are no known mismatches on
+`sign_in`: the screen renders exactly the two providers the app supports
+(Google and phone), and the summary says so. The email/password form and the
+Apple button were removed rather than left as dead controls.

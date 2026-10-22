@@ -199,10 +199,6 @@ class _AutoRow extends StatelessWidget {
         child: Container(
           constraints: const BoxConstraints(minHeight: OSpace.listRow),
           padding: const EdgeInsets.all(OSpace.s),
-          decoration: BoxDecoration(
-            color: c.surfaceAlt,
-            borderRadius: BorderRadius.circular(ORadius.m),
-          ),
           child: Row(
             children: [
               Container(
@@ -436,7 +432,7 @@ class _ActionRow extends StatelessWidget {
       onTap: onTap,
       excludeSemantics: true,
       child: Material(
-        color: accent ? c.accentSoft : Colors.transparent,
+        color: Colors.transparent,
         borderRadius: BorderRadius.circular(ORadius.m),
         child: InkWell(
           onTap: onTap,

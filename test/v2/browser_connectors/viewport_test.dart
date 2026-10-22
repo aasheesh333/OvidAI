@@ -68,7 +68,9 @@ Future<void> _pumpSmall(
 }
 
 void main() {
-  testWidgets('live view paints the frame and one Live pill', (tester) async {
+  testWidgets('live view paints the frame and the agent cursor', (
+    tester,
+  ) async {
     final frame = MemoryImage(_frameBytes);
     await _pump(
       tester,
@@ -81,9 +83,10 @@ void main() {
     final image = tester.widget<Image>(find.byType(Image));
     expect(image.image, same(frame));
     expect(image.fit, BoxFit.contain);
-    expect(find.byKey(BrowserViewport.statusKey), findsOneWidget);
-    expect(find.text('Live'), findsOneWidget);
     expect(find.byKey(BrowserViewport.cursorKey), findsOneWidget);
+
+    // The picture is the status: no Live pill, no corner chrome at all.
+    expect(find.text('Live'), findsNothing);
 
     // It is a frame painter, not a hidden embedded browser.
     expect(find.byType(AndroidView), findsNothing);
@@ -102,10 +105,9 @@ void main() {
   ) async {
     await _pump(tester, const BrowserViewport());
 
-    // It must not claim to be live while it has no picture.
+    // It must not claim to be live while it has no picture: one centred line.
     expect(find.text('Live'), findsNothing);
-    expect(find.text('Waiting'), findsOneWidget);
-    expect(find.text('No picture yet'), findsWidgets);
+    expect(find.text('Waiting for the page…'), findsOneWidget);
     expect(find.byType(Image), findsNothing);
     // Nothing is invented as a page either.
     expect(find.text('The live page shows here'), findsNothing);
@@ -132,7 +134,6 @@ void main() {
 
     expect(find.text('Connecting…'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    expect(find.text('Waiting'), findsOneWidget);
     expect(find.byType(Image), findsNothing);
   });
 
@@ -150,7 +151,8 @@ void main() {
     );
 
     expect(find.text('Stream lost'), findsOneWidget);
-    expect(find.text('Lost'), findsOneWidget);
+    // No corner pill: the centred line is the whole notice.
+    expect(find.text('Lost'), findsNothing);
     // The last frame stays behind the notice rather than going black.
     expect(find.byType(Image), findsOneWidget);
 
@@ -183,7 +185,7 @@ void main() {
       ),
     );
 
-    expect(find.text('No picture yet'), findsWidgets);
+    expect(find.text('Waiting for the page…'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsNothing);
 
     final retry = find.byKey(BrowserViewport.waitingRetryKey);
@@ -270,9 +272,10 @@ void main() {
     );
 
     expect(find.byKey(BrowserViewport.pageTapKey), findsOneWidget);
-    // The control bar already says who is in control; the picture stays clean.
+    // The control dock already says who is in control; the picture stays
+    // clean: no badge, no status pill.
     expect(find.text('You are controlling'), findsNothing);
-    expect(find.text('Live'), findsOneWidget);
+    expect(find.text('Live'), findsNothing);
   });
 
   testWidgets('the agent cursor is announced and stays inside the frame', (

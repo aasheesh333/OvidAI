@@ -362,9 +362,8 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
 
                     SizedBox(height: compact ? 4 : 14),
 
-                    // New chat button — now the Aether primary CTA. Label text
-                    // 'New session' is preserved verbatim so existing finders keep
-                    // working (sidebar_no_repo_labels_test).
+                    // New chat button — now the Aether primary CTA. "Chat" is
+                    // the only product noun; the legacy "session" label is gone.
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: Stack(
@@ -372,7 +371,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                           SizedBox(
                             width: double.infinity,
                             child: AetherPrimaryButton(
-                              label: 'New session',
+                              label: 'New chat',
                               icon: Icons.add,
                               onPressed: () {
                                 app.newSession();

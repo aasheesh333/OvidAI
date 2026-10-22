@@ -116,8 +116,8 @@ class V2CollabRoutes {
       isMyTurn: holderId == null || holderId == state.localParticipantId,
       status: closed ? V2CollabLiveStatus.error : V2CollabLiveStatus.ready,
       errorMessage: state.closeReason == CloseReason.localRemoved
-          ? 'You were removed from this live session.'
-          : 'This live session has ended.',
+          ? 'You were removed from this live chat.'
+          : 'This live chat has ended.',
     );
   }
 
@@ -292,7 +292,7 @@ class V2CollabRoutes {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: Text(owner ? 'End this live session?' : 'Leave this live chat?'),
+        title: Text(owner ? 'End this live chat?' : 'Leave this live chat?'),
         content: Text(
           owner
               ? 'Everyone is disconnected and the link stops working.'
@@ -306,7 +306,7 @@ class V2CollabRoutes {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: Text(owner ? 'End session' : 'Leave'),
+            child: Text(owner ? 'End chat' : 'Leave'),
           ),
         ],
       ),

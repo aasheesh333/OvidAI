@@ -1,7 +1,5 @@
-import 'dart:ui' show Tristate;
-
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
@@ -27,11 +25,8 @@ Widget _app(
 V2StoragePageData _data({
   String planName = 'Free plan',
   bool showCache = true,
-  VoidCallback? onClearPreviews,
   VoidCallback? onClearCache,
   Future<int> Function()? onClearCacheAndReport,
-  VoidCallback? onDeleteOldChats,
-  VoidCallback? onEmptyTrash,
   VoidCallback? onGoUpgrade,
 }) {
   return V2StoragePageData(
@@ -46,14 +41,8 @@ V2StoragePageData _data({
     cacheGb: 0.17,
     cacheSizeLabel: '170 MB',
     showCache: showCache,
-    previewSizeLabel: '80 MB',
-    trashItems: 12,
-    trashSizeLabel: '140 MB',
-    onClearPreviews: onClearPreviews,
     onClearCache: onClearCache,
     onClearCacheAndReport: onClearCacheAndReport,
-    onDeleteOldChats: onDeleteOldChats,
-    onEmptyTrash: onEmptyTrash,
     onGoUpgrade: onGoUpgrade,
   );
 }
@@ -81,7 +70,7 @@ Future<void> _pumpAt320(
 }
 
 void main() {
-  testWidgets('renders one bar, its legend and the clean-up list', (
+  testWidgets('renders one bar, the legend and one clean-up row', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -91,10 +80,10 @@ void main() {
 
     expect(find.text('Storage'), findsOneWidget);
     expect(find.text('Free plan'), findsOneWidget);
-    expect(find.text('WHAT USES SPACE'), findsOneWidget);
     expect(find.text('1.2 GB'), findsOneWidget);
     expect(find.text('of 3.0 GB'), findsOneWidget);
 
+    // The legend is the breakdown.
     expect(find.text('Artifacts'), findsOneWidget);
     expect(find.text('Chats'), findsOneWidget);
     expect(find.text('Cache'), findsOneWidget);
@@ -102,11 +91,9 @@ void main() {
     expect(find.text('620 MB'), findsOneWidget);
     expect(find.text('170 MB'), findsWidgets);
 
-    expect(find.text('Clear previews'), findsOneWidget);
+    // One clean-up row, no card chrome.
     expect(find.text('Clear cache'), findsOneWidget);
-    expect(find.text('Delete old chats'), findsOneWidget);
-    expect(find.text('Trash'), findsOneWidget);
-    expect(find.text('140 MB'), findsOneWidget);
+    expect(find.byKey(const ValueKey('storage-clear-cache-row')), findsOneWidget);
   });
 
   testWidgets('deleted dashboard sections are gone', (tester) async {
@@ -121,6 +108,11 @@ void main() {
     expect(find.byKey(const ValueKey('storage-quota-bar')), findsNothing);
     expect(find.textContaining('Cached offline data'), findsNothing);
     expect(find.text('3 GB included'), findsNothing);
+    expect(find.text('WHAT USES SPACE'), findsNothing);
+    expect(find.text('Clear previews'), findsNothing);
+    expect(find.text('Delete old chats'), findsNothing);
+    expect(find.text('Trash'), findsNothing);
+    expect(find.text('Empty'), findsNothing);
   });
 
   testWidgets('renders the shared breakdown with the page slices', (
@@ -160,7 +152,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Storage'), findsOneWidget);
-    expect(find.text('Clear previews'), findsOneWidget);
+    expect(find.text('Clear cache'), findsOneWidget);
     expect(find.text('Chats'), findsOneWidget);
   });
 
@@ -174,7 +166,7 @@ void main() {
     await tester.pump();
 
     expect(find.byType(OSkeletonList), findsOneWidget);
-    expect(find.text('Clear previews'), findsNothing);
+    expect(find.text('Clear cache'), findsNothing);
     expect(find.text('Storage'), findsOneWidget);
   });
 
@@ -199,7 +191,7 @@ void main() {
     expect(opened, isTrue);
   });
 
-  testWidgets('a known plan with no usage keeps the clean-up list', (
+  testWidgets('a known plan with no usage keeps the clean-up row', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -218,23 +210,7 @@ void main() {
 
     expect(find.text('Storage is empty'), findsNothing);
     expect(find.text('Nothing stored yet'), findsOneWidget);
-    expect(find.text('Clear previews'), findsOneWidget);
     expect(find.text('Clear cache'), findsOneWidget);
-  });
-
-  testWidgets('clear previews falls back to the real image cache', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      _app(StoragePage(data: _data()), theme: OTheme.light()),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(find.text('Clear').first);
-    await tester.tap(find.text('Clear').first);
-    await tester.pump();
-
-    expect(find.text('Previews cleared.'), findsOneWidget);
   });
 
   testWidgets('an un-wired data object shows the empty state', (tester) async {
@@ -246,37 +222,7 @@ void main() {
     expect(find.text('Storage is empty'), findsOneWidget);
   });
 
-  testWidgets('clear previews fires the primary callback', (tester) async {
-    var cleared = false;
-    await tester.pumpWidget(
-      _app(
-        StoragePage(data: _data(onClearPreviews: () => cleared = true)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(find.text('Clear').first);
-    await tester.tap(find.text('Clear').first);
-    expect(cleared, isTrue);
-  });
-
-  testWidgets('empty trash fires its callback', (tester) async {
-    var emptied = false;
-    await tester.pumpWidget(
-      _app(
-        StoragePage(data: _data(onEmptyTrash: () => emptied = true)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(find.text('Empty'));
-    await tester.tap(find.text('Empty'));
-    expect(emptied, isTrue);
-  });
-
-  testWidgets('clear cache fires its callback', (tester) async {
+  testWidgets('clear cache fires the injected callback', (tester) async {
     var cleared = false;
     await tester.pumpWidget(
       _app(
@@ -286,12 +232,46 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Clear').at(1));
-    await tester.tap(find.text('Clear').at(1));
+    await tester.tap(find.text('Clear cache'));
+    await tester.pump();
     expect(cleared, isTrue);
+    expect(find.text('Cache cleared.'), findsOneWidget);
   });
 
-  testWidgets('clear cache is hidden when the device has no local cache', (
+  testWidgets('clear cache reports the bytes actually freed', (tester) async {
+    const freedBytes = 142 * 1024 * 1024;
+    await tester.pumpWidget(
+      _app(
+        StoragePage(data: _data(onClearCacheAndReport: () async => freedBytes)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Clear cache'));
+    await tester.pump();
+
+    expect(find.text('Freed 142 MB of cache.'), findsOneWidget);
+  });
+
+  testWidgets('a fully clear cache says so instead of claiming fake bytes', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        StoragePage(data: _data(onClearCacheAndReport: () async => 0)),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Clear cache'));
+    await tester.pump();
+
+    expect(find.text('Cache is already empty.'), findsOneWidget);
+  });
+
+  testWidgets('the clean-up row drops the size value without a local cache', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -299,42 +279,16 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Clear cache'), findsNothing);
-    expect(find.text('Clear'), findsOneWidget);
+    // The row stays — the phone still has a temporary directory — but the
+    // size value is only shown when the caller tracks a local cache.
+    final row = find.byKey(const ValueKey('storage-clear-cache-row'));
+    expect(row, findsOneWidget);
+    expect(
+      find.descendant(of: row, matching: find.text('170 MB')),
+      findsNothing,
+    );
     // The cache category still explains where the space went.
     expect(find.text('Cache'), findsOneWidget);
-  });
-
-  testWidgets('delete old chats fires its callback', (tester) async {
-    var tapped = false;
-    await tester.pumpWidget(
-      _app(
-        StoragePage(data: _data(onDeleteOldChats: () => tapped = true)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(find.text('Delete old chats'));
-    await tester.tap(find.text('Delete old chats'));
-    expect(tapped, isTrue);
-  });
-
-  testWidgets('a missing callback leaves the action disabled and announced', (
-    tester,
-  ) async {
-    final semantics = tester.ensureSemantics();
-    await tester.pumpWidget(
-      _app(StoragePage(data: _data()), theme: OTheme.light()),
-    );
-    await tester.pumpAndSettle();
-
-    final node = tester.getSemantics(
-      find.widgetWithText(OutlinedButton, 'Empty'),
-    );
-    expect(node.flagsCollection.isEnabled, Tristate.isFalse);
-    expect(node.flagsCollection.isButton, isTrue);
-    semantics.dispose();
   });
 
   for (final dark in [false, true]) {
@@ -343,40 +297,31 @@ void main() {
     ) async {
       await _pumpAt320(
         tester,
-        _data(
-          onClearPreviews: () {},
-          onClearCache: () {},
-          onDeleteOldChats: () {},
-          onEmptyTrash: () {},
-          onGoUpgrade: () {},
-        ),
+        _data(onClearCache: () {}, onGoUpgrade: () {}),
         theme: dark ? OTheme.dark() : OTheme.light(),
       );
 
       expect(tester.takeException(), isNull);
       expect(find.text('Storage'), findsOneWidget);
-      expect(find.text('Clear previews'), findsOneWidget);
-      expect(find.text('Empty'), findsOneWidget);
+      expect(find.text('Clear cache'), findsOneWidget);
       expect(find.text('Artifacts'), findsOneWidget);
       expect(find.text('Chats'), findsOneWidget);
       expect(find.text('Cache'), findsOneWidget);
     });
 
     testWidgets(
-      '200% text keeps row labels readable (${dark ? 'dark' : 'light'})',
+      '200% text keeps the clean-up row readable (${dark ? 'dark' : 'light'})',
       (tester) async {
         await _pumpAt320(
           tester,
-          _data(onClearPreviews: () {}, onEmptyTrash: () {}),
+          _data(onClearCache: () {}),
           theme: dark ? OTheme.dark() : OTheme.light(),
         );
 
-        // Before the responsive row the trailing button took almost the whole
-        // row and these labels were squeezed to a couple of pixels wide.
-        final trash = tester.renderObject<RenderParagraph>(
-          find.text('Delete old chats'),
+        final label = tester.renderObject<RenderParagraph>(
+          find.text('Clear cache'),
         );
-        expect(trash.size.width, greaterThan(80));
+        expect(label.size.width, greaterThan(80));
       },
     );
   }
@@ -417,9 +362,8 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('1.2 GB'), findsOneWidget);
-    expect(find.text('Clear previews'), findsOneWidget);
-    expect(find.text('Delete old chats'), findsOneWidget);
-    expect(find.text('WHAT USES SPACE'), findsOneWidget);
+    expect(find.text('Clear cache'), findsOneWidget);
+    expect(find.text('Artifacts'), findsOneWidget);
   });
 
   testWidgets('error state offers a retry', (tester) async {
@@ -570,40 +514,5 @@ void main() {
     expect(find.text('1.2 GB'), findsOneWidget);
     expect(find.text('of 3.0 GB'), findsOneWidget);
     expect(find.text('Other'), findsNothing);
-  });
-
-  testWidgets('clear cache reports the bytes actually freed', (tester) async {
-    const freedBytes = 142 * 1024 * 1024;
-    await tester.pumpWidget(
-      _app(
-        StoragePage(data: _data(onClearCacheAndReport: () async => freedBytes)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(find.text('Clear').at(1));
-    await tester.tap(find.text('Clear').at(1));
-    await tester.pump();
-
-    expect(find.text('Freed 142 MB of cache.'), findsOneWidget);
-  });
-
-  testWidgets('a fully clear cache says so instead of claiming fake bytes', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      _app(
-        StoragePage(data: _data(onClearCacheAndReport: () async => 0)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(find.text('Clear').at(1));
-    await tester.tap(find.text('Clear').at(1));
-    await tester.pump();
-
-    expect(find.text('Cache is already empty.'), findsOneWidget);
   });
 }

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 
+import '../../../core/session_artifacts.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
@@ -38,6 +39,9 @@ class V2LiveUserMessage extends V2LiveChatItem {
   });
 
   final String text;
+
+  /// Kept for hosts that log or group by time. The transcript never draws a
+  /// per-message timestamp: a message is its text, nothing else.
   final String? timeLabel;
 }
 
@@ -77,6 +81,9 @@ class V2LiveTool extends V2LiveChatItem {
   final List<String> details;
 }
 
+/// A generated file in the transcript. [id] is the artifact's identity: the
+/// shell resolves it to the same vault row the library opens, so tapping the
+/// row reaches the real detail route instead of launching a bare URL.
 class V2LiveArtifact extends V2LiveChatItem {
   const V2LiveArtifact({
     required super.id,
@@ -86,6 +93,11 @@ class V2LiveArtifact extends V2LiveChatItem {
     required this.previewLabel,
     this.icon = Icons.code_rounded,
     this.href,
+    this.kind,
+    this.sizeBytes,
+    this.downloadUrl,
+    this.thumbnail,
+    this.content,
   });
 
   final String fileName;
@@ -97,6 +109,23 @@ class V2LiveArtifact extends V2LiveChatItem {
   /// Where the artifact lives. Null hides the download action instead of
   /// showing one that cannot save anything.
   final String? href;
+
+  /// The coarse type the artifact model reports. Drives the real preview kind
+  /// and whether Copy can read text; null falls back to the file name.
+  final ArtifactKind? kind;
+
+  /// The file's real size in bytes, when the model knows it.
+  final int? sizeBytes;
+
+  /// A URL the row can really save. Null means no download is offered.
+  final String? downloadUrl;
+
+  /// Real pixels for an image artifact. Null keeps the type glyph.
+  final ImageProvider? thumbnail;
+
+  /// The artifact's text when the host already has it (an inline page). The
+  /// detail page and Copy use it; a URL-only file is fetched on demand.
+  final String? content;
 }
 
 /// A spoken answer with the visual summary card that backs it up.
@@ -302,6 +331,17 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   final Map<String, String> _pickedSessionIds = {};
   final Set<String> _pickedProjectIds = {};
 
+  /// Ids the transcript has already shown. An item whose id arrives later (a
+  /// new message at the tail) gets a single ≤200 ms fade-in; everything that
+  /// was already there stays still, and scrolling never replays it.
+  final Set<String> _knownItemIds = <String>{};
+  final Set<String> _freshItemIds = <String>{};
+
+  /// Ids present on the first frame: only they get the staggered entrance,
+  /// so an appended row never fades twice.
+  final Set<String> _initialItemIds = <String>{};
+  Timer? _freshTimer;
+
   V2ActiveMention? _mention;
   List<V2MentionCandidate> _mentionCandidates = const [];
   String _lastDraft = '';
@@ -326,6 +366,8 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
       ),
     )..onTranscript = _applyVoiceTranscript;
     _voice.addListener(_handleVoiceChanged);
+    _knownItemIds.addAll(widget.data.items.map((item) => item.id));
+    _initialItemIds.addAll(_knownItemIds);
     _refreshMentions();
   }
 
@@ -337,6 +379,20 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     }
     if (oldWidget.data.running && !widget.data.running) {
       _announce('Run finished');
+    }
+    // A newly appended row fades in once. Ids the first frame already showed
+    // are known, so the initial paint never trips this path.
+    final fresh = <String>[
+      for (final item in widget.data.items)
+        if (!_knownItemIds.contains(item.id)) item.id,
+    ];
+    if (fresh.isNotEmpty) {
+      _knownItemIds.addAll(fresh);
+      _freshItemIds.addAll(fresh);
+      _freshTimer?.cancel();
+      _freshTimer = Timer(OMotion.base + OMotion.stagger, () {
+        if (mounted) setState(_freshItemIds.clear);
+      });
     }
     if (widget.data.draft != oldWidget.data.draft &&
         widget.data.draft != _controller.text) {
@@ -354,6 +410,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   @override
   void dispose() {
     _announcementTimer?.cancel();
+    _freshTimer?.cancel();
     if (_voice.listening) unawaited(_voice.cancel());
     _voice
       ..removeListener(_handleVoiceChanged)
@@ -637,6 +694,40 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   void _handleOpenLink(String url) => unawaited(_openLink(url));
   void _handleDownloadLink(String url) => unawaited(_downloadLink(url));
 
+  /// The artifact's real download URL, or null when it has none.
+  String? _artifactLink(V2LiveArtifact artifact) {
+    final url = artifact.downloadUrl?.trim();
+    if (url != null && url.isNotEmpty) return url;
+    final href = artifact.href?.trim();
+    return href == null || href.isEmpty ? null : href;
+  }
+
+  /// Copy needs something real to put on the clipboard: text the host already
+  /// has, or a URL whose text can be fetched on demand.
+  bool _canCopyArtifact(V2LiveArtifact artifact) =>
+      (artifact.content?.trim().isNotEmpty ?? false) ||
+      _artifactLink(artifact) != null;
+
+  /// Copies the artifact's text (fetching it when only a URL is known), or its
+  /// link, and reports which of those really happened.
+  Future<void> _copyArtifact(V2LiveArtifact artifact) async {
+    final result = await v2CopyArtifactContent(
+      fileName: artifact.fileName,
+      content: artifact.content,
+      url: _artifactLink(artifact),
+      kind: artifact.kind,
+    );
+    if (!mounted) return;
+    final message = switch (result) {
+      V2ArtifactCopyResult.text => 'Copied',
+      V2ArtifactCopyResult.link => 'Link copied',
+      V2ArtifactCopyResult.failed => 'Could not copy',
+    };
+    ScaffoldMessenger.maybeOf(context)
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
   @override
   Widget build(BuildContext context) {
     final data = widget.data;
@@ -758,14 +849,25 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
         ),
         child: ListView.builder(
           key: const ValueKey<String>('v2-live-transcript'),
-          padding: EdgeInsets.fromLTRB(gutter, OSpace.m, gutter, OSpace.l),
+          padding: EdgeInsets.fromLTRB(gutter, OSpace.l, gutter, OSpace.xl),
           itemCount: items.length,
           itemBuilder: (context, index) {
+            final item = items[index];
             final row = Padding(
-              padding: const EdgeInsets.only(bottom: OSpace.l),
-              child: _buildItem(context, items[index]),
+              padding: const EdgeInsets.only(bottom: OSpace.xl),
+              child: _buildItem(
+                context,
+                item,
+                isTail: index == items.length - 1,
+              ),
             );
-            if (index >= firstCount) return row;
+            // A message that just arrived fades in once, in under 200 ms.
+            if (_freshItemIds.contains(item.id)) {
+              return _FadeInOnce(child: row);
+            }
+            if (index >= firstCount || !_initialItemIds.contains(item.id)) {
+              return row;
+            }
             // A short entrance for the first screenful only. Delay plus
             // duration stays within 200 ms, so the transcript is still before
             // the user can read past the first row.
@@ -784,85 +886,98 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     );
   }
 
-  Widget _buildItem(BuildContext context, V2LiveChatItem item) {
+  Widget _buildItem(
+    BuildContext context,
+    V2LiveChatItem item, {
+    required bool isTail,
+  }) {
+    // The transcript is the screen. A message is text on the background or a
+    // gentle bubble — no avatar, no header row, no timestamp line.
     return switch (item) {
       V2LiveUserMessage message => _UserBubble(item: message),
-      // Assistant output has no avatar or header row; the content is the row.
-      _ => Align(
-        alignment: Alignment.topLeft,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 560),
-          child: switch (item) {
-            V2LiveAssistantMessage message => _AssistantBubble(
-              item: message,
-              onCopyCode: widget.onCopyCode,
-              onOpenLink: _handleOpenLink,
-              onDownloadLink: _handleDownloadLink,
-            ),
-            V2LiveThinking message => V2ThinkingTile(
-              key: ValueKey('thinking-${message.id}'),
-              label: message.label,
-              details: message.details,
-              expanded: _expandedThinking.contains(message.id),
-              onToggle: () => _toggleThinking(message),
-            ),
-            V2LiveTool message => V2ToolTile(
-              key: ValueKey('tool-${message.id}'),
-              title: message.title,
-              status: message.status,
-              progress: message.progress,
-              icon: message.icon,
-              details: message.details,
-              expanded: _expandedTools.contains(message.id),
-              onToggle: () => _toggleTool(message),
-            ),
-            V2LiveArtifact message => V2ArtifactTile(
-              key: ValueKey('artifact-${message.id}'),
-              fileName: message.fileName,
-              meta: message.meta,
-              statusLabel: message.statusLabel,
-              previewLabel: message.previewLabel,
-              icon: message.icon,
-              onOpen: widget.onArtifactTap != null
-                  ? () => widget.onArtifactTap!(message.id)
-                  : () => openV2ArtifactDetail(
-                      context,
-                      fileName: message.fileName,
-                      meta: message.meta,
-                      statusLabel: message.statusLabel,
-                      previewLabel: message.previewLabel,
-                      icon: message.icon,
-                    ),
-              onDownload: widget.onDownload != null
-                  ? () => widget.onDownload!(message.id)
-                  : message.href == null
-                  ? null
-                  : () => startV2ArtifactDownload(
-                      context,
-                      message.href!,
-                      suggestedName: message.fileName,
-                    ),
-            ),
-            V2LiveVoiceReply message => V2VoiceReplyCard(
-              key: ValueKey('voice-reply-${message.id}'),
-              data: message.reply,
-              transcriptExpanded: _expandedTranscripts.contains(message.id),
-              onPlay: widget.onVoicePlay == null
-                  ? null
-                  : () => widget.onVoicePlay!(message.id),
-              onSeek: widget.onVoiceSeek == null
-                  ? null
-                  : (position) => widget.onVoiceSeek!(message.id, position),
-              onOpenAction: widget.onVoiceAction == null
-                  ? null
-                  : () => widget.onVoiceAction!(message.id),
-              onToggleTranscript: message.reply.hasTranscript
-                  ? (expanded) => _toggleTranscript(message, expanded)
-                  : null,
-            ),
-            _ => const SizedBox.shrink(),
-          },
+      // Assistant answers render full-width in the content column: plain text
+      // on the page background, not a card.
+      V2LiveAssistantMessage message => V2MessageBlocks(
+        markdown: message.markdown,
+        onCopyCode: widget.onCopyCode,
+        onOpenLink: _handleOpenLink,
+        onDownload: _handleDownloadLink,
+      ),
+      V2LiveThinking message => V2ThinkingTile(
+        key: ValueKey('thinking-${message.id}'),
+        label: message.label,
+        details: message.details,
+        expanded: _expandedThinking.contains(message.id),
+        // The live tail of an active run shimmers; a finished thought does not.
+        running: widget.data.running && isTail,
+        onToggle: () => _toggleThinking(message),
+      ),
+      V2LiveTool message => V2ToolTile(
+        key: ValueKey('tool-${message.id}'),
+        title: message.title,
+        status: message.status,
+        progress: message.progress,
+        icon: message.icon,
+        details: message.details,
+        expanded: _expandedTools.contains(message.id),
+        onToggle: () => _toggleTool(message),
+      ),
+      V2LiveArtifact message => V2ArtifactTile(
+        key: ValueKey('artifact-${message.id}'),
+        fileName: message.fileName,
+        meta: message.meta,
+        statusLabel: message.statusLabel,
+        previewLabel: message.previewLabel,
+        icon: message.icon,
+        thumbnail: message.thumbnail,
+        copyText: v2ArtifactIsTextual(
+          message.fileName,
+          kind: message.kind,
         ),
+        onOpen: widget.onArtifactTap != null
+            ? () => widget.onArtifactTap!(message.id)
+            : () => openV2ArtifactDetail(
+                context,
+                fileName: message.fileName,
+                meta: message.meta,
+                statusLabel: message.statusLabel,
+                previewLabel: message.previewLabel,
+                icon: message.icon,
+                kind: message.kind,
+                sizeBytes: message.sizeBytes,
+                downloadUrl: _artifactLink(message),
+                content: message.content,
+                thumbnail: message.thumbnail,
+              ),
+        onCopy: _canCopyArtifact(message)
+            ? () => unawaited(_copyArtifact(message))
+            : null,
+        onDownload: widget.onDownload != null
+            ? () => widget.onDownload!(message.id)
+            : _artifactLink(message) == null
+            ? null
+            : () => startV2ArtifactDownload(
+                context,
+                _artifactLink(message)!,
+                suggestedName: message.fileName,
+              ),
+      ),
+      V2LiveVoiceReply message => V2VoiceReplyCard(
+        key: ValueKey('voice-reply-${message.id}'),
+        data: message.reply,
+        transcriptExpanded: _expandedTranscripts.contains(message.id),
+        onPlay: widget.onVoicePlay == null
+            ? null
+            : () => widget.onVoicePlay!(message.id),
+        onSeek: widget.onVoiceSeek == null
+            ? null
+            : (position) => widget.onVoiceSeek!(message.id, position),
+        onOpenAction: widget.onVoiceAction == null
+            ? null
+            : () => widget.onVoiceAction!(message.id),
+        onToggleTranscript: message.reply.hasTranscript
+            ? (expanded) => _toggleTranscript(message, expanded)
+            : null,
       ),
     };
   }
@@ -914,6 +1029,30 @@ class _LiveEmptyState extends StatelessWidget {
   }
 }
 
+/// The one-shot entrance for a message that just arrived: a 200 ms fade, then
+/// the wrapper is gone. Honour reduced motion by skipping the fade entirely.
+class _FadeInOnce extends StatelessWidget {
+  const _FadeInOnce({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (OMove.reduced(context)) return child;
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: 1),
+      duration: OMotion.base,
+      curve: OMotion.standard,
+      child: child,
+      builder: (context, value, child) => Opacity(
+        opacity: value,
+        alwaysIncludeSemantics: true,
+        child: child,
+      ),
+    );
+  }
+}
+
 class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
   const _LiveTopBar({
     required this.title,
@@ -943,7 +1082,8 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
   final VoidCallback? onMore;
 
   @override
-  Size get preferredSize => Size.fromHeight(subtitle == null ? 57 : 75);
+  // One quiet bar: no hairline under it — the transcript separates itself.
+  Size get preferredSize => Size.fromHeight(subtitle == null ? 56 : 74);
 
   @override
   Widget build(BuildContext context) {
@@ -1055,10 +1195,6 @@ class _LiveTopBar extends StatelessWidget implements PreferredSizeWidget {
           ),
           const SizedBox(width: OSpace.xs),
         ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(1),
-          child: Divider(height: 1, color: c.hairline),
-        ),
       ),
     );
   }
@@ -1080,10 +1216,15 @@ class _UserBubble extends StatelessWidget {
           alignment: Alignment.centerRight,
           child: ConstrainedBox(
             constraints: BoxConstraints(maxWidth: cap > 560 ? 560 : cap),
+            // A gentle filled bubble on the page background: no border, no
+            // shadow, no header and no timestamp.
             child: Container(
-              padding: const EdgeInsets.all(OSpace.l),
+              padding: const EdgeInsets.symmetric(
+                horizontal: OSpace.l,
+                vertical: OSpace.m,
+              ),
               decoration: BoxDecoration(
-                color: c.surfaceRaised,
+                color: c.surfaceAlt,
                 borderRadius: BorderRadius.circular(ORadius.l),
               ),
               child: Text(item.text, style: OType.body.copyWith(color: c.text)),
@@ -1091,39 +1232,6 @@ class _UserBubble extends StatelessWidget {
           ),
         );
       },
-    );
-  }
-}
-
-class _AssistantBubble extends StatelessWidget {
-  const _AssistantBubble({
-    required this.item,
-    this.onCopyCode,
-    this.onOpenLink,
-    this.onDownloadLink,
-  });
-
-  final V2LiveAssistantMessage item;
-  final ValueChanged<String>? onCopyCode;
-  final ValueChanged<String>? onOpenLink;
-  final ValueChanged<String>? onDownloadLink;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return Container(
-      padding: const EdgeInsets.all(OSpace.l),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(ORadius.l),
-        border: Border.all(color: c.hairline),
-      ),
-      child: V2MessageBlocks(
-        markdown: item.markdown,
-        onCopyCode: onCopyCode,
-        onOpenLink: onOpenLink,
-        onDownload: onDownloadLink,
-      ),
     );
   }
 }

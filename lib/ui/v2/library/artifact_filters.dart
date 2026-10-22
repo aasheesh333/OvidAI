@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
+import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 
 /// The type families the library filter bar exposes.
@@ -211,9 +212,11 @@ class V2ArtifactFilters {
   int get hashCode => Object.hash(type, source, date, sessionId, sort);
 }
 
-/// Size and count line shown under the controls.
+/// Size and count summary for the library.
 ///
-/// The library page passes the totals it already knows; the bar formats them.
+/// Retained for hosts and previews that still carry the totals. The minimal
+/// filter bar does not render a count line; the type itself stays because the
+/// wiring layer and the registry previews pass it.
 @immutable
 class V2ArtifactSizeSummary {
   const V2ArtifactSizeSummary({
@@ -273,23 +276,26 @@ String formatArtifactBytes(int bytes) {
   return '${gb.toStringAsFixed(1)} GB';
 }
 
-/// Filter bar for the artifacts library: type chips, source, session, sort and
-/// a size summary.
+/// Filter bar for the artifacts library: one horizontally scrolling row of
+/// chips — the type families, then the source, chat, date and sort pickers,
+/// then Clear while any filter is active.
 ///
 /// Presentational and controlled: [filters] is the single source of truth and
-/// every change is reported through [onChanged]. Session and sort choices open
-/// the shared bottom sheet; the sheet never mutates state by itself.
+/// every change is reported through [onChanged]. Picker choices open the
+/// shared bottom sheet; the sheet never mutates state by itself.
 class ArtifactFilterBar extends StatelessWidget {
   const ArtifactFilterBar({
     super.key,
     required this.filters,
-    required this.summary,
+    this.summary = const V2ArtifactSizeSummary(),
     this.sessions = const <V2ArtifactSession>[],
     this.onChanged,
     this.enabled = true,
   });
 
   final V2ArtifactFilters filters;
+
+  /// Retained for hosts and previews. The one-row bar never renders it.
   final V2ArtifactSizeSummary summary;
   final List<V2ArtifactSession> sessions;
   final ValueChanged<V2ArtifactFilters>? onChanged;
@@ -309,8 +315,8 @@ class ArtifactFilterBar extends StatelessWidget {
   }
 
   String get _sessionLabel {
-    if (filters.sessionId == null) return 'All sessions';
-    return _selectedSession?.title ?? 'Session';
+    if (filters.sessionId == null) return 'All chats';
+    return _selectedSession?.title ?? 'Chat';
   }
 
   void _change(V2ArtifactFilters next) {
@@ -320,55 +326,31 @@ class ArtifactFilterBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
+    // The row scrolls horizontally, so each picker caps itself against the
+    // width the page would give it instead of the unbounded scroll width.
+    final r = OResponsive.of(context);
+    final limit = r.maxContentWidth;
+    final cap = (r.width < limit ? r.width : limit) - r.gutter * 2;
     return Semantics(
       container: true,
       label: 'Artifact filters',
       enabled: enabled,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _typeChips(),
-          const SizedBox(height: OSpace.s),
-          _controls(context),
-          const SizedBox(height: OSpace.s),
-          _summaryRow(c),
-        ],
-      ),
-    );
-  }
-
-  Widget _typeChips() {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: [
-          for (final type in V2ArtifactTypeFilter.values) ...[
-            OChip(
-              key: ValueKey<String>('artifact-type-${type.name}'),
-              label: type.label,
-              icon: type.icon,
-              selected: filters.type == type,
-              onTap: _interactive
-                  ? () => _change(filters.copyWith(type: type))
-                  : null,
-            ),
-            if (type != V2ArtifactTypeFilter.values.last)
-              const SizedBox(width: OSpace.s),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _controls(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final maxWidth = constraints.maxWidth;
-        return Wrap(
-          spacing: OSpace.s,
-          runSpacing: OSpace.s,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
           children: [
+            for (final type in V2ArtifactTypeFilter.values) ...[
+              OChip(
+                key: ValueKey<String>('artifact-type-${type.name}'),
+                label: type.label,
+                icon: type.icon,
+                selected: filters.type == type,
+                onTap: _interactive
+                    ? () => _change(filters.copyWith(type: type))
+                    : null,
+              ),
+              const SizedBox(width: OSpace.s),
+            ],
             _FilterButton(
               key: const ValueKey<String>('artifact-filter-source'),
               icon: filters.source.icon,
@@ -376,19 +358,21 @@ class ArtifactFilterBar extends StatelessWidget {
               semanticLabel: 'Source: ${filters.source.label}',
               hint: 'Opens the source filter',
               selected: filters.source != V2ArtifactSourceFilter.all,
-              maxWidth: maxWidth,
+              maxWidth: cap,
               onTap: _interactive ? () => _pickSource(context) : null,
             ),
+            const SizedBox(width: OSpace.s),
             _FilterButton(
               key: const ValueKey<String>('artifact-filter-session'),
               icon: Icons.chat_bubble_outline_rounded,
               label: _sessionLabel,
-              semanticLabel: 'Session: $_sessionLabel',
-              hint: 'Opens the session filter',
+              semanticLabel: 'Chat: $_sessionLabel',
+              hint: 'Opens the chat filter',
               selected: filters.sessionId != null,
-              maxWidth: maxWidth,
+              maxWidth: cap,
               onTap: _interactive ? () => _pickSession(context) : null,
             ),
+            const SizedBox(width: OSpace.s),
             _FilterButton(
               key: const ValueKey<String>('artifact-filter-date'),
               icon: filters.date.icon,
@@ -396,9 +380,10 @@ class ArtifactFilterBar extends StatelessWidget {
               semanticLabel: 'Added: ${filters.date.label}',
               hint: 'Opens the date filter',
               selected: filters.date != V2ArtifactDateFilter.all,
-              maxWidth: maxWidth,
+              maxWidth: cap,
               onTap: _interactive ? () => _pickDate(context) : null,
             ),
+            const SizedBox(width: OSpace.s),
             _FilterButton(
               key: const ValueKey<String>('artifact-filter-sort'),
               icon: filters.sort.icon,
@@ -406,44 +391,22 @@ class ArtifactFilterBar extends StatelessWidget {
               semanticLabel: 'Sort: ${filters.sort.label}',
               hint: 'Opens the sort options',
               selected: filters.sort != V2ArtifactSort.newest,
-              maxWidth: maxWidth,
+              maxWidth: cap,
               onTap: _interactive ? () => _pickSort(context) : null,
             ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _summaryRow(OColors c) {
-    return Row(
-      children: [
-        Icon(Icons.data_usage_rounded, size: 15, color: c.textMuted),
-        const SizedBox(width: OSpace.xs),
-        Expanded(
-          child: Semantics(
-            container: true,
-            liveRegion: true,
-            label: 'Size summary: ${summary.text}',
-            child: ExcludeSemantics(
-              child: Text(
-                summary.text,
-                style: OType.caption.copyWith(color: c.textMuted),
+            if (_interactive && filters.isActive) ...[
+              const SizedBox(width: OSpace.s),
+              OChip(
+                key: const ValueKey<String>('artifact-filter-clear'),
+                label: 'Clear',
+                icon: Icons.close_rounded,
+                semanticLabel: 'Clear filters',
+                onTap: () => _change(const V2ArtifactFilters()),
               ),
-            ),
-          ),
+            ],
+          ],
         ),
-        if (_interactive && filters.isActive)
-          OButton(
-            key: const ValueKey<String>('artifact-filter-clear'),
-            label: 'Clear',
-            variant: OButtonVariant.ghost,
-            semanticLabel: 'Clear filters',
-            onPressed: _interactive
-                ? () => _change(const V2ArtifactFilters())
-                : null,
-          ),
-      ],
+      ),
     );
   }
 
@@ -474,13 +437,13 @@ class ArtifactFilterBar extends StatelessWidget {
   Future<void> _pickSession(BuildContext context) async {
     final picked = await showOSheet<String>(
       context,
-      title: 'Session',
+      title: 'Chat',
       builder: (sheetContext) => ListView(
         shrinkWrap: true,
         padding: const EdgeInsets.only(bottom: OSpace.l),
         children: [
           OListRow(
-            title: 'All sessions',
+            title: 'All chats',
             subtitle: 'Every chat and upload',
             icon: Icons.forum_outlined,
             showChevron: false,

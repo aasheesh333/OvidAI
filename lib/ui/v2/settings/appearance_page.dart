@@ -4,6 +4,7 @@ import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
+import 'settings_rows.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
 
@@ -124,12 +125,12 @@ class V2AppearancePageData {
       _voiceLanguageLabels[resolvedVoiceLanguageId] ?? 'English';
 }
 
-/// Theme, text size, voice, memory and motion: one line per choice.
+/// Theme, text size and voice: one section per choice.
 ///
 /// The page owns a local copy of every choice so the control changes on the
 /// same frame it is tapped. The injected callback still performs the real
-/// persistence (`AppState.setThemeMode`, `AppState.setMemoryEnabled`, …); the
-/// local copy is re-synced whenever the parent supplies new data.
+/// persistence (`AppState.setThemeMode`, …); the local copy is re-synced
+/// whenever the parent supplies new data.
 class AppearancePage extends StatefulWidget {
   const AppearancePage({super.key, required this.data});
 
@@ -142,13 +143,7 @@ class AppearancePage extends StatefulWidget {
 class _AppearancePageState extends State<AppearancePage> {
   late ThemeMode _theme = widget.data.themeMode;
   late double _textScale = widget.data.resolvedTextScale;
-  late bool _reduceMotion = widget.data.reduceMotion;
-  late bool _followsSystem = widget.data.reduceMotionFollowsSystem;
-  late bool _highContrast = widget.data.highContrast;
   late String _voiceLanguageId = widget.data.resolvedVoiceLanguageId;
-  late bool _memoryEnabled = widget.data.memoryEnabled;
-  late bool _shareSessionMemory = widget.data.shareSessionMemory;
-  late bool _showReasoning = widget.data.showReasoning;
 
   V2AppearancePageData get data => widget.data;
 
@@ -158,13 +153,7 @@ class _AppearancePageState extends State<AppearancePage> {
     if (oldWidget.data == widget.data) return;
     _theme = widget.data.themeMode;
     _textScale = widget.data.resolvedTextScale;
-    _reduceMotion = widget.data.reduceMotion;
-    _followsSystem = widget.data.reduceMotionFollowsSystem;
-    _highContrast = widget.data.highContrast;
     _voiceLanguageId = widget.data.resolvedVoiceLanguageId;
-    _memoryEnabled = widget.data.memoryEnabled;
-    _shareSessionMemory = widget.data.shareSessionMemory;
-    _showReasoning = widget.data.showReasoning;
   }
 
   void _setThemeMode(ThemeMode mode) {
@@ -187,61 +176,6 @@ class _AppearancePageState extends State<AppearancePage> {
     setState(() => _voiceLanguageId = id);
     changed(id);
   }
-
-  void _setMemoryEnabled(bool value) {
-    final changed = data.onMemoryEnabledChanged;
-    if (changed == null) return;
-    setState(() => _memoryEnabled = value);
-    changed(value);
-  }
-
-  void _setShareSessionMemory(bool value) {
-    final changed = data.onShareSessionMemoryChanged;
-    if (changed == null) return;
-    setState(() => _shareSessionMemory = value);
-    changed(value);
-  }
-
-  void _setShowReasoning(bool value) {
-    final changed = data.onShowReasoningChanged;
-    if (changed == null) return;
-    setState(() => _showReasoning = value);
-    changed(value);
-  }
-
-  void _setFollowsSystem(bool value) {
-    final changed = data.onReduceMotionFollowsSystemChanged;
-    if (changed == null) return;
-    setState(() {
-      _followsSystem = value;
-      if (value) _reduceMotion = true;
-    });
-    changed(value);
-  }
-
-  void _setReduceMotion(bool value) {
-    final changed = data.onReduceMotionChanged;
-    if (changed == null || _followsSystem) return;
-    setState(() => _reduceMotion = value);
-    changed(value);
-  }
-
-  void _setHighContrast(bool value) {
-    final changed = data.onHighContrastChanged;
-    if (changed == null) return;
-    setState(() => _highContrast = value);
-    changed(value);
-  }
-
-  bool get _hasMemoryHandlers =>
-      data.onMemoryEnabledChanged != null ||
-      data.onShareSessionMemoryChanged != null ||
-      data.onMemoryFilesTap != null;
-
-  bool get _hasMotionHandlers =>
-      data.onReduceMotionChanged != null ||
-      data.onReduceMotionFollowsSystemChanged != null ||
-      data.onHighContrastChanged != null;
 
   @override
   Widget build(BuildContext context) {
@@ -267,9 +201,6 @@ class _AppearancePageState extends State<AppearancePage> {
       _themeMode(context),
       _textSize(context),
       if (data.onVoiceLanguageChanged != null) _voiceLanguage(context),
-      if (_hasMemoryHandlers) _memory(context),
-      if (data.onShowReasoningChanged != null) _chat(context),
-      if (_hasMotionHandlers) _motion(context),
     ];
     return SingleChildScrollView(
       padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
@@ -280,81 +211,38 @@ class _AppearancePageState extends State<AppearancePage> {
     );
   }
 
+  /// System / Light / Dark as a 3-up row of small preview tiles. The tile
+  /// shows the mode instead of naming it again: a framed mini window painted
+  /// in the mode's own colours.
   Widget _themeMode(BuildContext context) {
     return OSection(
       title: 'Theme',
-      child: OCard(
-        padding: EdgeInsets.zero,
-        child: Row(
-          children: [
-            for (final mode in const <ThemeMode>[
-              ThemeMode.system,
-              ThemeMode.light,
-              ThemeMode.dark,
-            ])
-              Expanded(
-                child: _themeChoice(context, mode, switch (mode) {
-                  ThemeMode.system => 'System',
-                  ThemeMode.light => 'Light',
-                  ThemeMode.dark => 'Dark',
-                }),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _themeChoice(BuildContext context, ThemeMode mode, String label) {
-    final c = OColors.of(context);
-    final selected = _theme == mode;
-    final enabled = data.onThemeModeChanged != null;
-    return Semantics(
-      label: '$label theme',
-      selected: selected,
-      button: true,
-      enabled: enabled,
-      onTap: enabled ? () => _setThemeMode(mode) : null,
-      child: ExcludeSemantics(
-        child: OPressable(
-          onTap: enabled ? () => _setThemeMode(mode) : null,
-          child: AnimatedContainer(
-            duration: OMotion.fast,
-            curve: OMotion.standard,
-            constraints: const BoxConstraints(minHeight: OSpace.touch),
-            padding: const EdgeInsets.symmetric(
-              horizontal: OSpace.s,
-              vertical: OSpace.m,
-            ),
-            decoration: BoxDecoration(
-              color: selected ? c.accentSoft : null,
-              borderRadius: BorderRadius.circular(ORadius.l),
-              border: Border.all(
-                color: selected ? c.accentFill : Colors.transparent,
-                width: selected ? 1.5 : 1,
-              ),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Flexible(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.label.copyWith(
-                      color: selected ? c.accent : c.textMuted,
-                    ),
-                  ),
+      child: Row(
+        children: [
+          for (final mode in const <ThemeMode>[
+            ThemeMode.system,
+            ThemeMode.light,
+            ThemeMode.dark,
+          ])
+            Expanded(
+              child: Padding(
+                padding: mode == ThemeMode.light
+                    ? const EdgeInsets.symmetric(horizontal: OSpace.s)
+                    : EdgeInsets.zero,
+                child: _ThemeTile(
+                  mode: mode,
+                  label: switch (mode) {
+                    ThemeMode.system => 'System',
+                    ThemeMode.light => 'Light',
+                    ThemeMode.dark => 'Dark',
+                  },
+                  selected: _theme == mode,
+                  enabled: data.onThemeModeChanged != null,
+                  onTap: () => _setThemeMode(mode),
                 ),
-                if (selected) ...[
-                  const SizedBox(width: OSpace.xs),
-                  Icon(Icons.check_rounded, size: 16, color: c.accent),
-                ],
-              ],
+              ),
             ),
-          ),
-        ),
+        ],
       ),
     );
   }
@@ -362,14 +250,16 @@ class _AppearancePageState extends State<AppearancePage> {
   Widget _voiceLanguage(BuildContext context) {
     return OSection(
       title: 'Voice',
-      child: OCard(
-        padding: EdgeInsets.zero,
-        child: OListRow(
-          key: const ValueKey<String>('voice-language-row'),
-          title: 'Voice language',
-          subtitle: data.voiceLanguageLabel,
-          onTap: () => _pickVoiceLanguage(context),
-        ),
+      child: V2SettingsRowList(
+        rows: [
+          V2SettingsRow(
+            key: const ValueKey<String>('voice-language-row'),
+            icon: Icons.mic_none_rounded,
+            title: 'Voice language',
+            value: data.voiceLanguageLabel,
+            onTap: () => _pickVoiceLanguage(context),
+          ),
+        ],
       ),
     );
   }
@@ -390,194 +280,34 @@ class _AppearancePageState extends State<AppearancePage> {
     final percent = (_textScale * 100).round();
     return OSection(
       title: 'Text size',
-      child: OCard(
-        padding: const EdgeInsets.symmetric(
-          horizontal: OSpace.l,
-          vertical: OSpace.s,
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Semantics(
-                label: 'Chat text size',
-                value: '$percent%',
-                child: Slider(
-                  value: _textScale,
-                  min: 0.75,
-                  max: 1.8,
-                  divisions: 21,
-                  label: '$percent%',
-                  activeColor: c.accentFill,
-                  inactiveColor: c.surfaceRaised,
-                  thumbColor: c.accentFill,
-                  onChanged: data.onTextScaleChanged == null
-                      ? null
-                      : _setTextScale,
-                ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Semantics(
+              label: 'Chat text size',
+              value: '$percent%',
+              child: Slider(
+                value: _textScale,
+                min: 0.75,
+                max: 1.8,
+                divisions: 21,
+                label: '$percent%',
+                activeColor: c.accentFill,
+                inactiveColor: c.surfaceRaised,
+                thumbColor: c.accentFill,
+                onChanged: data.onTextScaleChanged == null
+                    ? null
+                    : _setTextScale,
               ),
             ),
-            const SizedBox(width: OSpace.s),
-            Text(
-              '$percent%',
-              maxLines: 1,
-              style: OType.caption.copyWith(color: c.textMuted),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _memory(BuildContext context) {
-    return OSection(
-      title: 'Memory',
-      child: OCard(
-        padding: EdgeInsets.zero,
-        child: Column(
-          children: [
-            if (data.onMemoryEnabledChanged != null)
-              _toggleRow(
-                context,
-                title: 'Global memory',
-                value: _memoryEnabled,
-                onChanged: _setMemoryEnabled,
-                switchKey: const ValueKey<String>('global-memory-switch'),
-              ),
-            if (data.onMemoryEnabledChanged != null &&
-                data.onShareSessionMemoryChanged != null)
-              _divider(context),
-            if (data.onShareSessionMemoryChanged != null)
-              _toggleRow(
-                context,
-                title: 'Share session memory',
-                value: _shareSessionMemory,
-                onChanged: _setShareSessionMemory,
-                switchKey: const ValueKey<String>(
-                  'share-session-memory-switch',
-                ),
-              ),
-            if (data.onMemoryFilesTap != null &&
-                (data.onMemoryEnabledChanged != null ||
-                    data.onShareSessionMemoryChanged != null))
-              _divider(context),
-            if (data.onMemoryFilesTap != null)
-              OListRow(
-                key: const ValueKey<String>('memory-files-row'),
-                title: 'Memory files',
-                onTap: data.onMemoryFilesTap,
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _chat(BuildContext context) {
-    return OSection(
-      title: 'Chat',
-      child: OCard(
-        padding: EdgeInsets.zero,
-        child: _toggleRow(
-          context,
-          title: 'Show reasoning',
-          value: _showReasoning,
-          onChanged: _setShowReasoning,
-          switchKey: const ValueKey<String>('show-reasoning-switch'),
-        ),
-      ),
-    );
-  }
-
-  Widget _motion(BuildContext context) {
-    return OSection(
-      title: 'Motion',
-      child: OCard(
-        padding: EdgeInsets.zero,
-        child: Column(
-          children: [
-            if (data.onReduceMotionChanged != null) ...[
-              _toggleRow(
-                context,
-                title: 'Reduce motion',
-                value: _reduceMotion,
-                onChanged: _followsSystem ? null : _setReduceMotion,
-                switchKey: const ValueKey<String>('reduce-motion-switch'),
-              ),
-              _divider(context),
-            ],
-            if (data.onReduceMotionFollowsSystemChanged != null) ...[
-              _toggleRow(
-                context,
-                title: 'Follow device setting',
-                value: _followsSystem,
-                onChanged: _setFollowsSystem,
-                switchKey: const ValueKey<String>('follow-device-switch'),
-              ),
-              if (data.onHighContrastChanged != null) _divider(context),
-            ],
-            if (data.onHighContrastChanged != null)
-              _toggleRow(
-                context,
-                title: 'High contrast',
-                value: _highContrast,
-                onChanged: _setHighContrast,
-                switchKey: const ValueKey<String>('high-contrast-switch'),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _divider(BuildContext context) =>
-      Divider(height: 1, color: OColors.of(context).hairline);
-
-  Widget _toggleRow(
-    BuildContext context, {
-    required String title,
-    required bool value,
-    required ValueChanged<bool>? onChanged,
-    required Key switchKey,
-  }) {
-    final c = OColors.of(context);
-    return ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: OSpace.listRow),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: OSpace.l,
-          vertical: OSpace.s,
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: OType.body.copyWith(
-                  color: onChanged == null ? c.textFaint : c.text,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-            const SizedBox(width: OSpace.s),
-            Semantics(
-              label: title,
-              toggled: value,
-              enabled: onChanged != null,
-              child: Switch(
-                key: switchKey,
-                value: value,
-                onChanged: onChanged,
-                activeThumbColor: c.onAccent,
-                activeTrackColor: c.accentFill,
-                inactiveThumbColor: c.textFaint,
-                inactiveTrackColor: c.surfaceRaised,
-                trackOutlineColor: WidgetStatePropertyAll(c.hairlineStrong),
-              ),
-            ),
-          ],
-        ),
+          ),
+          const SizedBox(width: OSpace.s),
+          Text(
+            '$percent%',
+            maxLines: 1,
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+        ],
       ),
     );
   }
@@ -614,3 +344,140 @@ class _VoiceLanguageSheet extends StatelessWidget {
   }
 }
 
+
+/// One theme choice: a small preview tile painted in the mode's own colours
+/// with the label under it. The selected tile carries the accent edge.
+class _ThemeTile extends StatelessWidget {
+  const _ThemeTile({
+    required this.mode,
+    required this.label,
+    required this.selected,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final ThemeMode mode;
+  final String label;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      label: '$label theme',
+      selected: selected,
+      button: true,
+      enabled: enabled,
+      onTap: enabled ? onTap : null,
+      child: ExcludeSemantics(
+        child: OPressable(
+          onTap: enabled ? onTap : null,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              AnimatedContainer(
+                duration: OMotion.fast,
+                curve: OMotion.standard,
+                height: 72,
+                decoration: BoxDecoration(
+                  color: selected ? c.accentSoft : c.surface,
+                  borderRadius: BorderRadius.circular(ORadius.m),
+                  border: Border.all(
+                    color: selected ? c.accentFill : c.hairline,
+                    width: selected ? 2 : 1,
+                  ),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: _ThemePreview(mode: mode),
+              ),
+              ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: OSpace.touch),
+                child: Center(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: OType.label.copyWith(
+                      color: selected ? c.accent : c.textMuted,
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The tiny framed window inside a theme tile: a header bar and two text
+/// lines in the mode's colours. System splits light and dark down the middle.
+class _ThemePreview extends StatelessWidget {
+  const _ThemePreview({required this.mode});
+
+  final ThemeMode mode;
+
+  // Derived from the design tokens so the tile cannot drift from the theme.
+  static final _lightBg = OColors.light.bg;
+  static final _lightLine = OColors.light.hairline;
+  static final _darkBg = OColors.dark.bg;
+  static final _darkLine = OColors.dark.hairline;
+
+  @override
+  Widget build(BuildContext context) {
+    return switch (mode) {
+      ThemeMode.light => _frame(_lightBg, _lightLine),
+      ThemeMode.dark => _frame(_darkBg, _darkLine),
+      ThemeMode.system => Row(
+        children: [
+          Expanded(child: _frame(_lightBg, _lightLine)),
+          Expanded(child: _frame(_darkBg, _darkLine)),
+        ],
+      ),
+    };
+  }
+
+  Widget _frame(Color bg, Color line) {
+    return ColoredBox(
+      color: bg,
+      child: Padding(
+        padding: const EdgeInsets.all(OSpace.s),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              height: 6,
+              decoration: BoxDecoration(
+                color: line,
+                borderRadius: BorderRadius.circular(ORadius.xs),
+              ),
+            ),
+            const Spacer(),
+            _textLine(line, 0.7),
+            const SizedBox(height: OSpace.xs),
+            _textLine(line, 0.45),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _textLine(Color color, double widthFactor) {
+    return FractionallySizedBox(
+      widthFactor: widthFactor,
+      alignment: Alignment.centerLeft,
+      child: Container(
+        height: 4,
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(ORadius.xs),
+        ),
+      ),
+    );
+  }
+}

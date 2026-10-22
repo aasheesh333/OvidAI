@@ -177,7 +177,8 @@ void main() {
   ) async {
     await _pump(tester, StorageBreakdown(data: _data()));
 
-    expect(find.text('STORAGE'), findsOneWidget);
+    // No header chrome: the bar and the legend are the breakdown.
+    expect(find.text('STORAGE'), findsNothing);
     expect(find.text('3 GB'), findsOneWidget);
     expect(find.text('of 5 GB'), findsOneWidget);
     expect(
@@ -204,7 +205,8 @@ void main() {
   testWidgets('renders in dark theme', (tester) async {
     await _pump(tester, StorageBreakdown(data: _data()), theme: OTheme.dark());
 
-    expect(find.text('STORAGE'), findsOneWidget);
+    // No header chrome: the bar and the legend are the breakdown.
+    expect(find.text('STORAGE'), findsNothing);
     expect(find.text('Chats'), findsOneWidget);
     expect(find.text('Previews'), findsOneWidget);
     expect(find.text('13%'), findsOneWidget);
@@ -272,7 +274,8 @@ void main() {
       ),
     );
 
-    expect(find.text('STORAGE'), findsOneWidget);
+    // No header chrome: the bar and the legend are the breakdown.
+    expect(find.text('STORAGE'), findsNothing);
     expect(find.text('Nothing stored yet'), findsOneWidget);
     expect(
       find.text(
@@ -488,7 +491,8 @@ void main() {
     await _pumpNarrow(tester, StorageBreakdown(data: _data()));
 
     expect(tester.takeException(), isNull);
-    expect(find.text('STORAGE'), findsOneWidget);
+    // No header chrome: the bar and the legend are the breakdown.
+    expect(find.text('STORAGE'), findsNothing);
     expect(find.text('Chats'), findsOneWidget);
     expect(find.text('Artifacts'), findsOneWidget);
     expect(find.text('Memory'), findsOneWidget);

@@ -116,9 +116,10 @@ ValueKey<String> _typeKey(String name) =>
     ValueKey<String>('artifact-type-$name');
 
 Future<void> _pickSource(WidgetTester tester, String label) async {
-  await tester.tap(
-    find.byKey(const ValueKey<String>('artifact-filter-source')),
-  );
+  final source = find.byKey(const ValueKey<String>('artifact-filter-source'));
+  await tester.ensureVisible(source);
+  await tester.pumpAndSettle();
+  await tester.tap(source);
   await tester.pumpAndSettle();
   await tester.tap(find.text(label).last);
   await tester.pumpAndSettle();
@@ -135,9 +136,11 @@ void main() {
     expect(find.byIcon(Icons.search_rounded), findsWidgets);
 
     expect(find.text('portfolio-index.html'), findsOneWidget);
-    expect(find.text('Code · HTML'), findsOneWidget);
-    expect(find.text('Today'), findsOneWidget);
-    expect(find.text('Document · PDF'), findsOneWidget);
+    expect(find.text('HTML · Today'), findsOneWidget);
+    expect(find.text('PDF · Yesterday'), findsOneWidget);
+    // The card is name, type glyph, time — no separate type or count lines.
+    expect(find.text('Code · HTML'), findsNothing);
+    expect(find.textContaining('files ·'), findsNothing);
 
     // Removed copy: no library summary, no "what Ovid can make" callout.
     expect(find.text('Your lifetime library'), findsNothing);
@@ -170,10 +173,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('No artifacts yet'), findsOneWidget);
-    expect(
-      find.text('Files you make and upload appear here.'),
-      findsOneWidget,
-    );
+    // One line is the whole state: no paragraph, no action.
+    expect(find.text('Files you make and upload appear here.'), findsNothing);
     expect(find.text('See what Ovid can make'), findsNothing);
     expect(find.byType(OButton), findsNothing);
   });
@@ -191,7 +192,6 @@ void main() {
 
     expect(find.text('portfolio-index.html'), findsOneWidget);
     expect(find.text('market-analysis-q2.pdf'), findsNothing);
-    expect(find.text('1 of 4 files · 2.4 MB'), findsOneWidget);
 
     await tester.tap(find.byIcon(Icons.close_rounded));
     await tester.pumpAndSettle();
@@ -223,9 +223,10 @@ void main() {
     expect(find.text('token-usage-breakdown.png'), findsOneWidget);
     expect(find.text('portfolio-index.html'), findsNothing);
 
-    await tester.tap(
-      find.byKey(const ValueKey<String>('artifact-filter-clear')),
-    );
+    final clear = find.byKey(const ValueKey<String>('artifact-filter-clear'));
+    await tester.ensureVisible(clear);
+    await tester.pumpAndSettle();
+    await tester.tap(clear);
     await tester.pumpAndSettle();
     expect(find.text('portfolio-index.html'), findsOneWidget);
   });
@@ -245,13 +246,23 @@ void main() {
     expect(find.text('portfolio-index.html'), findsOneWidget);
   });
 
-  testWidgets('uses the shared filter bar', (tester) async {
+  testWidgets('uses the shared filter bar as one row of chips', (
+    tester,
+  ) async {
     _phone(tester);
     await tester.pumpWidget(_app(ArtifactsPage(data: _data())));
     await tester.pumpAndSettle();
 
     expect(find.byType(ArtifactFilterBar), findsOneWidget);
-    expect(find.text('4 files · 2.4 MB'), findsOneWidget);
+    // The count summary is gone.
+    expect(find.text('4 files · 2.4 MB'), findsNothing);
+
+    // The type chips and the pickers sit on one shared row.
+    final chip = tester.getTopLeft(find.byKey(_typeKey('image')));
+    final picker = tester.getTopLeft(
+      find.byKey(const ValueKey<String>('artifact-filter-source')),
+    );
+    expect(picker.dy, closeTo(chip.dy, 1));
   });
 
   testWidgets('grid is one column under 600, two at 600, three at 1000', (
@@ -355,7 +366,7 @@ void main() {
 
       await _scrollTo(tester, find.text('portfolio-index.html'));
       expect(find.text('portfolio-index.html'), findsOneWidget);
-      expect(find.text('Code · HTML'), findsOneWidget);
+      expect(find.text('HTML · Today'), findsOneWidget);
       expect(tester.takeException(), isNull);
     }
   });
@@ -401,9 +412,10 @@ void main() {
     await tester.enterText(find.byType(TextField), 'nothing matches this');
     await tester.pumpAndSettle();
     expect(find.text('No matches'), findsOneWidget);
+    // No paragraph under the title; the one action clears the filters.
     expect(
       find.text('Try another search or clear the filters.'),
-      findsOneWidget,
+      findsNothing,
     );
 
     await tester.tap(find.text('Clear filters'));

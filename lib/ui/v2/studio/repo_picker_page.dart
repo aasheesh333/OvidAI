@@ -276,7 +276,7 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
         (data.status == V2RepoPickerStatus.content ||
             data.status == V2RepoPickerStatus.empty);
     return OScreen(
-      title: repo == null ? 'Studio' : repo.fullName,
+      title: repo == null ? 'Repositories' : repo.fullName,
       padding: false,
       // On the branch step the header back returns to the repository list, so
       // the body never repeats a second back affordance.
@@ -307,8 +307,6 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
     final data = widget.data;
     if (!data.githubConnected) return _buildDisconnected(context);
     final repos = _visibleRepos;
-    final advanced =
-        widget.onOpenToken != null || widget.onOpenAdvanced != null;
     return CustomScrollView(
       slivers: [
         SliverPadding(
@@ -361,16 +359,6 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
               itemBuilder: (context, index) => _RepoRow(
                 repo: repos[index],
                 onTap: () => _selectRepo(repos[index]),
-              ),
-            ),
-          ),
-        if (advanced)
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(OSpace.l, OSpace.m, OSpace.l, 0),
-            sliver: SliverToBoxAdapter(
-              child: _AdvancedRows(
-                onOpenToken: widget.onOpenToken,
-                onOpenAdvanced: widget.onOpenAdvanced,
               ),
             ),
           ),
@@ -497,7 +485,8 @@ class _V2RepoPickerPageState extends State<V2RepoPickerPage> {
   }
 }
 
-/// One repository: owner/name and one meta line.
+/// One repository row: an icon and `owner/name`. Nothing else — the list is
+/// the picker, not a dashboard about the account.
 class _RepoRow extends StatelessWidget {
   const _RepoRow({required this.repo, this.onTap});
 
@@ -507,7 +496,6 @@ class _RepoRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
-    final meta = repo.metaLabel;
     return Semantics(
       container: true,
       button: onTap != null,
@@ -538,27 +526,14 @@ class _RepoRow extends StatelessWidget {
                   ),
                   const SizedBox(width: OSpace.m),
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          repo.fullName,
-                          style: OType.body.copyWith(
-                            color: c.text,
-                            fontWeight: FontWeight.w500,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        if (meta.isNotEmpty)
-                          Text(
-                            meta,
-                            style: OType.caption.copyWith(color: c.textMuted),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                      ],
+                    child: Text(
+                      repo.fullName,
+                      style: OType.body.copyWith(
+                        color: c.text,
+                        fontWeight: FontWeight.w500,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
                   if (onTap != null) ...[
@@ -579,6 +554,8 @@ class _RepoRow extends StatelessWidget {
   }
 }
 
+/// One branch row: the same list pattern as the repository step — an icon,
+/// the branch name, and a check at the trailing edge when selected.
 class _BranchChoice extends StatelessWidget {
   const _BranchChoice({
     required this.branch,
@@ -596,9 +573,6 @@ class _BranchChoice extends StatelessWidget {
     final label = branch.isDefault
         ? 'Branch ${branch.name}, default'
         : 'Branch ${branch.name}';
-    final meta = branch.lastCommitLabel.isNotEmpty
-        ? branch.lastCommitLabel
-        : (branch.isDefault ? 'Default' : '');
     return Semantics(
       container: true,
       excludeSemantics: true,
@@ -622,79 +596,33 @@ class _BranchChoice extends StatelessWidget {
               child: Row(
                 children: [
                   Icon(
-                    selected
-                        ? Icons.radio_button_checked_rounded
-                        : Icons.radio_button_unchecked_rounded,
-                    size: 20,
-                    color: selected ? c.accent : c.textFaint,
+                    Icons.account_tree_outlined,
+                    size: 18,
+                    color: selected ? c.accent : c.textMuted,
                   ),
                   const SizedBox(width: OSpace.m),
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          branch.name,
-                          style: OType.body.copyWith(
-                            color: selected ? c.accent : c.text,
-                            fontWeight: selected
-                                ? FontWeight.w600
-                                : FontWeight.w400,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        if (meta.isNotEmpty)
-                          Text(
-                            meta,
-                            style: OType.caption.copyWith(color: c.textMuted),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                      ],
+                    child: Text(
+                      branch.name,
+                      style: OType.body.copyWith(
+                        color: selected ? c.accent : c.text,
+                        fontWeight: selected
+                            ? FontWeight.w600
+                            : FontWeight.w400,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  if (selected) ...[
+                    const SizedBox(width: OSpace.xs),
+                    Icon(Icons.check_rounded, size: 20, color: c.accent),
+                  ],
                 ],
               ),
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _AdvancedRows extends StatelessWidget {
-  const _AdvancedRows({this.onOpenToken, this.onOpenAdvanced});
-
-  final VoidCallback? onOpenToken;
-  final VoidCallback? onOpenAdvanced;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return OCard(
-      padding: EdgeInsets.zero,
-      child: Column(
-        children: [
-          if (onOpenToken != null)
-            OListRow(
-              key: const Key('repo-picker-token'),
-              icon: Icons.key_rounded,
-              title: 'Personal access token',
-              onTap: onOpenToken,
-            ),
-          if (onOpenToken != null && onOpenAdvanced != null)
-            Divider(height: 1, color: c.hairline),
-          if (onOpenAdvanced != null)
-            OListRow(
-              key: const Key('repo-picker-advanced'),
-              icon: Icons.tune_rounded,
-              title: 'Advanced',
-              onTap: onOpenAdvanced,
-            ),
-        ],
       ),
     );
   }

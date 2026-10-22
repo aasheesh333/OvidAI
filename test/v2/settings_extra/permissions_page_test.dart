@@ -124,7 +124,7 @@ Future<void> _pumpClean(
 }
 
 void main() {
-  testWidgets('renders five permissions, each with a status and one action', (
+  testWidgets('renders five permission rows, each with its status', (
     tester,
   ) async {
     await _pump(tester, _data());
@@ -135,13 +135,15 @@ void main() {
     expect(find.text('Granted'), findsNWidgets(2));
     expect(find.text('Not asked'), findsNWidgets(2));
     expect(find.text('Blocked'), findsOneWidget);
-    expect(find.text('Allow'), findsNWidgets(2));
-    expect(find.text('Settings'), findsNWidgets(3));
-    // The explainer, the reset control and the footer are gone.
+    // The explainer, the per-row reason, the reset control and the footer
+    // are gone; the row itself is the one action.
     expect(
       find.text('Ovid only asks when it needs something.'),
       findsNothing,
     );
+    expect(find.text('To take a photo you want to send.'), findsNothing);
+    expect(find.text('Allow'), findsNothing);
+    expect(find.text('Settings'), findsNothing);
     expect(find.text('Reset all permissions'), findsNothing);
     expect(find.text('Open Android settings'), findsNothing);
   });
@@ -210,40 +212,33 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('requests a permission', (tester) async {
+  testWidgets('tapping a not-asked row requests the permission', (
+    tester,
+  ) async {
     String? requested;
     await _pump(tester, _data(onRequest: (id) => requested = id));
 
-    final request = find.text('Allow').first;
-    await tester.ensureVisible(request);
-    await tester.tap(request);
+    final row = find.byKey(const ValueKey('permission-request-camera'));
+    await tester.ensureVisible(row);
+    await tester.tap(row);
     await tester.pumpAndSettle();
 
     expect(requested, 'camera');
   });
 
-  testWidgets('announces a disabled request button', (tester) async {
+  testWidgets('announces a request row with no handler as disabled', (
+    tester,
+  ) async {
     final handle = tester.ensureSemantics();
 
     await _pump(tester, _data());
 
-    final request = tester.getSemantics(find.text('Allow').first);
-    expect(request, isSemantics(isButton: true, isEnabled: false));
+    final row = tester.getSemantics(
+      find.byKey(const ValueKey('permission-request-camera')),
+    );
+    expect(row, isSemantics(hasEnabledState: true, isEnabled: false));
 
     handle.dispose();
-  });
-
-  testWidgets('names the permission in each row action label', (tester) async {
-    await _pump(tester, _data(onRequest: (_) {}, onOpenSettings: () {}));
-
-    final buttons = tester.widgetList<OButton>(find.byType(OButton)).toList();
-    final request = buttons.firstWhere((button) => button.label == 'Allow');
-    expect(request.semanticLabel, 'Allow Camera');
-
-    final settings = buttons.firstWhere(
-      (button) => button.label == 'Settings',
-    );
-    expect(settings.semanticLabel, 'Open settings for Microphone');
   });
 
   testWidgets('refreshes from the header', (tester) async {
@@ -257,14 +252,12 @@ void main() {
     expect(refreshes, 1);
   });
 
-  testWidgets('keeps every button at least 48dp tall', (tester) async {
+  testWidgets('keeps every row at least 48dp tall', (tester) async {
     await _pump(tester, _data(onRequest: (_) {}, onOpenSettings: () {}));
 
-    final buttons = find
-        .byWidgetPredicate((widget) => widget is ButtonStyleButton)
-        .evaluate();
-    expect(buttons, isNotEmpty);
-    for (final element in buttons) {
+    final rows = find.byType(OListRow).evaluate();
+    expect(rows, isNotEmpty);
+    for (final element in rows) {
       final box = element.renderObject! as RenderBox;
       expect(box.size.height, greaterThanOrEqualTo(48.0));
     }
@@ -279,7 +272,7 @@ void main() {
 
     expect(find.text('Camera'), findsOneWidget);
     expect(find.text('Blocked'), findsOneWidget);
-    expect(find.text('Settings'), findsNWidgets(3));
+    expect(find.text('Not asked'), findsNWidgets(2));
   });
 
   testWidgets('shows the empty state and opens settings', (tester) async {
@@ -303,18 +296,18 @@ void main() {
   testWidgets('centres the list at 600 dp', (tester) async {
     await _pump(tester, _data(), size: const Size(600, 1000));
 
-    final card = find.byType(OCard).first;
-    expect(tester.getSize(card).width, lessThanOrEqualTo(640));
-    expect(tester.getCenter(card).dx, closeTo(300, 0.5));
+    final row = find.byType(OListRow).first;
+    expect(tester.getSize(row).width, lessThanOrEqualTo(640));
+    expect(tester.getCenter(row).dx, closeTo(300, 0.5));
   });
 
   testWidgets('each row opens its own Android settings page', (tester) async {
     String? opened;
     await _pump(tester, _data(onOpenSettingsFor: (id) => opened = id));
 
-    final open = find.text('Settings').first;
-    await tester.ensureVisible(open);
-    await tester.tap(open);
+    final row = find.byKey(const ValueKey('permission-settings-microphone'));
+    await tester.ensureVisible(row);
+    await tester.tap(row);
     await tester.pumpAndSettle();
 
     expect(opened, 'microphone');
@@ -326,9 +319,9 @@ void main() {
     var opens = 0;
     await _pump(tester, _data(onOpenSettings: () => opens++));
 
-    final open = find.text('Settings').first;
-    await tester.ensureVisible(open);
-    await tester.tap(open);
+    final row = find.byKey(const ValueKey('permission-settings-microphone'));
+    await tester.ensureVisible(row);
+    await tester.tap(row);
     await tester.pumpAndSettle();
 
     expect(opens, 1);
@@ -342,9 +335,9 @@ void main() {
       _data(onRequest: (id) => requested = id, onRefresh: () => refreshes++),
     );
 
-    final request = find.text('Allow').first;
-    await tester.ensureVisible(request);
-    await tester.tap(request);
+    final row = find.byKey(const ValueKey('permission-request-camera'));
+    await tester.ensureVisible(row);
+    await tester.tap(row);
     await tester.pumpAndSettle();
 
     expect(requested, 'camera');

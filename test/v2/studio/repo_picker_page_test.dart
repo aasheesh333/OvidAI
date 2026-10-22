@@ -67,11 +67,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Studio'), findsOneWidget);
+      expect(find.text('Repositories'), findsOneWidget);
       expect(find.text('acme/landing-page'), findsOneWidget);
       expect(find.text('acme/api-server'), findsOneWidget);
-      // One meta line, never the description paragraph.
-      expect(find.text('TypeScript · Updated 2h ago'), findsOneWidget);
+      // One owner/name row, no meta line, never the description paragraph.
+      expect(find.text('TypeScript · Updated 2h ago'), findsNothing);
       expect(find.text('Marketing site for Acme Cloud'), findsNothing);
       expect(find.textContaining('Connected as'), findsNothing);
     }

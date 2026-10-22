@@ -91,7 +91,7 @@ void main() {
     expect(readOnly.color, c.textMuted);
   });
 
-  testWidgets('a selected Full Access row uses the danger selection mark', (
+  testWidgets('a selected Full Access row uses the danger check', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -99,8 +99,9 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    // One bare check on the surface, not a filled radio circle.
     final check = tester.widget<Icon>(find.byIcon(Icons.check_rounded));
-    expect(check.color, OColors.light.onDanger);
+    expect(check.color, OColors.light.danger);
   });
 
   testWidgets('current selection is announced', (tester) async {

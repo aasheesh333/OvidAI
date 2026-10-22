@@ -149,7 +149,7 @@ V2SettingsHubData previewSettingsHubData() {
           'connectors',
           'Connectors',
           Icons.extension_rounded,
-          '49 apps · 60 plugins and MCP',
+          '49 apps · 60 plugins and add-ons',
         ),
         row(
           'presets',
@@ -225,7 +225,7 @@ V2SettingsHubData previewSettingsHubData() {
           'account_health',
           'Account health',
           Icons.health_and_safety_outlined,
-          'Security and devices',
+          'Sign-in and deletion',
         ),
         row(
           'about',
@@ -1864,73 +1864,12 @@ V2CredentialsPageData previewCredentialsData() {
   );
 }
 
-/// A healthy account with services, devices and recent sign-ins.
+/// A healthy account with a verified sign-in address.
 V2AccountHealthPageData previewAccountHealthPageData() {
-  return V2AccountHealthPageData(
-    statusTitle: 'Everything looks healthy',
-    statusMessage: 'Account, devices and sign-ins all check out.',
-    healthy: true,
-    score: 96,
-    lastCheckLabel: 'Checked 10:20',
-    lastCheckDetail: 'Email, 2FA and 3 devices',
-    twoFactorEnabled: true,
+  return const V2AccountHealthPageData(
+    emailVerified: true,
     emailLabel: 'aarav@gmail.com',
-    regionLabel: 'India · IST',
     accountStatus: V2AccountStatus.active,
-    usage: const <V2AccountUsageMetric>[
-      V2AccountUsageMetric(
-        id: 'storage',
-        title: 'Storage left',
-        value: '8.8 GB',
-        detail: 'of 15 GB',
-      ),
-      V2AccountUsageMetric(
-        id: 'daily_usage',
-        title: 'Daily usage left',
-        value: '11.8M',
-        detail: 'of 20M tokens',
-      ),
-      V2AccountUsageMetric(
-        id: 'monthly_usage',
-        title: 'Monthly usage left',
-        value: '156M',
-        detail: 'of 200M tokens',
-      ),
-    ],
-    services: const <V2ServiceStatus>[
-      V2ServiceStatus(name: 'Sign-in', statusLabel: 'Working'),
-      V2ServiceStatus(name: 'Chat', statusLabel: 'Working'),
-      V2ServiceStatus(name: 'Studio', statusLabel: 'Working'),
-      V2ServiceStatus(name: 'Schedules', statusLabel: 'Degraded', healthy: false),
-    ],
-    devices: const <V2SignInDevice>[
-      V2SignInDevice(
-        id: 'pixel',
-        name: 'Pixel 8',
-        detail: 'Android 15 · Mumbai',
-        current: true,
-      ),
-      V2SignInDevice(
-        id: 'mac',
-        name: 'MacBook Air',
-        detail: 'Chrome · Mumbai',
-      ),
-    ],
-    recentSignIns: const <V2SignInEvent>[
-      V2SignInEvent(
-        id: 'e1',
-        device: 'Pixel 8',
-        location: 'Mumbai',
-        timeLabel: 'Now',
-        current: true,
-      ),
-      V2SignInEvent(
-        id: 'e2',
-        device: 'MacBook Air',
-        location: 'Mumbai',
-        timeLabel: '2h ago',
-      ),
-    ],
   );
 }
 

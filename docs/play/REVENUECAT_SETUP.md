@@ -39,6 +39,11 @@ App level (Ovid Si): *View app information*, *View financial data*,
   | `ovid_plus_monthly` | Ovid Go | $5 |
   | `ovid_pro_monthly` | Ovid Plus | $18 |
   | `ovid_max_monthly` | Ovid Pro | $99 |
+- Yearly products are coded (`ovid_plus_yearly`, `ovid_pro_yearly`,
+  `ovid_max_yearly`) and sold by the Plan & billing yearly toggle, but **no
+  yearly product or base plan exists in Play Console or RevenueCat yet**.
+  Until they are created, a yearly selection is reported as not available
+  instead of silently buying the monthly product.
 - Each product attached to its entitlement
 - Default offering **`default`** with packages `$rc_monthly`, `plus`, `pro`
 
@@ -76,6 +81,12 @@ Version 2 (`1.0.0+2`) of the AAB was uploaded to internal testing with this flag
    | Plus | `ovid_pro_monthly` | $18 / ₹1,799 |
    | Pro | `ovid_max_monthly` | $99 / ₹9,999 |
 
+   **Yearly base plans are not created.** The app maps `ovid_plus_yearly`,
+   `ovid_pro_yearly` and `ovid_max_yearly`; each needs a Play subscription with
+   an auto-renewing yearly base plan (and a matching RevenueCat product +
+   package) before the yearly toggle can sell anything. Until then it shows
+   "Yearly billing is not available for this plan yet."
+
    Monetize is locked until Google reviews the first internal release
    ("unreviewed" app name). Uploading the release is done; the review is
    automatic for internal testing.
@@ -110,8 +121,11 @@ gitignored (project `ovid-ai`, package `com.dhanuk.ovidai`).
 
 - `available` is true because the public SDK key is compiled in.
 - `configure()` binds the signed-in Firebase uid as the RevenueCat app user id.
-- `buy(tier)` maps `3x/7x/15x` → `ovid_plus_monthly/ovid_pro_monthly/ovid_max_monthly`,
-  finds the matching package, and purchases it.
+- `buy(tier, {period})` maps `3x/7x/15x` (and monthly/yearly) →
+  `ovid_plus_monthly/ovid_pro_monthly/ovid_max_monthly` or
+  `ovid_plus_yearly/ovid_pro_yearly/ovid_max_yearly`, finds the matching
+  package, and purchases it. A yearly request never falls back to a monthly
+  package.
 - `restore()` and `currentTier()` read entitlements `go/plus/pro`.
 - The Play Billing flow remains the fallback if the RevenueCat key is removed
   (`--dart-define=OVID_REVENUECAT_GOOGLE_KEY=`).

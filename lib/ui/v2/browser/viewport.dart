@@ -7,9 +7,10 @@ import '../../design/o_tokens.dart';
 
 /// What the live picture is doing.
 ///
-/// The screen shows this as one pill — Live, Waiting or Lost — instead of a
-/// strip of labels. A tab can be open while the picture is still connecting,
-/// and a lost picture never closes the page.
+/// A tab can be open while the picture is still connecting, and a lost
+/// picture never closes the page. While waiting or lost, the surface is one
+/// centred line plus one retry — no explainer; when the picture is live, the
+/// picture itself is the status.
 enum V2ViewportStatus {
   /// Connecting: the viewer is attached and the first frame is on its way.
   loading,
@@ -49,9 +50,9 @@ class V2ViewportCursor {
 /// paints an injected [ImageProvider] (a decoded screencast frame) or a calm
 /// neutral placeholder. The live adapter owns decoding and input.
 ///
-/// The only chrome is a single status pill in the corner and, when the person
-/// holds the page, their taps. There is no frame-rate explainer: the slow
-/// refresh is visible in the picture itself.
+/// There is no chrome on the picture itself: no status pill, no frame-rate
+/// explainer. The page overlays the one take-control pill and, while
+/// controlling, the control dock.
 class BrowserViewport extends StatelessWidget {
   const BrowserViewport({
     super.key,
@@ -77,9 +78,6 @@ class BrowserViewport extends StatelessWidget {
 
   /// Key for the surface that turns a tap into page input while controlling.
   static const pageTapKey = ValueKey<String>('browser-viewport-page-tap');
-
-  /// Key for the single status pill.
-  static const statusKey = ValueKey<String>('browser-viewport-status');
 
   /// The latest decoded screencast frame. Null means "no picture yet", which
   /// shows the waiting state instead of inventing page content.
@@ -133,7 +131,7 @@ class BrowserViewport extends StatelessWidget {
       base = const _LoadingBody();
     } else {
       base = _NoticeBody(
-        title: 'No picture yet',
+        title: 'Waiting for the page…',
         actionKey: waitingRetryKey,
         actionLabel: 'Try again',
         onRetry: onRetry,
@@ -164,11 +162,6 @@ class BrowserViewport extends StatelessWidget {
                   ],
                   if (effective == V2ViewportStatus.live && cursor != null)
                     _AgentCursor(cursor: cursor!),
-                  Positioned(
-                    left: OSpace.s,
-                    top: OSpace.s,
-                    child: _StatusPill(status: effective),
-                  ),
                 ],
               ),
             ),
@@ -191,29 +184,6 @@ class BrowserViewport extends StatelessWidget {
       return V2ViewportStatus.waiting;
     }
     return status;
-  }
-}
-
-/// The one status label: Live / Waiting / Lost.
-class _StatusPill extends StatelessWidget {
-  const _StatusPill({required this.status});
-
-  final V2ViewportStatus status;
-
-  @override
-  Widget build(BuildContext context) {
-    final (label, tone) = switch (status) {
-      V2ViewportStatus.loading ||
-      V2ViewportStatus.waiting => ('Waiting', OPillTone.warn),
-      V2ViewportStatus.live => ('Live', OPillTone.success),
-      V2ViewportStatus.streamLost => ('Lost', OPillTone.danger),
-    };
-    return OPill(
-      key: BrowserViewport.statusKey,
-      label: label,
-      tone: tone,
-      dot: true,
-    );
   }
 }
 

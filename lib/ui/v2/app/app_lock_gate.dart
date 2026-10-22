@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../../../core/app_lock.dart';
 import '../../design/o_components.dart';
 import '../../design/o_tokens.dart';
+import '../onboarding/step_progress.dart' show OnboardingMark;
 
 /// Covers the app with the PIN lock screen whenever [AppLock.locked] is true.
 ///
@@ -29,7 +30,7 @@ class AppLockGate extends StatefulWidget {
     this.biometric,
     this.onSignOut,
     this.title = 'App locked',
-    this.subtitle = 'Enter your PIN to continue.',
+    this.subtitle = 'Enter your PIN',
   });
 
   /// The protected subtree.
@@ -234,6 +235,8 @@ class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
+                          const Center(child: OnboardingMark(size: 72)),
+                          const SizedBox(height: OSpace.l),
                           Semantics(
                             header: true,
                             child: Text(
@@ -272,15 +275,18 @@ class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
                           ],
                           if (hasBiometrics) ...[
                             const SizedBox(height: OSpace.s),
-                            OButton(
-                              label: 'Use biometrics',
-                              icon: Icons.fingerprint_rounded,
-                              variant: OButtonVariant.secondary,
-                              expand: true,
-                              loading: _checkingBiometrics,
-                              onPressed: _checkingBiometrics
-                                  ? null
-                                  : _useBiometrics,
+                            // One quiet row, not a second full-width button:
+                            // the PIN pad is the primary path.
+                            Center(
+                              child: OButton(
+                                label: 'Use biometrics',
+                                icon: Icons.fingerprint_rounded,
+                                variant: OButtonVariant.ghost,
+                                loading: _checkingBiometrics,
+                                onPressed: _checkingBiometrics
+                                    ? null
+                                    : _useBiometrics,
+                              ),
                             ),
                           ],
                           if (widget.onSignOut != null) ...[
@@ -431,7 +437,7 @@ class _PinDots extends StatelessWidget {
                 duration: OMotion.instant,
                 width: 14,
                 height: 14,
-                margin: const EdgeInsets.symmetric(horizontal: 5),
+                margin: const EdgeInsets.symmetric(horizontal: OSpace.xs),
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: i < length ? colors.accentFill : Colors.transparent,

@@ -75,7 +75,9 @@ class V2StudioWorkspaceData {
   final String? errorMessage;
 }
 
-/// The code workspace: one tree column, one editor, one branch chip.
+/// The code workspace: header, the file tree and the editor. Nothing else —
+/// no status bar, no banner. Changes and preview are separate pushed pages,
+/// so the workspace never spends chrome on them.
 ///
 /// Wide layout (600 dp+) keeps the tree beside the editor. Below 600 dp the
 /// tree fills the screen and picking a file pushes the full code viewer.
@@ -97,6 +99,9 @@ class V2StudioWorkspacePage extends StatefulWidget {
   final VoidCallback? onBranchTap;
   final VoidCallback? onSync;
   final ValueChanged<String>? onSelectFile;
+
+  /// Reserved for the host shell's own navigation. The workspace body is
+  /// exactly the tree and the editor, so these render no chrome here.
   final VoidCallback? onCommit;
   final VoidCallback? onPreview;
   final VoidCallback? onPickRepo;
@@ -241,8 +246,9 @@ class _V2StudioWorkspacePageState extends State<V2StudioWorkspacePage> {
         final c = OColors.of(context);
         final data = widget.data;
         final wide = width >= OBreakpoints.tablet;
-        // The 320 dp tree is only worth its cost when the column has the wide
-        // band's full 720; a 600 dp column beside the rail keeps 280.
+        // Split view: 280 dp tree from the tablet band, widening to 320 dp
+        // once the column holds the wide band's full 720 dp content cap
+        // (a 900 dp window without the rail, wider windows with it).
         final treeWidth =
             width >= OBreakpoints.contentMaxWidth(OBreakpoints.wide)
             ? 320.0
@@ -299,29 +305,14 @@ class _V2StudioWorkspacePageState extends State<V2StudioWorkspacePage> {
                 ],
               );
 
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  OSpace.l,
-                  OSpace.m,
-                  OSpace.l,
-                  0,
-                ),
-                child: body,
-              ),
-            ),
-            if (_isBound)
-              _StatusBar(
-                filesChanged: data.filesChanged,
-                additions: data.additions,
-                deletions: data.deletions,
-                onChanges: widget.onCommit,
-                onPreview: widget.onPreview,
-              ),
-          ],
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(
+            OSpace.l,
+            OSpace.m,
+            OSpace.l,
+            OSpace.l,
+          ),
+          child: body,
         );
       },
     );
@@ -455,123 +446,6 @@ class _EditorPane extends StatelessWidget {
                 ),
         ),
       ],
-    );
-  }
-}
-
-/// IDE-style status bar: changes on the left, preview on the right. Both are
-/// compact text actions, never full-width buttons.
-class _StatusBar extends StatelessWidget {
-  const _StatusBar({
-    required this.filesChanged,
-    required this.additions,
-    required this.deletions,
-    this.onChanges,
-    this.onPreview,
-  });
-
-  final int filesChanged;
-  final int additions;
-  final int deletions;
-  final VoidCallback? onChanges;
-  final VoidCallback? onPreview;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final changes = filesChanged == 1 ? '1 change' : '$filesChanged changes';
-    final diff = '+$additions −$deletions';
-    return Container(
-      decoration: BoxDecoration(
-        color: c.surface,
-        border: Border(top: BorderSide(color: c.hairline)),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: OSpace.s),
-      child: Row(
-        children: [
-          Expanded(
-            flex: 3,
-            child: _BarAction(
-              key: const Key('studio-open-changes'),
-              icon: Icons.difference_rounded,
-              label: changes,
-              meta: diff,
-              onTap: onChanges,
-              semanticLabel: '$changes, $diff',
-            ),
-          ),
-          Expanded(
-            flex: 2,
-            child: _BarAction(
-              key: const Key('studio-open-preview'),
-              icon: Icons.visibility_rounded,
-              label: 'Preview',
-              onTap: onPreview,
-              semanticLabel: 'Open live preview',
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _BarAction extends StatelessWidget {
-  const _BarAction({
-    super.key,
-    required this.icon,
-    required this.label,
-    this.meta,
-    this.onTap,
-    this.semanticLabel,
-  });
-
-  final IconData icon;
-  final String label;
-
-  /// A count or diff summary that sits beside the label on the same line.
-  final String? meta;
-  final VoidCallback? onTap;
-  final String? semanticLabel;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final color = onTap == null ? c.textFaint : c.textMuted;
-    return OPressable(
-      onTap: onTap,
-      semanticLabel: semanticLabel ?? label,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: OSpace.touch),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: OSpace.s),
-          child: Row(
-            children: [
-              Icon(icon, size: 16, color: color),
-              const SizedBox(width: OSpace.xs),
-              Flexible(
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.label.copyWith(color: color),
-                ),
-              ),
-              if (meta != null) ...[
-                const SizedBox(width: OSpace.xs),
-                Flexible(
-                  child: Text(
-                    meta!,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.caption.copyWith(color: c.textFaint),
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

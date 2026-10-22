@@ -7,6 +7,9 @@ import 'confirm_typed_sheet.dart';
 import 'data_control_export.dart'
     if (dart.library.io) 'data_control_export_io.dart';
 import 'export_picker_sheet.dart';
+import 'settings_rows.dart';
+import 'storage_breakdown.dart';
+import 'storage_page.dart';
 
 // TODO(l10n): move user-facing copy to the ARB files in the localization pass.
 
@@ -78,7 +81,7 @@ class V2DataControlPageData {
     this.lastExportLabel = '',
     this.backupSizeLabel = '',
     this.totalDataSizeLabel = '',
-    this.exportLimitLabel = 'Up to 64 MB · 1,000 sessions · 20,000 messages',
+    this.exportLimitLabel = 'Up to 64 MB · 1,000 chats · 20,000 messages',
     this.exportLimitBytes = 64 * 1024 * 1024,
     this.exportSessions = const <V2ExportSession>[],
     this.permissionSummary = '',
@@ -104,6 +107,8 @@ class V2DataControlPageData {
     this.onStorage,
     this.onDeleteData,
     this.onResetMemory,
+    this.onClearCache,
+    this.onClearCacheAndReport,
     this.onRetry,
   });
 
@@ -151,7 +156,18 @@ class V2DataControlPageData {
   final ValueChanged<bool>? onCrashReportsChanged;
   final VoidCallback? onStorage;
   final VoidCallback? onDeleteData;
+
+  /// Retained for hosts that still pass it; memory reset lives on the Memory
+  /// page, so Data control no longer renders a row for it.
   final VoidCallback? onResetMemory;
+
+  /// Clears the on-device cache. When null the page clears the app's
+  /// temporary directory itself, so the row always does real work.
+  final VoidCallback? onClearCache;
+
+  /// Clears the cache and returns the bytes actually freed. Wins over
+  /// [onClearCache] when the host can measure the result itself.
+  final Future<int> Function()? onClearCacheAndReport;
   final VoidCallback? onRetry;
 
   int get exportTotalBytes =>
@@ -177,8 +193,9 @@ class V2DataControlPageData {
   bool get canImport => importValidation?.canImport ?? false;
 }
 
-/// Privacy and data controls: backup, account consent and destructive actions.
-/// Every row is an action or a value; there are no explanatory paragraphs.
+/// Privacy and data controls: four rows — export, import, cache and the
+/// destructive delete. Every row is an action; there are no explanatory
+/// paragraphs.
 class DataControlPage extends StatelessWidget {
   const DataControlPage({super.key, required this.data});
 
@@ -210,141 +227,68 @@ class DataControlPage extends StatelessWidget {
   }
 
   Widget _content(BuildContext context) {
-    final c = OColors.of(context);
-    final export = data.onExport == null ? null : () => _handleExport(context);
+    final export = _exportTap(context);
     return SingleChildScrollView(
-      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
+      padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          OSectionTitle(title: 'Backup'),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                Semantics(
-                  enabled: true,
-                  child: OListRow(
-                    icon: Icons.save_alt_rounded,
-                    title: 'Save to device',
-                    onTap: () => _handleExport(context, save: true),
-                  ),
+          V2SettingsRowList(
+            rows: [
+              if (export != null)
+                V2SettingsRow(
+                  key: const ValueKey<String>('export-backup-row'),
+                  icon: Icons.save_alt_rounded,
+                  title: 'Export backup',
+                  onTap: export,
                 ),
-                Divider(color: c.hairline, height: 1),
-                OListRow(
+              if (data.onChooseImport != null)
+                V2SettingsRow(
+                  key: const ValueKey<String>('import-backup-row'),
                   icon: Icons.upload_file_rounded,
-                  title: 'Choose backup',
+                  title: 'Import',
                   onTap: data.onChooseImport,
                 ),
-                if (data.importChecking || data.importValidation != null) ...[
-                  Divider(color: c.hairline, height: 1),
-                  _importRow(context),
-                ],
-              ],
-            ),
-          ),
-          OSectionTitle(title: 'Account'),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                OListRow(
-                  icon: Icons.cloud_outlined,
-                  title: 'Storage',
-                  subtitle: data.storageUsedLabel.isEmpty
-                      ? null
-                      : data.storageUsedLabel,
-                  onTap: data.onStorage,
-                ),
-                Divider(color: c.hairline, height: 1),
-                OListRow(
-                  icon: Icons.verified_user_outlined,
-                  title: 'Permissions',
-                  subtitle: data.permissionSummary.isEmpty
-                      ? null
-                      : data.permissionSummary,
-                  onTap: data.onPermissions,
-                ),
-                Divider(color: c.hairline, height: 1),
-                // One semantics node: the row name plus the switch state. The
-                // row and the switch must not both announce "Crash reports".
-                Semantics(
-                  label: 'Crash reports',
-                  toggled: data.crashReports,
-                  button: true,
-                  enabled: data.onCrashReportsChanged != null,
-                  excludeSemantics: true,
-                  onTap: data.onCrashReportsChanged == null
-                      ? null
-                      : () => data.onCrashReportsChanged!(!data.crashReports),
-                  child: OListRow(
-                    icon: Icons.bug_report_outlined,
-                    title: 'Crash reports',
-                    showChevron: false,
-                    trailing: ExcludeSemantics(
-                      child: Switch(
-                        value: data.crashReports,
-                        onChanged: data.onCrashReportsChanged,
-                        activeThumbColor: c.onAccent,
-                        activeTrackColor: c.accentFill,
-                        inactiveThumbColor: c.textFaint,
-                        inactiveTrackColor: c.surfaceRaised,
-                        trackOutlineColor: WidgetStatePropertyAll(
-                          c.hairlineStrong,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          OSectionTitle(title: 'Danger'),
-          OCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                OListRow(
-                  key: const ValueKey('delete-data-row'),
+              if (data.importChecking || data.importValidation != null)
+                _importRow(context),
+              V2SettingsRow(
+                key: const ValueKey<String>('clear-cache-row'),
+                icon: Icons.cleaning_services_outlined,
+                title: 'Clear cache',
+                showChevron: false,
+                onTap: () => _clearCache(context),
+              ),
+              if (data.onDeleteData != null)
+                V2SettingsRow(
+                  key: const ValueKey<String>('delete-data-row'),
                   icon: Icons.delete_forever_outlined,
-                  title: 'Delete your data',
+                  title: 'Delete data',
                   danger: true,
-                  enabled: data.onDeleteData != null,
-                  onTap: data.onDeleteData == null
-                      ? null
-                      : () => _confirmDelete(context),
+                  showChevron: false,
+                  onTap: () => _confirmDelete(context),
                 ),
-                Divider(color: c.hairline, height: 1),
-                OListRow(
-                  key: const ValueKey('reset-memory-row'),
-                  icon: Icons.history_rounded,
-                  title: 'Reset memory',
-                  danger: true,
-                  enabled: data.onResetMemory != null,
-                  onTap: data.onResetMemory == null
-                      ? null
-                      : () => _confirmResetMemory(context),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: OSpace.l),
-          OButton(
-            label: 'Export data',
-            icon: Icons.download_rounded,
-            expand: true,
-            onPressed: export,
+            ],
           ),
         ],
       ),
     );
   }
 
+  /// The export row's real tap: the archive flow when the host exports, the
+  /// save dialog when it only writes files. A page with neither omits the row.
+  VoidCallback? _exportTap(BuildContext context) {
+    if (data.onExport != null) return () => _handleExport(context);
+    if (data.onSaveExport != null) {
+      return () => _handleExport(context, save: true);
+    }
+    return null;
+  }
+
   /// The checked backup, or the check in flight. One row, no paragraphs.
   Widget _importRow(BuildContext context) {
     final check = data.importValidation;
     if (data.importChecking || check == null) {
-      return OListRow(
+      return const V2SettingsRow(
         icon: Icons.hourglass_empty_rounded,
         title: 'Checking backup…',
         showChevron: false,
@@ -368,9 +312,10 @@ class DataControlPage extends StatelessWidget {
             onPressed: data.onChooseImport,
           );
     return Column(
+      key: const ValueKey<String>('import-check-row'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        OListRow(
+        V2SettingsRow(
           icon: check.valid
               ? Icons.check_circle_outline_rounded
               : Icons.error_outline_rounded,
@@ -380,11 +325,44 @@ class DataControlPage extends StatelessWidget {
         ),
         // The action sits under the text instead of beside it: at 200 % text
         // a trailing button and a long file name cannot share one line.
-        Padding(
-          padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.s),
-          child: Align(alignment: Alignment.centerRight, child: action),
-        ),
+        Align(alignment: Alignment.centerRight, child: action),
       ],
+    );
+  }
+
+  /// Clears the on-device cache and reports the real bytes freed, exactly
+  /// like the Storage row: a host callback wins, otherwise the page measures
+  /// the temporary directory itself.
+  Future<void> _clearCache(BuildContext context) async {
+    final reporter = data.onClearCacheAndReport;
+    if (reporter != null) {
+      final freed = await reporter();
+      if (!context.mounted) return;
+      _snackFreed(context, freed);
+      return;
+    }
+    if (data.onClearCache != null) {
+      data.onClearCache!();
+      if (context.mounted) _snack(context, 'Cache cleared.');
+      return;
+    }
+    try {
+      final freed = await clearTemporaryCache();
+      if (!context.mounted) return;
+      _snackFreed(context, freed);
+    } catch (_) {
+      if (context.mounted) {
+        _snack(context, 'Could not clear the cache. Try again.');
+      }
+    }
+  }
+
+  void _snackFreed(BuildContext context, int freed) {
+    _snack(
+      context,
+      freed > 0
+          ? 'Freed ${formatStorageBytes(freed)} of cache.'
+          : 'Cache is already empty.',
     );
   }
 
@@ -497,14 +475,6 @@ class DataControlPage extends StatelessWidget {
     );
     if (confirmed) data.onDeleteData?.call();
   }
-
-  Future<void> _confirmResetMemory(BuildContext context) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (_) => _ResetMemoryDialog(summary: data.memorySummaryLabel),
-    );
-    if (confirmed == true) data.onResetMemory?.call();
-  }
 }
 
 /// Extracts `42` from `42 messages` for the picker's message total. The page
@@ -512,55 +482,4 @@ class DataControlPage extends StatelessWidget {
 int _messageCount(String detail) {
   final match = RegExp(r'([0-9]+)').firstMatch(detail);
   return match == null ? 0 : int.tryParse(match.group(1)!) ?? 0;
-}
-
-/// Reset memory confirmation. Separate from Delete data because chats and
-/// artifacts stay; only learned memory is removed.
-class _ResetMemoryDialog extends StatelessWidget {
-  const _ResetMemoryDialog({required this.summary});
-
-  final String summary;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return AlertDialog(
-      scrollable: true,
-      backgroundColor: c.surface,
-      title: Text('Reset all memory?', style: OType.h2.copyWith(color: c.text)),
-      content: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            summary.isEmpty
-                ? 'Ovid forgets everything it learned about you.'
-                : summary,
-            style: OType.bodySm.copyWith(color: c.text),
-          ),
-          const SizedBox(height: OSpace.m),
-          Text(
-            'Chats and files stay. This cannot be undone.',
-            style: OType.bodySm.copyWith(color: c.textMuted),
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          key: const ValueKey('reset-memory-confirm'),
-          onPressed: () => Navigator.pop(context, true),
-          style: FilledButton.styleFrom(
-            backgroundColor: c.danger,
-            foregroundColor: c.onDanger,
-            minimumSize: const Size(0, OSpace.touch),
-          ),
-          child: const Text('Reset memory'),
-        ),
-      ],
-    );
-  }
 }

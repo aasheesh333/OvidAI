@@ -149,13 +149,12 @@ these as done or not-done without running the corresponding check.
    price label, not a purchase.
 8. [ ] **Live chat artifact tile** has no inline thumbnail, no Preview button
    and no Copy; it opens the artifact detail and offers Download.
-9. [ ] **Sign-in still shows a dead email form.** The email/password field,
-   "Forgot password" and "Create account" render, and each one only sets the
-   inline error "Use Google or phone to sign in."
-   (`v2_onboarding_gate.dart`: `_submitEmail` and `_showEmailUnavailable`).
-   Google and phone are the only real providers, so the field and its two links
-   should be removed under the no-control-without-a-service rule. Apple already
-   does not render (`onApple` is never passed).
+9. [x] **Sign-in dead email form removed.** The email/password field,
+   "Forgot password" and "Create account" are gone, along with the unused
+   Apple hook (`onApple`). The step now offers exactly Google (filled primary)
+   and phone (outlined), and `_submitEmail`/`_showEmailUnavailable` were
+   deleted from `v2_onboarding_gate.dart`. Registry summaries and
+   `docs/audit/SCREEN_INVENTORY.md` now match the screen.
 
 ## Remaining P2
 

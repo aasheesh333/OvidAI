@@ -26,53 +26,25 @@ void _useNarrowPhone(WidgetTester tester) {
 
 V2AppearancePageData _data({
   ThemeMode themeMode = ThemeMode.system,
-  bool memoryEnabled = true,
-  bool shareSessionMemory = false,
-  bool showReasoning = true,
-  bool reduceMotion = false,
-  bool followsSystem = true,
-  bool highContrast = false,
   ValueChanged<ThemeMode>? onThemeModeChanged,
   ValueChanged<double>? onTextScaleChanged,
-  ValueChanged<bool>? onReduceMotionChanged,
-  ValueChanged<bool>? onReduceMotionFollowsSystemChanged,
-  ValueChanged<bool>? onHighContrastChanged,
-  ValueChanged<bool>? onMemoryEnabledChanged,
-  ValueChanged<bool>? onShareSessionMemoryChanged,
-  ValueChanged<bool>? onShowReasoningChanged,
   ValueChanged<String>? onVoiceLanguageChanged,
-  VoidCallback? onMemoryFilesTap,
 }) {
   return V2AppearancePageData(
     themeMode: themeMode,
     textScale: 1,
-    reduceMotion: reduceMotion,
-    reduceMotionFollowsSystem: followsSystem,
-    highContrast: highContrast,
-    memoryEnabled: memoryEnabled,
-    shareSessionMemory: shareSessionMemory,
-    showReasoning: showReasoning,
-    // Every control is wired by default so the render/layout tests exercise
-    // the full screen. Tests that assert "no handler" use raw data instead.
+    // Every remaining control is wired by default so the render/layout tests
+    // exercise the full screen. Tests that assert "no handler" use raw data.
     onThemeModeChanged: onThemeModeChanged ?? (_) {},
     onTextScaleChanged: onTextScaleChanged ?? (_) {},
     onVoiceLanguageChanged: onVoiceLanguageChanged ?? (_) {},
-    onReduceMotionChanged: onReduceMotionChanged ?? (_) {},
-    onReduceMotionFollowsSystemChanged:
-        onReduceMotionFollowsSystemChanged ?? (_) {},
-    onHighContrastChanged: onHighContrastChanged ?? (_) {},
-    onMemoryEnabledChanged: onMemoryEnabledChanged ?? (_) {},
-    onShareSessionMemoryChanged: onShareSessionMemoryChanged ?? (_) {},
-    onShowReasoningChanged: onShowReasoningChanged ?? (_) {},
-    onMemoryFilesTap: onMemoryFilesTap ?? () {},
   );
 }
 
-Switch _switch(WidgetTester tester, String key) =>
-    tester.widget<Switch>(find.byKey(ValueKey<String>(key)));
-
 void main() {
-  testWidgets('renders one header and one line per control', (tester) async {
+  testWidgets('renders one header, theme tiles, one slider, one voice row', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       _app(AppearancePage(data: _data()), theme: OTheme.light()),
     );
@@ -84,9 +56,7 @@ void main() {
     expect(find.text('TEXT SIZE'), findsOneWidget);
     expect(find.text('VOICE'), findsOneWidget);
     expect(find.text('Voice language'), findsOneWidget);
-    expect(find.text('MEMORY'), findsOneWidget);
-    expect(find.text('CHAT'), findsOneWidget);
-    expect(find.text('MOTION'), findsOneWidget);
+    expect(find.text('English'), findsOneWidget);
     expect(find.text('System'), findsOneWidget);
     expect(find.text('Light'), findsOneWidget);
     expect(find.text('Dark'), findsOneWidget);
@@ -107,6 +77,19 @@ void main() {
     expect(find.text('Density'), findsNothing);
     expect(find.text('Code font'), findsNothing);
     expect(find.textContaining('apply to this device'), findsNothing);
+
+    // Memory, reasoning and motion live on their own pages now.
+    expect(find.text('MEMORY'), findsNothing);
+    expect(find.text('CHAT'), findsNothing);
+    expect(find.text('MOTION'), findsNothing);
+    expect(find.text('Global memory'), findsNothing);
+    expect(find.text('Share chat memory'), findsNothing);
+    expect(find.text('Show reasoning'), findsNothing);
+    expect(find.text('Reduce motion'), findsNothing);
+    expect(find.text('Follow device setting'), findsNothing);
+    expect(find.text('High contrast'), findsNothing);
+    expect(find.text('Memory files'), findsNothing);
+    expect(find.byType(Switch), findsNothing);
   });
 
   testWidgets('renders in dark mode', (tester) async {
@@ -116,127 +99,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Appearance'), findsOneWidget);
-    expect(find.text('Global memory'), findsOneWidget);
-    expect(find.text('Show reasoning'), findsOneWidget);
-    expect(find.text('Reduce motion'), findsOneWidget);
-    expect(find.text('High contrast'), findsOneWidget);
-  });
-
-  testWidgets('defaults keep memory and reasoning on, sharing off', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      _app(AppearancePage(data: _data()), theme: OTheme.light()),
-    );
-    await tester.pumpAndSettle();
-
-    expect(_switch(tester, 'global-memory-switch').value, isTrue);
-    expect(_switch(tester, 'share-session-memory-switch').value, isFalse);
-    expect(_switch(tester, 'show-reasoning-switch').value, isTrue);
-  });
-
-  testWidgets('global memory switch reports the new value', (tester) async {
-    bool? next;
-    await tester.pumpWidget(
-      _app(
-        AppearancePage(
-          data: _data(onMemoryEnabledChanged: (value) => next = value),
-        ),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(
-      find.byKey(const ValueKey<String>('global-memory-switch')),
-    );
-    await tester.tap(find.byKey(const ValueKey<String>('global-memory-switch')));
-    expect(next, isFalse);
-  });
-
-  testWidgets('share session memory switch reports the new value', (
-    tester,
-  ) async {
-    bool? next;
-    await tester.pumpWidget(
-      _app(
-        AppearancePage(
-          data: _data(onShareSessionMemoryChanged: (value) => next = value),
-        ),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(
-      find.byKey(const ValueKey<String>('share-session-memory-switch')),
-    );
-    await tester.tap(
-      find.byKey(const ValueKey<String>('share-session-memory-switch')),
-    );
-    expect(next, isTrue);
-  });
-
-  testWidgets('show reasoning switch reports the new value', (tester) async {
-    bool? next;
-    await tester.pumpWidget(
-      _app(
-        AppearancePage(
-          data: _data(onShowReasoningChanged: (value) => next = value),
-        ),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(
-      find.byKey(const ValueKey<String>('show-reasoning-switch')),
-    );
-    await tester.tap(find.byKey(const ValueKey<String>('show-reasoning-switch')));
-    expect(next, isFalse);
-  });
-
-  testWidgets('show reasoning off persists when the page rebuilds', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      _app(
-        AppearancePage(data: _data(showReasoning: false)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(_switch(tester, 'show-reasoning-switch').value, isFalse);
-
-    // Rebuilding with the saved value must keep the switch off.
-    await tester.pumpWidget(
-      _app(
-        AppearancePage(data: _data(showReasoning: false)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(_switch(tester, 'show-reasoning-switch').value, isFalse);
-  });
-
-  testWidgets('memory files row opens the files screen', (tester) async {
-    var opened = 0;
-    await tester.pumpWidget(
-      _app(
-        AppearancePage(data: _data(onMemoryFilesTap: () => opened++)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final row = find.byKey(const ValueKey<String>('memory-files-row'));
-    await tester.ensureVisible(row);
-    await tester.tap(row);
-    await tester.pumpAndSettle();
-
-    expect(opened, 1);
+    expect(find.text('System'), findsOneWidget);
+    expect(find.text('Dark'), findsOneWidget);
+    expect(find.text('Voice language'), findsOneWidget);
   });
 
   testWidgets('choosing dark reports the new theme mode', (tester) async {
@@ -274,6 +139,24 @@ void main() {
     expect(next, 'hi');
   });
 
+  testWidgets('the voice row carries the current language as its value', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        AppearancePage(data: _data()),
+        theme: OTheme.light(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey<String>('voice-language-row'));
+    expect(
+      find.descendant(of: row, matching: find.text('English')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('chat text size slider covers 75 to 180 percent', (tester) async {
     await tester.pumpWidget(
       _app(AppearancePage(data: _data()), theme: OTheme.light()),
@@ -286,67 +169,21 @@ void main() {
     expect(slider.divisions, 21);
   });
 
-  testWidgets('reduce motion can follow the device setting', (tester) async {
-    bool? next;
+  testWidgets('text size slider reports the new value', (tester) async {
+    double? next;
     await tester.pumpWidget(
       _app(
-        AppearancePage(
-          data: _data(
-            onReduceMotionFollowsSystemChanged: (value) => next = value,
-          ),
-        ),
+        AppearancePage(data: _data(onTextScaleChanged: (value) => next = value)),
         theme: OTheme.light(),
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(
-      find.byKey(const ValueKey<String>('follow-device-switch')),
-    );
-    await tester.tap(
-      find.byKey(const ValueKey<String>('follow-device-switch')),
-    );
-    expect(next, isFalse);
-  });
+    await tester.drag(find.byType(Slider), const Offset(60, 0));
+    await tester.pump();
 
-  testWidgets('reduce motion is disabled while following the device', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      _app(
-        AppearancePage(data: _data(followsSystem: true)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(
-      find.byKey(const ValueKey<String>('reduce-motion-switch')),
-    );
-    expect(
-      _switch(tester, 'reduce-motion-switch').onChanged,
-      isNull,
-      reason: 'the device owns the value while following it',
-    );
-  });
-
-  testWidgets('high contrast reports the new value', (tester) async {
-    bool? next;
-    await tester.pumpWidget(
-      _app(
-        AppearancePage(data: _data(onHighContrastChanged: (value) => next = value)),
-        theme: OTheme.light(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(
-      find.byKey(const ValueKey<String>('high-contrast-switch')),
-    );
-    await tester.tap(
-      find.byKey(const ValueKey<String>('high-contrast-switch')),
-    );
-    expect(next, isTrue);
+    expect(next, isNotNull);
+    expect(next, greaterThan(1));
   });
 
   testWidgets('error state offers a retry', (tester) async {
@@ -395,13 +232,6 @@ void main() {
               onThemeModeChanged: (_) {},
               onTextScaleChanged: (_) {},
               onVoiceLanguageChanged: (_) {},
-              onReduceMotionChanged: (_) {},
-              onReduceMotionFollowsSystemChanged: (_) {},
-              onHighContrastChanged: (_) {},
-              onMemoryEnabledChanged: (_) {},
-              onShareSessionMemoryChanged: (_) {},
-              onShowReasoningChanged: (_) {},
-              onMemoryFilesTap: () {},
             ),
           ),
           theme: theme,
@@ -410,6 +240,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(tester.takeException(), isNull);
+      expect(find.text('System'), findsOneWidget);
+      expect(find.text('Voice language'), findsOneWidget);
     }
   });
 
@@ -426,10 +258,7 @@ void main() {
     // No callbacks are injected: the page omits the sections it cannot wire
     // instead of drawing dead controls.
     expect(find.text('VOICE'), findsNothing);
-    expect(find.text('Global memory'), findsNothing);
-    expect(find.text('Show reasoning'), findsNothing);
-    expect(find.text('High contrast'), findsNothing);
-    expect(find.text('Reduce motion'), findsNothing);
+    expect(find.text('Voice language'), findsNothing);
     expect(
       tester.getSemantics(find.bySemanticsLabel('Dark theme')),
       isSemantics(label: 'Dark theme', isButton: true, isEnabled: false),
@@ -487,9 +316,6 @@ void main() {
     expect(find.text('TEXT SIZE'), findsOneWidget);
     expect(find.text('VOICE'), findsOneWidget);
     expect(find.text('Voice language'), findsOneWidget);
-    expect(find.text('MEMORY'), findsOneWidget);
-    expect(find.text('CHAT'), findsOneWidget);
-    expect(find.text('MOTION'), findsOneWidget);
   });
 
   testWidgets('content is centred and capped at 600 dp', (tester) async {
@@ -502,10 +328,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final card = tester.getRect(find.byType(OCard).first);
-    expect(card.width, lessThanOrEqualTo(640));
-    expect(card.left, greaterThan(0));
-    expect(card.right, lessThan(600));
+    final slider = tester.getRect(find.byType(Slider));
+    expect(slider.width, lessThanOrEqualTo(640));
+    expect(slider.left, greaterThan(0));
+    expect(slider.right, lessThan(600));
   });
 
   testWidgets('content is centred and capped at 900 dp', (tester) async {
@@ -518,9 +344,9 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final card = tester.getRect(find.byType(OCard).first);
-    expect(card.width, lessThanOrEqualTo(720));
-    expect(card.left, greaterThan(0));
-    expect(card.right, lessThan(900));
+    final slider = tester.getRect(find.byType(Slider));
+    expect(slider.width, lessThanOrEqualTo(720));
+    expect(slider.left, greaterThan(0));
+    expect(slider.right, lessThan(900));
   });
 }

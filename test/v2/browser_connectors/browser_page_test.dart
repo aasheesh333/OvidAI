@@ -71,7 +71,7 @@ Future<void> _pumpSize(
 }
 
 void main() {
-  testWidgets('browser is one window: address, tabs, picture and controls', (
+  testWidgets('browser is one window: address, tabs, picture and one pill', (
     tester,
   ) async {
     await _pump(
@@ -84,24 +84,30 @@ void main() {
     expect(find.text('ovidsi.com/docs/quickstart'), findsOneWidget);
     expect(find.byIcon(Icons.more_vert_rounded), findsOneWidget);
 
-    // The tab strip is present because there are two tabs.
-    expect(find.text('Docs'), findsOneWidget);
-    expect(find.text('GitHub'), findsOneWidget);
+    // The icon-only tab strip is present because there are two tabs.
+    expect(find.byType(BrowserTabStrip), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-docs')), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-github')), findsOneWidget);
+    expect(find.text('Docs'), findsNothing);
 
-    // One status pill, no frame-rate explainer, no read-only badge.
-    expect(find.text('Waiting'), findsOneWidget);
+    // No status pill, no frame-rate explainer, no read-only badge: the
+    // waiting surface is one centred line.
+    expect(find.text('Waiting for the page…'), findsOneWidget);
+    expect(find.text('Waiting'), findsNothing);
     expect(find.textContaining('fps'), findsNothing);
     expect(find.text('Read-only'), findsNothing);
     expect(find.text('Ovid is driving'), findsNothing);
 
-    expect(find.byTooltip('Take control'), findsOneWidget);
+    // One pill over the picture is the way in.
+    expect(find.byKey(BrowserControlBar.takeControlKey), findsOneWidget);
+    expect(find.text('Take control'), findsOneWidget);
   });
 
   testWidgets('browser renders in dark theme', (tester) async {
     await _pump(tester, BrowserPage(data: _data()), theme: OTheme.dark());
 
     expect(find.text('ovidsi.com/docs/quickstart'), findsOneWidget);
-    expect(find.text('Waiting'), findsOneWidget);
+    expect(find.text('Waiting for the page…'), findsOneWidget);
   });
 
   testWidgets('the copy-address button is not in the header', (tester) async {
@@ -156,7 +162,7 @@ void main() {
     );
 
     expect(find.byType(BrowserTabStrip), findsNothing);
-    expect(find.text('Docs'), findsNothing);
+    expect(find.byKey(const ValueKey('v2-browser-tab-docs')), findsNothing);
   });
 
   testWidgets('the tab strip appears with more than one tab', (tester) async {
@@ -202,7 +208,7 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('take control is the primary callback', (tester) async {
+  testWidgets('the pill over the picture takes control', (tester) async {
     var taps = 0;
     await _pump(
       tester,
@@ -221,7 +227,7 @@ void main() {
       BrowserPage(data: _data(), onSelectTab: (id) => selected = id),
     );
 
-    await tester.tap(find.text('GitHub'));
+    await tester.tap(find.byKey(const ValueKey('v2-browser-tab-github')));
     await tester.pump(const Duration(milliseconds: 300));
     expect(selected, 'github');
   });
@@ -255,7 +261,7 @@ void main() {
     expect(find.byIcon(Icons.upload_rounded), findsNothing);
   });
 
-  testWidgets('a lost picture is one Lost pill with a retry', (tester) async {
+  testWidgets('a lost picture is one line with a retry', (tester) async {
     var retries = 0;
     await _pump(
       tester,
@@ -270,8 +276,9 @@ void main() {
       ),
     );
 
-    expect(find.text('Lost'), findsOneWidget);
+    expect(find.text('Stream lost'), findsOneWidget);
     expect(find.text('Reconnect'), findsOneWidget);
+    expect(find.text('Lost'), findsNothing);
 
     await tester.tap(find.text('Reconnect'));
     await tester.pump(const Duration(milliseconds: 300));
@@ -302,9 +309,9 @@ void main() {
       BrowserPage(data: _data(status: V2BrowserStatus.loading)),
     );
 
-    expect(find.text('Docs'), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-docs')), findsOneWidget);
     expect(find.byType(ListView), findsWidgets);
-    expect(find.byTooltip('Take control'), findsNothing);
+    expect(find.byKey(BrowserControlBar.takeControlKey), findsNothing);
   });
 
   testWidgets('no sample content ships in the default data', (tester) async {
@@ -318,8 +325,7 @@ void main() {
 
     // No picture means an honest waiting state, not a blank surface that
     // looks loaded.
-    expect(find.text('Waiting'), findsOneWidget);
-    expect(find.text('No picture yet'), findsWidgets);
+    expect(find.text('Waiting for the page…'), findsOneWidget);
     expect(find.text('The live page shows here'), findsNothing);
     expect(find.textContaining('sk_live'), findsNothing);
   });
@@ -332,8 +338,8 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('ovidsi.com/docs/quickstart'), findsOneWidget);
     expect(find.byKey(BrowserControlBar.takeControlKey), findsOneWidget);
-    expect(find.text('Waiting'), findsOneWidget);
-    expect(find.text('Docs'), findsOneWidget);
+    expect(find.text('Waiting for the page…'), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-docs')), findsOneWidget);
   });
 
   testWidgets('320 dp at 200 % text lays out without overflow (dark)', (
@@ -363,7 +369,7 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Lost'), findsOneWidget);
+    expect(find.text('Stream lost'), findsOneWidget);
   });
 
   testWidgets('a short landscape window scrolls nothing over', (tester) async {
@@ -374,7 +380,7 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Docs'), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-docs')), findsOneWidget);
     expect(find.byKey(BrowserControlBar.takeControlKey), findsOneWidget);
   });
 
@@ -436,7 +442,8 @@ void main() {
     final image = tester.widget<Image>(find.byType(Image).first);
     expect(image.image, same(frame));
     expect(find.byKey(BrowserViewport.cursorKey), findsOneWidget);
-    expect(find.text('Live'), findsOneWidget);
+    // The picture is the status: no Live pill over it.
+    expect(find.text('Live'), findsNothing);
   });
 
   testWidgets('viewport status and retry flow through the page', (
@@ -460,7 +467,7 @@ void main() {
     expect(find.byKey(BrowserViewport.retryKey), findsOneWidget);
   });
 
-  testWidgets('control bar carries only the wired controls', (tester) async {
+  testWidgets('the dock carries only the wired controls', (tester) async {
     var back = 0;
     var keyboard = 0;
     var released = 0;
@@ -496,9 +503,18 @@ void main() {
     expect(released, 1);
   });
 
-  testWidgets('tools without a handler are not rendered in the bar', (
-    tester,
-  ) async {
+  testWidgets('watching shows one pill and no dock', (tester) async {
+    await _pump(
+      tester,
+      BrowserPage(data: _data(), onTakeControl: () {}),
+    );
+
+    expect(find.byKey(BrowserControlBar.takeControlKey), findsOneWidget);
+    expect(find.byType(BrowserControlBar), findsNothing);
+    expect(find.byKey(BrowserControlBar.keyboardKey), findsNothing);
+  });
+
+  testWidgets('no handler means no pill and no dock at all', (tester) async {
     await _pump(
       tester,
       BrowserPage(
@@ -510,24 +526,53 @@ void main() {
       ),
     );
 
+    expect(find.byKey(BrowserControlBar.takeControlKey), findsNothing);
     expect(find.byKey(BrowserControlBar.backKey), findsNothing);
     expect(find.byKey(BrowserControlBar.forwardKey), findsNothing);
     expect(find.byKey(BrowserControlBar.keyboardKey), findsNothing);
-    expect(find.byKey(BrowserControlBar.takeControlKey), findsNothing);
-    // No dead bar at all.
-    expect(tester.getSize(find.byType(BrowserControlBar)).height, 0);
+    expect(find.byType(BrowserControlBar), findsNothing);
   });
 
-  testWidgets('control bar can hand the page over', (tester) async {
-    var takes = 0;
+  testWidgets('the dock floats over the bottom of the frame', (tester) async {
     await _pump(
       tester,
-      BrowserPage(data: _data(), onTakeControl: () => takes++),
+      BrowserPage(
+        data: const V2BrowserData(
+          tabs: [V2BrowserTab(id: 'docs', title: 'Docs', host: 'ovidsi.com')],
+          activeTabId: 'docs',
+          address: 'ovidsi.com/docs/quickstart',
+          controlling: true,
+        ),
+        onReleaseControl: () {},
+      ),
+    );
+
+    final viewport = tester.getRect(find.byType(BrowserViewport));
+    final bar = tester.getRect(find.byType(BrowserControlBar));
+    // Over the picture, near its bottom edge, horizontally centred.
+    expect(bar.bottom, lessThanOrEqualTo(viewport.bottom));
+    expect(bar.bottom, greaterThan(viewport.bottom - 80));
+    expect(bar.center.dx, closeTo(viewport.center.dx, 1));
+  });
+
+  testWidgets('the dock can hand the page back', (tester) async {
+    var released = 0;
+    await _pump(
+      tester,
+      BrowserPage(
+        data: const V2BrowserData(
+          tabs: [V2BrowserTab(id: 'docs', title: 'Docs', host: 'ovidsi.com')],
+          activeTabId: 'docs',
+          address: 'ovidsi.com/docs/quickstart',
+          controlling: true,
+        ),
+        onReleaseControl: () => released++,
+      ),
     );
 
     await tester.tap(find.byKey(BrowserControlBar.takeControlKey));
     await tester.pump(const Duration(milliseconds: 300));
-    expect(takes, 1);
+    expect(released, 1);
   });
 
   testWidgets('controlling layout fits 320 dp at 200 % text', (tester) async {
@@ -546,6 +591,7 @@ void main() {
         onBack: () {},
         onForward: () {},
         onToggleKeyboard: () {},
+        onReleaseControl: () {},
       ),
     );
 
@@ -554,7 +600,7 @@ void main() {
     expect(find.byKey(BrowserControlBar.forwardKey), findsOneWidget);
   });
 
-  testWidgets('600 dp centres the picture without stretching it', (
+  testWidgets('600 dp fills the picture area without stretching it', (
     tester,
   ) async {
     await _pumpSize(
@@ -564,16 +610,16 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    // The tab strip uses the whole width; the picture is centred inside it.
+    // The tab strip uses the whole width; the picture fills it side to side.
     expect(tester.getSize(find.byType(BrowserTabStrip)).width, 600);
     final viewport = find.byType(BrowserViewport);
     final size = tester.getSize(viewport);
     expect(size.width, 600 - 2 * 24);
-    expect(size.width / size.height, lessThanOrEqualTo(16 / 10));
+    expect(size.height, greaterThan(size.width / (16 / 10)));
     expect(tester.getCenter(viewport).dx, closeTo(300, 0.5));
   });
 
-  testWidgets('900 dp caps the page at 1100 and keeps the strip full width', (
+  testWidgets('900 dp caps the page at 1100 and fills the rest', (
     tester,
   ) async {
     await _pumpSize(
@@ -589,16 +635,15 @@ void main() {
       tester.getCenter(find.byType(BrowserTabStrip)).dx,
       closeTo(700, 0.5),
     );
-    expect(tester.getSize(find.byType(BrowserControlBar)).width, 1100);
 
+    // The frame fills the capped page edge to edge; the picture letterboxes
+    // inside it instead of the window letterboxing the frame.
     final viewport = find.byType(BrowserViewport);
     expect(tester.getCenter(viewport).dx, closeTo(700, 0.5));
-    final size = tester.getSize(viewport);
-    expect(size.width, lessThanOrEqualTo(1100));
-    expect(size.width / size.height, lessThanOrEqualTo(16 / 10));
+    expect(tester.getSize(viewport).width, 1100 - 2 * 24);
   });
 
-  testWidgets('a wide, short window letterboxes the picture at 16:10', (
+  testWidgets('a wide, short window still fills the picture area', (
     tester,
   ) async {
     await _pumpSize(
@@ -608,11 +653,12 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    final size = tester.getSize(find.byType(BrowserViewport));
-    // 1052 dp of room is wider than the 16:10 cap, so the height wins.
-    expect(size.width / size.height, closeTo(16 / 10, 0.001));
+    final viewport = find.byType(BrowserViewport);
+    final size = tester.getSize(viewport);
+    // No 16:10 cap on the frame itself: it takes the whole remaining area.
+    expect(size.width, 1100 - 2 * 24);
     expect(
-      tester.getCenter(find.byType(BrowserViewport)).dx,
+      tester.getCenter(viewport).dx,
       closeTo(600, 0.5),
     );
   });

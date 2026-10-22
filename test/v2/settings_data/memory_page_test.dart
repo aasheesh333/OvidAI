@@ -64,7 +64,7 @@ void main() {
     expect(find.text('architecture-spec.md'), findsOneWidget);
     expect(find.text('Global'), findsWidgets);
     // One filter, four chips.
-    for (final key in ['all', 'global', 'project', 'session']) {
+    for (final key in ['all', 'global', 'project', 'chat']) {
       expect(
         find.byKey(ValueKey<String>('memory-scope-$key')),
         findsOneWidget,
@@ -75,7 +75,7 @@ void main() {
 
     // The duplicate chrome is gone.
     expect(find.text('Memory on'), findsNothing);
-    expect(find.text('Share session memory'), findsNothing);
+    expect(find.text('Share chat memory'), findsNothing);
     expect(find.text('Export memory'), findsNothing);
     expect(find.textContaining('Memory automatically gathers'), findsNothing);
     expect(find.textContaining('cannot be undone'), findsNothing);
@@ -174,7 +174,7 @@ void main() {
     expect(find.text('Prefers plain English.'), findsNothing);
     expect(find.text('architecture-spec.md'), findsNothing);
 
-    await tester.tap(find.byKey(const ValueKey<String>('memory-scope-session')));
+    await tester.tap(find.byKey(const ValueKey<String>('memory-scope-chat')));
     await tester.pumpAndSettle();
     expect(find.text('architecture-spec.md'), findsOneWidget);
     expect(find.text('Mobile App Redesign'), findsNothing);
@@ -206,7 +206,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey<String>('memory-scope-session')));
+    await tester.tap(find.byKey(const ValueKey<String>('memory-scope-chat')));
     await tester.pumpAndSettle();
 
     expect(find.text('Nothing in this scope'), findsOneWidget);

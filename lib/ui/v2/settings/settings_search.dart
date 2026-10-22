@@ -5,6 +5,7 @@ import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'settings_hub.dart';
+import 'settings_rows.dart';
 
 /// The three states the settings search index can be in. A query with no
 /// matches is an empty state inside [ready]; it is not a data error.
@@ -323,35 +324,19 @@ class _SettingsSearchPageState extends State<SettingsSearchPage> {
       itemCount: groups.length,
       itemBuilder: (context, index) {
         final group = groups[index];
-        final c = OColors.of(context);
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             OSectionTitle(title: group.sectionTitle),
-            OCard(
-              padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (
-                    var row = 0;
-                    row < group.results.length;
-                    row++
-                  ) ...[
-                    if (row > 0)
-                      Divider(
-                        height: 1,
-                        thickness: 1,
-                        indent: 64,
-                        color: c.hairline,
-                      ),
-                    _ResultRow(
-                      result: group.results[row],
-                      actionable: _canActivate(group.results[row].item),
-                      onTap: () => _open(group.results[row]),
-                    ),
-                  ],
-                ],
-              ),
+            V2SettingsRowList(
+              rows: [
+                for (final result in group.results)
+                  _ResultRow(
+                    result: result,
+                    actionable: _canActivate(result.item),
+                    onTap: () => _open(result),
+                  ),
+              ],
             ),
           ],
         );
@@ -374,7 +359,7 @@ class _ResultRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final item = result.item;
-    return OListRow(
+    return V2SettingsRow(
       key: ValueKey<String>('search-result-${item.id}'),
       icon: item.icon,
       title: item.label,

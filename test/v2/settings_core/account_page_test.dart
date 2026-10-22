@@ -55,6 +55,7 @@ V2AccountData _accountData({
   ValueChanged<V2ConnectedAccount>? onAccountTap,
   VoidCallback? onLinkAccount,
   VoidCallback? onOpenCredentials,
+  VoidCallback? onDataControl,
   VoidCallback? onTeamSupport,
   VoidCallback? onSignOut,
   VoidCallback? onDeleteAccount,
@@ -80,6 +81,7 @@ V2AccountData _accountData({
     onAccountTap: onAccountTap,
     onLinkAccount: onLinkAccount,
     onOpenCredentials: onOpenCredentials,
+    onDataControl: onDataControl,
     onTeamSupport: onTeamSupport,
     onSignOut: onSignOut,
     onDeleteAccount: onDeleteAccount,
@@ -152,9 +154,7 @@ Future<void> _tapTypedConfirm(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets('renders the header, profile and at most five rows', (
-    tester,
-  ) async {
+  testWidgets('renders the header, profile and the four rows', (tester) async {
     _phoneSize(tester);
     await tester.pumpWidget(
       _app(
@@ -162,9 +162,7 @@ void main() {
         _accountData(
           onChangePhoto: () {},
           onEditProfile: () {},
-          onOpenCredentials: () {},
-          onTeamSupport: () {},
-          onSignOut: () {},
+          onDataControl: () {},
           onDeleteAccount: () {},
         ),
       ),
@@ -181,18 +179,21 @@ void main() {
     expect(find.text('Edit profile'), findsOneWidget);
     expect(find.text('Sign-in methods'), findsOneWidget);
     expect(find.text('Google, Apple'), findsOneWidget);
-    expect(find.text('Credentials'), findsOneWidget);
-    expect(find.text('Team & support'), findsOneWidget);
-    expect(find.text('Sign out'), findsOneWidget);
+    expect(find.text('Data control'), findsOneWidget);
     expect(find.text('Delete account'), findsOneWidget);
 
-    // The profile-detail grid is gone.
+    // Everything else is gone: no sign-out button, no credentials or support
+    // rows, no profile-detail grid.
+    expect(find.text('Sign out'), findsNothing);
+    expect(find.text('Credentials'), findsNothing);
+    expect(find.text('Team & support'), findsNothing);
     expect(find.text('PROFILE DETAILS'), findsNothing);
     expect(find.text('Display name'), findsNothing);
     expect(find.text('Email address'), findsNothing);
     expect(find.text('Verified'), findsNothing);
     expect(find.text('Senior Platform Architect'), findsNothing);
     expect(find.text('All synced'), findsNothing);
+    expect(find.textContaining('Deletes after 24 hours'), findsNothing);
   });
 
   testWidgets('renders correctly in dark', (tester) async {
@@ -306,37 +307,21 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Sign out'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Sign out'));
-    await tester.pump();
-
-    expect(signedOut, 1);
+    // Sign out no longer lives on the Account page; the callback is retained
+    // for the hub's bottom action.
+    expect(find.text('Sign out'), findsNothing);
+    expect(signedOut, 0);
   });
 
-  testWidgets('credentials row opens the credentials screen', (tester) async {
+  testWidgets('data control row calls the injected callback', (tester) async {
     _phoneSize(tester);
     var opened = 0;
     await tester.pumpWidget(
-      _app(OTheme.light(), _accountData(onOpenCredentials: () => opened++)),
+      _app(OTheme.light(), _accountData(onDataControl: () => opened++)),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Credentials'));
-    await tester.pump();
-
-    expect(opened, 1);
-  });
-
-  testWidgets('team and support row calls its callback', (tester) async {
-    _phoneSize(tester);
-    var opened = 0;
-    await tester.pumpWidget(
-      _app(OTheme.light(), _accountData(onTeamSupport: () => opened++)),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Team & support'));
+    await tester.tap(find.text('Data control'));
     await tester.pump();
 
     expect(opened, 1);
@@ -653,7 +638,7 @@ void main() {
     await tester.pumpWidget(
       _app(
         OTheme.light(),
-        _accountData(onSignOut: () {}, onDeleteAccount: () {}),
+        _accountData(onDataControl: () {}, onDeleteAccount: () {}),
         textScale: 2,
       ),
     );
@@ -671,7 +656,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Sign out'), findsOneWidget);
+    expect(find.text('Data control'), findsOneWidget);
     expect(find.text('Delete account'), findsOneWidget);
   });
 
@@ -719,10 +704,11 @@ void main() {
     await tester.pumpWidget(_app(OTheme.light(), _accountData()));
     await tester.pumpAndSettle();
 
-    // No dead buttons: without a handler the control is removed.
+    // No dead controls: without a handler the row is removed.
     expect(find.text('Sign out'), findsNothing);
     expect(find.text('Delete account'), findsNothing);
     expect(find.text('Edit profile'), findsNothing);
+    expect(find.text('Data control'), findsNothing);
     expect(find.text('Credentials'), findsNothing);
     expect(find.text('Team & support'), findsNothing);
   });
@@ -733,18 +719,20 @@ void main() {
       await tester.pumpWidget(
         _app(
           OTheme.light(),
-          _accountData(onEditProfile: () {}, onSignOut: () {}),
+          _accountData(onEditProfile: () {}, onDataControl: () {}),
         ),
       );
       await tester.pumpAndSettle();
 
-      final card = tester.getRect(find.byType(OCard).first);
+      final row = tester.getRect(
+        find.byKey(const ValueKey<String>('account-data-control-row')),
+      );
       final limit = width >= 900 ? 720.0 : 640.0;
 
-      expect(card.width, lessThanOrEqualTo(limit));
-      expect(card.width, lessThan(width), reason: 'rows must not stretch');
+      expect(row.width, lessThanOrEqualTo(limit));
+      expect(row.width, lessThan(width), reason: 'rows must not stretch');
       expect(
-        card.center.dx,
+        row.center.dx,
         moreOrLessEquals(width / 2, epsilon: 1),
         reason: 'content must be centred, not left aligned',
       );
@@ -758,7 +746,7 @@ void main() {
     await tester.pumpWidget(
       _app(
         OTheme.light(),
-        _accountData(onChangePhoto: () {}, onSignOut: () {}),
+        _accountData(onChangePhoto: () {}, onDeleteAccount: () {}),
       ),
     );
     await tester.pumpAndSettle();
@@ -770,12 +758,7 @@ void main() {
     );
     expect(
       tester
-          .getSize(
-            find.ancestor(
-              of: find.text('Sign out'),
-              matching: find.byType(OutlinedButton),
-            ),
-          )
+          .getSize(find.byKey(const ValueKey<String>('account-delete-row')))
           .height,
       greaterThanOrEqualTo(48),
     );

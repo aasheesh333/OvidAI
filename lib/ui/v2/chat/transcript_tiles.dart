@@ -1,10 +1,14 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
+import '../../../core/session_artifacts.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_tokens.dart';
+import '../library/artifact_actions.dart';
 import '../library/artifact_detail_page.dart';
 import 'transcript_actions.dart';
 
@@ -86,10 +90,12 @@ Color _toolTone(OColors c, V2ToolState state) => switch (state) {
   V2ToolState.unknown => c.textMuted,
 };
 
-/// One collapsible "thinking" row. The host owns [expanded]; tapping the row
-/// asks for the opposite state, so the row never looks interactive while the
-/// handler is missing. Collapsed it is a single line with a chevron; the
-/// chevron is the only affordance.
+/// One collapsible "thinking" line — "Thought for a moment" — that expands to
+/// the details. The host owns [expanded]; tapping the line asks for the
+/// opposite state, so it never looks interactive while the handler is missing.
+/// There is no icon and no card: the muted line is the whole row, the chevron
+/// the only affordance. While [running] the label carries a subtle shimmer;
+/// a finished thought is still.
 class V2ThinkingTile extends StatelessWidget {
   const V2ThinkingTile({
     super.key,
@@ -97,6 +103,7 @@ class V2ThinkingTile extends StatelessWidget {
     required this.details,
     required this.expanded,
     required this.onToggle,
+    this.running = false,
   });
 
   final String label;
@@ -104,10 +111,18 @@ class V2ThinkingTile extends StatelessWidget {
   final bool expanded;
   final VoidCallback? onToggle;
 
+  /// True while this thought is the live tail of an active run. Drives the
+  /// shimmer; when the run ends the line is plain muted text again.
+  final bool running;
+
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     final canToggle = onToggle != null && details.isNotEmpty;
+    final labelStyle = OType.caption.copyWith(
+      color: c.textMuted,
+      fontWeight: FontWeight.w500,
+    );
     // A thinking row is a status line, not a card: no fill, no border.
     return Material(
       color: Colors.transparent,
@@ -123,21 +138,19 @@ class V2ThinkingTile extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: OSpace.xs),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Row(
                     children: [
-                      Icon(Icons.psychology_rounded, size: 18, color: c.accent),
-                      const SizedBox(width: OSpace.s),
                       Expanded(
-                        child: Text(
-                          label,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: OType.caption.copyWith(
-                            color: c.textMuted,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
+                        child: running
+                            ? _ShimmerLine(text: label, style: labelStyle)
+                            : Text(
+                                label,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: labelStyle,
+                              ),
                       ),
                       if (canToggle)
                         AnimatedRotation(
@@ -172,10 +185,76 @@ class V2ThinkingTile extends StatelessWidget {
   }
 }
 
-/// A tool row with a real status glyph, an expandable detail area and a
-/// progress bar that only exists while the tool is running. A finished tool
-/// has no indeterminate animation left on screen. Collapsed it is one line;
-/// the chevron is the only affordance.
+/// A soft light sweep across a line of text while work is in flight. Honours
+/// reduced motion (renders the plain line) and never runs after the caller
+/// stops mounting it.
+class _ShimmerLine extends StatefulWidget {
+  const _ShimmerLine({required this.text, required this.style});
+
+  final String text;
+  final TextStyle style;
+
+  @override
+  State<_ShimmerLine> createState() => _ShimmerLineState();
+}
+
+class _ShimmerLineState extends State<_ShimmerLine>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: OMotion.ambient,
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (OMove.reduced(context)) {
+      _controller.stop();
+    } else if (!_controller.isAnimating) {
+      _controller.repeat();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final text = Text(
+      widget.text,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: widget.style,
+    );
+    if (OMove.reduced(context)) return text;
+    final base = widget.style.color ?? c.textMuted;
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        final t = _controller.value;
+        return ShaderMask(
+          blendMode: BlendMode.srcATop,
+          shaderCallback: (rect) => LinearGradient(
+            begin: Alignment(-1.5 + t * 3, 0),
+            end: Alignment(-0.5 + t * 3, 0),
+            colors: [base, c.text, base],
+            stops: const [0.25, 0.5, 0.75],
+          ).createShader(rect),
+          child: child,
+        );
+      },
+      child: text,
+    );
+  }
+}
+
+/// A tool is one quiet line: the state glyph, the title, and a chevron when
+/// it can expand. No card, no border. The progress bar exists only while the
+/// tool runs, so a finished row is visually still.
 class V2ToolTile extends StatelessWidget {
   const V2ToolTile({
     super.key,
@@ -206,28 +285,20 @@ class V2ToolTile extends StatelessWidget {
     final value = progress.clamp(0.0, 1.0).toDouble();
 
     return Material(
-      color: c.surface,
-      borderRadius: BorderRadius.circular(ORadius.l),
+      color: Colors.transparent,
       child: Semantics(
         button: canToggle,
         expanded: expanded,
         child: InkWell(
           onTap: canToggle ? onToggle : null,
-          borderRadius: BorderRadius.circular(ORadius.l),
-          child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: OSpace.m,
-              vertical: OSpace.s,
-            ),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(ORadius.l),
-              border: Border.all(color: c.hairline),
-            ),
+          borderRadius: BorderRadius.circular(ORadius.s),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: OSpace.xs),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 ConstrainedBox(
-                  constraints: const BoxConstraints(minHeight: 32),
+                  constraints: const BoxConstraints(minHeight: OSpace.touch),
                   child: Row(
                     children: [
                       // The state glyph replaces the tool-type icon: one icon
@@ -244,7 +315,7 @@ class V2ToolTile extends StatelessWidget {
                           title,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: OType.bodySmStrong.copyWith(color: c.text),
+                          style: OType.bodySm.copyWith(color: c.text),
                         ),
                       ),
                       if (canToggle)
@@ -260,19 +331,25 @@ class V2ToolTile extends StatelessWidget {
                     ],
                   ),
                 ),
-                if (state == V2ToolState.running) ...[
-                  const SizedBox(height: OSpace.s),
-                  OProgressBar(value: value),
-                ],
+                if (state == V2ToolState.running)
+                  Padding(
+                    padding: const EdgeInsets.only(
+                      left: OSpace.xl,
+                      bottom: OSpace.s,
+                    ),
+                    child: OProgressBar(value: value),
+                  ),
                 if (expanded && details.isNotEmpty) ...[
-                  const SizedBox(height: OSpace.s),
-                  Divider(height: 1, color: c.hairline),
-                  const SizedBox(height: OSpace.s),
+                  const SizedBox(height: OSpace.xs),
                   // The glyph already carries the outcome; repeating it as
                   // "Status: Done" only adds a line.
                   for (var i = 0; i < details.length; i++)
                     Padding(
-                      padding: EdgeInsets.only(top: i == 0 ? 0 : OSpace.xs),
+                      padding: EdgeInsets.only(
+                        left: OSpace.xl,
+                        bottom: OSpace.xs,
+                        top: i == 0 ? 0 : OSpace.xxs,
+                      ),
                       child: Text(
                         details[i],
                         style: OType.caption.copyWith(color: c.textMuted),
@@ -367,9 +444,15 @@ V2ArtifactState v2ArtifactStateOf(String statusLabel) {
   return V2ArtifactState.unknown;
 }
 
-/// A generated file in the transcript. One row: file name, meta and a
-/// download control. Tapping the row opens the artifact detail route; the
-/// status pill only appears while the file is not ready.
+/// A generated file in the transcript. One row: a real thumbnail (or the type
+/// glyph), the file name, one meta line and one menu. Tapping the row opens
+/// the artifact detail route; the status pill only appears while the file is
+/// not ready.
+///
+/// The menu holds only actions that can really run: Preview (the detail page's
+/// preview), Copy (the file's text, or its link when only a link exists) and
+/// Download (a real URL). A missing handler hides its row instead of leaving a
+/// dead control.
 class V2ArtifactTile extends StatelessWidget {
   const V2ArtifactTile({
     super.key,
@@ -379,7 +462,10 @@ class V2ArtifactTile extends StatelessWidget {
     required this.previewLabel,
     required this.onOpen,
     this.onDownload,
+    this.onCopy,
+    this.copyText = true,
     this.icon = Icons.code_rounded,
+    this.thumbnail,
   });
 
   final String fileName;
@@ -387,8 +473,25 @@ class V2ArtifactTile extends StatelessWidget {
   final String statusLabel;
   final String previewLabel;
   final VoidCallback onOpen;
+
+  /// Saves the file from a URL the host really has. Null hides Download.
   final VoidCallback? onDownload;
+
+  /// Puts the artifact's content (or its link) on the clipboard. Null hides
+  /// Copy.
+  final VoidCallback? onCopy;
+
+  /// True when Copy puts the file's text on the clipboard, so the menu says
+  /// "Copy"; false when only a link can be copied, so it says "Copy link".
+  final bool copyText;
+
   final IconData icon;
+
+  /// Real pixels for an image artifact. Null keeps the type glyph: the row
+  /// never draws a fake preview.
+  final ImageProvider? thumbnail;
+
+  bool get _hasMenu => onCopy != null || onDownload != null;
 
   @override
   Widget build(BuildContext context) {
@@ -419,16 +522,18 @@ class V2ArtifactTile extends StatelessWidget {
           ),
           child: Row(
             children: [
-              Icon(icon, size: 20, color: c.accent),
+              _leading(c),
               const SizedBox(width: OSpace.s),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // One line plus one meta line: the row never wraps into a
+                    // paragraph, at 320 dp or 200 % text.
                     Text(
                       fileName,
-                      maxLines: 2,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: OType.bodySmStrong.copyWith(color: c.text),
                     ),
@@ -460,12 +565,12 @@ class V2ArtifactTile extends StatelessWidget {
                   ],
                 ),
               ),
-              if (onDownload != null)
+              if (_hasMenu)
                 OIconButton(
-                  icon: Icons.download_rounded,
-                  semanticLabel: 'Download $fileName',
+                  icon: Icons.more_vert_rounded,
+                  semanticLabel: 'Actions for $fileName',
                   size: 20,
-                  onPressed: onDownload,
+                  onPressed: () => _openMenu(context),
                 ),
               Icon(Icons.chevron_right_rounded, size: 18, color: c.textFaint),
             ],
@@ -474,9 +579,170 @@ class V2ArtifactTile extends StatelessWidget {
       ),
     );
   }
+
+  /// The image thumbnail when the host has real pixels, else the type glyph.
+  Widget _leading(OColors c) {
+    final image = thumbnail;
+    if (image == null) {
+      return Icon(icon, size: 20, color: c.accent);
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(ORadius.s),
+      child: Image(
+        image: ResizeImage.resizeIfNeeded(80, null, image),
+        width: 40,
+        height: 40,
+        fit: BoxFit.cover,
+        // A broken or expired image falls back to the glyph rather than
+        // leaving an empty hole.
+        errorBuilder: (_, _, _) => SizedBox(
+          width: 40,
+          height: 40,
+          child: Center(child: Icon(icon, size: 20, color: c.accent)),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openMenu(BuildContext context) async {
+    final action = await showOSheet<String>(
+      context,
+      title: fileName,
+      builder: (sheetContext) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.only(bottom: OSpace.l),
+        children: [
+          OListRow(
+            title: 'Preview',
+            icon: Icons.visibility_outlined,
+            showChevron: false,
+            onTap: () => Navigator.of(sheetContext).pop('preview'),
+          ),
+          if (onCopy != null)
+            OListRow(
+              title: copyText ? 'Copy' : 'Copy link',
+              icon: Icons.copy_rounded,
+              showChevron: false,
+              onTap: () => Navigator.of(sheetContext).pop('copy'),
+            ),
+          if (onDownload != null)
+            OListRow(
+              title: 'Download',
+              icon: Icons.download_rounded,
+              showChevron: false,
+              onTap: () => Navigator.of(sheetContext).pop('download'),
+            ),
+        ],
+      ),
+    );
+    if (!context.mounted || action == null) return;
+    switch (action) {
+      case 'preview':
+        onOpen();
+      case 'copy':
+        onCopy?.call();
+      case 'download':
+        onDownload?.call();
+    }
+  }
+}
+
+/// The detail preview family the artifact model implies, when the host knows
+/// the real kind. Falls back to the file name for older rows.
+V2ArtifactPreviewKind v2ArtifactPreviewKindOf(
+  String name, {
+  ArtifactKind? kind,
+}) => switch (kind) {
+  ArtifactKind.image => V2ArtifactPreviewKind.image,
+  ArtifactKind.html || ArtifactKind.code => V2ArtifactPreviewKind.code,
+  ArtifactKind.document => V2ArtifactPreviewKind.document,
+  ArtifactKind.other => V2ArtifactPreviewKind.data,
+  null => v2ArtifactPreviewKindForName(name),
+};
+
+/// True for files whose text Copy can really read: code and pages always,
+/// documents only when the extension is textual. Images and binaries are not.
+bool v2ArtifactIsTextual(String name, {ArtifactKind? kind}) => switch (kind) {
+  ArtifactKind.code || ArtifactKind.html => true,
+  ArtifactKind.image => false,
+  ArtifactKind.document || ArtifactKind.other => artifactIsText(name),
+  null => artifactIsText(name),
+};
+
+/// `14.2 KB` for a real byte count; empty when the size is unknown.
+String v2ArtifactSizeLabel(int? bytes) {
+  final value = bytes ?? 0;
+  if (value <= 0) return '';
+  if (value < 1024) return '$value B';
+  if (value < 1024 * 1024) return '${(value / 1024).toStringAsFixed(1)} KB';
+  return '${(value / (1024 * 1024)).toStringAsFixed(1)} MB';
+}
+
+/// What a Copy action really put on the clipboard.
+enum V2ArtifactCopyResult { text, link, failed }
+
+/// A bounded head of the file behind [url], or null when it cannot be read.
+///
+/// Same limits as the library's detail host: 1 MiB and 20 s. The cap keeps a
+/// huge file from stalling the tap; the caller falls back to the link.
+const int v2ArtifactCopyMaxBytes = 1024 * 1024;
+const int v2ArtifactCopyMaxLines = 200;
+
+Future<String?> _fetchArtifactText(String url, {http.Client? client}) async {
+  final owned = client == null;
+  final httpClient = client ?? http.Client();
+  try {
+    final response = await httpClient
+        .get(Uri.parse(url))
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode < 200 || response.statusCode >= 300) return null;
+    if (response.bodyBytes.length > v2ArtifactCopyMaxBytes) return null;
+    final decoded = utf8.decode(response.bodyBytes, allowMalformed: true);
+    return decoded.split('\n').take(v2ArtifactCopyMaxLines).join('\n');
+  } catch (_) {
+    return null;
+  } finally {
+    if (owned) httpClient.close();
+  }
+}
+
+/// Copies the artifact's real content: the text the host already has, else the
+/// file's head fetched from [url], else the link itself.
+///
+/// The result says which of those really happened, so the caller never shows a
+/// "Copied" confirmation for an empty clipboard.
+Future<V2ArtifactCopyResult> v2CopyArtifactContent({
+  required String fileName,
+  String? content,
+  String? url,
+  ArtifactKind? kind,
+  http.Client? client,
+}) async {
+  final inline = content?.trim() ?? '';
+  if (inline.isNotEmpty) {
+    return await v2CopyArtifactText(inline)
+        ? V2ArtifactCopyResult.text
+        : V2ArtifactCopyResult.failed;
+  }
+  final link = url?.trim() ?? '';
+  if (link.isEmpty) return V2ArtifactCopyResult.failed;
+  if (v2ArtifactIsTextual(fileName, kind: kind)) {
+    final fetched = await _fetchArtifactText(link, client: client);
+    if (fetched != null && fetched.trim().isNotEmpty) {
+      return await v2CopyArtifactText(fetched)
+          ? V2ArtifactCopyResult.text
+          : V2ArtifactCopyResult.failed;
+    }
+  }
+  return await v2CopyArtifactText(link)
+      ? V2ArtifactCopyResult.link
+      : V2ArtifactCopyResult.failed;
 }
 
 /// Opens the real artifact detail route with everything the transcript knows.
+///
+/// The preview, size and Download come from the artifact itself; when a field
+/// is unknown the page shows less rather than inventing it.
 Future<void> openV2ArtifactDetail(
   BuildContext context, {
   required String fileName,
@@ -484,50 +750,49 @@ Future<void> openV2ArtifactDetail(
   required String statusLabel,
   required String previewLabel,
   IconData icon = Icons.code_rounded,
+  ArtifactKind? kind,
+  int? sizeBytes,
+  String? downloadUrl,
+  String? content,
+  ImageProvider? thumbnail,
 }) {
   final extension = fileName.contains('.')
       ? fileName.split('.').last.toLowerCase()
       : '';
   final previewKind = icon == Icons.image_outlined
       ? V2ArtifactPreviewKind.image
-      : switch (extension) {
-          'png' ||
-          'jpg' ||
-          'jpeg' ||
-          'gif' ||
-          'webp' ||
-          'svg' => V2ArtifactPreviewKind.image,
-          'pdf' ||
-          'doc' ||
-          'docx' ||
-          'txt' ||
-          'md' => V2ArtifactPreviewKind.data,
-          'dart' ||
-          'js' ||
-          'ts' ||
-          'tsx' ||
-          'py' ||
-          'sh' ||
-          'sql' ||
-          'html' ||
-          'htm' ||
-          'json' ||
-          'yaml' ||
-          'yml' => V2ArtifactPreviewKind.code,
-          _ => V2ArtifactPreviewKind.document,
-        };
+      : v2ArtifactPreviewKindOf(fileName, kind: kind);
+  final text = content?.trim() ?? '';
+  final code = previewKind == V2ArtifactPreviewKind.code;
+  final document =
+      previewKind == V2ArtifactPreviewKind.document ||
+      previewKind == V2ArtifactPreviewKind.data;
+  final sizeLabel = v2ArtifactSizeLabel(sizeBytes);
+  final link = downloadUrl?.trim() ?? '';
   return Navigator.of(context).push(
     MaterialPageRoute<void>(
       builder: (_) => ArtifactDetailPage(
         data: V2ArtifactDetailData(
           name: fileName,
           typeLabel: extension.isEmpty ? 'Artifact' : extension.toUpperCase(),
+          sizeLabel: sizeLabel,
           versionLabel: statusLabel,
           previewKind: previewKind,
           previewHeadline: previewLabel,
+          previewCodeFile: fileName,
+          previewCode: code ? text : '',
+          documentText: document ? text : '',
+          thumbnail: previewKind == V2ArtifactPreviewKind.image
+              ? thumbnail
+              : null,
+          downloadUrl: link,
+          shareUrl: link,
+          openUrl: link,
           details: <V2ArtifactDetailRow>[
             V2ArtifactDetailRow(label: 'Preview', value: previewLabel),
             V2ArtifactDetailRow(label: 'Details', value: meta),
+            if (sizeLabel.isNotEmpty)
+              V2ArtifactDetailRow(label: 'Size', value: sizeLabel),
           ],
         ),
       ),

@@ -316,7 +316,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Next Monday, 26 Oct at 9:00 AM'), findsOneWidget);
+      // Cadence and next run share one line, computed from the cadence.
+      expect(
+        find.text('Every Monday at 9:00 AM · Monday, 26 Oct at 9:00 AM'),
+        findsOneWidget,
+      );
       expect(find.textContaining('in 2 hours'), findsNothing);
     });
 
@@ -637,7 +641,7 @@ void main() {
       expect(find.text('Running'), findsOneWidget);
       expect(find.text('2m'), findsOneWidget);
       expect(find.text('Retry run'), findsNothing);
-      expect(find.text('1 runs · 0 succeeded · 0 failed'), findsOneWidget);
+      expect(find.text('0.0 % · 1 run'), findsOneWidget);
     });
 
     test('counts and the average runtime come from the rows', () {

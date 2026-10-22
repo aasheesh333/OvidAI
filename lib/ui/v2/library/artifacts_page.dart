@@ -42,8 +42,8 @@ class V2ArtifactItem {
   final DateTime createdAt;
   final String sizeLabel;
 
-  /// Raw size for the library total. Optional so older wiring keeps working;
-  /// when it is zero the row still shows [sizeLabel].
+  /// Raw size, retained for hosts that total the library. Optional so older
+  /// wiring keeps working; when it is zero the row still shows [sizeLabel].
   final int sizeBytes;
   final V2ArtifactSource source;
 
@@ -74,8 +74,8 @@ class V2ArtifactsData {
   final V2ArtifactsStatus status;
   final List<V2ArtifactItem> artifacts;
 
-  /// Pre-formatted total supplied by the wiring layer. When null the page adds
-  /// up [V2ArtifactItem.sizeBytes] itself.
+  /// Pre-formatted total supplied by the wiring layer. Retained for hosts;
+  /// the page itself no longer renders a library size summary.
   final String? totalSizeLabel;
   final String errorMessage;
 
@@ -278,11 +278,12 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
 
   /// Shown when the library itself is empty (status empty). Distinct from
   /// "No matches", which means artifacts exist but none pass the filters.
+  /// One line is the whole state.
   Widget _empty() {
     return OEmptyState(
       icon: Icons.auto_awesome_rounded,
       title: 'No artifacts yet',
-      message: 'Files you make and upload appear here.',
+      message: '',
     );
   }
 
@@ -297,9 +298,10 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         final cardWidth = (width - OSpace.m * (columns - 1)) / columns;
         final thumbHeight = cardWidth * 3 / 4;
         final textScale = MediaQuery.textScalerOf(context).scale(1);
-        // Three single lines plus the card's vertical padding. Sized from the
-        // text scale so 320 dp at 200 % never squeezes a line out of the card.
-        final textBlock = OSpace.m * 2 + textScale * 3 * 16 * 1.4;
+        // The name row is 48 dp (the menu target) and the meta row is one
+        // caption line; plus the card's vertical padding. Sized from the text
+        // scale so 320 dp at 200 % never squeezes a line out of the card.
+        final textBlock = OSpace.m * 2 + OSpace.touch + textScale * 16 * 1.4;
 
         return CustomScrollView(
           slivers: [
@@ -342,7 +344,6 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
                     const SizedBox(height: OSpace.m),
                     ArtifactFilterBar(
                       filters: _filters,
-                      summary: _sizeSummary(items),
                       sessions: sessions,
                       onChanged: (next) => setState(() => _filters = next),
                     ),
@@ -352,7 +353,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
               ),
             ),
             if (items.isEmpty)
-              SliverToBoxAdapter(child: _emptyResults(c))
+              SliverToBoxAdapter(child: _emptyResults())
             else
               SliverGrid(
                 gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
@@ -373,20 +374,20 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     );
   }
 
-  Widget _emptyResults(OColors c) {
+  Widget _emptyResults() {
     if (!_filtering) {
       return OEmptyState(
         compact: true,
         icon: Icons.auto_awesome_rounded,
         title: 'No artifacts yet',
-        message: 'Files you make and upload appear here.',
+        message: '',
       );
     }
     return OEmptyState(
       compact: true,
       icon: Icons.search_off_rounded,
       title: 'No matches',
-      message: 'Try another search or clear the filters.',
+      message: '',
       action: OButton(
         label: 'Clear filters',
         variant: OButtonVariant.secondary,
@@ -395,25 +396,15 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     );
   }
 
-  V2ArtifactSizeSummary _sizeSummary(List<V2ArtifactItem> visible) {
-    final all = widget.data.artifacts;
-    final bytes = all.fold<int>(0, (sum, item) => sum + item.sizeBytes);
-    return V2ArtifactSizeSummary(
-      totalBytes: bytes,
-      totalCount: all.length,
-      visibleCount: visible.length,
-      sizeLabel: widget.data.totalSizeLabel,
-    );
-  }
-
   Widget _card(BuildContext context, OColors c, V2ArtifactItem item) {
-    final ext = _extension(item.name);
-    final type = '${_typeName(item.kind)} · $ext';
     final time = _dateLabel(item.createdAt, widget.data.now ?? DateTime.now());
+    // One meta line under the name: a glyph for the family, then the
+    // extension (or the family name when the file has none) and the date.
+    final meta = '${_extLabel(item)} · $time';
     return OCard(
       padding: EdgeInsets.zero,
       onTap: () => _open(item),
-      semanticLabel: '${item.name}, $type, $time',
+      semanticLabel: '${item.name}, ${_typeName(item.kind)}, $time',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -456,17 +447,23 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
                     ),
                   ],
                 ),
-                Text(
-                  type,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textMuted),
-                ),
-                Text(
-                  time,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.caption.copyWith(color: c.textMuted),
+                Row(
+                  children: [
+                    Icon(
+                      _kindGlyph(item.kind),
+                      size: 13,
+                      color: c.textFaint,
+                    ),
+                    const SizedBox(width: OSpace.xs),
+                    Expanded(
+                      child: Text(
+                        meta,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: OType.caption.copyWith(color: c.textMuted),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -474,6 +471,20 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         ],
       ),
     );
+  }
+
+  /// The glyph that names the artifact family at a glance.
+  IconData _kindGlyph(V2ArtifactKind kind) => switch (kind) {
+    V2ArtifactKind.image => Icons.image_rounded,
+    V2ArtifactKind.document => Icons.description_rounded,
+    V2ArtifactKind.code => Icons.code_rounded,
+    V2ArtifactKind.data => Icons.category_rounded,
+  };
+
+  /// The upper-case extension, or the family name when there is none.
+  String _extLabel(V2ArtifactItem item) {
+    final ext = _extension(item.name);
+    return ext == 'FILE' ? _typeName(item.kind) : ext;
   }
 
   String _typeName(V2ArtifactKind kind) => switch (kind) {
@@ -690,7 +701,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
                   height: 5,
                   decoration: BoxDecoration(
                     color: c.accent,
-                    borderRadius: BorderRadius.circular(2),
+                    borderRadius: BorderRadius.circular(ORadius.xs),
                   ),
                 ),
                 const SizedBox(height: OSpace.s),
@@ -763,7 +774,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         height: 4,
         decoration: BoxDecoration(
           color: color,
-          borderRadius: BorderRadius.circular(2),
+          borderRadius: BorderRadius.circular(ORadius.xs),
         ),
       ),
     );
@@ -778,7 +789,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
           color: accent
               ? c.accentFill.withValues(alpha: 0.65)
               : c.surfaceRaised,
-          borderRadius: BorderRadius.circular(3),
+          borderRadius: BorderRadius.circular(ORadius.xs),
         ),
       ),
     );

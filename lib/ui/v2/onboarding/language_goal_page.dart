@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
-import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import 'step_progress.dart';
@@ -10,19 +9,13 @@ import 'step_progress.dart';
 
 @immutable
 class V2LanguageOption {
-  const V2LanguageOption({
-    required this.id,
-    required this.nativeLabel,
-    required this.englishLabel,
-    required this.scriptLabel,
-    this.isDefault = false,
-  });
+  const V2LanguageOption({required this.id, required this.nativeLabel});
 
   final String id;
+
+  /// The name a speaker recognises, written in the language itself
+  /// (English, हिन्दी, தமிழ்).
   final String nativeLabel;
-  final String englishLabel;
-  final String scriptLabel;
-  final bool isDefault;
 }
 
 @immutable
@@ -42,37 +35,11 @@ class V2GoalOption {
 class V2LanguageGoalData {
   const V2LanguageGoalData({
     this.languages = const [
-      V2LanguageOption(
-        id: 'en',
-        nativeLabel: 'English',
-        englishLabel: 'Global',
-        scriptLabel: 'Latin',
-        isDefault: true,
-      ),
-      V2LanguageOption(
-        id: 'hi',
-        nativeLabel: 'हिन्दी',
-        englishLabel: 'Hindi',
-        scriptLabel: 'Devanagari',
-      ),
-      V2LanguageOption(
-        id: 'hinglish',
-        nativeLabel: 'Hinglish',
-        englishLabel: 'Hindi + English',
-        scriptLabel: 'Latin',
-      ),
-      V2LanguageOption(
-        id: 'pa',
-        nativeLabel: 'ਪੰਜਾਬੀ',
-        englishLabel: 'Punjabi',
-        scriptLabel: 'Gurmukhi',
-      ),
-      V2LanguageOption(
-        id: 'ta',
-        nativeLabel: 'தமிழ்',
-        englishLabel: 'Tamil',
-        scriptLabel: 'Tamil',
-      ),
+      V2LanguageOption(id: 'en', nativeLabel: 'English'),
+      V2LanguageOption(id: 'hi', nativeLabel: 'हिन्दी'),
+      V2LanguageOption(id: 'hinglish', nativeLabel: 'Hinglish'),
+      V2LanguageOption(id: 'pa', nativeLabel: 'ਪੰਜਾਬੀ'),
+      V2LanguageOption(id: 'ta', nativeLabel: 'தமிழ்'),
     ],
     this.selectedLanguageId = 'en',
     this.goals = const [
@@ -214,7 +181,7 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
     } else if (data.languages.isEmpty) {
       body = OEmptyState(
         icon: Icons.language_rounded,
-        title: 'No languages yet',
+        title: 'No voice languages yet',
         message: 'Check your connection and try again.',
         action: widget.onRetry == null
             ? null
@@ -231,7 +198,7 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
         totalSteps: data.totalSteps,
         trailingLabel: '',
       ),
-      title: 'Language & goal',
+      title: 'Voice & goal',
       onBack: widget.onBack,
       backKey: const Key('language-goal-back'),
       onClose: widget.onClose,
@@ -251,41 +218,38 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
   }
 
   Widget _content(BuildContext context, V2LanguageGoalData data) {
-    final c = OColors.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const OSectionTitle(
-          title: 'Spoken language',
+          title: 'Language',
           padding: EdgeInsets.only(bottom: OSpace.s),
         ),
-        _LanguageGrid(
-          languages: data.languages,
-          selectedId: _languageId,
-          onSelected: _selectLanguage,
-        ),
-        const OSectionTitle(
-          title: 'First goal',
-          padding: EdgeInsets.only(top: OSpace.xl, bottom: OSpace.s),
-        ),
-        Wrap(
-          spacing: OSpace.s,
-          runSpacing: OSpace.s,
+        _ChipGrid(
           children: [
-            for (final goal in data.goals)
+            for (final language in data.languages)
               OChip(
-                label: goal.title,
-                icon: goal.icon,
-                selected: _goalIds.contains(goal.id),
-                onTap: () => _toggleGoal(goal.id),
+                label: language.nativeLabel,
+                selected: language.id == _languageId,
+                onTap: () => _selectLanguage(language.id),
               ),
           ],
         ),
-        if (data.goals.isEmpty) ...[
-          const SizedBox(height: OSpace.m),
-          Text(
-            'No goals to pick yet. You can continue and change this later.',
-            style: OType.bodySm.copyWith(color: c.textMuted),
+        if (data.goals.isNotEmpty) ...[
+          const OSectionTitle(
+            title: 'Goal',
+            padding: EdgeInsets.only(top: OSpace.xl, bottom: OSpace.s),
+          ),
+          _ChipGrid(
+            children: [
+              for (final goal in data.goals)
+                OChip(
+                  label: goal.title,
+                  icon: goal.icon,
+                  selected: _goalIds.contains(goal.id),
+                  onTap: () => _toggleGoal(goal.id),
+                ),
+            ],
           ),
         ],
       ],
@@ -293,154 +257,47 @@ class _LanguageGoalPageState extends State<LanguageGoalPage> {
   }
 }
 
-/// Language cards: one per row on a narrow phone, two per row from 360 dp.
-/// Each row is as tall as its tallest card, so large text grows the card
-/// instead of clipping the native or script label.
-class _LanguageGrid extends StatelessWidget {
-  const _LanguageGrid({
-    required this.languages,
-    required this.selectedId,
-    required this.onSelected,
-  });
+/// A grid of chips: one column under 360 dp, two from 360 dp, three from
+/// 600 dp. Cells share the column width and the chip centres inside its cell,
+/// so large text wraps to the next row instead of clipping a card.
+class _ChipGrid extends StatelessWidget {
+  const _ChipGrid({required this.children});
 
-  final List<V2LanguageOption> languages;
-  final String? selectedId;
-  final ValueChanged<String> onSelected;
+  final List<Widget> children;
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final columns = constraints.maxWidth < OBreakpoints.compact ? 1 : 2;
-        final rows = <Widget>[];
-        for (var i = 0; i < languages.length; i += columns) {
-          final end = i + columns < languages.length
-              ? i + columns
-              : languages.length;
-          rows.add(
-            Padding(
-              padding: EdgeInsets.only(top: i == 0 ? 0 : OSpace.s),
-              child: IntrinsicHeight(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    for (var j = 0; j < columns; j++) ...[
-                      if (j > 0) const SizedBox(width: OSpace.s),
-                      Expanded(
-                        child: j < end - i
-                            ? _card(languages[i + j])
-                            : const SizedBox.shrink(),
-                      ),
-                    ],
-                  ],
+    // The band comes from the window, not the (already capped) content width:
+    // at exactly 600 dp the page is a tablet even though its column is
+    // narrower. Below 360 dp a single column keeps 200 % text readable.
+    final width = OResponsive.of(context).width;
+    final columns = width < OBreakpoints.compact
+        ? 1
+        : width < OBreakpoints.tablet
+        ? 2
+        : 3;
+    final rows = <Widget>[];
+    for (var i = 0; i < children.length; i += columns) {
+      final end = i + columns < children.length ? i + columns : children.length;
+      rows.add(
+        Padding(
+          padding: EdgeInsets.only(top: i == 0 ? 0 : OSpace.s),
+          child: Row(
+            children: [
+              for (var j = 0; j < columns; j++) ...[
+                if (j > 0) const SizedBox(width: OSpace.s),
+                Expanded(
+                  child: j < end - i ? children[i + j] : const SizedBox.shrink(),
                 ),
-              ),
-            ),
-          );
-        }
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: rows,
-        );
-      },
-    );
-  }
-
-  Widget _card(V2LanguageOption language) => _LanguageCard(
-    language: language,
-    selected: language.id == selectedId,
-    onTap: () => onSelected(language.id),
-  );
-}
-
-class _LanguageCard extends StatelessWidget {
-  const _LanguageCard({
-    required this.language,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final V2LanguageOption language;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    return MergeSemantics(
-      child: Semantics(
-        label: '${language.nativeLabel}, ${language.englishLabel}',
-        selected: selected,
-        button: true,
-        child: OPressable(
-          onTap: onTap,
-          child: ExcludeSemantics(
-            child: AnimatedContainer(
-              duration: OMotion.fast,
-              curve: OMotion.standard,
-              padding: const EdgeInsets.all(OSpace.m),
-              decoration: BoxDecoration(
-                color: selected ? c.accentSoft : c.surface,
-                borderRadius: BorderRadius.circular(ORadius.l),
-                border: Border.all(
-                  color: selected
-                      ? c.accentFill.withValues(alpha: 0.50)
-                      : c.hairline,
-                  width: selected ? 1.5 : 1,
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          language.isDefault ? 'Default' : language.scriptLabel,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: OType.caption.copyWith(color: c.textMuted),
-                        ),
-                      ),
-                      Container(
-                        width: 22,
-                        height: 22,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: selected ? c.accentFill : Colors.transparent,
-                          border: Border.all(
-                            color: selected ? c.accentFill : c.hairlineStrong,
-                          ),
-                        ),
-                        child: selected
-                            ? Icon(
-                                Icons.check_rounded,
-                                size: 14,
-                                color: c.onAccent,
-                              )
-                            : null,
-                      ),
-                    ],
-                  ),
-                  const Spacer(),
-                  Text(
-                    language.nativeLabel,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.h2.copyWith(color: c.text),
-                  ),
-                  Text(
-                    language.englishLabel,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
-              ),
-            ),
+              ],
+            ],
           ),
         ),
-      ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: rows,
     );
   }
 }

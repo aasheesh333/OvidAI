@@ -120,7 +120,7 @@ class _V2BranchPickerSheetState extends State<V2BranchPickerSheet> {
                     height: 4,
                     decoration: BoxDecoration(
                       color: c.hairlineStrong,
-                      borderRadius: BorderRadius.circular(2),
+                      borderRadius: BorderRadius.circular(ORadius.xs),
                     ),
                   ),
                 ],

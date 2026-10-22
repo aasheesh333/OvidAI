@@ -423,7 +423,7 @@ void main() {
     );
   });
 
-  testWidgets('empty lists explain the gap and offer the next action', (
+  testWidgets('empty lists explain the gap', (
     tester,
   ) async {
     await _pump(
@@ -437,25 +437,12 @@ void main() {
       ),
     );
 
-    final tools = find.byKey(
-      const ValueKey('connector-permissions-tools'),
-    );
-    await _scrollTo(tester, tools);
-    expect(find.text('No tools exposed'), findsOneWidget);
+    // A connector with no tool manifest gets no tools card at all.
     expect(
-      find.text(
-        'Ovid uses only the permissions above. This connector does not expose '
-        'any named tools.',
-      ),
-      findsOneWidget,
+      find.byKey(const ValueKey('connector-permissions-tools')),
+      findsNothing,
     );
-    expect(
-      find.descendant(
-        of: tools,
-        matching: find.text('Back to connector'),
-      ),
-      findsOneWidget,
-    );
+    expect(find.text('No tools exposed'), findsNothing);
 
     final canDo = find.byKey(const ValueKey('connector-permissions-can-do'));
     await _scrollTo(tester, canDo);

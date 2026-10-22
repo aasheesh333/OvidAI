@@ -19,13 +19,14 @@ void main() {
     await tester.pumpWidget(_app(const V2ChatPage(data: V2ChatPageData())));
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('Ovid Si'), findsOneWidget);
+    // The wordmark is the empty state, so the name reads twice: once in the
+    // top bar, once as the brand in the body.
+    expect(find.text('Ovid Si'), findsNWidgets(2));
     expect(find.text('Auto'), findsOneWidget);
     expect(find.text('What should we build?'), findsOneWidget);
-    expect(
-      find.text('Ask anything. Ovid works in the background.'),
-      findsOneWidget,
-    );
+    // The empty state is the wordmark, one short line and three chips; the
+    // explainer paragraph is gone.
+    expect(find.text('Ask anything. Ovid works in the background.'), findsNothing);
     expect(find.text('Build a landing page'), findsOneWidget);
     expect(find.text('Research a topic'), findsOneWidget);
     expect(find.text('Fix a repo bug'), findsOneWidget);
@@ -501,7 +502,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(errors, isEmpty);
-    expect(find.text('Ovid Si'), findsOneWidget);
+    // Top bar and the empty-state wordmark both carry the name.
+    expect(find.text('Ovid Si'), findsNWidgets(2));
   });
 
   testWidgets('top bar uses the shared model chip with plan and subagents', (

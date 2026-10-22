@@ -73,9 +73,13 @@ void main() {
       const BrowserTabStrip(tabs: _tabs, activeTabId: 'docs'),
     );
 
-    expect(find.text('Docs'), findsOneWidget);
-    expect(find.text('GitHub'), findsOneWidget);
-    expect(find.text('Inbox'), findsOneWidget);
+    // Icon-only: the favicon is the tab, never a title label.
+    expect(find.byKey(const ValueKey('v2-browser-tab-docs')), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-github')), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-inbox')), findsOneWidget);
+    expect(find.text('Docs'), findsNothing);
+    expect(find.text('GitHub'), findsNothing);
+    expect(find.text('Inbox'), findsNothing);
     expect(find.byKey(_scrollKey), findsOneWidget);
     expect(find.text('Ovid opens tabs'), findsNothing);
   });
@@ -87,8 +91,8 @@ void main() {
       theme: OTheme.dark(),
     );
 
-    expect(find.text('GitHub'), findsOneWidget);
-    expect(find.text('Docs'), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-github')), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-docs')), findsOneWidget);
   });
 
   testWidgets('there is no add control at all', (tester) async {
@@ -176,7 +180,7 @@ void main() {
       ),
     );
 
-    await tester.tap(find.text('GitHub'));
+    await tester.tap(find.byKey(const ValueKey('v2-browser-tab-github')));
     await tester.pump(const Duration(milliseconds: 300));
     expect(selected, 'github');
   });
@@ -378,11 +382,26 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Inbox'), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2-browser-tab-inbox')), findsOneWidget);
   });
 
-  testWidgets('an empty strip renders nothing', (tester) async {
+  testWidgets('icon-only tabs still announce their names', (tester) async {
+    final semantics = tester.ensureSemantics();
     await _pump(
+      tester,
+      BrowserTabStrip(tabs: _tabs, activeTabId: 'docs', onSelectTab: (_) {}),
+    );
+
+    expect(find.bySemanticsLabel('Docs, ovidsi.com'), findsOneWidget);
+    expect(find.bySemanticsLabel('GitHub, github.com'), findsOneWidget);
+    expect(
+      find.bySemanticsLabel(RegExp('Inbox, mail.ovidsi.com, Headless')),
+      findsOneWidget,
+    );
+    semantics.dispose();
+  });
+
+  testWidgets('an empty strip renders nothing', (tester) async {    await _pump(
       tester,
       const BrowserTabStrip(tabs: <V2BrowserTabItem>[]),
       textScale: 2,

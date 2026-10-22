@@ -61,14 +61,37 @@ class V2WorkRoutes {
     ).push(MaterialPageRoute<void>(builder: (_) => const BrowserLivePage()));
   }
 
+  /// The account the Artifact Vault fences every mint against, or null when
+  /// signed out. Chat-derived artifact rows carry it so their detail page can
+  /// mint a fresh capability exactly like a library row.
+  static String? get artifactAccountId {
+    final svc = FirebaseService.I;
+    return svc.isSignedIn && svc.uid != null ? 'firebase:${svc.uid}' : null;
+  }
+
+  /// Opens one artifact with the same host the library uses.
+  ///
+  /// Minting and the preview fetch happen only after the explicit tap. A
+  /// transcript row that already carries a signed URL uses it; a row with a
+  /// cloud identity mints a fresh one; metadata still renders when both fail.
+  static Future<void> openArtifactDetail(
+    BuildContext context,
+    SessionArtifact artifact,
+  ) {
+    final accountId = artifactAccountId;
+    final client = ArtifactVaultClient(accountId: () => accountId);
+    return Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => _ArtifactDetailHost(client: client, artifact: artifact),
+      ),
+    );
+  }
+
   static Future<void> openArtifacts(
     BuildContext context,
     V2SettingsActions actions,
   ) async {
-    final svc = FirebaseService.I;
-    final accountId = svc.isSignedIn && svc.uid != null
-        ? 'firebase:${svc.uid}'
-        : null;
+    final accountId = artifactAccountId;
     final client = ArtifactVaultClient(accountId: () => accountId);
     final controller = ArtifactVaultController(client: client);
     await controller.reload();
@@ -91,12 +114,7 @@ class V2WorkRoutes {
           onArtifactTap: (item) async {
             final artifact = items.where((a) => a.id == item.id).firstOrNull;
             if (artifact == null) return;
-            await Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) =>
-                    _ArtifactDetailHost(client: client, artifact: artifact),
-              ),
-            );
+            await openArtifactDetail(context, artifact);
           },
         ),
       ),
@@ -261,6 +279,20 @@ class _ArtifactDetailHostState extends State<_ArtifactDetailHost> {
     return _artifact.name.substring(dot + 1).toLowerCase();
   }
 
+  /// The inline page's real source: no URL, no fetch, nothing invented.
+  String get _inlineText {
+    final html = _artifact.html;
+    if (html == null) return '';
+    final buffer = StringBuffer(html.html);
+    if (html.css.trim().isNotEmpty) {
+      buffer.write('\n<style>\n${html.css}\n</style>');
+    }
+    if (html.javascript.trim().isNotEmpty) {
+      buffer.write('\n<script>\n${html.javascript}\n</script>');
+    }
+    return buffer.toString();
+  }
+
   V2ArtifactPreviewKind get _previewKind => switch (_artifact.kind) {
     ArtifactKind.image => V2ArtifactPreviewKind.image,
     ArtifactKind.code || ArtifactKind.html => V2ArtifactPreviewKind.code,
@@ -273,19 +305,31 @@ class _ArtifactDetailHostState extends State<_ArtifactDetailHost> {
       setState(() => _status = V2ArtifactDetailStatus.loading);
     }
     var url = '';
-    var text = '';
-    int? totalLines;
-    try {
-      url = (await widget.client.mintPreferredUrl(
-        _artifact,
-        download: true,
-      )).url;
-    } catch (_) {
-      // No capability: the detail still shows its real metadata.
+    var text = _inlineText;
+    int? totalLines = text.isEmpty ? null : text.split('\n').length;
+    final cloudId = _artifact.cloudArtifactId ?? '';
+    if (cloudId.isNotEmpty) {
+      // A vault row: mint a fresh capability (the library path).
+      try {
+        url = (await widget.client.mintPreferredUrl(
+          _artifact,
+          download: true,
+        )).url;
+      } catch (_) {
+        // No fresh capability: the detail still shows its real metadata.
+      }
+      // A transcript row also arrived with the URL the event minted; keep it
+      // usable when the re-mint is refused instead of dropping a real link.
+      if (url.isEmpty) url = _artifact.url ?? '';
+    } else {
+      // A transcript row already carries the URL the cloud event minted, or
+      // has none. Nothing is minted without a cloud identity.
+      url = _artifact.url ?? '';
     }
     final size = _artifact.size ?? 0;
     if (url.isNotEmpty &&
         _isTextual &&
+        text.isEmpty &&
         (size == 0 || size <= _maxPreviewBytes)) {
       try {
         final response = await http

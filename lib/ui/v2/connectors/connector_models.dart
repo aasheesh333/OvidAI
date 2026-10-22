@@ -145,7 +145,7 @@ class V2Connector {
   bool get isMcp => kind == V2ConnectorKind.mcp;
 
   String get sectionTitle =>
-      kind == V2ConnectorKind.app ? 'Connectors' : 'Plugins & MCP';
+      kind == V2ConnectorKind.app ? 'Connectors' : 'Plugins & add-ons';
 
   V2Connector copyWith({
     bool? connected,

@@ -79,13 +79,16 @@ class V2ImageUsagePoint {
 }
 
 /// Daily token bars with a 7/30 day switch.
+///
+/// No card, no axis labels, no legend: the range switch sits above the bars
+/// and the bars are the whole chart. The a11y summary on the painted area
+/// carries the numbers a screen reader needs.
 class V2DailyTokensChart extends StatelessWidget {
   const V2DailyTokensChart({
     super.key,
     this.points = const [],
     this.range = V2UsageChartRange.sevenDays,
     this.status = V2UsageChartStatus.ready,
-    this.title = 'Daily tokens',
     this.emptyTitle = 'No token activity yet',
     this.emptyMessage =
         'Your daily token use will appear after your first chat.',
@@ -98,7 +101,6 @@ class V2DailyTokensChart extends StatelessWidget {
   final List<V2TokenChartPoint> points;
   final V2UsageChartRange range;
   final V2UsageChartStatus status;
-  final String title;
   final String emptyTitle;
   final String emptyMessage;
   final String errorMessage;
@@ -124,29 +126,32 @@ class V2DailyTokensChart extends StatelessWidget {
         body = hasData ? _chart(context) : _empty();
     }
 
-    return OCard(
-      padding: const EdgeInsets.all(OSpace.l),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _ChartHeader(
-            title: title,
-            subtitle: range.label,
-            trailing: hasData
-                ? _ChartTotal(value: _compactNumber(total), caption: 'tokens')
-                : null,
-            actionBuilder: hasData
-                ? (compact) => _ChartRangeTabs(
-                    value: range,
-                    onChanged: onRangeChanged,
-                    expanded: compact,
-                  )
-                : null,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (hasData) ...[
+          // The 7/30 switch: right-aligned normally, full-width when the
+          // text scale would overflow a trailing pill row.
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact =
+                  constraints.maxWidth < 360 ||
+                  MediaQuery.textScalerOf(context).scale(1) > 1.3;
+              final tabs = _ChartRangeTabs(
+                value: range,
+                onChanged: onRangeChanged,
+                expanded: compact,
+              );
+              return compact
+                  ? tabs
+                  : Align(alignment: Alignment.centerRight, child: tabs);
+            },
           ),
           const SizedBox(height: OSpace.m),
-          body,
         ],
-      ),
+        body,
+      ],
     );
   }
 
@@ -179,33 +184,26 @@ class V2DailyTokensChart extends StatelessWidget {
       container: true,
       label: summary,
       child: ExcludeSemantics(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            SizedBox(
-              height: 168,
-              child: TweenAnimationBuilder<double>(
-                tween: Tween<double>(begin: 0, end: 1),
-                duration: OMove.duration(context, OMotion.slow),
-                curve: OMotion.emphasized,
-                builder: (context, progress, _) => CustomPaint(
-                  painter: _TokenBarsPainter(
-                    values: [for (final point in points) point.value],
-                    maxValue: points.fold<double>(
-                      0,
-                      (max, point) => math.max(max, point.value),
-                    ),
-                    barColor: c.accentFill,
-                    gridColor: c.hairline,
-                    baselineColor: c.hairlineStrong,
-                    progress: progress,
-                  ),
+        child: SizedBox(
+          height: 168,
+          child: TweenAnimationBuilder<double>(
+            tween: Tween<double>(begin: 0, end: 1),
+            duration: OMove.duration(context, OMotion.slow),
+            curve: OMotion.emphasized,
+            builder: (context, progress, _) => CustomPaint(
+              painter: _TokenBarsPainter(
+                values: [for (final point in points) point.value],
+                maxValue: points.fold<double>(
+                  0,
+                  (max, point) => math.max(max, point.value),
                 ),
+                barColor: c.accentFill,
+                gridColor: c.hairline,
+                baselineColor: c.hairlineStrong,
+                progress: progress,
               ),
             ),
-            const SizedBox(height: OSpace.s),
-            _ChartAxis(labels: [for (final point in points) point.label]),
-          ],
+          ),
         ),
       ),
     );
@@ -465,17 +463,11 @@ class _ChartHeader extends StatelessWidget {
     required this.title,
     required this.subtitle,
     this.trailing,
-    this.actionBuilder,
   });
 
   final String title;
   final String subtitle;
   final Widget? trailing;
-
-  /// Built inside the layout pass so the action knows whether the header is
-  /// stacked. An intrinsic-width action inside a `Row` must not contain
-  /// `Expanded` children, so the tabs only expand in the stacked layout.
-  final Widget Function(bool compact)? actionBuilder;
 
   @override
   Widget build(BuildContext context) {
@@ -491,12 +483,11 @@ class _ChartHeader extends StatelessWidget {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        // On a 320 dp phone the card body is ~240 dp. Stack the controls under
-        // the title there and whenever text is scaled up.
+        // On a 320 dp phone the card body is ~240 dp. Stack the trailing
+        // control under the title there and whenever text is scaled up.
         final compact =
             constraints.maxWidth < 360 ||
             MediaQuery.textScalerOf(context).scale(1) > 1.3;
-        final action = actionBuilder?.call(compact);
         if (compact) {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -506,7 +497,6 @@ class _ChartHeader extends StatelessWidget {
                 const SizedBox(height: OSpace.xs),
                 Align(alignment: Alignment.centerLeft, child: trailing),
               ],
-              if (action != null) ...[const SizedBox(height: OSpace.m), action],
             ],
           );
         }
@@ -517,7 +507,6 @@ class _ChartHeader extends StatelessWidget {
               const SizedBox(width: OSpace.m),
               trailing!,
             ],
-            if (action != null) ...[const SizedBox(width: OSpace.m), action],
           ],
         );
       },
@@ -711,7 +700,7 @@ class _ModelLegendRow extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Padding(
-              padding: const EdgeInsets.only(top: 5),
+              padding: const EdgeInsets.only(top: OSpace.xs),
               child: Container(
                 width: 10,
                 height: 10,

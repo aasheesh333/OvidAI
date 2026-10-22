@@ -49,6 +49,60 @@ class V2OnboardingStepData {
   int get active => step.clamp(1, steps);
 }
 
+/// The onboarding content cap. The flow reads as one narrow column, so it
+/// centres tighter than the app-wide band caps: a phone is uncapped, a tablet
+/// stops at 480 and a wide window at 640. A wider window adds margin, not
+/// line length (MINIMAL_UI_CONTRACT §5).
+double onboardingContentMaxWidth(double width) {
+  if (width >= OBreakpoints.wide) return 640;
+  if (width >= OBreakpoints.tablet) return 480;
+  return double.infinity;
+}
+
+/// The identity block the flow opens with: the mark, the "Ovid Si" wordmark
+/// and one optional muted line. Splash, welcome and sign-in share it so the
+/// first three screens read as the same product. No tagline stack, no feature
+/// bullets — one line at most.
+class OnboardingIdentity extends StatelessWidget {
+  const OnboardingIdentity({super.key, this.line, this.markSize = 96});
+
+  /// The single line under the wordmark. Null shows mark and wordmark only.
+  final String? line;
+
+  final double markSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        OnboardingMark(size: markSize),
+        const SizedBox(height: OSpace.xl),
+        // The wordmark is the display-sized title of these screens, so it is
+        // marked as a heading wherever the identity appears.
+        Semantics(
+          header: true,
+          child: Text(
+            'Ovid Si',
+            textAlign: TextAlign.center,
+            style: OType.display.copyWith(color: c.text),
+          ),
+        ),
+        if (line != null) ...[
+          const SizedBox(height: OSpace.s),
+          Text(
+            line!,
+            textAlign: TextAlign.center,
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
 /// Segmented step indicator: "STEP 1 OF 3" plus one filled bar per step.
 ///
 /// The whole block is a single semantics node labelled "Step 1 of 3"; the
@@ -262,6 +316,7 @@ class OnboardingStepScaffold extends StatelessWidget {
         ],
       ),
       body: OContent(
+        maxWidth: onboardingContentMaxWidth(MediaQuery.sizeOf(context).width),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -342,66 +397,9 @@ class OnboardingStepScaffold extends StatelessWidget {
   }
 }
 
-/// Language selector shared by the welcome and sign-in steps, so the same
-/// control sits in the same place on both.
-class OnboardingLanguagePill extends StatelessWidget {
-  const OnboardingLanguagePill({super.key, required this.label, this.onTap});
-
-  final String label;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = OColors.of(context);
-    final enabled = onTap != null;
-    final content = Container(
-      constraints: const BoxConstraints(minHeight: OSpace.touch),
-      padding: const EdgeInsets.symmetric(horizontal: OSpace.m),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(ORadius.pill),
-        border: Border.all(color: c.hairline),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.language_rounded, size: 18, color: c.textMuted),
-          const SizedBox(width: OSpace.iconGap),
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: OType.caption.copyWith(color: c.text),
-            ),
-          ),
-          if (enabled) ...[
-            const SizedBox(width: OSpace.xs),
-            Icon(Icons.expand_more_rounded, size: 16, color: c.textFaint),
-          ],
-        ],
-      ),
-    );
-    // The label is announced once, from the pill itself; the inner text is
-    // excluded so screen readers do not repeat the language name.
-    if (enabled) {
-      return OPressable(
-        onTap: onTap,
-        semanticLabel: 'Language, $label',
-        child: ExcludeSemantics(child: content),
-      );
-    }
-    return Semantics(
-      label: 'Language, $label',
-      button: true,
-      enabled: false,
-      child: ExcludeSemantics(child: content),
-    );
-  }
-}
-
-/// The Ovid Si mark, shared by the splash and the welcome step so the flow
-/// opens with the same identity instead of two different illustrations.
+/// The Ovid Si mark, shared by the splash, the tour steps and the lock screen
+/// so the flow opens with the same identity instead of two different
+/// illustrations.
 class OnboardingMark extends StatelessWidget {
   const OnboardingMark({super.key, this.size = 120});
 

@@ -9,7 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Binding user revision (2026-09-24): the session sidebar shows NO repo
 /// name at all. Sessions render as a flat list under the original
-/// headings ("Ovid" brand, "New session", "Search sessions", "SESSIONS") —
+/// headings ("Ovid" brand, "New chat", "Search sessions", "SESSIONS") —
 /// the workspace-folder grouping that rendered labels like
 /// `AASHEESH333__OVIDAI__MAIN` is gone.
 void main() {
@@ -83,7 +83,7 @@ void main() {
     // brand wordmark, primary CTA, search hint, SESSIONS section). In the
     // Aether redesign the search heading is the search field's hint text.
     expect(find.byType(OvidWordmark), findsOneWidget);
-    expect(find.text('New session'), findsOneWidget);
+    expect(find.text('New chat'), findsOneWidget);
     expect(find.text('Search sessions'), findsOneWidget);
     expect(find.text('SESSIONS'), findsOneWidget);
   });

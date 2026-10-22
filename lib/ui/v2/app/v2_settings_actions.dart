@@ -24,6 +24,7 @@ import '../../../core/presets.dart';
 import '../../../core/revenuecat_billing.dart';
 import '../../../core/settings_backup_service.dart';
 import '../../../core/state.dart';
+import '../../design/o_tokens.dart';
 import '../chat/composer_voice.dart';
 import '../settings_extra/notifications_page.dart';
 
@@ -153,7 +154,11 @@ class V2SettingsActions {
     if (error != null && context.mounted) _snack(context, error);
   }
 
-  Future<void> buyPlan(BuildContext context, String tier) async {
+  Future<void> buyPlan(
+    BuildContext context,
+    String tier, {
+    OvidBillingPeriod period = OvidBillingPeriod.monthly,
+  }) async {
     // Gate on the *server-confirmed* plan only: the tier restored from
     // SharedPreferences is display-only (state.dart:4789), so a stale cache
     // must not block a real purchase.
@@ -165,16 +170,25 @@ class V2SettingsActions {
       _snack(context, 'Manage or cancel your plan in Google Play.');
       return;
     }
+    // Never let a period without a configured product fall through to another
+    // SKU: that would charge the monthly price for a yearly selection.
+    if (ovidPlayProductId(tier, period) == null) {
+      _snack(context, _periodUnavailableMessage(period));
+      return;
+    }
     // RevenueCat is the required purchase layer; the server-verified Play
     // flow remains the fallback for builds without a RevenueCat key.
     final rc = RevenueCatBilling.I;
     final viaRevenueCat = rc.available;
     final outcome = viaRevenueCat
-        ? await rc.buy(tier)
-        : await PlayBillingService.I.buy(tier);
+        ? await rc.buy(tier, period: period)
+        : await PlayBillingService.I.buy(tier, period: period);
     if (!context.mounted) return;
     if (!outcome.ok) {
-      _snack(context, _billingMessage(outcome.result));
+      final reason = viaRevenueCat
+          ? rc.lastPurchaseError
+          : PlayBillingService.I.lastPurchaseError;
+      _snack(context, reason ?? _billingMessage(outcome.result));
       return;
     }
     final unlocked = await _applyPurchase(
@@ -407,7 +421,7 @@ class V2SettingsActions {
     final ok = await _confirm(
       context,
       title: 'Reset memory?',
-      body: 'Ovid forgets global, project and session memory. Chats stay.',
+      body: 'Ovid forgets global, project and chat memory. Chats stay.',
       confirm: 'Reset memory',
       danger: true,
     );
@@ -626,7 +640,9 @@ class V2SettingsActions {
             onPressed: () => Navigator.pop(dialogContext, true),
             child: Text(
               confirm,
-              style: danger ? const TextStyle(color: Colors.red) : null,
+              style: danger
+                  ? TextStyle(color: OColors.of(dialogContext).danger)
+                  : null,
             ),
           ),
         ],
@@ -641,6 +657,11 @@ class V2SettingsActions {
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
   }
+
+  String _periodUnavailableMessage(OvidBillingPeriod period) =>
+      period == OvidBillingPeriod.yearly
+      ? 'Yearly billing is not available for this plan yet.'
+      : 'Monthly billing is not available for this plan right now.';
 
   String _billingMessage(UpgradeResult result) => switch (result) {
     UpgradeResult.ok => 'Plan updated.',

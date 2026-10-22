@@ -113,7 +113,7 @@ void main() {
     expect(find.byKey(const ValueKey('notifications-blocked')), findsNothing);
   });
 
-  testWidgets('Share session memory is disabled while Memory is off', (
+  testWidgets('Share chat memory is disabled while Memory is off', (
     tester,
   ) async {
     app.shareSessionMemory = true;

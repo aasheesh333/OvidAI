@@ -1,8 +1,10 @@
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
+import 'package:ovid_ai/ui/design/o_tokens.dart';
 import 'package:ovid_ai/ui/v2/chat/composer_attachments.dart';
 import 'package:ovid_ai/ui/v2/chat/composer_row.dart';
 import 'package:ovid_ai/ui/v2/chat/live_chat_page.dart';
@@ -131,7 +133,7 @@ void main() {
     await tester.pump();
     expect(find.text('portfolio-index.html'), findsOneWidget);
     expect(
-      find.bySemanticsLabel('Download portfolio-index.html'),
+      find.bySemanticsLabel('Actions for portfolio-index.html'),
       findsOneWidget,
     );
     expect(find.text('Your portfolio is ready'), findsOneWidget);
@@ -259,8 +261,97 @@ void main() {
       const Offset(0, -3000),
     );
     await tester.pump();
-    await tester.tap(find.bySemanticsLabel('Download portfolio-index.html'));
+    await tester.tap(find.bySemanticsLabel('Actions for portfolio-index.html'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Download'));
+    await tester.pumpAndSettle();
     expect(downloaded, 'art1');
+  });
+
+  testWidgets('the artifact row shows a real thumbnail when it has one', (
+    tester,
+  ) async {
+    final png = Uint8List.fromList(const <int>[
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
+      0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, //
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, //
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, //
+      0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, //
+      0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, //
+      0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, //
+      0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, //
+      0x42, 0x60, 0x82,
+    ]);
+    await tester.pumpWidget(
+      _app(
+        V2LiveChatPage(
+          data: V2LiveChatData(
+            items: [
+              V2LiveArtifact(
+                id: 'art-thumb',
+                fileName: 'hero.png',
+                meta: 'Image',
+                statusLabel: 'Ready',
+                previewLabel: 'Preview',
+                icon: Icons.image_outlined,
+                thumbnail: MemoryImage(png),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.byType(Image), findsOneWidget);
+    expect(find.byIcon(Icons.image_outlined), findsNothing);
+  });
+
+  testWidgets('artifact Copy puts the inline text on the clipboard', (
+    tester,
+  ) async {
+    String? copied;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copied = (call.arguments as Map)['text'] as String?;
+          }
+          return null;
+        });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null);
+    });
+
+    await tester.pumpWidget(
+      _app(
+        V2LiveChatPage(
+          data: const V2LiveChatData(
+            items: [
+              V2LiveArtifact(
+                id: 'art-copy',
+                fileName: 'preview.html',
+                meta: 'Web page',
+                statusLabel: 'Ready',
+                previewLabel: 'Preview',
+                content: '<h1>Real page</h1>',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    await tester.tap(find.bySemanticsLabel('Actions for preview.html'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Copy'));
+    await tester.pumpAndSettle();
+
+    expect(copied, '<h1>Real page</h1>');
+    expect(find.text('Copied'), findsOneWidget);
   });
 
   testWidgets('voice reply wires play, seek and action to its id', (
@@ -440,15 +531,12 @@ void main() {
     expect(userBubble.width, lessThanOrEqualTo(560));
     expect(userBubble.width, lessThanOrEqualTo(720 * 0.78));
 
-    final assistantBubble = tester.getSize(
-      find
-          .ancestor(
-            of: find.textContaining('A reply', findRichText: true),
-            matching: find.byType(Container),
-          )
-          .first,
+    // The assistant answer has no card and no inner cap: it spans the whole
+    // content column (720 minus the 24 dp gutters).
+    final reply = tester.getSize(
+      find.textContaining('A reply', findRichText: true),
     );
-    expect(assistantBubble.width, lessThanOrEqualTo(560));
+    expect(reply.width, closeTo(720 - 2 * OSpace.xl, 1));
   });
 
   testWidgets('long unbroken user text wraps at 320 dp and 200 % text', (
@@ -510,9 +598,7 @@ void main() {
   });
 
   testWidgets('primary controls expose semantic labels', (tester) async {
-    await tester.pumpWidget(
-      _app(_wired()),
-    );
+    await tester.pumpWidget(_app(_wired()));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
 
@@ -529,7 +615,11 @@ void main() {
       const Offset(0, -3000),
     );
     await tester.pump();
-    expect(find.bySemanticsLabel(RegExp('Download')), findsWidgets);
+    // The row's actions live in one labelled menu, not an icon per action.
+    expect(
+      find.bySemanticsLabel(RegExp('Actions for')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('composer is exactly one row in the contract order', (
@@ -566,9 +656,13 @@ void main() {
     final field = find.byType(TextField);
     final mic = find.bySemanticsLabel('Voice input');
     final send = find.bySemanticsLabel('Send');
-    final centres = [plus, permission, field, mic, send]
-        .map(tester.getCenter)
-        .toList();
+    final centres = [
+      plus,
+      permission,
+      field,
+      mic,
+      send,
+    ].map(tester.getCenter).toList();
     for (var i = 1; i < centres.length; i++) {
       expect(
         centres[i].dx,
@@ -619,9 +713,7 @@ void main() {
   ) async {
     // A composer with a real send handler: with none, Send stays disabled by
     // design (no control may announce a send that goes nowhere).
-    await tester.pumpWidget(
-      _app(V2LiveChatPage(data: _data, onSend: (_) {})),
-    );
+    await tester.pumpWidget(_app(V2LiveChatPage(data: _data, onSend: (_) {})));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
 

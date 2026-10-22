@@ -410,7 +410,7 @@
   "@promptCacheExtendedTitle": {
     "description": "Switch title: keep the prompt cache for one hour instead of five minutes."
   },
-  "promptCacheExtendedSubtitle": "For long 24/7 sessions with pauses over 5 minutes. Cache writes cost 2x input instead of 1.25x; reads stay 0.1x. Claude only.",
+  "promptCacheExtendedSubtitle": "For long 24/7 chats with pauses over 5 minutes. Cache writes cost 2x input instead of 1.25x; reads stay 0.1x. Claude only.",
   "@promptCacheExtendedSubtitle": {
     "description": "Explains the one-hour cache trade-off."
   },
@@ -1320,11 +1320,11 @@
   "@artifactCloudAccountBody": {
     "description": "Preview message when the previewing account no longer owns the file."
   },
-  "sessionRenameTitle": "Rename session",
+  "sessionRenameTitle": "Rename chat",
   "@sessionRenameTitle": {
     "description": "Rename-chat dialog title."
   },
-  "sessionRenameEmpty": "Session name cannot be empty",
+  "sessionRenameEmpty": "Chat name cannot be empty",
   "@sessionRenameEmpty": {
     "description": "Rename-chat validation error."
   },
@@ -1348,11 +1348,11 @@
     "placeholders": {
       "details": {
         "type": "String",
-        "example": "2 child sessions, 1 sandbox workspace"
+        "example": "2 subagent chats, 1 Studio workspace"
       }
     }
   },
-  "sessionDeleteChildSessions": "{count, plural, =1{1 child session} other{{count} child sessions}}",
+  "sessionDeleteChildSessions": "{count, plural, =1{1 subagent chat} other{{count} subagent chats}}",
   "@sessionDeleteChildSessions": {
     "description": "Delete-chat impact item.",
     "placeholders": {
@@ -2645,11 +2645,11 @@
   "@statusDiagnosticsCopied": {
     "description": "Snackbar."
   },
-  "sessionPinned": "Session pinned",
+  "sessionPinned": "Chat pinned",
   "@sessionPinned": {
     "description": "Snackbar after pinning a chat."
   },
-  "sessionUnpinned": "Session unpinned",
+  "sessionUnpinned": "Chat unpinned",
   "@sessionUnpinned": {
     "description": "Snackbar after unpinning a chat."
   },

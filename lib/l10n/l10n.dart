@@ -4,6 +4,10 @@ import 'app_localizations.dart';
 
 export 'app_localizations.dart';
 
+// The UI ships English only (`supportedLocales == [en]`). Hindi, Hinglish,
+// Punjabi and Tamil are voice/assistant languages, not app-UI locales; see
+// `lib/l10n/README.md` and the "Voice language" pickers.
+
 /// English strings used when no [AppLocalizations] is in scope: widget tests
 /// that pump a bare `MaterialApp`, and code that runs before the first frame.
 final AppLocalizations appLocalizationsFallback = lookupAppLocalizations(

@@ -7,6 +7,7 @@ import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
+import 'settings_rows.dart';
 import 'settings_search.dart';
 
 /// The four states every settings list can be in.
@@ -422,8 +423,9 @@ class _SettingsHubPageState extends State<SettingsHubPage> {
   }
 }
 
-/// One section: a short heading and a card of one-line rows. The account
-/// section leads with the profile row instead of repeating it as a destination.
+/// One section: a short heading and its one-line rows on the page background.
+/// The account section leads with the profile row instead of repeating it as
+/// a destination.
 class _SectionGroup extends StatelessWidget {
   const _SectionGroup({
     required this.section,
@@ -447,7 +449,6 @@ class _SectionGroup extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = OColors.of(context);
     final items = profile == null
         ? section.items
         : section.items.where((item) => item.id != 'account').toList();
@@ -469,18 +470,7 @@ class _SectionGroup extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         OSectionTitle(title: section.title),
-        OCard(
-          padding: EdgeInsets.zero,
-          child: Column(
-            children: [
-              for (var index = 0; index < rows.length; index++) ...[
-                if (index > 0)
-                  Divider(height: 1, thickness: 1, indent: 64, color: c.hairline),
-                rows[index],
-              ],
-            ],
-          ),
-        ),
+        V2SettingsRowList(rows: rows),
       ],
     );
   }
@@ -522,10 +512,7 @@ class _ProfileRow extends StatelessWidget {
       child: ConstrainedBox(
         constraints: const BoxConstraints(minHeight: OSpace.listRow),
         child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: OSpace.l,
-            vertical: OSpace.m,
-          ),
+          padding: const EdgeInsets.symmetric(vertical: OSpace.m),
           child: Row(
             children: [
               OAvatar(
@@ -599,10 +586,7 @@ class _SettingsRow extends StatelessWidget {
         child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: OSpace.listRow),
           child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: OSpace.l,
-              vertical: OSpace.m,
-            ),
+            padding: const EdgeInsets.symmetric(vertical: OSpace.m),
             child: LayoutBuilder(
               builder: (context, constraints) {
                 // One line, always: the value gets a share of the row and
@@ -613,21 +597,7 @@ class _SettingsRow extends StatelessWidget {
                 );
                 return Row(
                   children: [
-                    Container(
-                      width: OSpace.iconTile,
-                      height: OSpace.iconTile,
-                      decoration: BoxDecoration(
-                        color: item.danger
-                            ? c.danger.withValues(alpha: 0.10)
-                            : c.surfaceAlt,
-                        borderRadius: BorderRadius.circular(ORadius.m),
-                      ),
-                      child: Icon(
-                        item.icon,
-                        size: 19,
-                        color: item.danger ? c.danger : c.textMuted,
-                      ),
-                    ),
+                    V2SettingsTile(icon: item.icon, danger: item.danger),
                     const SizedBox(width: OSpace.m),
                     Expanded(
                       child: Text(

@@ -220,6 +220,7 @@ class ShareSheet extends StatelessWidget {
         children: [
           _header(),
           if (_canPickMode) ...[
+            const SizedBox(height: OSpace.s),
             _modeCard(V2ShareMode.collab),
             const SizedBox(height: OSpace.s),
             _modeCard(V2ShareMode.readOnly),
@@ -227,18 +228,11 @@ class ShareSheet extends StatelessWidget {
           const SizedBox(height: OSpace.l),
           OCard(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
                   'Not shared yet',
                   style: OType.h3.copyWith(color: c.text),
-                ),
-                const SizedBox(height: OSpace.xs),
-                Text(
-                  data.isCollab
-                      ? 'A live room for up to ${data.capacity} people.'
-                      : 'A read-only link anyone can open.',
-                  style: OType.caption.copyWith(color: c.textMuted),
                 ),
                 const SizedBox(height: OSpace.l),
                 if (onCreateLink != null)

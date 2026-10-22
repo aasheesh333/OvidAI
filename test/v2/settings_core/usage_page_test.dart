@@ -147,10 +147,13 @@ void main() {
     expect(find.text('Resets in 6h 12m'), findsOneWidget);
     expect(find.byType(OProgressBar), findsOneWidget);
 
-    expect(find.text('Activity'), findsOneWidget);
+    // One chart, one range switch. No chart title, no axis labels, no legend.
     expect(find.byType(V2DailyTokensChart), findsOneWidget);
     expect(find.text('7 days'), findsOneWidget);
     expect(find.text('30 days'), findsOneWidget);
+    expect(find.text('Activity'), findsNothing);
+    expect(find.text('Mon'), findsNothing);
+    expect(find.text('Sun'), findsNothing);
 
     // The multi-card dashboard is gone.
     expect(find.text('TOKENS TODAY'), findsNothing);
@@ -171,7 +174,7 @@ void main() {
 
     expect(find.text('Usage'), findsOneWidget);
     expect(find.text('12.4M'), findsOneWidget);
-    expect(find.text('Activity'), findsOneWidget);
+    expect(find.byType(V2DailyTokensChart), findsOneWidget);
   });
 
   testWidgets('empty state action fires', (tester) async {
@@ -269,7 +272,7 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Usage'), findsOneWidget);
     expect(find.text('Tokens today'), findsOneWidget);
-    expect(find.text('Activity'), findsOneWidget);
+    expect(find.byType(V2DailyTokensChart), findsOneWidget);
   });
 
   testWidgets('fits 320 dp at 200% text in dark too', (tester) async {

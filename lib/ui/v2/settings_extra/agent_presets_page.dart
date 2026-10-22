@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../design/o_components.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
+import '../settings/settings_rows.dart';
 
 // TODO(l10n): move the English copy in this screen to the ARB files.
 
@@ -160,63 +161,42 @@ class _AgentPresetsPageState extends State<AgentPresetsPage> {
   }
 
   Widget _list(BuildContext context) {
-    return ListView.separated(
-      padding: const EdgeInsets.only(top: OSpace.l, bottom: OSpace.xxl),
-      itemCount: _presets.length,
-      separatorBuilder: (_, _) => const SizedBox(height: OSpace.s),
-      itemBuilder: (context, index) => _presetCard(context, _presets[index]),
+    return ListView(
+      padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
+      children: [V2SettingsRowList(rows: [for (final p in _presets) _presetRow(context, p)])],
     );
   }
 
-  Widget _presetCard(BuildContext context, V2AgentPreset preset) {
+  /// One preset, one row: tile, name, the model it runs on, and the selected
+  /// check. Custom presets carry the row menu (edit / delete).
+  Widget _presetRow(BuildContext context, V2AgentPreset preset) {
     final c = OColors.of(context);
     final selected = _selectedId == preset.id;
-    return OCard(
+    return V2SettingsRow(
       key: ValueKey<String>('preset-${preset.id}'),
-      accent: selected,
-      padding: EdgeInsets.zero,
+      icon: preset.icon,
+      title: preset.name,
+      showChevron: false,
+      stacksTrailing: true,
       onTap: data.onSelect == null ? null : () => _select(preset),
-      semanticLabel:
-          '${preset.name} preset${selected ? ', selected' : ''}. '
-          '${preset.description}',
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: OSpace.l,
-          vertical: OSpace.m,
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    preset.name,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.bodyStrong.copyWith(color: c.text),
-                  ),
-                  const SizedBox(height: OSpace.xxs),
-                  Text(
-                    preset.description,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: OType.caption.copyWith(color: c.textMuted),
-                  ),
-                ],
-              ),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 120),
+            child: Text(
+              preset.modelLabel,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: OType.caption.copyWith(color: c.textMuted),
             ),
-            if (selected) ...[
-              const SizedBox(width: OSpace.s),
-              Icon(
-                Icons.check_circle_rounded,
-                size: 20,
-                color: c.accentFill,
-              ),
-            ],
-            if (!preset.builtIn) _presetMenu(context, preset),
+          ),
+          if (selected) ...[
+            const SizedBox(width: OSpace.s),
+            Icon(Icons.check_circle_rounded, size: 20, color: c.accentFill),
           ],
-        ),
+          if (!preset.builtIn) _presetMenu(context, preset),
+        ],
       ),
     );
   }

@@ -7,14 +7,71 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:ovid_ai/core/cloud_usage_store.dart';
 import 'package:ovid_ai/core/ovid_cloud_service.dart';
+import 'package:ovid_ai/core/play_billing.dart';
 import 'package:ovid_ai/core/revenuecat_billing.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/v2/app/v2_settings_actions.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Fake RevenueCat SDK that reports a successful purchase of Ovid Plus.
+/// Fake RevenueCat SDK that reports a successful purchase.
 class _PurchaseOkPlatform implements RevenueCatPlatform {
-  const _PurchaseOkPlatform();
+  _PurchaseOkPlatform({this.offered = monthly});
+
+  static const monthly = <RevenueCatPackage>[
+    RevenueCatPackage(
+      identifier: 'pkg_go',
+      productId: 'ovid_plus_monthly',
+      title: 'ovid_plus_monthly',
+      priceString: r'$5',
+    ),
+    RevenueCatPackage(
+      identifier: 'pkg_plus',
+      productId: 'ovid_pro_monthly',
+      title: 'ovid_pro_monthly',
+      priceString: r'$18',
+    ),
+    RevenueCatPackage(
+      identifier: 'pkg_max',
+      productId: 'ovid_max_monthly',
+      title: 'ovid_max_monthly',
+      priceString: r'$99',
+    ),
+  ];
+
+  static const yearly = <RevenueCatPackage>[
+    RevenueCatPackage(
+      identifier: 'pkg_go_yearly',
+      productId: 'ovid_plus_yearly',
+      title: 'ovid_plus_yearly',
+      priceString: r'$50',
+    ),
+    RevenueCatPackage(
+      identifier: 'pkg_plus_yearly',
+      productId: 'ovid_pro_yearly',
+      title: 'ovid_pro_yearly',
+      priceString: r'$180',
+    ),
+    RevenueCatPackage(
+      identifier: 'pkg_max_yearly',
+      productId: 'ovid_max_yearly',
+      title: 'ovid_max_yearly',
+      priceString: r'$990',
+    ),
+  ];
+
+  final List<RevenueCatPackage> offered;
+
+  /// Package identifiers the SDK was asked to buy.
+  final purchased = <String>[];
+
+  static const _tiers = <String, String>{
+    'pkg_go': '3x',
+    'pkg_plus': '7x',
+    'pkg_max': '15x',
+    'pkg_go_yearly': '3x',
+    'pkg_plus_yearly': '7x',
+    'pkg_max_yearly': '15x',
+  };
 
   @override
   Future<void> configure({
@@ -22,32 +79,14 @@ class _PurchaseOkPlatform implements RevenueCatPlatform {
     required String appUserId,
   }) async {}
 
-  static const _products = <String, String>{
-    'pkg_go': 'ovid_plus_monthly',
-    'pkg_plus': 'ovid_pro_monthly',
-    'pkg_max': 'ovid_max_monthly',
-  };
-
-  static const _tiers = <String, String>{
-    'pkg_go': '3x',
-    'pkg_plus': '7x',
-    'pkg_max': '15x',
-  };
+  @override
+  Future<List<RevenueCatPackage>> packages() async => offered;
 
   @override
-  Future<List<RevenueCatPackage>> packages() async => [
-    for (final entry in _products.entries)
-      RevenueCatPackage(
-        identifier: entry.key,
-        productId: entry.value,
-        title: entry.value,
-        priceString: '\$18',
-      ),
-  ];
-
-  @override
-  Future<RevenueCatResult> purchasePackage(String identifier) async =>
-      RevenueCatResult(ok: true, tier: _tiers[identifier] ?? '7x');
+  Future<RevenueCatResult> purchasePackage(String identifier) async {
+    purchased.add(identifier);
+    return RevenueCatResult(ok: true, tier: _tiers[identifier] ?? '7x');
+  }
 
   @override
   Future<RevenueCatResult> restore() async =>
@@ -62,6 +101,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   late List<String> paths;
+  late _PurchaseOkPlatform platform;
 
   setUp(() {
     paths = [];
@@ -71,8 +111,9 @@ void main() {
     AppState.createForTest();
     resetConfirmedPlanTierForTest();
     OvidCloudService.idTokenOverrideForTest = () async => 'billing-test-token';
+    platform = _PurchaseOkPlatform();
     RevenueCatBilling.instanceForTest = RevenueCatBilling(
-      platform: const _PurchaseOkPlatform(),
+      platform: platform,
       uid: () => 'u1',
       config: const RevenueCatConfig(apiKey: 'goog_test_key'),
     );
@@ -170,6 +211,50 @@ void main() {
     await tester.pump();
     await tester.pump();
 
+    expect(AppState.I.ovidCloudTier, 'free');
+    expect(isServerConfirmed('7x'), isFalse);
+    usage.release();
+  });
+
+  testWidgets('a yearly selection buys the yearly package', (tester) async {
+    final yearlyPlatform = _PurchaseOkPlatform(
+      offered: [..._PurchaseOkPlatform.monthly, ..._PurchaseOkPlatform.yearly],
+    );
+    RevenueCatBilling.instanceForTest = RevenueCatBilling(
+      platform: yearlyPlatform,
+      uid: () => 'u1',
+      config: const RevenueCatConfig(apiKey: 'goog_test_key'),
+    );
+    serve('7x');
+    final usage = CloudUsageStore.acquire(AppState.I);
+    final actions = V2SettingsActions(usage);
+    final context = await mount(tester);
+
+    await actions.buyPlan(context, '7x', period: OvidBillingPeriod.yearly);
+    await tester.pump();
+
+    expect(yearlyPlatform.purchased, ['pkg_plus_yearly']);
+    expect(AppState.I.ovidCloudTier, '7x');
+    usage.release();
+  });
+
+  testWidgets('a missing yearly package does not buy the monthly one', (
+    tester,
+  ) async {
+    // The setUp platform offers monthly packages only.
+    serve('7x');
+    final usage = CloudUsageStore.acquire(AppState.I);
+    final actions = V2SettingsActions(usage);
+    final context = await mount(tester);
+
+    await actions.buyPlan(context, '7x', period: OvidBillingPeriod.yearly);
+    await tester.pump();
+
+    expect(platform.purchased, isEmpty, reason: 'no monthly fallback');
+    expect(
+      find.textContaining('Yearly billing is not available'),
+      findsOneWidget,
+    );
     expect(AppState.I.ovidCloudTier, 'free');
     expect(isServerConfirmed('7x'), isFalse);
     usage.release();

@@ -9,12 +9,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/schedule_client.dart';
 import 'package:ovid_ai/core/cloud_usage_store.dart';
+import 'package:ovid_ai/core/html_artifact.dart';
 import 'package:ovid_ai/core/session_artifacts.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/v2/app/v2_settings_actions.dart';
 import 'package:ovid_ai/ui/v2/app/v2_work_routes.dart';
+import 'package:ovid_ai/ui/v2/library/artifact_detail_page.dart';
 import 'package:ovid_ai/ui/v2/library/artifacts_page.dart';
 import 'package:ovid_ai/ui/v2/schedules/schedules_flow.dart';
 
@@ -108,6 +110,87 @@ void main() {
 
       expect(item.source, V2ArtifactSource.uploaded);
       expect(item.sessionTitle, isEmpty);
+    });
+  });
+
+  group('artifact detail host', () {
+    testWidgets('a transcript artifact with a URL opens without a mint', (
+      tester,
+    ) async {
+      final artifact = SessionArtifact(
+        id: 'chat-1:img:msg-1',
+        name: 'hero.png',
+        url: 'https://files.example.com/hero.png',
+        sessionId: 'chat-1',
+        sessionTitle: 'Landing page',
+        time: DateTime(2026, 10, 21, 10),
+        origin: ArtifactOrigin.generated,
+        kind: ArtifactKind.image,
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: OTheme.light(),
+          home: Builder(
+            builder: (context) => OButton(
+              label: 'Open',
+              onPressed: () =>
+                  V2WorkRoutes.openArtifactDetail(context, artifact),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(find.byType(ArtifactDetailPage), findsOneWidget);
+      expect(find.text('hero.png'), findsWidgets);
+      // The URL arrived with the transcript row, so Download and Share are
+      // offered without minting a second capability.
+      expect(find.byIcon(Icons.more_vert_rounded), findsOneWidget);
+    });
+
+    testWidgets('an inline page previews its real source', (tester) async {
+      final html = HtmlArtifact.create('chat-1', {
+        'title': 'Receipt',
+        'html': '<h1>Real heading</h1>',
+      });
+      final artifact = SessionArtifact(
+        id: 'chat-1:html:${html.id}',
+        name: html.title,
+        sessionId: 'chat-1',
+        sessionTitle: 'Landing page',
+        time: DateTime(2026, 10, 21, 10),
+        origin: ArtifactOrigin.generated,
+        kind: ArtifactKind.html,
+        size: html.payloadBytes,
+        html: html,
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: OTheme.light(),
+          home: Builder(
+            builder: (context) => OButton(
+              label: 'Open',
+              onPressed: () =>
+                  V2WorkRoutes.openArtifactDetail(context, artifact),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(find.byType(ArtifactDetailPage), findsOneWidget);
+      expect(
+        find.textContaining('Real heading', findRichText: true),
+        findsOneWidget,
+      );
+      // No URL exists, so no download is invented.
+      expect(find.byIcon(Icons.more_vert_rounded), findsNothing);
     });
   });
 

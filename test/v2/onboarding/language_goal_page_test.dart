@@ -63,7 +63,7 @@ void main() {
   ) async {
     await _pump(tester);
 
-    expect(find.text('SPOKEN LANGUAGE'), findsOneWidget);
+    expect(find.text('LANGUAGE'), findsOneWidget);
     expect(find.text('English'), findsOneWidget);
     expect(find.text('हिन्दी'), findsOneWidget);
     expect(find.text('Hinglish'), findsOneWidget);
@@ -84,13 +84,13 @@ void main() {
     await _pumpSmall(tester);
 
     expect(tester.takeException(), isNull);
-    expect(find.text('SPOKEN LANGUAGE'), findsOneWidget);
+    expect(find.text('LANGUAGE'), findsOneWidget);
   });
 
   testWidgets('language and goal renders correctly in dark', (tester) async {
     await _pump(tester, dark: true);
 
-    expect(find.text('SPOKEN LANGUAGE'), findsOneWidget);
+    expect(find.text('LANGUAGE'), findsOneWidget);
     expect(find.text('हिन्दी'), findsOneWidget);
     expect(find.byKey(const Key('language-goal-continue')), findsOneWidget);
   });
@@ -232,7 +232,7 @@ void main() {
       onRetry: () => retries++,
     );
 
-    expect(find.text('No languages yet'), findsOneWidget);
+    expect(find.text('No voice languages yet'), findsOneWidget);
     await tester.tap(find.text('Try again'));
     await tester.pump();
 
@@ -243,7 +243,7 @@ void main() {
     await _pumpSmall(tester, dark: true);
 
     expect(tester.takeException(), isNull);
-    expect(find.text('FIRST GOAL'), findsOneWidget);
+    expect(find.text('GOAL'), findsOneWidget);
   });
 
   testWidgets('every goal chip stays reachable at 200 % text', (tester) async {
@@ -299,9 +299,9 @@ void main() {
     await _pump(tester, onContinue: (_, _) {});
 
     expect(
-      tester.getSemantics(find.bySemanticsLabel('English, Global')),
+      tester.getSemantics(find.bySemanticsLabel('English')),
       isSemantics(
-        label: 'English, Global',
+        label: 'English',
         isButton: true,
         hasSelectedState: true,
         isSelected: true,
@@ -309,9 +309,9 @@ void main() {
       ),
     );
     expect(
-      tester.getSemantics(find.bySemanticsLabel('हिन्दी, Hindi')),
+      tester.getSemantics(find.bySemanticsLabel('हिन्दी')),
       isSemantics(
-        label: 'हिन्दी, Hindi',
+        label: 'हिन्दी',
         isButton: true,
         hasSelectedState: true,
         isSelected: false,
@@ -353,22 +353,49 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('language cards stay two per row and at least 48 dp tall', (
+  testWidgets('language chips share a row and stay at least 48 dp tall', (
     tester,
   ) async {
     await _pump(tester);
 
-    final english = tester.getRect(find.bySemanticsLabel('English, Global'));
-    final hindi = tester.getRect(find.bySemanticsLabel('हिन्दी, Hindi'));
+    final english = tester.getRect(find.bySemanticsLabel('English'));
+    final hindi = tester.getRect(find.bySemanticsLabel('हिन्दी'));
 
-    expect(english.width, hindi.width);
     expect(english.top, hindi.top);
     expect(hindi.left, greaterThan(english.left));
     expect(english.height, greaterThanOrEqualTo(48));
     expect(hindi.height, greaterThanOrEqualTo(48));
   });
 
-  testWidgets('an empty goal list still lets the user continue', (
+  testWidgets('the chip grid is 2-up at 360 dp and 3-up at 600 dp', (
+    tester,
+  ) async {
+    Future<void> pumpAt(double width) async {
+      tester.view.physicalSize = Size(width, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(theme: OTheme.light(), home: const LanguageGoalPage()),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    await pumpAt(360);
+    var english = tester.getRect(find.bySemanticsLabel('English'));
+    var hindi = tester.getRect(find.bySemanticsLabel('हिन्दी'));
+    var hinglish = tester.getRect(find.bySemanticsLabel('Hinglish'));
+    expect(english.top, hindi.top, reason: '2-up shares a row');
+    expect(hinglish.top, greaterThan(english.top), reason: 'third wraps');
+
+    await pumpAt(600);
+    english = tester.getRect(find.bySemanticsLabel('English'));
+    hindi = tester.getRect(find.bySemanticsLabel('हिन्दी'));
+    hinglish = tester.getRect(find.bySemanticsLabel('Hinglish'));
+    expect(english.top, hindi.top, reason: '3-up first row');
+    expect(hindi.top, hinglish.top, reason: '3-up first row');
+  });
+
+  testWidgets('an empty goal list hides the section and still continues', (
     tester,
   ) async {
     Set<String>? goals;
@@ -378,12 +405,9 @@ void main() {
       onContinue: (_, ids) => goals = ids,
     );
 
-    expect(
-      find.text(
-        'No goals to pick yet. You can continue and change this later.',
-      ),
-      findsOneWidget,
-    );
+    // No helper paragraph stands in for the missing section.
+    expect(find.text('GOAL'), findsNothing);
+    expect(find.text('LANGUAGE'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('language-goal-continue')));
     await tester.pump();

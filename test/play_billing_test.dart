@@ -56,6 +56,35 @@ void main() {
       expect(store.restores, 1);
     });
 
+    test('the catalogue queries monthly and yearly products', () async {
+      await billing.ensureLoaded();
+      expect(store.queriedIds, containsAll(kOvidPlayProductIds.values));
+      expect(
+        billing.productFor('3x', period: OvidBillingPeriod.yearly)!.id,
+        'ovid_plus_yearly',
+      );
+      expect(
+        billing.productFor('3x')!.id,
+        'ovid_plus_monthly',
+        reason: 'monthly stays the default',
+      );
+    });
+
+    test(
+      'buying yearly uses the yearly product, never the monthly one',
+      () async {
+        store.autoResult = PurchaseStatus.purchased;
+        final outcome = await billing.buy(
+          '3x',
+          period: OvidBillingPeriod.yearly,
+        );
+        expect(store.bought.single.product, 'ovid_plus_yearly');
+        expect(store.bought.single.product, isNot('ovid_plus_monthly'));
+        expect(outcome.result, UpgradeResult.ok);
+        expect(outcome.tier, '3x');
+      },
+    );
+
     test('purchase is acknowledged only after server verification', () async {
       final result = billing.buy('3x');
       await settle();
@@ -320,7 +349,10 @@ void main() {
         calls++;
         auths.add(request.headers['Authorization']);
         return calls == 1
-            ? http.Response('{"ok":false,"error":{"code":"sign_in_required"}}', 401)
+            ? http.Response(
+                '{"ok":false,"error":{"code":"sign_in_required"}}',
+                401,
+              )
             : http.Response(
                 jsonEncode({'ok': true, 'tier': '3x', 'acknowledge': true}),
                 200,

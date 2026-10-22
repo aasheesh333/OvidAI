@@ -334,10 +334,7 @@ class _UsageHero extends StatelessWidget {
               data.usedText,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: OType.display.copyWith(
-                color: c.text,
-                fontWeight: FontWeight.w700,
-              ),
+              style: OType.h1.copyWith(color: c.text),
             ),
           ),
         ),
@@ -444,7 +441,6 @@ class _DailyTokensSection extends StatelessWidget {
     final onRangeChanged = data.onRangeChanged;
     return V2DailyTokensChart(
       key: const ValueKey('usage-daily-tokens-chart'),
-      title: 'Activity',
       points: [for (final day in data.days) _tokenPoint(day)],
       range: range,
       status: data.historyLoading

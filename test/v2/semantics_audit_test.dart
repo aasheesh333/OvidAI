@@ -194,7 +194,7 @@ void main() {
       final order = _readingOrder(tester);
       _expectOrder(order, <String>[
         'Profile, Ovid user, Free plan',
-        'New session',
+        'New chat',
         'Search',
         'No chats yet',
         'Settings',
@@ -1152,15 +1152,6 @@ class _KnownGap {
 }
 
 const _knownGaps = <_KnownGap>[
-  // Full-screen tap bridge that dismisses the keyboard. It is not a visible
-  // control and has no label or enabled state of its own.
-  _KnownGap(
-    'sign_in',
-    _GapKind.unlabeled,
-    null,
-    'Keyboard-dismiss bridge (no visible target).',
-    signature: _GapSignature.tapWrapper,
-  ),
   _KnownGap(
     'add_connector',
     _GapKind.unlabeled,

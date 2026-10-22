@@ -187,7 +187,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     id: 'sign_in',
     title: 'Sign in',
     group: 'Identity',
-    summary: 'Email, password, Google, Apple and inline errors',
+    summary: 'Google and phone sign-in with inline errors',
     builder: (_) => const SignInPage(),
   ),
   V2ScreenEntry(
@@ -480,7 +480,7 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     id: 'connectors',
     title: 'Connectors',
     group: 'Connectors',
-    summary: 'Installed apps, plugins and MCP with categories',
+    summary: 'Installed apps, plugins and add-ons with categories',
     builder: (_) => const ConnectorsPage(data: V2ConnectorsData()),
   ),
   V2ScreenEntry(

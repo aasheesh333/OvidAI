@@ -266,13 +266,11 @@ longer exists (search is inline in the drawer).
 3. **Artifact card in live chat.** The PNG's thumbnail + Preview + Copy is what
    makes generated output feel real; v2 opens the artifact detail (chevron) and
    offers Download, with no inline thumbnail and no Copy.
-4. **Sign-in: Apple is gone, the email form is not.** `onApple` is never passed
-   by `v2_onboarding_gate.dart`, so the Apple button does not render — the brief's
-   "Google or phone" is what ships. But the email/password field, "Forgot
-   password" and "Create account" still render, and all three just set the inline
-   error "Use Google or phone to sign in." That is exactly the pattern the
-   contract bans (a control with no service behind it); it survives because it
-   fails *honestly* rather than pretending. It should be removed with the field.
+4. **Sign-in: Apple and the email form are both gone.** `onApple` was never
+   passed by `v2_onboarding_gate.dart`, and the email/password field, "Forgot
+   password" and "Create account" only set the inline error "Use Google or
+   phone to sign in." Both were removed under the contract's no-control-without-
+   a-service rule; the step now offers Google (filled) and phone (outlined).
 5. **Splash parity is spec-driven.** It has a progress line and no version
    pill / sandbox badge, which is correct per the spec row even though it does
    not resemble the PNG. Do not "fix" it toward the PNG without amending the

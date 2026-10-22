@@ -601,7 +601,7 @@ abstract class AppLocalizations {
   /// Explains the one-hour cache trade-off.
   ///
   /// In en, this message translates to:
-  /// **'For long 24/7 sessions with pauses over 5 minutes. Cache writes cost 2x input instead of 1.25x; reads stay 0.1x. Claude only.'**
+  /// **'For long 24/7 chats with pauses over 5 minutes. Cache writes cost 2x input instead of 1.25x; reads stay 0.1x. Claude only.'**
   String get promptCacheExtendedSubtitle;
 
   /// Help text under the per-provider prompt caching choice (Auto / On / Off).
@@ -1687,13 +1687,13 @@ abstract class AppLocalizations {
   /// Rename-chat dialog title.
   ///
   /// In en, this message translates to:
-  /// **'Rename session'**
+  /// **'Rename chat'**
   String get sessionRenameTitle;
 
   /// Rename-chat validation error.
   ///
   /// In en, this message translates to:
-  /// **'Session name cannot be empty'**
+  /// **'Chat name cannot be empty'**
   String get sessionRenameEmpty;
 
   /// Delete-chat confirmation title.
@@ -1717,7 +1717,7 @@ abstract class AppLocalizations {
   /// Delete-chat impact item.
   ///
   /// In en, this message translates to:
-  /// **'{count, plural, =1{1 child session} other{{count} child sessions}}'**
+  /// **'{count, plural, =1{1 subagent chat} other{{count} subagent chats}}'**
   String sessionDeleteChildSessions(int count);
 
   /// Delete-chat impact item.
@@ -3397,13 +3397,13 @@ abstract class AppLocalizations {
   /// Snackbar after pinning a chat.
   ///
   /// In en, this message translates to:
-  /// **'Session pinned'**
+  /// **'Chat pinned'**
   String get sessionPinned;
 
   /// Snackbar after unpinning a chat.
   ///
   /// In en, this message translates to:
-  /// **'Session unpinned'**
+  /// **'Chat unpinned'**
   String get sessionUnpinned;
 
   /// Snackbar when pinning a chat fails.

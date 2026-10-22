@@ -133,7 +133,7 @@ void main() {
     expect(find.text('SESSION FILES'), findsNothing);
 
     // One scope filter.
-    for (final key in ['all', 'global', 'project', 'session']) {
+    for (final key in ['all', 'global', 'project', 'chat']) {
       expect(
         find.byKey(ValueKey<String>('memory-files-filter-$key')),
         findsOneWidget,
@@ -164,7 +164,7 @@ void main() {
 
     expect(find.text('Global · 12 KB · Updated 2 hours ago'), findsOneWidget);
     expect(find.text('Project · 48 KB · Updated Yesterday'), findsOneWidget);
-    expect(find.text('Session · 24 KB · Updated Just now'), findsOneWidget);
+    expect(find.text('Chat · 24 KB · Updated Just now'), findsOneWidget);
   });
 
   testWidgets('scope chips really filter the list', (tester) async {
@@ -179,7 +179,7 @@ void main() {
     expect(find.text('session-408.md'), findsNothing);
 
     await tester.tap(
-      find.byKey(const ValueKey<String>('memory-files-filter-session')),
+      find.byKey(const ValueKey<String>('memory-files-filter-chat')),
     );
     await tester.pumpAndSettle();
     expect(find.text('session-408.md'), findsOneWidget);
@@ -201,7 +201,7 @@ void main() {
     );
 
     await tester.tap(
-      find.byKey(const ValueKey<String>('memory-files-filter-session')),
+      find.byKey(const ValueKey<String>('memory-files-filter-chat')),
     );
     await tester.pumpAndSettle();
 

@@ -1,10 +1,29 @@
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:ovid_ai/core/session_artifacts.dart';
 import 'package:ovid_ai/ui/design/o_components.dart';
 import 'package:ovid_ai/ui/design/o_theme.dart';
 import 'package:ovid_ai/ui/design/o_tokens.dart';
 import 'package:ovid_ai/ui/v2/chat/transcript_tiles.dart';
 import 'package:ovid_ai/ui/v2/library/artifact_detail_page.dart';
+
+/// A real 1×1 PNG, so the thumbnail test decodes instead of hitting the
+/// network.
+final Uint8List _pngBytes = Uint8List.fromList(const <int>[
+  0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
+  0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, //
+  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, //
+  0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, //
+  0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, //
+  0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, //
+  0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, //
+  0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, //
+  0x42, 0x60, 0x82,
+]);
 
 Widget _app(Widget child, {bool dark = false, double textScale = 1}) =>
     MaterialApp(
@@ -24,6 +43,8 @@ Widget _app(Widget child, {bool dark = false, double textScale = 1}) =>
     );
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   group('tool state', () {
     test('maps the durable toolState tokens', () {
       expect(v2ToolStateOf('running'), V2ToolState.running);
@@ -186,43 +207,148 @@ void main() {
       expect(tester.widget<OPill>(find.byType(OPill)).tone, OPillTone.danger);
     });
 
-    testWidgets('tapping the card opens it; download appears only when wired', (
+    testWidgets(
+      'tapping the card opens it; the menu owns Preview and Download',
+      (tester) async {
+        var opens = 0;
+        var downloads = 0;
+        await tester.pumpWidget(
+          _app(
+            V2ArtifactTile(
+              fileName: 'portfolio.html',
+              meta: '14 KB',
+              statusLabel: 'Ready',
+              previewLabel: 'Preview',
+              onOpen: () => opens++,
+              onDownload: () => downloads++,
+            ),
+          ),
+        );
+
+        await tester.tap(find.text('portfolio.html'));
+        expect(opens, 1);
+
+        // The row has one menu, not a second icon per action.
+        await tester.tap(find.bySemanticsLabel('Actions for portfolio.html'));
+        await tester.pumpAndSettle();
+        expect(find.text('Preview'), findsOneWidget);
+        expect(find.text('Download'), findsOneWidget);
+        expect(find.text('Copy'), findsNothing);
+
+        await tester.tap(find.text('Download'));
+        await tester.pumpAndSettle();
+        expect(downloads, 1);
+        // The menu action is its own control: the row must not also open.
+        expect(opens, 1);
+
+        await tester.pumpWidget(
+          _app(
+            V2ArtifactTile(
+              fileName: 'portfolio.html',
+              meta: '14 KB',
+              statusLabel: 'Ready',
+              previewLabel: 'Preview',
+              onOpen: () {},
+            ),
+          ),
+        );
+        expect(
+          find.bySemanticsLabel('Actions for portfolio.html'),
+          findsNothing,
+          reason: 'no action is wired, so the row offers no menu',
+        );
+      },
+    );
+
+    testWidgets('the menu Preview opens the detail route', (tester) async {
+      await tester.pumpWidget(
+        _app(
+          Builder(
+            builder: (context) => V2ArtifactTile(
+              fileName: 'portfolio.html',
+              meta: '14 KB',
+              statusLabel: 'Ready',
+              previewLabel: 'Preview',
+              onOpen: () => openV2ArtifactDetail(
+                context,
+                fileName: 'portfolio.html',
+                meta: '14 KB',
+                statusLabel: 'Ready',
+                previewLabel: 'Preview',
+              ),
+              onCopy: () {},
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.bySemanticsLabel('Actions for portfolio.html'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Preview'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(find.byType(ArtifactDetailPage), findsOneWidget);
+    });
+
+    testWidgets('Copy runs its real handler; the link label is honest', (
       tester,
     ) async {
-      var opens = 0;
-      var downloads = 0;
-      await tester.pumpWidget(
+      var copies = 0;
+      Future<void> pump({required bool copyText}) => tester.pumpWidget(
         _app(
           V2ArtifactTile(
-            fileName: 'portfolio.html',
-            meta: '14 KB',
+            fileName: 'diagram.png',
+            meta: 'Image',
             statusLabel: 'Ready',
             previewLabel: 'Preview',
-            onOpen: () => opens++,
-            onDownload: () => downloads++,
-          ),
-        ),
-      );
-
-      await tester.tap(find.text('portfolio.html'));
-      expect(opens, 1);
-      await tester.tap(find.bySemanticsLabel('Download portfolio.html'));
-      expect(downloads, 1);
-      // The download icon is its own control: the row must not also open.
-      expect(opens, 1);
-
-      await tester.pumpWidget(
-        _app(
-          V2ArtifactTile(
-            fileName: 'portfolio.html',
-            meta: '14 KB',
-            statusLabel: 'Ready',
-            previewLabel: 'Preview',
+            copyText: copyText,
             onOpen: () {},
+            onCopy: () => copies++,
           ),
         ),
       );
-      expect(find.bySemanticsLabel('Download portfolio.html'), findsNothing);
+
+      await pump(copyText: true);
+      await tester.tap(find.bySemanticsLabel('Actions for diagram.png'));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy'), findsOneWidget);
+      await tester.tap(find.text('Copy'));
+      await tester.pumpAndSettle();
+      expect(copies, 1);
+
+      // An image has no text to copy, so the menu says what it really does.
+      await pump(copyText: false);
+      await tester.tap(find.bySemanticsLabel('Actions for diagram.png'));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy link'), findsOneWidget);
+    });
+
+    testWidgets('a real thumbnail replaces the glyph, a missing one keeps it', (
+      tester,
+    ) async {
+      Widget tile({ImageProvider? thumbnail}) => _app(
+        V2ArtifactTile(
+          fileName: 'diagram.png',
+          meta: 'Image',
+          statusLabel: 'Ready',
+          previewLabel: 'Preview',
+          icon: Icons.image_outlined,
+          thumbnail: thumbnail,
+          onOpen: () {},
+        ),
+      );
+
+      await tester.pumpWidget(tile(thumbnail: MemoryImage(_pngBytes)));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byType(Image), findsOneWidget);
+      expect(find.byIcon(Icons.image_outlined), findsNothing);
+
+      await tester.pumpWidget(tile());
+      await tester.pump();
+      expect(find.byType(Image), findsNothing);
+      expect(find.byIcon(Icons.image_outlined), findsOneWidget);
     });
 
     testWidgets('the default detail route opens with the real file name', (
@@ -255,6 +381,126 @@ void main() {
       await tester.tap(find.text('Details'));
       await tester.pump();
       expect(find.text('Interactive canvas'), findsWidgets);
+    });
+
+    testWidgets('the detail route carries the real size and text', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _app(
+          Builder(
+            builder: (context) => OButton(
+              label: 'Open artifact',
+              onPressed: () => openV2ArtifactDetail(
+                context,
+                fileName: 'notes.md',
+                meta: 'Generated',
+                statusLabel: 'Ready',
+                previewLabel: 'Markdown',
+                kind: ArtifactKind.document,
+                sizeBytes: 14540,
+                content: '# Real heading',
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open artifact'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(find.byType(ArtifactDetailPage), findsOneWidget);
+      // The document preview shows the file's real text, and the metadata
+      // reports the size the host passed.
+      expect(
+        find.textContaining('Real heading', findRichText: true),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Details'));
+      await tester.pump();
+      expect(find.text('14.2 KB'), findsWidgets);
+    });
+  });
+
+  group('artifact copy', () {
+    String? copied;
+
+    setUp(() {
+      copied = null;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.setData') {
+              copied = (call.arguments as Map)['text'] as String?;
+            }
+            return null;
+          });
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null);
+    });
+
+    test('copies the inline text without a fetch', () async {
+      final result = await v2CopyArtifactContent(
+        fileName: 'preview.html',
+        content: '<h1>Real page</h1>',
+        url: 'https://files.example.com/preview.html',
+        kind: ArtifactKind.html,
+        client: MockClient((_) async => throw StateError('no fetch expected')),
+      );
+
+      expect(result, V2ArtifactCopyResult.text);
+      expect(copied, '<h1>Real page</h1>');
+    });
+
+    test('fetches the file head when only a URL is known', () async {
+      final result = await v2CopyArtifactContent(
+        fileName: 'main.dart',
+        url: 'https://files.example.com/main.dart',
+        kind: ArtifactKind.code,
+        client: MockClient(
+          (request) async => http.Response('void main() {}', 200),
+        ),
+      );
+
+      expect(result, V2ArtifactCopyResult.text);
+      expect(copied, 'void main() {}');
+    });
+
+    test('copies the link for an image', () async {
+      final result = await v2CopyArtifactContent(
+        fileName: 'diagram.png',
+        url: 'https://files.example.com/diagram.png',
+        kind: ArtifactKind.image,
+        client: MockClient((_) async => throw StateError('no fetch expected')),
+      );
+
+      expect(result, V2ArtifactCopyResult.link);
+      expect(copied, 'https://files.example.com/diagram.png');
+    });
+
+    test('a failed fetch still copies the link', () async {
+      final result = await v2CopyArtifactContent(
+        fileName: 'main.dart',
+        url: 'https://files.example.com/main.dart',
+        kind: ArtifactKind.code,
+        client: MockClient((_) async => http.Response('nope', 500)),
+      );
+
+      expect(result, V2ArtifactCopyResult.link);
+      expect(copied, 'https://files.example.com/main.dart');
+    });
+
+    test('nothing to copy is reported, never faked', () async {
+      final result = await v2CopyArtifactContent(
+        fileName: 'diagram.png',
+        kind: ArtifactKind.image,
+      );
+
+      expect(result, V2ArtifactCopyResult.failed);
+      expect(copied, isNull);
     });
   });
 

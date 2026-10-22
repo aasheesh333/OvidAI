@@ -180,7 +180,10 @@ void main() {
     // Countdown derived from the server's resets_at.
     expect(find.textContaining('Resets in 6 h'), findsOneWidget);
     // One chart with one range switch.
-    expect(find.text('Activity'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('usage-daily-tokens-chart')),
+      findsOneWidget,
+    );
     expect(find.text('7 days'), findsOneWidget);
     expect(find.text('30 days'), findsOneWidget);
     // The multi-card dashboard is gone.

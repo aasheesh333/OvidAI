@@ -278,14 +278,25 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
     final kind = V2ConnectorPermissionKind.values
         .where((item) => item.name == permissionId)
         .firstOrNull;
-    if (kind == null) return;
+    if (kind == null) {
+      // No persisted grant can carry an unknown id: put the switch back rather
+      // than showing a change that was never saved.
+      if (mounted) {
+        setState(() {
+          _granted[permissionId] = !value;
+          _actionError = 'Could not save that permission.';
+        });
+      }
+      return;
+    }
     try {
       await _store.setPermission(widget.data.id, kind, value);
     } catch (_) {
       if (!mounted) return;
-      setState(
-        () => _actionError = 'Could not save that permission.',
-      );
+      setState(() {
+        _granted[permissionId] = !value;
+        _actionError = 'Could not save that permission.';
+      });
     }
   }
 
@@ -632,11 +643,14 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
               onPressed: widget.onBack,
             ),
       actions: [
-        OIconButton(
-          icon: Icons.more_vert_rounded,
-          semanticLabel: 'Connector menu',
-          onPressed: _openMenu,
-        ),
+        // The menu only leads to the permissions review, so it is absent when
+        // there is nothing to review (a connector that was never set up).
+        if (widget.onMenu != null || widget.data.permissions.isNotEmpty)
+          OIconButton(
+            icon: Icons.more_vert_rounded,
+            semanticLabel: 'Connector menu',
+            onPressed: _openMenu,
+          ),
       ],
       child: OFadeSlide(child: _body(context)),
     );

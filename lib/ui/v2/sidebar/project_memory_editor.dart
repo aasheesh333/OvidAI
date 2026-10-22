@@ -429,7 +429,7 @@ class _SizeNote extends StatelessWidget {
         Semantics(
           label: 'File size ${_formatSize(used)} of ${_formatSize(max)}',
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(2),
+            borderRadius: BorderRadius.circular(ORadius.xs),
             child: LinearProgressIndicator(
               value: fraction,
               minHeight: 4,

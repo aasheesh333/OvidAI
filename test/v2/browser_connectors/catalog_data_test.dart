@@ -314,7 +314,7 @@ void main() {
         containsAll(<String>['stripe', 'paypal', 'square']),
       );
       expect(
-        searchV2Catalog('mcp server').map((entry) => entry.id),
+        searchV2Catalog('add-on').map((entry) => entry.id),
         contains('context7'),
       );
     });
@@ -381,10 +381,10 @@ void main() {
     test('kinds expose labels and catalog section titles', () {
       expect(V2CatalogKind.connector.label, 'Connector');
       expect(V2CatalogKind.plugin.label, 'Plugin');
-      expect(V2CatalogKind.mcp.label, 'MCP server');
+      expect(V2CatalogKind.mcp.label, 'Add-on');
       expect(V2CatalogKind.connector.sectionTitle, 'Connectors');
-      expect(V2CatalogKind.plugin.sectionTitle, 'Plugins & MCP');
-      expect(V2CatalogKind.mcp.sectionTitle, 'Plugins & MCP');
+      expect(V2CatalogKind.plugin.sectionTitle, 'Plugins & add-ons');
+      expect(V2CatalogKind.mcp.sectionTitle, 'Plugins & add-ons');
     });
 
     test('auth labels and secret requirements are complete', () {
@@ -418,11 +418,11 @@ void main() {
 
       final superpowers = v2CatalogEntryById('superpowers')!;
       expect(superpowers.isPlugin, isTrue);
-      expect(superpowers.sectionTitle, 'Plugins & MCP');
+      expect(superpowers.sectionTitle, 'Plugins & add-ons');
 
       final postgres = v2CatalogEntryById('postgres')!;
       expect(postgres.isMcp, isTrue);
-      expect(postgres.sectionTitle, 'Plugins & MCP');
+      expect(postgres.sectionTitle, 'Plugins & add-ons');
     });
   });
 }

@@ -443,6 +443,9 @@ class OListRow extends StatelessWidget {
         child: Semantics(
           label: subtitle == null ? title : '$title, $subtitle',
           button: true,
+          // Without this the row announced a tap but no state, so TalkBack
+          // read "Clear cache, button" with no way to know it can act.
+          enabled: true,
           child: labelledRow,
         ),
       ),
