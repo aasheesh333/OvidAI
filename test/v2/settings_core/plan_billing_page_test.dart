@@ -208,10 +208,9 @@ void main() {
     expect(find.text('PLAN LIMITS'), findsOneWidget);
     for (final text in [
       'Storage',
-      'Files / day',
       'Files / project',
       'Model access',
-      'Auto multiplier',
+      'Allowance multiplier',
       'Custom connectors',
       'Token caps',
       'Price',
@@ -220,10 +219,8 @@ void main() {
     }
     expect(_inTable('3 GB'), findsOneWidget);
     expect(_inTable('75 GB'), findsOneWidget);
-    expect(_inTable('50 / day'), findsOneWidget);
-    expect(_inTable('640 / day'), findsNWidgets(3));
-    expect(_inTable('1.5×'), findsOneWidget);
-    expect(_inTable('75M / 24 h'), findsOneWidget);
+    expect(_inTable('3×'), findsOneWidget);
+    expect(_inTable('No token cap'), findsNWidgets(3));
   });
 
   testWidgets('the current plan is marked and its CTA is disabled', (
@@ -708,7 +705,7 @@ void main() {
     expect(find.byType(OButton), findsNWidgets(4));
     // The detail lives in the compare table.
     expect(find.text('Storage'), findsOneWidget);
-    expect(find.text('Files / day'), findsOneWidget);
+    expect(find.text('Files / project'), findsOneWidget);
     expect(find.text('Token caps'), findsOneWidget);
 
     final free = tester.getSize(find.byKey(const ValueKey('plan-card-free')));

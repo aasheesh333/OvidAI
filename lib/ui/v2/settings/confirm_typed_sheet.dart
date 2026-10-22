@@ -25,6 +25,7 @@ class V2ConfirmTypedSheetData {
       'Global, project and per-chat memory',
       'Connectors and saved cloud keys',
       'Drafts, scheduled runs and shared links',
+      'This device\'s saved copy',
     ],
     this.playNote =
         'Your Google Play subscription is not cancelled automatically. '

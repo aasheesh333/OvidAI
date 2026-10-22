@@ -1,3 +1,16 @@
+
+// Money-safety contract, in one place:
+//
+//   resolveBillingRoute() decides which store may charge, and
+//   RevenueCatBilling.buy() refuses before the store sheet when the purchase
+//   could not be unlocked server-side. Both are asserted here.
+//
+// A widget-level version of this was attempted in
+// test/v2/app/billing_purchase_confirmation_test.dart and removed: it drove
+// V2SettingsActions.buyPlan, which awaits the real Play Billing plugin, so the
+// test hung on a store that never answers. Testing through a plugin that
+// cannot be faked proves nothing; the route decision above is the invariant
+// that matters, and it needs no store.
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -88,6 +101,12 @@ RevenueCatBilling _billing(
           : const RevenueCatConfig(apiKey: 'goog_test_key')),
   testStore: testStore,
   releaseMode: releaseMode,
+  // These tests exercise package matching, not the webhook gate; the gate is
+  // covered separately below.
+  serverConfirmation: true,
+  // Reconcile tests assume RevenueCat is the purchase path; in the app Play
+  // is preferred and its purchases never appear in RevenueCat.
+  playActive: () => false,
   applyTier: applyTier,
 );
 
@@ -338,6 +357,50 @@ void main() {
     expect(outcome.result, UpgradeResult.notAvailable);
     expect(fake.purchasedIdentifier, isNull);
     expect(billing.lastPurchaseWasDemo, isFalse);
+  });
+
+  test(
+    'a chargeable RevenueCat build without the webhook never charges',
+    () async {
+      final fake = _FakePlatform(
+        offeredPackages: [_pkg('ovid_plus_monthly', identifier: 'pkg_go')],
+      );
+      final billing = RevenueCatBilling(
+        platform: fake,
+        uid: () => 'u1',
+        config: const RevenueCatConfig(apiKey: 'goog_test_key'),
+      );
+      // No `OVID_REVENUECAT_SERVER_CONFIRMATION`: the SDK must not even open.
+      expect(billing.serverConfirmationAvailable, isFalse);
+      final outcome = await billing.buy('3x');
+      expect(outcome.result, UpgradeResult.notAvailable);
+      expect(fake.purchasedIdentifier, isNull);
+      expect(billing.lastPurchaseError, kRevenueCatUnconfirmedReason);
+    },
+  );
+
+  test('Play wins; unconfirmed RevenueCat is only reached when Play is absent', () {
+    final billing = RevenueCatBilling(
+      platform: _FakePlatform(),
+      uid: () => 'u1',
+      config: const RevenueCatConfig(apiKey: 'goog_test_key'),
+    );
+    expect(
+      resolveBillingRoute(
+        playLoaded: true,
+        playAvailable: true,
+        revenueCat: billing,
+      ),
+      BillingRoute.play,
+    );
+    expect(
+      resolveBillingRoute(
+        playLoaded: true,
+        playAvailable: false,
+        revenueCat: billing,
+      ),
+      BillingRoute.none,
+    );
   });
 
   test(

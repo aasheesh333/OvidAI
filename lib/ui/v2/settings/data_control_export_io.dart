@@ -70,6 +70,11 @@ class _IoDataControlService implements V2DataControlService {
           plan.limitHit ?? 'There is nothing to export yet.',
         );
       }
+      // Everything the archive does not carry: chats the picker left out plus
+      // chats a limit stopped. Reporting both keeps a narrowed selection from
+      // looking like a complete account export.
+      final leftOut =
+          plan.skipped.length + (snapshot.sessions.length - chosen.length);
       onProgress?.call(const V2TransferProgress(label: 'Packing backup…'));
       final bytes = await SettingsBackupService().export(plan.included);
       final messages = plan.included.fold<int>(
@@ -90,7 +95,7 @@ class _IoDataControlService implements V2DataControlService {
           chats: plan.included.length,
           messages: messages,
           bytes: bytes.length,
-          skippedChats: plan.skipped.length,
+          skippedChats: leftOut,
           limitHit: plan.limitHit,
         );
       } on MissingPluginException {
@@ -113,7 +118,7 @@ class _IoDataControlService implements V2DataControlService {
         chats: plan.included.length,
         messages: messages,
         bytes: bytes.length,
-        skippedChats: plan.skipped.length,
+        skippedChats: leftOut,
         limitHit: plan.limitHit,
       );
     } on CloudBackupCancelled {

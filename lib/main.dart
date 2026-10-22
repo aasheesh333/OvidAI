@@ -178,7 +178,17 @@ void _reportBootError(Object error, StackTrace stack) {
 Future<void> _boot() async {
   // Crashlytics first: Firebase.initializeApp, the persisted consent flag and
   // the error handlers. Collection stays off until the user opts in.
-  await FirebaseService.I.initializeCrashReporting();
+  //
+  // Nothing is painted until the awaits below finish, so neither may hold the
+  // first frame forever: a wedged platform channel would otherwise leave the
+  // native splash with no UI, no watchdog and no way out. A timeout does not
+  // cancel the work — the cached futures keep running and AppState notifies
+  // when they land.
+  await _bounded(
+    'boot.crash_reporting',
+    FirebaseService.I.initializeCrashReporting,
+    const Duration(seconds: 5),
+  );
   installReleaseErrorWidget();
   // M7: no-op unless built with OVID_CERT_PINNING=true AND pins configured.
   installOvidCertificatePinning();
@@ -193,7 +203,11 @@ Future<void> _boot() async {
   SessionHistoryRepository.I.enableSqlite();
   // Unsaved Studio drafts survive process death (app-private directory).
   StudioDraftStore.I.enable();
-  await AppState.I.initializeForFirstFrame();
+  await _bounded(
+    'boot.first_frame',
+    AppState.I.initializeForFirstFrame,
+    const Duration(seconds: 15),
+  );
   // W1: install the ProjectsPort before any chat surface can read it. The
   // controller is the sidebar's source of truth and the adapter makes the
   // composer `@project:` rows / turn refs live (the gateway now validates
@@ -221,6 +235,21 @@ Future<void> _boot() async {
 }
 
 Future<void> _startReadiness() => AppState.I.initializeReadiness();
+
+/// Awaits [work] for at most [limit]. Startup work is never cancelled by a
+/// timeout: it keeps running and its own state notifies when it lands, so a
+/// slow device is merely not *held* at the native splash.
+Future<void> _bounded(
+  String label,
+  Future<void> Function() work,
+  Duration limit,
+) async {
+  try {
+    await work().timeout(limit);
+  } catch (e) {
+    Diag.swallow(label, e);
+  }
+}
 
 class OvidApp extends StatefulWidget {
   const OvidApp({super.key});
@@ -297,7 +326,10 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     // (state.deleteSession also fires the server-side DELETE).
     AppState.I.onSessionDeleted = CloudAgentFacade.I.dropSession;
     unawaited(PushService.I.bindAccount(uid));
-    unawaited(PlayBillingService.I.ensureLoaded());
+    // Billing connects lazily: the paywall and the plan screen load the store
+    // when they open. Connecting on every sign-in spent a store handshake on
+    // people who never buy, and left a pending deadline in tests that only
+    // care about the mint.
     await CloudSessionStore.I.ready;
     try {
       await WsMultiplexer.I.connectIfNeeded();
@@ -548,31 +580,55 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
                 };
                 if (tier == null) return false;
                 final rc = RevenueCatBilling.I;
-                final outcome = rc.available
-                    ? await rc.buy(tier, period: period)
-                    : await PlayBillingService.I.buy(tier, period: period);
+                final play = PlayBillingService.I;
+                // Make Play answer before choosing a path: Play is the
+                // preferred, server-verified flow. RevenueCat is only the
+                // fallback when Play is unavailable, and only when the server
+                // can confirm its charge.
+                await play.ensureLoaded();
+                final route = resolveBillingRoute(
+                  playLoaded: play.loaded,
+                  playAvailable: play.available,
+                  revenueCat: rc,
+                );
+                if (route == BillingRoute.none) return false;
+                final outcome = route == BillingRoute.play
+                    ? await play.buy(tier, period: period)
+                    : await rc.buy(tier, period: period);
                 if (outcome.ok) {
                   // Unlock only on the server's answer (or the debug/profile
                   // Test Store demo), never on the client outcome alone.
                   await applyPurchasedPlan(
                     outcome.tier ?? tier,
-                    demo: rc.available && rc.lastPurchaseWasDemo,
+                    demo:
+                        route != BillingRoute.play && rc.lastPurchaseWasDemo,
                   );
                 }
                 return outcome.ok;
               },
               restorePurchases: () async {
                 final rc = RevenueCatBilling.I;
-                final outcome = rc.available
-                    ? await rc.restore()
-                    : await PlayBillingService.I.restore();
+                final play = PlayBillingService.I;
+                await play.ensureLoaded();
+                final route = resolveBillingRoute(
+                  playLoaded: play.loaded,
+                  playAvailable: play.available,
+                  revenueCat: rc,
+                );
+                // No route can confirm a plan: do not claim a restore.
+                if (route == BillingRoute.none) {
+                  return V2PaywallRestoreResult.failed;
+                }
+                final outcome = route == BillingRoute.play
+                    ? await play.restore()
+                    : await rc.restore();
                 if (outcome.result == UpgradeResult.nothingToRestore) {
                   return V2PaywallRestoreResult.nothingToRestore;
                 }
                 if (!outcome.ok) return V2PaywallRestoreResult.failed;
                 final tier = outcome.tier;
                 if (tier == null) return V2PaywallRestoreResult.failed;
-                if (!rc.available) {
+                if (route == BillingRoute.play) {
                   // The Play flow is already the server's verdict.
                   AppState.I.setOvidCloudTier(tier);
                   return V2PaywallRestoreResult.restored;

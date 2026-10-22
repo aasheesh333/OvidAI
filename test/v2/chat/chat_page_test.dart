@@ -247,7 +247,7 @@ void main() {
 
     expect(find.text('Daily limit reached'), findsOneWidget);
     expect(
-      find.text("You've used all 50M free tokens for today. Resets in 6h 12m."),
+      find.text("You've reached your plan's daily limit."),
       findsOneWidget,
     );
     await tester.tap(find.text('See plans'));

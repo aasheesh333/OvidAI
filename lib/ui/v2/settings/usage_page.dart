@@ -114,19 +114,26 @@ class V2UsageData {
       dailyUsedLabel.trim().isEmpty ? unknownLabel : dailyUsedLabel;
 
   /// The exact 24 h cap from the authoritative plan table when the caller did
-  /// not supply one. Compact, because it sits next to the hero number.
-  String get limitText => dailyLimitLabel.trim().isEmpty
-      ? _compactCap(planLimits.dailyTokenCap)
-      : dailyLimitLabel;
+  /// not supply one. Empty when the plan has no token cap (paid plans are not
+  /// token-capped), so the page never paints a cap that is not enforced.
+  String get limitText {
+    final supplied = dailyLimitLabel.trim();
+    if (supplied.isNotEmpty) return supplied;
+    final cap = planLimits.dailyTokenCap;
+    return cap <= 0 ? '' : _compactCap(cap);
+  }
 
   String get monthlyUsedText =>
       monthlyUsedLabel.trim().isEmpty ? unknownLabel : monthlyUsedLabel;
 
   /// The exact 30 day cap, compact. A caller-supplied label wins; otherwise the
-  /// plan table is the only source of truth.
-  String get monthlyLimitText => monthlyLimitLabel.trim().isEmpty
-      ? _compactCap(planLimits.monthlyTokenCap)
-      : monthlyLimitLabel;
+  /// plan table is the only source of truth. Empty for a plan with no cap.
+  String get monthlyLimitText {
+    final supplied = monthlyLimitLabel.trim();
+    if (supplied.isNotEmpty) return supplied;
+    final cap = planLimits.monthlyTokenCap;
+    return cap <= 0 ? '' : _compactCap(cap);
+  }
 
   /// The account's request and image counters for today, straight from
   /// `/usage`'s `today` object (`requests`, `images`). Empty when the server
@@ -293,9 +300,13 @@ class _UsageHero extends StatelessWidget {
         const SizedBox(height: OSpace.xs),
         Semantics(
           label: hasDaily
-              ? '${data.usedText} of $limit tokens used today'
-              : 'Today\'s token usage is not available. '
-                    'The limit is $limit tokens.',
+              ? (limit.isEmpty
+                    ? '${data.usedText} tokens used today'
+                    : '${data.usedText} of $limit tokens used today')
+              : (limit.isEmpty
+                    ? 'Today\'s token usage is not available.'
+                    : 'Today\'s token usage is not available. '
+                          'The limit is $limit tokens.'),
           child: ExcludeSemantics(
             child: Text(
               data.usedText,
@@ -306,7 +317,7 @@ class _UsageHero extends StatelessWidget {
           ),
         ),
         Text(
-          'of $limit tokens',
+          limit.isEmpty ? 'tokens used today' : 'of $limit tokens',
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: OType.bodySm.copyWith(color: c.textMuted),
@@ -329,12 +340,18 @@ class _UsageHero extends StatelessWidget {
         // It stays a caption under the one hero instead of a second card.
         Semantics(
           label: data.monthlyUsedLabel.trim().isEmpty
-              ? 'This month\'s token usage is not available. '
-                    'The limit is $monthlyLimit tokens.'
-              : '$monthlyUsed of $monthlyLimit tokens used this month',
+              ? (monthlyLimit.isEmpty
+                    ? 'This month\'s token usage is not available.'
+                    : 'This month\'s token usage is not available. '
+                          'The limit is $monthlyLimit tokens.')
+              : (monthlyLimit.isEmpty
+                    ? '$monthlyUsed tokens used this month'
+                    : '$monthlyUsed of $monthlyLimit tokens used this month'),
           child: ExcludeSemantics(
             child: Text(
-              'This month: $monthlyUsed of $monthlyLimit',
+              monthlyLimit.isEmpty
+                  ? 'This month: $monthlyUsed'
+                  : 'This month: $monthlyUsed of $monthlyLimit',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: OType.caption.copyWith(color: c.textMuted),

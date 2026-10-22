@@ -15,12 +15,13 @@ enum V2Currency { usd, inr }
 
 enum V2BillingPeriod { monthly, yearly }
 
-/// The authoritative plan table from the product spec (§11). Every limit is
-/// per user: storage, file intake, project size, model access and the token
-/// allowance multiplier over Free.
+/// The authoritative plan table. Every limit is per user: storage, project
+/// size, model access and the custom-connector slots.
 ///
-/// Paid token caps are Free × the plan's auto multiplier:
-/// Go 1.5×, Plus 5×, Pro 20× (50M / 24 h and 1.5B / 30 d on Free).
+/// The token ceilings are Free-only: 50M / 24 h and 1.5B / 30 d, enforced by
+/// `server/mint/ovid_plans.py`. Paid plans are never token-capped (their
+/// allowance is the Free USD allowance × the server's plan multiplier), so
+/// their caps are 0 here and the UI states "No token cap".
 @immutable
 class V2PlanLimits {
   const V2PlanLimits({
@@ -74,10 +75,10 @@ class V2PlanLimits {
     fileWindowLabel: '3 h',
     filesPerProject: 100,
     manualModels: false,
-    autoMultiplier: 1.5,
+    autoMultiplier: 3,
     customConnectors: 5,
-    dailyTokenCap: 75000000,
-    monthlyTokenCap: 2250000000,
+    dailyTokenCap: 0,
+    monthlyTokenCap: 0,
   );
 
   static const plus = V2PlanLimits(
@@ -88,10 +89,10 @@ class V2PlanLimits {
     fileWindowLabel: '3 h',
     filesPerProject: 150,
     manualModels: true,
-    autoMultiplier: 5,
+    autoMultiplier: 23,
     customConnectors: 20,
-    dailyTokenCap: 250000000,
-    monthlyTokenCap: 7500000000,
+    dailyTokenCap: 0,
+    monthlyTokenCap: 0,
   );
 
   static const pro = V2PlanLimits(
@@ -102,10 +103,10 @@ class V2PlanLimits {
     fileWindowLabel: '3 h',
     filesPerProject: 250,
     manualModels: true,
-    autoMultiplier: 20,
+    autoMultiplier: 43,
     customConnectors: 20,
-    dailyTokenCap: 1000000000,
-    monthlyTokenCap: 30000000000,
+    dailyTokenCap: 0,
+    monthlyTokenCap: 0,
   );
 
   /// Table order: Free, Go, Plus, Pro.
@@ -161,22 +162,27 @@ class V2PlanLimits {
   String get modelAccessLabel =>
       manualModels ? 'Auto + manual models' : 'Auto only';
 
-  String get autoMultiplierLabel => '${formatMultiplier(autoMultiplier)}× auto';
+  String get autoMultiplierLabel => '${formatMultiplier(autoMultiplier)}×';
 
   String get autoAllowanceLabel =>
-      '${formatMultiplier(autoMultiplier)}× Free auto allowance';
+      '${formatMultiplier(autoMultiplier)}× Free allowance';
 
   String get customConnectorsLabel => customConnectors == 0
       ? 'No custom connectors'
       : '$customConnectors custom connectors';
 
-  String get dailyCapLabel => _groupDigits(dailyTokenCap);
+  String get dailyCapLabel =>
+      dailyTokenCap <= 0 ? 'No token cap' : _groupDigits(dailyTokenCap);
 
-  String get monthlyCapLabel => _groupDigits(monthlyTokenCap);
+  String get monthlyCapLabel =>
+      monthlyTokenCap <= 0 ? 'No token cap' : _groupDigits(monthlyTokenCap);
 
-  String get dailyCapDescription => '$dailyCapLabel tokens / 24 h';
+  String get dailyCapDescription =>
+      dailyTokenCap <= 0 ? 'No token cap' : '$dailyCapLabel tokens / 24 h';
 
-  String get monthlyCapDescription => '$monthlyCapLabel tokens / 30 days';
+  String get monthlyCapDescription => monthlyTokenCap <= 0
+      ? 'No token cap'
+      : '$monthlyCapLabel tokens / 30 days';
 }
 
 /// `1` → `1`, `1.5` → `1.5`, `20` → `20`.
@@ -535,6 +541,7 @@ class V2PlanBillingData {
     this.onRestorePurchases,
     this.onHistoryTap,
     this.onRetry,
+    this.checkoutBlockedReason,
     this.errorMessage =
         'We could not load plans. Check your connection and try again.',
   });
@@ -562,6 +569,12 @@ class V2PlanBillingData {
   final VoidCallback? onRestorePurchases;
   final ValueChanged<V2BillingHistoryEntry>? onHistoryTap;
   final VoidCallback? onRetry;
+
+  /// A build-level reason every paid plan cannot be bought right now, even
+  /// when the card has a product and a price (a RevenueCat build with no
+  /// server confirmation route). Null means checkout is not globally blocked.
+  final String? checkoutBlockedReason;
+
   final String errorMessage;
 }
 
@@ -694,6 +707,7 @@ class PlanBillingPage extends StatelessWidget {
                         period: data.period,
                         current: _isCurrent(plan),
                         onPurchase: data.onPurchase,
+                        checkoutBlockedReason: data.checkoutBlockedReason,
                       ),
                     ),
                 ],
@@ -872,6 +886,7 @@ class _PlanCard extends StatelessWidget {
     required this.period,
     required this.current,
     required this.onPurchase,
+    this.checkoutBlockedReason,
   });
 
   final V2Plan plan;
@@ -879,6 +894,9 @@ class _PlanCard extends StatelessWidget {
   final V2BillingPeriod period;
   final bool current;
   final ValueChanged<V2PlanPurchase>? onPurchase;
+
+  /// Set when no paid plan can be bought at all in this build.
+  final String? checkoutBlockedReason;
 
   @override
   Widget build(BuildContext context) {
@@ -899,10 +917,17 @@ class _PlanCard extends StatelessWidget {
     // base plan has not been created in Play Console yet).
     final storeMissing =
         !current && !free && !missingProduct && plan.storeAvailableFor(period) == false;
-    final unavailable = missingProduct || missingPrice || storeMissing;
+    // No purchase path in this build can both take money and unlock the plan
+    // (e.g. RevenueCat with no server confirmation route).
+    final checkoutBlocked =
+        !current && !free && checkoutBlockedReason != null;
+    final unavailable =
+        checkoutBlocked || missingProduct || missingPrice || storeMissing;
     final canBuy = !current && onPurchase != null && !unavailable;
     final periodWord = period == V2BillingPeriod.yearly ? 'yearly' : 'monthly';
-    final reason = missingProduct
+    final reason = checkoutBlocked
+        ? checkoutBlockedReason
+        : missingProduct
         ? '${plan.name} is not sold with $periodWord billing right now.'
         : missingPrice
         ? 'No $periodWord price for ${plan.name}.'

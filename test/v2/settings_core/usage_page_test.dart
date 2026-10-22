@@ -443,21 +443,30 @@ void main() {
     expect(find.text('Usage'), findsOneWidget);
   });
 
-  testWidgets('the caps follow the authoritative plan table', (tester) async {
+  testWidgets('only Free carries a token cap', (tester) async {
     _phoneSize(tester);
-    const caps = <String, String>{
-      'free': '50M',
-      'go': '75M',
-      'plus': '250M',
-      'pro': '1B',
-    };
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2UsageData(
+          planId: 'free',
+          dailyUsedLabel: '12.4M',
+          dailyFraction: 0.1,
+          days: _days,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('of 50M tokens'), findsOneWidget);
 
-    for (final entry in caps.entries) {
+    // Paid plans are not token-capped (server/mint/ovid_plans.py), so the
+    // hero states the usage without inventing a cap.
+    for (final plan in const ['go', 'plus', 'pro']) {
       await tester.pumpWidget(
         _app(
           OTheme.light(),
           V2UsageData(
-            planId: entry.key,
+            planId: plan,
             dailyUsedLabel: '12.4M',
             dailyFraction: 0.1,
             days: _days,
@@ -465,11 +474,15 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-
       expect(
-        find.text('of ${entry.value} tokens'),
+        find.text('of 50M tokens'),
+        findsNothing,
+        reason: '$plan must not borrow the Free cap',
+      );
+      expect(
+        find.text('tokens used today'),
         findsOneWidget,
-        reason: '${entry.key} cap',
+        reason: '$plan states usage without a cap',
       );
     }
   });

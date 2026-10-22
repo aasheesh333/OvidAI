@@ -164,7 +164,8 @@ The dangerous ones are only:
 | `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (`:18`) | Acceptable-use list only | **Removed**. Kotlin falls back to the battery-optimization settings list. |
 | `FOREGROUND_SERVICE_SPECIAL_USE` and the `specialUse` type (`:13`, `:116`) | Needs Play review. The idle "Ready & Listening" presence isn't an approvable use. | **Removed.** Idle keep-alive is off in the Play build. Agent runs keep `dataSync`. |
 | `AD_ID`, ad-services (from firebase-analytics) | Ad ID declaration | **Removed**, plus `google_analytics_adid_collection_enabled=false`. Declare "No advertising ID". |
-| CAMERA, RECORD_AUDIO, FINE/COARSE location | Browser `getUserMedia` (`agent_service.dart:2851`), voice input, page geolocation | Kept. Each runtime prompt is triggered by the user. |
+| CAMERA, FINE/COARSE location | Browser `getUserMedia` (`agent_service.dart:2851`), page geolocation | **Removed** with the on-device WebView browser (P8 T16); nothing in `lib/` calls the camera or location APIs. |
+| RECORD_AUDIO | Voice input (dictation) | Kept. The prompt fires only when the person taps the mic, and a denial leaves the composer typing normally. |
 | `QUERY_ALL_PACKAGES`, `SYSTEM_ALERT_WINDOW`, `REQUEST_INSTALL_PACKAGES`, `USE_EXACT_ALARM`, `SCHEDULE_EXACT_ALARM`, background location | (not declared) | **Pass** |
 
 The pre-migration agent's `request_permission` tool refused permissions that a Play build did not declare (`Distribution.agentPermissions`). Both the tool and that list were deleted with the on-device agent (P8 T17–T19); `Distribution.declaredPermissions` now mirrors the three-permission manifest.

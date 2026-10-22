@@ -98,6 +98,22 @@ class FirebaseService extends ChangeNotifier {
     currentUid: () => uid,
   );
   AccountDeletion? lastDeletionReceipt;
+
+  /// True when the last accepted deletion request could not erase this
+  /// device's copy. The server request still stands; Data control → Delete
+  /// data is the retry. Never reported as a clean device.
+  bool deletionDeviceEraseFailed = false;
+
+  /// Erases this device's copy of the account (transcripts, search index,
+  /// drafts, cache, secure store and sign-in) once the server has accepted a
+  /// deletion request. Registered by the settings owner, which owns the only
+  /// verified all-store reset; null on hosts without one (tests, desktop).
+  ///
+  /// It runs BEFORE the sign-out so a failed store can still be reported and,
+  /// when the failure precedes the reset's own sign-out store, the person stays
+  /// signed in with Data control available to retry. The reset's account store
+  /// performs the local sign-out when it succeeds.
+  Future<void> Function()? eraseDeviceCopyOnDeletion;
   User? get user => _user;
   String? get email => _user?.email;
   String? get displayName => _user?.displayName;
@@ -543,6 +559,22 @@ class FirebaseService extends ChangeNotifier {
     if (revision != _authRevision) return result;
     if (result.isPending) {
       lastDeletionReceipt = result;
+      // The server copy is scheduled; this device must not keep a readable
+      // transcript, draft or key for an account that asked to be erased.
+      final erase = eraseDeviceCopyOnDeletion;
+      if (erase != null) {
+        deletionDeviceEraseFailed = false;
+        try {
+          await erase();
+        } catch (e) {
+          // The server request stands. Stay signed in (when the failed store
+          // was not the sign-out itself) so Data control can retry the erase;
+          // never report a half-erased device as complete.
+          deletionDeviceEraseFailed = true;
+          Diag.swallow('account.erase_device_copy', e);
+          return result;
+        }
+      }
       // The retained server request is the success criterion; signing out only
       // prevents this device's old session from continuing to use the account.
       try {

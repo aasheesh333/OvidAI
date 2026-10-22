@@ -6,7 +6,8 @@
 - **Prepared / verified:** 2026-10-22 from the shipped code (`lib/ui/v2/**`,
   `lib/core/**`, `android/app/src/main/AndroidManifest.xml`) and
   `docs/audit/FEATURE_GAPS.md`. No build was run.
-- **Status:** READY TO PASTE. Nothing here is submitted automatically.
+- **Status:** COPY READY; **submission blocked** by the Report gap in §6
+  (images, artifacts and v2 Collab). Nothing here is submitted automatically.
 - **Supersedes:** `docs/play/LISTING.md` (an earlier draft that claims features
   the current build does not ship).
 
@@ -78,7 +79,7 @@ BROWSE WITH THE AGENT
 Ovid opens pages in a cloud browser. Watch the page live and take control for clicks and typing when you need to.
 
 GITHUB WORKSPACE
-Connect GitHub, choose a repository and branch, and edit its files in a private cloud workspace.
+Connect GitHub, choose a repository and branch, and have Ovid edit its files in a private cloud workspace.
 
 CONNECT YOUR TOOLS
 Add the connectors you already use. Ovid never installs a connector from a chat message.
@@ -97,24 +98,26 @@ Ovid Si is for adults (18 and over). AI can make mistakes, so check important an
 Not affiliated with Anthropic, [OI] or Google. Model and company names belong to their owners.
 ```
 
-**Count: 2,032 / 4,000 characters** (including line breaks; verified with a
+**Count: 2,043 / 4,000 characters** (including line breaks; verified with a
 character count on the block above).
 
 ### Why the copy is shaped this way
 
 - **Only shipped behaviour is described.** Deliberately absent:
-  - the in-app **Report** action on replies, images and artifacts, and
-    **Report/Block** in Collab. They exist in the legacy v1 chat, share and
-    Collab screens (`lib/ui/chat_screen.dart` → `reportAiMessage`;
-    `lib/ui/collab_session_screen.dart`) but the default **v2** shell
-    (`V2AppShell`, `kOvidUiV1=false`) exposes only Copy, Branch and Regenerate
-    on an answer, and v2 Collab has no Report/Block. Play's Generative-AI and
-    UGC policies require in-app reporting, so this is a **release blocker**
-    (`RELEASE-CHECKLIST.md` §0), not a listing choice. Re-add the Report line to
-    the full description only after the v2 action ships;
+  - **Report/Block in Collab**, and **Report** on generated images and
+    artifacts. The v2 answer menu now has **Report**
+    (`lib/ui/v2/chat/live_chat_page.dart` → `_reportMessage`;
+    `V2AppShell.onReportMessage`), so the full description may say replies can
+    be reported. v2 Collab still has no Report/Block (owner Remove and Leave
+    exist), and images/artifacts have no Report action; Play's UGC and
+    Generative-AI policies still make those a release blocker
+    (`RELEASE-CHECKLIST.md` §0). Do not claim reporting for images, artifacts
+    or Collab until they ship;
   - live preview, diff/commit/push in Studio (`FEATURE_GAPS.md` A1–A3);
   - browser upload/download/history/close-tab from the viewer (`A10`);
-  - a 50-subagent cap (the code has subagents, but no 50 cap to advertise);
+  - a 50-subagent cap as a selling point (the server enforces 50 total per root
+    session in `cloud/packages/agent-core/src/subagents.ts`; it is a runtime
+    limit, not a listing feature);
   - reading or forking someone else's share link (`A14` is conditional on the
     share service being deployed);
   - prices, plans, storage allowances and purchase claims (no Play product
@@ -197,19 +200,20 @@ directed at children and does not opt in to the Play Families policy.
 | **Digital purchases** | **No for this build** | No Play subscription exists yet. Change to Yes only when one is live. |
 | **Unrestricted internet access** | **Yes** | The agent browser can open arbitrary pages. |
 | **Advertising** | **No** | No ads, no Ad ID. |
-| **Generative AI** | **Yes** | Core product. Play also requires in-app reporting; the v2 shell does not expose it yet (release blocker). |
-| **Users can report objectionable content** | **No today (v2)** | The legacy v1 chat, share and Collab screens have Report actions; the default v2 shell exposes only Copy, Branch and Regenerate on an answer, and v2 Collab has no Report action (owner Remove and Leave exist). Do not submit until Report is wired. |
+| **Generative AI** | **Yes** | Core product. Play also requires in-app reporting: the v2 answer menu reports replies, but images/artifacts and Collab have no Report action (release blocker). |
+| **Users can report objectionable content** | **Partly — chat replies only** | The v2 answer menu has **Report** (`live_chat_page.dart` → `_reportMessage`; `V2AppShell.onReportMessage`). Generated images, artifacts and Collab messages still have no Report action (v2 Collab has owner Remove and Leave). Do not submit until those surfaces have Report too. |
 | **External purchase links** | **No** | No checkout or pricing link; Play Billing only when subscriptions ship. |
 
 **Expected rating:** IARC decides, but expect roughly **Teen / PEGI 12** because
 of unrestricted internet access and user interaction. Do not print a rating
 badge in the listing before IARC returns one.
 
-**Free-text moderation note for IARC (use only after the v2 Report action
-ships):** "Ovid Si generates text and images. Every finished reply, image and
-artifact has an in-app Report action. Reports go to a review queue with 180-day
-retention. Ovid never installs a connector from chat. The browser and Collab
-are available only to signed-in users aged 18+."
+**Free-text moderation note for IARC (use only after Report covers images,
+artifacts and Collab):** "Ovid Si generates text and images. Every finished
+reply has an in-app Report action; images, artifacts and Collab messages do not
+yet. Reports go to a review queue with 180-day retention. Ovid never installs a
+connector from chat. The browser and Collab are available only to signed-in
+users aged 18+."
 
 ---
 
@@ -256,12 +260,12 @@ test number.
 | Attach through the system picker; generate images; library filters | `lib/ui/v2/library/artifact_filters.dart`; image generation message kind (`MsgKind.imageGen`); no `READ_MEDIA_*` in the manifest |
 | Schedules once/daily/weekly; next run and history | `lib/ui/v2/schedules/cadence_picker.dart` (`V2CadenceFrequency`); `schedule_client.dart` (`daily_at`, cron) |
 | Cloud browser live view and takeover (clicks/typing) | `lib/ui/v2/browser/browser_live_page.dart`; viewer ops `browser_attach`/`browser_input`/`browser_takeover` |
-| GitHub connect, repo/branch, edit files in a cloud workspace | `lib/ui/v2/app/v2_studio_routes.dart` (workspace + branch picker); `lib/core/cloud/studio_files.dart` |
+| GitHub connect, repo/branch, Ovid edits files in a cloud workspace | `lib/ui/v2/app/v2_studio_routes.dart` (workspace + branch picker); `lib/core/cloud/studio_files.dart` |
 | Connectors can be added; never installed from chat | `lib/ui/v2/connectors/add_connector_page.dart` (`'Ovid never installs connectors from chat.'`) |
 | Read-only share link; Collab up to 50; one sender; creator pays storage | `server/collaboration/repository.py` (`MAX_ACTIVE_MEMBERS = 50`); `lib/ui/v2/share/share_sheet.dart` |
 | Google/phone sign-in; delete chat; export data; delete account with 24 h grace | `lib/core/firebase_service.dart`; `server/account/domain.py` (`GRACE_SECONDS = 24 * 60 * 60`); `lib/ui/v2/settings/data_control_page.dart` |
 | Analytics/crash off by default | `AndroidManifest.xml` (`firebase_*_collection_enabled=false`); `firebase_service.dart` (`_consentGiven`, persisted `ovid_telemetry_consent`) |
-| Report flow exists in v1 only; server queue retains 180 days | `lib/ui/content_report_sheet.dart`; `lib/ui/chat_screen.dart:6114`; `server/reports/repository.py` (`retention_seconds=180 * 86400`). **Not reachable in the default v2 shell — release blocker.** |
+| Report on chat replies; server queue retains 180 days | `lib/ui/v2/chat/live_chat_page.dart` (`_reportMessage`) and `lib/ui/v2/app/v2_app_shell.dart` (`onReportMessage`); `server/reports/repository.py` (`retention_seconds=180 * 86400`). **Images, artifacts and v2 Collab still have no Report action — release blocker for those surfaces.** |
 | No ads / no Ad ID | `android/app/src/play/AndroidManifest.xml` (`AD_ID` removed); `google_analytics_adid_collection_enabled=false` |
 | No location, contacts, calendar, SMS, phone, health, camera, photo-library permission | `AndroidManifest.xml` declares only `INTERNET`, `POST_NOTIFICATIONS`, `RECORD_AUDIO`; `test/play_distribution_test.dart` pins the set |
 | 18+ only | `docs/legal/PRIVACY.md` ("18+"), `docs/play/PLAY_COMPLIANCE_AUDIT.md` §9 |

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../../core/auth_identity.dart';
@@ -47,6 +49,11 @@ abstract class V2OnboardingAuth implements Listenable {
   /// Why admission failed, if it did.
   String? get accountError;
 
+  /// True when the local session namespace for the signed-in account could
+  /// not be opened. [accountError] is null in that case (the server was never
+  /// asked), so without this the gate could only show a spinner.
+  bool get accountTransitionFailed;
+
   /// Display name / email / phone for the signed-in user.
   String get accountLabel;
 
@@ -81,6 +88,9 @@ class _FirebaseOnboardingAuth implements V2OnboardingAuth {
 
   @override
   String? get accountError => _service.accountError;
+
+  @override
+  bool get accountTransitionFailed => _service.accountTransitionFailed;
 
   @override
   String get accountLabel => _service.accountLabel;
@@ -194,6 +204,18 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
   bool _booted = false;
   String? _startupError;
 
+  /// A startup step that waits on the platform (Firebase / Play services /
+  /// prefs) must never leave the splash spinning forever. On expiry the gate
+  /// shows the existing error state with a retry instead. The work is not
+  /// cancelled: the underlying future keeps running and its result is used on
+  /// the next retry.
+  static const Duration _initializeTimeout = Duration(seconds: 30);
+  static const Duration _storeTimeout = Duration(seconds: 10);
+
+  /// A provider request that never answers must not leave the step disabled
+  /// with no exit. After this the inline error appears and Retry/Back work.
+  static const Duration _signInTimeout = Duration(minutes: 2);
+
   /// Startup progress reflects the work actually left to do. It is never a
   /// timer: each step moves it once, and it stays put while a step blocks.
   double _startupProgress = 0;
@@ -263,7 +285,7 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
 
     Object? failure;
     try {
-      await _auth.initialize();
+      await _auth.initialize().timeout(_initializeTimeout);
     } catch (error) {
       failure = error;
     }
@@ -276,7 +298,9 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
 
     V2OnboardingSnapshot? snapshot;
     try {
-      snapshot = await _store.load(welcomeVersion: widget.welcomeVersion);
+      snapshot = await _store
+          .load(welcomeVersion: widget.welcomeVersion)
+          .timeout(_storeTimeout);
     } catch (_) {
       // Preferences are an enhancement here: without them the tour starts
       // from the top instead of blocking the app.
@@ -370,7 +394,16 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
 
   Widget _accountPending(BuildContext context) {
     final c = OColors.of(context);
-    final error = _accountRetryError ?? _auth.accountError;
+    // A failed local session load never reaches the server, so it has no
+    // [V2OnboardingAuth.accountError]. Without this line the screen would spin
+    // forever with no explanation.
+    final error =
+        _accountRetryError ??
+        _auth.accountError ??
+        (_auth.accountTransitionFailed
+            ? 'Your chats could not be opened on this device. Try again, or '
+                  'use another account.'
+            : null);
     return OScaffold(
       body: Center(
         child: SingleChildScrollView(
@@ -643,7 +676,14 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
     });
     String? error;
     try {
-      error = await _auth.authenticateSocial('google.com', AuthIntent.signIn);
+      error = await _auth
+          .authenticateSocial('google.com', AuthIntent.signIn)
+          .timeout(_signInTimeout);
+    } on TimeoutException {
+      // The account picker may never call back (no Play services, a wedged
+      // network). Returning here re-enables Google, phone and Back instead of
+      // leaving a spinner that cannot be dismissed.
+      error = 'Sign-in took too long. Check your connection and try again.';
     } catch (failure) {
       error = authError(failure);
     }
@@ -702,6 +742,7 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
   // ── Paywall ──────────────────────────────────────────────────────────────
 
   Widget _paywall() {
+    final route = _billingRoute();
     return PaywallPage(
       data: V2PaywallData(
         plans: _paywallPlans(),
@@ -713,6 +754,9 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
         testModeNote: _testStore
             ? 'Test mode: purchases are simulated and never charge you.'
             : null,
+        // RevenueCat present but no server route can confirm its charge:
+        // disable the paid CTA with the real reason instead of taking money.
+        checkoutBlockedReason: _checkoutBlockedReason(route),
       ),
       onPlanSelected: _purchasing
           ? null
@@ -734,15 +778,35 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
     );
   }
 
+  /// The purchase path this build may use. Play wins whenever it is available;
+  /// RevenueCat is only used when it can be server-confirmed.
+  BillingRoute _billingRoute() {
+    final play = PlayBillingService.I;
+    return resolveBillingRoute(
+      playLoaded: play.loaded,
+      playAvailable: play.available,
+      revenueCat: RevenueCatBilling.I,
+    );
+  }
+
+  /// The real reason paid plans cannot be bought, or null when checkout works.
+  String? _checkoutBlockedReason(BillingRoute route) =>
+      route == BillingRoute.none && RevenueCatBilling.I.available
+      ? kRevenueCatUnconfirmedReason
+      : null;
+
   /// The canonical cards, carrying the store's localised prices and whether
   /// Play sells each period. Falls back to the product-spec prices only when
   /// the store has not answered.
   List<V2PlanOption> _paywallPlans() {
     const base = V2PaywallData();
     final play = PlayBillingService.I;
-    // Only Play's own purchase path can be gated by Play's catalogue; a
-    // RevenueCat build may sell a package Play does not list here.
-    final playCatalogue = !RevenueCatBilling.I.available;
+    // Only Play's own purchase path can be gated by Play's catalogue. A
+    // confirmed RevenueCat fallback (or Test Store) may sell a package Play
+    // does not list here; every other route still attempts Play.
+    final route = _billingRoute();
+    final playCatalogue =
+        route != BillingRoute.revenueCat && route != BillingRoute.demo;
     return [
       for (final plan in base.plans)
         plan.withStore(

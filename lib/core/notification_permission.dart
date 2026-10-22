@@ -31,9 +31,12 @@ class NotificationPermissionAccess {
 /// `ovid/native` channel.
 ///
 /// Methods:
-/// - `notificationsEnabled` → `bool`: whether POST_NOTIFICATIONS is granted.
+/// - `notificationsEnabled` → `bool`: whether POST_NOTIFICATIONS is granted
+///   *and* the app's notification switch is on (`areNotificationsEnabled`,
+///   which also catches a switch turned off after the grant).
 /// - `openNotificationSettings` → `bool`: opens the app's notification
-///   settings page.
+///   settings page. This shell implements `notifyOpenAppSettings` instead,
+///   which opens the same screen.
 ///
 /// On non-Android platforms (and in tests, which run on the host) both
 /// operations are no-ops that report notifications as allowed. When the
@@ -60,6 +63,25 @@ class NotificationPermission {
   }
 
   static bool get _isAndroid => androidOverrideForTest ?? Platform.isAndroid;
+
+  /// Android API level (`Build.VERSION.SDK_INT`), or 0 when the shell cannot
+  /// report it (host tests, desktop, an older native shell).
+  ///
+  /// POST_NOTIFICATIONS only exists from API 33; below that Android has no
+  /// notification prompt at all, so a request returns "denied" without
+  /// showing anything. Callers use this to send the person to the system
+  /// switch instead of pretending a dialog appeared.
+  static Future<int> androidSdkInt() async {
+    if (!_isAndroid) return 0;
+    try {
+      final value = await _invoke('getSdkInt');
+      return value is int ? value : 0;
+    } on MissingPluginException {
+      return 0;
+    } on PlatformException {
+      return 0;
+    }
+  }
 
   /// Whether the app may post notifications.
   static Future<bool> isEnabled() async {

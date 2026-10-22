@@ -8,6 +8,10 @@
          on modern Android. Do not re-add a permission without a live caller. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Play reads RECORD_AUDIO as "this app requires a microphone" and filters
+         the listing on devices without one. Dictation is optional (typing
+         always works), so the feature is declared as not required. -->
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <application
         android:label="Ovid Si"
         android:name="${applicationName}"

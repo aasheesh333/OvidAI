@@ -448,18 +448,20 @@ class _AuthPhoneDialogState extends State<AuthPhoneDialog> {
         child: _AuthAction(
           ghost: true,
           label: 'Cancel',
-          onPressed: flow.submitting
-              ? null
-              : () {
-                  flow.cancel();
-                  Navigator.of(context).pop(false);
-                },
+          // Always available: a credential submission already in flight
+          // cannot be cancelled, but the person must not be trapped in this
+          // dialog while it hangs. cancel() invalidates its result, so a late
+          // success can never sign in after this closes.
+          onPressed: () {
+            flow.cancel();
+            Navigator.of(context).pop(false);
+          },
         ),
       ),
     );
 
     return PopScope(
-      canPop: !flow.submitting,
+      canPop: true,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop && !_finished) {
           _finished = true;

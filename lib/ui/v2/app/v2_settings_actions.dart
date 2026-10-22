@@ -185,18 +185,37 @@ class V2SettingsActions {
       _snack(context, _periodUnavailableMessage(period));
       return;
     }
-    // RevenueCat is the required purchase layer; the server-verified Play
-    // flow remains the fallback for builds without a RevenueCat key.
+    // RevenueCat is the fallback purchase layer, not the preferred one: the
+    // server-verified Play flow wins whenever Play is available. RevenueCat is
+    // used only when Play is unavailable and its charge can be confirmed by
+    // the server; otherwise the CTA is blocked and nothing is charged.
     final rc = RevenueCatBilling.I;
-    final viaRevenueCat = rc.available;
+    final play = PlayBillingService.I;
+    await play.ensureLoaded();
+    final route = resolveBillingRoute(
+      playLoaded: play.loaded,
+      playAvailable: play.available,
+      revenueCat: rc,
+    );
+    if (route == BillingRoute.none) {
+      if (!context.mounted) return;
+      _snack(
+        context,
+        rc.available
+            ? kRevenueCatUnconfirmedReason
+            : 'Google Play billing is not available.',
+      );
+      return;
+    }
+    final viaRevenueCat = route != BillingRoute.play;
     final outcome = viaRevenueCat
         ? await rc.buy(tier, period: period)
-        : await PlayBillingService.I.buy(tier, period: period);
+        : await play.buy(tier, period: period);
     if (!context.mounted) return;
     if (!outcome.ok) {
       final reason = viaRevenueCat
           ? rc.lastPurchaseError
-          : PlayBillingService.I.lastPurchaseError;
+          : play.lastPurchaseError;
       _snack(context, reason ?? _billingMessage(outcome.result));
       return;
     }
@@ -216,10 +235,29 @@ class V2SettingsActions {
 
   Future<void> restorePurchases(BuildContext context) async {
     final rc = RevenueCatBilling.I;
-    final viaRevenueCat = rc.available;
+    final play = PlayBillingService.I;
+    await play.ensureLoaded();
+    final route = resolveBillingRoute(
+      playLoaded: play.loaded,
+      playAvailable: play.available,
+      revenueCat: rc,
+    );
+    // A RevenueCat build with no server confirmation can find a purchase but
+    // can never unlock it: say so instead of promising confirmation.
+    if (route == BillingRoute.none) {
+      if (!context.mounted) return;
+      _snack(
+        context,
+        rc.available
+            ? kRevenueCatUnconfirmedReason
+            : 'Google Play billing is not available.',
+      );
+      return;
+    }
+    final viaRevenueCat = route != BillingRoute.play;
     final outcome = viaRevenueCat
         ? await rc.restore()
-        : await PlayBillingService.I.restore();
+        : await play.restore();
     if (!context.mounted) return;
     if (!outcome.ok) {
       _snack(context, _billingMessage(outcome.result));

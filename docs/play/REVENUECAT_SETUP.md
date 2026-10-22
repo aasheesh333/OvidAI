@@ -22,6 +22,12 @@
 > the server's purchase ledger, or ship without the key so
 > `PlayBillingService` (server-verified) handles purchases. Do not advertise
 > paid plans until one of those is true.
+>
+> **The client now fails closed (2026-10-22).** With the key compiled in but no
+> webhook, `RevenueCatBilling.buy` refuses to open the store sheet and the
+> paywall / Plan & billing CTA is disabled with a real reason, so nobody can be
+> charged for a plan that cannot unlock. Play Billing wins whenever it is
+> available. See §5b.
 
 ### Play Console (signed in as `aasheeshkatheriya@gmail.com`) **(console)**
 - Developer account: **Dhanuk Softwares** (`4722370385057181718`)
@@ -242,6 +248,15 @@ and the confirmation never arrives.
 
 Two acceptable fixes (pick one before shipping a release with the RevenueCat
 key):
+
+> **Client fail-closed gate (2026-10-22).** Until one of the two fixes below
+> exists, `lib/core/revenuecat_billing.dart` refuses to start a RevenueCat
+> purchase: `RevenueCatBilling.buy` returns `notAvailable` with
+> `kRevenueCatUnconfirmedReason`, and `resolveBillingRoute` disables the paywall
+> / Plan & billing CTA. The Play path wins whenever it is available. The
+> RevenueCat path is re-enabled only by compiling with
+> `--dart-define=OVID_REVENUECAT_SERVER_CONFIRMATION=true` after the webhook in
+> fix 1 is deployed and verified end to end.
 
 1. **RevenueCat webhook (designed path).** Add
    `cloud/apps/mint/src/billing/revenuecatWebhook.ts` + a route:

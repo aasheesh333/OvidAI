@@ -17,9 +17,11 @@ This is the answer set for Play Console → **App content → Data safety**. Eve
 row is derived from a real table/route; if a feature is removed later, the row
 must be removed with it. The Generative-AI and UGC answers live in
 `STORE-LISTING.md` §6; `PLAY_COMPLIANCE_AUDIT.md` §5–§6 keeps the policy
-rationale. **The Report action exists only in the legacy v1 chat, share and
-Collab screens; the default v2 shell (`V2AppShell`) and v2 Collab do not expose
-it, so Play's in-app-reporting requirement is not met yet — release blocker.**
+rationale. **Report exists in the v2 answer menu for chat replies
+(`lib/ui/v2/chat/live_chat_page.dart` → `_reportMessage`;
+`V2AppShell.onReportMessage`); generated images, artifacts and v2 Collab
+messages still have no Report action, so Play's in-app-reporting requirement is
+not fully met yet — release blocker.**
 The public privacy policy (`docs/legal/PRIVACY.md`) is the wording of record
 where the two overlap.
 
@@ -73,6 +75,24 @@ The three-permission check above is on `src/main`; the merged Play manifest
 must be re-checked in App bundle explorer for every upload
 (`RELEASE-CHECKLIST.md` §2).
 
+The three are the only permissions Ovid itself declares. The **merged**
+artifact also carries library permissions that Play lists but never prompts
+for, because they are normal or signature permissions:
+`ACCESS_NETWORK_STATE` and `WAKE_LOCK` (firebase-analytics, firebase-messaging,
+play-services-measurement), `com.google.android.c2dm.permission.RECEIVE` and
+`.SEND` (firebase-messaging),
+`com.google.android.finsky.permission.BIND_GET_INSTALL_REFERRER_SERVICE`
+(install referrer, used by `MainActivity.getInstallReferrer`) and
+`com.android.vending.BILLING` (the Play Billing library under
+`in_app_purchase_android` / RevenueCat). None is requestable at runtime, so
+none adds a prompt or a declaration form.
+
+`RECORD_AUDIO` would otherwise make Play treat `android.hardware.microphone`
+as required and filter the listing on devices without one; the manifest
+declares `<uses-feature android:name="android.hardware.microphone"
+android:required="false" />` because dictation is optional and typing always
+works.
+
 The `RECORD_AUDIO` permission is used only by the speech recognizer
 (`speech_to_text`, requested in `lib/core/voice_input_service.dart`). The app
 never records or uploads audio; see the Audio row in §2 for the recognizer
@@ -101,9 +121,10 @@ only microphone and notifications.
   wired to the server (`lib/ui/v2/app/v2_settings_actions.dart` →
   `FirebaseService.requestAccountDeletion`) and starts the server-side deletion
   lifecycle (**24-hour grace, cancellable**; the deadline is
-  `GRACE_SECONDS = 24 * 60 * 60` in `server/account/domain.py`). Signing in
-  again during the grace window cancels the deletion
-  (`server/account/domain.py`, `_grace_login`). The lifecycle then removes:
+  `GRACE_SECONDS = 24 * 60 * 60` in `server/account/domain.py`). Cancelling is an
+  explicit, recently authenticated action (`POST /deletion/cancel`); signing in
+  is observational and does not cancel (`server/account/domain.py`, `cancel`).
+  The lifecycle then removes:
   the deployment-configured SQL table scopes (sessions, messages, memory,
   schedules, devices and related rows) via `server/account/adapters.py`; the
   user's object-storage prefix `users/{uid}/` via the R2 prefix deleter
@@ -111,10 +132,17 @@ only microphone and notifications.
   BYOK keys (`cloud/apps/worker/src/main.ts`, `createCloudCleanup`); private-sync
   data and live-collaboration data (`server/account/composition.py`); and the
   LiteLLM key (`cloud/apps/worker/src/main.ts`, `createCloudCleanup`).
+  On the device, an accepted request runs the verified all-store reset
+  (`lib/core/settings_state_integration.dart`) before signing out, which clears
+  transcripts, the search index, drafts, cache, cookies and the secure store
+  and reads every store back; a partial reset is reported and blocks the claim
+  that the device is clean.
   **This path only runs in a build compiled with
-  `OVID_ACCOUNT_ENABLED=true`.** With `false`, the Settings panel offers the
-  public web form and a support email instead
-  (`lib/ui/account_deletion_panel.dart`). The production release must set the
+  `OVID_ACCOUNT_ENABLED=true`.** With `false`, the v2 Settings account screen
+  renders no Delete account row at all (a row that can only fail is not
+  offered); the public web form and support email on the sign-in screen
+  (`lib/ui/account_deletion_panel.dart`) remain the route. The production
+  release must set the
   repository variable to `true`; see `RELEASE-CHECKLIST.md` §0.
   If `OVID_R2_*` is unset, the worker logs that workspace/browser objects will
   **not** be deleted — deletion must not be enabled in production without R2.
@@ -206,9 +234,11 @@ compiled with `OVID_ACCOUNT_ENABLED=true`; the production release must set it.
       `resolveRevenueCatConfig` refuses the Test Store in a release build, but
       the define must not be in the release command at all.
 - [ ] Confirm the **merged Play manifest** in App bundle explorer still has only
-      `INTERNET`, `POST_NOTIFICATIONS` and `RECORD_AUDIO`. The source check
-      below covers `src/main`; the overlay and library manifests are only
-      visible in the artifact.
+      `INTERNET`, `POST_NOTIFICATIONS`, `RECORD_AUDIO` from Ovid plus the
+      library permissions `ACCESS_NETWORK_STATE`, `WAKE_LOCK`,
+      `c2dm.RECEIVE`/`SEND`, `finsky.BIND_GET_INSTALL_REFERRER_SERVICE` and
+      `com.android.vending.BILLING`. The source check below covers `src/main`;
+      the overlay and library manifests are only visible in the artifact.
 - [ ] Decide whether App Check is enabled for this release. If it is, the
       privacy policy and §4 must say so and the gateway must be in
       `OVID_APPCHECK_MODE=required`.

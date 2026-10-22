@@ -911,6 +911,8 @@ class V2ExportScopeSheetData {
     this.chatCount = 0,
     this.overLimit = false,
     this.limitLabel = '64 MB',
+    this.limitChats = v2ExportPickerChatLimit,
+    this.limitMessages = v2ExportPickerMessageLimit,
   });
 
   /// A real measured line, for example "42 chats · 12 MB".
@@ -925,6 +927,12 @@ class V2ExportScopeSheetData {
 
   /// The enforced per-archive limit, already formatted ("64 MB").
   final String limitLabel;
+
+  /// The enforced per-archive chat and message limits. Printed before the
+  /// export starts, because an account above either cap is written in parts:
+  /// the archive keeps the most recently active chats that fit.
+  final int limitChats;
+  final int limitMessages;
 }
 
 /// One small sheet that says what the backup covers and where it goes.
@@ -1004,6 +1012,14 @@ class _ExportScopeSheetState extends State<ExportScopeSheet> {
                   'Chats only. Files and memory stay online.',
                   style: OType.caption.copyWith(color: c.textMuted),
                 ),
+                if (_canChoose) ...[
+                  const SizedBox(height: OSpace.xs),
+                  Text(
+                    'Choose chats: only chats loaded here. '
+                    'All chats: every chat in your account.',
+                    style: OType.caption.copyWith(color: c.textMuted),
+                  ),
+                ],
                 const SizedBox(height: OSpace.s),
                 Row(
                   children: [
@@ -1016,6 +1032,26 @@ class _ExportScopeSheetState extends State<ExportScopeSheet> {
                     Expanded(
                       child: Text(
                         '${data.limitLabel} per backup',
+                        style: OType.caption.copyWith(color: c.textMuted),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: OSpace.xs),
+                Row(
+                  children: [
+                    Icon(
+                      Icons.info_outline_rounded,
+                      size: 16,
+                      color: c.textFaint,
+                    ),
+                    const SizedBox(width: OSpace.s),
+                    Expanded(
+                      child: Text(
+                        'Up to ${_formatCount(data.limitChats)} chats and '
+                        '${_formatCount(data.limitMessages)} messages per '
+                        'backup. A larger account is exported in parts, newest '
+                        'chats first.',
                         style: OType.caption.copyWith(color: c.textMuted),
                       ),
                     ),

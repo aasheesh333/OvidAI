@@ -46,6 +46,39 @@ const bool kRevenueCatTestStoreRequested = bool.fromEnvironment(
   'OVID_REVENUECAT_TEST_STORE',
 );
 
+/// Compile-time declaration that the server can confirm a RevenueCat purchase
+/// out of band.
+///
+/// **Default `false` on purpose.** A RevenueCat purchase is only charged, never
+/// reported to Ovid: `purchases_flutter` does not expose the Play purchase
+/// token, so neither `/billing/verify` nor `/billing/rtdn` (the only code that
+/// can set a paid tier) ever sees the purchase. A build that takes money through
+/// RevenueCat without this route is the "charged but never unlocked" bug.
+///
+/// TEST-SEAM ASSERTION — what makes RevenueCat safe to enable
+/// (`docs/play/REVENUECAT_SETUP.md` §5b, fix 1). Flip this to `true` only when
+/// all of the following exist, are deployed, and have passed an end-to-end
+/// purchase:
+///   * `cloud/apps/mint/src/billing/revenuecatWebhook.ts` plus a route that
+///     verifies the `Authorization` header against
+///     `OVID_REVENUECAT_WEBHOOK_SECRET` (fail closed, constant-time compare);
+///   * `entitlement_ids` `go`/`plus`/`pro` mapped to `3x`/`7x`/`15x`, unknown
+///     ids ignored;
+///   * the tier derived from `expiration_at_ms` (never the body's `tier`),
+///     `CANCELLATION` keeps access until expiry, `EXPIRATION`/`REFUND` revoke;
+///   * dedupe on `event.id` so a redelivered event is idempotent;
+///   * the webhook URL + secret configured in the RevenueCat console.
+/// Only then does `GET /usage` name the tier after a RevenueCat charge, which
+/// is what `applyPurchasedPlan`/`refreshServerTier` require before unlocking.
+const bool kRevenueCatServerConfirmation = bool.fromEnvironment(
+  'OVID_REVENUECAT_SERVER_CONFIRMATION',
+);
+
+/// The reason shown instead of starting a purchase when RevenueCat would take
+/// money but no server-side confirmation route can set the tier.
+const String kRevenueCatUnconfirmedReason =
+    'Purchases are not available yet.';
+
 /// RevenueCat entitlement id per Ovid tier.
 const Map<String, String> kRevenueCatEntitlements = {
   '3x': 'go',
@@ -164,6 +197,46 @@ final RevenueCatConfig kRevenueCatConfig = resolveRevenueCatConfig(
 /// True when this build may talk to the RevenueCat Test Store (debug/profile
 /// plus the explicit define only).
 bool get kRevenueCatTestStore => kRevenueCatConfig.testStore;
+
+/// The one purchase path a build may use.
+///
+/// * [play] — Google Play Billing, verified by `/billing/verify`; the server
+///   names the tier before the purchase is acknowledged.
+/// * [revenueCat] — RevenueCat may take money **only** when a server-side
+///   confirmation route exists ([kRevenueCatServerConfirmation]); otherwise
+///   this route is never returned.
+/// * [demo] — debug/profile Test Store; simulated, never charges.
+/// * [none] — no path can both take money and unlock the plan.
+enum BillingRoute { play, revenueCat, demo, none }
+
+/// Chooses the purchase path, preferring the server-verified Play flow.
+///
+/// Play wins whenever it is available. RevenueCat is only considered when Play
+/// is known to be unavailable, and even then only when
+/// [RevenueCatBilling.serverConfirmationAvailable] is true. A chargeable
+/// RevenueCat build with no confirmation route resolves to [BillingRoute.none],
+/// which disables the purchase CTA instead of charging for an unlock that can
+/// never arrive.
+BillingRoute resolveBillingRoute({
+  required bool playLoaded,
+  required bool playAvailable,
+  required RevenueCatBilling revenueCat,
+}) {
+  // A Test Store build is a debug/profile simulation: it never charges, so it
+  // is safe even though it cannot be server-confirmed.
+  if (revenueCat.usingTestStore) return BillingRoute.demo;
+  if (playLoaded && playAvailable) return BillingRoute.play;
+  // Play is unavailable or has not answered. With no RevenueCat key the Play
+  // path is still the only candidate: `buy` awaits the load and reports an
+  // honest not-available outcome if Play never arrives.
+  if (!revenueCat.available) {
+    return playLoaded ? BillingRoute.none : BillingRoute.play;
+  }
+  // Never start a RevenueCat charge unless the server can confirm it.
+  return revenueCat.serverConfirmationAvailable
+      ? BillingRoute.revenueCat
+      : BillingRoute.none;
+}
 
 // ── Server-confirmed plan tier ───────────────────────────────────────────────
 
@@ -314,10 +387,15 @@ class RevenueCatBilling with WidgetsBindingObserver {
     RevenueCatConfig? config,
     bool? testStore,
     bool? releaseMode,
+    bool? serverConfirmation,
+    bool Function()? playActive,
     void Function(String tier)? applyTier,
   }) : _platform = platform ?? PurchasesRevenueCatPlatform(),
        _uid = uid ?? (() => FirebaseService.I.uid),
        _releaseMode = releaseMode ?? kReleaseMode,
+       _serverConfirmation =
+           serverConfirmation ?? kRevenueCatServerConfirmation,
+       _playActive = playActive ?? _playIsActive,
        _applyTier = applyTier ?? _applyTierToAppState,
        _config =
            config ??
@@ -337,10 +415,24 @@ class RevenueCatBilling with WidgetsBindingObserver {
   static void _applyTierToAppState(String tier) =>
       AppState.I.setOvidCloudTier(tier);
 
+  /// Whether Play is (or may be) the purchase path, in which case RevenueCat
+  /// must not downgrade the plan.
+  ///
+  /// A purchase made through [PlayBillingService] (the preferred path) never
+  /// appears in RevenueCat's entitlement list, so "no entitlement" there is not
+  /// evidence of a refund. Treat "Play has not answered yet" as Play-active
+  /// too: an offline or slow launch must not wipe a server-confirmed plan.
+  static bool _playIsActive() {
+    final play = PlayBillingService.I;
+    return !play.loaded || play.available;
+  }
+
   final RevenueCatPlatform _platform;
   final String? Function() _uid;
   final RevenueCatConfig _config;
   final bool _releaseMode;
+  final bool _serverConfirmation;
+  final bool Function() _playActive;
   final void Function(String tier) _applyTier;
 
   bool _configured = false;
@@ -369,6 +461,16 @@ class RevenueCatBilling with WidgetsBindingObserver {
 
   /// True when a purchase can be attempted: a real SDK key or the local demo.
   bool get available => apiKey.isNotEmpty || _demoOnly;
+
+  /// True when this build may take real money through RevenueCat.
+  bool get chargeable => available && !usingTestStore;
+
+  /// True when a chargeable RevenueCat purchase can be confirmed by the server
+  /// (the RevenueCat webhook from `docs/play/REVENUECAT_SETUP.md` §5b).
+  ///
+  /// A Test Store/demo build is routed to [BillingRoute.demo] before this is
+  /// consulted: it never charges, so it needs no server confirmation.
+  bool get serverConfirmationAvailable => _serverConfirmation;
 
   /// Why this build has no usable RevenueCat config, when it does not.
   String? get configError => _config.error;
@@ -468,6 +570,14 @@ class RevenueCatBilling with WidgetsBindingObserver {
     }
     if (!available) {
       lastPurchaseError = _periodUnavailableMessage(period);
+      return const UpgradeOutcome(UpgradeResult.notAvailable);
+    }
+    // Fail closed: RevenueCat cannot hand the Play purchase token to the
+    // server, so without the webhook route the tier would never be set. Refuse
+    // before the store sheet opens — never charge for an unlock that cannot
+    // arrive. Test Store/demo builds return above and never reach this.
+    if (!usingTestStore && !_serverConfirmation) {
+      lastPurchaseError = kRevenueCatUnconfirmedReason;
       return const UpgradeOutcome(UpgradeResult.notAvailable);
     }
     if (!await configure()) {
@@ -600,6 +710,13 @@ class RevenueCatBilling with WidgetsBindingObserver {
   Future<String?> reconcile() async {
     if (_demoOnly) return null;
     if (!available) return null;
+    // RevenueCat may only downgrade a plan it is the purchase path for. When
+    // Play is available (or has not answered), an empty RC entitlement list is
+    // not evidence of a refund: Play purchases made through
+    // `in_app_purchase` never appear in RevenueCat, and wiping the tier here
+    // would relock a paying user. An unconfirmed RC build is never a purchase
+    // path either, so it must not downgrade anything.
+    if (!_serverConfirmation || _playActive()) return null;
     if (!await configure()) return null;
     try {
       final info = await _platform.customerInfo();

@@ -7194,6 +7194,22 @@ class _MicButtonState extends State<_MicButton> {
       if (mounted) setState(() => _listening = false);
       return;
     }
+    // Ask for the microphone on the tap itself, before initialize(): the
+    // plugin's implicit request never surfaces from a backgrounded overlay,
+    // and a denial must read as a denial instead of "not available".
+    final permitted = await voice.ensureMicrophonePermission();
+    if (!mounted) return;
+    if (!permitted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Microphone access is off. Allow it in Settings to use voice input.',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
     final available = await voice.isAvailable();
     if (!mounted) return;
     if (!available) {

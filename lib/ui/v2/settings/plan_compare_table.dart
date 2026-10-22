@@ -43,8 +43,10 @@ class V2PlanComparePlan {
   final bool priceAvailable;
   final int storageGb;
 
-  /// Files accepted inside [fileWindowHours] (50 / day on Free, 80 / 3 h on
-  /// the paid plans).
+  /// Product-spec file-intake window (50 / day on Free, 80 / 3 h on the paid
+  /// plans). It is **not enforced** anywhere yet
+  /// (`docs/architecture/FEATURE_GAPS.md` §4.2), so the table shows only the
+  /// enforced per-project cap.
   final int filesPerWindow;
   final int fileWindowHours;
   final int filesPerProject;
@@ -59,15 +61,6 @@ class V2PlanComparePlan {
   final int monthlyTokenCap;
 
   String get storageLabel => '$storageGb GB';
-
-  /// Normalised intake so the row is a true per-day comparison. Go, Plus and
-  /// Pro accept 80 files every 3 h, i.e. 640 files/day.
-  num get filesPerDay => filesPerWindow * 24 / fileWindowHours;
-
-  String get filesPerDayLabel => '${_formatNumber(filesPerDay)} / day';
-
-  /// The exact window shown as a sub-line for paid plans.
-  String get filesWindowLabel => '$filesPerWindow / $fileWindowHours h';
 
   String get filesPerProjectLabel => '$filesPerProject max';
 
@@ -108,10 +101,10 @@ class V2PlanComparePlan {
     fileWindowHours: 3,
     filesPerProject: 100,
     manualModels: false,
-    autoMultiplier: 1.5,
+    autoMultiplier: 3,
     customConnectors: 5,
-    dailyTokenCap: 75000000,
-    monthlyTokenCap: 2250000000,
+    dailyTokenCap: 0,
+    monthlyTokenCap: 0,
   );
 
   static const plus = V2PlanComparePlan(
@@ -123,10 +116,10 @@ class V2PlanComparePlan {
     fileWindowHours: 3,
     filesPerProject: 150,
     manualModels: true,
-    autoMultiplier: 5,
+    autoMultiplier: 23,
     customConnectors: 20,
-    dailyTokenCap: 250000000,
-    monthlyTokenCap: 7500000000,
+    dailyTokenCap: 0,
+    monthlyTokenCap: 0,
   );
 
   static const pro = V2PlanComparePlan(
@@ -138,10 +131,10 @@ class V2PlanComparePlan {
     fileWindowHours: 3,
     filesPerProject: 250,
     manualModels: true,
-    autoMultiplier: 20,
+    autoMultiplier: 43,
     customConnectors: 20,
-    dailyTokenCap: 1000000000,
-    monthlyTokenCap: 30000000000,
+    dailyTokenCap: 0,
+    monthlyTokenCap: 0,
   );
 
   static const canonical = <V2PlanComparePlan>[free, go, plus, pro];
@@ -316,23 +309,6 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
                             labelWidth,
                             columnWidth,
                             maxOffset,
-                            id: 'files',
-                            label: 'Files / day',
-                            semanticLabel: 'Files per day',
-                            value: (plan) => _filesCell(context, plan),
-                            semanticValue: (plan) => plan.fileWindowHours == 24
-                                ? '${plan.filesPerWindow} files per day'
-                                : '${_formatNumber(plan.filesPerDay)} files per '
-                                      'day, ${plan.filesPerWindow} files every '
-                                      '${plan.fileWindowHours} hours',
-                          ),
-                          _row(
-                            context,
-                            plans,
-                            currentId,
-                            labelWidth,
-                            columnWidth,
-                            maxOffset,
                             id: 'project',
                             label: 'Files / project',
                             semanticLabel: 'Files per project',
@@ -364,14 +340,14 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
                             columnWidth,
                             maxOffset,
                             id: 'auto',
-                            label: 'Auto multiplier',
-                            semanticLabel: 'Auto multiplier',
+                            label: 'Allowance multiplier',
+                            semanticLabel: 'Allowance multiplier',
                             value: (plan) => _text(
                               plan.autoMultiplierLabel,
                               style: OType.label,
                             ),
                             semanticValue: (plan) =>
-                                '${plan.autoMultiplierLabel} the Free auto '
+                                '${plan.autoMultiplierLabel} the Free '
                                 'allowance',
                           ),
                           _row(
@@ -403,9 +379,10 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
                             label: 'Token caps',
                             semanticLabel: 'Token caps',
                             value: (plan) => _tokensCell(context, plan),
-                            semanticValue: (plan) =>
-                                '${plan.dailyTokenCapLabel} tokens per 24 hours, '
-                                '${plan.monthlyTokenCapLabel} tokens per 30 days',
+                            semanticValue: (plan) => plan.dailyTokenCap <= 0
+                                ? 'No token cap'
+                                : '${plan.dailyTokenCapLabel} tokens per 24 hours, '
+                                      '${plan.monthlyTokenCapLabel} tokens per 30 days',
                           ),
                           _row(
                             context,
@@ -680,30 +657,6 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
     );
   }
 
-  Widget _filesCell(BuildContext context, V2PlanComparePlan plan) {
-    final c = OColors.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          plan.filesPerDayLabel,
-          style: OType.caption.copyWith(
-            color: c.text,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        if (plan.fileWindowHours != 24) ...[
-          const SizedBox(height: OSpace.xxs),
-          Text(
-            plan.filesWindowLabel,
-            style: OType.caption.copyWith(color: c.textMuted),
-          ),
-        ],
-      ],
-    );
-  }
-
   Widget _modelsCell(BuildContext context, V2PlanComparePlan plan) {
     final c = OColors.of(context);
     return Row(
@@ -732,6 +685,14 @@ class _PlanCompareTableState extends State<PlanCompareTable> {
 
   Widget _tokensCell(BuildContext context, V2PlanComparePlan plan) {
     final c = OColors.of(context);
+    // Paid plans are not token-capped (server/mint/ovid_plans.py); a zero cap
+    // means "no cap", not a zero allowance.
+    if (plan.dailyTokenCap <= 0) {
+      return Text(
+        'No token cap',
+        style: OType.caption.copyWith(color: c.textMuted),
+      );
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,

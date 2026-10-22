@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/cloud/cloud_agent_facade.dart';
 import '../../../core/conversation_share_service.dart';
 import '../../../core/format.dart';
 import '../../../core/state.dart';
@@ -258,7 +259,8 @@ class V2RunRoutes {
       builder: (dialogContext) => AlertDialog(
         title: const Text('Stop this subagent?'),
         content: const Text(
-          'It stops working and keeps the changes it has already made.',
+          'Ovid asks the server to stop this run. It keeps the changes it has '
+          'already made.',
         ),
         actions: [
           TextButton(
@@ -272,7 +274,14 @@ class V2RunRoutes {
         ],
       ),
     );
-    if (confirmed == true) AppState.I.setAgentState(sessionId, 'stopped');
+    if (confirmed != true) return;
+    // A subagent has its own server run; cancel that run, not the parent
+    // turn. Local state alone would hide the Stop control while the server
+    // kept working, so a missing run is reported instead of faked.
+    final requested = CloudAgentFacade.I.stopRequested(sessionId: sessionId);
+    if (!requested && context.mounted) {
+      _snack(context, 'Nothing is running to stop.');
+    }
   }
 
   /// The full tool log for one subagent, as a scrollable sheet. The page's
@@ -294,7 +303,7 @@ class V2RunRoutes {
               Padding(
                 padding: const EdgeInsets.all(16),
                 child: Text(
-                  'Full log · ${lines.length} '
+                  'Recorded tool rows · ${lines.length} '
                   '${lines.length == 1 ? 'line' : 'lines'}',
                   style: Theme.of(sheetContext).textTheme.titleMedium,
                 ),

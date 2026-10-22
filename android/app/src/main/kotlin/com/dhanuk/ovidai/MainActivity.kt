@@ -466,6 +466,9 @@ class MainActivity : FlutterActivity() {
             "notifyOpenAppSettings" -> result.success(
                 launchIntent(OvidNotifications.appNotificationSettingsIntent(app)),
             )
+            "notificationsEnabled" -> result.success(
+                OvidNotifications.notificationsEnabled(app),
+            )
             else -> return false
         }
         return true

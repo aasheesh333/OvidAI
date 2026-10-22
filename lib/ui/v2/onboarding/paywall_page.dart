@@ -267,7 +267,11 @@ class V2PaywallData {
         priceInrYearly: 4990,
         storageGb: 5,
         autoOnly: true,
-        features: ['5 GB storage', 'Schedules', 'Manual models locked'],
+        features: [
+          '5 GB storage',
+          '5 custom connectors',
+          'Manual models locked',
+        ],
       ),
       V2PlanOption(
         id: 'plus',
@@ -277,7 +281,7 @@ class V2PaywallData {
         priceUsdYearly: 180,
         priceInrYearly: 17990,
         storageGb: 15,
-        features: ['15 GB storage', 'Manual models', 'Collaboration'],
+        features: ['15 GB storage', 'Manual models', '20 custom connectors'],
       ),
       V2PlanOption(
         id: 'pro',
@@ -287,7 +291,7 @@ class V2PaywallData {
         priceUsdYearly: 990,
         priceInrYearly: 99990,
         storageGb: 75,
-        features: ['75 GB storage', 'Manual models', 'Priority support'],
+        features: ['75 GB storage', 'Manual models', '20 custom connectors'],
       ),
     ],
     this.selectedPlanId = 'plus',
@@ -300,6 +304,7 @@ class V2PaywallData {
     this.purchaseStatus,
     this.purchaseDetail,
     this.testModeNote,
+    this.checkoutBlockedReason,
     this.trialDays = 0,
   });
 
@@ -329,6 +334,14 @@ class V2PaywallData {
   /// Legacy test-store note. Still honoured as the banner detail; new hosts
   /// should pass `purchaseStatus: V2PurchaseBannerStatus.testStore` instead.
   final String? testModeNote;
+
+  /// A build-level reason every paid plan cannot be bought right now, even
+  /// though the card has a product and a price.
+  ///
+  /// Set when the only available purchase path cannot be server-confirmed
+  /// (a RevenueCat build with no webhook): the CTA is disabled and this reason
+  /// is shown instead of starting a charge that would never unlock the plan.
+  final String? checkoutBlockedReason;
 
   /// Length of the Play introductory offer, in days. Zero means no trial is
   /// configured, so the call to action must not promise one.
@@ -570,6 +583,11 @@ class _PaywallPageState extends State<PaywallPage> {
     }
     final reason = _disabledReason(plan);
     if (reason != null) return reason;
+    if (plan.storeAvailableFor(_period) == null) {
+      // The store has not answered for this build. Do not imply the plan is
+      // already on sale; checkout is where the SKU is confirmed.
+      return 'Play confirms at checkout.';
+    }
     if (widget.onPurchase == null && widget.onStartTrial == null) {
       return 'Checkout is not connected.';
     }
@@ -607,6 +625,9 @@ class _PaywallPageState extends State<PaywallPage> {
   /// True when this plan and period can reach a real purchase call.
   bool _canPurchase(V2PlanOption plan) {
     if (plan.isFree) return widget.onContinueFree != null;
+    // A build-level block (e.g. RevenueCat with no server confirmation) makes
+    // every paid CTA unavailable, whatever the card's product/price state.
+    if (widget.data.checkoutBlockedReason != null) return false;
     if (plan.productIdFor(_period) == null ||
         !plan.hasPrice(_currency, _period)) {
       return false;
@@ -629,6 +650,8 @@ class _PaywallPageState extends State<PaywallPage> {
           ? 'Free action is unavailable.'
           : null;
     }
+    final blocked = widget.data.checkoutBlockedReason;
+    if (blocked != null) return blocked;
     if (plan.productIdFor(_period) == null) {
       return _period == V2PaywallPeriod.yearly
           ? 'Yearly is not sold for this plan.'
@@ -815,21 +838,26 @@ class _PaywallPageState extends State<PaywallPage> {
               ? null
               : _restore,
         ),
-        const SizedBox(height: OSpace.l),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.verified_user_rounded, size: 16, color: c.success),
-            const SizedBox(width: OSpace.iconGap),
-            Flexible(
-              child: Text(
-                'Cancel anytime. Billed by Google Play.',
-                textAlign: TextAlign.center,
-                style: OType.caption.copyWith(color: c.textMuted),
+        // The billing promise only appears when a paid plan can actually reach
+        // the store. With no product in Play (or a blocked checkout) the cards
+        // say why, and this line would claim a purchase that cannot happen.
+        if (!selectedPlan.isFree && _canPurchase(selectedPlan)) ...[
+          const SizedBox(height: OSpace.l),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.verified_user_rounded, size: 16, color: c.success),
+              const SizedBox(width: OSpace.iconGap),
+              Flexible(
+                child: Text(
+                  'Cancel anytime. Billed by Google Play.',
+                  textAlign: TextAlign.center,
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
               ),
-            ),
-          ],
-        ),
+            ],
+          ),
+        ],
         if (banner.status != V2PurchaseBannerStatus.hidden) ...[
           const SizedBox(height: OSpace.l),
           V2PurchaseBanner(

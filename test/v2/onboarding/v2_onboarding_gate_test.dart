@@ -41,6 +41,9 @@ class _FakeAuth extends ChangeNotifier implements V2OnboardingAuth {
   String? get accountError => accountErrorValue;
 
   @override
+  bool get accountTransitionFailed => false;
+
+  @override
   String get accountLabel => 'ada@example.com';
 
   @override

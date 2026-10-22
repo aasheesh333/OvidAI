@@ -209,6 +209,17 @@ object OvidNotifications {
         NotificationManagerCompat.from(context).cancel(id)
     }
 
+    /**
+     * Whether Android will actually show this app's notifications.
+     *
+     * `areNotificationsEnabled` covers both POST_NOTIFICATIONS (API 33+) and
+     * the app-level switch the user can turn off later in system settings,
+     * where the grant itself still reads as granted. The Dart settings screen
+     * uses this so it never claims notifications work when they cannot arrive.
+     */
+    fun notificationsEnabled(context: Context): Boolean =
+        NotificationManagerCompat.from(context).areNotificationsEnabled()
+
     /** Low-importance, silent ongoing notification for the foreground service. */
     fun statusNotification(
         context: Context,

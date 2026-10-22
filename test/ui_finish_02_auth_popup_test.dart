@@ -262,21 +262,25 @@ void main() {
     expect(busy, [true, false]);
   });
 
-  testWidgets('in-flight apply locks cancel and back until completion', (tester) async {
+  testWidgets('cancel escapes an in-flight verify and ignores its result', (tester) async {
+    // An in-flight verify must never trap the person: the dialog has no
+    // timeout of its own, so a hung provider call would otherwise leave no way
+    // out. Cancel closes it, and the late result is discarded rather than
+    // signing in after the dialog is gone.
     final fixture = _PhoneFixture()..applying = Completer<void>();
     await _host(tester, fixture.picker());
     await _openCode(tester, fixture);
     await tester.enterText(_digit(0), '123456');
     await _tap(tester, 'Verify code');
-    await _tap(tester, 'Cancel');
-    await tester.binding.handlePopRoute();
-    await tester.pump();
-    expect(find.byType(AuthPhoneDialog), findsOneWidget);
     expect(fixture.codes, ['123456']);
+    await _tap(tester, 'Cancel');
+    await tester.pump();
+    expect(find.byType(AuthPhoneDialog), findsNothing);
+    // The provider finally answers, after the dialog is gone.
     fixture.applying!.complete();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
-    expect(fixture.successes, 1);
+    expect(fixture.successes, 0, reason: 'a cancelled verify must not sign in');
     expect(find.byType(AuthPhoneDialog), findsNothing);
   });
 

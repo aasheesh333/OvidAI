@@ -65,8 +65,9 @@ const v2PermissionModes = <V2PermissionMode>[
     id: 'studio',
     label: 'Studio',
     description:
-        'For coding in a connected repo. Ovid edits files, runs the '
-        'terminal, and syncs, and asks before committing or publishing.',
+        'For coding in a connected repo. Ovid edits files, runs commands '
+        'in the workspace and syncs, and asks before committing or '
+        'publishing.',
     icon: Icons.code_rounded,
   ),
 ];

@@ -2,7 +2,7 @@
 
 Ovid Si is an AI agent app for Android: a chat-first assistant that can also
 edit code in a cloud workspace (Studio), drive a cloud browser, run scheduled
-tasks, keep artifacts, and work with plugins and MCP connectors. The v2 client
+tasks, keep artifacts, and connect tools and MCP servers. The v2 client
 in `lib/` is a thin client: in the shipped flow, model runs, sandboxes, git,
 storage and billing verification happen on Ovid's servers (`server/`, `cloud/`).
 A user can supply their own provider key (BYOK); the gateway stores it and uses
@@ -49,7 +49,7 @@ its own guide at [`server/account/DEPLOYMENT.md`](server/account/DEPLOYMENT.md).
 ## How to test
 
 ```bash
-# Flutter unit + widget suite (391 *_test.dart files at the time of writing)
+# Flutter unit + widget suite (393 *_test.dart files at the time of writing)
 flutter test
 
 # Static analysis
@@ -93,7 +93,7 @@ that as evidence.
 | `lib/core/` | Client services: cloud facade, billing, auth, sandbox, storage, state |
 | `docs/audit/` | Current audit: `SCREEN_INVENTORY.md` (50 screens), `SCREENS_AND_FEATURES.md`, `FEATURE_GAPS.md` (what does not work, with file citations) |
 | `docs/design/` | Design contracts and the Figma sheet workflow (`FIGMA_SETUP.md`, `MINIMAL_UI_CONTRACT.md`) |
-| `docs/play/` | Play Console worksheets (`DATA-SAFETY.md`, `REVENUECAT_SETUP.md`, `LISTING.md`, `PLAY_COMPLIANCE_AUDIT.md`) |
+| `docs/play/` | Play Console worksheets (`DATA-SAFETY.md`, `STORE-LISTING.md`, `REVENUECAT_SETUP.md`, `PLAY_COMPLIANCE_AUDIT.md`) |
 | `docs/architecture/` | Scale, security and the 100 M-user plan |
 | `server/` | Python account, billing, collaboration, mint and security services |
 | `cloud/` | TypeScript gateway, worker, mint, browser, sandbox and storage packages |
@@ -133,11 +133,18 @@ never automatically migrates to PostgreSQL.
 
 ## Plugin formats
 
-Ovid installs plugins from GitHub (repo, branch, tag, or commit — no silent
-fallback to `main` for pinned refs) and discovered marketplace catalogs
-(each marketplace is itself a GitHub repo). The Plugins screen has exactly
-one "+" which opens one sheet: fetch a plugin from GitHub, or add a
-marketplace (with the existing marketplace list and remove). The core
+**Not shipped in the v2 client.** The v2 app has no plugin installer or
+marketplace screen: `lib/` contains no plugin runtime or `Plugins` page, and
+the Connectors screen adds catalogue entries (including built-in plugin/MCP
+rows) rather than installing a plugin package. The format and activation
+contract below describes the retired v1 runtime; do not cite it as a current
+v2 capability.
+
+The retired v1 runtime installed plugins from GitHub (repo, branch, tag, or
+commit — no silent fallback to `main` for pinned refs) and discovered
+marketplace catalogs (each marketplace is itself a GitHub repo). Its Plugins
+screen had exactly one "+" which opened one sheet: fetch a plugin from GitHub,
+or add a marketplace (with the existing marketplace list and remove). The core
 install transaction still accepts every source type (local folder, ZIP,
 npm, pasted config, direct MCP) for forward-compat; the UI offers only
 the GitHub route. Adapters normalize each of the
@@ -206,22 +213,24 @@ ids (`plugin:<id>/command:<name>`, `…/skill:<name>`, `…/agent:<name>`,
   by default** (28px/30px summary rows with a rotating chevron) and expand in
   place to a full-column, muted body with no heavy border. Nothing is
   auto-expanded.
-- **Large histories are bounded.** A session folds only the tail window needed
-  for display (40 folded items in chat, 200 in a subagent transcript) and shows
-  an "N earlier messages · scroll up" affordance for the rest; opening a
-  5,000-message session does not fold the whole history. Streaming tokens
-  repaint only the live tail row and do not re-fold the transcript. Persistence
-  coalesces rapid writes into one debounced, per-session-dirty encode and
-  flushes pending writes on session switch and lifecycle pause.
-- The workspace **folder picker is Studio-only**. The chat composer's folder
-  chip shows the pinned folder read-only and opens Studio; folder change/clear
-  lives only in Studio.
-- **Read-Only is not a direct mode pick.** The mode pickers offer General, Full
-  Access, Studio, and Control. `/preset plan` selects the read-only Plan policy
-  (plan mode plus the read-only tool gate); approving the plan, `/plan off`, the
-  Plan chip, or a direct mode pick releases the plan-owned read-only mode.
-  `/permission read-only` remains functional but unadvertised for compatibility
-  with existing sessions.
+- **Large histories stay cheap.** The v2 transcript is a lazy list: it builds
+  only the rows in and around the viewport, so opening a 5,000-message session
+  does not build the whole history. The legacy v1 transcript folds to a tail
+  window (40 items in chat, 200 in a subagent transcript) with an "N earlier
+  messages · scroll up" affordance. Streaming tokens repaint only the live tail
+  row. Persistence coalesces rapid writes into one debounced, per-session-dirty
+  encode and flushes pending writes on session switch and lifecycle pause.
+- The workspace **folder picker is Studio-only**. The composer's "+" sheet has a
+  **Studio folder** row that reports whether a folder is pinned and opens
+  Studio; folder change/clear lives only in Studio.
+- **The mode picker offers Read-Only, General, Full Access and Studio.**
+  `AgentMode` has exactly those four values (`lib/core/cloud/models.dart`) and
+  `v2PermissionModes` lists them (`lib/ui/v2/chat/permission_sheet.dart`).
+  There is no Control mode in the shipped client. `/preset plan` also selects
+  the read-only Plan policy (plan mode plus the read-only tool gate);
+  approving the plan, `/plan off`, the Plan chip, or a direct mode pick
+  releases the plan-owned read-only mode. `/permission read-only` selects the
+  same mode as the Read-Only row.
 - Parity with the DSH web reference is **structural only**: no DSH branding,
   icons, product copy, CSS token names, or other assets are copied or imported.
 
@@ -242,10 +251,10 @@ on-device sign-off remains open until a release owner completes that checklist.
   last-used `(repo, branch, workspace folder)` when logged in, so a restart
   does not force a fresh repo/folder selection. A folder that no longer exists
   falls back to the per-session sandbox.
-- **The Studio terminal is persistent and streaming.** Each terminal tab owns
-  an independent pipe shell: shell state (`cd`, exports) survives across
-  commands, output streams as it happens, and stdin is supported. It is a pipe
-  shell, not a full TTY (no job control or terminal escape handling).
+- **There is no in-app Studio terminal in the v2 client.** The workspace shows
+  the file tree, the open file and a sync action; the agent runs shell commands
+  inside the cloud sandbox. The persistent pipe-shell tabs described in earlier
+  contracts are not part of the shipped v2 UI.
 - **Repo binding is `(repo, branch)`.** Branch selection is threaded end-to-end:
   tree/read/blob-SHA requests carry the branch (`?ref=`), commits target the
   branch, and a missing ref surfaces an explicit error rather than silently
@@ -254,7 +263,7 @@ on-device sign-off remains open until a release owner completes that checklist.
   `full-upgrade` fail loudly (non-zero, stderr) instead of silently succeeding;
   `-y`/`--yes` are options, not packages; and a native `dpkg` failure surfaces
   its real non-zero exit code.
-- **Git credentials are host-scoped and ephemeral.** Terminal/agent git against
+- **Git credentials are host-scoped and ephemeral.** Agent git against
   github.com authenticates from a credential helper scoped to
   `https://github.com`, injected into the spawned process environment only. It
   is never written to `.git-credentials` or any global/system config and is
@@ -271,6 +280,12 @@ attached; on-device sign-off remains open until a release owner completes that
 checklist.
 
 ## Browser desktop behavior contract
+
+**Not shipped in the v2 client.** The v2 browser viewer has no desktop/mobile or
+zoom controls; it exposes attach, take-over, tap/type/scroll and tab switch
+(`lib/ui/v2/browser/browser_live_page.dart`). The server still supports
+`browser_resize`, but the contract below describes the retired v1 browser
+surface and is not a current UI capability.
 
 - **Desktop mode stays readable.** Desktop is a desktop UA plus the wide
   viewport for desktop layouts, without overview-mode auto-fit and without a
@@ -325,6 +340,13 @@ those items.
   workspace containment, or Android platform security.
 
 ## Control mode device actions
+
+**Not shipped in the v2 client.** `AgentMode` has no `control` value
+(`lib/core/cloud/models.dart:769`; `state.dart` records that `'control'` was
+retired), the v2 picker offers Read-Only, General, Full Access and Studio, and
+no Dart device tool (`device_key`, `device_scroll`, …) exists in `lib/`. The
+contract below describes the retired v1 surface and is not a current
+capability.
 
 - A floating Ovid field steers the run while Control mode drives other apps:
   an accessibility overlay (no new permission), draggable by its dot handle,

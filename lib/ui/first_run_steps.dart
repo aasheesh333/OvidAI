@@ -39,6 +39,10 @@ class FirstRunSteps {
 /// targetSdk 36 never shows it otherwise, and Settings then reported
 /// "blocked by Android"). Skipped when already granted, permanently denied,
 /// or when the platform has no such permission. Settings keeps the toggle.
+///
+/// The runtime dialog only exists on API 33+. On 24–32 the permission is an
+/// install-time switch, so "Turn on" opens the system notification settings
+/// instead — `request()` there returns denied without showing anything.
 Future<void> askNotificationsOnce(
   BuildContext context, {
   @visibleForTesting bool? isAndroid,
@@ -94,8 +98,16 @@ Future<void> askNotificationsOnce(
     ),
   );
   if (allow != true) return;
+  // 0 means "the shell could not say" (host tests, older shell): assume the
+  // prompt exists rather than sending a 33+ user to settings for nothing.
+  final sdkInt = await NotificationPermission.androidSdkInt();
+  final canPrompt = sdkInt == 0 || sdkInt >= 33;
   try {
-    await NotificationPermissionAccess.request();
+    if (canPrompt) {
+      await NotificationPermissionAccess.request();
+    } else {
+      await NotificationPermission.openSettings();
+    }
   } catch (e) {
     Diag.swallow('first_run.notifications_request', e);
   }

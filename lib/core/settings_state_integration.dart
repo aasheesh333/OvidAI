@@ -19,6 +19,20 @@ extension _SettingsStateIntegration on AppState {
             );
           },
     );
+    // An accepted account deletion must not leave a readable transcript,
+    // draft, cache or saved key on this device. The reset is the only wipe
+    // that fences writers and reads every store back; it also performs the
+    // local sign-out. A partial result throws so the deletion flow keeps the
+    // person signed in and can retry instead of claiming the device is clean.
+    FirebaseService.I.eraseDeviceCopyOnDeletion = () async {
+      final result = await _resetAllData();
+      if (!result.success) {
+        final detail = result.failures.entries
+            .map((entry) => '${entry.key}: ${entry.value}')
+            .join('; ');
+        throw StateError('Local erase incomplete ($detail)');
+      }
+    };
   }
 
   void _checkSettingsOwner(Object token) {

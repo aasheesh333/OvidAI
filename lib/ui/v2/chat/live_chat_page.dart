@@ -1078,7 +1078,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
           if (canReport)
             OListRow(
               title: 'Report',
-              subtitle: 'Flag this answer',
+              subtitle: 'Flag this',
               icon: Icons.flag_outlined,
               showChevron: false,
               onTap: () => Navigator.of(sheetContext).pop('report'),
@@ -1122,7 +1122,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     if (serverId == null || handler == null) return;
     final sent = await handler(serverId);
     if (!mounted) return;
-    _notify(sent ? 'Report sent' : 'Report not sent. Try again.');
+    _notify(sent ? 'Report sent' : 'Report failed. Try again.');
   }
 
   Future<void> _copyMessage(V2LiveAssistantMessage message) async {
@@ -2037,43 +2037,80 @@ class _OutboxNotice extends StatelessWidget {
             color: danger ? c.danger.withValues(alpha: 0.28) : c.hairline,
           ),
         ),
-        child: Row(
-          children: [
-            Icon(
-              danger ? Icons.error_outline_rounded : Icons.cloud_off_rounded,
-              size: 16,
-              color: danger ? c.danger : c.warn,
-            ),
-            const SizedBox(width: OSpace.xs),
-            Expanded(
-              child: Semantics(
-                // The error bar above already announces a refusal; the offline
-                // line has no other owner, so it speaks for itself.
-                liveRegion: !danger,
-                child: Text(
-                  text,
-                  maxLines: 2,
-                  style: OType.caption.copyWith(
-                    color: danger ? c.danger : c.textMuted,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final retryButton = danger && data.onRetryFailed != null
+                ? OIconButton(
+                    icon: Icons.refresh_rounded,
+                    semanticLabel: 'Retry sending',
+                    tooltip: 'Retry sending',
+                    onPressed: data.onRetryFailed,
+                  )
+                : null;
+            final discardButton = danger && data.onDiscardFailed != null
+                ? OIconButton(
+                    icon: Icons.close_rounded,
+                    semanticLabel: 'Discard unsent message',
+                    tooltip: 'Discard',
+                    onPressed: data.onDiscardFailed,
+                  )
+                : null;
+            // Two 48 dp targets, the leading icon and the gaps leave ~150 dp
+            // for the sentence at 320 dp / 200 % text — about eleven characters
+            // a line. A two-line clamp there cut "…when you reconnect" off
+            // mid-word with no ellipsis, so the one instruction the notice
+            // carries was the part that vanished. Give the actions their own
+            // row instead of squeezing the message.
+            final stacked =
+                (retryButton != null || discardButton != null) &&
+                (constraints.maxWidth < 260 ||
+                    MediaQuery.textScalerOf(context).scale(12) > 18);
+
+            final message = Row(
+              children: [
+                Icon(
+                  danger
+                      ? Icons.error_outline_rounded
+                      : Icons.cloud_off_rounded,
+                  size: 16,
+                  color: danger ? c.danger : c.warn,
+                ),
+                const SizedBox(width: OSpace.xs),
+                Expanded(
+                  child: Semantics(
+                    // The error bar above already announces a refusal; the
+                    // offline line has no other owner, so it speaks for itself.
+                    liveRegion: !danger,
+                    child: Text(
+                      text,
+                      maxLines: stacked ? 3 : 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.caption.copyWith(
+                        color: danger ? c.danger : c.textMuted,
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ),
-            if (danger && data.onRetryFailed != null)
-              OIconButton(
-                icon: Icons.refresh_rounded,
-                semanticLabel: 'Retry sending',
-                tooltip: 'Retry sending',
-                onPressed: data.onRetryFailed,
-              ),
-            if (danger && data.onDiscardFailed != null)
-              OIconButton(
-                icon: Icons.close_rounded,
-                semanticLabel: 'Discard unsent message',
-                tooltip: 'Discard',
-                onPressed: data.onDiscardFailed,
-              ),
-          ],
+                if (!stacked && retryButton != null) retryButton,
+                if (!stacked && discardButton != null) discardButton,
+              ],
+            );
+
+            if (!stacked) return message;
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                message,
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    ?retryButton,
+                    ?discardButton,
+                  ],
+                ),
+              ],
+            );
+          },
         ),
       ),
     );

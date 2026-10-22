@@ -126,6 +126,7 @@ class V2AccountData {
     this.signOutLoading = false,
     this.deletionPending = false,
     this.deletionDeadline,
+    this.deviceEraseFailed,
     this.deletionLoading = false,
     this.errorMessage = 'We could not load your account.',
   });
@@ -179,6 +180,13 @@ class V2AccountData {
   /// Server deadline for a pending deletion. The copy stays truthful even
   /// when the adapter cannot supply it yet.
   final DateTime? deletionDeadline;
+
+  /// True when this device could not erase its copy after the server accepted
+  /// the request. Read at build time, because the erase finishes inside the
+  /// request and the page rebuilds afterwards. The pending row then says so
+  /// instead of implying a clean device.
+  final bool Function()? deviceEraseFailed;
+
   final bool deletionLoading;
   final String errorMessage;
 }
@@ -383,14 +391,18 @@ class _AccountPageState extends State<AccountPage> {
   List<Widget> _deleteRows(BuildContext context) {
     if (_deletionPending) {
       final deadline = _deletionDeadline;
+      final when = deadline == null
+          ? 'Deletes after 24 hours'
+          : 'Deletes ${formatLocalDateTime(deadline)}';
+      final eraseFailed = data.deviceEraseFailed?.call() ?? false;
       return <Widget>[
         V2SettingsRow(
           key: const ValueKey<String>('account-delete-row'),
           icon: Icons.hourglass_bottom_rounded,
           title: 'Deletion pending',
-          subtitle: deadline == null
-              ? 'Deletes after 24 hours'
-              : 'Deletes ${formatLocalDateTime(deadline)}',
+          subtitle: eraseFailed
+              ? '$when · This device could not be cleared'
+              : when,
           showChevron: false,
           stacksTrailing: true,
           trailing: _hasCancel

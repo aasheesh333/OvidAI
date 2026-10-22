@@ -7,7 +7,10 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../../../core/account_service.dart';
 import '../../../core/app_info.dart';
+import '../../../core/auth_identity.dart';
+import '../../../core/auth_providers.dart';
 import '../../../core/connection_service.dart';
 import '../../../core/background_notifications.dart';
 import '../../../core/cloud/account_settings_client.dart';
@@ -28,6 +31,7 @@ import '../../../core/play_billing.dart';
 import '../../../core/presets.dart';
 import '../../../core/revenuecat_billing.dart';
 import '../../../core/state.dart' hide ServiceStatus;
+import '../../auth_methods.dart';
 import '../../github_login_sheet.dart';
 import '../settings/account_health_page.dart' as health;
 import '../settings/account_page.dart';
@@ -163,6 +167,11 @@ class V2SettingsRoutes {
     final firebase = FirebaseService.I;
     final app = AppState.I;
     final receipt = firebase.lastDeletionReceipt;
+    // OVID_ACCOUNT_ENABLED off means the account service is not deployed: a
+    // "Delete account" row could only ever fail. Render no row rather than a
+    // control that cannot do what it says. `OVID_ACCOUNT_ENABLED=true` is a
+    // release requirement (docs/play/RELEASE-CHECKLIST.md).
+    final accountService = firebase.accountService.enabled;
     return V2AccountData(
       profile: V2AccountProfile(
         name: firebase.accountLabel,
@@ -225,14 +234,84 @@ class V2SettingsRoutes {
         if (field.id == 'display_name') actions.renameAccount(context);
       },
       onSignOut: () => actions.signOut(context),
-      onDeleteAccount: () => actions.deleteAccount(context),
+      onDeleteAccount: accountService
+          ? () => actions.deleteAccount(context)
+          : null,
       onLinkAccount: () => open(context, 'credentials', actions),
       onDataControl: () => unawaited(open(context, 'data_control', actions)),
-      requestDeletion: FirebaseService.I.requestAccountDeletion,
-      restoreDeletion: actions.restoreAccount,
+      // The account service refuses a deletion without a fresh identity proof
+      // (5 minutes, `AuthIdentity.deletionAuthorized`). The typed confirmation
+      // alone is not proof of who is holding the phone, so verify with a
+      // linked provider first and report a refusal instead of a silent no-op.
+      requestDeletion: accountService
+          ? (requestId) async {
+              // A legacy password-only account has no linked provider to
+              // verify, so the server's proof requirement can never be met.
+              // Say what to do instead of failing on a check that cannot pass.
+              if (firebase.reauthProviders.isEmpty) {
+                throw const AccountException(legacyAuthMigrationHelp);
+              }
+              if (!await _verifyIdentityForDeletion(context, firebase)) {
+                throw const AccountException(
+                  'Deletion needs a fresh sign-in check. Verify this account '
+                  'and try again.',
+                );
+              }
+              return firebase.requestAccountDeletion(requestId);
+            }
+          : null,
+      restoreDeletion: accountService ? actions.restoreAccount : null,
       deletionPending: receipt?.isPending == true,
       deletionDeadline: receipt?.deleteAfter,
+      deviceEraseFailed: () => firebase.deletionDeviceEraseFailed,
     );
+  }
+
+  /// Same-account verification before a destructive account action.
+  ///
+  /// Mirrors the legacy Account screen's proof step: a linked provider is
+  /// reauthenticated, which is what makes [FirebaseService
+  /// .requestAccountDeletion] accept the request. False on cancel, on a
+  /// changed account, or when the account has no linked provider to verify.
+  static Future<bool> _verifyIdentityForDeletion(
+    BuildContext context,
+    FirebaseService fb,
+  ) async {
+    if (fb.reauthProviders.isEmpty) return false;
+    final expectedUid = fb.uid;
+    var busy = false;
+    final verified = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialog) => StatefulBuilder(
+        builder: (dialog, update) => PopScope(
+          canPop: !busy,
+          child: AlertDialog(
+            title: const Text('Verify this account'),
+            content: SingleChildScrollView(
+              child: AuthMethods(
+                providers: fb.authProviders,
+                intent: AuthIntent.reauthenticate,
+                linkedIds: fb.linkedProviderIds,
+                phoneNumber: fb.phoneNumber,
+                social: (id) =>
+                    fb.authenticateSocial(id, AuthIntent.reauthenticate),
+                phone: () => fb.createPhoneFlow(AuthIntent.reauthenticate),
+                onBusyChanged: (value) => update(() => busy = value),
+                onSuccess: () => Navigator.of(dialog).pop(true),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: busy ? null : () => Navigator.of(dialog).pop(false),
+                child: const Text('Cancel'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    return verified == true && fb.uid == expectedUid;
   }
 
   static V2PlanBillingData _plans(
@@ -250,10 +329,16 @@ class V2SettingsRoutes {
         : OvidPlanCatalog.plans;
     final plans = <V2Plan>[];
     final play = PlayBillingService.I;
-    // Play's catalogue can only gate the CTA when Play is the purchase path.
-    // A RevenueCat build (Test Store included) may sell products Play does not
-    // list, so there the availability is unknown rather than false.
-    final playCatalogue = !RevenueCatBilling.I.available;
+    // Play's catalogue only gates the CTA when Play is the attempted path. A
+    // confirmed RevenueCat fallback (or Test Store) may sell products Play does
+    // not list, so there the availability is unknown.
+    final route = resolveBillingRoute(
+      playLoaded: play.loaded,
+      playAvailable: play.available,
+      revenueCat: RevenueCatBilling.I,
+    );
+    final playCatalogue =
+        route != BillingRoute.revenueCat && route != BillingRoute.demo;
     for (final plan in catalog) {
       final tier = plan.tier;
       final spec = _planSpec(tier);
@@ -304,6 +389,16 @@ class V2SettingsRoutes {
       period: period,
       currentPlanId: currentTier,
       plans: plans,
+      // RevenueCat present but no server route can confirm its charge: every
+      // paid card disables its CTA with this real reason. Only once Play has
+      // answered, so a page opened during startup cannot stay disabled after
+      // Play turns out to be available.
+      checkoutBlockedReason:
+          route == BillingRoute.none &&
+              play.loaded &&
+              RevenueCatBilling.I.available
+          ? kRevenueCatUnconfirmedReason
+          : null,
       onCurrencyChanged: onCurrencyChanged,
       onPeriodChanged: onPeriodChanged,
       // Every card names its own plan; the old screen hard-coded Plus here,
@@ -393,15 +488,24 @@ class V2SettingsRoutes {
       );
     }
 
-    final dailyFraction = dailyTokens == null || limits.dailyTokenCap == 0
-        ? 0.0
-        : (dailyTokens / limits.dailyTokenCap).clamp(0.0, 1.0);
+    // The progress bar follows the server's real remaining fraction (the USD
+    // allowance gate) when it sent one. The token fraction is only a Free-plan
+    // fallback; paid plans have no token cap, so an unknown server fraction
+    // stays 0 rather than inventing a cap.
+    final remaining = usage.remainingFraction;
+    final dailyFraction = remaining != null
+        ? (1 - remaining).clamp(0.0, 1.0)
+        : (dailyTokens == null || limits.dailyTokenCap <= 0
+              ? 0.0
+              : (dailyTokens / limits.dailyTokenCap).clamp(0.0, 1.0));
 
     return V2UsageData(
       status: V2UsageStatus.ready,
       planId: tier,
       dailyUsedLabel: dailyTokens == null ? '' : compactTokens(dailyTokens),
-      dailyLimitLabel: compactTokens(limits.dailyTokenCap),
+      dailyLimitLabel: limits.dailyTokenCap <= 0
+          ? ''
+          : compactTokens(limits.dailyTokenCap),
       dailyFraction: dailyFraction,
       // The page derives a live countdown from this instant; no static string.
       resetsAt: usage.resetsAt,
@@ -411,7 +515,9 @@ class V2SettingsRoutes {
       monthlyUsedLabel: monthlyTokens == null
           ? ''
           : compactTokens(monthlyTokens),
-      monthlyLimitLabel: compactTokens(limits.monthlyTokenCap),
+      monthlyLimitLabel: limits.monthlyTokenCap <= 0
+          ? ''
+          : compactTokens(limits.monthlyTokenCap),
       days: _usageDays(recorded, history.days),
       range: history.days == 7
           ? V2UsageRange.sevenDays
@@ -1207,7 +1313,7 @@ class V2SettingsRoutes {
           usd: 5,
           inr: 499,
           storageGb: 5,
-          features: ['Auto models', '5 GB storage', 'Schedules'],
+          features: ['Auto models', '5 GB storage', '5 custom connectors'],
         );
       case '7x':
         return const V2PlanSpec(
@@ -1216,7 +1322,7 @@ class V2SettingsRoutes {
           usd: 18,
           inr: 1799,
           storageGb: 15,
-          features: ['All models', '15 GB storage', 'Collaboration'],
+          features: ['All models', '15 GB storage', '20 custom connectors'],
         );
       case '15x':
         return const V2PlanSpec(
@@ -1225,7 +1331,7 @@ class V2SettingsRoutes {
           usd: 99,
           inr: 9999,
           storageGb: 75,
-          features: ['All models', '75 GB storage', 'Priority support'],
+          features: ['All models', '75 GB storage', '20 custom connectors'],
         );
       default:
         return const V2PlanSpec(
@@ -2335,6 +2441,17 @@ class _PermissionsLoaderState extends State<_PermissionsLoader>
             'to review them.';
       });
       return;
+    }
+    if (!mounted) return;
+    // Android below API 33 has no notification prompt at all: a denied
+    // notifications row can only be changed in system settings, so it must
+    // offer "Open settings" instead of an "Ask" that can never show a dialog.
+    final sdkInt = await NotificationPermission.androidSdkInt();
+    if (sdkInt > 0 && sdkInt < 33) {
+      final status = next['notifications'];
+      if (status != null && !status.isGranted) {
+        next['notifications'] = PermissionStatus.permanentlyDenied;
+      }
     }
     if (!mounted) return;
     setState(() {

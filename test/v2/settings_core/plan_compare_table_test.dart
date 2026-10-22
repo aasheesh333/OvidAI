@@ -87,10 +87,9 @@ void main() {
 
     for (final label in [
       'Storage',
-      'Files / day',
       'Files / project',
       'Model access',
-      'Auto multiplier',
+      'Allowance multiplier',
       'Custom connectors',
       'Token caps',
       'Price',
@@ -107,11 +106,6 @@ void main() {
     expect(find.text('15 GB'), findsOneWidget);
     expect(find.text('75 GB'), findsOneWidget);
 
-    // Go, Plus and Pro accept 80 files every 3 h: 640 files a day.
-    expect(find.text('50 / day'), findsOneWidget);
-    expect(find.text('640 / day'), findsNWidgets(3));
-    expect(find.text('80 / 3 h'), findsNWidgets(3));
-
     expect(find.text('80 max'), findsOneWidget);
     expect(find.text('100 max'), findsOneWidget);
     expect(find.text('150 max'), findsOneWidget);
@@ -120,9 +114,9 @@ void main() {
     expect(find.text('Auto only'), findsNWidgets(2));
     expect(find.text('Auto + manual'), findsNWidgets(2));
     expect(find.text('1×'), findsOneWidget);
-    expect(find.text('1.5×'), findsOneWidget);
-    expect(find.text('5×'), findsOneWidget);
-    expect(find.text('20×'), findsOneWidget);
+    expect(find.text('3×'), findsOneWidget);
+    expect(find.text('23×'), findsOneWidget);
+    expect(find.text('43×'), findsOneWidget);
 
     expect(find.text('None'), findsOneWidget);
     expect(find.text('5'), findsOneWidget);
@@ -130,12 +124,8 @@ void main() {
 
     expect(find.text('50M / 24 h'), findsOneWidget);
     expect(find.text('1.5B / 30 d'), findsOneWidget);
-    expect(find.text('75M / 24 h'), findsOneWidget);
-    expect(find.text('2.25B / 30 d'), findsOneWidget);
-    expect(find.text('250M / 24 h'), findsOneWidget);
-    expect(find.text('7.5B / 30 d'), findsOneWidget);
-    expect(find.text('1B / 24 h'), findsOneWidget);
-    expect(find.text('30B / 30 d'), findsOneWidget);
+    // Paid plans are not token-capped (server/mint/ovid_plans.py).
+    expect(find.text('No token cap'), findsNWidgets(3));
 
     expect(find.text(r'$0'), findsOneWidget);
     expect(find.text(r'$5'), findsOneWidget);
@@ -345,10 +335,9 @@ void main() {
       expect(tester.takeException(), isNull);
       for (final label in [
         'Storage',
-        'Files / day',
         'Files / project',
         'Model access',
-        'Auto multiplier',
+        'Allowance multiplier',
         'Custom connectors',
         'Token caps',
         'Price',
@@ -356,8 +345,6 @@ void main() {
         expect(find.text(label), findsOneWidget, reason: 'row $label');
       }
       expect(find.text('75 GB'), findsOneWidget);
-      expect(find.text('50 / day'), findsOneWidget);
-      expect(find.text('640 / day'), findsNWidgets(3));
       expect(find.text('Current'), findsOneWidget);
       expect(
         find.byKey(const ValueKey('plan-compare-current-pro')),

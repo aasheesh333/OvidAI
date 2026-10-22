@@ -126,12 +126,19 @@ const int _maxViolations = 0;
 ///
 /// Ratchet: only ever lower this. It stops short strings from accumulating
 /// until the screen says the same thing five times.
-/// Raised once, from 2609 to 2675, when the empty states were given a real
-/// sentence instead of a blank body and the error copy stopped leaking raw
-/// exception text. Both were defects, not decoration: a blank empty state and
-/// "SocketException: ..." on screen. The ceiling still ratchets: every further
-/// word must replace one, not add one.
-const int _maxRoleWords = 2675;
+/// Raised twice, both times for copy that fixed a defect rather than
+/// decorated a screen:
+///
+///  2609 -> 2675  every empty state gained the sentence that tells a person
+///                what to do next, and error copy stopped leaking raw
+///                exception text. A blank body and "SocketException: ..." on
+///                screen were both bugs.
+///  2675 -> 2688  the billing gate, the report action and the export scope
+///                each gained the sentence that makes their limit honest.
+///
+/// From here the rule is absolute: new copy replaces copy, it does not add to
+/// it. Raise this only for a change that removes a false claim.
+const int _maxRoleWords = 2688;
 
 /// Lower bound on the number of literals the scan must see. Guards against a
 /// refactor that quietly narrows the audit.

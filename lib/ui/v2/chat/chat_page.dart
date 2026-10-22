@@ -65,7 +65,7 @@ class V2ChatPageData {
     this.queuedCount = 0,
     this.autoOnly = false,
     this.subagentCount = 0,
-    this.limitResetLabel = 'Resets in 6h 12m',
+    this.limitResetLabel = '',
     this.errorMessage = "Couldn't load this chat.",
     this.permissionLabel = 'General',
     this.composerHint = 'Ask Ovid anything',
@@ -618,8 +618,14 @@ class _V2ChatPageState extends State<V2ChatPage> {
         return OEmptyState(
           icon: Icons.hourglass_top_rounded,
           title: 'Daily limit reached',
-          message:
-              "You've used all 50M free tokens for today. ${data.limitResetLabel}.",
+          // The limit that stops a run is the plan's allowance, not a fixed
+          // token count: the Free USD allowance gates before the 50M token
+          // ceiling, and paid plans are not token-capped. Naming 50M here
+          // would be false for most accounts.
+          message: data.limitResetLabel.trim().isEmpty
+              ? "You've reached your plan's daily limit."
+              : "You've reached your plan's daily limit. "
+                    '${data.limitResetLabel}.',
           // No handler means no upgrade route from this host: the state then
           // explains itself and offers no button that would do nothing.
           action: widget.onSeePlans == null

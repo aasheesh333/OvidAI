@@ -107,6 +107,9 @@ class _OnboardingAuth extends ChangeNotifier implements V2OnboardingAuth {
   String? get accountError => null;
 
   @override
+  bool get accountTransitionFailed => false;
+
+  @override
   String get accountLabel => 'Test account';
 
   @override

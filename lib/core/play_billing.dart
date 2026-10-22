@@ -202,12 +202,48 @@ class PlayBillingService extends ChangeNotifier {
 
   /// Connects to Play once, loads products and re-checks owned purchases
   /// (picks up purchases that were paid but not yet verified/acknowledged).
+  ///
+  /// Bounded: a store that never answers must not hold the paywall open. On a
+  /// timeout the service reports itself as not loaded, which the purchase
+  /// route already treats as "Play unavailable" — the honest outcome.
   Future<void> ensureLoaded() {
     // A different account than the one loaded: forget the previous one's
     // plan and re-read this account's purchases (SH-013).
     if (_loadedFor != _uid()) resetForAccount();
     return _loading ??= _load();
   }
+
+  /// Awaits the store with a deadline, for the paths a person is waiting on.
+  ///
+  /// The deadline is owned here rather than by `Future.timeout`, whose timer
+  /// stays armed until the wrapped future settles — precisely the hung case it
+  /// exists for. A background warm-up ([ensureLoaded]) has no deadline on
+  /// purpose: a store that never answers must not leave a timer running.
+  Future<void> ensureLoadedWithin(Duration limit) async {
+    final settled = Completer<void>();
+    final deadline = Timer(limit, () {
+      if (settled.isCompleted) return;
+      _loading = null;
+      Diag.swallow(
+        'play_billing.load',
+        StateError('Play Billing did not answer in time'),
+      );
+      settled.complete();
+    });
+    try {
+      await ensureLoaded();
+    } catch (error) {
+      Diag.swallow('play_billing.load', error);
+    } finally {
+      deadline.cancel();
+      if (!settled.isCompleted) settled.complete();
+    }
+    await settled.future;
+  }
+
+  /// How long a Play Billing connection may take before the paywall treats the
+  /// store as unavailable.
+  static const Duration _loadTimeout = Duration(seconds: 10);
 
   /// Clears every per-account fact (owned plan, expiry, renewal, pending
   /// purchase/restore waiters) so account B never sees account A's plan or
@@ -301,7 +337,7 @@ class PlayBillingService extends ChangeNotifier {
     OvidBillingPeriod period = OvidBillingPeriod.monthly,
   }) async {
     lastPurchaseError = null;
-    await ensureLoaded();
+    await ensureLoadedWithin(_loadTimeout);
     final configured = ovidPlayProductId(tier, period);
     if (configured == null) {
       lastPurchaseError = _periodUnavailableMessage(period);
@@ -379,7 +415,7 @@ class PlayBillingService extends ChangeNotifier {
   /// "Restore purchases": re-reads owned subscriptions from Play and
   /// re-verifies them with the server.
   Future<UpgradeOutcome> restore() async {
-    await ensureLoaded();
+    await ensureLoadedWithin(_loadTimeout);
     if (!_available) return const UpgradeOutcome(UpgradeResult.notAvailable);
     final uid = _uid();
     if (uid == null) return const UpgradeOutcome(UpgradeResult.rejected);
