@@ -181,13 +181,20 @@ class V2LiveChatData {
     this.draft = '',
     this.composerHint = 'Ask Ovid anything',
     this.emptyTitle = 'Ask Ovid anything',
-    this.emptyMessage = 'Replies and files appear here.',
+    this.emptyMessage = 'Type a question below to get started.',
     this.emptyActionLabel = 'Start a chat',
     this.queuedCount = 0,
     this.queuedPreview,
     this.autoOnly = false,
     this.subagentCount = 0,
-  }) : assert(subagentCount >= 0, 'subagentCount cannot be negative');
+    this.offline = false,
+    this.waitingToSend = 0,
+    this.failedToSend = 0,
+    this.onRetryFailed,
+    this.onDiscardFailed,
+  })  : assert(subagentCount >= 0, 'subagentCount cannot be negative'),
+        assert(waitingToSend >= 0, 'waitingToSend cannot be negative'),
+        assert(failedToSend >= 0, 'failedToSend cannot be negative');
 
   final String title;
   final String? sessionId;
@@ -226,6 +233,21 @@ class V2LiveChatData {
   /// Subagents launched in this session, shown as a badge on the model chip.
   final int subagentCount;
 
+  /// True when the connectivity probe says the device is offline. Drives the
+  /// composer notice, so a queued prompt never looks like a sent one.
+  final bool offline;
+
+  /// Prompts for this chat waiting in the durable outbox (offline or being
+  /// retried). Nothing is lost while they wait — the store flushes them.
+  final int waitingToSend;
+
+  /// Prompts the server refused (4xx): they stay in the outbox until the user
+  /// chooses Retry or Discard. Without these controls a refused prompt would
+  /// hold every later prompt in this chat forever.
+  final int failedToSend;
+  final VoidCallback? onRetryFailed;
+  final VoidCallback? onDiscardFailed;
+
   /// Returns a copy carrying [error] in the composer error slot. Used by the
   /// shell, which owns the facade and therefore the failure state.
   V2LiveChatData copyWithSendError(V2ChatError? error) => V2LiveChatData(
@@ -251,6 +273,11 @@ class V2LiveChatData {
     queuedPreview: queuedPreview,
     autoOnly: autoOnly,
     subagentCount: subagentCount,
+    offline: offline,
+    waitingToSend: waitingToSend,
+    failedToSend: failedToSend,
+    onRetryFailed: onRetryFailed,
+    onDiscardFailed: onDiscardFailed,
   );
 }
 
@@ -270,6 +297,7 @@ class V2LiveChatPage extends StatefulWidget {
     this.onCopyCode,
     this.onRegenerateMessage,
     this.onBranchMessage,
+    this.onReportMessage,
     this.onOpenLink,
     this.onDownloadLink,
     this.onThinkingToggle,
@@ -321,6 +349,11 @@ class V2LiveChatPage extends StatefulWidget {
   /// Branch from here. The host owns the navigation and reports what happened.
   final Future<V2MessageActionReport> Function(String serverMessageId)?
   onBranchMessage;
+
+  /// Report this answer to the safety queue. Play's AI-Generated Content
+  /// policy requires in-app reporting, so the action is offered on every
+  /// stored answer. Null hides Report.
+  final Future<bool> Function(String serverMessageId)? onReportMessage;
 
   /// Open an image or non-download link from an assistant message.
   final ValueChanged<String>? onOpenLink;
@@ -807,7 +840,13 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     // had scrolled back: the reply is what they are waiting for.
     _pinToTail();
     _clearComposer();
-    _announce('Message sent');
+    // Offline the prompt is queued in the durable outbox, not sent. Say so:
+    // "Message sent" would be a lie the user only discovers on reconnect.
+    _announce(
+      widget.data.offline
+          ? 'Message queued. It will send when you reconnect.'
+          : 'Message sent',
+    );
   }
 
   void _clearComposer() {
@@ -815,7 +854,11 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     _controller.clear();
     _syncingDraft = false;
     _lastDraft = '';
-    widget.onDraftChanged?.call('');
+    // The DURABLE draft is deliberately not cleared here: the send path drops
+    // it only once the prompt is in the outbox (runTask onQueued), so a
+    // process kill or a refused send between tap and enqueue keeps the text.
+    // A page wired only with onSend has no acceptance signal, so it clears now.
+    if (widget.onSubmit == null) widget.onDraftChanged?.call('');
     _voice.clearError();
     setState(() {
       _attachments.clear();
@@ -941,6 +984,10 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     final busy = _busyMessageIds.contains(message.id);
     final canBranch =
         message.serverMessageId != null && widget.onBranchMessage != null;
+    final canReport =
+        message.serverMessageId != null &&
+        widget.onReportMessage != null &&
+        message.markdown.trim().isNotEmpty;
     // Regenerate only on the newest answer of a settled run: an older one
     // would delete everything after it, and a running one would race the live
     // answer.
@@ -949,7 +996,10 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
         !widget.data.running &&
         message.serverMessageId != null &&
         widget.onRegenerateMessage != null;
-    if (!canBranch && !canRegenerate && message.markdown.trim().isEmpty) {
+    if (!canBranch &&
+        !canRegenerate &&
+        !canReport &&
+        message.markdown.trim().isEmpty) {
       return blocks;
     }
     return Column(
@@ -983,6 +1033,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
                     _openMessageActions(
                       message,
                       canRegenerate: canRegenerate,
+                      canReport: canReport,
                       laterMessages: laterMessages,
                       laterRows: laterRows,
                     ),
@@ -998,6 +1049,7 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   Future<void> _openMessageActions(
     V2LiveAssistantMessage message, {
     required bool canRegenerate,
+    required bool canReport,
     required int laterMessages,
     required int laterRows,
   }) async {
@@ -1023,6 +1075,14 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
               showChevron: false,
               onTap: () => Navigator.of(sheetContext).pop('branch'),
             ),
+          if (canReport)
+            OListRow(
+              title: 'Report',
+              subtitle: 'Flag this answer',
+              icon: Icons.flag_outlined,
+              showChevron: false,
+              onTap: () => Navigator.of(sheetContext).pop('report'),
+            ),
           if (canRegenerate)
             OListRow(
               title: 'Regenerate',
@@ -1041,6 +1101,8 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
         await _copyMessage(message);
       case 'branch':
         await _runMessageAction(message, branch: true);
+      case 'report':
+        await _reportMessage(message);
       case 'regenerate':
         // Regenerating removes the answer, so anything after it goes too. A
         // later message is destructive enough to name the count first.
@@ -1050,6 +1112,17 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
         }
         await _runMessageAction(message, branch: false);
     }
+  }
+
+  /// Hands the answer to the host, which owns the report sheet and the
+  /// service call. A refusal is reported honestly rather than swallowed.
+  Future<void> _reportMessage(V2LiveAssistantMessage message) async {
+    final serverId = message.serverMessageId;
+    final handler = widget.onReportMessage;
+    if (serverId == null || handler == null) return;
+    final sent = await handler(serverId);
+    if (!mounted) return;
+    _notify(sent ? 'Report sent' : 'Report not sent. Try again.');
   }
 
   Future<void> _copyMessage(V2LiveAssistantMessage message) async {
@@ -1201,6 +1274,10 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        // What the durable outbox really knows: offline
+                        // prompts are queued (not sent), and a refused one is
+                        // still here with Retry / Discard.
+                        _OutboxNotice(data: data),
                         // A failed send sits here, not over the transcript: the
                         // user keeps their place and can retry in context.
                         if (data.sendError != null)
@@ -1912,6 +1989,90 @@ class _LiveComposer extends StatelessWidget {
               permissionLabel: permissionLabel,
               onPermission: onPermissionTap,
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _OutboxNotice extends StatelessWidget {
+  const _OutboxNotice({required this.data});
+
+  final V2LiveChatData data;
+
+  @override
+  Widget build(BuildContext context) {
+    final failed = data.failedToSend;
+    if (failed <= 0 && !data.offline) return const SizedBox.shrink();
+    final c = OColors.of(context);
+    final danger = failed > 0;
+    final waiting = data.waitingToSend;
+    final text = danger
+        ? (failed == 1
+              ? '1 message was not sent.'
+              : '$failed messages were not sent.')
+        : waiting > 0
+        ? (waiting == 1
+              ? "You're offline — 1 message will send when you reconnect."
+              : "You're offline — $waiting messages will send when you "
+                    'reconnect.')
+        : "You're offline. New messages will send when you reconnect.";
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(OSpace.l, 0, OSpace.l, OSpace.s),
+      child: Container(
+        constraints: const BoxConstraints(minHeight: OSpace.touch),
+        padding: const EdgeInsets.only(
+          left: OSpace.m,
+          right: OSpace.xs,
+          top: OSpace.xxs,
+          bottom: OSpace.xxs,
+        ),
+        decoration: BoxDecoration(
+          color: danger
+              ? c.danger.withValues(alpha: 0.08)
+              : c.surfaceAlt,
+          borderRadius: BorderRadius.circular(ORadius.pill),
+          border: Border.all(
+            color: danger ? c.danger.withValues(alpha: 0.28) : c.hairline,
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              danger ? Icons.error_outline_rounded : Icons.cloud_off_rounded,
+              size: 16,
+              color: danger ? c.danger : c.warn,
+            ),
+            const SizedBox(width: OSpace.xs),
+            Expanded(
+              child: Semantics(
+                // The error bar above already announces a refusal; the offline
+                // line has no other owner, so it speaks for itself.
+                liveRegion: !danger,
+                child: Text(
+                  text,
+                  maxLines: 2,
+                  style: OType.caption.copyWith(
+                    color: danger ? c.danger : c.textMuted,
+                  ),
+                ),
+              ),
+            ),
+            if (danger && data.onRetryFailed != null)
+              OIconButton(
+                icon: Icons.refresh_rounded,
+                semanticLabel: 'Retry sending',
+                tooltip: 'Retry sending',
+                onPressed: data.onRetryFailed,
+              ),
+            if (danger && data.onDiscardFailed != null)
+              OIconButton(
+                icon: Icons.close_rounded,
+                semanticLabel: 'Discard unsent message',
+                tooltip: 'Discard',
+                onPressed: data.onDiscardFailed,
+              ),
           ],
         ),
       ),

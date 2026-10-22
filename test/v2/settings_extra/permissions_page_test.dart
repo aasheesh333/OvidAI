@@ -400,7 +400,7 @@ void main() {
       _data(status: V2PermissionsStatus.error, onRetry: () => retries++),
     );
 
-    expect(find.text('Something went wrong'), findsOneWidget);
+    expect(find.text('That did not work'), findsOneWidget);
     expect(find.text('We could not load your permissions.'), findsOneWidget);
 
     await tester.tap(find.text('Try again'));

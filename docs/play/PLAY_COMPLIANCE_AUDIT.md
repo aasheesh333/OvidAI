@@ -1,5 +1,18 @@
 # Ovid Si: Google Play pre-launch compliance audit
 
+> **STATUS 2026-10-22 — historical audit, not the release runbook.**
+> The code has moved on since 2026-10-11. Several findings below are fixed and
+> several instructions are stale: every build now targets API 36 (there is no
+> target-28 sideload profile), the Play overlay removes the broad permissions,
+> the foreground-service/`dataSync` path and the on-device sandbox are gone,
+> the Report flow exists but is wired only in the legacy v1 chat screen (the
+> default v2 shell still needs it — a release blocker), and Play Billing +
+> RevenueCat exist (but no Play subscription has been created yet). For the
+> current answers use `DATA-SAFETY.md`; for the listing use
+> `STORE-LISTING.md`; for the ordered release steps use
+> `RELEASE-CHECKLIST.md`. Keep this file for policy rationale and the IARC/AI/
+> UGC reasoning, not for build commands.
+
 - Date: 2026-10-11. Policies were re-checked that day on support.google.com and developer.android.com.
 - Package: `com.dhanuk.ovidai`. The app is not on Play yet; this is the first submission.
 - Code audited: `integration/production-hardening` @ `cdd8fb9`, the most complete merge. Also read: `feat/session-link-collab` (share/collab), `release/play-policy-blockers` (PR-1b) and `feat/play-billing-usage` (PR-8).
@@ -264,7 +277,7 @@ Owner action: describe the Play app as "AI chat, browser and image assistant". D
 
 ### Fix
 
-Done: `93329fe`.
+Done: `93329fe`, but **only in the legacy v1 `ChatScreen`** (`lib/ui/chat_screen.dart:6114`). The default v2 shell does not expose it yet, so this remains a Play blocker.
 - A **Report** (flag) action on every finished assistant reply, generated image and HTML artifact.
 - `ContentReportSheet` offers reasons that match Play's restricted categories, an optional note, and shows a confirmation. Nothing leaves the app.
 - `ContentReportService` POSTs `{base}/v1/reports` with the Firebase ID token and App Check. Reports are idempotent and capped at a 4,000-character excerpt.

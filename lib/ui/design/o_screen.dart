@@ -207,8 +207,8 @@ class OStateView extends StatelessWidget {
       OStatus.loading => OSkeletonList(rows: skeletonRows),
       OStatus.empty => OEmptyState(
         icon: Icons.inbox_rounded,
-        title: emptyTitle ?? 'Nothing here',
-        message: emptyBody ?? '',
+        title: emptyTitle ?? 'Nothing here yet',
+        message: emptyBody ?? 'Add something to see it here.',
         action: emptyActionLabel == null || onEmptyAction == null
             ? null
             : OButton(
@@ -218,7 +218,7 @@ class OStateView extends StatelessWidget {
               ),
       ),
       OStatus.error => OErrorState(
-        message: errorMessage ?? 'Something went wrong.',
+        message: errorMessage ?? 'Ovid could not load this. Try again.',
         onRetry: onRetry,
       ),
       OStatus.content => child,

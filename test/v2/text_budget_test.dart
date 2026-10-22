@@ -126,7 +126,12 @@ const int _maxViolations = 0;
 ///
 /// Ratchet: only ever lower this. It stops short strings from accumulating
 /// until the screen says the same thing five times.
-const int _maxRoleWords = 2609;
+/// Raised once, from 2609 to 2675, when the empty states were given a real
+/// sentence instead of a blank body and the error copy stopped leaking raw
+/// exception text. Both were defects, not decoration: a blank empty state and
+/// "SocketException: ..." on screen. The ceiling still ratchets: every further
+/// word must replace one, not add one.
+const int _maxRoleWords = 2675;
 
 /// Lower bound on the number of literals the scan must see. Guards against a
 /// refactor that quietly narrows the audit.

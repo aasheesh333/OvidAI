@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/cloud/error_text.dart';
 import '../../../core/cloud/schedule_client.dart'
     if (dart.library.js_interop) 'schedule_run_dto_web.dart';
 import '../../design/o_components.dart';
@@ -110,7 +111,9 @@ class V2ScheduleRun {
         : started != null && status == V2RunStatus.running
         ? formatRunDuration((now ?? DateTime.now()).difference(started))
         : null;
-    final error = dto.error?.trim();
+    // Never print a raw provider dump or HTTP status from the run record: the
+    // one-line filter keeps identifiers and stack text off the screen.
+    final error = cloudErrorDetail(dto.error);
     return V2ScheduleRun(
       id: dto.id,
       timeLabel: at == null ? 'Not scheduled' : _clockLabel(at),

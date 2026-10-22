@@ -486,6 +486,19 @@ describe.skipIf(!RUN)("BillingService (service.ts)", () => {
     ).rejects.toMatchObject({ status: 503, code: "play_unavailable" });
   });
 
+  it("a token Play does not know is acknowledged, not retried forever", async () => {
+    // A forged/foreign/replayed token cannot be fixed by redelivery.
+    await expect(
+      service.notify(
+        push({
+          subscriptionNotification: { notificationType: 2, purchaseToken: "forged" },
+        }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(play.calls).toEqual(["forged"]);
+    expect(sink).toEqual([]);
+  });
+
   it("malformed, test and foreign-package notifications are acknowledged without Play calls", async () => {
     await service.notify({});
     await service.notify({ message: { data: "!!" } });

@@ -562,7 +562,7 @@ class _MemoryPageState extends State<MemoryPage> {
     return OEmptyState(
       icon: Icons.psychology_alt_outlined,
       title: 'No memories yet',
-      message: 'Ovid remembers details as you chat.',
+      message: 'Chat with Ovid and the details it saves appear here.',
       action: action,
     );
   }

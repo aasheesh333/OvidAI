@@ -540,7 +540,7 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
       compact: true,
       icon: Icons.hub_outlined,
       title: 'No connectors',
-      message: 'New connectors appear here.',
+      message: 'Add a connector to give Ovid new tools.',
       // At the cap there is nothing to add, so the one action is the real way
       // out. A disabled "Add connector" here would be a dead control.
       action: _customCapReached
@@ -585,7 +585,7 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
         compact: true,
         icon: Icons.hub_outlined,
         title: 'No connectors yet',
-        message: 'Connectors you add appear here.',
+        message: 'Browse the catalogue and add your first connector.',
         action: OButton(
           label: 'Browse available',
           icon: Icons.explore_outlined,

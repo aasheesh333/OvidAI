@@ -490,7 +490,14 @@ class RevenueCatBilling with WidgetsBindingObserver {
         return const UpgradeOutcome(UpgradeResult.notAvailable);
       }
       final result = await _platform.purchasePackage(match.identifier);
-      return result.toOutcome();
+      if (result.ok || result.cancelled || result.error != null) {
+        return result.toOutcome();
+      }
+      // The store accepted the purchase but the entitlement is not active yet
+      // (RevenueCat can lag a few seconds behind Play). This is not a refusal:
+      // say it is being confirmed rather than "not accepted".
+      lastPurchaseError = 'Payment received. Confirming your plan…';
+      return const UpgradeOutcome(UpgradeResult.confirming);
     } catch (e) {
       Diag.swallow('revenuecat.buy', e);
       if (demoAllowed) {
@@ -520,6 +527,13 @@ class RevenueCatBilling with WidgetsBindingObserver {
       if (p.identifier != r'$rc_monthly' && p.identifier != 'monthly') {
         return false;
       }
+      // The conventional monthly package must actually contain a monthly (or
+      // unknown, legacy) product: a yearly SKU sitting in the `$rc_monthly`
+      // slot would charge a year for a monthly selection.
+      final productPeriod = ovidPeriodForProduct(p.productId);
+      if (productPeriod != null && productPeriod != OvidBillingPeriod.monthly) {
+        return false;
+      }
       // A legacy monthly product id is acceptable; a known product that
       // belongs to another tier is not (that would buy the wrong plan).
       final owner = ovidTierForProduct(p.productId);
@@ -540,10 +554,20 @@ class RevenueCatBilling with WidgetsBindingObserver {
     }
     if (!available) return const UpgradeOutcome(UpgradeResult.notAvailable);
     if (!await configure()) {
-      return const UpgradeOutcome(UpgradeResult.rejected);
+      // "Failed to reach the store" is not "no purchase found".
+      return const UpgradeOutcome(UpgradeResult.unknown);
     }
     try {
-      return (await _platform.restore()).toOutcome();
+      final result = await _platform.restore();
+      if (result.ok) return result.toOutcome();
+      // The SDK answered with no entitlement and no error: the account really
+      // has nothing to restore. That is a different outcome from a failed
+      // restore (network/SDK error), which must not be reported as "nothing
+      // found" and vice versa.
+      if (result.error == null) {
+        return const UpgradeOutcome(UpgradeResult.nothingToRestore);
+      }
+      return result.toOutcome();
     } catch (e) {
       Diag.swallow('revenuecat.restore', e);
       return const UpgradeOutcome(UpgradeResult.unknown);

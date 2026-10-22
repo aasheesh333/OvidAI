@@ -949,7 +949,7 @@ class OEmptyState extends StatelessWidget {
 class OErrorState extends StatelessWidget {
   const OErrorState({
     super.key,
-    this.title = 'Something went wrong',
+    this.title = 'That did not work',
     required this.message,
     this.onRetry,
     this.retryLabel = 'Try again',

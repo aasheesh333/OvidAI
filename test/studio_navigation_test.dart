@@ -51,9 +51,12 @@ class _EmptyRest extends CloudRestClient {
       const CloudPage<MessageDto>(items: [], nextCursor: null);
 }
 
+WsMultiplexer? _ws;
+
 Future<CloudSessionStore> _bindCloud() async {
   final prefs = await SharedPreferences.getInstance();
   final ws = WsMultiplexer(mintTicket: () async => 'ticket', prefs: prefs);
+  _ws = ws;
   final rest = _EmptyRest();
   final store = CloudSessionStore(
     rest: rest,
@@ -111,6 +114,8 @@ void main() {
 
   tearDown(() async {
     StudioRemoteClient.I.clearAll();
+    await _ws?.disconnect();
+    _ws = null;
     CloudAgentFacade.resetForTest();
     CloudSessionStore.resetForTest();
     AppState.resetTestInstance();

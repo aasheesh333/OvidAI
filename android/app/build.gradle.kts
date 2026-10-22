@@ -202,6 +202,12 @@ flutter {
 }
 
 dependencies {
+    // Native (NDK) crash capture. The Flutter Crashlytics plugin depends only
+    // on the Java SDK, so without this a SIGSEGV in sqlite/webview/crypto is
+    // never reported. The BOM version tracks firebase_core's
+    // android/gradle.properties `FirebaseSDKVersion` (33.16.0 today).
+    implementation(platform("com.google.firebase:firebase-bom:33.16.0"))
+    implementation("com.google.firebase:firebase-crashlytics-ndk")
     // 16 KB page size: androidx.datastore 1.1.x (pulled in by
     // shared_preferences_android 2.4.16 at 1.1.7) ships
     // libdatastore_shared_counter.so with a GNU_RELRO end that is not 16 KB

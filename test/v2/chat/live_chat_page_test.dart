@@ -196,7 +196,7 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('Something went wrong'), findsOneWidget);
+    expect(find.text('That did not work'), findsOneWidget);
     await tester.tap(find.text('Try again'));
     expect(retries, 1);
   });

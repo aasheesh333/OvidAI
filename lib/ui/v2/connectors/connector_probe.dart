@@ -112,15 +112,11 @@ class V2HttpConnectorProbe implements V2ConnectorProbe {
         message:
             '${uri.host} did not answer within ${timeout.inSeconds} seconds.',
       );
-    } on http.ClientException catch (error) {
+    } catch (_) {
       return V2ConnectorTestReport(
         ok: false,
-        message: 'Could not reach ${uri.host}. ${_clean(error.message)}',
-      );
-    } catch (error) {
-      return V2ConnectorTestReport(
-        ok: false,
-        message: 'Could not reach ${uri.host}. ${_clean('$error')}',
+        message: 'Could not reach ${uri.host}. Check the address and your '
+            'connection, then test again.',
       );
     } finally {
       if (ownsClient) httpClient.close();
@@ -196,18 +192,6 @@ class V2HttpConnectorProbe implements V2ConnectorProbe {
         normalized == '[::1]' ||
         normalized == '127.0.0.1' ||
         normalized.startsWith('127.');
-  }
-
-  /// Keeps a failure readable: one line, no stack, no Dart type prefix.
-  String _clean(String raw) {
-    final firstLine = raw.split('\n').first.trim();
-    if (firstLine.isEmpty) return 'The request did not complete.';
-    final withoutPrefix = firstLine
-        .replaceFirst(RegExp(r'^(Client)?Exception:\s*'), '')
-        .trim();
-    return withoutPrefix.length <= 140
-        ? withoutPrefix
-        : '${withoutPrefix.substring(0, 137)}…';
   }
 }
 

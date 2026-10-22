@@ -95,7 +95,14 @@ class CloudHeaders {
   Future<Map<String, String>> authorize({bool forceRefresh = false}) async {
     String? token;
     try {
-      token = await _idToken?.call(forceRefresh: forceRefresh);
+      // A token mint that never answers must not hold every request open
+      // forever: the timeout turns it into the signed-out path below, which
+      // the UI already explains.
+      final mint = _idToken;
+      token = mint == null
+          ? null
+          : await mint(forceRefresh: forceRefresh)
+              .timeout(const Duration(seconds: 15));
     } catch (_) {
       token = null;
     }
@@ -110,7 +117,7 @@ class CloudHeaders {
     final appCheck = _appCheck;
     if (appCheck != null) {
       try {
-        appCheckToken = await appCheck();
+        appCheckToken = await appCheck().timeout(const Duration(seconds: 10));
       } catch (_) {
         throw CloudApiException(
           status: 403,

@@ -211,6 +211,11 @@ class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
         ? 'Too many wrong attempts. Sign in again to reset your PIN.'
         : widget.subtitle;
 
+    // Kept for hosts that mount the gate inside a route (tests, embeds). In
+    // production `MaterialApp.builder` puts it ABOVE the Navigator, where
+    // there is no ModalRoute to register with; the legacy back path is
+    // swallowed by `_AppLockBackGuard` in main.dart instead, and predictive
+    // back simply leaves the app (the lock is persisted).
     return PopScope(
       canPop: false,
       child: Material(

@@ -174,7 +174,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('No projects'), findsOneWidget);
-    expect(find.text('Projects group chats and memory.'), findsOneWidget);
+    expect(find.text('Create a project to group chats and memory.'), findsOneWidget);
     expect(find.byKey(const Key('v2-empty-new-project')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('v2-empty-new-project')));

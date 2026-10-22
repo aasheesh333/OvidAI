@@ -505,8 +505,8 @@ class GitHubStudioBindingPort extends StudioBindingPort {
         );
       }
       if (response.statusCode != 200) {
-        throw StudioAccessException(
-          'GitHub answered ${response.statusCode} for that request.',
+        throw const StudioAccessException(
+          'GitHub could not answer that request. Try again.',
         );
       }
       return jsonDecode(response.body);

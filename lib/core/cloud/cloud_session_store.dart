@@ -516,10 +516,15 @@ class CloudSessionStore extends ChangeNotifier {
   /// The last walk's failure, cleared by the next success.
   Object? get lastSyncError => _lastSyncError;
 
-  /// Account change: the next account has not synced yet.
+  /// Account change: the next account has not synced yet, and the previous
+  /// account's in-memory transcript cache must not be served to it (a shared
+  /// device: account B opening a link that carries account A's session id
+  /// would otherwise seed A's cached messages before the server answers).
+  /// Only the RAM view is dropped; the on-disk rows stay.
   void resetSyncState() {
     _hasSynced = false;
     _lastSyncError = null;
+    _cacheMemory.clear();
     notifyListeners();
   }
 
@@ -675,6 +680,10 @@ class CloudSessionStore extends ChangeNotifier {
     // is replayed; the projector's messageId guard makes that idempotent).
     final cursor = before == null ? await _ws.cursorFor(serverSessionId) : null;
 
+    // Serve the cache while the link is down, then let the live stream catch
+    // up. Keying this on the connectivity probe alone made a cold start issue
+    // a REST read before the socket existed, which is slower and, in tests,
+    // opened a socket nothing owned.
     if (before == null && offline) {
       await _seedFromCache(serverSessionId);
       return;
@@ -1122,11 +1131,15 @@ class CloudSessionStore extends ChangeNotifier {
     do {
       _flushAgain = false;
       await _flushOutbox();
-    } while (_flushAgain && !offline);
+    } while (_flushAgain && !_connection.offline);
   }
 
   Future<void> _flushOutbox() async {
-    if (offline) return;
+    // Delivery is REST, so a down WebSocket must not hold prompts back while
+    // HTTP still works (a proxy that blocks WS, a reconnect in progress).
+    // Only the connectivity probe — "can we reach Ovid at all?" — can skip;
+    // a dead REST link fails fast and the backoff below retries it.
+    if (_connection.offline) return;
     final held = <String>{};
     for (final id in [for (final e in _outbox) e.clientMsgId]) {
       // Re-read by key: a session create mid-flush rewrites entries.
@@ -1213,6 +1226,12 @@ class CloudSessionStore extends ChangeNotifier {
           notifyListeners();
           return null;
         case CloudFailureKind.transient:
+          // A failed request is first-hand evidence the connection may be
+          // gone; re-ask now so the offline banner and the composer notice
+          // stop claiming "online" until the next 30 s tick or app resume.
+          if (code == 'network' || code == 'timeout') {
+            unawaited(_connection.probe());
+          }
           final current = _current(entry);
           final attempts = current.attempts + 1;
           await _replaceEntry(current, current.copyWith(attempts: attempts));

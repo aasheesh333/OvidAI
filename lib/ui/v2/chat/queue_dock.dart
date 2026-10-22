@@ -115,13 +115,22 @@ class _SendNow extends StatelessWidget {
             child: Center(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: OSpace.s),
-                child: Text(
-                  'Send now',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: OType.label.copyWith(
-                    color: c.accent,
-                    fontWeight: FontWeight.w600,
+                // A control label must stay whole. At 320 dp / 200 % text the
+                // row cannot give "Send now" its full width, and ellipsizing it
+                // to "Send n…" leaves a button nobody can read. Scaling the
+                // word down keeps it legible and keeps the dock on one line.
+                // The count beside it is data, not a control, so it may
+                // ellipsize instead.
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    'Send now',
+                    maxLines: 1,
+                    softWrap: false,
+                    style: OType.label.copyWith(
+                      color: c.accent,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
               ),

@@ -110,6 +110,12 @@ Two caveats, so nobody over-reads that:
 Carried over from 2026-10-21 and **not re-verified in this pass** — do not quote
 these as done or not-done without running the corresponding check.
 
+- [ ] **v2 has no in-app Report/Block action.** `reportAiMessage` is wired only
+      in the legacy v1 `ChatScreen` (`lib/ui/chat_screen.dart:6114`) and the
+      legacy Collab/share screens; the default `V2AppShell` message menu is
+      Copy/Branch/Regenerate (`lib/ui/v2/chat/live_chat_page.dart`), and the v2
+      Collab pages have no Report action (owner Remove and Leave exist). Play's
+      Generative-AI and UGC policies require in-app reporting — release blocker.
 - [ ] RevenueCat credentials validation — waiting on Google Play permission propagation
 - [ ] Play subscriptions — locked until Google reviews the first release
 - [ ] Live 50-user collaboration soak (unit + PG tests pass; no live soak yet)
@@ -143,10 +149,11 @@ these as done or not-done without running the corresponding check.
    every catalog row (`v2ConnectorDetailForRow` passes none), so per-tool
    permissions cannot be listed until an MCP `tools/list` or a provider scope map
    exists.
-7. [ ] **Yearly billing charges monthly.** `V2PlanProducts.yearly` names
-   `ovid_*_yearly` products, but `buyPlan` sends only the tier and
-   `kOvidPlayProducts` maps tiers to the monthly ids — so the yearly toggle is a
-   price label, not a purchase.
+7. [x] **Yearly billing period.** `V2PlanProducts.yearly` names
+   `ovid_*_yearly` products, and `buyPlan`/`RevenueCatBilling.buy` now pass the
+   period through; `kOvidPlayProductIds` has a distinct id per (tier, period).
+   The remaining gap is console-only: the yearly SKUs do not exist in Play
+   (D2), and the server map needs the yearly ids (`REVENUECAT_SETUP.md` §5).
 8. [ ] **Live chat artifact tile** has no inline thumbnail, no Preview button
    and no Copy; it opens the artifact detail and offers Download.
 9. [x] **Sign-in dead email form removed.** The email/password field,
@@ -163,8 +170,9 @@ these as done or not-done without running the corresponding check.
       green with an empty gap map; nobody has listened to it yet)
 - [ ] Cold-start + first-token traces; crash-free/ANR dashboards
 - [ ] `dart format lib/ui/v2` — 40 of 132 files differ from the formatter
-- [ ] `docs/play/DATA-SAFETY.md` still says a 7-day deletion grace (code is
-      `GRACE_SECONDS = 24 h`) and still claims `Personal info → Name: No`
+- [x] `docs/play/DATA-SAFETY.md` re-verified 2026-10-22: 24-hour grace,
+      `Personal info → Name: Yes`, Phone number, Photos and Web browsing
+      history are all present and match the code.
 - [ ] Design-defect leftovers from `docs/design/stitch/PARITY_REVIEW.md`:
       `Colors.red` in `v2_settings_actions.dart`, `OType.display` on the usage
       hero, 12 radius literals, ~18 spacing literals, one `fontSize: 13`
@@ -185,7 +193,7 @@ Done in the consoles:
 - Google Cloud project `ovid-ai`: service account `revenuecat-play@ovid-ai.iam.gserviceaccount.com` created, JSON key issued
 - Google Play Android Developer API enabled on `ovid-ai`
 - Play Console: service account added with *View financial data*, *Manage orders and subscriptions*, *View app information*
-- RevenueCat project `Ovid Si` (`afe58e73`), Play Store app `app3f89cc64b6`, public SDK key embedded
+- RevenueCat project `Ovid Si` (`afe58e73`), Play Store app `app3f89cc64b6`; the public Play SDK key is **not** embedded — inject it with `--dart-define=OVID_REVENUECAT_GOOGLE_KEY=...` (a release without it falls back to server-verified Play Billing)
 - RevenueCat entitlements created: `go`, `plus`, `pro`
 - Internal testing release `2 (1.0.0)` published and **Active**; testers list "Ovid internal" (4 emails)
 - Version bumped to `1.0.0+3` for the next internal upload (AAB not uploaded yet)

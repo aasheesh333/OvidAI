@@ -8,7 +8,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../../core/app_info.dart';
-import '../../../core/cloud_usage_store.dart';
 import '../../../core/connection_service.dart';
 import '../../../core/background_notifications.dart';
 import '../../../core/cloud/account_settings_client.dart';
@@ -139,7 +138,11 @@ class V2SettingsRoutes {
     BuildContext context,
     V2SettingsActions actions,
   ) {
-    final usage = CloudUsageStore.acquire(AppState.I).usage;
+    // The shell already holds the one live store; reading it through the
+    // actions avoids a second `acquire` whose consumer count is never
+    // released (which would keep the store, its AppState listener and its
+    // lifecycle observer alive after the shell is gone).
+    final usage = actions.usage.usage;
     final limited = usage != null && usage.hasRemainingPct && usage.remainingPct <= 0;
     return V2SystemStatesPage(
       data: V2SystemStatesData(
@@ -246,10 +249,20 @@ class V2SettingsRoutes {
         ? usage.plans
         : OvidPlanCatalog.plans;
     final plans = <V2Plan>[];
+    final play = PlayBillingService.I;
+    // Play's catalogue can only gate the CTA when Play is the purchase path.
+    // A RevenueCat build (Test Store included) may sell products Play does not
+    // list, so there the availability is unknown rather than false.
+    final playCatalogue = !RevenueCatBilling.I.available;
     for (final plan in catalog) {
       final tier = plan.tier;
       final spec = _planSpec(tier);
       final limits = V2PlanLimits.forIdOrFree(tier);
+      final monthlyProduct = play.productFor(tier);
+      final yearlyProduct = play.productFor(
+        tier,
+        period: OvidBillingPeriod.yearly,
+      );
       plans.add(
         V2Plan(
           id: tier,
@@ -259,6 +272,18 @@ class V2SettingsRoutes {
           priceInr: spec.inr,
           priceUsdYearly: spec.usd * 10,
           priceInrYearly: spec.inr * 10,
+          // What Google Play actually charges, when the store has answered.
+          // The canonical prices above stay the fallback only.
+          storePriceMonthly: monthlyProduct?.price,
+          storePriceYearly: yearlyProduct?.price,
+          storeCurrency:
+              monthlyProduct?.currencyCode ?? yearlyProduct?.currencyCode,
+          storeMonthlyAvailable: playCatalogue && play.loaded
+              ? monthlyProduct != null
+              : null,
+          storeYearlyAvailable: playCatalogue && play.loaded
+              ? yearlyProduct != null
+              : null,
           storageGb: spec.storageGb,
           autoOnly: !limits.manualModels,
           features: spec.features,
@@ -1889,14 +1914,14 @@ class _MemoryLoaderState extends State<_MemoryLoader> {
       );
       await _load();
       return true;
-    } catch (e) {
+    } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context)
           ..hideCurrentSnackBar()
           ..showSnackBar(
             SnackBar(
               content: Text(
-                e is StateError ? e.message : 'Could not forget that memory.',
+                'Could not forget that memory. Try again.',
               ),
             ),
           );

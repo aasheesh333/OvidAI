@@ -18,8 +18,10 @@ import 'core/state.dart';
 import 'core/studio_drafts.dart';
 import 'core/background_notifications.dart';
 import 'core/composer_drafts.dart';
+import 'core/connection_service.dart';
 import 'core/firebase_service.dart';
 import 'core/native_routes.dart';
+import 'core/ovid_cloud_service.dart';
 import 'core/play_billing.dart';
 import 'core/revenuecat_billing.dart';
 import 'core/session_history_store.dart';
@@ -31,6 +33,7 @@ import 'ui/shell.dart';
 import 'ui/v2/app/v2_app_shell.dart';
 import 'ui/v2/app/app_lock_gate.dart';
 import 'ui/v2/app/v2_onboarding_gate.dart';
+import 'ui/v2/onboarding/paywall_page.dart';
 import 'ui/v2/v2_gallery.dart';
 import 'ui/v2/v2_registry.dart';
 import 'core/share_link_resolver.dart';
@@ -142,8 +145,40 @@ class ShareLinkOpener {
   }
 }
 
-Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+void main() {
+  // The binding is created inside the guarded zone so `runApp` runs in the
+  // same zone (Flutter reports a "Zone mismatch" otherwise). Every startup
+  // failure then reaches the Crashlytics handler. The Firebase app and the
+  // Flutter/platform handlers are installed in [_boot] before any other
+  // startup work, so a crash before the first frame is reported instead of
+  // escaping with no handler attached.
+  runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
+    // Registered before runApp so it is consulted before WidgetsApp's own
+    // `didPopRoute` (observers run in registration order). AppLockGate sits
+    // ABOVE the Navigator, so its PopScope has no ModalRoute to register with;
+    // without this the legacy back path pops the offstage navigator. On
+    // API 33+ predictive back the system may finish the activity instead —
+    // harmless, because the lock state is persisted and re-shown on launch.
+    WidgetsBinding.instance.addObserver(_AppLockBackGuard());
+    await _boot();
+  }, _reportBootError);
+}
+
+/// Swallows the system back press while the app lock covers the UI.
+class _AppLockBackGuard extends WidgetsBindingObserver {
+  @override
+  Future<bool> didPopRoute() async => AppLock.I.loaded && AppLock.I.locked;
+}
+
+void _reportBootError(Object error, StackTrace stack) {
+  FirebaseService.I.recordZoneError(error, stack);
+}
+
+Future<void> _boot() async {
+  // Crashlytics first: Firebase.initializeApp, the persisted consent flag and
+  // the error handlers. Collection stays off until the user opts in.
+  await FirebaseService.I.initializeCrashReporting();
   installReleaseErrorWidget();
   // M7: no-op unless built with OVID_CERT_PINNING=true AND pins configured.
   installOvidCertificatePinning();
@@ -270,6 +305,11 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     } catch (e) {
       Diag.swallow('main.warmCloud', e);
     }
+    // A prompt queued offline in a PREVIOUS process is already in the outbox
+    // at this point; the connectivity edge that normally flushes it happened
+    // before this process listened, so deliver it explicitly. No-op when the
+    // queue is empty or the probe says offline.
+    unawaited(CloudSessionStore.I.flushOutbox());
     // A link or notification tap that arrived before the account was ready
     // opens now, against reconciled sessions (SH-019).
     if (mounted) _drainPendingRoute();
@@ -404,13 +444,27 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     AppState.I.setAccountFeaturesForeground(state == AppLifecycleState.resumed);
     if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden) {
       // Backgrounding may be followed by process death: write composer
       // drafts now instead of waiting for the debounce.
       unawaited(ComposerDraftStore.I.flush());
+      // The production UI is V2AppShell (ui/shell.dart's lifecycle flush is
+      // not mounted), so this is the only pause hook: land a coalesced
+      // session write before Android can freeze or kill the isolate, or the
+      // tail of a streamed answer is lost.
+      unawaited(AppState.I.flushSessionPersistence());
     }
     if (state == AppLifecycleState.paused) {
       unawaited(StudioDraftStore.I.flush());
+    }
+    if (state == AppLifecycleState.resumed) {
+      // The production UI (V2AppShell) has no lifecycle hook of its own, so
+      // this is the only place a phone coming back from sleep re-asks "can we
+      // reach Ovid?" and delivers whatever was queued while it was away.
+      unawaited(ConnectionService.I.probe());
+      unawaited(WsMultiplexer.I.connectIfNeeded());
+      unawaited(CloudSessionStore.I.flushOutbox());
     }
   }
 
@@ -484,7 +538,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
           ? V2GalleryPage(screens: v2Screens)
           : kOvidUiV2
           ? V2OnboardingGate(
-              purchase: (planId) async {
+              purchaseForPeriod: (planId, period) async {
                 // Paywall ids are product names; billing uses plan tiers.
                 final tier = switch (planId) {
                   'go' => '3x',
@@ -495,8 +549,8 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
                 if (tier == null) return false;
                 final rc = RevenueCatBilling.I;
                 final outcome = rc.available
-                    ? await rc.buy(tier)
-                    : await PlayBillingService.I.buy(tier);
+                    ? await rc.buy(tier, period: period)
+                    : await PlayBillingService.I.buy(tier, period: period);
                 if (outcome.ok) {
                   // Unlock only on the server's answer (or the debug/profile
                   // Test Store demo), never on the client outcome alone.
@@ -506,6 +560,30 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
                   );
                 }
                 return outcome.ok;
+              },
+              restorePurchases: () async {
+                final rc = RevenueCatBilling.I;
+                final outcome = rc.available
+                    ? await rc.restore()
+                    : await PlayBillingService.I.restore();
+                if (outcome.result == UpgradeResult.nothingToRestore) {
+                  return V2PaywallRestoreResult.nothingToRestore;
+                }
+                if (!outcome.ok) return V2PaywallRestoreResult.failed;
+                final tier = outcome.tier;
+                if (tier == null) return V2PaywallRestoreResult.failed;
+                if (!rc.available) {
+                  // The Play flow is already the server's verdict.
+                  AppState.I.setOvidCloudTier(tier);
+                  return V2PaywallRestoreResult.restored;
+                }
+                final unlocked = await applyPurchasedPlan(
+                  tier,
+                  demo: rc.lastPurchaseWasDemo,
+                );
+                return unlocked
+                    ? V2PaywallRestoreResult.restored
+                    : V2PaywallRestoreResult.failed;
               },
               child: const LoginGate(child: V2AppShell()),
             )

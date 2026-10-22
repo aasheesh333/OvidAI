@@ -15,6 +15,7 @@ import 'package:flutter/services.dart'
 import 'package:path_provider/path_provider.dart';
 
 import '../../../core/cloud/cloud_backup.dart';
+import '../../../core/cloud/cloud_errors.dart';
 import '../../../core/cloud/cloud_rest.dart';
 import '../../../core/cloud/cloud_session_store.dart';
 import '../../../core/diag.dart';
@@ -404,7 +405,7 @@ String _reason(Object error) {
     if (error.status == 401 || error.status == 403) {
       return 'Sign in to Ovid Cloud first.';
     }
-    return error.message;
+    return cloudErrorSentence(error);
   }
   if (error is MissingPluginException) {
     return 'This device cannot open the share sheet.';

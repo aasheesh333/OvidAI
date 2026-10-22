@@ -43,8 +43,10 @@ typedef BiometricCheck = Future<bool> Function();
 ///   flip the app to `inactive` and must never lock the user out. `hidden` is
 ///   treated as backgrounded on non-mobile platforms (desktop/web window
 ///   switches never emit `paused`).
-/// * A cold start only locks when a background timestamp was persisted; a
-///   first launch (or a launch that never left the foreground) stays unlocked.
+/// * The lock screen itself is persisted, so killing the app (or swiping it
+///   away) from the lock screen does not dismiss it. A first launch stays
+///   unlocked; a cold start after a real background locks through the
+///   persisted timestamp.
 ///
 /// This is a privacy lock for a shared device, not a cryptographic boundary
 /// against a rooted attacker: the digest lives in platform secure storage, and
@@ -116,6 +118,14 @@ class AppLock extends ChangeNotifier {
   static const String _backgroundedKey = 'ovid_app_lock_backgrounded_at_ms';
   static const String _totalAttemptsKey = 'ovid_app_lock_total_failures';
   static const String _reauthKey = 'ovid_app_lock_reauth_required';
+
+  /// The lock screen's own state, persisted so it survives process death.
+  ///
+  /// Without this, swiping the app away (or a force-stop) from the lock screen
+  /// cleared the lock: the swipe refreshes [_backgroundedKey] and
+  /// [markResumed] had already removed it, so the next launch saw a fresh idle
+  /// window and opened the chat. Cleared by every successful unlock.
+  static const String _lockedKey = 'ovid_app_lock_locked';
 
   final FlutterSecureStorage _storage;
   final DateTime Function() _now;
@@ -269,6 +279,10 @@ class AppLock extends ChangeNotifier {
       _reauthRequired = prefs.getBool(_reauthKey) ?? false;
       if (_totalFailures >= reauthThreshold) _reauthRequired = true;
 
+      // A lock that was on when the process died stays on: the PIN screen is
+      // not dismissed by killing the app. Cleared on every unlock.
+      _locked = prefs.getBool(_lockedKey) ?? false;
+
       final untilMs = prefs.getInt(_cooldownKey);
       if (untilMs != null) {
         final until = DateTime.fromMillisecondsSinceEpoch(untilMs);
@@ -284,6 +298,7 @@ class AppLock extends ChangeNotifier {
 
       if (!wanted) {
         _enabled = false;
+        _locked = false;
         return;
       }
 
@@ -420,6 +435,7 @@ class AppLock extends ChangeNotifier {
 
     if (await _verify(pin)) {
       _locked = false;
+      _backgroundedAt = null;
       _failedAttempts = 0;
       _totalFailures = 0;
       _cooldownUntil = null;
@@ -460,6 +476,7 @@ class AppLock extends ChangeNotifier {
     if (!ok) return false;
 
     _locked = false;
+    _backgroundedAt = null;
     _failedAttempts = 0;
     _totalFailures = 0;
     _cooldownUntil = null;
@@ -480,7 +497,10 @@ class AppLock extends ChangeNotifier {
     _reauthRequired = false;
     // The account credential proved who the user is: drop the lock screen. An
     // unrecoverable secret still needs the explicit reset path.
-    if (!_recoveryRequired) _locked = false;
+    if (!_recoveryRequired) {
+      _locked = false;
+      _backgroundedAt = null;
+    }
     notifyListeners();
     await _persist();
   }
@@ -713,6 +733,7 @@ class AppLock extends ChangeNotifier {
     try {
       final prefs = await _prefsFactory();
       await prefs.setBool(_enabledKey, _enabled);
+      await prefs.setBool(_lockedKey, _locked);
       await prefs.setInt(_lockAfterKey, _lockAfter.inMilliseconds);
       await prefs.setInt(_attemptsKey, _failedAttempts);
       await prefs.setInt(_totalAttemptsKey, _totalFailures);

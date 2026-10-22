@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
@@ -57,6 +59,7 @@ class BrowserViewport extends StatelessWidget {
   const BrowserViewport({
     super.key,
     this.frame,
+    this.frameImage,
     this.status = V2ViewportStatus.live,
     this.cursor,
     this.controlling = false,
@@ -82,6 +85,19 @@ class BrowserViewport extends StatelessWidget {
   /// The latest decoded screencast frame. Null means "no picture yet", which
   /// shows the waiting state instead of inventing page content.
   final ImageProvider? frame;
+
+  /// The same frame as an engine image, when the stream decoder already
+  /// produced one.
+  ///
+  /// MEMORY (browser screencast): the live stream decodes every frame once, at
+  /// up to 5 fps. Painting [frame] would decode those bytes a second time and
+  /// leave each result in the global image cache (100 MiB by default) until it
+  /// is evicted — a browser left open would keep tens of megabytes of frames
+  /// alive for no reason. When this is supplied the viewport paints it
+  /// directly with [RawImage]: no decode, no cache entry, no second bitmap.
+  /// [frame] stays the fallback for decoders that report dimensions without an
+  /// engine image.
+  final ui.Image? frameImage;
 
   final V2ViewportStatus status;
 
@@ -117,7 +133,7 @@ class BrowserViewport extends StatelessWidget {
 
     Widget base;
     if (hasFrame) {
-      base = _FrameSurface(frame: frame, fit: fit);
+      base = _FrameSurface(frame: frame, frameImage: frameImage, fit: fit);
       if (effective == V2ViewportStatus.live &&
           controlling &&
           onPageTap != null) {
@@ -181,23 +197,46 @@ class BrowserViewport extends StatelessWidget {
   /// `live` without a frame is not a live picture: it is still waiting. The
   /// screen must never paint "Live" over an empty surface.
   V2ViewportStatus get _effectiveStatus {
-    if (status == V2ViewportStatus.live && frame == null) {
+    if (status == V2ViewportStatus.live && !_hasFrame) {
       return V2ViewportStatus.waiting;
     }
     return status;
   }
+
+  bool get _hasFrame => frameImage != null || frame != null;
 }
 
 /// Paints the frame (or the neutral placeholder) without any page chrome.
 class _FrameSurface extends StatelessWidget {
-  const _FrameSurface({required this.frame, required this.fit});
+  const _FrameSurface({
+    required this.frame,
+    required this.frameImage,
+    required this.fit,
+  });
 
   final ImageProvider? frame;
+  final ui.Image? frameImage;
   final BoxFit fit;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
+    // A decoded frame is painted directly: no image-cache entry and no second
+    // decode of the same bytes (see [BrowserViewport.frameImage]).
+    final decoded = frameImage;
+    if (decoded != null) {
+      // RawImage takes no semanticLabel, so the name is wrapped around it.
+      // Without this the frame is an unnamed image node to TalkBack.
+      return Semantics(
+        image: true,
+        label: 'Live page',
+        child: RawImage(
+          image: decoded,
+          fit: fit,
+          filterQuality: FilterQuality.medium,
+        ),
+      );
+    }
     if (frame == null) return const _Placeholder();
     return Image(
       image: frame!,

@@ -74,7 +74,7 @@ class V2StateTileCopy {
   static const offline = V2StateTileCopy(
     icon: Icons.cloud_off_rounded,
     title: "You're offline",
-    message: 'Messages wait until you reconnect.',
+    message: 'Queued messages send when you reconnect.',
     actionLabel: 'Retry',
     actionVariant: OButtonVariant.secondary,
   );

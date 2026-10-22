@@ -21,7 +21,7 @@
 | S2 | Stop publishing symbols artifact | `.github/workflows/build.yml` | DONE | grep: no upload step; YAML valid |
 | S3 | Remove permanent apt TLS loosening | `lib/core/sandbox_service.dart` | DONE | grep Verify-Peer → none; 49 tests pass |
 | S4 | Harden FlutterSecureStorage AndroidOptions | `lib/core/secure_store.dart` + 6 call sites | DONE | grep `const FlutterSecureStorage()` → none |
-| S5 | FLAG_SECURE toggle (block recents/screenshot) | `MainActivity.kt`, `security_service.dart`, `state.dart`, `settings_screen.dart` | DONE | Kotlin BUILD SUCCESSFUL; Settings row added |
+| S5 | FLAG_SECURE toggle (block recents/screenshot) | `MainActivity.kt`, `security_service.dart`, `state.dart`, `settings_screen.dart` | REMOVED (`dbac43e6`) | Was DONE, then deliberately removed: Recents showed a black rectangle. No flag is set today; the Recents thumbnail and screenshots show chat content. |
 | S6 | Wire SecurityCheck (root/Frida/debugger) to Dart | `security_service.dart` + `state.dart` + `settings_screen.dart` | DONE (verified) | `_initializeReadiness` → `refreshDeviceSecurity()`; Settings "Device integrity" row; `test/security_device_integrity_test.dart` (5) |
 | S7 | ProGuard/R8 hardening + no debug info in release | `proguard-rules.pro` | DONE | `minifyReleaseWithR8` BUILD SUCCESSFUL |
 | S8 | FileProvider narrowed (root-path removed) | `file_provider_paths.xml` | DONE | XML valid |

@@ -7,6 +7,7 @@ library;
 
 import 'package:flutter/foundation.dart';
 
+import '../../../core/cloud/cloud_errors.dart';
 import '../../../core/cloud/cloud_rest.dart';
 import '../../../core/cloud/schedule_client.dart';
 import 'cadence_picker.dart';
@@ -280,10 +281,7 @@ class SchedulesController extends ChangeNotifier {
       'Could not $action. ${_reason(error)}';
 
   String _reason(Object error) {
-    if (error is CloudApiException) {
-      final message = error.message.trim();
-      return message.isEmpty ? 'Check your connection and try again.' : message;
-    }
+    if (error is CloudApiException) return cloudErrorSentence(error);
     return 'Check your connection and try again.';
   }
 }

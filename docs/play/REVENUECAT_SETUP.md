@@ -7,6 +7,22 @@
 
 ## Current state
 
+> **BLOCKER before enabling RevenueCat in production (verified 2026-10-22).**
+> The client treats a RevenueCat purchase as *pending server confirmation*:
+> `applyPurchasedPlan` re-reads `/usage`, and only a server-named tier unlocks
+> (`lib/core/revenuecat_billing.dart`). The server learns about a purchase from
+> `/billing/verify` (Play purchase token) or `/billing/rtdn`
+> (`server/billing/api.py`). RevenueCat purchases never reach either: the SDK
+> owns the Play flow and the app does not forward a token, and there is no
+> RevenueCat webhook in this repo (`grep -rni revenuecat cloud server` finds
+> only `cloud/apps/gateway/src/planGate.ts` comments). A RevenueCat purchase
+> would therefore be charged by Google Play and **never unlock the plan**.
+> Before shipping with `OVID_REVENUECAT_GOOGLE_KEY`, either add a RevenueCat
+> webhook that maps `INITIAL_PURCHASE`/`RENEWAL`/`CANCELLATION`/`EXPIRATION` to
+> the server's purchase ledger, or ship without the key so
+> `PlayBillingService` (server-verified) handles purchases. Do not advertise
+> paid plans until one of those is true.
+
 ### Play Console (signed in as `aasheeshkatheriya@gmail.com`) **(console)**
 - Developer account: **Dhanuk Softwares** (`4722370385057181718`)
 - App: **Ovid Si**, package `com.dhanuk.ovidai`, app id `4973478968349167758`
@@ -67,12 +83,14 @@ App level (Ovid Si): *View app information*, *View financial data*,
   returns `null` for a yearly product id that is not in the offering, and
   `buy()` reports `UpgradeResult.notAvailable` with "Yearly billing is not
   available for this plan yet." (`lib/core/revenuecat_billing.dart`).
-- **The server's default product map has no yearly ids.**
-  `server/billing/products.py` `DEFAULT_PRODUCTS` lists only the three monthly
-  products, and `evaluate()` rejects a product it does not know with a typed
-  `400 unknown_product` (`server/billing/domain.py`). A yearly purchase will
-  therefore fail server verification until the mapping is extended — see
-  step 5.
+- **The server product map now includes both periods.** `server/billing/products.py`
+  `DEFAULT_PRODUCTS` and `cloud/apps/mint/src/billing/products.ts`
+  `DEFAULT_PRODUCTS` list the three monthly ids **and** the three yearly ids
+  (`ovid_plus_yearly` / `ovid_pro_yearly` / `ovid_max_yearly`). `evaluate()`
+  still rejects an unknown product with a typed `400 unknown_product`, so any
+  new SKU must be added to both maps before it is sold. An override
+  (`OVID_PLAY_PRODUCTS`) replaces the defaults entirely: if you use it, it must
+  list all six ids.
 
 ### Demo paywall (debug/profile only)
 
@@ -181,15 +199,25 @@ flutter build appbundle --release \
 
 Without the define, `kRevenueCatGoogleKey` is empty and the app falls back to
 plain Play Billing (verification still happens server-side). Do not pass the
-Test Store define: a release build ignores it by design.
+Test Store define: a release build ignores it by design. A release command that
+still contains `OVID_REVENUECAT_TEST_STORE=true` is misconfigured even though
+the resolver refuses it — rebuild clean before uploading.
 
-### 5. Extend the server product map with the yearly ids
+### 5. Keep the server product map in step with the store
 
-This is required for a yearly purchase to unlock anything. The server maps
-Play product → tier from `OVID_PLAY_PRODUCTS`, defaulting to monthly only
-(`server/billing/products.py`):
+The default map now lists all six ids, so a yearly purchase verifies without
+an environment override. Two rules:
+
+- If you set `OVID_PLAY_PRODUCTS`, it **replaces** the defaults: include all
+  six ids, monthly and yearly.
+- Adding a seventh SKU later means updating `server/billing/products.py`,
+  `cloud/apps/mint/src/billing/products.ts` **and**
+  `lib/core/billing_products.dart` in the same change. A missing id means Play
+  charges the card, `/billing/verify` answers `400 unknown_product`, the app
+  does not acknowledge, and Google refunds the purchase.
 
 ```bash
+# Only if you need an override; this is the complete six-id map.
 OVID_PLAY_PRODUCTS='{
   "ovid_plus_monthly":"3x","ovid_plus_yearly":"3x",
   "ovid_pro_monthly":"7x","ovid_pro_yearly":"7x",
@@ -197,19 +225,58 @@ OVID_PLAY_PRODUCTS='{
 }'
 ```
 
-Set this on the billing service before the yearly SKUs go live. Without it,
-`evaluate()` raises `400 unknown_product` and the app shows a purchase error
-even though Play charged the card.
+### 5b. Fixing the RevenueCat blocker (implementation notes)
+
+This is the detail behind the blocker at the top of this file. The client only
+unlocks after `GET /usage` names the paid tier
+(`lib/core/revenuecat_billing.dart` `applyPurchasedPlan` → `refreshServerTier`).
+Today the **only** code that sets a tier is the Google Play path:
+`POST /billing/verify` (`server/billing/api.py`, `cloud/apps/mint/src/billing/service.ts`)
+and the Play RTDN handler. Both need the Play **purchase token**, which the
+RevenueCat SDK purchase does not hand to the app (its
+`StoreTransaction.transactionIdentifier` is the Play order id, not the token).
+
+Consequence with `OVID_REVENUECAT_GOOGLE_KEY` compiled in: RevenueCat charges
+the card, the client shows "Payment received. Plan unlocks after confirmation",
+and the confirmation never arrives.
+
+Two acceptable fixes (pick one before shipping a release with the RevenueCat
+key):
+
+1. **RevenueCat webhook (designed path).** Add
+   `cloud/apps/mint/src/billing/revenuecatWebhook.ts` + a route:
+   - verify the `Authorization` header against a shared secret
+     (`OVID_REVENUECAT_WEBHOOK_SECRET`, fail closed, constant-time compare);
+   - map `entitlement_ids` (`go`/`plus`/`pro`) to `3x`/`7x`/`15x` and ignore
+     unknown ids;
+   - set the tier from `expiration_at_ms` (never from the request body's
+     `tier`), keep access on `CANCELLATION` until expiry, revoke on
+     `EXPIRATION`/`REFUND`;
+   - dedupe on `event.id` so a redelivered event is idempotent;
+   - then configure the webhook URL + secret in the RevenueCat console.
+2. **Purchase through Play Billing only.** Keep RevenueCat for entitlement
+   display, but make the release build buy through
+   `PlayBillingService` so `/billing/verify` binds the token and sets the tier.
+
+Until one is done, a release build **without** the RevenueCat key (Play
+Billing path) is the only configuration that reliably unlocks a purchase.
 
 ### 6. Validate end to end
+
+> This step only passes after the server-confirmation blocker at the top of this
+> file is closed. With the current code, a RevenueCat purchase is charged but
+> the tier stays unchanged; the Play Billing fallback (no RevenueCat key) does
+> reach `/billing/verify`.
 
 1. Install the release build on a license-tester account.
 2. Buy each yearly SKU once; confirm the tier unlocks, and confirm the server
    recorded `product_id` = the yearly id (not the monthly one).
 3. `restore()` must return the same tier from the `go`/`plus`/`pro`
    entitlements.
-4. Cancel in Play → confirm the RTDN path downgrades the account
-   (`server/billing/api.py` `notify`).
+4. Cancel in Play → confirm the account **keeps the plan until the paid period
+   ends** and is downgraded only at `expiryTime` (RTDN path,
+   `server/billing/api.py` `notify` + `domain.evaluate`: CANCELED is an
+   entitled state). `plan_auto_renews` must flip to false immediately.
 5. Only then update `docs/play/DATA-SAFETY.md` §2 from "No today" to **Yes**
    for Purchase history.
 
@@ -249,6 +316,13 @@ gitignored (project `ovid-ai`, package `com.dhanuk.ovidai`).
   package, and purchases it. A yearly request never falls back to a monthly
   package.
 - `restore()` and `currentTier()` read entitlements `go/plus/pro`.
+  `restore()` reports **nothing to restore** (the store answered, no active
+  entitlement) separately from a **failed** restore (network/SDK error), so the
+  paywall banner never says "nothing found" when it simply could not ask.
+- The paywall and Plan & billing show the **store's localised price** when the
+  Play catalogue has answered, and disable a period Play does not sell with a
+  real reason. The canonical table (Go $5/₹499, Plus $18/₹1,799, Pro
+  $99/₹9,999, yearly = 10 monthly payments) is only the fallback.
 - The Play Billing flow remains the fallback if the RevenueCat key is removed
   (`--dart-define=OVID_REVENUECAT_GOOGLE_KEY=`).
 

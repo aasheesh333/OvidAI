@@ -5,6 +5,7 @@ import '../../../core/auth_phone_flow.dart';
 import '../../../core/auth_providers.dart';
 import '../../../core/diag.dart';
 import '../../../core/firebase_service.dart';
+import '../../../core/play_billing.dart';
 import '../../../core/revenuecat_billing.dart';
 import '../../../core/state.dart';
 import '../../auth_methods.dart' show AuthPhoneDialog;
@@ -133,6 +134,8 @@ class V2OnboardingGate extends StatefulWidget {
     required this.child,
     this.auth,
     this.purchase,
+    this.purchaseForPeriod,
+    this.restorePurchases,
     this.store,
     this.testStore,
     this.welcomeVersion = kV2OnboardingWelcomeVersion,
@@ -148,6 +151,17 @@ class V2OnboardingGate extends StatefulWidget {
   /// billing layer completed a purchase. The default returns false: the gate
   /// continues without granting anything.
   final Future<bool> Function(String planId)? purchase;
+
+  /// Period-aware purchase seam. When set, the paywall buys the exact product
+  /// the user selected; [purchase] is only the monthly fallback for callers
+  /// that predate the period toggle. Without this a yearly selection can never
+  /// reach checkout.
+  final Future<bool> Function(String planId, OvidBillingPeriod period)?
+  purchaseForPeriod;
+
+  /// The real restore seam for the paywall. Null leaves Restore disabled
+  /// instead of pretending it ran.
+  final Future<V2PaywallRestoreResult> Function()? restorePurchases;
 
   /// Durable store for the welcome marker and the first-run choices. The
   /// default reads and writes SharedPreferences.
@@ -207,6 +221,7 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
   bool _purchasing = false;
   String? _paywallError;
   String _selectedPlanId = 'plus';
+  V2PaywallPeriod _paywallPeriod = V2PaywallPeriod.monthly;
 
   /// Paywall currency id (`usd` / `inr`). Persisted by [V2OnboardingStore].
   String _currencyId = 'usd';
@@ -219,11 +234,19 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
   void initState() {
     super.initState();
     _auth.addListener(_onAuth);
+    // The paywall shows the store's own prices and disables a period Play does
+    // not sell. The catalogue loads asynchronously, so rebuild when it lands.
+    PlayBillingService.I.addListener(_onBillingChanged);
     _boot();
+  }
+
+  void _onBillingChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    PlayBillingService.I.removeListener(_onBillingChanged);
     _auth.removeListener(_onAuth);
     super.dispose();
   }
@@ -681,8 +704,10 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
   Widget _paywall() {
     return PaywallPage(
       data: V2PaywallData(
+        plans: _paywallPlans(),
         selectedPlanId: _selectedPlanId,
         currency: _currencyId == 'inr' ? V2Currency.inr : V2Currency.usd,
+        period: _paywallPeriod,
         purchasing: _purchasing,
         error: _paywallError,
         testModeNote: _testStore
@@ -693,13 +718,105 @@ class _V2OnboardingGateState extends State<V2OnboardingGate> {
           ? null
           : (id) => setState(() => _selectedPlanId = id),
       onCurrencyChanged: _purchasing ? null : _setCurrency,
+      onPeriodChanged: _purchasing
+          ? null
+          : (period) => setState(() => _paywallPeriod = period),
+      // The period travels with the request: a yearly selection must buy the
+      // yearly SKU, never the monthly one.
+      onPurchase: _purchasing ? null : _purchasePlan,
       onStartTrial: _purchasing ? null : _startTrial,
       onContinueFree: _purchasing ? null : _finishPaywall,
-      onRetry: _purchasing || _paywallError == null
+      onRetry: _purchasing || _paywallError == null ? null : _retryPurchase,
+      onRestorePurchases: _purchasing || widget.restorePurchases == null
           ? null
-          : () => _startTrial(_selectedPlanId),
+          : _restorePaywall,
       onClose: _purchasing ? null : _finishPaywall,
     );
+  }
+
+  /// The canonical cards, carrying the store's localised prices and whether
+  /// Play sells each period. Falls back to the product-spec prices only when
+  /// the store has not answered.
+  List<V2PlanOption> _paywallPlans() {
+    const base = V2PaywallData();
+    final play = PlayBillingService.I;
+    // Only Play's own purchase path can be gated by Play's catalogue; a
+    // RevenueCat build may sell a package Play does not list here.
+    final playCatalogue = !RevenueCatBilling.I.available;
+    return [
+      for (final plan in base.plans)
+        plan.withStore(
+          monthlyPrice: play.productFor(plan.tier)?.price,
+          yearlyPrice: play
+              .productFor(plan.tier, period: OvidBillingPeriod.yearly)
+              ?.price,
+          currency:
+              play.productFor(plan.tier)?.currencyCode ??
+              play
+                  .productFor(plan.tier, period: OvidBillingPeriod.yearly)
+                  ?.currencyCode,
+          monthlyAvailable: playCatalogue && play.loaded
+              ? play.hasProduct(plan.tier)
+              : null,
+          yearlyAvailable: playCatalogue && play.loaded
+              ? play.hasProduct(plan.tier, period: OvidBillingPeriod.yearly)
+              : null,
+        ),
+    ];
+  }
+
+  /// Runs the purchase for [planId] and [period]. A caller that only wired the
+  /// monthly [V2OnboardingGate.purchase] seam cannot buy yearly: it returns
+  /// false instead of quietly buying the monthly SKU.
+  Future<bool> _buyForPeriod(String planId, V2PaywallPeriod period) {
+    final billingPeriod = period == V2PaywallPeriod.yearly
+        ? OvidBillingPeriod.yearly
+        : OvidBillingPeriod.monthly;
+    final periodAware = widget.purchaseForPeriod;
+    if (periodAware != null) return periodAware(planId, billingPeriod);
+    if (billingPeriod == OvidBillingPeriod.monthly) return _purchase(planId);
+    return Future.value(false);
+  }
+
+  Future<void> _purchasePlan(V2PaywallPurchase purchase) =>
+      _runPurchase(purchase.planId, purchase.period);
+
+  void _retryPurchase() => _runPurchase(_selectedPlanId, _paywallPeriod);
+
+  Future<void> _runPurchase(String planId, V2PaywallPeriod period) async {
+    if (_purchasing) return;
+    setState(() {
+      _purchasing = true;
+      _paywallError = null;
+    });
+    try {
+      await _buyForPeriod(planId, period);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _purchasing = false;
+        _paywallError =
+            'The purchase could not be completed. Try again, or continue '
+            'with the Free plan.';
+      });
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _purchasing = false;
+      _paywallSeen = true;
+      _step = _Step.done;
+    });
+  }
+
+  Future<V2PaywallRestoreResult> _restorePaywall() async {
+    final restore = widget.restorePurchases;
+    if (restore == null) return V2PaywallRestoreResult.failed;
+    try {
+      return await restore();
+    } catch (_) {
+      return V2PaywallRestoreResult.failed;
+    }
   }
 
   /// Switches the displayed currency and writes the choice to disk. The view

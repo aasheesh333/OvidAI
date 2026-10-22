@@ -176,7 +176,7 @@ void main() {
           onRetry: () {},
         ),
       );
-      expect(find.text('Something went wrong'), findsOneWidget);
+      expect(find.text('That did not work'), findsOneWidget);
       expect(find.text('Try again'), findsOneWidget);
 
       await _pump(
@@ -387,7 +387,7 @@ void main() {
           onRetry: () {},
         ),
       );
-      expect(find.text('Something went wrong'), findsOneWidget);
+      expect(find.text('That did not work'), findsOneWidget);
 
       await _pump(
         tester,
@@ -585,7 +585,7 @@ void main() {
           onRetry: () {},
         ),
       );
-      expect(find.text('Something went wrong'), findsOneWidget);
+      expect(find.text('That did not work'), findsOneWidget);
 
       await _pump(
         tester,
@@ -701,7 +701,7 @@ void main() {
           onRetry: () {},
         ),
       );
-      expect(find.text('Something went wrong'), findsOneWidget);
+      expect(find.text('That did not work'), findsOneWidget);
 
       await _pump(
         tester,

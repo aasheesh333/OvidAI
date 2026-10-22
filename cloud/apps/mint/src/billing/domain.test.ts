@@ -91,6 +91,9 @@ describe("products (port of products.py)", () => {
       ovid_plus_monthly: "3x",
       ovid_pro_monthly: "7x",
       ovid_max_monthly: "15x",
+      ovid_plus_yearly: "3x",
+      ovid_pro_yearly: "7x",
+      ovid_max_yearly: "15x",
     });
   });
 

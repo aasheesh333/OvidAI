@@ -157,12 +157,16 @@ class V2LegalDocument {
       icon: icon,
       kind: V2LegalDocumentKind.network,
       load: () async {
-        final response = client == null
-            ? await http.get(url)
-            : await client.get(url);
+        // A dead host must not leave the reader on a loading skeleton: the
+        // ceiling turns it into the page's own "could not be downloaded" copy
+        // with a retry.
+        final response = await (client == null
+                ? http.get(url)
+                : client.get(url))
+            .timeout(const Duration(seconds: 20));
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          throw V2LegalLoadException(
-            'The document could not be downloaded (${response.statusCode}).',
+          throw const V2LegalLoadException(
+            'The document could not be downloaded. Try again.',
           );
         }
         return response.body;

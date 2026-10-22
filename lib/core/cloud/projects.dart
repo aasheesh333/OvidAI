@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../chat_integration_ports.dart';
 import '../chat_pins.dart';
 import '../state.dart';
+import 'cloud_errors.dart';
 import 'cloud_rest.dart';
 import 'models.dart';
 
@@ -73,9 +74,9 @@ class ProjectsController extends ChangeNotifier {
       _serverTurnProjectRefs = payload.turnProjectRefs;
       _loadedOnce = true;
     } on CloudApiException catch (e) {
-      _error = e.message;
+      _error = _copyFor(e);
     } catch (e) {
-      _error = 'Could not load projects.';
+      _error = 'Could not load projects. Check your connection and try again.';
       debugPrint('projects.refresh: $e');
     } finally {
       _loading = false;
@@ -97,7 +98,7 @@ class ProjectsController extends ChangeNotifier {
       notifyListeners();
       return created;
     } on CloudApiException catch (e) {
-      _error = e.message;
+      _error = _copyFor(e);
       notifyListeners();
       return null;
     }
@@ -119,7 +120,7 @@ class ProjectsController extends ChangeNotifier {
       notifyListeners();
       return true;
     } on CloudApiException catch (e) {
-      _error = e.message;
+      _error = _copyFor(e);
       notifyListeners();
       return false;
     }
@@ -139,7 +140,7 @@ class ProjectsController extends ChangeNotifier {
       notifyListeners();
       return true;
     } on CloudApiException catch (e) {
-      _error = e.message;
+      _error = _copyFor(e);
       notifyListeners();
       return false;
     }
@@ -170,11 +171,15 @@ class ProjectsController extends ChangeNotifier {
       notifyListeners();
       return true;
     } on CloudApiException catch (e) {
-      _error = e.message;
+      _error = _copyFor(e);
       notifyListeners();
       return false;
     }
   }
+
+  /// The server's own sentence when it reads as prose; otherwise the mapped
+  /// copy for this code. Never an HTTP status, a provider dump or an id.
+  String _copyFor(CloudApiException e) => cloudErrorSentence(e);
 
   static ProjectDto _withSessionCount(ProjectDto p, int count) => ProjectDto(
         id: p.id,

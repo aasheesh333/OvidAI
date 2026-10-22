@@ -70,7 +70,7 @@ class V2ChatPageData {
     this.permissionLabel = 'General',
     this.composerHint = 'Ask Ovid anything',
     this.offlineTitle = "You're offline",
-    this.offlineMessage = 'Messages will send when you reconnect.',
+    this.offlineMessage = 'Your message is saved and sends when you reconnect.',
   }) : assert(subagentCount >= 0, 'subagentCount cannot be negative');
 
   final String title;
@@ -481,7 +481,11 @@ class _V2ChatPageState extends State<V2ChatPage> {
       widget.onSend?.call(text);
     }
     _clearComposer();
-    _announce('Message sent');
+    _announce(
+      widget.data.state == V2ChatState.offline
+          ? 'Message queued. It will send when you reconnect.'
+          : 'Message sent',
+    );
   }
 
   void _clearComposer() {
@@ -489,7 +493,11 @@ class _V2ChatPageState extends State<V2ChatPage> {
     _controller.clear();
     _syncingDraft = false;
     _lastDraft = '';
-    widget.onDraftChanged?.call('');
+    // The DURABLE draft is deliberately not cleared here: the send path drops
+    // it only once the prompt is in the outbox (runTask onQueued), so a
+    // process kill or a refused send between tap and enqueue keeps the text.
+    // A page wired only with onSend has no acceptance signal, so it clears now.
+    if (widget.onSubmit == null) widget.onDraftChanged?.call('');
     _voice.clearError();
     setState(() {
       _attachments.clear();

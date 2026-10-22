@@ -138,7 +138,7 @@ The manifest requests `READ_CONTACTS`, `ACCESS_FINE_LOCATION`, `SEND_SMS`, `CALL
 - CI: every action pinned to a commit SHA, `flutter pub get --enforce-lockfile`, `permissions: contents: read`.
 
 **Gaps:**
-- **`FLAG_SECURE` is deliberately absent** — enforced by `test/control_gestures_overlay_test.dart:396` ("FLAG_SECURE is gone from every layer"). Screenshot/Recents protection was intentionally dropped. Worth re-confirming now that the app stores API keys and OAuth tokens in-app: the trade-off (screen-sharing/accessibility overlay) is defensible, but it should be a conscious decision, not an inherited one.
+- **`FLAG_SECURE` is deliberately absent** — removed in `dbac43e6` ("Screenshots were blocked and the app showed as a black rectangle in Recents"). Nothing sets it today and **no test enforces its absence**: the `test/control_gestures_overlay_test.dart` reference is stale (that file does not exist). Consequence: screenshots and the Recents thumbnail show chat content; the app lock covers the live UI only, not the snapshot Android takes on `paused`. Re-adding it is a product decision (it removes the Recents preview), not a bug fix.
 - **`WebView` runs `JavaScriptMode.unrestricted`** (`agent_service.dart:3151`). Expected for a browser panel, but combined with per-session cookie jars, `OvidWebViewHandler` JS bridges and the accessibility overlay it deserves an explicit origin allowlist for injected-JS paths.
 - **No privacy policy** (P0-2).
 - `MANAGE_EXTERNAL_STORAGE` + `SEND_SMS` + `CALL_PHONE` are the highest-scrutiny permissions on Play; each needs a declaration form.
@@ -183,7 +183,7 @@ The manifest requests `READ_CONTACTS`, `ACCESS_FINE_LOCATION`, `SEND_SMS`, `CALL
 These look like bugs from a distance but are **intentional and documented**:
 
 - **`targetSdk = 28`** — required for app-private-dir `exec()` (the sandbox). Documented in `build.gradle.kts` with the Play trade-off spelled out.
-- **`FLAG_SECURE` absent** — enforced by a regression test (deliberate).
+- **`FLAG_SECURE` absent** — removed deliberately in `dbac43e6` (Recents showed a black card); nothing sets it and no test enforces its absence.
 - **Cleartext allowed to localhost only** — for agent-run dev servers in the preview tab.
 - **No `assets:` images** — fonts are declared via the `fonts:` block; there simply are no raster assets.
 - **`defaultProvider => providers.first`** (`state.dart:4812`) — has **zero call sites** in `lib/` or `test/`, and `_seed()` (`state.dart:7742`) always populates the catalog, so it cannot throw today. Latent only; make it `providers.firstOrNull` opportunistically.

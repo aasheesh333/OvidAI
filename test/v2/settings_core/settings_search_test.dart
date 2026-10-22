@@ -575,7 +575,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Something went wrong'), findsOneWidget);
+    expect(find.text('That did not work'), findsOneWidget);
     expect(find.text('Search is offline.'), findsOneWidget);
 
     await tester.tap(find.text('Try again'));

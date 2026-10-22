@@ -417,6 +417,10 @@ class PlayBillingService extends ChangeNotifier {
         purchases.every(
           (p) =>
               p.status == PurchaseStatus.restored ||
+              // An unacknowledged purchase is re-delivered as `purchased`
+              // during a restore. It has been verified above, so the restore
+              // succeeded rather than "found nothing".
+              p.status == PurchaseStatus.purchased ||
               ovidTierForProduct(p.productID) == null,
         )) {
       _finishRestore(

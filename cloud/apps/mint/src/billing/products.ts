@@ -15,9 +15,14 @@ export const TIER_RANK: Record<string, number> = Object.fromEntries(
 );
 
 export const DEFAULT_PRODUCTS: Record<string, string> = {
+  // Monthly first: /usage shows the first product that maps to a tier.
   ovid_plus_monthly: "3x",
   ovid_pro_monthly: "7x",
   ovid_max_monthly: "15x",
+  // Yearly SKUs (10 monthly payments). Same tier, different billing period.
+  ovid_plus_yearly: "3x",
+  ovid_pro_yearly: "7x",
+  ovid_max_yearly: "15x",
 };
 
 /*

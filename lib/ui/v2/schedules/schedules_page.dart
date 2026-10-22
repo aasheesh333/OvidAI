@@ -236,7 +236,7 @@ class SchedulesPage extends StatelessWidget {
     return OEmptyState(
       icon: Icons.calendar_month_rounded,
       title: 'No schedules yet',
-      message: 'Set a task to run on its own.',
+      message: 'Create a schedule to run a task automatically.',
       action: onCreate == null
           ? null
           : OButton(

@@ -412,7 +412,9 @@ void main() {
       final restarted = AppLock(now: () => now, random: Random(7));
       await restarted.load();
       expect(restarted.enabled, isTrue);
-      expect(restarted.locked, isFalse);
+      // The PIN screen survives a process restart: killing the app must not
+      // dismiss it (swipe-away used to clear the lock).
+      expect(restarted.locked, isTrue);
       expect(restarted.failedAttempts, 3);
       expect(restarted.attemptsRemaining, 2);
 
@@ -441,8 +443,8 @@ void main() {
       final afterCooldown = AppLock(now: () => now, random: Random(9));
       await afterCooldown.load();
       expect(afterCooldown.inCooldown, isFalse);
-      // A restart does not lock the app; unlock() reports the existing state.
-      expect(afterCooldown.locked, isFalse);
+      // The lock stays on across restarts; unlock() reports the existing state.
+      expect(afterCooldown.locked, isTrue);
       expect(afterCooldown.failedAttempts, 0);
     });
   });

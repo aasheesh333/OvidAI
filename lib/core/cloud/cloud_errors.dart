@@ -11,6 +11,7 @@ import 'dart:async' show TimeoutException;
 import 'dart:io' show FileSystemException, HttpException, SocketException;
 
 import 'cloud_rest.dart' show CloudApiException;
+import 'error_text.dart';
 
 /// What the user can do about a failure.
 enum CloudErrorAction {
@@ -139,14 +140,28 @@ CloudErrorCopy cloudErrorCopy(
     case 'unauthenticated':
     case 'sign_in_required':
     case 'forbidden':
+    case 'invalid_authentication':
+    case 'invalid_attestation':
+    case 'reauthentication_required':
+    case 'invalid_identity':
+    case 'unsupported_identity':
+    case 'reset_required':
       return CloudErrorCopy(
-        text: 'Your Ovid session expired. Sign in again to send this '
-            'message.',
+        text: 'Your Ovid session expired. Sign in again to continue.',
         action: CloudErrorAction.signIn,
+        detail: detail,
+      );
+    case 'app_check_unavailable':
+      return CloudErrorCopy(
+        text: 'Ovid could not verify this copy of the app. Restart it and '
+            'try again.',
+        action: CloudErrorAction.retry,
         detail: detail,
       );
     case 'timeout':
     case 'network':
+    case 'request_timeout':
+    case 'unreachable':
       return CloudErrorCopy(
         text: 'Connection problem. Ovid could not be reached.',
         action: CloudErrorAction.retry,
@@ -154,6 +169,16 @@ CloudErrorCopy cloudErrorCopy(
       );
     case 'unavailable':
     case 'internal':
+    case 'server_error':
+    case 'upstream_error':
+    case 'temporarily_unavailable':
+    case 'no_provider':
+    case 'method_not_allowed':
+    case 'invalid_record':
+    case 'key_layout':
+    case 'group_max_ceiling':
+    case 'evict_local_failed':
+    case 'hibernate_failed':
       return CloudErrorCopy(
         text: 'Ovid had a problem handling this message. Try again.',
         action: CloudErrorAction.retry,
@@ -167,16 +192,36 @@ CloudErrorCopy cloudErrorCopy(
         detail: detail,
       );
     case 'model_unavailable':
+    case 'model_not_found':
+    case 'unknown_model':
       return CloudErrorCopy(
         text: 'That model is not available on Ovid Cloud. Pick another '
             'model.',
         action: CloudErrorAction.pickModel,
         detail: detail,
       );
+    case 'manual_model_not_allowed':
+      return CloudErrorCopy(
+        text: 'Your plan uses Auto only. Switch the model to Auto.',
+        action: CloudErrorAction.pickModel,
+        detail: detail,
+      );
+    case 'catalog_unavailable':
+      return CloudErrorCopy(
+        text: 'The model list could not be loaded. Try again.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
     case 'model_no_vision':
       return CloudErrorCopy(
         text: 'The selected model cannot read images. Pick a model that '
             'supports images, or remove the image.',
+        action: CloudErrorAction.pickModel,
+        detail: detail,
+      );
+    case 'unsupported_modality':
+      return CloudErrorCopy(
+        text: 'That model cannot handle this input. Pick another model.',
         action: CloudErrorAction.pickModel,
         detail: detail,
       );
@@ -214,6 +259,255 @@ CloudErrorCopy cloudErrorCopy(
         action: CloudErrorAction.retry,
         detail: detail,
       );
+    case 'not_warm':
+    case 'hydrate_timeout':
+    case 'hydrating':
+      return CloudErrorCopy(
+        text: 'Your workspace is still starting. Try again in a moment.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'workspace_lost':
+    case 'pty_gone':
+      return CloudErrorCopy(
+        text: 'The workspace restarted. Reopen this chat to continue.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'sandbox_busy':
+    case 'workspace_busy':
+    case 'session_busy':
+      return CloudErrorCopy(
+        text: 'Ovid is still working on this chat. Stop it, then try again.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'sandbox_unavailable':
+      return CloudErrorCopy(
+        text: 'Ovid could not start a workspace. Try again in a moment.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'disk_pressure':
+      return CloudErrorCopy(
+        text: 'The workspace is out of space. Remove a file and try again.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'baseline_mismatch':
+      return CloudErrorCopy(
+        text: 'That file changed since you opened it. Reload it and try '
+            'again.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'credential_leak':
+      return CloudErrorCopy(
+        text: 'That looked like a secret, so it was not sent. Remove the '
+            'key and retry.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'no_workspace':
+      return CloudErrorCopy(
+        text: 'This chat has no workspace yet. Send a message to create one.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'not_attached':
+    case 'not_controller':
+      return CloudErrorCopy(
+        text: 'You no longer control this browser tab. Reconnect to continue.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'run_not_cancellable':
+      return CloudErrorCopy(
+        text: 'That task already finished, so it could not be stopped.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'run_merged':
+      return CloudErrorCopy(
+        text: 'That message was already accepted. Wait for the reply.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'subagent_limit_exceeded':
+      return CloudErrorCopy(
+        text: 'Too many subagents are running. Wait for one to finish.',
+        action: CloudErrorAction.wait,
+        detail: detail,
+      );
+    case 'subagent_nested':
+      return CloudErrorCopy(
+        text: 'A subagent cannot start another subagent.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'subagent_log_failed':
+      return CloudErrorCopy(
+        text: 'Ovid could not save the subagent log. Try again.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'project_file_limit':
+      return CloudErrorCopy(
+        text: 'This project has reached its file limit. Remove a file first.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'limit_reached':
+      return CloudErrorCopy(
+        text: "You have reached your plan's limit. Remove one, or open Plans.",
+        action: CloudErrorAction.openPlans,
+        detail: detail,
+      );
+    case 'pro_required':
+    case 'tier_required':
+      return CloudErrorCopy(
+        text: 'This needs a higher plan. Open Plans to upgrade.',
+        action: CloudErrorAction.openPlans,
+        detail: detail,
+      );
+    case 'billing_unavailable':
+    case 'no_priced_model':
+      return CloudErrorCopy(
+        text: 'Plans cannot be loaded right now. Try again.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'name_taken':
+    case 'label_taken':
+    case 'server_exists':
+    case 'already_exists':
+      return CloudErrorCopy(
+        text: 'That name is already in use. Choose another.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'not_empty':
+      return CloudErrorCopy(
+        text: 'That folder is not empty. Remove its contents first.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'file_too_large':
+    case 'attachment_too_large':
+      return CloudErrorCopy(
+        text: 'That file is too large to send. Choose a smaller one.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'attachments_not_configured':
+      return CloudErrorCopy(
+        text: 'File uploads are unavailable right now. Try again later.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'unsupported_media_type':
+      return CloudErrorCopy(
+        text: 'That file type cannot be sent. Choose another file.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'upload_unverified':
+    case 'hash_mismatch':
+    case 'r2_short_read':
+    case 'artifact_length_mismatch':
+    case 'archive_length_mismatch':
+    case 'file_not_in_archive':
+      return CloudErrorCopy(
+        text: 'That file did not upload completely. Try again.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'archive_corrupt':
+    case 'archive_truncated':
+    case 'archive_worker_exit':
+      return CloudErrorCopy(
+        text: 'That backup could not be read. Choose another file.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'image_capacity_unavailable':
+    case 'no_capacity':
+      return CloudErrorCopy(
+        text: 'Image generation is full right now. Try again in a moment.',
+        action: CloudErrorAction.wait,
+        detail: detail,
+      );
+    case 'image_access_denied':
+      return CloudErrorCopy(
+        text: 'Image generation is not available on your plan. Open Plans.',
+        action: CloudErrorAction.openPlans,
+        detail: detail,
+      );
+    case 'image_request_pending':
+      return CloudErrorCopy(
+        text: 'That image is still being generated. Wait a moment.',
+        action: CloudErrorAction.wait,
+        detail: detail,
+      );
+    case 'image_unavailable':
+    case 'image_request_failed':
+      return CloudErrorCopy(
+        text: 'That image could not be generated. Try again.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'account_deletion_pending':
+    case 'account_deleted':
+    case 'account_fenced':
+      return CloudErrorCopy(
+        text: 'This account cannot be used. Contact support.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'account_changed':
+      return CloudErrorCopy(
+        text: 'The account changed. Sign in again and retry.',
+        action: CloudErrorAction.signIn,
+        detail: detail,
+      );
+    case 'credential_unavailable':
+      return CloudErrorCopy(
+        text: 'Live chat credentials are unavailable. Try again.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'schema_version_unsupported':
+    case 'endpoint_rejected':
+      return CloudErrorCopy(
+        text: 'This version of Ovid is out of date. Update the app to '
+            'continue.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'not_member':
+      return CloudErrorCopy(
+        text: 'You are not a member of this space.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'ui_manifest_budget':
+      return CloudErrorCopy(
+        text: 'This app has too many screens to publish. Remove one and '
+            'retry.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'validation_error':
+    case 'invalid_arg':
+    case 'invalid_request':
+    case 'unsupported_n':
+    case 'unsupported_size':
+    case 'bad_message':
+      return CloudErrorCopy(
+        text: 'Ovid could not accept that. Change it and try again.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
     case 'attachment_unavailable':
     case 'attachment_missing':
       return CloudErrorCopy(
@@ -223,8 +517,9 @@ CloudErrorCopy cloudErrorCopy(
         detail: detail,
       );
     case 'hook_blocked':
+    case 'hook_block_ignored':
       return CloudErrorCopy(
-        text: raw.isNotEmpty && _looksHuman(raw)
+        text: raw.isNotEmpty && isHumanFailureText(raw)
             ? 'A workspace hook blocked this message: $raw'
             : 'A workspace hook blocked this message.',
         action: CloudErrorAction.none,
@@ -244,7 +539,7 @@ CloudErrorCopy cloudErrorCopy(
       );
     case 'bad_request':
       return CloudErrorCopy(
-        text: raw.isNotEmpty && _looksHuman(raw)
+        text: raw.isNotEmpty && isHumanFailureText(raw)
             ? raw
             : 'Ovid could not accept this message.',
         action: CloudErrorAction.retry,
@@ -252,7 +547,7 @@ CloudErrorCopy cloudErrorCopy(
       );
     case 'not_found':
       return CloudErrorCopy(
-        text: 'This chat no longer exists on Ovid Cloud. Start a new chat.',
+        text: 'That is no longer on Ovid Cloud. Go back and try again.',
         action: CloudErrorAction.none,
         detail: detail,
       );
@@ -261,32 +556,127 @@ CloudErrorCopy cloudErrorCopy(
         text: 'Start a chat first.',
         action: CloudErrorAction.none,
       );
+    case 'authentication_required':
+      return CloudErrorCopy(
+        text: 'Your Ovid session expired. Sign in again to continue.',
+        action: CloudErrorAction.signIn,
+        detail: detail,
+      );
+    case 'explicit_consent_required':
+      return CloudErrorCopy(
+        text: 'Accept the updated terms to continue.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'model_catalog_unavailable':
+      return CloudErrorCopy(
+        text: 'The model list could not be loaded. Try again.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'duplicate_project_ref':
+      return CloudErrorCopy(
+        text: 'That project is already tagged in this message.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'too_many_project_refs':
+      return CloudErrorCopy(
+        text: 'Too many projects are tagged. Remove a few and retry.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'unknown_project_ref':
+      return CloudErrorCopy(
+        text: 'A tagged project no longer exists. Remove the tag.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'run_conflict':
+      return CloudErrorCopy(
+        text: 'That message was already accepted. Wait for the reply.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'file_service_not_configured':
+    case 'storage_not_configured':
+      return CloudErrorCopy(
+        text: 'File storage is unavailable right now. Try again later.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'import_too_large':
+      return CloudErrorCopy(
+        text: 'That backup is too large to import.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'invalid_source':
+      return CloudErrorCopy(
+        text: 'That file is not an Ovid backup. Choose another.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'archive_unsafe':
+      return CloudErrorCopy(
+        text: 'That archive is not safe to install. Choose a trusted plugin.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'oauth_failed':
+      return CloudErrorCopy(
+        text: 'The connector sign-in failed. Try connecting again.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'history_actions_unavailable':
+      return CloudErrorCopy(
+        text: 'History editing is unavailable here. Start a new chat.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'invalid_state':
+      return CloudErrorCopy(
+        text: 'That action is no longer available. Reload and try again.',
+        action: CloudErrorAction.retry,
+        detail: detail,
+      );
+    case 'share_limit_reached':
+      return CloudErrorCopy(
+        text: 'You have reached the share limit. Revoke an old link.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'share_storage_limit_reached':
+      return CloudErrorCopy(
+        text: 'Shared storage is full. Revoke an old link to free space.',
+        action: CloudErrorAction.none,
+        detail: detail,
+      );
+    case 'report_limit_reached':
+      return CloudErrorCopy(
+        text: 'You have reached the report limit. Try again later.',
+        action: CloudErrorAction.wait,
+        detail: detail,
+      );
     default:
       return CloudErrorCopy(
-        text: raw.isNotEmpty && _looksHuman(raw)
+        text: raw.isNotEmpty && isHumanFailureText(raw)
             ? raw
-            : 'Something went wrong. Try again.',
+            : 'Ovid could not handle that request. Try again, or contact '
+                'support if it repeats.',
         action: CloudErrorAction.retry,
         detail: detail,
       );
   }
 }
 
-/// True for short server prose; false for provider exception dumps, stack
-/// traces, JSON blobs and identifiers.
-bool _looksHuman(String text) {
-  if (text.length > 240) return false;
-  if (text.contains('\n    at ') || text.contains('Traceback')) return false;
-  if (text.contains('Error:') ||
-      text.contains('Exception') ||
-      text.contains('litellm') ||
-      text.startsWith('{') ||
-      text.startsWith('[')) {
-    return false;
-  }
-  if (RegExp(r'^[a-z0-9_]+$').hasMatch(text)) return false;
-  return true;
-}
+/// The one sentence to show for [error]: its own server prose when that reads
+/// as human, otherwise the mapped copy for its code. Never a status, an id or
+/// a provider dump.
+String cloudErrorSentence(CloudApiException error) =>
+    cloudErrorDetail(error.message) ??
+    cloudErrorCopy(error.code, message: error.message).text;
 
 String _resetPhrase(DateTime resetsAt, DateTime? now) {
   final current = now ?? DateTime.now();

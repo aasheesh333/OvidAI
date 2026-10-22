@@ -132,6 +132,16 @@ class DomainTest(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 load_products({'OVID_PLAY_PRODUCTS': raw})
 
+    def test_default_products_cover_every_client_sku(self):
+        # Must match lib/core/billing_products.dart kOvidPlayProductIds. A
+        # missing yearly id means Play charged the card and verify refused it.
+        from server.billing.products import DEFAULT_PRODUCTS
+        self.assertEqual(DEFAULT_PRODUCTS, {
+            'ovid_plus_monthly': '3x', 'ovid_plus_yearly': '3x',
+            'ovid_pro_monthly': '7x', 'ovid_pro_yearly': '7x',
+            'ovid_max_monthly': '15x', 'ovid_max_yearly': '15x',
+        })
+
 
 class PlayApiTest(unittest.TestCase):
     def client(self, handler):
@@ -328,6 +338,13 @@ class BillingApiTest(unittest.TestCase):
         self.play.fail = BillingError(503, 'play_unavailable')
         response = self.rtdn({'subscriptionNotification': {'notificationType': 2, 'purchaseToken': 'tok-1'}})
         self.assertEqual(response.status_code, 503)
+
+    def test_rtdn_unknown_token_is_acknowledged_not_retried(self):
+        # A forged/foreign/replayed token cannot be fixed by redelivery.
+        response = self.rtdn({'subscriptionNotification': {'notificationType': 2,
+                                                           'purchaseToken': 'forged'}})
+        self.assertEqual(response.status_code, 204)
+        self.assertNotIn('user:u1:tier', self.rds.values)
 
     def test_rtdn_malformed_and_test_notifications_are_acknowledged(self):
         self.assertEqual(self.client.post('/billing/rtdn?secret=push-secret',

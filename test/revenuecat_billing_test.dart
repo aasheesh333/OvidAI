@@ -320,6 +320,17 @@ void main() {
     expect(fake.purchasedIdentifier, isNull);
   });
 
+  test('the monthly fallback never buys a yearly product', () async {
+    // A misconfigured offering could put a yearly SKU in the `$rc_monthly`
+    // slot; a monthly selection must not be charged for a year.
+    final fake = _FakePlatform(
+      offeredPackages: [_pkg('ovid_plus_yearly', identifier: r'$rc_monthly')],
+    );
+    final outcome = await _billing(fake).buy('3x');
+    expect(outcome.result, UpgradeResult.notAvailable);
+    expect(fake.purchasedIdentifier, isNull);
+  });
+
   test('buy without an offered package is not available', () async {
     final fake = _FakePlatform(offeredPackages: [_pkg('some_other')]);
     final billing = _billing(fake);
@@ -416,6 +427,37 @@ void main() {
     final billing = _billing(fake);
     expect((await billing.restore()).tier, '3x');
     expect(await billing.currentTier(), '7x');
+  });
+
+  test('restore with no purchase reports nothing to restore', () async {
+    final fake = _FakePlatform(
+      restoreResult: const RevenueCatResult(ok: false),
+    );
+    expect(
+      (await _billing(fake).restore()).result,
+      UpgradeResult.nothingToRestore,
+    );
+  });
+
+  test('a failed restore is not reported as nothing to restore', () async {
+    final fake = _FakePlatform(
+      restoreResult: const RevenueCatResult(ok: false, error: 'network'),
+    );
+    expect(
+      (await _billing(fake).restore()).result,
+      isNot(UpgradeResult.nothingToRestore),
+    );
+  });
+
+  test('a purchase with no entitlement yet is confirming, not rejected', () async {
+    final fake = _FakePlatform(
+      offeredPackages: [_pkg('ovid_pro_monthly')],
+      purchaseResult: const RevenueCatResult(ok: false),
+    );
+    expect(
+      (await _billing(fake).buy('7x')).result,
+      UpgradeResult.confirming,
+    );
   });
 
   test('cancel is reported as cancelled, not rejected', () {

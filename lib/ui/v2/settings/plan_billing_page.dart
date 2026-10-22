@@ -275,6 +275,11 @@ class V2Plan {
     this.features = const [],
     this.popular = false,
     this.ctaLabel,
+    this.storePriceMonthly,
+    this.storePriceYearly,
+    this.storeCurrency,
+    this.storeMonthlyAvailable,
+    this.storeYearlyAvailable,
   });
 
   final String id;
@@ -294,6 +299,21 @@ class V2Plan {
   final List<String> features;
   final bool popular;
   final String? ctaLabel;
+
+  /// The store's own localised price for each period, when the store was
+  /// queried and sells it. This is what the card shows when available: the
+  /// canonical table is only a fallback, never an override.
+  final String? storePriceMonthly;
+  final String? storePriceYearly;
+
+  /// ISO currency of the store prices (`USD`, `INR`). The price string already
+  /// carries its symbol; this records which currency the store quoted.
+  final String? storeCurrency;
+
+  /// Whether the store sells the period. Null = not queried yet; false
+  /// disables the CTA with a reason instead of attempting a missing SKU.
+  final bool? storeMonthlyAvailable;
+  final bool? storeYearlyAvailable;
 
   /// Canonical plan id (`free`, `go`, `plus`, `pro`) for this plan.
   ///
@@ -359,11 +379,34 @@ class V2Plan {
   bool hasPrice(V2Currency currency, V2BillingPeriod period) =>
       amount(currency, period) != null;
 
-  /// `$18`, `₹1,799`, or `—` when this period has no price at all.
+  /// The store's price for [period], or null when the store was not queried
+  /// or does not sell it.
+  ///
+  /// The store string already carries its own currency (Play localises it), so
+  /// it wins over the currency toggle: the card must show the amount Google
+  /// Play will actually charge.
+  String? storePriceFor(V2Currency currency, V2BillingPeriod period) {
+    final price = period == V2BillingPeriod.yearly
+        ? storePriceYearly
+        : storePriceMonthly;
+    if (price == null || price.trim().isEmpty) return null;
+    return price;
+  }
+
+  /// null = the store has not been queried; false = it does not sell [period].
+  bool? storeAvailableFor(V2BillingPeriod period) =>
+      period == V2BillingPeriod.yearly
+      ? storeYearlyAvailable
+      : storeMonthlyAvailable;
+
+  /// `$18`, `₹1,799`, the store's localised price, or `—` when this period has
+  /// no price at all.
   String priceLabel(
     V2Currency currency, {
     V2BillingPeriod period = V2BillingPeriod.monthly,
   }) {
+    final store = storePriceFor(currency, period);
+    if (store != null) return store;
     final amount = this.amount(currency, period);
     if (amount == null) return '—';
     final symbol = currency == V2Currency.inr ? '₹' : r'$';
@@ -848,20 +891,28 @@ class _PlanCard extends StatelessWidget {
     // Every other plan must have both a product for the selected period and a
     // price for it; without either the CTA is disabled instead of charging a
     // different period's SKU or an invented amount.
+    final storePrice = plan.storePriceFor(currency, period);
+    final priceKnown = price != null || storePrice != null;
     final missingProduct = !current && !free && productId == null;
-    final missingPrice = !current && !free && !missingProduct && price == null;
-    final unavailable = missingProduct || missingPrice;
+    final missingPrice = !current && !free && !missingProduct && !priceKnown;
+    // The store was queried and does not sell this period (e.g. the yearly
+    // base plan has not been created in Play Console yet).
+    final storeMissing =
+        !current && !free && !missingProduct && plan.storeAvailableFor(period) == false;
+    final unavailable = missingProduct || missingPrice || storeMissing;
     final canBuy = !current && onPurchase != null && !unavailable;
     final periodWord = period == V2BillingPeriod.yearly ? 'yearly' : 'monthly';
     final reason = missingProduct
         ? '${plan.name} is not sold with $periodWord billing right now.'
         : missingPrice
         ? 'No $periodWord price for ${plan.name}.'
+        : storeMissing
+        ? '$periodWord billing is not available in Google Play yet.'
         : null;
     // The card is one group for a screen reader: name and price first, then
     // the CTA (which announces its own enabled/disabled state). The name and
     // price texts are excluded so they are not read twice.
-    final groupLabel = price == null
+    final groupLabel = !priceKnown
         ? '${plan.name}, price unavailable'
         : '${plan.name}, $priceLabel ${plan.periodPhrase(period)}';
     // The current plan is marked with a 2 dp accent edge; the popular plan

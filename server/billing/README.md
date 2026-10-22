@@ -113,7 +113,7 @@ Route `/billing/*` to the mint/verifier upstream (like `/mint`, `/usage`).
 |---|---|---|
 | `OVID_PLAY_SERVICE_ACCOUNT_FILE` | — (unset = billing disabled) | JSON key of the Play API service account |
 | `OVID_PLAY_PACKAGE` | `com.dhanuk.ovidai` | Android package name |
-| `OVID_PLAY_PRODUCTS` | `{"ovid_plus_monthly":"3x","ovid_pro_monthly":"7x","ovid_max_monthly":"15x"}` | product ID → tier |
+| `OVID_PLAY_PRODUCTS` | all six ids: `{"ovid_plus_monthly":"3x","ovid_plus_yearly":"3x","ovid_pro_monthly":"7x","ovid_pro_yearly":"7x","ovid_max_monthly":"15x","ovid_max_yearly":"15x"}` | product ID → tier (an override replaces the whole map) |
 | `OVID_BILLING_DB` | `/data/ovid-billing.sqlite` | purchase-token ledger (persistent volume) |
 | `OVID_RTDN_AUDIENCE`, `OVID_RTDN_SERVICE_ACCOUNT` | — | Pub/Sub OIDC push auth |
 | `OVID_RTDN_SHARED_SECRET` | — | fallback push auth |
@@ -122,9 +122,12 @@ Route `/billing/*` to the mint/verifier upstream (like `/mint`, `/usage`).
 ## Owner setup (Play Console / Google Cloud)
 
 1. Play Console → Monetize → Subscriptions: create `ovid_plus_monthly`,
-   `ovid_pro_monthly`, `ovid_max_monthly`, each with one auto-renewing monthly
-   base plan (prices per country; no free trial unless decided). IDs must match
-   `OVID_PLAY_PRODUCTS` and `kOvidPlayProducts` in `lib/core/play_billing.dart`.
+   `ovid_pro_monthly`, `ovid_max_monthly` (auto-renewing **monthly** base plan)
+   and `ovid_plus_yearly`, `ovid_pro_yearly`, `ovid_max_yearly`
+   (auto-renewing **yearly** base plan; 10 monthly payments). Prices per
+   country; no free trial unless decided. IDs must match
+   `OVID_PLAY_PRODUCTS` (or the defaults in `products.py`) and
+   `kOvidPlayProductIds` in `lib/core/billing_products.dart`.
    In-app upgrades replace the current subscription with
    `ReplacementMode.chargeProratedPrice`; downgrades and cancellation go
    through the Play subscription centre.

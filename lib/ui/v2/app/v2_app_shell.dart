@@ -33,6 +33,7 @@ import '../chat/composer_voice.dart';
 import '../chat/chat_page.dart';
 import '../chat/composer_attachments.dart';
 import '../chat/chat_error_bar.dart';
+import '../../content_report_sheet.dart';
 import '../chat/live_chat_page.dart';
 import '../chat/model_chip_menu.dart';
 import '../chat/model_picker_sheet.dart';
@@ -121,12 +122,28 @@ class _V2AppShellState extends State<V2AppShell> {
       }),
     );
     unawaited(ProjectsController.I.refresh());
+    // Open the restored chat with its real history: the projection starts
+    // empty, and offline the store seeds it from the read cache instead of
+    // leaving the conversation blank.
+    _lastActiveSessionId = AppState.I.activeSessionId;
+    if (_lastActiveSessionId != null) {
+      unawaited(_loadTranscript(_lastActiveSessionId!));
+    }
+    // Links and notifications select a chat through AppState directly, not
+    // through [_selectSession]; follow the active id so those opens load
+    // their history too.
+    AppState.I.addListener(_onActiveSessionChanged);
   }
 
   @override
   void dispose() {
+    AppState.I.removeListener(_onActiveSessionChanged);
     _tabObserver.current.dispose();
-    _usage.dispose();
+    // Drop the settings listener before the store it listens to goes away,
+    // then hand the store back: `release` is the acquire/release pair, and
+    // `dispose` here would leave a disposed store in the per-AppState cache.
+    _settings.dispose();
+    _usage.release();
     super.dispose();
   }
 
@@ -309,6 +326,7 @@ class _V2AppShellState extends State<V2AppShell> {
           onArtifactTap: (id) => _openArtifact(routeContext, id),
           onRegenerateMessage: _regenerateMessage,
           onBranchMessage: _branchMessage,
+          onReportMessage: _reportMessage,
           onOpenLink: (url) =>
               unawaited(v2OpenTranscriptLink(routeContext, url)),
           onDownloadLink: (url) =>
@@ -511,7 +529,7 @@ class _V2AppShellState extends State<V2AppShell> {
       permissionLabel: agent.mode.label,
       composerHint: 'Ask Ovid anything',
       offlineTitle: "You're offline",
-      offlineMessage: 'Messages will send when you reconnect.',
+      offlineMessage: 'Your message is saved and sends when you reconnect.',
     );
   }
 
@@ -582,6 +600,11 @@ class _V2AppShellState extends State<V2AppShell> {
     final agent = CloudAgentFacade.I;
     final running = agent.busyFor(session.id);
     final queued = agent.queuedMessagesFor(session.id);
+    // The durable outbox is the only truthful source for "waiting to send"
+    // and "not sent": the composer queue above is a different (in-memory)
+    // queue that only exists while a run is busy.
+    final outbox = CloudSessionStore.I.outboxFor(session.id);
+    final failedSends = outbox.where((entry) => entry.failed).length;
     // Response-wait watchdog: the same source the legacy transcript reads, so
     // the Settings limit has a visible effect here too.
     final stalled = agent.stalledFor(session.id);
@@ -607,6 +630,11 @@ class _V2AppShellState extends State<V2AppShell> {
       queuedPreview: queued.firstOrNull,
       autoOnly: _planAutoOnly,
       subagentCount: agent.subagentsOf(session.id).length,
+      offline: ConnectionService.I.offline,
+      waitingToSend: outbox.length,
+      failedToSend: failedSends,
+      onRetryFailed: () => _retryFailedSend(session.id),
+      onDiscardFailed: () => _discardFailedSend(session.id),
     );
   }
 
@@ -843,7 +871,42 @@ class _V2AppShellState extends State<V2AppShell> {
   void _selectSession(String id) {
     AppState.I.selectSession(id);
     CloudAgentFacade.I.activateSession(id);
+    unawaited(_loadTranscript(id));
     _scaffoldKey.currentState?.closeDrawer();
+  }
+
+  /// Chats whose first history page this shell has already asked for. The WS
+  /// projection keeps them fresh afterwards.
+  final Set<String> _transcriptsLoaded = <String>{};
+
+  /// The active session the shell last followed, so a route/link open loads
+  /// its history once.
+  String? _lastActiveSessionId;
+
+  void _onActiveSessionChanged() {
+    final id = AppState.I.activeSessionId;
+    if (id == null || id == _lastActiveSessionId) return;
+    _lastActiveSessionId = id;
+    unawaited(_loadTranscript(id));
+  }
+
+  /// Pages [sessionId]'s transcript through the store: online it seeds the
+  /// projection (and the offline cache) from the server, offline it seeds
+  /// from that cache. A chat that never reached the server has no history.
+  Future<void> _loadTranscript(String sessionId) async {
+    if (!_transcriptsLoaded.add(sessionId)) return;
+    final store = CloudSessionStore.I;
+    try {
+      await store.ready;
+      final serverId = store.knownServerIdFor(sessionId);
+      if (serverId == null) return; // local-only chat: no server history
+      await store.loadTranscript(serverId);
+    } catch (e) {
+      // Allow the next open (or Retry) to try again; the chat shows its
+      // cached rows, if any, meanwhile.
+      _transcriptsLoaded.remove(sessionId);
+      Diag.swallow('v2.loadTranscript', e);
+    }
   }
 
   Future<void> _submit(V2ComposerSubmission submission) async {
@@ -853,7 +916,9 @@ class _V2AppShellState extends State<V2AppShell> {
     if (app.activeSessionId == null) app.newSession();
     final id = app.activeSessionId;
     if (id == null) return;
-    ComposerDraftStore.I.remove(id);
+    // The composer trims before submitting, so compare against the stored
+    // draft as it was at tap time (untrimmed) rather than the trimmed text.
+    final draftAtSubmit = ComposerDraftStore.I.draftFor(id);
     final attachments = <({String name, String path, int size})>[
       for (final file in submission.attachments)
         if (file.isReadable)
@@ -865,6 +930,16 @@ class _V2AppShellState extends State<V2AppShell> {
       attachments: attachments.isEmpty ? null : attachments,
       sessionRefs: submission.sessionRefs,
       projectRefs: submission.projectRefs,
+      // The composer clears its own text on tap, so the durable draft is the
+      // ONLY remaining copy until the prompt is safely in the outbox. Drop it
+      // on acceptance (offline enqueue included), never on tap — a kill or a
+      // refused send between the tap and the enqueue must not lose the text.
+      onQueued: () {
+        final current = ComposerDraftStore.I.draftFor(id);
+        if (current == draftAtSubmit || current == submission.text) {
+          ComposerDraftStore.I.remove(id);
+        }
+      },
     );
   }
 
@@ -893,7 +968,36 @@ class _V2AppShellState extends State<V2AppShell> {
   void _retry() {
     final id = AppState.I.activeSessionId;
     if (id == null) return;
+    // A refused prompt is still in the outbox: retry THAT (same clientMsgId,
+    // so the server cannot run it twice). Minting a new prompt instead would
+    // queue it behind the failed one and never deliver it.
+    final failed = _failedOutboxEntry(id);
+    if (failed != null) {
+      unawaited(CloudAgentFacade.I.retryPendingSend(failed.clientMsgId));
+      return;
+    }
     CloudAgentFacade.I.retryLastPrompt(id);
+  }
+
+  /// The oldest refused prompt still in [sessionId]'s outbox, or null. It
+  /// holds every later prompt in that chat until Retry or Discard.
+  OutboxEntry? _failedOutboxEntry(String sessionId) {
+    for (final entry in CloudSessionStore.I.outboxFor(sessionId)) {
+      if (entry.failed) return entry;
+    }
+    return null;
+  }
+
+  void _retryFailedSend(String sessionId) {
+    final entry = _failedOutboxEntry(sessionId);
+    if (entry == null) return;
+    unawaited(CloudAgentFacade.I.retryPendingSend(entry.clientMsgId));
+  }
+
+  void _discardFailedSend(String sessionId) {
+    final entry = _failedOutboxEntry(sessionId);
+    if (entry == null) return;
+    unawaited(CloudAgentFacade.I.discardPendingSend(entry.clientMsgId));
   }
 
   /// The stored row behind [messageId] in [sessionId], or null when the
@@ -950,6 +1054,32 @@ class _V2AppShellState extends State<V2AppShell> {
   /// Branch: the server copies this history into a NEW chat. Navigate there
   /// only after the call succeeds, then report what actually happened — a
   /// branch whose transcript cannot load still exists and is still opened.
+  /// Reports one stored answer to the safety queue.
+  ///
+  /// Play's AI-Generated Content policy requires in-app reporting of offensive
+  /// output. The v2 transcript only carries the server message id, so the real
+  /// row is resolved from the projection; a missing row reports nothing rather
+  /// than sending an empty excerpt.
+  Future<bool> _reportMessage(String messageId) async {
+    final sessionId = AppState.I.activeSessionId;
+    if (sessionId == null) return false;
+    final rows = CloudAgentFacade.I.transcriptFor(sessionId) ??
+        AppState.I.activeSession?.messages ??
+        const <Message>[];
+    Message? target;
+    for (final row in rows) {
+      if (CloudAgentFacade.isServerMessage(row) &&
+          row.privateSyncId == messageId) {
+        target = row;
+        break;
+      }
+    }
+    if (target == null) return false;
+    if (!mounted) return false;
+    final model = AppState.I.activeSession?.model;
+    return reportAiMessage(_navContext, target, model: model);
+  }
+
   Future<V2MessageActionReport> _branchMessage(String messageId) async {
     final sessionId = AppState.I.activeSessionId;
     if (sessionId == null) {
@@ -1615,7 +1745,7 @@ class _V2AppShellState extends State<V2AppShell> {
   }
 
   String _projectMemoryError(Object error) => error is CloudApiException
-      ? error.message
+      ? cloudErrorSentence(error)
       : 'Could not load this project’s memory. Try again.';
 
   int _storageGb(String tier) => switch (tier) {
@@ -2159,7 +2289,7 @@ class _ProjectDetailSheetState extends State<_ProjectDetailSheet> {
       setState(() {
         _loading = false;
         _error = e is CloudApiException
-            ? e.message
+            ? cloudErrorSentence(e)
             : 'Could not load this project’s memory. Try again.';
       });
     }

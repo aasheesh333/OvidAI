@@ -128,7 +128,10 @@ class V2ThinkingTile extends StatelessWidget {
       color: Colors.transparent,
       child: Semantics(
         button: canToggle,
-        expanded: expanded,
+        // Only a row that really expands owns an expanded/collapsed state. A
+        // status line with no details is not a collapsed control, and saying
+        // so would describe a button that is not there.
+        expanded: canToggle ? expanded : null,
         child: InkWell(
           onTap: canToggle ? onToggle : null,
           borderRadius: BorderRadius.circular(ORadius.s),
@@ -280,7 +283,10 @@ class V2ToolTile extends StatelessWidget {
       color: Colors.transparent,
       child: Semantics(
         button: canToggle,
-        expanded: expanded,
+        // Only a row that really expands owns an expanded/collapsed state. A
+        // status line with no details is not a collapsed control, and saying
+        // so would describe a button that is not there.
+        expanded: canToggle ? expanded : null,
         child: InkWell(
           onTap: canToggle ? onToggle : null,
           borderRadius: BorderRadius.circular(ORadius.s),
@@ -593,6 +599,9 @@ class V2ArtifactTile extends StatelessWidget {
         width: 40,
         height: 40,
         fit: BoxFit.cover,
+        // Decorative: the row's own label already names the file, so exposing
+        // the thumbnail would add an unnamed image node to the transcript.
+        excludeFromSemantics: true,
         // A broken or expired image falls back to the glyph rather than
         // leaving an empty hole.
         errorBuilder: (_, _, _) => SizedBox(

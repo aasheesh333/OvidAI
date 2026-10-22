@@ -320,7 +320,7 @@ class _SidebarState extends State<Sidebar> {
         compact: true,
         icon: Icons.chat_bubble_outline_rounded,
         title: 'No chats yet',
-        message: '',
+        message: 'Start a chat and it appears here.',
       );
     }
 
@@ -443,7 +443,7 @@ class _SidebarState extends State<Sidebar> {
         compact: true,
         icon: Icons.search_off_rounded,
         title: 'No matches',
-        message: '',
+        message: 'Try another search, or clear it.',
         action: OButton(
           label: 'Clear search',
           variant: OButtonVariant.ghost,

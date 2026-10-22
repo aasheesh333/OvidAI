@@ -495,7 +495,7 @@ class _ProjectsPageState extends State<ProjectsPage> {
               child: OEmptyState(
                 icon: Icons.create_new_folder_outlined,
                 title: 'No projects',
-                message: 'Projects group chats and memory.',
+                message: 'Create a project to group chats and memory.',
                 action: _canCreate
                     ? OButton(
                         key: const Key('v2-empty-new-project'),

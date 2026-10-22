@@ -202,7 +202,7 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('Something went wrong'), findsOneWidget);
+    expect(find.text('That did not work'), findsOneWidget);
     await tester.tap(find.text('Try again'));
     expect(retries, 1);
   });
@@ -225,7 +225,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text("You're offline"), findsOneWidget);
-    expect(find.text('Messages will send when you reconnect.'), findsOneWidget);
+    expect(find.text('Your message is saved and sends when you reconnect.'), findsOneWidget);
     expect(find.text('2 messages are waiting to send.'), findsOneWidget);
     await tester.tap(find.text('Retry'));
     expect(retries, 1);

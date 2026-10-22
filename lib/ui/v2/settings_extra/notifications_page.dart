@@ -425,7 +425,7 @@ class _NotificationsPageState extends State<NotificationsPage> {
       errorMessage: _data.errorMessage,
       onRetry: _data.onRetry,
       emptyTitle: 'No notification settings',
-      emptyBody: 'Choices appear when your account is ready.',
+      emptyBody: 'Sign in, then refresh to choose what notifies you.',
       emptyActionLabel: 'Refresh',
       onEmptyAction: _data.onRetry,
       skeletonRows: 8,

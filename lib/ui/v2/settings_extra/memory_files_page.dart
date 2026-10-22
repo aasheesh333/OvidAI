@@ -864,7 +864,7 @@ class _MemoryFileEditorState extends State<_MemoryFileEditor> {
   }
 
   String _saveError(Object error) {
-    if (error is StateError) return error.message;
+    if (error is StateError) return 'Could not save. Try again.';
     if (error is CloudApiException && error.code == 'baseline_mismatch') {
       return 'This file changed. Reopen it.';
     }

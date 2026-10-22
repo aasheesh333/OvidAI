@@ -40,6 +40,15 @@ class V2SettingsActions {
 
   final CloudUsageStore usage;
 
+  /// Drops the listener this object added to [usage].
+  ///
+  /// The shell owns one of these for its lifetime; without this, every shell
+  /// mount (a sign-out/sign-in cycle) left another listener on the shared
+  /// usage store.
+  void dispose() {
+    usage.removeListener(_onUsage);
+  }
+
   /// Mirrors the server's plan answer into the local state.
   ///
   /// The tier restored from SharedPreferences (`state.dart:4789`

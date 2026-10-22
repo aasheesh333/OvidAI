@@ -68,6 +68,11 @@ class V2PlanOption {
     this.priceInrYearly,
     this.autoOnly = false,
     this.features = const [],
+    this.storePriceMonthly,
+    this.storePriceYearly,
+    this.storeCurrency,
+    this.storeMonthlyAvailable,
+    this.storeYearlyAvailable,
   });
 
   final String id;
@@ -89,6 +94,22 @@ class V2PlanOption {
 
   /// At most three are shown; the card is a comparison, not a feature list.
   final List<String> features;
+
+  /// The store's own localised price for each period, when the store was
+  /// queried and sells it. Displayed instead of the canonical table so the
+  /// amount on screen is the amount Google Play charges.
+  final String? storePriceMonthly;
+  final String? storePriceYearly;
+
+  /// ISO currency of [storePriceMonthly] / [storePriceYearly] (`USD`, `INR`).
+  /// The price string already carries its symbol; this records which currency
+  /// the store quoted for diagnostics.
+  final String? storeCurrency;
+
+  /// Whether the store sells the period. Null means "not queried yet"; false
+  /// disables the CTA with a real reason instead of attempting a missing SKU.
+  final bool? storeMonthlyAvailable;
+  final bool? storeYearlyAvailable;
 
   /// Maps a server tier id or a display name onto the canonical card id.
   static String canonicalIdFor(String id) {
@@ -131,10 +152,55 @@ class V2PlanOption {
   bool hasPrice(V2Currency currency, V2PaywallPeriod period) =>
       amountFor(currency, period) != null;
 
+  /// The store's price for [period], or null when the store was not queried
+  /// or does not sell it.
+  ///
+  /// The store string already carries its own currency (Play localises it), so
+  /// it wins over the currency toggle: the card must show the amount Google
+  /// Play will actually charge, not a converted guess.
+  String? storePriceFor(V2Currency currency, V2PaywallPeriod period) {
+    final price = period == V2PaywallPeriod.yearly
+        ? storePriceYearly
+        : storePriceMonthly;
+    if (price == null || price.trim().isEmpty) return null;
+    return price;
+  }
+
+  /// null = the store has not been queried; false = it does not sell [period].
+  bool? storeAvailableFor(V2PaywallPeriod period) => period == V2PaywallPeriod.yearly
+      ? storeYearlyAvailable
+      : storeMonthlyAvailable;
+
+  /// A copy carrying what the store reported for this build.
+  V2PlanOption withStore({
+    String? monthlyPrice,
+    String? yearlyPrice,
+    String? currency,
+    bool? monthlyAvailable,
+    bool? yearlyAvailable,
+  }) => V2PlanOption(
+    id: id,
+    name: name,
+    priceUsd: priceUsd,
+    priceInr: priceInr,
+    priceUsdYearly: priceUsdYearly,
+    priceInrYearly: priceInrYearly,
+    storageGb: storageGb,
+    autoOnly: autoOnly,
+    features: features,
+    storePriceMonthly: monthlyPrice,
+    storePriceYearly: yearlyPrice,
+    storeCurrency: currency,
+    storeMonthlyAvailable: monthlyAvailable,
+    storeYearlyAvailable: yearlyAvailable,
+  );
+
   String priceFor(
     V2Currency currency, [
     V2PaywallPeriod period = V2PaywallPeriod.monthly,
   ]) {
+    final store = storePriceFor(currency, period);
+    if (store != null) return store;
     final amount = amountFor(currency, period);
     if (amount == null) return '—';
     return currency == V2Currency.inr
@@ -545,6 +611,9 @@ class _PaywallPageState extends State<PaywallPage> {
         !plan.hasPrice(_currency, _period)) {
       return false;
     }
+    // The store has been queried and does not sell this period: disable rather
+    // than attempt a SKU that does not exist.
+    if (plan.storeAvailableFor(_period) == false) return false;
     if (widget.onPurchase != null) return true;
     return widget.onStartTrial != null && _period == V2PaywallPeriod.monthly;
   }
@@ -569,6 +638,11 @@ class _PaywallPageState extends State<PaywallPage> {
       return _period == V2PaywallPeriod.yearly
           ? 'No yearly price for this plan.'
           : 'No monthly price for this plan.';
+    }
+    if (plan.storeAvailableFor(_period) == false) {
+      return _period == V2PaywallPeriod.yearly
+          ? 'Yearly billing is not available in Google Play yet.'
+          : 'Monthly billing is not available in Google Play right now.';
     }
     if (widget.onPurchase != null) return null;
     if (widget.onStartTrial == null) return 'Checkout is not connected.';

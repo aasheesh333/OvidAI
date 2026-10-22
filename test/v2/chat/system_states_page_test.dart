@@ -97,7 +97,7 @@ void main() {
 
     expect(find.byType(V2StateTile), findsOneWidget);
     expect(find.text("You're offline"), findsOneWidget);
-    expect(find.text('Messages wait until you reconnect.'), findsOneWidget);
+    expect(find.text('Queued messages send when you reconnect.'), findsOneWidget);
     expect(find.text('All clear'), findsNothing);
 
     await tester.tap(find.text('Retry'));
@@ -300,7 +300,7 @@ void main() {
 
     expect(
       find.bySemanticsLabel(
-        "You're offline. Messages wait until you reconnect.",
+        "You're offline. Queued messages send when you reconnect.",
       ),
       findsOneWidget,
     );

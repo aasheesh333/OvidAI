@@ -291,7 +291,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Something went wrong'), findsOneWidget);
+    expect(find.text('That did not work'), findsOneWidget);
     expect(find.text('We could not load your image usage.'), findsOneWidget);
     await tester.tap(find.text('Try again'));
     await tester.pump();

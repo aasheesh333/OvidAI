@@ -418,13 +418,15 @@ void main() {
 
     expect(
       find.bySemanticsLabel(
-        "You're offline. Messages wait until you reconnect.",
+        "You're offline. Queued messages send when you reconnect.",
       ),
       findsOneWidget,
     );
     expect(find.bySemanticsLabel('Retry'), findsOneWidget);
     expect(
-      find.bySemanticsLabel(RegExp(r'^Messages wait until you reconnect\.$')),
+      find.bySemanticsLabel(
+        RegExp(r'^Queued messages send when you reconnect\.$'),
+      ),
       findsNothing,
       reason: 'the body must not become a second node',
     );

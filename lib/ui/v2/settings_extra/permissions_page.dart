@@ -80,9 +80,9 @@ class V2PermissionsPageData {
   final ValueChanged<String>? onRequest;
   final VoidCallback? onOpenSettings;
 
-  /// Opens the Android settings page for one permission (camera, microphone,
-  /// photos, notifications, files) instead of the app's own page. Falls back
-  /// to [onOpenSettings] when a caller cannot target a single permission.
+  /// Opens the Android settings page for one permission (microphone or
+  /// notifications) instead of the app's own page. Falls back to
+  /// [onOpenSettings] when a caller cannot target a single permission.
   final ValueChanged<String>? onOpenSettingsFor;
 
   /// Re-reads the real permission state. Called when the app returns to the
@@ -93,8 +93,9 @@ class V2PermissionsPageData {
   final String errorMessage;
 }
 
-/// Camera, microphone, photos, notifications and files: one row each, with
-/// the real status and at most one action.
+/// Microphone and notifications: one row each, with the real status and at
+/// most one action. Those are the only runtime permissions the app declares;
+/// camera, photos and files are never requested.
 ///
 /// Every row reflects what Android reports. The page only renders the injected
 /// snapshot; the route re-reads it when the app resumes, so a grant made in
@@ -196,8 +197,9 @@ class _PermissionsPageState extends State<PermissionsPage>
     };
     return Semantics(
       container: true,
-      // One node per row: "Camera, not asked, Requests camera access, button".
-      // Without excludeSemantics TalkBack reads the title and the pill twice.
+      // One node per row: "Microphone, not asked, Requests microphone access,
+      // button". Without excludeSemantics TalkBack reads the title and the pill
+      // twice.
       label: '${item.name}, ${view.state}',
       hint: view.hint,
       button: view.onTap == null ? null : true,

@@ -195,7 +195,8 @@ typedef CloudMirrorReader = Future<List<CloudSessionEvent>> Function(
 
 /// One session subscription's client-side state.
 class _SessionSub {
-  _SessionSub(this.sessionId);
+  _SessionSub(this.sessionId, {void Function()? onCancel})
+      : events = StreamController<CloudSessionEvent>(onCancel: onCancel);
 
   final String sessionId;
 
@@ -205,8 +206,11 @@ class _SessionSub {
   late final Stream<CloudSessionEvent> stream = events.stream;
 
   /// Emits each accepted event exactly once (per-seq dedupe upstream).
-  final StreamController<CloudSessionEvent> events =
-      StreamController<CloudSessionEvent>();
+  ///
+  /// `onCancel` drops the registration: without it, a cancelled listener left
+  /// the multiplexer holding a subscription nobody reads, so it kept the
+  /// socket alive and retried forever after the screen that wanted it closed.
+  final StreamController<CloudSessionEvent> events;
 
   /// Replay cursor: the max seq accepted for this session. Seeded from
   /// SharedPreferences at registration, updated on every accepted event.
@@ -425,7 +429,10 @@ class WsMultiplexer extends ChangeNotifier {
     final existing = _subs[sessionId];
     if (existing != null) return existing.stream;
 
-    final sub = _SessionSub(sessionId);
+    final sub = _SessionSub(
+      sessionId,
+      onCancel: () => unsubscribe(sessionId),
+    );
     sub.lastEventId = _seededCursors.containsKey(sessionId)
         ? _seededCursors[sessionId]
         : _prefs?.getString('$_lastEventKey$sessionId');
@@ -455,6 +462,14 @@ class WsMultiplexer extends ChangeNotifier {
       _send(<String, Object?>{'op': 'unsubscribe', 'sessionId': sessionId});
     }
     unawaited(sub.events.close().catchError((Object _) {}));
+    // Nothing is listening any more: stop retrying a socket nobody reads.
+    // Without this a cancelled subscription left the reconnect timer armed,
+    // so a closed screen kept dialling the gateway (and a widget test ended
+    // with a pending timer).
+    if (_subs.isEmpty) {
+      _reconnectTimer?.cancel();
+      _reconnectTimer = null;
+    }
   }
 
   /// Connects if the link is not already up/coming up. A no-op while
@@ -738,6 +753,10 @@ class WsMultiplexer extends ChangeNotifier {
   /// the first consecutive attempt) skips the delay entirely.
   void _scheduleReconnect({bool immediate = false}) {
     if (_userDisconnecting) return;
+    // No intent to hold a link: do not arm a timer that would only discover
+    // that on its own callback. This is what left a pending timer after a
+    // torn-down screen (and a failing widget-test teardown).
+    if (!_wantLink) return;
     if (_isOffline) return; // flip to online retries (_onConnectionChanged)
 
     final delay =

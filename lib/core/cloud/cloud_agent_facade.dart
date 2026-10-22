@@ -108,7 +108,16 @@ class CloudAgentFacade extends ChangeNotifier
 
   /// Clears the singleton — test wiring only.
   @visibleForTesting
-  static void resetForTest() => _instance = null;
+  /// Test seam: tear the instance down before forgetting it.
+  ///
+  /// Nulling the reference alone left the WebSocket reconnect timer and the
+  /// session subscriptions alive, so a widget test ended with a pending timer
+  /// and failed teardown. Disposing first is also what production does on a
+  /// full reset, so the seam matches the real teardown.
+  static void resetForTest() {
+    _instance?.dispose();
+    _instance = null;
+  }
 
   /// Drops every in-memory per-account cache on an account switch or a full
   /// data reset. This is the surviving owner of the reset guarantee the
@@ -1487,6 +1496,16 @@ class CloudAgentFacade extends ChangeNotifier
       }
     }
     _notify();
+    // A refused prompt holds every later prompt in its chat; once it is gone,
+    // deliver them now instead of waiting for an unrelated trigger.
+    final s = store;
+    if (s != null) {
+      try {
+        await s.flushOutbox();
+      } catch (_) {
+        // Delivery failures are recorded on the entries themselves.
+      }
+    }
   }
 
   /// The last prompt sent per session — the run-failure Retry re-sends it.

@@ -159,7 +159,16 @@ class BillingService:
         if not isinstance(notification, dict) or not notification.get('purchaseToken'):
             return  # testNotification / one-time products: nothing to do
         token = notification['purchaseToken']
-        resource = self.api.get_subscription(token)  # 503 => Pub/Sub retries
+        try:
+            resource = self.api.get_subscription(token)  # 503 => Pub/Sub retries
+        except BillingError as error:
+            if error.status >= 500:
+                raise  # transient: let Pub/Sub redeliver
+            # Google does not know this token (forged, foreign package, or a
+            # replay of a token that has been purged). Redelivery cannot fix
+            # it, so acknowledge instead of looping forever.
+            _LOG.warning('billing.rtdn ignored token: %s', error.code)
+            return
         try:
             entitlement = evaluate(resource, self.products, now)
         except BillingError as error:

@@ -665,7 +665,7 @@ void main() {
 
       expect(find.text('Document unavailable'), findsOneWidget);
       expect(
-        find.text('The document could not be downloaded (503).'),
+        find.text('The document could not be downloaded. Try again.'),
         findsOneWidget,
       );
     },

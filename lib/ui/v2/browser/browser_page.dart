@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 
 import '../../design/o_components.dart';
@@ -57,6 +59,7 @@ class V2BrowserData {
     this.address = '',
     this.status = V2BrowserStatus.content,
     this.frame,
+    this.frameImage,
     this.viewportStatus = V2ViewportStatus.live,
     this.fps,
     this.headless = false,
@@ -79,6 +82,10 @@ class V2BrowserData {
   /// The latest decoded screencast frame. Null means "no picture yet", which
   /// shows the viewport's neutral waiting state instead of inventing content.
   final ImageProvider? frame;
+
+  /// The same frame already decoded by the stream, painted without a second
+  /// decode or an image-cache entry. See [BrowserViewport.frameImage].
+  final ui.Image? frameImage;
 
   /// What the live picture is doing, separate from the page status.
   final V2ViewportStatus viewportStatus;
@@ -264,6 +271,7 @@ class BrowserPage extends StatelessWidget {
         viewportChild ??
         BrowserViewport(
           frame: data.frame,
+          frameImage: data.frameImage,
           status: data.viewportStatus,
           cursor: data.cursor,
           controlling: data.controlling,

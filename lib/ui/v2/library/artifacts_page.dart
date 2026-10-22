@@ -309,7 +309,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
     return OEmptyState(
       icon: Icons.auto_awesome_rounded,
       title: 'No artifacts yet',
-      message: '',
+      message: 'Ask Ovid for a file in a chat and it appears here.',
     );
   }
 
@@ -409,14 +409,14 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         compact: true,
         icon: Icons.auto_awesome_rounded,
         title: 'No artifacts yet',
-        message: '',
+        message: 'Ask Ovid for a file in a chat and it appears here.',
       );
     }
     return OEmptyState(
       compact: true,
       icon: Icons.search_off_rounded,
       title: 'No matches',
-      message: '',
+      message: 'Try another search, or clear the filters.',
       action: OButton(
         label: 'Clear filters',
         variant: OButtonVariant.secondary,
@@ -686,6 +686,9 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
       return Image(
         image: ResizeImage.resizeIfNeeded(cacheWidth, null, thumbnail),
         fit: BoxFit.cover,
+        // Decorative: the card's label already names the file, its type and
+        // the date, so the pixels must not add an unnamed image node.
+        excludeFromSemantics: true,
         errorBuilder: (_, _, _) => _mockThumb(c, item.kind),
       );
     }
@@ -695,6 +698,7 @@ class _ArtifactsPageState extends State<ArtifactsPage> {
         link,
         cacheWidth: cacheWidth,
         fit: BoxFit.cover,
+        excludeFromSemantics: true,
         errorBuilder: (_, _, _) => _mockThumb(c, item.kind),
       );
     }

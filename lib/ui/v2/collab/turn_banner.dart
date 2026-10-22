@@ -423,11 +423,17 @@ class _ActionText extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: OSpace.s),
             child: Center(
               widthFactor: 1,
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: OType.label.copyWith(color: c.accent),
+              // A control label must stay whole: at 200 % text the 160 dp cap
+              // would ellipsize it to "Request tu…". Scale the word down
+              // instead; the spoken label is unaffected.
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  softWrap: false,
+                  style: OType.label.copyWith(color: c.accent),
+                ),
               ),
             ),
           ),

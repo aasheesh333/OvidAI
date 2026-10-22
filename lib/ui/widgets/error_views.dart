@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../core/diag.dart';
+import '../../core/secret_scrub.dart';
 import '../../core/theme.dart';
 import '../../l10n/l10n.dart';
 import 'aether_primitives.dart';
@@ -25,6 +26,11 @@ class _ErrorDetailsState extends State<ErrorDetails> {
   @override
   Widget build(BuildContext context) {
     if (widget.detail.isEmpty) return const SizedBox.shrink();
+    // Error text can carry a URL, a bearer token or a provider key (an
+    // upstream 401 echoes the key it rejected). The disclosure is readable and
+    // the copy button writes to the SHARED clipboard, so scrub once and use
+    // the scrubbed value for both.
+    final detail = scrubSecretsInText(widget.detail);
     final l = context.l10n;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -41,14 +47,14 @@ class _ErrorDetailsState extends State<ErrorDetails> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
-                child: SelectableText(widget.detail, style: AetherType.caption),
+                child: SelectableText(detail, style: AetherType.caption),
               ),
               IconButton(
                 tooltip: l.errorDetailsCopy,
                 icon: const Icon(Icons.copy_outlined, size: 18),
                 onPressed: () async {
                   final messenger = ScaffoldMessenger.maybeOf(context);
-                  await Clipboard.setData(ClipboardData(text: widget.detail));
+                  await Clipboard.setData(ClipboardData(text: detail));
                   messenger?.showSnackBar(
                     SnackBar(content: Text(l.errorDetailsCopied)),
                   );

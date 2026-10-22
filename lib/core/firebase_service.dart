@@ -152,6 +152,7 @@ class FirebaseService extends ChangeNotifier {
 
   StreamSubscription<User?>? _authSub;
   Future<void>? _initialization;
+  Future<void>? _appInitialization;
   final Future<void> Function()? _initializeApp;
   final Future<void> Function()? _configureForTest;
   final Stream<User?>? _userChangesForTest;
@@ -169,13 +170,54 @@ class FirebaseService extends ChangeNotifier {
     return attempt;
   }
 
-  Future<void> _initialize() async {
+  /// Initializes only the Firebase app, the stored consent flag and the
+  /// Crashlytics handlers, before the first frame.
+  ///
+  /// [initialize] runs inside the readiness pipeline, after `runApp`, so a
+  /// failure during startup would otherwise never reach Crashlytics. This does
+  /// the minimum needed to report one. It is not a consent bypass: the Android
+  /// manifest ships `firebase_crashlytics_collection_enabled=false` and
+  /// [_applyTelemetryFlags] applies the stored choice, so Crashlytics drops
+  /// every event until the user opts in.
+  Future<void> initializeCrashReporting() async {
     try {
+      await _ensureApp();
+      _available = true;
+    } catch (e) {
+      debugPrint('Firebase unavailable: $e');
+      return;
+    }
+    try {
+      await _restoreConsent();
+    } catch (e) {
+      Diag.swallow('firebase.consent', e);
+    }
+    _attachCrashHandlers();
+  }
+
+  /// The Firebase app, initialized at most once. A failed attempt clears the
+  /// cache so [initialize] can retry.
+  Future<void> _ensureApp() {
+    final existing = _appInitialization;
+    if (existing != null) return existing;
+    late final Future<void> attempt;
+    attempt = (() async {
       if (_initializeApp != null) {
         await _initializeApp();
       } else {
         await Firebase.initializeApp();
       }
+    })().catchError((Object error, StackTrace stack) {
+      if (identical(_appInitialization, attempt)) _appInitialization = null;
+      Error.throwWithStackTrace(error, stack);
+    });
+    _appInitialization = attempt;
+    return attempt;
+  }
+
+  Future<void> _initialize() async {
+    try {
+      await _ensureApp();
       _available = true;
     } catch (e) {
       // Readiness reports the failure and may retry; the app remains usable.
@@ -217,8 +259,10 @@ class FirebaseService extends ChangeNotifier {
       _publishFirstUser();
       await first;
 
-      // Route Flutter + platform errors to Crashlytics only when consented.
-      if (_consentGiven) _attachCrashHandlers();
+      // Handlers are installed regardless of consent: Crashlytics discards
+      // every event while collection is disabled, so consent still gates the
+      // data, but an early crash is not lost once the user opts in.
+      _attachCrashHandlers();
       notifyListeners();
     } catch (_) {
       _available = false;
@@ -544,17 +588,37 @@ class FirebaseService extends ChangeNotifier {
     }
   }
 
+  /// Installs the Crashlytics handlers.
+  ///
+  /// This is not the consent gate; collection is (see
+  /// [initializeCrashReporting]). Installing them before `runApp` is what makes
+  /// a crash before the first frame visible. The previous handler is kept so
+  /// debug builds still print the error.
   bool _crashHandlersAttached = false;
   void _attachCrashHandlers() {
     if (_crashHandlersAttached || !_available) return;
     _crashHandlersAttached = true;
+    final previousOnError = FlutterError.onError;
     FlutterError.onError = (details) {
+      previousOnError?.call(details);
       FirebaseCrashlytics.instance.recordFlutterFatalError(details);
     };
     PlatformDispatcher.instance.onError = (error, stack) {
       FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
       return true;
     };
+  }
+
+  /// Reports an uncaught asynchronous error from the guarded boot zone.
+  ///
+  /// Before Firebase is up there is nowhere to send it, so it is printed
+  /// instead of swallowed.
+  void recordZoneError(Object error, StackTrace stack) {
+    if (!_available) {
+      debugPrint('Uncaught boot error: $error\n$stack');
+      return;
+    }
+    FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
   }
 
   /// The current user's Firebase ID token (JWT), or null when signed out.

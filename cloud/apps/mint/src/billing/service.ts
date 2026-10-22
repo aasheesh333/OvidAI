@@ -277,7 +277,18 @@ export function createBillingService(deps: BillingServiceDeps): BillingService {
     }
     const token = notification.purchaseToken;
     // A Play 503 propagates so Pub/Sub retries.
-    const resource = await api!.getSubscription(token);
+    let resource;
+    try {
+      resource = await api!.getSubscription(token);
+    } catch (err) {
+      if (err instanceof BillingError && err.status < 500) {
+        // Google does not know this token (forged, foreign package, or a
+        // replayed token that has been purged). Redelivery cannot fix it, so
+        // acknowledge instead of looping forever.
+        return;
+      }
+      throw err;
+    }
     let entitlement;
     try {
       entitlement = evaluate(resource, products, now);

@@ -449,7 +449,9 @@ void main() {
         find.byKey(const ValueKey<String>('memory-file-editor-error')),
         findsOneWidget,
       );
-      expect(find.text('The server refused it.'), findsOneWidget);
+      // A raw StateError is not shown to a person: the page maps it to one
+      // sentence they can act on.
+      expect(find.text('Could not save. Try again.'), findsOneWidget);
       expect(
         tester
             .widget<TextField>(

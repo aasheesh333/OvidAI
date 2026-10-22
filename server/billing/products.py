@@ -2,9 +2,15 @@
 
 PRODUCT DECISION PLACEHOLDERS. The product IDs below must match the
 subscriptions created in Play Console (Monetize -> Subscriptions) and the
-client constants in ``lib/core/play_billing.dart`` (``kOvidPlayProducts``).
-Override without a code change with ``OVID_PLAY_PRODUCTS`` (JSON object
-``{"product_id": "tier"}``).
+client constants in ``lib/core/billing_products.dart``
+(``kOvidPlayProductIds``). Override without a code change with
+``OVID_PLAY_PRODUCTS`` (JSON object ``{"product_id": "tier"}``).
+
+Every SKU the client can buy MUST be here. ``evaluate()`` raises
+``400 unknown_product`` for a product it does not know, so a missing id means
+Play charged the card and Ovid refused to grant (and refused to acknowledge,
+so Google refunds it). Monthly and yearly are separate products: never drop a
+yearly id because "the monthly one is close enough".
 """
 import hashlib
 import json
@@ -14,9 +20,14 @@ TIERS = ('free', '3x', '7x', '15x')
 TIER_RANK = {tier: rank for rank, tier in enumerate(TIERS)}
 
 DEFAULT_PRODUCTS = {
+    # Monthly first: /usage shows the first product that maps to a tier.
     'ovid_plus_monthly': '3x',
     'ovid_pro_monthly': '7x',
     'ovid_max_monthly': '15x',
+    # Yearly SKUs (10 monthly payments). Same tier, different billing period.
+    'ovid_plus_yearly': '3x',
+    'ovid_pro_yearly': '7x',
+    'ovid_max_yearly': '15x',
 }
 
 # Shown on the Plans screen (F-200). Approximate, server-owned copy so client

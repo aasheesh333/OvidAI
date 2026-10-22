@@ -138,8 +138,13 @@ class _BrowserLivePageState extends State<BrowserLivePage>
     _client.removeListener(_onClientChanged);
     unawaited(_framesSub?.cancel());
     final image = _frame?.image;
+    final provider = _frameProvider;
     _frame = null;
+    _frameProvider = null;
     image?.dispose();
+    if (provider != null) {
+      PaintingBinding.instance.imageCache.evict(provider);
+    }
     // Closing the viewer detaches: the worker keeps rendering for its grace
     // window, then goes headless instead of streaming to nobody.
     _client.detach();
@@ -271,25 +276,39 @@ class _BrowserLivePageState extends State<BrowserLivePage>
     if (!mounted) return;
     _firstStateTimer?.cancel();
     final old = _frame;
+    final oldProvider = _frameProvider;
     setState(() {
       _frame = frame;
-      // The decoded bytes are a real ImageProvider; the viewport paints it.
-      _frameProvider = MemoryImage(frame.webpBytes);
+      // The client already decoded this frame: the viewport paints that image
+      // directly (no second decode, no image-cache entry). A provider is only
+      // built for a decoder that reports dimensions without an engine image.
+      _frameProvider = frame.image == null
+          ? MemoryImage(frame.webpBytes)
+          : null;
       _quietSeconds = 0;
       _stalled = false;
       _waitExpired = false;
     });
     // The decoded image is ours to release. Do it after the frame that
     // replaced it has painted, so the render tree never draws a disposed
-    // image.
+    // image (and never the image it is still painting).
     final image = old?.image;
-    if (image != null) {
+    if (image != null && !identical(image, frame.image)) {
       WidgetsBinding.instance.addPostFrameCallback((_) => image.dispose());
+    }
+    // MEMORY: the fallback provider's decode would otherwise sit in the global
+    // image cache (100 MiB by default) for every frame of a 5 fps stream. Drop
+    // the entry as soon as the next frame owns the viewport.
+    if (oldProvider != null) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => PaintingBinding.instance.imageCache.evict(oldProvider),
+      );
     }
   }
 
   void _clearFrame() {
     final old = _frame;
+    final oldProvider = _frameProvider;
     setState(() {
       _frame = null;
       _frameProvider = null;
@@ -297,7 +316,16 @@ class _BrowserLivePageState extends State<BrowserLivePage>
       _stalled = false;
       _waitExpired = false;
     });
-    old?.image?.dispose();
+    // The viewport paints the decoded image directly, so it must outlive the
+    // frame that is still on screen: release it only after the rebuild that
+    // replaced it has painted.
+    final image = old?.image;
+    if (image != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => image.dispose());
+    }
+    if (oldProvider != null) {
+      PaintingBinding.instance.imageCache.evict(oldProvider);
+    }
   }
 
   Future<void> _retry() async {
@@ -540,6 +568,7 @@ class _BrowserLivePageState extends State<BrowserLivePage>
       address: state?.url ?? '',
       status: status,
       frame: _frameProvider,
+      frameImage: _frame?.image,
       viewportStatus: _viewportStatus,
       // Straight from `browser_state`: null fps stays unknown (no number is
       // painted), and headless only shows when the server says so.

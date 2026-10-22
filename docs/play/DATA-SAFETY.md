@@ -6,16 +6,22 @@
 - **Prepared:** 2026-10-18, from the shipped code and the production schema
   (`cloud/packages/db/src/schema.ts`, `cloud/apps/gateway/src/routes/*`,
   `lib/core/**`). **Revised 2026-10-22**, re-verified against the Android
-  manifest, `lib/ui/v2/app/v2_settings_routes.dart`, `server/account/*` and the
-  current client. Method: file reading and `grep`; no build was run.
+  manifest and Play overlay, `lib/ui/v2/app/v2_settings_routes.dart`,
+  `lib/ui/v2/settings_extra/permissions_page.dart`,
+  `lib/core/revenuecat_billing.dart`, `server/account/*` and the current
+  client. Method: file reading and `grep`; no build was run.
 - **Status:** WORKSHEET. The Play Console form is filled by the owner (R4).
   Nothing here is submitted automatically.
 
 This is the answer set for Play Console → **App content → Data safety**. Every
 row is derived from a real table/route; if a feature is removed later, the row
 must be removed with it. The Generative-AI and UGC answers live in
-`PLAY_COMPLIANCE_AUDIT.md` §5–§6. The public privacy policy
-(`docs/legal/PRIVACY.md`) is the wording of record where the two overlap.
+`STORE-LISTING.md` §6; `PLAY_COMPLIANCE_AUDIT.md` §5–§6 keeps the policy
+rationale. **The Report action exists only in the legacy v1 chat, share and
+Collab screens; the default v2 shell (`V2AppShell`) and v2 Collab do not expose
+it, so Play's in-app-reporting requirement is not met yet — release blocker.**
+The public privacy policy (`docs/legal/PRIVACY.md`) is the wording of record
+where the two overlap.
 
 ---
 
@@ -30,23 +36,23 @@ run a prompt, because model execution happens on Ovid's servers.
 |---|---|---|---|---|---|---|
 | **Personal info → Email address** | Yes (Google sign-in) | No (see §4) | Account creation, sign-in, support | Required for Google sign-in; phone is the alternative | Yes (TLS) | Yes — in-app deletion + `/account/deletion` |
 | **Personal info → Phone number** | Yes (phone sign-in) | No | Account creation, sign-in, security | Optional — only if phone sign-in is used | Yes | Yes |
-| **Personal info → Name** | Yes (Google account display name) | No | Account identity and profile; shown to people in a Collab room, and on a share link only when the user enables "Show my name" | Optional — only with Google sign-in | Yes | Yes |
+| **Personal info → Name** | Yes (Google account display name) | No | Account identity and profile; shown to people in a Collab room (member names come from Firebase claims) | Optional — only with Google sign-in | Yes | Yes |
 | **Personal info → User IDs** | Yes | No | Account identity, per-user sandbox/workspace isolation | Required | Yes | Yes |
 | **Messages → Other in-app messages** (chat transcripts, prompts, model replies) | Yes | No (sent only to the model provider, see §4) | The core feature: running the assistant | Required for the feature | Yes | Yes — delete a chat or the account |
 | **Files and docs** (attachments, generated images, Studio workspace files) | Yes | No | The user's own work; stored in Ovid's object storage (R2) | Optional (only if attached) | Yes | Yes — R2 prefix `users/{uid}/` is deleted with the account |
 | **Photos and videos → Photos** (an image the user attaches, or one Ovid generates) | Yes | No | The user's own work; stored with the chat/artifact | Optional | Yes | Yes |
 | **App activity → Other user-generated content** (tool calls, plans, schedules the user creates) | Yes | No | Running the agent and showing history | Required for the feature | Yes | Yes |
-| **App activity → In-app search history** | **No.** Chat search runs on the device: an on-device SQLite FTS5 index over the user's own messages (`lib/core/session_search.dart`) and the v2 drawer filter (`lib/ui/v2/sidebar/sidebar.dart`, `_searchResults`). No search query is sent to a server or retained as a history. Artifact name search is a per-request query parameter on the vault list (`cloud/apps/gateway/src/routes/artifactVault.ts`) and is not stored. | — | — | — | — | — |
+| **App activity → In-app search history** | **No.** Chat search runs on the device: an on-device SQLite FTS5 index over the user's own messages (`lib/core/session_search.dart`) and the v2 drawer filter (`lib/ui/v2/sidebar/sidebar.dart`, `_searchResults`). No search query is sent to a server or retained as a history. Artifact name search is a per-request query parameter on the vault list (`cloud/apps/gateway/src/routes/artifactVault.ts`) and is not stored. The privacy policy's "Search" row refers to web-search queries the assistant sends to a search provider, not to in-app history. | — | — | — | — | — |
 | **App activity → App interactions** (product events) | Yes, **only after consent** | No | Reliability and product analytics | Optional (consent toggle, default off) | Yes | On request / retention window |
-| **Web browsing history** (pages the agent opens in the cloud browser) | Yes | No | The browser feature: showing what the agent did | Optional — only when the browser is used | Yes | Yes — delete the chat or the account |
-| **App info and performance → Crash logs** | Yes, **only after consent** | No | Diagnosing crashes | Optional (consent toggle, default off) | Yes | On request / up to 90 days |
-| **App info and performance → Diagnostics** (performance, error traces) | Yes, only after consent | No | Reliability | Optional (default off) | Yes | On request / up to 90 days |
-| **Device or other IDs → Device or other IDs** (FCM registration token) | Yes | No | Push notifications for finished runs | Optional (notifications can be denied) | Yes | On sign-out / deletion |
-| **Financial info → Purchase history** | **No today.** No Play subscription exists yet (monthly or yearly), so the submitted build cannot purchase; the server still verifies any token that arrives. Change this to **Yes** the day the first subscription is live. | No | Entitlements and billing | Required for paid plans | Yes | Per Play policy (tax/accounting records are retained) |
+| **Web browsing history** (pages the agent opens in the cloud browser) | Yes | No | The browser feature: showing what the agent did | Optional — only when the browser is used | Yes | Yes — delete the account (browser state is per account, not per chat) |
+| **App info and performance → Crash logs** | Yes, **only after consent** | No | Diagnosing crashes | Optional (consent toggle, default off) | Yes | On request / up to 90 days (Crashlytics default; no repo setting overrides it — see §3) |
+| **App info and performance → Diagnostics** (performance, error traces) | Yes, only after consent | No | Reliability | Optional (default off) | Yes | On request / up to 90 days (same console setting) |
+| **Device or other IDs → Device or other IDs** (FCM registration token, Firebase installation ID) | Yes | No | Push notifications for finished runs; app/device identification | Optional (notifications can be denied) | Yes | On sign-out (`DELETE /devices`) / deletion |
+| **Financial info → Purchase history** | **No today.** No Play subscription exists yet (monthly or yearly), so the submitted build cannot purchase; RevenueCat is compiled in but inactive without `OVID_REVENUECAT_GOOGLE_KEY`, and the server still verifies any Play token that arrives. Change this to **Yes** the day the first subscription is live and verified. | No | Entitlements and billing | Required for paid plans | Yes | Per Play policy (tax/accounting records are retained) |
 | **Location** | **No** | — | — | — | — | — |
 | **Contacts / Calendar / SMS / Phone / Health** | **No** | — | — | — | — | — |
 | **Photos and videos (library access)** | **No** — files are chosen through the system picker and only the chosen file is uploaded | — | — | — | — | — |
-| **Audio (voice input)** | **No audio is collected or stored by Ovid.** The device's speech recognizer converts speech to text; only the resulting text is sent | — | Voice-to-text | Optional (mic permission) | — | — |
+| **Audio (voice input)** | **No audio is collected or stored by Ovid.** The device's speech recognizer converts speech to text; only the resulting text is sent. If the OS recognizer on a given device is cloud-backed, the audio leaves the device under the OS/provider terms — the Ovid app itself never records or uploads it. | — | Voice-to-text | Optional (mic permission) | — | — |
 | **Advertising / Ad ID** | **No** — no ads, and `google_analytics_adid_collection_enabled=false` | — | — | — | — | — |
 
 ### 2.1 What the manifest declares today
@@ -55,30 +61,42 @@ run a prompt, because model execution happens on Ovid's servers.
 permissions: `INTERNET`, `POST_NOTIFICATIONS`, `RECORD_AUDIO`. Every broad
 permission the old on-device agent needed (contacts, calendar, SMS, phone,
 location, camera, all-files access, battery exemption) was removed with that
-agent; `test/play_distribution_test.dart` parses the manifest and fails if the
+agent; `test/play_distribution_test.dart` parses that file and fails if the
 declared set drifts from those three.
 
+The Play artifact also merges `android/app/src/play/AndroidManifest.xml`
+(when built with `OVID_PLAY_BUILD=true`), which removes broad permissions a
+library manifest could contribute (`AD_ID`, `SEND_SMS`, `CALL_PHONE`,
+`READ_CONTACTS`, `READ_CALENDAR`, `READ_MEDIA_*`, `MANAGE_EXTERNAL_STORAGE`,
+`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, and the rest listed in the overlay).
+The three-permission check above is on `src/main`; the merged Play manifest
+must be re-checked in App bundle explorer for every upload
+(`RELEASE-CHECKLIST.md` §2).
+
 The `RECORD_AUDIO` permission is used only by the speech recognizer
-(`speech_to_text`). Ovid never records or uploads audio.
+(`speech_to_text`, requested in `lib/core/voice_input_service.dart`). The app
+never records or uploads audio; see the Audio row in §2 for the recognizer
+caveat.
 
 **The in-app Permissions screen lists only those two user-facing permissions**
 — microphone and notifications (`lib/ui/v2/app/v2_settings_routes.dart`,
-`_permissionItems`: `ids = ['microphone', 'notifications']`). Camera, photos and
+`_permissions`: `ids = ['microphone', 'notifications']`). Camera, photos and
 storage are deliberately absent because this build never requests them, so
-listing them would send the user to an OS page with no Ovid entry. The screen's
-own doc comment in `lib/ui/v2/settings_extra/permissions_page.dart` still names
-"camera, microphone, photos, notifications and files" — that comment is stale
-and should be corrected; the rendered list is the two ids above.
+listing them would send the user to an OS page with no Ovid entry. The
+`permissions_page.dart` doc comments were corrected on 2026-10-22 and now name
+only microphone and notifications.
 
 ## 3. Data handling
 
-- **Encrypted in transit:** yes — HTTPS/WSS everywhere; cleartext is disabled
-  (`android:usesCleartextTraffic="false"` plus
-  `android/app/src/main/res/xml/network_security_config.xml`). The gateway is
-  fronted by Cloudflare. Certificate pinning is implemented
-  (`lib/core/cert_pinning.dart`) but **ships disabled** (`kCertPinningEnabled =
-  false`, `kOvidSpkiPins` empty) until the owner supplies the real SPKI pins, so
-  it is not a security practice to declare yet.
+- **Encrypted in transit:** yes — HTTPS/WSS for every remote host. Cleartext is
+  disabled (`android:usesCleartextTraffic="false"` plus
+  `android/app/src/main/res/xml/network_security_config.xml`); the only
+  exceptions are `localhost`, `127.0.0.1` and `::1`, for local previews during
+  development, and no remote endpoint uses them. The gateway is fronted by
+  Cloudflare. Certificate pinning is implemented (`lib/core/cert_pinning.dart`)
+  but **ships disabled** (`kCertPinningEnabled = false`, `kOvidSpkiPins` empty)
+  until the owner supplies the real SPKI pins, so it is not a security practice
+  to declare yet.
 - **Data deletion request:** in-app **Settings → Delete account**. The action is
   wired to the server (`lib/ui/v2/app/v2_settings_actions.dart` →
   `FirebaseService.requestAccountDeletion`) and starts the server-side deletion
@@ -89,21 +107,31 @@ and should be corrected; the rendered list is the two ids above.
   the deployment-configured SQL table scopes (sessions, messages, memory,
   schedules, devices and related rows) via `server/account/adapters.py`; the
   user's object-storage prefix `users/{uid}/` via the R2 prefix deleter
-  (`cloud/apps/worker/src/main.ts`, `createCloudCleanup`); images, shares,
-  BYOK keys, private-sync data and collaboration data
-  (`cloud/apps/worker/src/main.ts`, `createCloudCleanup`;
-  `server/account/composition.py`); and the LiteLLM key
-  (`cloud/apps/worker/src/main.ts`, `createCloudCleanup`).
+  (`cloud/apps/worker/src/main.ts`, `createCloudCleanup`); images, shares and
+  BYOK keys (`cloud/apps/worker/src/main.ts`, `createCloudCleanup`); private-sync
+  data and live-collaboration data (`server/account/composition.py`); and the
+  LiteLLM key (`cloud/apps/worker/src/main.ts`, `createCloudCleanup`).
+  **This path only runs in a build compiled with
+  `OVID_ACCOUNT_ENABLED=true`.** With `false`, the Settings panel offers the
+  public web form and a support email instead
+  (`lib/ui/account_deletion_panel.dart`). The production release must set the
+  repository variable to `true`; see `RELEASE-CHECKLIST.md` §0.
   If `OVID_R2_*` is unset, the worker logs that workspace/browser objects will
   **not** be deleted — deletion must not be enabled in production without R2.
 - **Data retention:** account data lives until deletion, plus the 24-hour grace.
   Live run events keep 24 hours hot and up to 30 days archived (founder
-  decision 2026-10-18); share snapshots 30 days; content reports 180 days
-  (`server/reports/repository.py`, `retention_seconds=180 * 86400`); crash and
-  diagnostic data up to 90 days; backups rotate out after 14 days. The 90-day
-  and 14-day figures are **policy statements in `docs/legal/PRIVACY.md`**;
-  Firebase Crashlytics retention and the backup rotation are configured in the
-  console and are **unverified** from this repo.
+  decision 2026-10-18, not a constant in this repo); share snapshots 30 days
+  (`server/shares/repository.py`, `ttl_seconds=30 * 86400`); content reports
+  180 days (`server/reports/repository.py`,
+  `retention_seconds=180 * 86400`); crash and diagnostic data up to 90 days;
+  backups rotate out after 14 days. The 90-day and 14-day figures are **policy
+  statements in `docs/legal/PRIVACY.md`**; Firebase Crashlytics retention and
+  the backup rotation are configured in the console/infrastructure and are
+  **unverified** from this repo. Android device backup is **off**:
+  `android:allowBackup="false"`, `android:fullBackupContent="false"` and
+  `res/xml/data_extraction_rules.xml` excludes cloud backup and device-to-device
+  transfer for every domain, so the app does not place user data in Google
+  backup or a device migration.
 - **Children:** the app is not directed at children; no age-gated content. It
   is an 18+ product and does **not** opt in to the Play Families policy.
 
@@ -113,10 +141,14 @@ Ovid runs the models through its own gateway (LiteLLM) and a model provider.
 Prompts and replies are transmitted to the model provider **to produce the
 answer** — Play treats that as service-provider processing, not "sharing for
 advertising". Firebase (Authentication, Cloud Messaging, Crashlytics,
-Analytics, App Check / Play Integrity) processes account identifiers, the push
-token and — only with consent — crash, diagnostic and usage data. No data is
-sold. The full list is maintained in the privacy policy
-(`docs/legal/PRIVACY.md`).
+Analytics, and App Check / Play Integrity when the build enables it) processes
+account identifiers, the push token and — only with consent — crash, diagnostic
+and usage data. App Check is **not active by default**: it runs only when the
+build sets `OVID_APPCHECK=true` and Firebase App Check is registered with the
+Play Integrity provider (`lib/core/cloud_app_check.dart`). RevenueCat is
+compiled in but **inactive without `OVID_REVENUECAT_GOOGLE_KEY`**; when enabled
+it processes the Firebase UID and purchase/entitlement status. No data is sold.
+The full list is maintained in the privacy policy (`docs/legal/PRIVACY.md`).
 
 If the owner enables BYOK (user-supplied provider keys), the user's key and
 prompts go to **the provider the user chose** — that is the user's own
@@ -127,7 +159,7 @@ instruction, and it is stated in the policy.
 **Data collected:** Name; Email address; Phone number; User IDs; Other in-app
 messages; Files and docs; Photos; Other user-generated content; App interactions
 (optional); Web browsing history; Crash logs (optional); Diagnostics (optional);
-Device or other IDs (push token).
+Device or other IDs (push token, Firebase installation ID).
 
 **Not collected:** location, contacts, calendar, SMS, phone, health, audio,
 photo-library access, in-app search history, ad ID, and purchase history (until
@@ -137,12 +169,13 @@ a subscription is live).
 run the requested feature. No sale of data.
 
 **Security practices:** data encrypted in transit; users can request deletion;
-the app is not directed at children.
+the app is not directed at children; no independent security review.
 
 **Data deletion:** users can delete individual chats in-app and delete the
 whole account in-app (Settings → Delete account) and via the public deletion
 page. Account deletion has a 24-hour grace period and can be cancelled by
-signing in again during that window.
+signing in again during that window. In-app deletion is present only in a build
+compiled with `OVID_ACCOUNT_ENABLED=true`; the production release must set it.
 
 ---
 
@@ -164,6 +197,20 @@ signing in again during that window.
 - [ ] If Crashlytics/Analytics consent defaults change, update §2 first.
 - [ ] Confirm the 90-day crash retention in the Firebase console and the
       14-day backup rotation with the infrastructure owner; both are policy
-      text today, not code.
+      text today, not code. Android device backup is off in the manifest.
+- [ ] Build the production AAB with `OVID_ACCOUNT_ENABLED=true` so the in-app
+      deletion path is live. Check the repository variable in
+      `.github/workflows/build.yml` before dispatching the release.
+- [ ] Do **not** ship a build made with
+      `--dart-define=OVID_REVENUECAT_TEST_STORE=true` or a Test Store key.
+      `resolveRevenueCatConfig` refuses the Test Store in a release build, but
+      the define must not be in the release command at all.
+- [ ] Confirm the **merged Play manifest** in App bundle explorer still has only
+      `INTERNET`, `POST_NOTIFICATIONS` and `RECORD_AUDIO`. The source check
+      below covers `src/main`; the overlay and library manifests are only
+      visible in the artifact.
+- [ ] Decide whether App Check is enabled for this release. If it is, the
+      privacy policy and §4 must say so and the gateway must be in
+      `OVID_APPCHECK_MODE=required`.
 - [ ] Re-run `flutter test test/play_distribution_test.dart` after any manifest
       change (it fails if the declared permission set drifts).

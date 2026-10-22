@@ -647,7 +647,7 @@ void main() {
       ),
     );
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('Something went wrong'), findsOneWidget);
+    expect(find.text('That did not work'), findsOneWidget);
     expect(find.text('Try again'), findsOneWidget);
 
     await tester.pumpWidget(
