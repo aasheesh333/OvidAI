@@ -22,6 +22,7 @@ import '../../../core/format.dart';
 import '../../../core/native_share.dart';
 import '../../../core/ovid_cloud_service.dart';
 import '../../../core/session_artifacts.dart';
+import '../../../core/cloud/cloud_errors.dart';
 import '../../../core/state.dart';
 import '../../../core/voice_reply_service.dart';
 import '../../design/o_screen.dart';
@@ -30,6 +31,7 @@ import '../chat/composer_mentions.dart';
 import '../chat/composer_voice.dart';
 import '../chat/chat_page.dart';
 import '../chat/composer_attachments.dart';
+import '../chat/chat_error_bar.dart';
 import '../chat/live_chat_page.dart';
 import '../chat/model_picker_sheet.dart';
 import '../chat/permission_sheet.dart';
@@ -254,9 +256,10 @@ class _V2AppShellState extends State<V2AppShell> {
         final hasMessages = messages.isNotEmpty;
         final sessionId = session?.id;
         if (!hasMessages) {
+          final emptyError = session == null ? null : _chatErrorFor(session);
           return V2ChatPage(
             key: ValueKey('empty-${session?.id ?? 'new'}'),
-            data: _chatData(app),
+            data: _chatData(app).copyWithSendError(emptyError),
             onMenu: _usesDrawer(routeContext) ? _openDrawer : null,
             onModelChipTap: () => _openModelPicker(routeContext),
             onStudio: () => V2WorkRoutes.openStudio(_navContext, _settings),
@@ -266,6 +269,11 @@ class _V2AppShellState extends State<V2AppShell> {
                 : () => _chatMenu(routeContext, session.id),
             onSubmit: _submit,
             onStop: _stop,
+            onSendErrorAction: () {
+              final err = emptyError;
+              if (err != null) _actOnChatError(routeContext, err);
+            },
+            onDismissSendError: _dismissChatError,
             onSendQueuedNow: _sendQueuedNow,
             onDismissQueued: () => _dismissQueued(app.activeSessionId),
             onPermissionTap: () =>
@@ -279,9 +287,11 @@ class _V2AppShellState extends State<V2AppShell> {
             },
           );
         }
+        // `hasMessages` implies a session exists.
+        final chatError = _chatErrorFor(session!);
         return V2LiveChatPage(
           key: ValueKey('live-${sessionId ?? 'new'}'),
-          data: _liveData(app, session!),
+          data: _liveData(app, session).copyWithSendError(chatError),
           onMenu: _usesDrawer(routeContext) ? _openDrawer : null,
           onModelChipTap: () => _openModelPicker(routeContext),
           onStudio: () => V2WorkRoutes.openStudio(_navContext, _settings),
@@ -289,6 +299,11 @@ class _V2AppShellState extends State<V2AppShell> {
           onMore: () => _chatMenu(routeContext, sessionId!),
           onSubmit: _submit,
           onStop: _stop,
+          onSendErrorAction: () {
+            final err = chatError;
+            if (err != null) _actOnChatError(routeContext, err);
+          },
+          onDismissSendError: _dismissChatError,
           onSendQueuedNow: _sendQueuedNow,
           onDismissQueued: () => _dismissQueued(sessionId!),
           onDownload: (id) => _download(routeContext, id),
@@ -499,6 +514,46 @@ class _V2AppShellState extends State<V2AppShell> {
       offlineTitle: "You're offline",
       offlineMessage: 'Messages will send when you reconnect.',
     );
+  }
+
+
+  /// The inline error a chat shows above its composer.
+  ///
+  /// The facade records a failed send in `runStateFor`, but until now nothing
+  /// in the v2 shell read it, so a rejected message looked like the model
+  /// simply never answered.
+  V2ChatError? _chatErrorFor(ChatSession session) {
+    final run = CloudAgentFacade.I.runStateFor(session.id);
+    return V2ChatError.fromCode(
+      run.lastErrorCode,
+      message: run.lastErrorMessage,
+      resetsAt: CloudAgentFacade.I.errorResetsAtFor(session.id),
+    );
+  }
+
+  /// Runs whatever the error bar's button names.
+  void _actOnChatError(BuildContext context, V2ChatError error) {
+    switch (error.action) {
+      case CloudErrorAction.retry:
+        _retry();
+      case CloudErrorAction.signIn:
+        // Signing in again is the recovery: the login gate owns the flow, so
+        // clear the local session and let it take over.
+        unawaited(_settings.signOut(_navContext));
+      case CloudErrorAction.openPlans:
+        V2SettingsRoutes.open(_navContext, 'plan_billing', _settings);
+      case CloudErrorAction.pickModel:
+        _openModelPicker(context);
+      case CloudErrorAction.wait:
+      case CloudErrorAction.none:
+        break;
+    }
+  }
+
+  void _dismissChatError() {
+    final id = AppState.I.activeSessionId;
+    if (id == null) return;
+    CloudAgentFacade.I.clearErrorFor(id);
   }
 
   V2LiveChatData _liveData(AppState app, ChatSession session) {

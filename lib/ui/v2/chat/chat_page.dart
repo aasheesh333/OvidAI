@@ -9,6 +9,7 @@ import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import '../a11y/live_region.dart';
+import 'chat_error_bar.dart';
 import 'composer_attachments.dart';
 import 'composer_mentions.dart';
 import 'composer_plus_sheet.dart';
@@ -48,6 +49,9 @@ class V2ChatPageData {
     this.headline = 'What should we build?',
     this.subtitle = 'Ask anything. Ovid works in the background.',
     this.draft = '',
+    this.sendError,
+    this.onSendErrorAction,
+    this.onDismissSendError,
     this.state = V2ChatState.empty,
     this.suggestions = const [
       V2ChatSuggestion(
@@ -107,10 +111,44 @@ class V2ChatPageData {
 
   final String limitResetLabel;
   final String errorMessage;
+
+  /// A failed send, shown above the composer. The empty state stays, so a
+  /// dropped message never looks like a chat that did nothing.
+  final V2ChatError? sendError;
+  final VoidCallback? onSendErrorAction;
+  final VoidCallback? onDismissSendError;
+
   final String permissionLabel;
   final String composerHint;
   final String offlineTitle;
   final String offlineMessage;
+
+  /// Returns a copy carrying [error] in the composer error slot.
+  V2ChatPageData copyWithSendError(V2ChatError? error) => V2ChatPageData(
+    title: title,
+    sessionId: sessionId,
+    modelLabel: modelLabel,
+    tokensLabel: tokensLabel,
+    fastAgentLabel: fastAgentLabel,
+    headline: headline,
+    subtitle: subtitle,
+    draft: draft,
+    state: state,
+    suggestions: suggestions,
+    queuedCount: queuedCount,
+    queuedPreview: queuedPreview,
+    autoOnly: autoOnly,
+    subagentCount: subagentCount,
+    limitResetLabel: limitResetLabel,
+    errorMessage: errorMessage,
+    sendError: error,
+    onSendErrorAction: onSendErrorAction,
+    onDismissSendError: onDismissSendError,
+    permissionLabel: permissionLabel,
+    composerHint: composerHint,
+    offlineTitle: offlineTitle,
+    offlineMessage: offlineMessage,
+  );
 }
 
 /// The core chat home screen: top bar, empty state, suggestions and composer.
@@ -126,6 +164,8 @@ class V2ChatPage extends StatefulWidget {
     this.onSuggestionTap,
     this.onSend,
     this.onStop,
+    this.onSendErrorAction,
+    this.onDismissSendError,
     this.onAttach,
     this.onPlus,
     this.onPermissionTap,
@@ -145,6 +185,10 @@ class V2ChatPage extends StatefulWidget {
 
   final V2ChatPageData data;
   final VoidCallback? onMenu;
+
+  /// Runs the action on [V2ChatPageData.sendError].
+  final VoidCallback? onSendErrorAction;
+  final VoidCallback? onDismissSendError;
   final VoidCallback? onModelChipTap;
   final VoidCallback? onStudio;
   final VoidCallback? onBrowser;
@@ -972,6 +1016,12 @@ class _Composer extends StatelessWidget {
                 V2ComposerNotice(
                   message: voiceError!,
                   icon: Icons.mic_off_rounded,
+                ),
+              if (data.sendError != null)
+                V2ChatErrorBar(
+                  error: data.sendError!,
+                  onAction: data.onSendErrorAction,
+                  onDismiss: data.onDismissSendError,
                 ),
               // One row: plus, permission, field, mic, send. Nothing else.
               V2ComposerRow(

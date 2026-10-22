@@ -10,6 +10,7 @@ import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
 import '../../design/o_tokens.dart';
 import '../a11y/live_region.dart';
+import 'chat_error_bar.dart';
 import 'composer_attachments.dart';
 import 'composer_mentions.dart';
 import 'composer_plus_sheet.dart';
@@ -147,6 +148,9 @@ class V2LiveChatData {
     this.running = false,
     this.loading = false,
     this.errorMessage,
+    this.sendError,
+    this.onSendErrorAction,
+    this.onDismissSendError,
     this.statusLabel = 'Ovid is generating code...',
     this.stopHint = 'Press stop to pause',
     this.draft = '',
@@ -168,6 +172,14 @@ class V2LiveChatData {
   final bool running;
   final bool loading;
   final String? errorMessage;
+
+  /// A failed send or run, shown above the composer so the transcript stays
+  /// visible. Distinct from [errorMessage], which replaces the whole body when
+  /// the chat itself could not load.
+  final V2ChatError? sendError;
+  final VoidCallback? onSendErrorAction;
+  final VoidCallback? onDismissSendError;
+
   final String statusLabel;
   final String stopHint;
   final String draft;
@@ -188,6 +200,33 @@ class V2LiveChatData {
 
   /// Subagents launched in this session, shown as a badge on the model chip.
   final int subagentCount;
+
+  /// Returns a copy carrying [error] in the composer error slot. Used by the
+  /// shell, which owns the facade and therefore the failure state.
+  V2LiveChatData copyWithSendError(V2ChatError? error) => V2LiveChatData(
+    title: title,
+    sessionId: sessionId,
+    sessionTitle: sessionTitle,
+    modelLabel: modelLabel,
+    items: items,
+    running: running,
+    loading: loading,
+    errorMessage: errorMessage,
+    sendError: error,
+    onSendErrorAction: onSendErrorAction,
+    onDismissSendError: onDismissSendError,
+    statusLabel: statusLabel,
+    stopHint: stopHint,
+    draft: draft,
+    composerHint: composerHint,
+    emptyTitle: emptyTitle,
+    emptyMessage: emptyMessage,
+    emptyActionLabel: emptyActionLabel,
+    queuedCount: queuedCount,
+    queuedPreview: queuedPreview,
+    autoOnly: autoOnly,
+    subagentCount: subagentCount,
+  );
 }
 
 /// A live transcript with thinking, tools, markdown and generated artifacts.
@@ -210,6 +249,8 @@ class V2LiveChatPage extends StatefulWidget {
     this.onArtifactTap,
     this.onStartChat,
     this.onRetry,
+    this.onSendErrorAction,
+    this.onDismissSendError,
     this.onAttach,
     this.onPlus,
     this.onMic,
@@ -257,6 +298,10 @@ class V2LiveChatPage extends StatefulWidget {
 
   final VoidCallback? onStartChat;
   final VoidCallback? onRetry;
+
+  /// Runs the action on [V2LiveChatData.sendError].
+  final VoidCallback? onSendErrorAction;
+  final VoidCallback? onDismissSendError;
   final VoidCallback? onAttach;
 
   /// When supplied, the composer "+" opens the host's plus menu instead of
@@ -787,6 +832,14 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        // A failed send sits here, not over the transcript: the
+                        // user keeps their place and can retry in context.
+                        if (data.sendError != null)
+                          V2ChatErrorBar(
+                            error: data.sendError!,
+                            onAction: widget.onSendErrorAction,
+                            onDismiss: widget.onDismissSendError,
+                          ),
                         if (data.queuedCount > 0)
                           V2QueueDock(
                             count: data.queuedCount,
