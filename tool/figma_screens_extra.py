@@ -62,7 +62,7 @@ def remaining(p) -> list[Screen]:
     s.parts.append(text(32, 36, "Auto", 12.5, p.text, weight=500))
     s.parts.append(icon("chevron", 152, 22, 18, p.muted))
     s.card(16, 58, W - 32, 132)
-    s.parts.append(rect(16, 58, 2, 132, p.agent))
+    s.parts.append(rect(16, 58, 2, 132, p.text))
     s.parts.append(text(32, 84, "Auto", 14, p.text, weight=600))
     s.parts.append(text(32, 104, "Routes each request", 11.5, p.muted))
     s.parts.append(icon("check", W - 46, 76, 20, p.text))
@@ -81,7 +81,7 @@ def remaining(p) -> list[Screen]:
         ("Account blocked", "Suspicious activity detected. Check your email.", True),
     ]:
         s.card(16, yy, W - 32, 88)
-        s.parts.append(circle(38, yy + 26, 5, p.agent if danger else p.muted))
+        s.parts.append(circle(38, yy + 26, 5, p.danger if danger else p.muted))
         s.parts.append(text(56, yy + 30, title, 14, p.text, weight=600))
         s.parts.append(text(56, yy + 52, body[:40], 12, p.muted))
         s.parts.append(text(56, yy + 70, body[40:80], 12, p.muted))
@@ -120,8 +120,8 @@ def remaining(p) -> list[Screen]:
         ("Pin chat", "pin"), ("Export as Markdown", "file"), ("Delete chat", "trash"),
     ]:
         danger = label.startswith("Delete")
-        s.parts.append(icon(ic, 20, y + 10, 20, p.agent if danger else p.muted))
-        s.parts.append(text(52, y + 26, label, 14, p.agent if danger else p.text))
+        s.parts.append(icon(ic, 20, y + 10, 20, p.danger if danger else p.muted))
+        s.parts.append(text(52, y + 26, label, 14, p.danger if danger else p.text))
         s.parts.append(line(16, y + 44, W, y + 44, p.hairline))
         y += 46
     out.append(s)
@@ -235,7 +235,7 @@ def remaining(p) -> list[Screen]:
         s.parts.append(rect(W - 56, yy + 10, 40, 22, p.text if on else p.surface_alt, rx=11))
         s.parts.append(circle(W - 27 if on else W - 45, yy + 21, 9, p.bg if on else p.muted))
         yy += 44
-    s.parts.append(text(W / 2, H - 60, "Disconnect", 13, p.agent, anchor="middle"))
+    s.parts.append(text(W / 2, H - 60, "Disconnect", 13, p.danger, anchor="middle"))
     out.append(s)
 
     # Add connector --------------------------------------------------------
@@ -290,7 +290,7 @@ def remaining(p) -> list[Screen]:
         s.parts.append(text(16, yy, day.upper(), 10.5, p.faint, weight=600, letter_spacing=0.8))
         yy += 20
         for t, status, dur in runs:
-            s.parts.append(circle(22, yy + 10, 4, p.agent if status == "Failed" else p.text))
+            s.parts.append(circle(22, yy + 10, 4, p.danger if status == "Failed" else p.text))
             s.parts.append(text(36, yy + 14, t, 12.5, p.text))
             s.parts.append(text(76, yy + 14, status, 11.5, p.muted))
             s.parts.append(text(W - 16, yy + 14, dur, 11.5, p.faint, anchor="end"))
@@ -315,7 +315,7 @@ def remaining(p) -> list[Screen]:
     s = Screen("collab_live", "Collaboration live", "Turn banner, gated composer", palette=p)
     s.header("Ovid Si · 4 here", actions=["user"])
     s.parts.append(rect(16, 72, W - 32, 40, p.surface_alt, rx=10))
-    s.parts.append(circle(34, 92, 5, p.agent))
+    s.parts.append(circle(34, 92, 5, p.text))
     s.parts.append(text(48, 96, "Aasheesh has the turn · 0:42", 12, p.text))
     s.parts.append(rect(96, 128, W - 112, 44, p.surface_alt, rx=14))
     s.parts.append(text(112, 155, "Let's rename the auth module", 13, p.text))
@@ -344,7 +344,7 @@ def remaining(p) -> list[Screen]:
             s.parts.append(icon("dots", W - 42, yy + 12, 20, p.muted))
         s.parts.append(line(16, yy + 56, W, yy + 56, p.hairline))
         yy += 58
-    s.parts.append(text(W / 2, H - 60, "Leave chat", 13, p.agent, anchor="middle"))
+    s.parts.append(text(W / 2, H - 60, "Leave chat", 13, p.danger, anchor="middle"))
     out.append(s)
 
     # Trajectory -----------------------------------------------------------
@@ -372,7 +372,7 @@ def remaining(p) -> list[Screen]:
     s.header("Subagent", actions=["dots"])
     s.parts.append(text(16, 84, "Refactor auth guard", 12, p.muted))
     s.parts.append(rect(16, 96, 88, 26, p.surface_alt, rx=13))
-    s.parts.append(circle(32, 109, 4, p.agent))
+    s.parts.append(circle(32, 109, 4, p.text))
     s.parts.append(text(44, 113, "Completed", 11, p.text))
     yy = 146
     for k, v in [
@@ -399,8 +399,8 @@ def remaining(p) -> list[Screen]:
         ("Data control", "file"), ("Delete account", "trash"),
     ]:
         danger = label.startswith("Delete")
-        s.parts.append(icon(ic, 16, yy + 12, 20, p.agent if danger else p.muted))
-        s.parts.append(text(52, yy + 28, label, 14, p.agent if danger else p.text))
+        s.parts.append(icon(ic, 16, yy + 12, 20, p.danger if danger else p.muted))
+        s.parts.append(text(52, yy + 28, label, 14, p.danger if danger else p.text))
         s.parts.append(icon("chevron", W - 40, yy + 14, 18, p.faint))
         s.parts.append(line(16, yy + 48, W, yy + 48, p.hairline))
         yy += 52
@@ -458,8 +458,8 @@ def remaining(p) -> list[Screen]:
         ("Delete data", "Chats, artifacts, memory", "trash"),
     ]:
         danger = label.startswith("Delete")
-        s.parts.append(icon(ic, 16, yy + 14, 20, p.agent if danger else p.muted))
-        s.parts.append(text(52, yy + 24, label, 14, p.agent if danger else p.text))
+        s.parts.append(icon(ic, 16, yy + 14, 20, p.danger if danger else p.muted))
+        s.parts.append(text(52, yy + 24, label, 14, p.danger if danger else p.text))
         s.parts.append(text(52, yy + 42, meta, 11, p.faint))
         s.parts.append(icon("chevron", W - 40, yy + 16, 18, p.faint))
         s.parts.append(line(16, yy + 56, W, yy + 56, p.hairline))
@@ -529,7 +529,7 @@ def remaining(p) -> list[Screen]:
         s.parts.append(icon("dots", W - 42, yy + 16, 20, p.muted))
         s.parts.append(line(16, yy + 56, W, yy + 56, p.hairline))
         yy += 62
-    s.parts.append(text(W / 2, H - 60, "Revoke all", 13, p.agent, anchor="middle"))
+    s.parts.append(text(W / 2, H - 60, "Revoke all", 13, p.danger, anchor="middle"))
     out.append(s)
 
     # Account health -------------------------------------------------------

@@ -131,3 +131,24 @@ python3 tool/figma_sheet.py           # prints "50 screens"
 ```
 
 Both binaries are on `PATH` (`/usr/bin/figma`, `/usr/bin/figma-developer-mcp`).
+
+## Palette in the sheet
+
+The generator keeps its own `Palette` dataclass; it does not import Dart. It
+now mirrors the app's semantic split, so the sheet can never show a colour the
+app forbids:
+
+| Role | Light | Dark |
+|---|---|---|
+| page | `#F4F1EA` | `#141413` |
+| text | `#1B1B1B` | `#F4F1EA` |
+| agent (Signal Red) | `#E5484D` | `#FF6B6F` |
+| danger | `#C2333A` | `#E8835C` |
+
+Signal Red is drawn only where the agent is: the wordmark mark, the active
+session edge, the agent-authored dot. Destructive actions and failed runs use
+`danger`, which is a different hue in both themes. Switch fills use text ink, not
+red — a toggle is a control, not an agent mark.
+
+If you change `lib/ui/design/o_tokens.dart`, change `LIGHT`/`DARK` in
+`tool/figma_sheet.py` in the same commit, then regenerate both sheets.

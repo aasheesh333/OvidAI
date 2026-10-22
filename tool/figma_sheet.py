@@ -39,6 +39,7 @@ class Palette:
     faint: str
     agent: str
     on_agent: str
+    danger: str
 
 
 LIGHT = Palette(
@@ -51,6 +52,9 @@ LIGHT = Palette(
     faint="#837F76",
     agent="#E5484D",
     on_agent="#0F0F0F",
+    # Errors and destructive actions. Never Signal Red: that colour is the
+    # agent's alone, in both themes.
+    danger="#C2333A",
 )
 
 DARK = Palette(
@@ -63,6 +67,9 @@ DARK = Palette(
     faint="#8A867D",
     agent="#FF6B6F",
     on_agent="#0F0F0F",
+    # Deliberately orange-red, 18 degrees from the agent's Signal Red, so a
+    # destructive row never reads as "this is the agent".
+    danger="#E8835C",
 )
 
 # --------------------------------------------------------------------------
@@ -254,7 +261,7 @@ class Screen:
             x += 44
         tx = x
         self.parts.append(
-            text(tx, y + (28 if subtitle is None else 30), title, 15, p.agent if danger else p.text)
+            text(tx, y + (28 if subtitle is None else 30), title, 15, p.danger if danger else p.text)
         )
         if subtitle:
             self.parts.append(text(tx, y + 46, subtitle, 11.5, p.faint))
@@ -263,7 +270,7 @@ class Screen:
         right = W - 16
         if switch:
             self.parts.append(
-                rect(right - 40, y + 18, 40, 22, p.agent if switch_on else p.surface_alt, rx=11)
+                rect(right - 40, y + 18, 40, 22, p.text if switch_on else p.surface_alt, rx=11)
             )
             cx = right - 11 if switch_on else right - 29
             self.parts.append(circle(cx, y + 29, 9, p.bg if switch_on else p.muted))
@@ -469,7 +476,7 @@ def build_screens(p: Palette) -> list[Screen]:
         ("Studio clone fix", "Mon", False),
     ]:
         if active:
-            s.parts.append(rect(0, y, 2, 44, p.agent))
+            s.parts.append(rect(0, y, 2, 44, p.text))
         s.parts.append(text(16, y + 20, title, 14, p.text))
         s.parts.append(text(16, y + 37, when, 11, p.faint))
         y += 48
@@ -520,7 +527,7 @@ def build_screens(p: Palette) -> list[Screen]:
     for name, price, line_txt, current in plans:
         s.card(16, yy, W - 32, 104, raised=current)
         if current:
-            s.parts.append(rect(16, yy, 2, 104, p.agent))
+            s.parts.append(rect(16, yy, 2, 104, p.text))
         s.parts.append(text(34, yy + 28, name, 15, p.text, weight=600))
         s.parts.append(text(W - 34, yy + 30, price, 17, p.text, anchor="end", weight=600))
         s.parts.append(text(34, yy + 50, line_txt, 12, p.muted))
@@ -581,7 +588,7 @@ def build_screens(p: Palette) -> list[Screen]:
         if len(prompt) > 34:
             s.parts.append(text(30, yy + 46, prompt[34:68], 13.5, p.text))
         s.parts.append(text(30, yy + 72, cadence, 11.5, p.muted))
-        s.parts.append(rect(W - 56, yy + 38, 40, 22, p.agent if on else p.surface_alt, rx=11))
+        s.parts.append(rect(W - 56, yy + 38, 40, 22, p.text if on else p.surface_alt, rx=11))
         s.parts.append(circle(W - 27 if on else W - 45, yy + 49, 9, p.bg if on else p.muted))
         yy += 108
     out.append(s)
@@ -644,7 +651,7 @@ def build_screens(p: Palette) -> list[Screen]:
     ]:
         s.card(16, yy, W - 32, 72, raised=sel)
         if sel:
-            s.parts.append(rect(16, yy, 2, 72, p.agent))
+            s.parts.append(rect(16, yy, 2, 72, p.text))
         s.parts.append(text(34, yy + 28, title, 15, p.text, weight=600))
         s.parts.append(text(34, yy + 48, line_txt, 12, p.muted))
         if sel:
@@ -654,7 +661,7 @@ def build_screens(p: Palette) -> list[Screen]:
     s.parts.append(text(30, yy + 35, "ovid.ai/s/8f3k…", 12.5, p.text))
     s.parts.append(icon("share", W - 48, yy + 20, 20, p.muted))
     s.button(16, yy + 72, W - 32, "Copy link")
-    s.parts.append(text(W / 2, yy + 148, "Stop sharing", 12.5, p.agent, anchor="middle"))
+    s.parts.append(text(W / 2, yy + 148, "Stop sharing", 12.5, p.danger, anchor="middle"))
     out.append(s)
 
     # 12. Onboarding: welcome ---------------------------------------------
@@ -677,7 +684,7 @@ def build_screens(p: Palette) -> list[Screen]:
     ]:
         s.card(16, yy, W - 32, 150, raised=sel)
         if sel:
-            s.parts.append(rect(16, yy, 2, 150, p.agent))
+            s.parts.append(rect(16, yy, 2, 150, p.text))
         s.parts.append(text(34, yy + 30, name, 16, p.text, weight=600))
         s.parts.append(text(W - 34, yy + 32, price, 18, p.text, anchor="end", weight=600))
         for i, b in enumerate(bullets):
@@ -696,7 +703,7 @@ def build_screens(p: Palette) -> list[Screen]:
     s.parts.append(icon("dots", W - 40, 32, 22, p.muted))
     yy = 72
     s.card(16, yy, W - 32, 92, raised=True)
-    s.parts.append(rect(16, yy, 2, 92, p.agent))
+    s.parts.append(rect(16, yy, 2, 92, p.text))
     s.agent_mark(46, yy + 34, 14)
     s.parts.append(text(70, yy + 30, "Auto", 15, p.text, weight=600))
     s.parts.append(text(70, yy + 50, "Picks the fastest model per request", 11.5, p.muted))
