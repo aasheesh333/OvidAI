@@ -14,8 +14,7 @@ const _models = <V2ModelOption>[
     id: 'flash',
     name: 'Ovid Flash 2.5',
     subtitle: 'Quick chats · Light reasoning',
-    speed: 'Very fast',
-    costHint: 'Low token use',
+    costHint: 'Included',
     locked: true,
     tag: 'Speed',
     tagTone: OPillTone.success,
@@ -24,8 +23,7 @@ const _models = <V2ModelOption>[
     id: 'pro',
     name: 'Ovid Pro 1.5',
     subtitle: 'Deep thinking · Coding & math',
-    speed: 'Moderate',
-    costHint: '2x tokens',
+    costHint: 'Included',
     locked: true,
     advanced: true,
     tag: 'Balanced',
@@ -34,8 +32,7 @@ const _models = <V2ModelOption>[
     id: 'claude',
     name: 'the model Sonnet',
     subtitle: 'Advanced architecture & synthesis',
-    speed: 'Moderate',
-    costHint: 'Paid plan',
+    costHint: 'Your key',
     locked: true,
     advanced: true,
     icon: Icons.terminal_rounded,
@@ -49,8 +46,7 @@ const _mixedModels = <V2ModelOption>[
     id: 'standard',
     name: 'Ovid Mini 1.0',
     subtitle: 'Short answers',
-    speed: 'Very fast',
-    costHint: 'Low token use',
+    costHint: 'Included',
     tag: 'Free',
     tagTone: OPillTone.neutral,
   ),
@@ -58,8 +54,7 @@ const _mixedModels = <V2ModelOption>[
     id: 'pro',
     name: 'Ovid Pro 1.5',
     subtitle: 'Deep thinking · Coding & math',
-    speed: 'Moderate',
-    costHint: '2x tokens',
+    costHint: 'Included',
     locked: true,
     advanced: true,
     tag: 'Balanced',
@@ -73,15 +68,13 @@ const _manualModels = <V2ModelOption>[
     id: 'mini',
     name: 'Ovid Mini 1.0',
     subtitle: 'Short answers',
-    speed: 'Very fast',
-    costHint: 'Low token use',
+    costHint: 'Included',
   ),
   V2ModelOption(
     id: 'pro',
     name: 'Ovid Pro 1.5',
     subtitle: 'Deep thinking · Coding & math',
-    speed: 'Moderate',
-    costHint: '2x tokens',
+    costHint: 'Included',
   ),
 ];
 
@@ -191,9 +184,7 @@ void main() {
     expect(find.text('Free plan uses Auto only.'), findsNothing);
   });
 
-  testWidgets('search filters by name, subtitle, speed and cost', (
-    tester,
-  ) async {
+  testWidgets('search filters by name, subtitle and cost', (tester) async {
     await tester.pumpWidget(_app(_sheet()));
     await tester.pumpAndSettle();
 
@@ -208,15 +199,10 @@ void main() {
     expect(find.text('Ovid Pro 1.5'), findsOneWidget);
     expect(find.text('Ovid Flash 2.5'), findsNothing);
 
-    await tester.enterText(find.byType(TextField), 'Very fast');
+    await tester.enterText(find.byType(TextField), 'Your key');
     await tester.pumpAndSettle();
-    expect(find.text('Ovid Flash 2.5'), findsOneWidget);
-    expect(find.text('Ovid Pro 1.5'), findsNothing);
-
-    await tester.enterText(find.byType(TextField), 'Low token use');
-    await tester.pumpAndSettle();
-    expect(find.text('Ovid Flash 2.5'), findsOneWidget);
-    expect(find.text('the model Sonnet'), findsNothing);
+    expect(find.text('the model Sonnet'), findsOneWidget);
+    expect(find.text('Ovid Flash 2.5'), findsNothing);
 
     // Surrounding whitespace and case must not defeat the match.
     await tester.enterText(find.byType(TextField), '  FLASH  ');
@@ -231,7 +217,7 @@ void main() {
     await tester.enterText(find.byType(TextField), 'no such model');
     await tester.pumpAndSettle();
     expect(find.text('No models found'), findsOneWidget);
-    expect(find.text('Try a name, speed or cost.'), findsOneWidget);
+    expect(find.text('Try a name or provider.'), findsOneWidget);
     expect(find.text('Ovid Flash 2.5'), findsNothing);
     expect(find.text('Auto'), findsNothing);
 
@@ -746,19 +732,75 @@ void main() {
     );
   });
 
-  testWidgets('rows keep their title and meta line to one line', (tester) async {
-    await tester.pumpWidget(_app(_sheet()));
+  testWidgets('rows keep their title and meta line to one line', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        _sheet(
+          data: const V2ModelPickerData(
+            models: _manualModels,
+            planLabel: 'Plus',
+          ),
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
 
-    for (final label in [
-      'Ovid Flash 2.5',
-      'Quick chats · Light reasoning',
-      'Low token use',
-    ]) {
+    for (final label in ['Ovid Mini 1.0', 'Short answers']) {
       final text = tester.widget<Text>(find.text(label));
       expect(text.maxLines, 1, reason: label);
       expect(text.overflow, TextOverflow.ellipsis, reason: label);
     }
+
+    final cost = tester.widget<Text>(find.text('Included').first);
+    expect(cost.maxLines, 1);
+    expect(cost.overflow, TextOverflow.ellipsis);
+  });
+
+  testWidgets('a gated row states the plan, not a cost', (tester) async {
+    await tester.pumpWidget(_app(_sheet()));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Plus plan'), findsNWidgets(3));
+    expect(
+      find.text('Included'),
+      findsNothing,
+      reason: 'the model is not reachable on this plan, so no cost is claimed',
+    );
+    expect(
+      find.text('Your key'),
+      findsNothing,
+      reason: 'a gated row cannot be run, so its billing source is not drawn',
+    );
+  });
+
+  testWidgets('a row with no cost hint draws no cost line', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        _sheet(
+          data: const V2ModelPickerData(
+            models: [
+              V2ModelOption(
+                id: 'gated',
+                name: 'Ovid Gated 1.0',
+                subtitle: 'Ovid Cloud',
+              ),
+            ],
+            planLabel: 'Plus',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Ovid Gated 1.0'), findsOneWidget);
+    expect(find.text('Ovid Cloud'), findsOneWidget);
+    expect(
+      find.text('Included'),
+      findsNothing,
+      reason: 'a row with nothing true to say about cost says nothing',
+    );
   });
 
   testWidgets('opens as a bottom sheet with a grabber and a close control', (

@@ -34,6 +34,7 @@ import '../chat/chat_page.dart';
 import '../chat/composer_attachments.dart';
 import '../chat/chat_error_bar.dart';
 import '../chat/live_chat_page.dart';
+import '../chat/model_chip_menu.dart';
 import '../chat/model_picker_sheet.dart';
 import '../chat/permission_sheet.dart';
 import '../chat/transcript_actions.dart';
@@ -261,12 +262,10 @@ class _V2AppShellState extends State<V2AppShell> {
             key: ValueKey('empty-${session?.id ?? 'new'}'),
             data: _chatData(app).copyWithSendError(emptyError),
             onMenu: _usesDrawer(routeContext) ? _openDrawer : null,
-            onModelChipTap: () => _openModelPicker(routeContext),
+            onModelChipTap: () => _openModelChipMenu(routeContext),
             onStudio: () => V2WorkRoutes.openStudio(_navContext, _settings),
             onBrowser: () => V2WorkRoutes.openBrowser(_navContext, _settings),
-            onMore: session == null
-                ? null
-                : () => _chatMenu(routeContext, session.id),
+            onMore: () => _chatMenu(routeContext, session?.id),
             onSubmit: _submit,
             onStop: _stop,
             onSendErrorAction: () {
@@ -293,10 +292,10 @@ class _V2AppShellState extends State<V2AppShell> {
           key: ValueKey('live-${sessionId ?? 'new'}'),
           data: _liveData(app, session).copyWithSendError(chatError),
           onMenu: _usesDrawer(routeContext) ? _openDrawer : null,
-          onModelChipTap: () => _openModelPicker(routeContext),
+          onModelChipTap: () => _openModelChipMenu(routeContext),
           onStudio: () => V2WorkRoutes.openStudio(_navContext, _settings),
           onBrowser: () => V2WorkRoutes.openBrowser(_navContext, _settings),
-          onMore: () => _chatMenu(routeContext, sessionId!),
+          onMore: () => _chatMenu(routeContext, sessionId),
           onSubmit: _submit,
           onStop: _stop,
           onSendErrorAction: () {
@@ -308,6 +307,8 @@ class _V2AppShellState extends State<V2AppShell> {
           onDismissQueued: () => _dismissQueued(sessionId!),
           onDownload: (id) => _download(routeContext, id),
           onArtifactTap: (id) => _openArtifact(routeContext, id),
+          onRegenerateMessage: _regenerateMessage,
+          onBranchMessage: _branchMessage,
           onOpenLink: (url) =>
               unawaited(v2OpenTranscriptLink(routeContext, url)),
           onDownloadLink: (url) =>
@@ -687,6 +688,11 @@ class _V2AppShellState extends State<V2AppShell> {
               V2LiveAssistantMessage(
                 id: message.privateSyncId,
                 markdown: message.content,
+                // Only a stored answer can be regenerated or branched; a turn
+                // tail or a streaming row has no address on the server.
+                serverMessageId: CloudAgentFacade.isServerMessage(message)
+                    ? message.privateSyncId
+                    : null,
               ),
             );
           }
@@ -699,6 +705,63 @@ class _V2AppShellState extends State<V2AppShell> {
 
   void _openDrawer() => _scaffoldKey.currentState?.openDrawer();
 
+  /// The top bar chip opens a compact menu: Auto plus every model this plan
+  /// can reach, with one way into the full picker. It is the fast path for
+  /// switching back and forth; the sheet stays the place to browse.
+  void _openModelChipMenu(BuildContext context) {
+    final app = AppState.I;
+    final tier = app.ovidCloudTier;
+    final autoOnly = _planAutoOnly;
+    final current = app.activeSession?.model ?? 'auto';
+    final currentId =
+        '${app.activeSession?.providerId ?? AppState.ovidCloudProviderId}::$current';
+
+    final rows = <V2ChipModel>[];
+    for (final provider in app.providers) {
+      if (!provider.connected) continue;
+      for (final model in provider.models) {
+        if (model == 'auto') continue;
+        rows.add(
+          V2ChipModel(
+            id: '${provider.id}::$model',
+            name: ovidModelLabel(model),
+            subtitle: provider.name,
+          ),
+        );
+      }
+    }
+
+    // A remembered manual pick the plan cannot reach falls back to Auto, which
+    // is the model that will actually run.
+    final selectedId = current != 'auto' &&
+            rows.any((row) => row.id == currentId)
+        ? currentId
+        : 'auto';
+
+    unawaited(
+      showV2ModelChipMenu(
+        context,
+        data: V2ModelChipMenuData(
+          lockedModels: rows,
+          tierLabel: _planLabel(tier),
+          selectedId: selectedId,
+          manualModelsAllowed: !autoOnly,
+        ),
+        onSelect: (id) {
+          if (id == 'auto') {
+            app.setModel(AppState.ovidCloudProviderId, 'auto');
+            return;
+          }
+          final parts = id.split('::');
+          if (parts.length != 2) return;
+          app.setModel(parts[0], parts[1]);
+        },
+        onManageModels: () => _openModelPicker(context),
+        onComparePlans: () => _openSettings(),
+      ),
+    );
+  }
+
   void _openModelPicker(BuildContext context) {
     final app = AppState.I;
     final tier = app.ovidCloudTier;
@@ -709,6 +772,9 @@ class _V2AppShellState extends State<V2AppShell> {
     };
     for (final provider in app.providers) {
       if (!provider.connected) continue;
+      // A model on the Ovid plan is covered by the subscription. Anything else
+      // runs on the caller's own provider key, which Ovid does not bill.
+      final inPlan = provider.id == AppState.ovidCloudProviderId;
       for (final model in provider.models) {
         if (model == 'auto') continue;
         final id = '${provider.id}::$model';
@@ -718,10 +784,12 @@ class _V2AppShellState extends State<V2AppShell> {
             id: id,
             name: ovidModelLabel(model),
             subtitle: provider.name,
-            speed: 'Standard',
-            costHint: 'Included',
+            // Only quote a cost the row can honour. On Free and Go the manual
+            // rows are gated, so the locked pill names the plan and no cost is
+            // claimed; on a paid plan the model is either in-plan or on the
+            // caller's key. No per-model price exists to state.
+            costHint: autoOnly ? null : (inPlan ? 'Included' : 'Your key'),
             locked: autoOnly,
-            tag: autoOnly ? 'Paid plans' : null,
           ),
         );
       }
@@ -828,6 +896,100 @@ class _V2AppShellState extends State<V2AppShell> {
     CloudAgentFacade.I.retryLastPrompt(id);
   }
 
+  /// The stored row behind [messageId] in [sessionId], or null when the
+  /// transcript no longer holds one (a stale menu after a reload).
+  Message? _serverMessage(String sessionId, String messageId) {
+    if (sessionId != AppState.I.activeSessionId) return null;
+    final message = _messageById(messageId);
+    return message != null && CloudAgentFacade.isServerMessage(message)
+        ? message
+        : null;
+  }
+
+  /// The server's own reason when it gives one, else an honest fallback.
+  String _messageActionError(Object error, String fallback) {
+    if (error is CloudApiException) {
+      if (error.code == 'session_busy') {
+        return 'A task is still running in this chat. Stop it first.';
+      }
+      // A vanished message keeps the server's exact words ("Message not
+      // found."), which says more than the generic chat-level 404 copy.
+      if (error.code == 'not_found' && error.message.trim().isNotEmpty) {
+        return error.message.trim();
+      }
+      final text = cloudErrorCopy(error.code, message: error.message).text;
+      if (text.trim().isNotEmpty) return text.trim();
+    }
+    return '$fallback Check your connection and try again.';
+  }
+
+  /// Regenerate: the server removes the answer (and anything after it) and
+  /// runs the prompt again. The facade mirrors the server's truncation only
+  /// after the call succeeds, so nothing disappears optimistically.
+  Future<V2MessageActionReport> _regenerateMessage(String messageId) async {
+    final sessionId = AppState.I.activeSessionId;
+    if (sessionId == null) {
+      return const V2MessageActionReport.failed('Start a chat first.');
+    }
+    final message = _serverMessage(sessionId, messageId);
+    if (message == null) {
+      return const V2MessageActionReport.failed(
+        'This message is no longer in the chat.',
+      );
+    }
+    try {
+      await CloudAgentFacade.I.regenerate(sessionId, message);
+      return const V2MessageActionReport.done();
+    } catch (error) {
+      return V2MessageActionReport.failed(
+        _messageActionError(error, 'Could not regenerate this answer.'),
+      );
+    }
+  }
+
+  /// Branch: the server copies this history into a NEW chat. Navigate there
+  /// only after the call succeeds, then report what actually happened — a
+  /// branch whose transcript cannot load still exists and is still opened.
+  Future<V2MessageActionReport> _branchMessage(String messageId) async {
+    final sessionId = AppState.I.activeSessionId;
+    if (sessionId == null) {
+      return const V2MessageActionReport.failed('Start a chat first.');
+    }
+    final message = _serverMessage(sessionId, messageId);
+    if (message == null) {
+      return const V2MessageActionReport.failed(
+        'This message is no longer in the chat.',
+      );
+    }
+    try {
+      final newId = await CloudAgentFacade.I.branchFrom(sessionId, message);
+      final title = AppState.I.sessionById(newId)?.title.trim() ?? '';
+      var loaded = true;
+      try {
+        // The branch is a separate session: its seeded history is one read.
+        await CloudSessionStore.I.loadTranscript(newId);
+      } catch (error) {
+        loaded = false;
+        Diag.swallow('v2.branch.loadTranscript', error);
+      }
+      _selectSession(newId);
+      if (mounted) {
+        final name = title.isEmpty ? 'a new chat' : '“$title”';
+        _snack(
+          _navContext,
+          loaded
+              ? 'Branched into $name.'
+              : 'Branched into $name. Messages did not load.',
+        );
+      }
+      return const V2MessageActionReport.done();
+    } catch (error) {
+      return V2MessageActionReport.failed(
+        _messageActionError(error, 'Could not branch this chat.'),
+      );
+    }
+  }
+
   Future<void> _openPermissionSheet(BuildContext context) {
     final agent = CloudAgentFacade.I;
     return showV2PermissionSheet(
@@ -844,78 +1006,114 @@ class _V2AppShellState extends State<V2AppShell> {
     );
   }
 
-  Future<void> _chatMenu(BuildContext context, String id) async {
+  /// The chat menu: identity first, then the actions for the open chat.
+  ///
+  /// The avatar lives here, not in the top bar, so the bar keeps its fixed
+  /// order (`☰ · chip · title · spacer · Studio · Browser · ⋮`). [id] is null
+  /// on a new chat: there is no chat to act on, but the account entry point
+  /// must stay reachable from the bar.
+  Future<void> _chatMenu(BuildContext context, String? id) async {
     final navContext = _navContext;
-    final session = AppState.I.sessionById(id);
-    if (session == null) return;
-    final bound = StudioBindingPort.instance?.bindingFor(id);
-    final studioRepo = (session.repo?.trim().isNotEmpty ?? false)
-        ? session.repo!
-        : (bound?.ready == true ? bound!.repo : null);
+    final session = id == null ? null : AppState.I.sessionById(id);
+    final studioRepo = _studioRepoFor(session);
     // A live room is keyed by the collaboration session id, and only the chat
     // that started it (or the room's own id) can open it from this menu.
     final collaboration = AppState.I.collaboration;
     final collabState = collaboration?.state;
     final collabSessionId = collabState?.session.sessionId;
     final collabHere =
+        session != null &&
         collabSessionId != null &&
-        (collaboration?.sourceSessionId == id || collabSessionId == id);
+        (collaboration?.sourceSessionId == session.id ||
+            collabSessionId == session.id);
+    final firebase = FirebaseService.I;
     final action = await showOSheet<String>(
       context,
       builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            OListRow(
-              title: 'Chat actions',
-              subtitle: 'Pin, rename, move, export or delete',
-              icon: Icons.tune_rounded,
-              showChevron: false,
-              onTap: () => Navigator.pop(sheetContext, 'actions'),
-            ),
-            OListRow(
-              title: 'Run details',
-              subtitle: 'Steps, tools and token usage',
-              icon: Icons.route_outlined,
-              showChevron: false,
-              onTap: () => Navigator.pop(sheetContext, 'run'),
-            ),
-            if (studioRepo != null)
-              OListRow(
-                title: 'Open Studio',
-                subtitle: studioRepo,
-                icon: Icons.code_rounded,
-                showChevron: false,
-                onTap: () => Navigator.pop(sheetContext, 'studio'),
+        // The identity section makes the sheet taller, so it scrolls instead
+        // of overflowing a short window at 200 % text.
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Identity, not a control: the "Account" row below is the only
+              // tap target, so the name and plan are announced once.
+              _MenuIdentity(
+                name: firebase.accountLabel,
+                planLabel: _planLabel(AppState.I.ovidCloudTier),
+                initials: _initials(firebase.accountLabel),
+                photoUrl: firebase.photoUrl,
               ),
-            if (collabHere)
               OListRow(
-                title: 'Live chat',
-                subtitle: 'Open the live room',
-                icon: Icons.forum_outlined,
+                title: 'Account',
+                subtitle: 'Profile, email and region',
+                icon: Icons.manage_accounts_rounded,
                 showChevron: false,
-                onTap: () => Navigator.pop(sheetContext, 'live'),
+                onTap: () => Navigator.pop(sheetContext, 'account'),
               ),
-            if (collabHere)
-              OListRow(
-                title: 'Members',
-                subtitle: 'People in this room',
-                icon: Icons.group_outlined,
-                showChevron: false,
-                onTap: () => Navigator.pop(sheetContext, 'members'),
-              ),
-            OListRow(
-              title: 'Share chat',
-              icon: Icons.share_outlined,
-              showChevron: false,
-              onTap: () => Navigator.pop(sheetContext, 'share'),
-            ),
-            const SizedBox(height: OSpace.s),
-          ],
+              if (session != null) ...[
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: OSpace.xs),
+                  child: ODivider(),
+                ),
+                OListRow(
+                  title: 'Chat actions',
+                  subtitle: 'Pin, rename, move or delete',
+                  icon: Icons.tune_rounded,
+                  showChevron: false,
+                  onTap: () => Navigator.pop(sheetContext, 'actions'),
+                ),
+                OListRow(
+                  title: 'Run details',
+                  subtitle: 'Steps, tools and token usage',
+                  icon: Icons.route_outlined,
+                  showChevron: false,
+                  onTap: () => Navigator.pop(sheetContext, 'run'),
+                ),
+                if (studioRepo != null)
+                  OListRow(
+                    title: 'Open Studio',
+                    subtitle: studioRepo,
+                    icon: Icons.code_rounded,
+                    showChevron: false,
+                    onTap: () => Navigator.pop(sheetContext, 'studio'),
+                  ),
+                if (collabHere)
+                  OListRow(
+                    title: 'Live chat',
+                    subtitle: 'Open the live room',
+                    icon: Icons.forum_outlined,
+                    showChevron: false,
+                    onTap: () => Navigator.pop(sheetContext, 'live'),
+                  ),
+                if (collabHere)
+                  OListRow(
+                    title: 'Members',
+                    subtitle: 'People in this room',
+                    icon: Icons.group_outlined,
+                    showChevron: false,
+                    onTap: () => Navigator.pop(sheetContext, 'members'),
+                  ),
+                OListRow(
+                  title: 'Share chat',
+                  icon: Icons.share_outlined,
+                  showChevron: false,
+                  onTap: () => Navigator.pop(sheetContext, 'share'),
+                ),
+              ],
+              const SizedBox(height: OSpace.s),
+            ],
+          ),
         ),
       ),
     );
     if (action == null || !context.mounted) return;
+    if (action == 'account') {
+      await V2SettingsRoutes.open(navContext, 'account', _settings);
+      return;
+    }
+    // Every remaining row is drawn only when a session exists.
+    if (id == null) return;
     switch (action) {
       case 'actions':
         await _showSessionActions(context, id);
@@ -946,6 +1144,17 @@ class _V2AppShellState extends State<V2AppShell> {
       case 'share':
         await _shareChat(context, id);
     }
+  }
+
+  /// The repo the chat menu's Studio row opens: the chat's own repo, else a
+  /// ready Studio binding. Null means there is no workspace to open, so the
+  /// row is not drawn.
+  String? _studioRepoFor(ChatSession? session) {
+    if (session == null) return null;
+    final repo = session.repo?.trim() ?? '';
+    if (repo.isNotEmpty) return repo;
+    final bound = StudioBindingPort.instance?.bindingFor(session.id);
+    return bound?.ready == true ? bound!.repo : null;
   }
 
   Future<void> _showSessionActions(BuildContext context, String id) async {
@@ -1095,7 +1304,6 @@ class _V2AppShellState extends State<V2AppShell> {
       context,
       fileName: _artifactName(message),
       meta: message.kind == MsgKind.imageGen ? 'Image' : 'Web page',
-      statusLabel: _artifactStatus(message),
       previewLabel: 'Open',
       icon: message.kind == MsgKind.imageGen
           ? Icons.image_outlined
@@ -1254,6 +1462,7 @@ class _V2AppShellState extends State<V2AppShell> {
     id: project.id,
     name: project.name,
     chatCount: project.sessionCount,
+    updatedAt: project.updatedAt,
     storageLabel: _bytes(project.fileBytes),
     updatedLabel: _timeLabel(project.updatedAt),
   );
@@ -1529,7 +1738,7 @@ class _V2AppShellState extends State<V2AppShell> {
                   'crash',
                   'Crash reports',
                   Icons.bug_report_outlined,
-                  'Anonymous and optional',
+                  'Crash logs and anonymous usage counts',
                 ),
                 _settingsRow(
                   'storage',
@@ -1572,7 +1781,13 @@ class _V2AppShellState extends State<V2AppShell> {
                   'account_health',
                   'Account health',
                   Icons.health_and_safety_outlined,
-                  'Sign-in and deletion',
+                  'Plan, usage and deletion',
+                ),
+                _settingsRow(
+                  'system_states',
+                  'System states',
+                  Icons.wifi_tethering_error_rounded,
+                  'Offline, allowance and limits',
                 ),
                 _settingsRow(
                   'about',
@@ -1786,6 +2001,78 @@ class _V2AppShellState extends State<V2AppShell> {
       buffer.write('\n<script>\n${html.javascript}\n</script>');
     }
     return buffer.toString();
+  }
+}
+
+/// The account identity at the top of the chat menu: avatar, name and plan.
+///
+/// Identity is not a control, so the row carries one label and no tap target;
+/// the "Account" row under it is the only way in.
+class _MenuIdentity extends StatelessWidget {
+  const _MenuIdentity({
+    required this.name,
+    required this.planLabel,
+    required this.initials,
+    required this.photoUrl,
+  });
+
+  final String name;
+  final String planLabel;
+  final String? initials;
+  final String? photoUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Semantics(
+      container: true,
+      label: planLabel.isEmpty ? name : '$name, $planLabel',
+      excludeSemantics: true,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: OSpace.l,
+          vertical: OSpace.m,
+        ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: OSpace.listRow),
+          child: Row(
+            children: [
+              // The real photo when Firebase has one, initials otherwise.
+              OPhotoAvatar(
+                initials: initials ?? name,
+                photoUrl: photoUrl,
+                size: 40,
+              ),
+              const SizedBox(width: OSpace.m),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: OType.bodyStrong.copyWith(color: c.text),
+                    ),
+                    if (planLabel.isNotEmpty) ...[
+                      const SizedBox(height: OSpace.xs),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: OPill(
+                          label: planLabel,
+                          tone: OPillTone.accent,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 

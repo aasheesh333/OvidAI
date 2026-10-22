@@ -83,19 +83,12 @@ V2UsageData _usageData({
     resetsAtLabel: resetsAtLabel,
     monthlyUsedLabel: '1.02B',
     monthlyLimitLabel: '1.5B',
-    monthlyFraction: 0.68,
-    monthlyPercentLabel: '68%',
-    billingNote: 'Billing cycle ends in 18 days',
     days: days,
-    selectedDayId: 'sun',
-    selectedDayLabel: 'Sun (Today): 12.4M tokens',
     models: models,
     range: range,
     requestsLabel: '1,284',
     imagesLabel: '86',
-    storageUsedLabel: '1.2 GB',
     storageLimitLabel: '3 GB',
-    storageFraction: 0.4,
     onRangeChanged: onRangeChanged,
     onStartChat: onStartChat,
     onUpgrade: onUpgrade,
@@ -168,6 +161,33 @@ void main() {
     expect(find.byType(V2ImageUsageChart), findsNothing);
     expect(find.textContaining('Free and Go use Auto'), findsNothing);
     expect(find.text('Upgrade plan'), findsNothing);
+  });
+
+  testWidgets('the hero carries the request and image counters', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(_app(OTheme.light(), _usageData()));
+    await tester.pumpAndSettle();
+
+    expect(find.text('1,284 requests · 86 images today'), findsOneWidget);
+
+    // A server that reports only tokens omits the line instead of inventing 0.
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        V2UsageData(
+          dailyUsedLabel: '12.4M',
+          dailyLimitLabel: '50M',
+          dailyFraction: 0.248,
+          days: _days,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('requests'), findsNothing);
+    expect(find.textContaining('images'), findsNothing);
   });
 
   testWidgets('monthly total comes from the ledger, missing is a dash', (

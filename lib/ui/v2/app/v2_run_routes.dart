@@ -123,6 +123,10 @@ class V2RunRoutes {
       runLabel: steps.length == 1 ? '1 step' : '${steps.length} steps',
       steps: steps,
       subagents: launches,
+      startedAt: session.createdAt,
+      // A run that is still working has no end yet, so the summary strip says
+      // "so far" instead of printing a duration that keeps growing.
+      endedAt: session.agentState == 'running' ? null : session.lastActivityAt,
     );
   }
 
@@ -140,7 +144,6 @@ class V2RunRoutes {
         name: 'Subagent',
         instanceLabel: '',
         stepLabel: '',
-        paceLabel: '',
         goal: '',
         startedLabel: '',
         elapsedLabel: '',
@@ -156,7 +159,6 @@ class V2RunRoutes {
         name: session.title,
         instanceLabel: '',
         stepLabel: '',
-        paceLabel: '',
         goal: '',
         startedLabel: '',
         elapsedLabel: '',
@@ -190,7 +192,6 @@ class V2RunRoutes {
       // failed run has no measured progress in the session.
       progressKnown: state == 'finished',
       stepLabel: timedOut ? 'Timed out' : _agentStateLabel(state),
-      paceLabel: '',
       goal: session.title,
       files: _filesFrom(session),
       startedLabel: _timeOfDay(session.createdAt),

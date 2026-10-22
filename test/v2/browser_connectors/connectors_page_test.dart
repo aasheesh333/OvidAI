@@ -315,23 +315,83 @@ void main() {
     expect(find.text('GitHub'), findsOneWidget);
   });
 
-  testWidgets('search filters the list', (tester) async {
+  testWidgets('search filters the active tab', (tester) async {
     await _pump(
       tester,
       ConnectorsPage(data: _data(), plan: V2ConnectorPlan.plus),
     );
 
-    await tester.enterText(find.byType(TextField).first, 'context7');
-    await tester.pump(const Duration(milliseconds: 400));
-
-    expect(find.text('context7'), findsWidgets);
-    expect(find.text('GitHub'), findsNothing);
-
+    // Installed holds GitHub, Google Drive and Notion.
     await tester.enterText(find.byType(TextField).first, 'github');
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('GitHub'), findsOneWidget);
-    expect(find.text('context7'), findsNothing);
+    expect(find.text('Notion'), findsNothing);
+
+    // Available is searched on its own; a saved connector is not listed there.
+    await tester.tap(find.byKey(const Key('connector-tab-available')));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.enterText(find.byType(TextField).first, 'gmail');
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('Gmail'), findsOneWidget);
+    expect(find.text('GitHub'), findsNothing);
+  });
+
+  testWidgets('the two tabs carry counts and announce the selection', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await _pump(
+      tester,
+      ConnectorsPage(data: _data(), plan: V2ConnectorPlan.plus),
+    );
+
+    expect(find.text('Installed'), findsOneWidget);
+    expect(find.text('Available'), findsOneWidget);
+    expect(find.text('3'), findsNWidgets(2));
+
+    final installed = tester.getSemantics(
+      find.bySemanticsLabel('Installed, 3'),
+    );
+    expect(installed.flagsCollection.isSelected.toBoolOrNull(), isTrue);
+
+    await tester.tap(find.byKey(const Key('connector-tab-available')));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    final available = tester.getSemantics(
+      find.bySemanticsLabel('Available, 3'),
+    );
+    expect(available.flagsCollection.isSelected.toBoolOrNull(), isTrue);
+    expect(find.text('GitHub'), findsNothing);
+    expect(find.text('Gmail'), findsOneWidget);
+    expect(find.text('Draft emails and summaries'), findsOneWidget);
+    handle.dispose();
+  });
+
+  testWidgets('an empty Installed tab points at the catalogue', (tester) async {
+    await _pump(
+      tester,
+      ConnectorsPage(
+        data: _data(
+          connectors: _connected
+              .where((connector) => !connector.connected)
+              .toList(),
+        ),
+        plan: V2ConnectorPlan.plus,
+      ),
+    );
+
+    // Nothing is installed, so the catalogue is the useful first screen.
+    expect(find.text('Gmail'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('connector-tab-installed')));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('No connectors yet'), findsOneWidget);
+
+    await tester.tap(find.text('Browse available'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Gmail'), findsOneWidget);
   });
 
   testWidgets('the row switch reports the new value', (tester) async {
@@ -371,7 +431,7 @@ void main() {
     expect(opened, 'github');
   });
 
-  testWidgets('the switch on an unconnected row opens setup', (tester) async {
+  testWidgets('an available row offers Add instead of a switch', (tester) async {
     String? connected;
     await _pump(
       tester,
@@ -386,7 +446,12 @@ void main() {
       ),
     );
 
-    await tester.tap(find.byKey(const ValueKey('connector-switch-gmail')));
+    expect(
+      find.byKey(const ValueKey('connector-switch-gmail')),
+      findsNothing,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('connector-add-gmail')));
     await tester.pump(const Duration(milliseconds: 300));
     expect(connected, 'gmail');
   });
@@ -400,7 +465,7 @@ void main() {
     await tester.enterText(find.byType(TextField).first, 'zzz');
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('No matches'), findsOneWidget);
+    expect(find.text('Nothing matches'), findsOneWidget);
     expect(find.text('Clear search'), findsOneWidget);
 
     await tester.tap(find.text('Clear search'));

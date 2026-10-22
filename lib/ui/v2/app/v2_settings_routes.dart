@@ -8,6 +8,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../../core/app_info.dart';
+import '../../../core/cloud_usage_store.dart';
+import '../../../core/connection_service.dart';
 import '../../../core/background_notifications.dart';
 import '../../../core/cloud/account_settings_client.dart';
 import '../../../core/cloud/artifact_vault.dart';
@@ -44,6 +46,7 @@ import '../settings_extra/notifications_page.dart';
 import '../settings_extra/permissions_page.dart';
 import '../settings_extra/response_wait_page.dart';
 import '../settings_extra/shared_memory_page.dart';
+import '../states/system_states_page.dart';
 import 'app_lock_settings_page.dart';
 import 'v2_settings_actions.dart';
 
@@ -119,9 +122,35 @@ class V2SettingsRoutes {
         return const AppLockSettingsPage();
       case 'about':
         return AboutPage(data: _about(context, actions));
+      case 'system_states':
+        return _systemStates(context, actions);
       default:
         return null;
     }
+  }
+
+  /// The live conditions this device can actually observe.
+  ///
+  /// Every flag is read from a real source. Blocked, rate-limited and
+  /// update-required have no endpoint or version feed yet, so they stay false
+  /// rather than being guessed — the page then says "All clear", which is the
+  /// truth it can stand behind.
+  static Widget _systemStates(
+    BuildContext context,
+    V2SettingsActions actions,
+  ) {
+    final usage = CloudUsageStore.acquire(AppState.I).usage;
+    final limited = usage != null && usage.hasRemainingPct && usage.remainingPct <= 0;
+    return V2SystemStatesPage(
+      data: V2SystemStatesData(
+        offline: ConnectionService.I.offline,
+        allowanceUsed: limited,
+        allowanceResetsAt: usage?.resetsAt,
+      ),
+      onRetryConnection: () => ConnectionService.I.probe(),
+      onSeePlans: () => V2SettingsRoutes.open(context, 'plan_billing', actions),
+      onBackToChat: () => Navigator.of(context).maybePop(),
+    );
   }
 
   static V2AccountData _account(
@@ -137,6 +166,7 @@ class V2SettingsRoutes {
         email: firebase.email ?? firebase.accountDetail,
         role: _planName(app.ovidCloudTier),
         initials: initialsFor(firebase.accountLabel),
+        photoUrl: firebase.photoUrl,
       ),
       fields: [
         V2AccountField(
@@ -171,6 +201,23 @@ class V2SettingsRoutes {
         ),
       ],
       onEditProfile: () => actions.renameAccount(context),
+      // Phone-only accounts have no email to verify, so they get no control.
+      onResendEmailVerification: (firebase.email ?? '').contains('@')
+          ? () async {
+              final error = await firebase.resendEmailVerification();
+              if (error == 'too-many-requests') {
+                return V2EmailVerificationResult.tooManyRequests;
+              }
+              if (error == 'network-request-failed') {
+                return V2EmailVerificationResult.network;
+              }
+              if (error != null) return V2EmailVerificationResult.failed;
+              // The service re-read the user; report what it actually says.
+              return firebase.emailVerified
+                  ? V2EmailVerificationResult.verified
+                  : V2EmailVerificationResult.sent;
+            }
+          : null,
       onFieldTap: (field) {
         if (field.id == 'display_name') actions.renameAccount(context);
       },
@@ -290,15 +337,19 @@ class V2SettingsRoutes {
     final today = usage.today;
     final recorded = history.history;
 
+    final bucket = _todayBucket(recorded);
     int? dailyTokens;
     if (today != null) {
       dailyTokens = today.inputTokens + today.outputTokens;
     } else {
-      final bucket = _todayBucket(recorded);
       dailyTokens = bucket?.counts.totalTokens;
     }
     final monthlyTokens = recorded?.totals.totalTokens;
-    final requests = today?.requests ?? recorded?.totals.runs;
+    // The counters are today's, like the hero number. `totals.runs` /
+    // `totals.modelCalls` cover the whole 30 day window, so only today's
+    // bucket may stand in for `/usage`'s `today` counters. `modelCalls` is the
+    // ledger's equivalent of a request (one row per model call).
+    final requests = today?.requests ?? bucket?.counts.modelCalls;
     final images = today?.images;
 
     // Both endpoints are still in flight and nothing real is known yet: show
@@ -320,9 +371,6 @@ class V2SettingsRoutes {
     final dailyFraction = dailyTokens == null || limits.dailyTokenCap == 0
         ? 0.0
         : (dailyTokens / limits.dailyTokenCap).clamp(0.0, 1.0);
-    final monthlyFraction = monthlyTokens == null || limits.monthlyTokenCap == 0
-        ? 0.0
-        : (monthlyTokens / limits.monthlyTokenCap).clamp(0.0, 1.0);
 
     return V2UsageData(
       status: V2UsageStatus.ready,
@@ -339,13 +387,6 @@ class V2SettingsRoutes {
           ? ''
           : compactTokens(monthlyTokens),
       monthlyLimitLabel: compactTokens(limits.monthlyTokenCap),
-      monthlyFraction: monthlyFraction,
-      monthlyPercentLabel: monthlyTokens == null
-          ? ''
-          : '${(monthlyFraction * 100).round()}%',
-      billingNote: usage.isPaid
-          ? 'Billed through Google Play.'
-          : 'Free plan · limits reset every 24 hours.',
       days: _usageDays(recorded, history.days),
       range: history.days == 7
           ? V2UsageRange.sevenDays
@@ -355,7 +396,6 @@ class V2SettingsRoutes {
       requestsLabel: requests == null ? '' : '$requests',
       imagesLabel: images == null ? '' : '$images',
       storageLimitLabel: '${limits.storageGb} GB',
-      showFreePlanNote: !limits.manualModels,
       onRangeChanged: (range) =>
           unawaited(history.setDays(range == V2UsageRange.sevenDays ? 7 : 30)),
       onUpgrade: upgrade,
@@ -770,7 +810,6 @@ class V2SettingsRoutes {
     V2SettingsActions actions, {
     VoidCallback? onCancelDeletion,
     int? storageUsedBytes,
-    int storageQuotaGb = 0,
   }) {
     final firebase = FirebaseService.I;
     final receipt = firebase.lastDeletionReceipt;
@@ -812,16 +851,15 @@ class V2SettingsRoutes {
           ? null
           : (todayTokens / limits.dailyTokenCap).clamp(0.0, 1.0),
       // Measured by the loader from the artifact inventory plus this device's
-      // transcripts; null until that read finishes or when it fails.
-      storageUsedLabel: storageUsedBytes == null || storageQuotaGb <= 0
+      // transcripts; null until that read finishes or when it fails. The quota
+      // is the same tier the plan row names, so the two rows cannot disagree.
+      storageUsedLabel: storageUsedBytes == null || limits.storageGb <= 0
           ? ''
-          : '${_bytes(storageUsedBytes)} of $storageQuotaGb GB',
-      storageFraction: storageUsedBytes == null || storageQuotaGb <= 0
+          : '${_bytes(storageUsedBytes)} of ${limits.storageGb} GB',
+      storageFraction: storageUsedBytes == null || limits.storageGb <= 0
           ? null
-          : (storageUsedBytes / (storageQuotaGb * 1024 * 1024 * 1024)).clamp(
-              0.0,
-              1.0,
-            ),
+          : (storageUsedBytes / (limits.storageGb * 1024 * 1024 * 1024))
+                .clamp(0.0, 1.0),
       deletionScheduledLabel: pending && deadline != null
           ? formatLocalDateTime(deadline)
           : '',
@@ -1660,7 +1698,6 @@ class _AccountHealthLoader extends StatefulWidget {
 class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
   /// Used storage in bytes, or null until the read finishes (or if it fails).
   int? _storageUsedBytes;
-  int _storageQuotaGb = 0;
 
   @override
   void initState() {
@@ -1688,12 +1725,10 @@ class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
   /// excluded, as it is not part of the cloud quota. A failed inventory read
   /// leaves the value unknown instead of inventing a zero.
   Future<void> _loadStorage() async {
-    final spec = V2SettingsRoutes._planSpec(AppState.I.ovidCloudTier);
     final sessions = V2SettingsRoutes._localTranscriptBytes();
     final artifacts = await _artifactBytes();
     if (!mounted) return;
     setState(() {
-      _storageQuotaGb = spec.storageGb;
       _storageUsedBytes = artifacts == null ? null : artifacts + sessions;
     });
   }
@@ -1735,7 +1770,6 @@ class _AccountHealthLoaderState extends State<_AccountHealthLoader> {
         widget.actions,
         onCancelDeletion: _cancelDeletion,
         storageUsedBytes: _storageUsedBytes,
-        storageQuotaGb: _storageQuotaGb,
       ),
     );
   }

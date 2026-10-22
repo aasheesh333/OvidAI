@@ -750,7 +750,6 @@ Future<void> openV2ArtifactDetail(
   BuildContext context, {
   required String fileName,
   required String meta,
-  required String statusLabel,
   required String previewLabel,
   IconData icon = Icons.code_rounded,
   ArtifactKind? kind,
@@ -779,9 +778,7 @@ Future<void> openV2ArtifactDetail(
           name: fileName,
           typeLabel: extension.isEmpty ? 'Artifact' : extension.toUpperCase(),
           sizeLabel: sizeLabel,
-          versionLabel: statusLabel,
           previewKind: previewKind,
-          previewHeadline: previewLabel,
           previewCodeFile: fileName,
           previewCode: code ? text : '',
           documentText: document ? text : '',

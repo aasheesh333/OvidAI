@@ -217,6 +217,44 @@ void main() {
     }
   });
 
+  testWidgets('crash consent shows the real value and reports the change', (
+    tester,
+  ) async {
+    final changes = <bool>[];
+    await tester.pumpWidget(
+      _app(
+        DataControlPage(
+          data: V2DataControlPageData(
+            service: _FakeService(),
+            crashReports: false,
+            onCrashReportsChanged: changes.add,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The row names what leaves the device, and the switch is the stored value.
+    expect(find.text('Crash reports'), findsOneWidget);
+    expect(find.text('Crash logs and anonymous usage counts'), findsOneWidget);
+    final toggle = find.byKey(const ValueKey<String>('crash-reports-switch'));
+    expect(tester.widget<Switch>(toggle).value, isFalse);
+
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+
+    expect(changes, <bool>[true]);
+    expect(tester.widget<Switch>(toggle).value, isTrue);
+  });
+
+  testWidgets('no crash row without a host that persists it', (tester) async {
+    await tester.pumpWidget(
+      _app(DataControlPage(data: _data(service: _FakeService()))),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('crash-reports-row')), findsNothing);
+  });
+
   testWidgets('export opens the scope sheet, shows progress and the result', (
     tester,
   ) async {

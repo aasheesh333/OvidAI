@@ -24,7 +24,6 @@ class V2UsageDay {
     required this.fraction,
     this.valueLabel = '',
     this.tokens = 0,
-    this.imageCount = 0,
   });
 
   final String id;
@@ -37,9 +36,6 @@ class V2UsageDay {
   /// Absolute token count for the day. When zero the count is parsed from
   /// [valueLabel] (for example `8.2M tokens`), so older callers keep working.
   final int tokens;
-
-  /// Image generations for the day. Zero means no image activity.
-  final int imageCount;
 }
 
 @immutable
@@ -51,8 +47,6 @@ class V2UsageModel {
     required this.percent,
     required this.tokensLabel,
     this.tone = V2UsageTone.accent,
-    this.providerLabel,
-    this.isCustomProvider = false,
   });
 
   final String id;
@@ -61,12 +55,6 @@ class V2UsageModel {
   final int percent;
   final String tokensLabel;
   final V2UsageTone tone;
-
-  /// Provider name for custom connectors (`Ollama`, `OpenRouter`, …).
-  final String? providerLabel;
-
-  /// True when this row came from a user-added provider, not Ovid Cloud.
-  final bool isCustomProvider;
 }
 
 @immutable
@@ -77,34 +65,19 @@ class V2UsageData {
     this.dailyUsedLabel = '',
     this.dailyLimitLabel = '',
     this.dailyFraction = 0,
-    this.dailyCapLabel = '',
     this.resetLabel = '',
     this.resetsAt,
     this.resetsAtLabel = '',
     this.monthlyUsedLabel = '',
     this.monthlyLimitLabel = '',
-    this.monthlyFraction = 0,
-    this.monthlyPercentLabel = '',
-    this.monthlyCapLabel = '',
-    this.billingNote = '',
     this.days = const [],
     this.historyLoading = false,
-    this.selectedDayId,
-    this.selectedDayLabel = '',
     this.models = const [],
     this.range = V2UsageRange.today,
-    this.showFreePlanNote = true,
     this.requestsLabel = '',
     this.imagesLabel = '',
-    this.imagesDetail = 'image generations',
-    this.storageUsedLabel = '',
     this.storageLimitLabel = '',
-    this.storageFraction = 0,
-    this.upgradeTitle = 'Need more room?',
-    this.upgradeMessage = 'Upgrade for higher limits and faster models.',
-    this.upgradeLabel = 'Upgrade plan',
     this.onRangeChanged,
-    this.onDaySelected,
     this.onStartChat,
     this.onUpgrade,
     this.onRetry,
@@ -155,12 +128,19 @@ class V2UsageData {
       ? _compactCap(planLimits.monthlyTokenCap)
       : monthlyLimitLabel;
 
-  String get monthlyPercentText =>
-      monthlyPercentLabel.trim().isEmpty ? unknownLabel : monthlyPercentLabel;
-  final double dailyFraction;
+  /// The account's request and image counters for today, straight from
+  /// `/usage`'s `today` object (`requests`, `images`). Empty when the server
+  /// reported neither, so the line is omitted rather than showing a zero that
+  /// looks like real usage.
+  String get countersText {
+    final parts = <String>[
+      if (requestsLabel.trim().isNotEmpty) '${requestsLabel.trim()} requests',
+      if (imagesLabel.trim().isNotEmpty) '${imagesLabel.trim()} images',
+    ];
+    return parts.isEmpty ? '' : '${parts.join(' · ')} today';
+  }
 
-  /// Overrides for the exact 24 h cap; empty derives it from [planId].
-  final String dailyCapLabel;
+  final double dailyFraction;
 
   /// Optional pre-formatted countdown. Live data should pass [resetsAt]
   /// instead, so the countdown keeps ticking instead of freezing at the value
@@ -176,33 +156,17 @@ class V2UsageData {
   final String resetsAtLabel;
   final String monthlyUsedLabel;
   final String monthlyLimitLabel;
-  final double monthlyFraction;
-  final String monthlyPercentLabel;
-
-  /// Overrides for the exact 30 day cap; empty derives it from [planId].
-  final String monthlyCapLabel;
-  final String billingNote;
   final List<V2UsageDay> days;
 
   /// True while the daily ledger (`/usage/history`) is still loading. The
   /// charts show a skeleton instead of "no activity" in that window.
   final bool historyLoading;
-  final String? selectedDayId;
-  final String selectedDayLabel;
   final List<V2UsageModel> models;
   final V2UsageRange range;
-  final bool showFreePlanNote;
   final String requestsLabel;
   final String imagesLabel;
-  final String imagesDetail;
-  final String storageUsedLabel;
   final String storageLimitLabel;
-  final double storageFraction;
-  final String upgradeTitle;
-  final String upgradeMessage;
-  final String upgradeLabel;
   final ValueChanged<V2UsageRange>? onRangeChanged;
-  final ValueChanged<V2UsageDay>? onDaySelected;
   final VoidCallback? onStartChat;
   final VoidCallback? onUpgrade;
   final VoidCallback? onRetry;
@@ -214,15 +178,6 @@ class V2UsageData {
     final gb = int.tryParse(storageLimitLabel.split(' ').first);
     return V2PlanLimits.forStorageGb(gb) ?? V2PlanLimits.free;
   }
-
-  String get effectiveDailyCapLabel =>
-      dailyCapLabel.isNotEmpty ? dailyCapLabel : planLimits.dailyCapLabel;
-
-  String get effectiveMonthlyCapLabel =>
-      monthlyCapLabel.isNotEmpty ? monthlyCapLabel : planLimits.monthlyCapLabel;
-
-  int get customProviderCount =>
-      models.where((model) => model.isCustomProvider).length;
 }
 
 class UsagePage extends StatelessWidget {
@@ -309,8 +264,8 @@ class UsagePage extends StatelessWidget {
 }
 
 /// One hero number: today's tokens, the cap and the live reset, with the
-/// 30 day allowance as a single caption underneath. Everything else on the
-/// screen is the single activity chart.
+/// 30 day allowance and today's request/image counters as captions underneath.
+/// Everything else on the screen is the single activity chart.
 class _UsageHero extends StatelessWidget {
   const _UsageHero({required this.data, this.clock});
 
@@ -386,6 +341,17 @@ class _UsageHero extends StatelessWidget {
             ),
           ),
         ),
+        // The request/image counters from `/usage`'s `today` object. One line,
+        // never a card; omitted when the server reported neither.
+        if (data.countersText.isNotEmpty) ...[
+          const SizedBox(height: OSpace.xs),
+          Text(
+            data.countersText,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+        ],
       ],
     );
   }

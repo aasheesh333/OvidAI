@@ -123,22 +123,51 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('TODAY — MAY 18'), findsOneWidget);
-    expect(find.text('Retry run'), findsOneWidget);
+    expect(find.text('Run now'), findsOneWidget);
     expect(find.text('daily-brief.md'), findsOneWidget);
   });
 
-  testWidgets('only a failed run offers retry, and it fires', (tester) async {
+  testWidgets('only a finished failure offers run now, and it fires', (
+    tester,
+  ) async {
     _phone(tester);
     V2TimelineRun? retried;
     await tester.pumpWidget(
-      _app(RunTimeline(data: _data, onRetryRun: (run) => retried = run)),
+      _app(RunTimeline(data: _data, onRunNow: (run) => retried = run)),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Retry run'), findsOneWidget);
-    await tester.ensureVisible(find.text('Retry run'));
-    await tester.tap(find.text('Retry run'));
+    expect(find.text('Run now'), findsOneWidget);
+    expect(find.text('Starts a new run.'), findsOneWidget);
+    await tester.ensureVisible(find.text('Run now'));
+    await tester.tap(find.text('Run now'));
     expect(retried?.id, 'r2');
+  });
+
+  testWidgets('a run still in flight never offers run now', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        RunTimeline(
+          data: const V2RunTimelineData(
+            runs: <V2TimelineRun>[
+              V2TimelineRun(
+                id: 'r1',
+                dayLabel: 'Today — May 18',
+                timeLabel: '9:00 AM',
+                outcome: V2RunOutcome.running,
+                summary: 'Still running.',
+              ),
+            ],
+          ),
+          onRunNow: (_) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Run now'), findsNothing);
+    expect(find.text('Starts a new run.'), findsNothing);
   });
 
   testWidgets('artifact link names the file and opens that run', (
@@ -159,14 +188,14 @@ void main() {
     expect(opened?.id, 'r1');
   });
 
-  testWidgets('announces disabled retry and artifact actions', (tester) async {
+  testWidgets('announces disabled run-now and artifact actions', (tester) async {
     final handle = tester.ensureSemantics();
     _phone(tester);
     await tester.pumpWidget(_app(const RunTimeline(data: _data)));
     await tester.pumpAndSettle();
 
     expect(
-      tester.getSemantics(find.text('Retry run')),
+      tester.getSemantics(find.text('Run now')),
       isSemantics(isButton: true, isEnabled: false),
     );
     expect(
@@ -182,7 +211,7 @@ void main() {
     _phone(tester);
     await tester.pumpWidget(
       _app(
-        RunTimeline(data: _data, onOpenArtifact: (_) {}, onRetryRun: (_) {}),
+        RunTimeline(data: _data, onOpenArtifact: (_) {}, onRunNow: (_) {}),
       ),
     );
     await tester.pumpAndSettle();
@@ -346,7 +375,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('TODAY — MAY 18'), findsOneWidget);
-    expect(find.text('Retry run'), findsOneWidget);
+    expect(find.text('Run now'), findsOneWidget);
     expect(find.text('daily-brief.md'), findsOneWidget);
   });
 
@@ -360,7 +389,7 @@ void main() {
         _smallApp(
           RunTimeline(
             data: _data,
-            onRetryRun: (run) => retried = run,
+            onRunNow: (run) => retried = run,
             onOpenArtifact: (_) {},
           ),
           dark: dark,
@@ -372,16 +401,16 @@ void main() {
       expect(find.text('TODAY — MAY 18'), findsOneWidget);
 
       await tester.scrollUntilVisible(
-        find.text('Retry run'),
+        find.text('Run now'),
         160,
         scrollable: find.byType(Scrollable).first,
       );
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
 
-      // The error line and retry action stay readable when everything wraps.
+      // The error line and run-now action stay readable when everything wraps.
       expect(find.textContaining('storage connector'), findsOneWidget);
-      await tester.tap(find.text('Retry run'));
+      await tester.tap(find.text('Run now'));
       expect(retried?.id, 'r2');
       expect(tester.takeException(), isNull);
     });

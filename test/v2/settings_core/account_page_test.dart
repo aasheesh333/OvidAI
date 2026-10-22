@@ -45,7 +45,6 @@ V2AccountData _accountData({
   V2AccountProfile? profile = _profile,
   List<V2AccountField> fields = _fields,
   List<V2ConnectedAccount> accounts = _accounts,
-  VoidCallback? onChangePhoto,
   VoidCallback? onEditProfile,
   ValueChanged<V2AccountField>? onFieldTap,
   ValueChanged<V2ConnectedAccount>? onAccountTap,
@@ -69,7 +68,6 @@ V2AccountData _accountData({
     profile: profile,
     fields: fields,
     connectedAccounts: accounts,
-    onChangePhoto: onChangePhoto,
     onEditProfile: onEditProfile,
     onFieldTap: onFieldTap,
     onAccountTap: onAccountTap,
@@ -167,7 +165,6 @@ void main() {
       _app(
         OTheme.light(),
         _accountData(
-          onChangePhoto: () {},
           onEditProfile: () {},
           onLinkAccount: () {},
           onDataControl: () {},
@@ -920,21 +917,43 @@ void main() {
     await tester.pumpWidget(
       _app(
         OTheme.light(),
-        _accountData(onChangePhoto: () {}, onDeleteAccount: () {}),
+        _accountData(onDeleteAccount: () {}),
       ),
     );
     await tester.pumpAndSettle();
 
-    expect(find.bySemanticsLabel('Change photo'), findsWidgets);
-    expect(
-      tester.getSize(find.byTooltip('Change photo')).height,
-      greaterThanOrEqualTo(48),
-    );
+    // There is no upload endpoint, so no change-photo affordance is drawn.
+    expect(find.bySemanticsLabel('Change photo'), findsNothing);
+    expect(find.byTooltip('Change photo'), findsNothing);
     expect(
       tester
           .getSize(find.byKey(const ValueKey<String>('account-delete-row')))
           .height,
       greaterThanOrEqualTo(48),
     );
+  });
+
+  testWidgets('the avatar uses the account photo when one exists', (
+    tester,
+  ) async {
+    _phoneSize(tester);
+    await tester.pumpWidget(
+      _app(
+        OTheme.light(),
+        _accountData(
+          profile: const V2AccountProfile(
+            name: 'Aarav Sharma',
+            email: 'aarav@gmail.com',
+            initials: 'AS',
+            photoUrl: 'https://example.com/avatar.png',
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byType(Image), findsOneWidget);
+    // flutter_test's HTTP override fails the load; the avatar keeps initials.
+    await tester.pumpAndSettle();
+    expect(find.text('A'), findsOneWidget);
   });
 }

@@ -8,15 +8,19 @@ import 'composer_sheet.dart';
 // TODO(l10n): move user-facing copy to ARB keys in the localization pass.
 
 /// One selectable model row. The shape mirrors the shared model contract:
-/// id, name, subtitle, speed, costHint, locked.
+/// id, name, subtitle, costHint, locked.
+///
+/// There is deliberately no speed or latency field. The chat catalogue carries
+/// no measured per-model value for either (the only timing the app holds is the
+/// analytics of the session that just ran), so a row cannot state one without
+/// inventing it.
 @immutable
 class V2ModelOption {
   const V2ModelOption({
     required this.id,
     required this.name,
     required this.subtitle,
-    required this.speed,
-    required this.costHint,
+    this.costHint,
     this.locked = false,
     this.advanced = false,
     this.tag,
@@ -28,10 +32,11 @@ class V2ModelOption {
   final String name;
   final String subtitle;
 
-  /// Searchable only: the row shows one meta line and the cost, so speed is
-  /// not drawn but a query still matches it.
-  final String speed;
-  final String costHint;
+  /// What the model costs on the plan the caller is on, and nothing more:
+  /// `Included` when the subscription covers it, `Your key` when it runs on the
+  /// caller's own provider key. Null when the row is gated — the plan pill
+  /// already names the gate, and there is no per-model price to quote.
+  final String? costHint;
 
   /// A per-row gate. The plan gate ([V2ModelPickerData.autoOnly]) is applied
   /// on top, so a Free/Go caller cannot leak a row by leaving this false.
@@ -181,10 +186,10 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
   bool _matches(V2ModelOption model) {
     final q = _normalizedQuery;
     if (q.isEmpty) return true;
+    final cost = model.costHint;
     return model.name.toLowerCase().contains(q) ||
         model.subtitle.toLowerCase().contains(q) ||
-        model.speed.toLowerCase().contains(q) ||
-        model.costHint.toLowerCase().contains(q);
+        (cost != null && cost.toLowerCase().contains(q));
   }
 
   bool get _autoMatches {
@@ -308,7 +313,7 @@ class _V2ModelPickerSheetState extends State<V2ModelPickerSheet> {
           compact: true,
           icon: Icons.search_off_rounded,
           title: 'No models found',
-          message: 'Try a name, speed or cost.',
+          message: 'Try a name or provider.',
           action: OButton(
             label: 'Clear search',
             variant: OButtonVariant.secondary,
@@ -538,12 +543,16 @@ class _ModelRow extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style: OType.caption.copyWith(color: c.textMuted),
                       ),
-                      Text(
-                        model.costHint,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OType.caption.copyWith(color: c.textFaint),
-                      ),
+                      // A gated row states the gate (the pill above), never a
+                      // cost: the model is not usable on this plan, so any
+                      // price line would be describing something unreachable.
+                      if (!locked && model.costHint != null)
+                        Text(
+                          model.costHint!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: OType.caption.copyWith(color: c.textFaint),
+                        ),
                     ],
                   ),
                 ],

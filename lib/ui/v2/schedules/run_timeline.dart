@@ -62,6 +62,10 @@ class V2TimelineRun {
   bool get succeeded => outcome == V2RunOutcome.succeeded;
   bool get running => outcome == V2RunOutcome.running;
 
+  /// Only a run that already finished badly offers the action. A run still in
+  /// flight has no result yet, so there is nothing to run again.
+  bool get canRunNow => failed && !running;
+
   String get outcomeLabel =>
       statusLabel ??
       switch (outcome) {
@@ -145,8 +149,8 @@ class V2RunTimelineData {
 /// A schedule's run history as a vertical timeline.
 ///
 /// Each day is a heading plus a rail of runs. A run shows a status dot, when
-/// it started, how long it took, what it did, a link to any file it made and a
-/// retry action when it failed.
+/// it started, how long it took, what it did, a link to any file it made and,
+/// when it failed, a run-now action that starts a fresh run.
 ///
 /// The widget is a section, not a page: it returns a [Column] in the content
 /// state and never owns scrolling, so a host can place it inside its own list.
@@ -156,7 +160,7 @@ class RunTimeline extends StatelessWidget {
     super.key,
     required this.data,
     this.onOpenArtifact,
-    this.onRetryRun,
+    this.onRunNow,
     this.onRetry,
     this.onBackToSchedule,
   });
@@ -166,8 +170,9 @@ class RunTimeline extends StatelessWidget {
   /// Open the file a successful run made.
   final ValueChanged<V2TimelineRun>? onOpenArtifact;
 
-  /// Run a failed job again now.
-  final ValueChanged<V2TimelineRun>? onRetryRun;
+  /// Start a new run of the schedule now. This never re-attempts the failed
+  /// occurrence above: the server has no per-run retry, so a fresh run starts.
+  final ValueChanged<V2TimelineRun>? onRunNow;
 
   /// Reload the history after an error.
   final VoidCallback? onRetry;
@@ -213,7 +218,7 @@ class RunTimeline extends StatelessWidget {
             _DayGroup(
               day: groups[i],
               onOpenArtifact: onOpenArtifact,
-              onRetryRun: onRetryRun,
+              onRunNow: onRunNow,
             ),
           ],
         ],
@@ -223,11 +228,11 @@ class RunTimeline extends StatelessWidget {
 }
 
 class _DayGroup extends StatelessWidget {
-  const _DayGroup({required this.day, this.onOpenArtifact, this.onRetryRun});
+  const _DayGroup({required this.day, this.onOpenArtifact, this.onRunNow});
 
   final V2TimelineDay day;
   final ValueChanged<V2TimelineRun>? onOpenArtifact;
-  final ValueChanged<V2TimelineRun>? onRetryRun;
+  final ValueChanged<V2TimelineRun>? onRunNow;
 
   @override
   Widget build(BuildContext context) {
@@ -272,7 +277,7 @@ class _DayGroup extends StatelessWidget {
                   run: day.runs[i],
                   isLast: i == day.runs.length - 1,
                   onOpenArtifact: onOpenArtifact,
-                  onRetryRun: onRetryRun,
+                  onRunNow: onRunNow,
                 )
               else
                 // A day can hold hundreds of runs; only the first screenful
@@ -285,7 +290,7 @@ class _DayGroup extends StatelessWidget {
                     run: day.runs[i],
                     isLast: i == day.runs.length - 1,
                     onOpenArtifact: onOpenArtifact,
-                    onRetryRun: onRetryRun,
+                    onRunNow: onRunNow,
                   ),
                 ),
           ],
@@ -300,13 +305,13 @@ class _RunRow extends StatelessWidget {
     required this.run,
     required this.isLast,
     this.onOpenArtifact,
-    this.onRetryRun,
+    this.onRunNow,
   });
 
   final V2TimelineRun run;
   final bool isLast;
   final ValueChanged<V2TimelineRun>? onOpenArtifact;
-  final ValueChanged<V2TimelineRun>? onRetryRun;
+  final ValueChanged<V2TimelineRun>? onRunNow;
 
   @override
   Widget build(BuildContext context) {
@@ -371,16 +376,24 @@ class _RunRow extends StatelessWidget {
                           : () => onOpenArtifact!(run),
                     ),
                   ],
-                  if (run.failed) ...[
+                  if (run.canRunNow) ...[
                     const SizedBox(height: OSpace.s),
                     OButton(
-                      label: 'Retry run',
-                      icon: Icons.replay_rounded,
+                      label: 'Run now',
+                      icon: Icons.play_arrow_rounded,
                       variant: OButtonVariant.secondary,
                       expand: true,
-                      onPressed: onRetryRun == null
+                      onPressed: onRunNow == null
                           ? null
-                          : () => onRetryRun!(run),
+                          : () => onRunNow!(run),
+                    ),
+                    const SizedBox(height: OSpace.xs),
+                    // The server has no per-run retry: this action starts a
+                    // fresh run, so the row says so instead of implying that
+                    // the failed occurrence above is attempted again.
+                    Text(
+                      'Starts a new run.',
+                      style: OType.caption.copyWith(color: c.textMuted),
                     ),
                   ],
                 ],

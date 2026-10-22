@@ -111,10 +111,7 @@ void main() {
     await pumpAt600(
       tester,
       CollabMembersPage(
-        data: const V2CollabMembersPageData(
-          members: _members,
-          memberCount: 2,
-        ),
+        data: const V2CollabMembersPageData(members: _members, memberCount: 2),
         onInvite: () {},
         onMemberMenu: (_) {},
         onLeave: () {},
@@ -157,7 +154,6 @@ void main() {
           name: 'Frontend builder',
           instanceLabel: 'subagent_a402',
           stepLabel: 'Step 4 of 7',
-          paceLabel: 'On pace',
           goal: 'Rebuild the landing page.',
           startedLabel: '10:41',
           elapsedLabel: '6m',

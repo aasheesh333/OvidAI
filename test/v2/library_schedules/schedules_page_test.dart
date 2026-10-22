@@ -116,6 +116,85 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('one summary line counts schedules and the next run', (
+    tester,
+  ) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        SchedulesPage(
+          data: V2SchedulesData(
+            now: DateTime(2026, 10, 22, 9),
+            schedules: [
+              V2ScheduleItem(
+                id: 'late',
+                title: 'Evening report',
+                description: 'Evening report.',
+                rule: 'Daily at 5:00 PM',
+                nextRunAt: DateTime(2026, 10, 22, 17),
+              ),
+              V2ScheduleItem(
+                id: 'off',
+                title: 'Aardvark check',
+                description: 'Aardvark check.',
+                rule: 'Daily at 8:00 AM',
+                enabled: false,
+                nextRunAt: DateTime(2026, 10, 22, 10),
+              ),
+              V2ScheduleItem(
+                id: 'soon',
+                title: 'Midday digest',
+                description: 'Midday digest.',
+                rule: 'Daily at 1:00 PM',
+                nextRunAt: DateTime(2026, 10, 22, 13),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Two enabled rows; the paused row's earlier timestamp never wins.
+    expect(find.text('3 schedules · next in 4h'), findsOneWidget);
+
+    // Next to run first, then the later one, then the paused row.
+    final soon = tester.getTopLeft(find.text('Midday digest.')).dy;
+    final late = tester.getTopLeft(find.text('Evening report.')).dy;
+    final off = tester.getTopLeft(find.text('Aardvark check.')).dy;
+    expect(soon, lessThan(late));
+    expect(late, lessThan(off));
+  });
+
+  testWidgets('the summary says all paused when nothing is enabled', (
+    tester,
+  ) async {
+    _phone(tester);
+    await tester.pumpWidget(
+      _app(
+        SchedulesPage(
+          data: V2SchedulesData(
+            now: DateTime(2026, 10, 22, 9),
+            schedules: [
+              for (final id in ['a', 'b'])
+                V2ScheduleItem(
+                  id: id,
+                  title: 'Paused $id',
+                  description: 'Paused $id.',
+                  rule: 'Daily at 9:00 AM',
+                  enabled: false,
+                  nextRunAt: DateTime(2026, 10, 22, 10),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('2 schedules · all paused'), findsOneWidget);
+  });
+
   testWidgets('the header add action creates a schedule', (tester) async {
     _phone(tester);
     var created = 0;
@@ -188,7 +267,9 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byType(Switch).first);
+    await tester.tap(
+      _switchFor('Browses 5 top tech sites and writes a short summary.'),
+    );
     await tester.pumpAndSettle();
     expect(toggled?.id, 's1');
     expect(value, isFalse);
@@ -359,7 +440,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      tester.getSemantics(find.byType(Switch).first),
+      tester.getSemantics(
+        _switchFor('Browses 5 top tech sites and writes a short summary.'),
+      ),
       isSemantics(
         label: 'Turn Morning AI news briefing on or off',
         isEnabled: true,
@@ -622,4 +705,13 @@ Finder _menuButton(String title) => find.byWidgetPredicate(
   (widget) =>
       widget is OIconButton &&
       widget.semanticLabel == 'More options for $title',
+);
+
+/// The switch inside the card whose prompt is [prompt]. The list is ordered by
+/// next run, so a card is addressed by its content rather than by position.
+Finder _switchFor(String prompt) => find.descendant(
+  of: find
+      .ancestor(of: find.text(prompt), matching: find.byType(OCard))
+      .first,
+  matching: find.byType(Switch),
 );

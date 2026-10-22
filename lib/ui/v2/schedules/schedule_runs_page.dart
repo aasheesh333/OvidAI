@@ -299,7 +299,7 @@ class ScheduleRunsPage extends StatelessWidget {
   const ScheduleRunsPage({
     super.key,
     required this.data,
-    this.onRetryRun,
+    this.onRunNow,
     this.onViewArtifact,
     this.onBackToSchedule,
     this.onMore,
@@ -307,7 +307,9 @@ class ScheduleRunsPage extends StatelessWidget {
   });
 
   final V2ScheduleRunsData data;
-  final ValueChanged<V2ScheduleRun>? onRetryRun;
+
+  /// Starts a new run of the schedule from a finished run's row.
+  final ValueChanged<V2ScheduleRun>? onRunNow;
   final ValueChanged<V2ScheduleRun>? onViewArtifact;
   final VoidCallback? onBackToSchedule;
   final VoidCallback? onMore;
@@ -391,11 +393,11 @@ class ScheduleRunsPage extends StatelessWidget {
                   final source = _runById(run.id);
                   if (source != null) onViewArtifact!(source);
                 },
-          onRetryRun: onRetryRun == null
+          onRunNow: onRunNow == null
               ? null
               : (run) {
                   final source = _runById(run.id);
-                  if (source != null) onRetryRun!(source);
+                  if (source != null) onRunNow!(source);
                 },
           onBackToSchedule: onBackToSchedule,
         ),

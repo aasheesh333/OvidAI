@@ -106,7 +106,7 @@ void main() {
       find.text('Summarized 12 news items into daily-brief.md.'),
       findsOneWidget,
     );
-    expect(find.text('Retry run'), findsOneWidget);
+    expect(find.text('Run now'), findsOneWidget);
 
     // Status is more than colour: each dot carries a check or a cross.
     expect(
@@ -193,22 +193,24 @@ void main() {
     expect(opened?.id, 'r1');
   });
 
-  testWidgets('failed run shows its detail and retries', (tester) async {
+  testWidgets('failed run shows its detail and starts a new run', (
+    tester,
+  ) async {
     _phone(tester);
     V2ScheduleRun? retried;
     await tester.pumpWidget(
-      _app(ScheduleRunsPage(data: _data, onRetryRun: (run) => retried = run)),
+      _app(ScheduleRunsPage(data: _data, onRunNow: (run) => retried = run)),
     );
     await tester.pumpAndSettle();
 
     expect(find.textContaining('storage connector'), findsOneWidget);
 
     await tester.scrollUntilVisible(
-      find.text('Retry run'),
+      find.text('Run now'),
       120,
       scrollable: find.byType(Scrollable).first,
     );
-    await tester.tap(find.text('Retry run'));
+    await tester.tap(find.text('Run now'));
     expect(retried?.id, 'r2');
   });
 
@@ -303,9 +305,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
 
-      // The failed run's detail and retry action are the densest part.
+      // The failed run's detail and run-now action are the densest part.
       await tester.scrollUntilVisible(
-        find.text('Retry run'),
+        find.text('Run now'),
         160,
         scrollable: find.byType(Scrollable).first,
       );

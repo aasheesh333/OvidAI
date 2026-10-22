@@ -9,7 +9,10 @@ void main() {
   });
 
   test('the gallery covers every approved area', () {
-    expect(v2Screens.length, greaterThanOrEqualTo(50));
+    // The floor moved from 50 to 49 when the duplicate `share_sheet` gallery
+    // row was removed: `ShareSheet` is `ShareChatSheet`'s creator surface, not
+    // a screen the app can open on its own.
+    expect(v2Screens.length, greaterThanOrEqualTo(49));
     final groups = v2Screens.map((s) => s.group).toSet();
     expect(
       groups,
@@ -45,7 +48,6 @@ void main() {
         'session_actions',
         'branch_picker',
         'take_control',
-        'share_sheet',
         'share_chat',
       ]),
     );

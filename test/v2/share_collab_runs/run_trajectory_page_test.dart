@@ -659,4 +659,64 @@ void main() {
       expect(find.text('You'), findsOneWidget);
     }
   });
+
+  testWidgets(
+    'a settled run summarises steps, tools and duration in one line',
+    (tester) async {
+      await pumpAt(
+        tester,
+        RunTrajectoryPage(
+          data: V2RunTrajectoryPageData(
+            title: 'Landing page',
+            runLabel: 'Run 18',
+            startedAt: _at(41),
+            endedAt: _at(41).add(const Duration(seconds: 41)),
+            steps: _completed(_steps),
+          ),
+        ),
+      );
+
+      // 4 steps, 2 of them tool calls, no subagents, 41 s from the real clock.
+      expect(find.text('4 steps · 2 tools · 41s'), findsOneWidget);
+    },
+  );
+
+  testWidgets('a running run counts steps so far and prints no duration', (
+    tester,
+  ) async {
+    await pumpAt(
+      tester,
+      RunTrajectoryPage(
+        data: V2RunTrajectoryPageData(
+          title: 'Landing page',
+          runLabel: 'Run 18',
+          startedAt: _at(41),
+          steps: _steps,
+        ),
+      ),
+    );
+
+    expect(find.text('4 steps so far'), findsOneWidget);
+    expect(find.textContaining('41s'), findsNothing);
+  });
+
+  testWidgets(
+    'the strip reads as one sentence and shows a dash when the end is unknown',
+    (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpAt(
+        tester,
+        RunTrajectoryPage(data: _data(steps: _completed(_steps))),
+      );
+
+      expect(find.text('4 steps · 2 tools · —'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel(
+          'Run summary, 4 steps, 2 tools, duration not reported',
+        ),
+        findsOneWidget,
+      );
+      handle.dispose();
+    },
+  );
 }

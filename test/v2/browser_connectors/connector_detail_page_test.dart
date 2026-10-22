@@ -134,6 +134,57 @@ void main() {
     expect(find.text('Automatic sync'), findsNothing);
   });
 
+  testWidgets('an empty tool manifest says so instead of drawing a list', (
+    tester,
+  ) async {
+    await _pump(tester, ConnectorDetailPage(data: _data()));
+
+    await _scrollTo(tester, find.text('PERMISSIONS'));
+    expect(
+      find.text(
+        'Which tools a grant enables is not reported by this server yet.',
+      ),
+      findsOneWidget,
+    );
+    // No invented rows and no empty section heading.
+    expect(find.byKey(const Key('connector-tools-unreported')), findsOneWidget);
+    expect(find.text('Tools'), findsNothing);
+  });
+
+  testWidgets('permissions list the tools when the model carries them', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      ConnectorDetailPage(
+        data: V2ConnectorDetailData(
+          id: 'github',
+          name: 'GitHub',
+          description: 'Read repositories and review code.',
+          connected: true,
+          permissions: _permissions,
+          tools: const [
+            V2ConnectorTool(id: 'repo_read', name: 'read_file'),
+            V2ConnectorTool(
+              id: 'pr_open',
+              name: 'open_pull_request',
+              description: 'Open a pull request.',
+            ),
+          ],
+        ),
+      ),
+    );
+
+    await _scrollTo(tester, find.byKey(const Key('connector-tool-pr_open')));
+    // One line per tool; the description only appears when one was supplied.
+    expect(find.text('read_file'), findsOneWidget);
+    expect(
+      find.text('open_pull_request — Open a pull request.'),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('connector-tools-unreported')), findsNothing);
+  });
+
   testWidgets('detail renders in dark theme', (tester) async {
     await _pump(
       tester,

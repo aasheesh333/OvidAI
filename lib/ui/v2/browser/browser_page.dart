@@ -58,6 +58,8 @@ class V2BrowserData {
     this.status = V2BrowserStatus.content,
     this.frame,
     this.viewportStatus = V2ViewportStatus.live,
+    this.fps,
+    this.headless = false,
     this.cursor,
     this.controlling = false,
     this.keyboard = false,
@@ -80,6 +82,15 @@ class V2BrowserData {
 
   /// What the live picture is doing, separate from the page status.
   final V2ViewportStatus viewportStatus;
+
+  /// The server's measured screencast frame rate, or null when it does not
+  /// report one. Null means "unknown": the page shows no number at all rather
+  /// than inventing one.
+  final double? fps;
+
+  /// True after the server went headless (45 s without human input): the page
+  /// stays open but there is no picture.
+  final bool headless;
 
   /// Where Ovid's pointer is inside the frame, normalized to `0..1`.
   final V2ViewportCursor? cursor;
@@ -157,6 +168,13 @@ class BrowserPage extends StatelessWidget {
   /// A tap on the live picture while the person controls it, normalized to
   /// the frame.
   final void Function(double x, double y)? onPageTap;
+
+  /// Key for the status pill carrying the live frame rate / headless state.
+  /// The pill is only mounted when the server reported one of them.
+  static const statusPillKey = ValueKey<String>('browser-status-pill');
+
+  /// Key for the "Headless" badge inside the status pill.
+  static const headlessBadgeKey = ValueKey<String>('browser-status-headless');
 
   @override
   Widget build(BuildContext context) {
@@ -257,38 +275,61 @@ class BrowserPage extends StatelessWidget {
       top: false,
       child: Padding(
         padding: EdgeInsets.fromLTRB(r.gutter, 0, r.gutter, OSpace.m),
-        child: Stack(
-          fit: StackFit.expand,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _frame(context, viewport),
-            if (!data.controlling && onTakeControl != null)
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: OSpace.m,
-                child: Center(
-                  child: BrowserTakeControlPill(onPressed: onTakeControl),
-                ),
-              ),
-            if (data.controlling)
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: OSpace.m,
-                child: Center(
-                  child: BrowserControlBar(
-                    controlling: true,
-                    keyboard: data.keyboard,
-                    canGoBack: data.canGoBack,
-                    canGoForward: data.canGoForward,
-                    onTakeControl: onTakeControl,
-                    onReleaseControl: onReleaseControl,
-                    onToggleKeyboard: onToggleKeyboard,
-                    onBack: onBack,
-                    onForward: onForward,
+            // Stream facts the server actually reported. Absent fps means
+            // "unknown" — the pill is not mounted at all, so no number is
+            // ever invented.
+            if (data.fps != null || data.headless)
+              Padding(
+                padding: const EdgeInsets.only(bottom: OSpace.s),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: _BrowserStatusPill(
+                    fps: data.fps,
+                    headless: data.headless,
                   ),
                 ),
               ),
+            Expanded(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  _frame(context, viewport),
+                  if (!data.controlling && onTakeControl != null)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: OSpace.m,
+                      child: Center(
+                        child: BrowserTakeControlPill(
+                          onPressed: onTakeControl,
+                        ),
+                      ),
+                    ),
+                  if (data.controlling)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: OSpace.m,
+                      child: Center(
+                        child: BrowserControlBar(
+                          controlling: true,
+                          keyboard: data.keyboard,
+                          canGoBack: data.canGoBack,
+                          canGoForward: data.canGoForward,
+                          onTakeControl: onTakeControl,
+                          onReleaseControl: onReleaseControl,
+                          onToggleKeyboard: onToggleKeyboard,
+                          onBack: onBack,
+                          onForward: onForward,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
           ],
         ),
       ),
@@ -310,6 +351,53 @@ class BrowserPage extends StatelessWidget {
       child: ClipRRect(
         borderRadius: BorderRadius.circular(ORadius.l),
         child: child,
+      ),
+    );
+  }
+}
+
+/// The live-stream facts the server reported: the measured frame rate and the
+/// headless state.
+///
+/// Nothing here is inferred. A null [fps] renders no number at all, and the
+/// headless badge exists only when [headless] is true.
+class _BrowserStatusPill extends StatelessWidget {
+  const _BrowserStatusPill({required this.fps, required this.headless});
+
+  final double? fps;
+  final bool headless;
+
+  /// "4 fps" for a whole rate, "3.7 fps" for a measured fractional one.
+  static String formatFps(double value) {
+    final rounded = value.roundToDouble();
+    if ((value - rounded).abs() < 0.05) return '${rounded.toInt()} fps';
+    return '${value.toStringAsFixed(1)} fps';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final value = fps;
+    final fpsLabel = value == null ? null : formatFps(value);
+    return MediaQuery.withClampedTextScaling(
+      maxScaleFactor: 1.3,
+      child: Row(
+        key: BrowserPage.statusPillKey,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (fpsLabel != null)
+            OPill(
+              icon: Icons.speed_rounded,
+              label: fpsLabel,
+              semanticLabel: 'Live at $fpsLabel',
+            ),
+          if (fpsLabel != null && headless) const SizedBox(width: OSpace.xs),
+          if (headless)
+            OPill(
+              key: BrowserPage.headlessBadgeKey,
+              dot: true,
+              label: 'Headless',
+            ),
+        ],
       ),
     );
   }

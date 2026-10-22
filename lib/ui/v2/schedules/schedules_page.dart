@@ -51,22 +51,29 @@ class V2ScheduleItem {
     return rule;
   }
 
+  /// The next occurrence as a real instant, from the cadence or the server's
+  /// timestamp. Null when the schedule is paused, when neither source can be
+  /// expanded, or when the only timestamp has already passed.
+  ///
+  /// This is what orders the list and what the summary's "next in 4h" is
+  /// measured from — never a label that cannot be compared.
+  DateTime? nextOccurrence(DateTime now) {
+    if (!enabled) return null;
+    final computed = cadence?.nextRunAfter(now);
+    if (computed != null) return computed;
+    final at = nextRunAt?.toLocal();
+    if (at != null && at.isAfter(now)) return at;
+    return null;
+  }
+
   /// The next run computed from the real cadence, never a hardcoded label.
   ///
   /// A paused schedule has no next run, and a server timestamp that has already
   /// passed is not shown as if it were still ahead.
   String? nextRunLabel(DateTime now) {
     if (!enabled) return null;
-    final cadence = this.cadence;
-    if (cadence != null) {
-      final computed = describeNextRun(cadence, now);
-      if (computed != null) return computed;
-    }
-    final at = nextRunAt?.toLocal();
-    if (at != null) {
-      if (!at.isAfter(now)) return null;
-      return describeNextRunAt(at, now);
-    }
+    final next = nextOccurrence(now);
+    if (next != null) return describeNextRunAt(next, now);
     return nextRun;
   }
 
@@ -102,10 +109,72 @@ class V2SchedulesData {
   /// tests; defaults to now.
   final DateTime? now;
   final String errorMessage;
+
+  /// The list in display order: the schedule that runs next first, then by
+  /// title, with paused schedules last.
+  ///
+  /// The next occurrence is computed once per row, so a large list does not
+  /// re-expand every cadence on every comparison.
+  List<V2ScheduleItem> ordered(DateTime now) {
+    final keyed = <(V2ScheduleItem, DateTime?)>[
+      for (final schedule in schedules)
+        (schedule, schedule.nextOccurrence(now)),
+    ];
+    keyed.sort((a, b) {
+      final aNext = a.$2;
+      final bNext = b.$2;
+      if (aNext != null && bNext != null) {
+        final byTime = aNext.compareTo(bNext);
+        if (byTime != 0) return byTime;
+      } else if (aNext != null) {
+        return -1;
+      } else if (bNext != null) {
+        return 1;
+      }
+      // Paused rows have no next occurrence, so they fall below every row that
+      // can still run, whatever their title.
+      if (a.$1.enabled != b.$1.enabled) return a.$1.enabled ? -1 : 1;
+      return a.$1.title.toLowerCase().compareTo(b.$1.title.toLowerCase());
+    });
+    return <V2ScheduleItem>[for (final entry in keyed) entry.$1];
+  }
+
+  /// One line over the list: "3 schedules · next in 4h".
+  ///
+  /// The count is every saved schedule; the "next" is the earliest occurrence
+  /// among the enabled ones, so a paused row never claims the queue. When
+  /// nothing is enabled the line says so instead of inventing a time.
+  String summary(DateTime now) {
+    final total = schedules.length;
+    final count = '$total ${total == 1 ? 'schedule' : 'schedules'}';
+    DateTime? next;
+    for (final schedule in schedules) {
+      final at = schedule.nextOccurrence(now);
+      if (at == null) continue;
+      if (next == null || at.isBefore(next)) next = at;
+    }
+    if (next != null) {
+      return '$count · next in ${_timeUntil(next.difference(now))}';
+    }
+    final anyEnabled = schedules.any((schedule) => schedule.enabled);
+    return '$count · ${anyEnabled ? 'next run unknown' : 'all paused'}';
+  }
 }
 
-/// All of the user's recurring tasks. One card per schedule: the prompt, its
-/// cadence and the next run.
+/// A compact distance for the summary line: "12m", "4h", "2d".
+String _timeUntil(Duration until) {
+  final minutes = until.inMinutes;
+  if (minutes < 1) return 'under a minute';
+  if (minutes < Duration.minutesPerHour) return '${minutes}m';
+  if (minutes < Duration.minutesPerDay) {
+    final hours = (minutes / Duration.minutesPerHour).round();
+    return hours < Duration.hoursPerDay ? '${hours}h' : '1d';
+  }
+  return '${(minutes / Duration.minutesPerDay).round()}d';
+}
+
+/// All of the user's recurring tasks. One summary line, then one card per
+/// schedule: the prompt, its cadence and the next run, next-to-run first.
 class SchedulesPage extends StatelessWidget {
   const SchedulesPage({
     super.key,
@@ -179,30 +248,49 @@ class SchedulesPage extends StatelessWidget {
   }
 
   Widget _content(BuildContext context, OColors c) {
-    final schedules = [
-      for (final schedule in data.schedules)
-        if (schedule.enabled) schedule,
-      for (final schedule in data.schedules)
-        if (!schedule.enabled) schedule,
-    ];
-    return ListView.builder(
-      padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
-      itemCount: schedules.length,
-      itemBuilder: (context, index) {
-        final card = _card(context, c, schedules[index]);
-        if (index >= 8) return card;
-        final delay = OMotion.stagger * index;
-        return OFadeSlide(
-          delay: delay > const Duration(milliseconds: 400)
-              ? const Duration(milliseconds: 400)
-              : delay,
-          child: card,
-        );
-      },
+    final now = data.now ?? DateTime.now();
+    final schedules = data.ordered(now);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // One line, above the list: how many schedules there are and when the
+        // first one runs. The cards below already carry every other detail.
+        Padding(
+          padding: const EdgeInsets.only(top: OSpace.s),
+          child: Text(
+            data.summary(now),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+        ),
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
+            itemCount: schedules.length,
+            itemBuilder: (context, index) {
+              final card = _card(context, c, schedules[index], now);
+              if (index >= 8) return card;
+              final delay = OMotion.stagger * index;
+              return OFadeSlide(
+                delay: delay > const Duration(milliseconds: 400)
+                    ? const Duration(milliseconds: 400)
+                    : delay,
+                child: card,
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 
-  Widget _card(BuildContext context, OColors c, V2ScheduleItem schedule) {
+  Widget _card(
+    BuildContext context,
+    OColors c,
+    V2ScheduleItem schedule,
+    DateTime now,
+  ) {
     final onTap = onScheduleTap;
     final onToggleSchedule = onToggle;
     final menuEnabled =
@@ -213,7 +301,7 @@ class SchedulesPage extends StatelessWidget {
     final prompt = schedule.description.trim().isEmpty
         ? schedule.title
         : schedule.description.trim();
-    final nextRun = schedule.nextRunLabel(data.now ?? DateTime.now());
+    final nextRun = schedule.nextRunLabel(now);
     // One line carries the cadence and, when the schedule is on, its next run.
     final meta = [
       if (schedule.ruleLabel.isNotEmpty) schedule.ruleLabel,

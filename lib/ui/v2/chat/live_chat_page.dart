@@ -47,9 +47,20 @@ class V2LiveUserMessage extends V2LiveChatItem {
 }
 
 class V2LiveAssistantMessage extends V2LiveChatItem {
-  const V2LiveAssistantMessage({required super.id, required this.markdown});
+  const V2LiveAssistantMessage({
+    required super.id,
+    required this.markdown,
+    this.serverMessageId,
+  });
 
   final String markdown;
+
+  /// The server's message id when this row is a stored answer, else null.
+  ///
+  /// Regenerate and Branch address a message by its server id, so a row the
+  /// server does not store (a turn tail, a locally minted row) must not offer
+  /// them. Null keeps those actions off the menu; Copy still works.
+  final String? serverMessageId;
 }
 
 class V2LiveThinking extends V2LiveChatItem {
@@ -127,6 +138,20 @@ class V2LiveArtifact extends V2LiveChatItem {
   /// The artifact's text when the host already has it (an inline page). The
   /// detail page and Copy use it; a URL-only file is fetched on demand.
   final String? content;
+}
+
+/// What a transcript action really did.
+///
+/// The host runs the server call and returns this; the page never removes a
+/// row on its own. [message] is the copy to show, and is empty when the
+/// outcome needs no announcement (a regenerating run shows its own state).
+@immutable
+class V2MessageActionReport {
+  const V2MessageActionReport.done([this.message = '']) : ok = true;
+  const V2MessageActionReport.failed(this.message) : ok = false;
+
+  final bool ok;
+  final String message;
 }
 
 /// A spoken answer with the visual summary card that backs it up.
@@ -243,6 +268,8 @@ class V2LiveChatPage extends StatefulWidget {
     this.onStop,
     this.onDownload,
     this.onCopyCode,
+    this.onRegenerateMessage,
+    this.onBranchMessage,
     this.onOpenLink,
     this.onDownloadLink,
     this.onThinkingToggle,
@@ -283,6 +310,17 @@ class V2LiveChatPage extends StatefulWidget {
 
   /// Copy the text of a code block in an assistant message.
   final ValueChanged<String>? onCopyCode;
+
+  /// Run the answer's prompt again on the server, replacing the answer (and
+  /// anything after it). Null hides Regenerate. The returned report carries
+  /// the real outcome: the page never drops a row before the server agrees.
+  final Future<V2MessageActionReport> Function(String serverMessageId)?
+  onRegenerateMessage;
+
+  /// Start a new chat seeded with this history, up to the answer. Null hides
+  /// Branch from here. The host owns the navigation and reports what happened.
+  final Future<V2MessageActionReport> Function(String serverMessageId)?
+  onBranchMessage;
 
   /// Open an image or non-download link from an assistant message.
   final ValueChanged<String>? onOpenLink;
@@ -379,6 +417,10 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
   final Set<String> _expandedThinking = <String>{};
   final Set<String> _expandedTools = <String>{};
   final Set<String> _expandedTranscripts = <String>{};
+
+  /// Assistant rows with a server action in flight. The row shows a small
+  /// progress glyph in place of its menu button until the host reports back.
+  final Set<String> _busyMessageIds = <String>{};
 
   final List<V2ComposerAttachment> _attachments = [];
   final Map<String, String> _pickedSessionIds = {};
@@ -544,6 +586,20 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
       if (label != null) return label;
     }
     return null;
+  }
+
+  /// User and answer rows after [index] — the messages a history edit from
+  /// this row would remove. Tool and artifact rows belong to those turns, so
+  /// counting them again would overstate the loss.
+  static int _messageCountAfter(List<V2LiveChatItem> items, int index) {
+    var count = 0;
+    for (var i = index + 1; i < items.length; i++) {
+      if (items[i] is V2LiveUserMessage ||
+          items[i] is V2LiveAssistantMessage) {
+        count++;
+      }
+    }
+    return count;
   }
 
   V2MentionSource get _mentionSource =>
@@ -857,9 +913,223 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
       V2ArtifactCopyResult.link => 'Link copied',
       V2ArtifactCopyResult.failed => 'Could not copy',
     };
+    _notify(message);
+  }
+
+  void _notify(String message) {
+    if (!mounted) return;
     ScaffoldMessenger.maybeOf(context)
       ?..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// An answer plus its one quiet action affordance: a muted ⋯ at the right
+  /// edge. Copy, Branch and Regenerate live in that menu, so the transcript
+  /// stays text rather than three rows of buttons.
+  Widget _assistantMessage(
+    V2LiveAssistantMessage message, {
+    required bool isLastAssistant,
+    required int laterMessages,
+    required int laterRows,
+  }) {
+    final blocks = V2MessageBlocks(
+      markdown: message.markdown,
+      onCopyCode: widget.onCopyCode,
+      onOpenLink: _handleOpenLink,
+      onDownload: _handleDownloadLink,
+    );
+    final busy = _busyMessageIds.contains(message.id);
+    final canBranch =
+        message.serverMessageId != null && widget.onBranchMessage != null;
+    // Regenerate only on the newest answer of a settled run: an older one
+    // would delete everything after it, and a running one would race the live
+    // answer.
+    final canRegenerate =
+        isLastAssistant &&
+        !widget.data.running &&
+        message.serverMessageId != null &&
+        widget.onRegenerateMessage != null;
+    if (!canBranch && !canRegenerate && message.markdown.trim().isEmpty) {
+      return blocks;
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        blocks,
+        Align(
+          alignment: Alignment.centerRight,
+          child: busy
+              ? Semantics(
+                  label: 'Working on this message',
+                  liveRegion: true,
+                  child: const SizedBox(
+                    width: OSpace.touch,
+                    height: OSpace.touch,
+                    child: Center(
+                      child: SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ),
+                  ),
+                )
+              : OIconButton(
+                  icon: Icons.more_horiz_rounded,
+                  semanticLabel: 'Actions',
+                  size: 18,
+                  onPressed: () => unawaited(
+                    _openMessageActions(
+                      message,
+                      canRegenerate: canRegenerate,
+                      laterMessages: laterMessages,
+                      laterRows: laterRows,
+                    ),
+                  ),
+                ),
+        ),
+      ],
+    );
+  }
+
+  /// The answer's action menu. Only actions the host really wired appear, so
+  /// a row never opens a sheet full of controls that cannot act.
+  Future<void> _openMessageActions(
+    V2LiveAssistantMessage message, {
+    required bool canRegenerate,
+    required int laterMessages,
+    required int laterRows,
+  }) async {
+    final canBranch =
+        message.serverMessageId != null && widget.onBranchMessage != null;
+    final action = await showOSheet<String>(
+      context,
+      title: 'Actions',
+      builder: (sheetContext) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          OListRow(
+            title: 'Copy',
+            icon: Icons.copy_rounded,
+            showChevron: false,
+            onTap: () => Navigator.of(sheetContext).pop('copy'),
+          ),
+          if (canBranch)
+            OListRow(
+              title: 'Branch',
+              subtitle: 'New chat from this point',
+              icon: Icons.call_split_rounded,
+              showChevron: false,
+              onTap: () => Navigator.of(sheetContext).pop('branch'),
+            ),
+          if (canRegenerate)
+            OListRow(
+              title: 'Regenerate',
+              subtitle: _regenerateSubtitle(laterMessages, laterRows),
+              icon: Icons.refresh_rounded,
+              showChevron: false,
+              onTap: () => Navigator.of(sheetContext).pop('regenerate'),
+            ),
+          const SizedBox(height: OSpace.s),
+        ],
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case 'copy':
+        await _copyMessage(message);
+      case 'branch':
+        await _runMessageAction(message, branch: true);
+      case 'regenerate':
+        // Regenerating removes the answer, so anything after it goes too. A
+        // later message is destructive enough to name the count first.
+        if (laterRows > 0) {
+          final confirmed = await _confirmRegenerate(laterMessages);
+          if (!confirmed || !mounted) return;
+        }
+        await _runMessageAction(message, branch: false);
+    }
+  }
+
+  Future<void> _copyMessage(V2LiveAssistantMessage message) async {
+    final text = message.markdown.trim();
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    _notify('Copied');
+  }
+
+  /// Runs one server action and reports exactly what the host answered.
+  /// Nothing is removed here: a failed call leaves the transcript untouched.
+  Future<void> _runMessageAction(
+    V2LiveAssistantMessage message, {
+    required bool branch,
+  }) async {
+    final serverId = message.serverMessageId;
+    final handler = branch
+        ? widget.onBranchMessage
+        : widget.onRegenerateMessage;
+    if (serverId == null || handler == null) return;
+    if (!_busyMessageIds.add(message.id)) return;
+    setState(() {});
+    V2MessageActionReport report;
+    try {
+      report = await handler(serverId);
+    } catch (_) {
+      report = const V2MessageActionReport.failed(
+        'That did not work. Check your connection and try again.',
+      );
+    }
+    if (!mounted) return;
+    setState(() => _busyMessageIds.remove(message.id));
+    final text = report.message.trim();
+    if (text.isNotEmpty) _notify(text);
+    if (report.ok && !branch) _announce('Regenerating this answer');
+  }
+
+  /// The menu's one-line warning: name the message count when there is one,
+  /// otherwise say that the answer's tail goes with it.
+  static String _regenerateSubtitle(int laterMessages, int laterRows) {
+    if (laterMessages > 0) {
+      return 'Removes this answer and $laterMessages later '
+          '${laterMessages == 1 ? 'message' : 'messages'}';
+    }
+    return laterRows > 0
+        ? 'Removes this answer and what follows it'
+        : 'Run this prompt again';
+  }
+
+  Future<bool> _confirmRegenerate(int later) async {
+    final c = OColors.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        scrollable: true,
+        title: const Text('Regenerate this answer?'),
+        content: Text(
+          later > 0
+              ? 'This removes this answer and the $later '
+                    '${later == 1 ? 'message' : 'messages'} after it, along '
+                    'with anything else that follows, then runs the prompt '
+                    'again. This cannot be undone.'
+              : 'This removes this answer and everything after it, then runs '
+                    'the prompt again. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton.icon(
+            style: TextButton.styleFrom(foregroundColor: c.danger),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.refresh_rounded, size: 18),
+            label: const Text('Regenerate'),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true;
   }
 
   @override
@@ -1001,6 +1271,19 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
 
     final items = data.items;
     final gutter = OResponsive.of(context).gutter;
+    // Regenerate is safe on the newest stored answer only: an older one would
+    // also delete every message the user has read since. A run-failure note or
+    // a system tail is not an answer the server can re-run, so it never owns
+    // the action. One reverse scan keeps the lazy list from doing that work
+    // per row.
+    var lastAssistant = -1;
+    for (var i = items.length - 1; i >= 0; i--) {
+      final item = items[i];
+      if (item is V2LiveAssistantMessage && item.serverMessageId != null) {
+        lastAssistant = i;
+        break;
+      }
+    }
     // Lazy list: a 5,000-message session builds only the rows in (and just
     // around) the viewport instead of the whole transcript every frame.
     final firstCount = items.length < 6 ? items.length : 6;
@@ -1018,16 +1301,36 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
           itemCount: items.length,
           itemBuilder: (context, index) {
             final item = items[index];
+            final isLastAssistant = index == lastAssistant;
+            // What a regenerate from this answer would also remove. Only the
+            // newest answer can be regenerated, so only it pays for the scan.
+            final laterMessages = isLastAssistant
+                ? _messageCountAfter(items, index)
+                : 0;
+            // Files and tool rows after the answer are deleted with it too,
+            // even when no later message exists.
+            final laterRows = isLastAssistant ? items.length - index - 1 : 0;
+            final hasActions =
+                item is V2LiveAssistantMessage &&
+                item.markdown.trim().isNotEmpty;
             final row = Padding(
               // The id is the row's identity: a rebuild reuses the element
               // instead of re-creating it, and a host that prepends history
               // cannot shift state onto the wrong message.
               key: ValueKey('live-item-${item.id}'),
-              padding: const EdgeInsets.only(bottom: OSpace.xl),
+              padding: EdgeInsets.only(
+                // An answer's action menu is its footer: it already adds the
+                // 48 dp control box, so the row's own gap shrinks to keep the
+                // transcript's rhythm.
+                bottom: hasActions ? OSpace.s : OSpace.xl,
+              ),
               child: _buildItem(
                 context,
                 item,
                 isTail: index == items.length - 1,
+                isLastAssistant: isLastAssistant,
+                laterMessages: laterMessages,
+                laterRows: laterRows,
               ),
             );
             // A message that just arrived fades in once, in under 200 ms.
@@ -1059,18 +1362,22 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
     BuildContext context,
     V2LiveChatItem item, {
     required bool isTail,
+    required bool isLastAssistant,
+    required int laterMessages,
+    required int laterRows,
   }) {
     // The transcript is the screen. A message is text on the background or a
     // gentle bubble — no avatar, no header row, no timestamp line.
     return switch (item) {
       V2LiveUserMessage message => _UserBubble(item: message),
       // Assistant answers render full-width in the content column: plain text
-      // on the page background, not a card.
-      V2LiveAssistantMessage message => V2MessageBlocks(
-        markdown: message.markdown,
-        onCopyCode: widget.onCopyCode,
-        onOpenLink: _handleOpenLink,
-        onDownload: _handleDownloadLink,
+      // on the page background, not a card. Their actions hide in a small
+      // menu so the answer itself stays chromeless.
+      V2LiveAssistantMessage message => _assistantMessage(
+        message,
+        isLastAssistant: isLastAssistant,
+        laterMessages: laterMessages,
+        laterRows: laterRows,
       ),
       V2LiveThinking message => V2ThinkingTile(
         key: ValueKey('thinking-${message.id}'),
@@ -1106,7 +1413,6 @@ class _V2LiveChatPageState extends State<V2LiveChatPage> {
                 context,
                 fileName: message.fileName,
                 meta: message.meta,
-                statusLabel: message.statusLabel,
                 previewLabel: message.previewLabel,
                 icon: message.icon,
                 kind: message.kind,

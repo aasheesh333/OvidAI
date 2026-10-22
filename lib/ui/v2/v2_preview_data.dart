@@ -190,7 +190,7 @@ V2SettingsHubData previewSettingsHubData() {
           'crash',
           'Crash reports',
           Icons.bug_report_outlined,
-          'Anonymous and optional',
+          'Crash logs and anonymous usage counts',
         ),
         row(
           'storage',
@@ -321,17 +321,6 @@ V2SharedMemoryPageData previewSharedMemoryData() {
     ],
     onEnabledChanged: _noopBool,
     onScopeChanged: _noopScope,
-  );
-}
-
-/// Share sheet mid-flight as a Collab room that viewers can also fork.
-V2ShareSheetData previewShareSheetData() {
-  return const V2ShareSheetData(
-    link: 'ovidsi.com/c/79f9b4c0e',
-    creatorName: 'Aarav Sharma',
-    mode: V2ShareMode.collab,
-    memberCount: 4,
-    viewerCanFork: true,
   );
 }
 
@@ -1136,8 +1125,7 @@ List<V2ModelOption> previewModelOptions({required bool locked}) =>
         id: 'ovid-2-flash',
         name: 'Ovid 2 Flash',
         subtitle: 'Fast answers and small edits',
-        speed: 'Fast',
-        costHint: '1 credit',
+        costHint: 'Included',
         locked: locked,
         tag: locked ? 'Go and up' : null,
         icon: Icons.bolt_rounded,
@@ -1146,8 +1134,7 @@ List<V2ModelOption> previewModelOptions({required bool locked}) =>
         id: 'ovid-2-pro',
         name: 'Ovid 2 Pro',
         subtitle: 'Hard reasoning and long code',
-        speed: 'Slower',
-        costHint: '4 credits',
+        costHint: 'Included',
         locked: locked,
         tag: locked ? 'Plus and up' : 'Best for code',
         icon: Icons.psychology_rounded,
@@ -1156,7 +1143,6 @@ List<V2ModelOption> previewModelOptions({required bool locked}) =>
         id: 'custom-anthropic',
         name: 'Claude (your key)',
         subtitle: 'Connected provider',
-        speed: 'Standard',
         costHint: 'Your key',
         locked: locked,
         tag: locked ? 'Paid plan' : null,
@@ -1229,10 +1215,12 @@ V2LiveChatData previewLiveChatData() {
 
 /// A finished run with five steps and one subagent.
 V2RunTrajectoryPageData previewRunTrajectoryData() {
-  return const V2RunTrajectoryPageData(
+  return V2RunTrajectoryPageData(
     title: 'Auth refresh',
     runLabel: 'Run 4 of 7',
-    steps: <V2RunStep>[
+    startedAt: DateTime(2026, 10, 22, 10, 41),
+    endedAt: DateTime(2026, 10, 22, 10, 43, 30),
+    steps: const <V2RunStep>[
       V2RunStep(
         id: 's1',
         title: 'Plan the change',
@@ -1246,6 +1234,7 @@ V2RunTrajectoryPageData previewRunTrajectoryData() {
         detail: 'Found the guard in lib/core/auth_guard.dart.',
         durationLabel: '4s',
         kind: V2RunStepKind.search,
+        toolName: 'workspace_search',
         sources: <V2RunSource>[V2RunSource(label: 'lib/core/auth_guard.dart')],
       ),
       V2RunStep(
@@ -1254,6 +1243,7 @@ V2RunTrajectoryPageData previewRunTrajectoryData() {
         detail: 'Refreshed the token once before retrying.',
         durationLabel: '48s',
         kind: V2RunStepKind.write,
+        toolName: 'fs_edit',
         fileName: 'auth_service.dart',
         fileMeta: '+14 −6',
       ),
@@ -1283,7 +1273,6 @@ V2SubagentPageData previewSubagentData() {
     name: 'Explorer',
     instanceLabel: 'Instance 2 of 3',
     stepLabel: 'Reading chat_page.dart',
-    paceLabel: 'On pace',
     goal: 'Find every caller of AuthService.signIn.',
     startedLabel: 'Started 10:43',
     elapsedLabel: '2m 10s elapsed',
@@ -1559,9 +1548,7 @@ V2ArtifactDetailData previewArtifactDetailData() {
     typeLabel: 'Dart',
     sizeLabel: '6 KB',
     createdLabel: 'Created 21 Oct, 10:44',
-    versionLabel: 'Version 3',
     sourceChatTitle: 'Auth refresh',
-    previewHeadline: 'Auth token refresh',
     previewCodeFile: 'lib/core/auth_service.dart',
     previewCode:
         'class AuthService {\n'
@@ -1588,9 +1575,13 @@ V2ArtifactDetailData previewArtifactDetailData() {
   );
 }
 
-/// Three projects, one shared with the team.
+/// Four projects, one shared with the team.
+///
+/// Four is the threshold at which the Projects page shows its sort chips, so
+/// the gallery exercises the control rather than hiding it.
 V2ProjectsData previewProjectsData() {
-  return const V2ProjectsData(
+  final now = DateTime.utc(2026, 10, 22, 9);
+  return V2ProjectsData(
     projects: <V2Project>[
       V2Project(
         id: 'redesign',
@@ -1599,6 +1590,7 @@ V2ProjectsData previewProjectsData() {
         storageLabel: '340 MB',
         shared: true,
         memberInitials: <String>['PN', 'RM', 'MI'],
+        updatedAt: now.subtract(const Duration(hours: 2)),
         updatedLabel: 'Updated 2h ago',
       ),
       V2Project(
@@ -1606,6 +1598,7 @@ V2ProjectsData previewProjectsData() {
         name: 'Auth refactor',
         chatCount: 5,
         storageLabel: '48 MB',
+        updatedAt: now.subtract(const Duration(days: 1)),
         updatedLabel: 'Updated yesterday',
       ),
       V2Project(
@@ -1613,8 +1606,17 @@ V2ProjectsData previewProjectsData() {
         name: 'Launch checklist',
         chatCount: 3,
         storageLabel: '12 MB',
+        updatedAt: now.subtract(const Duration(days: 7)),
         updatedLabel: 'Updated last week',
         colorKey: 'teal',
+      ),
+      V2Project(
+        id: 'pricing',
+        name: 'Pricing page copy',
+        chatCount: 2,
+        storageLabel: '6 MB',
+        updatedAt: now.subtract(const Duration(days: 3)),
+        updatedLabel: 'Updated 3d ago',
       ),
     ],
   );
@@ -1690,20 +1692,12 @@ V2UsageData previewUsageData() {
     dailyUsedLabel: '8.2M',
     dailyLimitLabel: '20M',
     dailyFraction: 0.41,
-    dailyCapLabel: '20M tokens a day',
     resetLabel: 'Resets in 6h',
     monthlyUsedLabel: '44M',
     monthlyLimitLabel: '200M',
-    monthlyFraction: 0.22,
-    monthlyPercentLabel: '22% of the month',
-    monthlyCapLabel: '200M tokens a month',
-    billingNote: 'Renews on 12 Nov',
     requestsLabel: '128',
     imagesLabel: '36',
-    storageUsedLabel: '6.2 GB',
     storageLimitLabel: '15 GB',
-    storageFraction: 0.41,
-    showFreePlanNote: false,
     days: const <V2UsageDay>[
       V2UsageDay(id: 'mon', label: 'Mon', fraction: 0.42, valueLabel: '4.2M'),
       V2UsageDay(id: 'tue', label: 'Tue', fraction: 0.68, valueLabel: '6.8M'),
@@ -1804,6 +1798,8 @@ V2DataControlPageData previewDataControlData() {
     ],
     hasData: true,
     accountContact: 'aarav@gmail.com',
+    crashReports: false,
+    onCrashReportsChanged: (_) {},
     onExport: () {},
     onChooseImport: () {},
     onDeleteData: () {},

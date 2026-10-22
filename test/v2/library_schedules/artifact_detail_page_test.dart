@@ -89,7 +89,6 @@ const _codeData = V2ArtifactDetailData(
   typeLabel: 'HTML5 + Tailwind',
   sizeLabel: '14.2 KB',
   createdLabel: 'Created today at 10:24 AM',
-  versionLabel: 'v2.4 Ready',
   sourceChatTitle: 'Landing page redesign',
   previewKind: V2ArtifactPreviewKind.code,
   previewCodeFile: 'agent_manifest.ts',
@@ -156,6 +155,8 @@ void main() {
     expect(find.text('Lines of code'), findsOneWidget);
     expect(find.text('Artifact hash'), findsOneWidget);
     expect(find.text('Access'), findsOneWidget);
+    // The origin chat really shows when the row carries one.
+    expect(find.text('From chat · Landing page redesign'), findsOneWidget);
   });
 
   testWidgets('renders in dark mode', (tester) async {
@@ -291,6 +292,8 @@ void main() {
     expect(find.text('No image preview'), findsOneWidget);
     expect(find.text('Type'), findsOneWidget);
     expect(find.text('PNG image'), findsOneWidget);
+    // No chat on the row: no origin line is invented.
+    expect(find.textContaining('From chat'), findsNothing);
   });
 
   testWidgets('preview adds no header, no note and no extra rows', (

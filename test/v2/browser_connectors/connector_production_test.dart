@@ -297,6 +297,9 @@ void main() {
         ConnectorsPage(data: _list(), plan: V2ConnectorPlan.plus),
       );
 
+      // Gmail is not installed, so the match is in the Available tab.
+      await tester.tap(find.byKey(const Key('connector-tab-available')));
+      await tester.pump(const Duration(milliseconds: 300));
       await tester.enterText(find.byType(TextField).first, 'mail');
       await tester.pump(const Duration(milliseconds: 400));
 

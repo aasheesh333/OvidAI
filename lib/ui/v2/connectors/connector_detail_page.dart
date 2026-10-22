@@ -761,6 +761,29 @@ class _ConnectorDetailPageState extends State<ConnectorDetailPage> {
               onChanged: (value) => _togglePermission(permissions[i], value),
             ),
           ],
+          // What each grant unlocks. When the model carries tools they are
+          // listed name-first; when it does not, say so rather than drawing an
+          // empty list. Nothing in the app fetches a per-grant tool manifest
+          // yet, so this line is the current truth for every connector.
+          const SizedBox(height: OSpace.s),
+          if (data.tools.isEmpty)
+            Text(
+              'Which tools a grant enables is not reported by this server yet.',
+              key: const Key('connector-tools-unreported'),
+              style: OType.caption.copyWith(color: c.textMuted),
+            )
+          else
+            for (final tool in data.tools)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: OSpace.xs),
+                child: Text(
+                  tool.description.isEmpty
+                      ? tool.name
+                      : '${tool.name} — ${tool.description}',
+                  key: ValueKey('connector-tool-${tool.id}'),
+                  style: OType.caption.copyWith(color: c.textMuted),
+                ),
+              ),
         ],
         const SizedBox(height: OSpace.xxl),
         OButton(
@@ -867,6 +890,12 @@ class _ReportLine extends StatelessWidget {
 ///
 /// A row with no saved connection is *not* connected: the page then offers the
 /// real setup form instead of a "Connected" badge with nothing behind it.
+///
+/// `tools` stays empty: the gateway lists tools for *curated* servers on
+/// `GET /mcp/catalog` (`items[].tools`), but the app has no client for that
+/// route, and a custom server's tools would need a live `tools/list`. Until
+/// one of those reaches this adapter, the detail page says the tool list is
+/// not reported instead of inventing one.
 V2ConnectorDetailData v2ConnectorDetailForRow(
   V2Connector row, {
   V2ConnectorConnection? connection,

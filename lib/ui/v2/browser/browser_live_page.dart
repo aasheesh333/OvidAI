@@ -27,8 +27,33 @@ import 'viewport.dart';
 ///  * a tap on the picture while controlling is sent as page input;
 ///  * the keyboard tool is a real text bridge to `browser_input`.
 ///
-/// Controls the server cannot support (history, upload, download, closing a
-/// tab) are simply not passed, so the page never renders a dead button.
+/// The gateway accepts exactly five viewer ops for a browser attach —
+/// `browser_attach`, `browser_detach`, `browser_input`, `browser_takeover`
+/// and `browser_switch_tab` (`cloud/packages/shared/src/ws.ts`) — and the
+/// only browser op it sends back is `browser_state`
+/// (`cloud/packages/shared/src/browser.ts`); frames arrive as binary
+/// messages and failures as `error` ops. The screen therefore omits the
+/// rest instead of rendering dead buttons:
+///
+///  * **history (back / forward)** and **reload** — no viewer op and no
+///    `browser_state` field for them, so a tap could not reach the page.
+///    `browser_input` only presses keys into the page (`input.ts`), not
+///    browser chrome. The agent can do all three (`browser_back`,
+///    `browser_forward`, `browser_reload`); the viewer cannot.
+///  * **upload** — no viewer op. `browser_upload` is an agent tool that takes
+///    a workspace path (`cloud/packages/browser/src/tools/transfers.ts`), not
+///    bytes from a viewer's file picker, so a file input here would go
+///    nowhere.
+///  * **download** — no viewer op, and neither `browser_state` nor any
+///    browser channel carries a download name or URL. `browser_download` and
+///    page-initiated saves write into the owning chat's workspace and emit an
+///    `artifact_created` event on that chat's stream
+///    (`cloud/packages/browser/src/tools/downloadWiring.ts`), which this
+///    screen does not subscribe to; the file appears in the chat transcript
+///    and the Artifacts library instead.
+///  * **close tab** — no close op (and no `new_tab`): tabs are agent-owned
+///    (`browser_new_tab` / `browser_close_tab`), so `closable: false` is
+///    passed for every tab and the strip draws no close control.
 class BrowserLivePage extends StatefulWidget {
   const BrowserLivePage({
     super.key,
@@ -501,7 +526,8 @@ class _BrowserLivePageState extends State<BrowserLivePage>
             id: '${tab.index}',
             title: title.isEmpty ? host : title,
             host: host,
-            // Tabs are agent-owned and the gateway has no close op.
+            // Tabs are agent-owned: no viewer close op exists (see the
+            // class doc comment).
             closable: false,
           ),
         );
@@ -515,10 +541,14 @@ class _BrowserLivePageState extends State<BrowserLivePage>
       status: status,
       frame: _frameProvider,
       viewportStatus: _viewportStatus,
+      // Straight from `browser_state`: null fps stays unknown (no number is
+      // painted), and headless only shows when the server says so.
+      fps: state?.fps,
+      headless: state?.headless ?? false,
       controlling: controlling,
       keyboard: _keyboard.value,
-      // The gateway exposes no history op, so no back / forward control is
-      // passed and the bar does not render one.
+      // No viewer history op and no `browser_state` field for it, so no back
+      // / forward control is passed and the bar does not render one.
       canGoBack: false,
       canGoForward: false,
       viewportAspectRatio: state == null

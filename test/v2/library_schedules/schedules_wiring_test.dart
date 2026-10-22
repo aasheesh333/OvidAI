@@ -717,7 +717,7 @@ void main() {
 
       expect(find.text('Running'), findsOneWidget);
       expect(find.text('2m'), findsOneWidget);
-      expect(find.text('Retry run'), findsNothing);
+      expect(find.text('Run now'), findsNothing);
       expect(find.text('0.0 % · 1 run'), findsOneWidget);
     });
 

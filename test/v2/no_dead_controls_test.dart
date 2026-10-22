@@ -298,7 +298,7 @@ void main() {
       handle.dispose();
     });
 
-    testWidgets('run retry and artifact stay disabled without owners', (
+    testWidgets('run-now and artifact stay disabled without owners', (
       tester,
     ) async {      final handle = tester.ensureSemantics();
       await _pump(
@@ -323,7 +323,7 @@ void main() {
           ),
         ),
       );
-      final retry = find.widgetWithText(OButton, 'Retry run');
+      final retry = find.widgetWithText(OButton, 'Run now');
       expect(retry, findsOneWidget);
       expect(
         tester

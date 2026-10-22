@@ -26,6 +26,7 @@ class V2AccountProfile {
     this.planName = '',
     this.initials,
     this.image,
+    this.photoUrl,
   });
 
   final String name;
@@ -39,7 +40,14 @@ class V2AccountProfile {
   /// (`free`, `3x`, `7x`, `15x`) is resolved to its real plan name.
   final String planName;
   final String? initials;
+
+  /// An already-resolved image supplied by a host that has one in memory.
   final ImageProvider? image;
+
+  /// The account's real avatar URL (Firebase Auth `photoURL`). When it is
+  /// missing, malformed or fails to load, the avatar falls back to initials.
+  /// There is no upload endpoint yet, so the header never offers to change it.
+  final String? photoUrl;
 }
 
 @immutable
@@ -74,6 +82,26 @@ class V2ConnectedAccount {
   final bool connected;
 }
 
+/// What a resend attempt actually achieved. A send Firebase accepted is not
+/// the same as a verified address, and a rate limit is not a network failure.
+enum V2EmailVerificationResult {
+  /// Firebase accepted the request. The address stays unverified until the
+  /// link in that email is opened.
+  sent,
+
+  /// The fresh read after sending says the address is now verified.
+  verified,
+
+  /// Firebase rate-limited this account.
+  tooManyRequests,
+
+  /// The request never reached Firebase.
+  network,
+
+  /// Any other failure.
+  failed,
+}
+
 @immutable
 class V2AccountData {
   const V2AccountData({
@@ -81,8 +109,8 @@ class V2AccountData {
     this.profile,
     this.fields = const [],
     this.connectedAccounts = const [],
-    this.onChangePhoto,
     this.onEditProfile,
+    this.onResendEmailVerification,
     this.onFieldTap,
     this.onAccountTap,
     this.onLinkAccount,
@@ -106,8 +134,13 @@ class V2AccountData {
   final V2AccountProfile? profile;
   final List<V2AccountField> fields;
   final List<V2ConnectedAccount> connectedAccounts;
-  final VoidCallback? onChangePhoto;
   final VoidCallback? onEditProfile;
+
+  /// Sends a fresh verification link to the account email. The screen only
+  /// offers it when the email is present and unverified; phone-only accounts
+  /// never get a resend control.
+  final Future<V2EmailVerificationResult> Function()? onResendEmailVerification;
+
   final ValueChanged<V2AccountField>? onFieldTap;
   final ValueChanged<V2ConnectedAccount>? onAccountTap;
   final VoidCallback? onLinkAccount;
@@ -169,6 +202,13 @@ class _AccountPageState extends State<AccountPage> {
   String? _deletionError;
   bool _restored = false;
 
+  /// True while the verification email is in flight, so the button cannot be
+  /// tapped twice and returns to idle when the call settles.
+  bool _resending = false;
+
+  /// Set only when the fresh read after a send says the address is verified.
+  bool _emailVerifiedNow = false;
+
   bool get _deletionPending =>
       !_restored && (data.deletionPending || _receipt?.isPending == true);
 
@@ -226,10 +266,7 @@ class _AccountPageState extends State<AccountPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _ProfileHeader(
-            profile: profile,
-            onChangePhoto: data.onChangePhoto,
-          ),
+          _ProfileHeader(profile: profile),
           const SizedBox(height: OSpace.xl),
           if (rows.isNotEmpty) V2SettingsRowList(rows: rows),
           if (sessionRows.isNotEmpty) ...[
@@ -257,6 +294,32 @@ class _AccountPageState extends State<AccountPage> {
   /// A row is only rendered when it has a real destination.
   List<Widget> _rows(BuildContext context) {
     final rows = <Widget>[];
+
+    // A resend control exists only when there is an unverified email and a
+    // handler that can actually send it. No handler, no row.
+    final unverifiedEmail = _unverifiedEmail();
+    final resend = data.onResendEmailVerification;
+    if (unverifiedEmail != null && resend != null) {
+      rows.add(
+        V2SettingsRow(
+          key: const ValueKey<String>('account-email-verification-row'),
+          icon: Icons.mark_email_unread_outlined,
+          title: 'Email not verified',
+          subtitle: unverifiedEmail,
+          showChevron: false,
+          stacksTrailing: true,
+          trailing: OButton(
+            key: const ValueKey<String>('account-resend-verification'),
+            label: 'Resend email',
+            variant: OButtonVariant.ghost,
+            size: OButtonSize.compact,
+            loading: _resending,
+            onPressed: _resending ? null : _resendVerification,
+          ),
+        ),
+      );
+    }
+
     final edit = _editProfileAction();
     if (edit != null) {
       rows.add(
@@ -382,6 +445,50 @@ class _AccountPageState extends State<AccountPage> {
       if (field.editable) return () => tap(field);
     }
     return null;
+  }
+
+  /// The address a resend would go to, or null when there is nothing honest
+  /// to resend: no email field, already verified, or a phone-only account
+  /// whose identifier is not an email.
+  String? _unverifiedEmail() {
+    if (_emailVerifiedNow) return null;
+    for (final field in data.fields) {
+      if (field.id != 'email' || field.verified) continue;
+      final value = field.value.trim();
+      if (value.contains('@')) return value;
+    }
+    return null;
+  }
+
+  /// Awaits the real send, then reports its outcome. The button is only
+  /// released after the call settles, whatever it returns or throws.
+  Future<void> _resendVerification() async {
+    final resend = data.onResendEmailVerification;
+    if (resend == null || _resending) return;
+    setState(() => _resending = true);
+    V2EmailVerificationResult result;
+    try {
+      result = await resend();
+    } catch (_) {
+      result = V2EmailVerificationResult.failed;
+    }
+    if (!mounted) return;
+    setState(() {
+      _resending = false;
+      if (result == V2EmailVerificationResult.verified) {
+        _emailVerifiedNow = true;
+      }
+    });
+    _snack(switch (result) {
+      V2EmailVerificationResult.sent => 'Verification email sent.',
+      V2EmailVerificationResult.verified => 'Email verified.',
+      V2EmailVerificationResult.tooManyRequests =>
+        'Too many requests. Try again later.',
+      V2EmailVerificationResult.network =>
+        'No connection. Try again when you are online.',
+      V2EmailVerificationResult.failed =>
+        'Could not send the email. Try again.',
+    });
   }
 
   String _linkedLabel() {
@@ -722,10 +829,9 @@ class _DeletionError extends StatelessWidget {
 /// Avatar, name and plan pill. Everything else about the profile lives behind
 /// the one "Edit profile" action, and the identity is announced once.
 class _ProfileHeader extends StatelessWidget {
-  const _ProfileHeader({required this.profile, required this.onChangePhoto});
+  const _ProfileHeader({required this.profile});
 
   final V2AccountProfile profile;
-  final VoidCallback? onChangePhoto;
 
   @override
   Widget build(BuildContext context) {
@@ -738,28 +844,13 @@ class _ProfileHeader extends StatelessWidget {
       child: Center(
         child: Column(
           children: [
-            Stack(
-              clipBehavior: Clip.none,
-              children: [
-                ExcludeSemantics(
-                  child: OAvatar(
-                    initials: _avatarSeed(profile, name),
-                    image: profile.image,
-                    size: 80,
-                  ),
-                ),
-                if (onChangePhoto != null)
-                  Positioned(
-                    right: -OSpace.s,
-                    bottom: -OSpace.s,
-                    child: OIconButton(
-                      icon: Icons.photo_camera_rounded,
-                      semanticLabel: 'Change photo',
-                      tooltip: 'Change photo',
-                      onPressed: onChangePhoto,
-                    ),
-                  ),
-              ],
+            ExcludeSemantics(
+              child: _ProfileAvatar(
+                initials: _avatarSeed(profile, name),
+                image: profile.image,
+                photoUrl: profile.photoUrl,
+                size: 80,
+              ),
             ),
             const SizedBox(height: OSpace.m),
             ExcludeSemantics(
@@ -782,4 +873,29 @@ class _ProfileHeader extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The account avatar: the real photo when [photoUrl] is a usable HTTPS URL,
+/// initials otherwise. Loading and failure both keep the initials visible, so
+/// a slow or broken URL never leaves an empty circle.
+class _ProfileAvatar extends StatelessWidget {
+  const _ProfileAvatar({
+    required this.initials,
+    required this.size,
+    this.image,
+    this.photoUrl,
+  });
+
+  final String initials;
+  final double size;
+  final ImageProvider? image;
+  final String? photoUrl;
+
+  @override
+  Widget build(BuildContext context) => OPhotoAvatar(
+    initials: initials,
+    image: image,
+    photoUrl: photoUrl,
+    size: size,
+  );
 }

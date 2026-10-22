@@ -148,7 +148,7 @@ longer exists (search is inline in the drawer).
 
 | # | Screen | Status | Missing vs PNG | Owning file |
 |---|---|---|---|---|
-| 34 | `ovid_si_connectors` | close | No `Installed (3)` / `Available (37)` tab pair and no 2-column "Popular Connectors" grid with `+ Connect` tiles; v2 uses a category strip and flat rows split into "Connectors" and "Plugins & MCP". Search, installed toggles with Connected/Paused, connected-first ordering, the plan note and Upgrade are present. | `lib/ui/v2/connectors/connectors_page.dart` |
+| 34 | `ovid_si_connectors` | close | `Installed (n)` / `Available (n)` tabs match the design's tab pair, and Available rows carry a per-row `Add`. Missing: the 2-column "Popular Connectors" grid with `+ Connect` tiles — Available is one flat catalogue list. Search, installed toggles with Connected/Paused, connected-first ordering, the plan note and Upgrade are present. | `lib/ui/v2/connectors/connectors_page.dart` |
 | 35 | `ovid_si_connector_detail` | match | Icon, Connected pill, description, account/synced row, permission checklist, "Used by" main agent + subagents with access labels, automatic sync, Disconnect with consequence copy; adds Tools, Usage and Recent activity cards. | `lib/ui/v2/connectors/connector_detail_page.dart` |
 | 36 | `ovid_si_add_connector` | match | Catalog suggestions with Add, custom name + server URL/command, auth chips (OAuth / API key / None), Test connection, Read / Write / Execute switches, trust warning and the plan-limit line. Adds a "Plugins are added here, not in chat" block. | `lib/ui/v2/connectors/add_connector_page.dart` |
 
@@ -260,9 +260,9 @@ longer exists (search is inline in the drawer).
    second navigation.
 2. **The wiring pass is done; what is left is genuinely missing service
    surface.** The remaining `close` gaps need a producer, not more UI: projects
-   sort/status chips, the memory accuracy card, connectors' installed/available
-   tabs, schedules' total and CTA, run stat tiles and the upcoming-queue card,
-   the collab raise-priority action, and a real live-chat artifact thumbnail.
+   sort/status chips, the memory accuracy card, schedules' total and CTA, run
+   stat tiles and the upcoming-queue card, the collab raise-priority action,
+   and a real live-chat artifact thumbnail.
 3. **Artifact card in live chat.** The PNG's thumbnail + Preview + Copy is what
    makes generated output feel real; v2 opens the artifact detail (chevron) and
    offers Download, with no inline thumbnail and no Copy.

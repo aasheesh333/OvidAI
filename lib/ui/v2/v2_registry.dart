@@ -39,7 +39,6 @@ import 'settings_extra/notifications_page.dart';
 import 'settings_extra/permissions_page.dart';
 import 'settings_extra/response_wait_page.dart';
 import 'share/share_chat_sheet.dart';
-import 'share/share_sheet.dart';
 import 'sidebar/projects_page.dart';
 import 'sidebar/session_actions_sheet.dart';
 import 'sidebar/sidebar.dart';
@@ -298,16 +297,8 @@ List<V2ScreenEntry> v2Screens = <V2ScreenEntry>[
   ),
 
   // ── Sharing ─────────────────────────────────────────────────────────────
-  V2ScreenEntry(
-    id: 'share_sheet',
-    isSheet: true,
-    title: 'Share sheet',
-    group: 'Sharing',
-    summary: 'Read-only link, visibility and share targets',
-    builder: (_) => const ShareSheet(
-      data: V2ShareSheetData(link: '', creatorName: ''),
-    ),
-  ),
+  // No `share_sheet` entry: the creator link surface is `ShareSheet` inside
+  // `ShareChatSheet`, not a screen the app can open on its own.
   V2ScreenEntry(
     id: 'share_chat',
     isSheet: true,

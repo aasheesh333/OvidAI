@@ -171,9 +171,9 @@ these as done or not-done without running the corresponding check.
 - [ ] Delete `test/v2/sw_probe_test.dart` — a debug probe that only `print`s
       (the analyzer stays clean because it is `// ignore`d)
 - [ ] Parity gaps that need a product decision, not code: projects sort/status
-      chips, memory accuracy card, connectors' installed/available tabs,
-      schedules' total + CTA card, run stat tiles + upcoming queue, collab
-      raise-priority, notification/avatar entry point in the top bars
+      chips, memory accuracy card, schedules' total + CTA card, run stat tiles
+      + upcoming queue, collab raise-priority, notification/avatar entry point
+      in the top bars
 
 ---
 

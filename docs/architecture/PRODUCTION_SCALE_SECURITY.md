@@ -31,7 +31,7 @@ history; several of its P0s have since been fixed and are called out below.
 | Plans, caps, metering | Partial | `server/mint/ovid_plans.py` (free token caps), `cloud/apps/gateway/src/planGate.ts` (**now called** by `cloud/apps/gateway/src/routes/messages.ts`, `cloud/apps/gateway/src/routes/accountSettings.ts`, `cloud/apps/gateway/src/routes/schedules.ts`); connector/storage quotas not wired; free USD allowance still gates first (C15) |
 | Billing | Partial | RevenueCat + Play code: `lib/core/revenuecat_billing.dart`, `lib/core/billing_products.dart`; **no Play subscription (monthly or yearly) exists yet** — FEATURE_GAPS D1/D2 |
 | Memory (session, global, project) | Partial | DB-backed `private_memory_files`; no global store, no project write path (architecture FEATURE_GAPS §5.3–5.5); screens in `lib/ui/v2/settings/memory_page.dart` |
-| Sharing (collab 50, read-only fork) | Partial | Server: `server/collaboration/repository.py` + `postgres.py` enforce 50 members and the turn lease; app collab runtime is device-local (`lib/core/collaboration/production.dart`); the production sheet is `ShareChatSheet` in `lib/ui/v2/app/v2_app_shell.dart`, and `share_sheet` is gallery-only (FEATURE_GAPS C4) |
+| Sharing (collab 50, read-only fork) | Partial | Server: `server/collaboration/repository.py` + `postgres.py` enforce 50 members and the turn lease; app collab runtime is device-local (`lib/core/collaboration/production.dart`); the production sheet is `ShareChatSheet` in `lib/ui/v2/app/v2_app_shell.dart`, which composes `ShareSheet` as its creator surface (FEATURE_GAPS C4 resolved) |
 | Security (lock, keys, IP guard, SSRF) | Done for the app; see §4 | `lib/core/app_lock.dart`, `server/security/ip_hop.py`, `cloud/packages/browser/src/tools/transfers.ts` |
 | Observability | Weak | Crash + diag exist (`lib/core/firebase_service.dart`); no traces, SLOs, or user-visible failure alerting |
 | i18n | Missing | English only; 101 `TODO(l10n)` markers in `lib/ui/v2` (FEATURE_GAPS C1) |
@@ -311,9 +311,9 @@ These choices are correct and should not be revisited:
 ### 6.3 P2 — a designed convenience is absent
 
 Connector per-tool permissions (A4), response-wait auto-extend (A7), payment
-history (A8), artifact version history (A9, B3), avatar upload (B4), project
-sort/status (B5, C5), per-schedule notification override (B6), memory accuracy
-card (C6), installed/available connector tabs (C7), schedule summary card (C8),
+history (A8), artifact version history (A9, B3), avatar upload (B4),
+per-schedule notification override (B6), memory accuracy
+card (C6), schedule summary card (C8),
 run stat tiles (C9), collab priority control (C10), top-bar notification/avatar
 entry points (C11), message edit/branch/regenerate (C12), live model
 latency/price (C13), usage request/image counters (C17), usage model chart

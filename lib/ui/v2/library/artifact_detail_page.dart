@@ -48,10 +48,8 @@ class V2ArtifactDetailData {
     this.typeLabel = '',
     this.sizeLabel = '',
     this.createdLabel = '',
-    this.versionLabel = 'Ready',
     this.sourceChatTitle = '',
     V2ArtifactPreviewKind? previewKind,
-    this.previewHeadline = '',
     this.previewCodeFile = '',
     this.previewCode = '',
     this.previewTotalLines,
@@ -70,7 +68,9 @@ class V2ArtifactDetailData {
   final String typeLabel;
   final String sizeLabel;
   final String createdLabel;
-  final String versionLabel;
+
+  /// The title of the chat whose turn produced this artifact. Empty when the
+  /// row carries no chat (a transcript artifact with no session yet).
   final String sourceChatTitle;
   final V2ArtifactPreviewKind? previewKindOverride;
 
@@ -79,7 +79,6 @@ class V2ArtifactDetailData {
   /// `.ts` never as a blank image.
   V2ArtifactPreviewKind get previewKind =>
       previewKindOverride ?? v2ArtifactPreviewKindForName(name);
-  final String previewHeadline;
   final String previewCodeFile;
   final String previewCode;
 
@@ -423,6 +422,10 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
       padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xxl),
       children: [
         _preview(data),
+        if (data.sourceChatTitle.trim().isNotEmpty) ...[
+          const SizedBox(height: OSpace.m),
+          _sourceChat(c, data.sourceChatTitle.trim()),
+        ],
         if (_canOpen) ...[
           const SizedBox(height: OSpace.m),
           OButton(
@@ -436,6 +439,24 @@ class _ArtifactDetailPageState extends State<ArtifactDetailPage> {
           const SizedBox(height: OSpace.m),
           _metadata(c, rows),
         ],
+      ],
+    );
+  }
+
+  /// Where the artifact came from: the chat whose turn produced it. Wraps
+  /// instead of truncating, so a long chat title stays readable at 200 % text.
+  Widget _sourceChat(OColors c, String title) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(Icons.forum_outlined, size: 16, color: c.textMuted),
+        const SizedBox(width: OSpace.s),
+        Expanded(
+          child: Text(
+            'From chat · $title',
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+        ),
       ],
     );
   }

@@ -28,6 +28,46 @@ V2ProjectsData _contentData([
   List<V2Project> projects = const <V2Project>[_project, _brandProject],
 ]) => V2ProjectsData(projects: projects);
 
+/// Four rows with distinct timestamps, names and counts so each order is
+/// distinguishable. Four is the count at which the sort chips appear.
+List<V2Project> _sortableProjects() {
+  final now = DateTime.utc(2026, 10, 22, 12);
+  return <V2Project>[
+    V2Project(
+      id: 'alpha',
+      name: 'Alpha',
+      chatCount: 9,
+      updatedAt: now.subtract(const Duration(days: 3)),
+    ),
+    V2Project(id: 'zebra', name: 'Zebra', chatCount: 1, updatedAt: now),
+    V2Project(
+      id: 'mango',
+      name: 'Mango',
+      chatCount: 4,
+      updatedAt: now.subtract(const Duration(days: 1)),
+    ),
+    V2Project(
+      id: 'banana',
+      name: 'Banana',
+      chatCount: 1,
+      updatedAt: now.subtract(const Duration(days: 2)),
+    ),
+  ];
+}
+
+/// The visible row order, top to bottom.
+List<String> _rowOrder(WidgetTester tester) {
+  const ids = <String>['alpha', 'zebra', 'mango', 'banana'];
+  final rows = <(double, String)>[
+    for (final id in ids)
+      (
+        tester.getTopLeft(find.byKey(ValueKey<String>('v2-project-$id'))).dy,
+        id,
+      ),
+  ]..sort((a, b) => a.$1.compareTo(b.$1));
+  return <String>[for (final row in rows) row.$2];
+}
+
 Widget _app(Widget child, {ThemeData? theme}) =>
     MaterialApp(theme: theme ?? OTheme.light(), home: child);
 
@@ -741,5 +781,113 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     expect(find.text('Delete project?'), findsOneWidget);
+  });
+
+  testWidgets('sort chips appear only once the list is long enough', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        ProjectsPage(
+          data: _contentData(const <V2Project>[
+            _project,
+            _brandProject,
+            _longProject,
+          ]),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('v2-projects-sort-recent')),
+      findsNothing,
+      reason: 'three rows do not need a sort control',
+    );
+
+    await tester.pumpWidget(
+      _app(ProjectsPage(data: _contentData(_sortableProjects()))),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('v2-projects-sort-recent')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('v2-projects-sort-name')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('v2-projects-sort-chats')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('recent is the default and name/chats reorder the rows', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(ProjectsPage(data: _contentData(_sortableProjects()))),
+    );
+    await tester.pumpAndSettle();
+
+    expect(_rowOrder(tester), <String>['zebra', 'mango', 'banana', 'alpha']);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('v2-projects-sort-name')),
+    );
+    await tester.pumpAndSettle();
+    expect(_rowOrder(tester), <String>['alpha', 'banana', 'mango', 'zebra']);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('v2-projects-sort-chats')),
+    );
+    await tester.pumpAndSettle();
+    expect(_rowOrder(tester), <String>['alpha', 'mango', 'banana', 'zebra']);
+  });
+
+  testWidgets('the sort row is a radio group and the active chip says so', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(ProjectsPage(data: _contentData(_sortableProjects()))),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Recent')),
+      isSemantics(
+        label: 'Recent',
+        isButton: true,
+        hasSelectedState: true,
+        isSelected: true,
+      ),
+    );
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Name')),
+      isSemantics(
+        label: 'Name',
+        isButton: true,
+        hasSelectedState: true,
+        isSelected: false,
+      ),
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('v2-projects-sort-name')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Recent')),
+      isSemantics(label: 'Recent', hasSelectedState: true, isSelected: false),
+    );
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Name')),
+      isSemantics(label: 'Name', hasSelectedState: true, isSelected: true),
+    );
+    semantics.dispose();
   });
 }

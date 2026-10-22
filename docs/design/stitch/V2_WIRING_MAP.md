@@ -59,7 +59,7 @@ here is invented; every source exists in `lib/core/`.
 | `schedules/schedules_page.dart` | `ScheduleClient` list + `ScheduleLiveFeed` | toggle, open, create |
 | `schedules/schedule_editor_page.dart` | schedule draft + timezone | save |
 | `schedules/schedule_runs_page.dart` | `ScheduleRunDto` history | retry, open chat |
-| `share/share_sheet.dart` | `ConversationShareService` link state | create/stop link, copy, share |
+| `share/share_sheet.dart` | creator link surface, composed by `share_chat_sheet.dart` | create/stop link, copy |
 | `share/share_chat_sheet.dart` | same + fork eligibility | fork into account |
 | `collab/collab_live_page.dart` | collaboration session, members, turn lock | send (disabled unless turn), leave |
 | `collab/collab_members_page.dart` | member list + roles + creator storage | remove, leave |

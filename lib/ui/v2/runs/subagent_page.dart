@@ -14,8 +14,8 @@ enum V2SubagentStatus { loading, empty, error, ready }
 
 enum V2SubagentLogTone { normal, success, accent }
 
-/// One line in the subagent log. Retained for hosts; the page links to the
-/// log instead of previewing it.
+/// One line in the subagent log. The page previews the most recent rows and
+/// keeps the full log one action away.
 @immutable
 class V2SubagentLogLine {
   const V2SubagentLogLine({
@@ -36,7 +36,6 @@ class V2SubagentPageData {
     required this.name,
     required this.instanceLabel,
     required this.stepLabel,
-    required this.paceLabel,
     required this.goal,
     required this.startedLabel,
     required this.elapsedLabel,
@@ -70,13 +69,18 @@ class V2SubagentPageData {
   final bool progressKnown;
 
   /// The host's label for the live agent state (`Working`, `Finished`,
-  /// `Stopped`, `Failed`). Used only for the two terminal states a summary
-  /// cannot supply; `Finished` alone is never read as `completed`.
+  /// `Stopped`, `Failed`) or, when the host records one, the step the run is
+  /// on. Rendered as the one-line progress line while the run is in flight;
+  /// also the legacy fallback in [runStatus] for the two terminal states a
+  /// summary cannot supply.
   final String stepLabel;
 
-  final String paceLabel;
+  /// What the subagent was asked to do, shown as one line.
   final String goal;
+
+  /// The files the run has written so far, from its recorded tool rows.
   final List<String> files;
+
   final String startedLabel;
 
   /// The elapsed time the host measured. While [working] the page ticks this
@@ -84,7 +88,13 @@ class V2SubagentPageData {
   final String elapsedLabel;
   final String timeLimitLabel;
   final String remainingLabel;
+
+  /// The most recent log rows, previewed as a tail. The full log stays one
+  /// action away through [SubagentPage.onViewLog] or [logPath].
   final List<V2SubagentLogLine> logLines;
+
+  /// How many log rows the run has recorded in total, so the tail can say what
+  /// it is a tail of.
   final int totalLogLines;
 
   /// Absolute path of the full log, e.g.
@@ -134,7 +144,8 @@ class V2SubagentPageData {
   }
 }
 
-/// One subagent: its status, the five contract fields and one log action.
+/// One subagent: its status, the five contract fields, the live progress the
+/// run records (step, goal, files touched, log tail) and one log action.
 class SubagentPage extends StatefulWidget {
   const SubagentPage({
     super.key,
@@ -334,6 +345,7 @@ class _SubagentPageState extends State<SubagentPage> {
   }
 
   Widget _content(BuildContext context) {
+    final data = widget.data;
     final log = _logAction;
     return ListView(
       padding: const EdgeInsets.fromLTRB(
@@ -344,10 +356,15 @@ class _SubagentPageState extends State<SubagentPage> {
       ),
       children: [
         _statusField(context),
+        if (_status == V2SubagentRunStatus.running &&
+            data.stepLabel.trim().isNotEmpty) ...[
+          const SizedBox(height: OSpace.s),
+          _progressLine(context),
+        ],
         const SizedBox(height: OSpace.l),
         SubagentSummaryCard(
-          summary: widget.data.summary,
-          status: widget.data.summary == null
+          summary: data.summary,
+          status: data.summary == null
               ? V2SubagentSummaryStatus.empty
               : V2SubagentSummaryStatus.ready,
           // The status above is the live run state and already covers this
@@ -356,6 +373,18 @@ class _SubagentPageState extends State<SubagentPage> {
           onFileTap: widget.onFileTap,
           onRetry: widget.onRetry,
         ),
+        if (data.goal.trim().isNotEmpty) ...[
+          const SizedBox(height: OSpace.l),
+          _goalField(context),
+        ],
+        if (data.files.isNotEmpty) ...[
+          const SizedBox(height: OSpace.l),
+          _filesField(context),
+        ],
+        if (data.logLines.isNotEmpty) ...[
+          const SizedBox(height: OSpace.l),
+          _logTail(context),
+        ],
         if (log != null) ...[const SizedBox(height: OSpace.l), log],
         const SizedBox(height: OSpace.l),
         _nestingNote(context),
@@ -412,6 +441,132 @@ class _SubagentPageState extends State<SubagentPage> {
           ),
         ],
       ),
+    );
+  }
+
+  /// One live line while the run is in flight: the host's step label and how
+  /// many tool rows it has recorded so far. Nothing here is invented — both
+  /// values come from the run's own record.
+  Widget _progressLine(BuildContext context) {
+    final c = OColors.of(context);
+    final rows = widget.data.totalLogLines;
+    final parts = <String>[
+      widget.data.stepLabel.trim(),
+      if (rows > 0) '$rows ${rows == 1 ? 'tool row' : 'tool rows'}',
+    ];
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ExcludeSemantics(
+          child: Padding(
+            padding: const EdgeInsets.only(top: OSpace.xxs),
+            child: Icon(Icons.autorenew_rounded, size: 14, color: c.textFaint),
+          ),
+        ),
+        const SizedBox(width: OSpace.s),
+        Expanded(
+          child: Text(
+            parts.join(' · '),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: OType.caption.copyWith(color: c.textMuted),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// What the run was asked to do, on one line.
+  Widget _goalField(BuildContext context) {
+    final c = OColors.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('GOAL', style: OType.overline.copyWith(color: c.textFaint)),
+        const SizedBox(height: OSpace.xs),
+        Text(
+          widget.data.goal.trim(),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: OType.bodySm.copyWith(color: c.text),
+        ),
+      ],
+    );
+  }
+
+  /// The files the run has written, as chips. A chip only becomes a control
+  /// when the host wires [SubagentPage.onFileTap].
+  Widget _filesField(BuildContext context) {
+    final c = OColors.of(context);
+    final onFileTap = widget.onFileTap;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'FILES',
+          style: OType.overline.copyWith(color: c.textFaint),
+        ),
+        const SizedBox(height: OSpace.xs),
+        Wrap(
+          spacing: OSpace.s,
+          runSpacing: OSpace.s,
+          children: [
+            for (final file in widget.data.files)
+              OChip(
+                label: file,
+                icon: Icons.description_outlined,
+                semanticLabel: onFileTap == null
+                    ? 'file $file'
+                    : 'Open file $file',
+                onTap: onFileTap == null ? null : () => onFileTap(file),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// The most recent log rows, as a compact tail. The full log stays one tap
+  /// away through the log action below it.
+  Widget _logTail(BuildContext context) {
+    final c = OColors.of(context);
+    final lines = widget.data.logLines;
+    // The page shows a tail, never the whole log: the full record is one
+    // action away, and a long log must not push the rest of the screen down.
+    const preview = 5;
+    final shown = lines.length <= preview
+        ? lines
+        : lines.sublist(lines.length - preview);
+    final total = widget.data.totalLogLines > lines.length
+        ? widget.data.totalLogLines
+        : lines.length;
+    final caption = total == shown.length
+        ? '$total ${total == 1 ? 'row' : 'rows'}'
+        : 'Last ${shown.length} of $total rows';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('LOG', style: OType.overline.copyWith(color: c.textFaint)),
+        const SizedBox(height: OSpace.xs),
+        Text(caption, style: OType.caption.copyWith(color: c.textFaint)),
+        const SizedBox(height: OSpace.s),
+        for (final line in shown)
+          Padding(
+            padding: const EdgeInsets.only(bottom: OSpace.xs),
+            child: Text(
+              '[${line.time}] ${line.text}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: OType.mono.copyWith(
+                color: switch (line.tone) {
+                  V2SubagentLogTone.normal => c.textMuted,
+                  V2SubagentLogTone.success => c.success,
+                  V2SubagentLogTone.accent => c.warn,
+                },
+              ),
+            ),
+          ),
+      ],
     );
   }
 

@@ -29,18 +29,21 @@ V2SubagentPageData _data({
   String elapsedLabel = '6m',
   String logPath = '/workspace/.ovid/logs/subagent_a402.log',
   String name = 'Frontend builder',
+  List<String> files = const <String>[],
+  List<V2SubagentLogLine> logLines = const <V2SubagentLogLine>[],
 }) {
   return V2SubagentPageData(
     name: name,
     instanceLabel: 'subagent_a402',
     stepLabel: stepLabel,
-    paceLabel: '',
     goal: 'Rebuild the landing page.',
     startedLabel: startedLabel,
     elapsedLabel: elapsedLabel,
     timeLimitLabel: '8 h',
     remainingLabel: '',
     totalLogLines: 42,
+    files: files,
+    logLines: logLines,
     logPath: logPath,
     summary: summary,
     working: working,
@@ -245,6 +248,55 @@ void main() {
 
     await pumpAt(tester, SubagentPage(data: _data()));
     expect(find.text('View log'), findsNothing);
+  });
+
+  testWidgets('a running run shows one live progress line', (tester) async {
+    await pumpAt(
+      tester,
+      SubagentPage(
+        data: _data(working: true, summary: null, stepLabel: 'Working'),
+      ),
+    );
+
+    // The step and the real tool-row count, on one line.
+    expect(find.text('Working · 42 tool rows'), findsOneWidget);
+  });
+
+  testWidgets('the goal, the files touched and the log tail are rendered', (
+    tester,
+  ) async {
+    await pumpAt(
+      tester,
+      SubagentPage(
+        data: _data(
+          summary: null,
+          files: const <String>[
+            'lib/core/auth_service.dart',
+            'lib/ui/v2/chat/chat_page.dart',
+          ],
+          logLines: const <V2SubagentLogLine>[
+            V2SubagentLogLine(
+              time: '10:43',
+              text: 'Opened the workspace tree.',
+            ),
+            V2SubagentLogLine(time: '10:45', text: 'Found 4 call sites.'),
+          ],
+        ),
+        onViewLog: () {},
+      ),
+    );
+
+    expect(find.text('GOAL'), findsOneWidget);
+    expect(find.text('Rebuild the landing page.'), findsOneWidget);
+    expect(find.text('FILES'), findsOneWidget);
+    expect(find.text('lib/core/auth_service.dart'), findsOneWidget);
+    expect(find.text('lib/ui/v2/chat/chat_page.dart'), findsOneWidget);
+    expect(find.text('LOG'), findsOneWidget);
+    // The tail says what it is a tail of: the real recorded row count.
+    expect(find.text('Last 2 of 42 rows'), findsOneWidget);
+    expect(find.text('[10:43] Opened the workspace tree.'), findsOneWidget);
+    expect(find.text('[10:45] Found 4 call sites.'), findsOneWidget);
+    expect(find.text('View log'), findsOneWidget);
   });
 
   testWidgets('a modified file opens from the summary', (tester) async {

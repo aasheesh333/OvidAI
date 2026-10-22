@@ -22,12 +22,11 @@ enum V2AccountStatus {
 
 /// Injected state for the Account health screen.
 ///
-/// The page carries only facts the app can read: the plan, the account's
-/// standing, today's usage, storage and the deletion state. Every label is
-/// supplied by the caller; an empty label renders the honest [unknown] mark
-/// instead of a zero that looks like real usage. Device management and
-/// two-step sign-in have no endpoint behind them, so they are neither modelled
-/// nor rendered.
+/// The page carries only the four facts the app can read: the plan, today's
+/// usage, storage and the deletion state. Every label is supplied by the
+/// caller; an empty label renders the honest [unknown] mark instead of a zero
+/// that looks like real usage. Nothing else is modelled or rendered, so no
+/// row can promise a fact the app cannot read.
 @immutable
 class V2AccountHealthPageData {
   const V2AccountHealthPageData({

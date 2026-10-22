@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 
+import '../../../core/format.dart';
 import '../../design/o_components.dart';
 import '../../design/o_motion.dart';
 import '../../design/o_screen.dart';
@@ -125,6 +126,8 @@ class V2RunTrajectoryPageData {
     required this.runLabel,
     this.steps = const [],
     this.subagents = const [],
+    this.startedAt,
+    this.endedAt,
     this.status = V2RunTrajectoryStatus.ready,
     this.errorMessage = 'We could not load this run.',
   });
@@ -133,12 +136,90 @@ class V2RunTrajectoryPageData {
   final String runLabel;
   final List<V2RunStep> steps;
   final List<V2SubagentLaunch> subagents;
+
+  /// When the run started, when the runtime records it.
+  ///
+  /// Only used with [endedAt] for the summary strip's duration. A caller that
+  /// records neither timestamp shows no measured duration instead of a guess.
+  final DateTime? startedAt;
+
+  /// When the run settled, or null while it is still going.
+  ///
+  /// A started run without an end is what keeps the strip from printing a
+  /// duration that is still growing.
+  final DateTime? endedAt;
+
   final V2RunTrajectoryStatus status;
   final String errorMessage;
 
   /// "1 subagent" / "3 subagents".
   String get subagentCountLabel =>
       subagents.length == 1 ? '1 subagent' : '${subagents.length} subagents';
+
+  /// "1 step" / "12 steps".
+  String get stepCountLabel =>
+      steps.length == 1 ? '1 step' : '${steps.length} steps';
+
+  /// How many steps actually invoked a tool.
+  ///
+  /// A tool step is the only kind that records a tool name; messages, plans and
+  /// run updates carry none, so this counts real calls rather than rows.
+  int get toolStepCount =>
+      steps.where((step) => step.toolName?.trim().isNotEmpty ?? false).length;
+
+  /// True while any step or subagent is still in flight.
+  bool get hasRunningWork =>
+      steps.any((step) => step.status == V2RunStepStatus.running) ||
+      subagents.any(
+        (launch) => launch.status == V2SubagentLaunchStatus.running,
+      );
+
+  /// True while work is in flight or the run has not reported an end.
+  bool get isRunning =>
+      hasRunningWork || (startedAt != null && endedAt == null);
+
+  /// Measured run time, or null when either end is unknown.
+  Duration? get elapsed {
+    final start = startedAt;
+    final end = endedAt;
+    if (start == null || end == null) return null;
+    final measured = end.difference(start);
+    return measured.isNegative ? Duration.zero : measured;
+  }
+
+  /// The count segments, in reading order, with no duration.
+  List<String> get _countSegments => <String>[
+    stepCountLabel,
+    if (toolStepCount > 0)
+      toolStepCount == 1 ? '1 tool' : '$toolStepCount tools',
+    if (subagents.isNotEmpty) subagentCountLabel,
+  ];
+
+  /// The one-line summary above the timeline: counts first, duration last.
+  ///
+  /// While the run is still going it reports only what has arrived ("12 steps
+  /// so far"): a total that keeps growing is noise, not shape.
+  String get statStripLabel {
+    if (isRunning) return '$stepCountLabel so far';
+    final duration = elapsed;
+    final durationLabel = duration == null
+        ? '—'
+        : formatCompactDuration(duration);
+    return [..._countSegments, durationLabel].join(' · ');
+  }
+
+  /// [statStripLabel] as one spoken sentence, with no separator glyphs.
+  String get statStripSemantics {
+    if (isRunning) return 'Run so far, $stepCountLabel';
+    final duration = elapsed;
+    return [
+      'Run summary',
+      ..._countSegments,
+      duration == null
+          ? 'duration not reported'
+          : formatCompactDuration(duration),
+    ].join(', ');
+  }
 
   /// Steps in start order when every step carries a timestamp.
   ///
@@ -409,7 +490,39 @@ class _RunTrajectoryPageState extends State<RunTrajectoryPage> {
         _scroll.jumpTo(notification.metrics.maxScrollExtent);
         return false;
       },
-      child: list,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // A run with only subagents has no step timeline to summarise; the
+          // subagent section title already states that count.
+          if (steps.isNotEmpty) _statStrip(data),
+          Expanded(child: list),
+        ],
+      ),
+    );
+  }
+
+  /// One muted line of real counts above the timeline.
+  ///
+  /// Flat by design: no card, no tiles, no separators heavier than the middle
+  /// dot. The numbers are [V2RunTrajectoryPageData.statStripLabel]'s; this only
+  /// places them, using the same one-line summary treatment as Schedules.
+  Widget _statStrip(V2RunTrajectoryPageData data) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(OSpace.l, OSpace.s, OSpace.l, 0),
+      child: Semantics(
+        container: true,
+        label: data.statStripSemantics,
+        child: ExcludeSemantics(
+          child: Text(
+            data.statStripLabel,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: OType.bodySm.copyWith(color: c.textMuted),
+          ),
+        ),
+      ),
     );
   }
 

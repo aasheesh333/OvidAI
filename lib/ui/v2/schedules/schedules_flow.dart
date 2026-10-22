@@ -350,7 +350,10 @@ class _ScheduleRunsScreenState extends State<ScheduleRunsScreen> {
     }
   }
 
-  Future<void> _retry(V2ScheduleRun run) async {
+  /// Starts a new run of the schedule. The gateway has no per-run retry
+  /// endpoint, so the failed occurrence stays as it is and a fresh occurrence
+  /// is claimed now — the row's copy says exactly that.
+  Future<void> _runNow(V2ScheduleRun run) async {
     await widget.controller.runNow(widget.schedule);
     if (!mounted) return;
     final notice = widget.controller.notice;
@@ -365,7 +368,7 @@ class _ScheduleRunsScreenState extends State<ScheduleRunsScreen> {
   Widget build(BuildContext context) {
     return ScheduleRunsPage(
       data: _data,
-      onRetryRun: _retry,
+      onRunNow: _runNow,
       onRetry: _load,
       onBackToSchedule: () => Navigator.of(context).pop(),
       onMore: _openMore,

@@ -9,6 +9,21 @@ import '../../design/o_tokens.dart';
 
 enum V2ProjectsStatus { loading, content, error }
 
+/// Client-side order for the projects list.
+///
+/// The gateway returns projects in creation order and never sorts; ordering at
+/// most a few dozen rows is a view concern. The choice lives in page state and
+/// is deliberately not persisted — a sort preference is not worth a write.
+enum V2ProjectSort {
+  recent('Recent'),
+  name('Name'),
+  chats('Chats');
+
+  const V2ProjectSort(this.label);
+
+  final String label;
+}
+
 /// Immutable view data for the Projects screen.
 @immutable
 class V2ProjectsData {
@@ -30,6 +45,7 @@ class V2Project {
     required this.name,
     required this.chatCount,
     this.shared = false,
+    this.updatedAt,
     // Transitional arguments: the shell still builds its snapshot with the
     // old card fields. Rows show only name, count and share state, so these
     // are accepted but never read. Drop them with the shell migration.
@@ -44,6 +60,11 @@ class V2Project {
   final int chatCount;
   final bool shared;
 
+  /// Last write time from `GET /projects` (`updatedAt`). Only used to order
+  /// the list; rows never render it. Null for snapshots without a timestamp,
+  /// which sort after every dated project.
+  final DateTime? updatedAt;
+
   String get chatLabel => chatCount == 1 ? '1 chat' : '$chatCount chats';
 
   V2Project copyWith({String? name}) => V2Project(
@@ -51,6 +72,7 @@ class V2Project {
     name: name ?? this.name,
     chatCount: chatCount,
     shared: shared,
+    updatedAt: updatedAt,
   );
 }
 
@@ -90,6 +112,10 @@ typedef V2DeleteProject = Future<V2ProjectMutation> Function(V2Project project);
 /// snapshot, and every successful write is applied locally so a create,
 /// rename or delete is visible without waiting for the page to be reopened.
 /// A failed write is rolled back to the previous list.
+///
+/// Ordering is a client-side view choice (recent, name, chats) held in page
+/// state. The chip row only renders once there are enough projects for the
+/// order to matter; below that it is noise.
 class ProjectsPage extends StatefulWidget {
   const ProjectsPage({
     super.key,
@@ -138,7 +164,12 @@ class ProjectsPage extends StatefulWidget {
 }
 
 class _ProjectsPageState extends State<ProjectsPage> {
+  /// A chip row is noise for a handful of rows: below this many projects the
+  /// list keeps its default order and the control stays hidden.
+  static const int _sortChipMinProjects = 4;
+
   late List<V2Project> _projects;
+  V2ProjectSort _sort = V2ProjectSort.recent;
 
   @override
   void initState() {
@@ -154,6 +185,45 @@ class _ProjectsPageState extends State<ProjectsPage> {
     if (!identical(oldWidget.data.projects, widget.data.projects)) {
       _projects = List<V2Project>.of(widget.data.projects);
     }
+  }
+
+  void _selectSort(V2ProjectSort sort) {
+    if (sort == _sort) return;
+    setState(() => _sort = sort);
+  }
+
+  /// The visible order. Every comparator falls back to the name so the result
+  /// is deterministic when two rows tie or carry no timestamp.
+  List<V2Project> get _sortedProjects {
+    final items = List<V2Project>.of(_projects);
+    items.sort(switch (_sort) {
+      V2ProjectSort.recent => _byRecent,
+      V2ProjectSort.name => _byName,
+      V2ProjectSort.chats => _byChats,
+    });
+    return items;
+  }
+
+  static int _byName(V2Project a, V2Project b) =>
+      a.name.toLowerCase().compareTo(b.name.toLowerCase());
+
+  static int _byRecent(V2Project a, V2Project b) {
+    final aAt = a.updatedAt;
+    final bAt = b.updatedAt;
+    if (aAt != null && bAt != null) {
+      final byTime = bAt.compareTo(aAt);
+      if (byTime != 0) return byTime;
+    } else if (aAt != null) {
+      return -1;
+    } else if (bAt != null) {
+      return 1;
+    }
+    return _byName(a, b);
+  }
+
+  static int _byChats(V2Project a, V2Project b) {
+    final byCount = b.chatCount.compareTo(a.chatCount);
+    return byCount != 0 ? byCount : _byName(a, b);
   }
 
   bool get _canCreate =>
@@ -438,17 +508,44 @@ class _ProjectsPageState extends State<ProjectsPage> {
             ),
           ];
         }
+        final projects = _sortedProjects;
         return <Widget>[
+          if (_projects.length >= _sortChipMinProjects)
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(
+                OSpace.s,
+                OSpace.s,
+                OSpace.s,
+                0,
+              ),
+              sliver: SliverToBoxAdapter(
+                child: Wrap(
+                  spacing: OSpace.s,
+                  runSpacing: OSpace.s,
+                  children: [
+                    for (final sort in V2ProjectSort.values)
+                      _SortChip(
+                        key: ValueKey<String>(
+                          'v2-projects-sort-${sort.label.toLowerCase()}',
+                        ),
+                        label: sort.label,
+                        selected: _sort == sort,
+                        onTap: () => _selectSort(sort),
+                      ),
+                  ],
+                ),
+              ),
+            ),
           SliverPadding(
             padding: const EdgeInsets.only(top: OSpace.s, bottom: OSpace.xl),
             sliver: SliverList.builder(
-              itemCount: _projects.length,
+              itemCount: projects.length,
               itemBuilder: (context, index) {
-                final project = _projects[index];
+                final project = projects[index];
                 return _ProjectRow(
                   key: ValueKey<String>('v2-project-${project.id}'),
                   project: project,
-                  showDivider: index < _projects.length - 1,
+                  showDivider: index < projects.length - 1,
                   onTap: widget.onProjectTap == null
                       ? null
                       : () => widget.onProjectTap!(project),
@@ -459,6 +556,40 @@ class _ProjectsPageState extends State<ProjectsPage> {
           ),
         ];
     }
+  }
+}
+
+/// One member of the sort radio group.
+///
+/// The visible [OChip] is excluded from semantics so the chip publishes exactly
+/// one node: label, button, and the selected flag that makes TalkBack say
+/// "Recent, selected". [Semantics.inMutuallyExclusiveGroup] marks it as a radio
+/// member rather than a toggle.
+class _SortChip extends StatelessWidget {
+  const _SortChip({
+    super.key,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: label,
+      button: true,
+      enabled: true,
+      selected: selected,
+      inMutuallyExclusiveGroup: true,
+      onTap: onTap,
+      child: ExcludeSemantics(
+        child: OChip(label: label, selected: selected, onTap: onTap),
+      ),
+    );
   }
 }
 

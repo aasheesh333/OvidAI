@@ -48,10 +48,11 @@ typedef V2ExportSessionToggle = void Function(String id, bool selected);
 
 /// Injected state for the Data control screen.
 ///
-/// The four rows are backed by [service] (real on device, unavailable on web).
-/// The callbacks below are the host's hooks: the async ones take over a flow
-/// when supplied; the older `VoidCallback`s are only used on a platform with
-/// no service (web) and are kept so existing hosts still compile.
+/// The export, import, cache and delete rows are backed by [service] (real on
+/// device, unavailable on web). The callbacks below are the host's hooks: the
+/// async ones take over a flow when supplied; the older `VoidCallback`s are
+/// only used on a platform with no service (web) and are kept so existing hosts
+/// still compile.
 @immutable
 class V2DataControlPageData {
   const V2DataControlPageData({
@@ -71,14 +72,16 @@ class V2DataControlPageData {
     this.onClearCache,
     this.onClearCacheAndReport,
 
-    // Retained for hosts that still pass them. Data control no longer renders
-    // rows for permissions, crash reports, storage or memory; those live on
-    // their own pages.
+    // Retained for hosts that still pass them. Permissions, storage and memory
+    // have their own pages; only the crash-report consent is rendered here,
+    // because its Settings row routes to this page.
     this.onExportImport,
     this.onPermissions,
     this.onStorage,
     this.onResetMemory,
-    this.crashReports = true,
+    // Off unless the host passes the stored consent; a consent flag must never
+    // default to yes.
+    this.crashReports = false,
     this.onCrashReportsChanged,
     this.permissionSummary = '',
     this.storageUsedLabel = '',
@@ -127,7 +130,12 @@ class V2DataControlPageData {
   final VoidCallback? onPermissions;
   final VoidCallback? onStorage;
   final VoidCallback? onResetMemory;
+
+  /// Whether anonymous crash reports and usage counts may be sent. Read from
+  /// the real consent store by the host, never guessed here.
   final bool crashReports;
+
+  /// Called with the new choice; the host persists it and applies it.
   final ValueChanged<bool>? onCrashReportsChanged;
   final String permissionSummary;
   final String storageUsedLabel;
@@ -165,8 +173,9 @@ class V2DataControlPageData {
 
 enum _Phase { idle, exporting, importing, deleting }
 
-/// Privacy and data controls: export, import, cache and the destructive
-/// delete. Every row does real work, and every flow reports what happened.
+/// Privacy and data controls: the crash-report consent, export, import, cache
+/// and the destructive delete. Every row does real work, and every flow reports
+/// what happened.
 class DataControlPage extends StatefulWidget {
   const DataControlPage({super.key, required this.data});
 
@@ -190,7 +199,14 @@ class _DataControlPageState extends State<DataControlPage> {
   String? _cacheError;
   String? _cacheMessage;
 
+  /// The consent choice shown on the switch. Seeded from the host's real value
+  /// and kept in step with it; the host is still the one that persists it.
+  late bool _crashReports = widget.data.crashReports;
+
   bool get _busy => _phase != _Phase.idle || _clearing;
+
+  /// The switch only appears when the host can actually persist a change.
+  bool get _canCrashReports => widget.data.onCrashReportsChanged != null;
 
   bool get _canExport => _service.available || widget.data.onExport != null;
 
@@ -211,6 +227,16 @@ class _DataControlPageState extends State<DataControlPage> {
   }
 
   @override
+  void didUpdateWidget(covariant DataControlPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Consent changed somewhere else (the first-run sheet, another device
+    // flow): show the host's value, not a stale local copy.
+    if (oldWidget.data.crashReports != widget.data.crashReports) {
+      _crashReports = widget.data.crashReports;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final data = widget.data;
     final status = data.loading
@@ -220,18 +246,39 @@ class _DataControlPageState extends State<DataControlPage> {
         : data.hasData
         ? OStatus.content
         : OStatus.empty;
+    final state = OStateView(
+      status: status,
+      errorMessage: data.errorMessage,
+      onRetry: data.onRetry,
+      skeletonRows: 5,
+      emptyTitle: 'No data yet',
+      emptyBody: 'Chats and files appear here.',
+      emptyActionLabel: _canImport ? 'Import backup' : null,
+      onEmptyAction: _canImport ? _import : null,
+      child: _content(context),
+    );
+    if (!_canCrashReports) return OScreen(title: 'Data control', child: state);
+    // The consent switch is a control, not measured data: it stays on screen
+    // while the rows load, are empty or fail, so the Settings hub's
+    // "Crash reports" row always lands on the setting it names.
+    final c = OColors.of(context);
     return OScreen(
       title: 'Data control',
-      child: OStateView(
-        status: status,
-        errorMessage: data.errorMessage,
-        onRetry: data.onRetry,
-        skeletonRows: 5,
-        emptyTitle: 'No data yet',
-        emptyBody: 'Chats and files appear here.',
-        emptyActionLabel: _canImport ? 'Import backup' : null,
-        onEmptyAction: _canImport ? _import : null,
-        child: _content(context),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: OSpace.s),
+            child: _crashRow(),
+          ),
+          Divider(
+            height: 1,
+            thickness: 1,
+            indent: v2SettingsRowDividerIndent,
+            color: c.hairline,
+          ),
+          Expanded(child: state),
+        ],
       ),
     );
   }
@@ -265,6 +312,53 @@ class _DataControlPageState extends State<DataControlPage> {
   }
 
   // ── Rows ──────────────────────────────────────────────────────────────────
+
+  /// The telemetry opt-in the hub's "Crash reports" row promises.
+  ///
+  /// The switch mirrors the consent store's real value and names what leaves
+  /// the device, so turning it off is a decision the user can make here.
+  Widget _crashRow() {
+    final c = OColors.of(context);
+    final value = _crashReports;
+    void toggle() => _setCrashReports(!value);
+    return V2SettingsRow(
+      key: const ValueKey<String>('crash-reports-row'),
+      icon: Icons.bug_report_outlined,
+      title: 'Crash reports',
+      subtitle: 'Crash logs and anonymous usage counts',
+      showChevron: false,
+      onTap: toggle,
+      trailing: Semantics(
+        label: 'Crash reports',
+        value: value ? 'On' : 'Off',
+        toggled: value,
+        enabled: true,
+        onTap: toggle,
+        child: ExcludeSemantics(
+          child: Switch(
+            key: const ValueKey<String>('crash-reports-switch'),
+            value: value,
+            onChanged: _setCrashReports,
+            activeThumbColor: c.onAccent,
+            activeTrackColor: c.accentFill,
+            inactiveThumbColor: c.textMuted,
+            inactiveTrackColor: c.surfaceRaised,
+            trackOutlineColor: WidgetStatePropertyAll(c.hairlineStrong),
+            materialTapTargetSize: MaterialTapTargetSize.padded,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Shows the choice at once, then hands it to the host. The host writes the
+  /// same value to the consent store, so the two cannot disagree.
+  void _setCrashReports(bool value) {
+    final onChanged = widget.data.onCrashReportsChanged;
+    if (onChanged == null || value == _crashReports) return;
+    setState(() => _crashReports = value);
+    onChanged(value);
+  }
 
   Widget _exportRow() {
     final total = widget.data.totalDataSizeLabel;

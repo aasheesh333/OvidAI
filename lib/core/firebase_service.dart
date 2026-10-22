@@ -602,6 +602,33 @@ class FirebaseService extends ChangeNotifier {
     }
   }
 
+  /// Sends the signed-in user a fresh email-verification link, then re-reads
+  /// the account so [emailVerified] reflects Firebase.
+  ///
+  /// Returns null when Firebase accepted the request, else the Firebase error
+  /// code (`too-many-requests`, `network-request-failed`, …). Never throws.
+  Future<String?> resendEmailVerification() async {
+    final u = _user ?? (_available ? FirebaseAuth.instance.currentUser : null);
+    if (u == null) return 'no-user';
+    if ((u.email ?? '').trim().isEmpty) return 'no-email';
+    try {
+      await u.sendEmailVerification();
+      await u.reload();
+      // Do not resurrect a user who signed out while the call was in flight.
+      final current = _available ? FirebaseAuth.instance.currentUser : null;
+      if (current?.uid == u.uid) {
+        _user = current;
+        notifyListeners();
+      }
+      return null;
+    } on FirebaseAuthException catch (e) {
+      return e.code;
+    } catch (e) {
+      debugPrint('sendEmailVerification failed: $e');
+      return 'unknown';
+    }
+  }
+
   /// Google sign-in (B7): native Google account picker → Firebase credential.
   /// Returns null on success, else an error message; 'cancelled' means the
   /// user closed the picker (not an error to surface loudly).

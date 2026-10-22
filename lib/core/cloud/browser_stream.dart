@@ -121,6 +121,8 @@ class BrowserState {
     required this.title,
     required this.takeover,
     required this.screencast,
+    this.fps,
+    this.headless = false,
     required this.frameFormat,
     required this.viewportWidth,
     required this.viewportHeight,
@@ -141,6 +143,13 @@ class BrowserState {
         : const <BrowserTab>[];
     final url = json['url'] as String?;
     final title = json['title'] as String?;
+    // Additive browser-runtime metadata: absent on older workers, so an
+    // unreadable/missing value stays "unknown" (null) rather than becoming a
+    // made-up frame rate.
+    final rawFps = json['fps'];
+    final fps = rawFps is num && rawFps.isFinite && rawFps >= 0
+        ? rawFps.toDouble()
+        : null;
     // Pre-W4 workers have no tab list. Synthesize the single active tab so
     // the viewer still shows what it always did.
     final effectiveTabs = tabs.isNotEmpty || url == null
@@ -155,6 +164,8 @@ class BrowserState {
       title: title,
       takeover: json['takeover'] == true,
       screencast: json['screencast'] == true,
+      fps: fps,
+      headless: json['headless'] == true,
       frameFormat: json['frameFormat'] as String? ?? 'webp',
       viewportWidth: (view['width'] as num?)?.toInt() ?? 1280,
       viewportHeight: (view['height'] as num?)?.toInt() ?? 800,
@@ -177,6 +188,14 @@ class BrowserState {
 
   /// True while the worker is streaming screencast frames.
   final bool screencast;
+
+  /// Measured screencast delivery rate from the server (frames per second), or
+  /// null when the server does not report one. Never invented locally.
+  final double? fps;
+
+  /// True after the server converted the browser to headless mode (45 s with
+  /// no human input): the page stays alive but frames stop.
+  final bool headless;
 
   /// `jpeg` or `webp` — the format of the binary frames on the wire.
   final String frameFormat;

@@ -49,7 +49,6 @@ Regenerate this file from the registry, not from memory: the id, title and summa
 - `schedule_runs` — Schedule runs — Run history, failures, retry and artifacts
 
 ## Sharing
-- `share_sheet` — Share sheet *(sheet)* — Read-only link, visibility and share targets
 - `share_chat` — Share chat *(sheet)* — Chat-specific share with fork note
 - `collab_live` — Collaboration live — Up to 50 members, one sender and a turn queue
 - `collab_members` — Collaboration members — Roles, capacity and creator-paid storage
@@ -68,7 +67,7 @@ Regenerate this file from the registry, not from memory: the id, title and summa
 - `storage` — Storage — Plan quota, breakdown and clean-up
 - `appearance` — Appearance — System/Light/Dark, text size and motion
 - `credentials` — Credentials — Sign-in providers, GitHub and the cloud key
-- `account_health` — Account health — Security score, devices, sign-ins and services
+- `account_health` — Account health — Plan, today's usage, storage and deletion state
 - `about` — About — Version, legal, support and system status
 - `notifications` — Notifications — Runs, schedules, security and delivery
 - `presets` — Agent presets — General, Coder, Researcher, Writer and custom

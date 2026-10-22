@@ -58,8 +58,8 @@ Keep these shapes stable so wiring is mechanical:
 
 - Plans: `id, name, priceUsd, priceInr, storageGb, autoOnly, popular`.
 - Sessions: `id, title, updatedAt, modelLabel, pinned, projectId`.
-- Projects: `id, name, chatCount, storageLabel, shared`.
-- Models: `id, name, subtitle, speed, costHint, locked`.
+- Projects: `id, name, chatCount, updatedAt, storageLabel, shared`.
+- Models: `id, name, subtitle, costHint, locked`.
 - Connectors: `id, name, description, connected, category`.
 - Artifacts: `id, name, kind, createdAt, sizeLabel, thumbnail`.
 - Schedules: `id, title, rule, nextRun, enabled, lastRunFailed`.

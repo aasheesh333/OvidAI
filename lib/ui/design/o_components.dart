@@ -777,6 +777,64 @@ class OAvatar extends StatelessWidget {
   }
 }
 
+/// An avatar backed by a real photo: the image when [photoUrl] is a usable
+/// HTTPS URL, initials otherwise. Loading and failure both keep the initials
+/// visible, so a slow or broken URL never leaves an empty circle.
+class OPhotoAvatar extends StatelessWidget {
+  const OPhotoAvatar({
+    super.key,
+    required this.initials,
+    required this.size,
+    this.image,
+    this.photoUrl,
+    this.semanticLabel,
+  });
+
+  final String? initials;
+  final double size;
+  final ImageProvider? image;
+  final String? photoUrl;
+  final String? semanticLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final fallback = OAvatar(
+      initials: initials,
+      image: image,
+      size: size,
+      semanticLabel: semanticLabel,
+    );
+    final uri = Uri.tryParse(photoUrl?.trim() ?? '');
+    final valid = uri != null && uri.scheme == 'https' && uri.host.isNotEmpty;
+    if (!valid) return fallback;
+    final c = OColors.of(context);
+    return Semantics(
+      label: semanticLabel,
+      image: true,
+      excludeSemantics: true,
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: c.hairline),
+        ),
+        child: ClipOval(
+          child: Image.network(
+            uri.toString(),
+            width: size,
+            height: size,
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => fallback,
+            loadingBuilder: (_, child, progress) =>
+                progress == null ? child : fallback,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class OSearchField extends StatelessWidget {
   const OSearchField({
     super.key,

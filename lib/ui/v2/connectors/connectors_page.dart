@@ -18,7 +18,7 @@ export 'connector_models.dart';
 enum V2ConnectorsStatus { loading, content, error }
 
 /// Everything the connectors list needs. The wiring layer supplies the rows
-/// and persists changes; the page only filters them locally.
+/// and persists changes; the page only splits and filters them locally.
 @immutable
 class V2ConnectorsData {
   const V2ConnectorsData({
@@ -43,7 +43,8 @@ class V2ConnectorsData {
       : v2BuiltInCatalog;
 }
 
-/// One list of connectors: search, one filter menu, and a switch per row.
+/// Two tabs over one catalog: Installed holds the saved connections, Available
+/// holds the rest of the built-in catalog with an Add action per row.
 class ConnectorsPage extends StatefulWidget {
   const ConnectorsPage({
     super.key,
@@ -107,10 +108,30 @@ enum _Filter {
   };
 }
 
+/// Installed is the person's own list; Available is the catalogue they have
+/// not set up yet. Both are the same rows, split on [V2Connector.connected].
+enum _Tab {
+  installed('Installed'),
+  available('Available');
+
+  const _Tab(this.label);
+
+  final String label;
+}
+
 class _ConnectorsPageState extends State<ConnectorsPage> {
   final TextEditingController _search = TextEditingController();
   String _query = '';
   _Filter _filter = _Filter.all;
+  _Tab _tab = _Tab.installed;
+
+  /// Whether the first store answer has had its chance to correct [_tab].
+  /// Later reloads must never move the person's tab.
+  bool _initialTabSettled = false;
+
+  /// Set as soon as the person picks a tab, so a slow store answer cannot
+  /// override them.
+  bool _tabTouched = false;
 
   /// Saved connections, keyed by id. Empty until the store answers, and empty
   /// when the platform has no preferences (previews).
@@ -132,6 +153,12 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
   void initState() {
     super.initState();
     _plan = widget.plan;
+    // Pick the first tab from the injected rows right away, so the first frame
+    // is already correct even if the store answers late (or never, in a
+    // preview). The first store answer may still correct it below.
+    _tab = _catalog.any((row) => row.connected)
+        ? _Tab.installed
+        : _Tab.available;
     _reload();
   }
 
@@ -144,17 +171,42 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
           for (final connection in saved) connection.id: connection,
         };
         _enabledOverrides.clear();
+        _settleInitialTab();
       });
     } catch (_) {
       // No readable store: the built-in catalog is still shown, all
       // disconnected, which is the truth when nothing can be loaded.
       if (!mounted) return;
-      setState(() => _connections = const {});
+      setState(() {
+        _connections = const {};
+        _settleInitialTab();
+      });
     }
     if (_plan != null) return;
     final plan = await v2LoadConnectorPlan();
     if (!mounted) return;
     setState(() => _plan = plan);
+  }
+
+  /// The first store answer may correct the tab chosen from the injected rows:
+  /// a saved connection turns the built-in catalogue into an installed list.
+  /// It never overrides a tab the person chose, and later reloads are ignored,
+  /// so removing the last connector leaves them where they are.
+  void _settleInitialTab() {
+    if (_initialTabSettled) return;
+    _initialTabSettled = true;
+    if (_tabTouched) return;
+    _tab = _catalog.any((row) => row.connected)
+        ? _Tab.installed
+        : _Tab.available;
+  }
+
+  void _selectTab(_Tab tab) {
+    setState(() {
+      _tab = tab;
+      _tabTouched = true;
+      _initialTabSettled = true;
+    });
   }
 
   int get _customUsed =>
@@ -396,67 +448,90 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
 
   Widget _content(BuildContext context) {
     final catalog = _catalog;
-    final filtered = catalog.where(_matches).toList();
-    // Connected rows first, so what the person already uses is not buried.
-    final rows = [
-      ...filtered.where((connector) => connector.connected),
-      ...filtered.where((connector) => !connector.connected),
-    ];
+    final installed = catalog.where((row) => row.connected).toList();
+    final available = catalog.where((row) => !row.connected).toList();
+    final active = _tab == _Tab.installed ? installed : available;
+    final rows = active.where(_matches).toList();
 
-    return CustomScrollView(
-      slivers: [
-        SliverToBoxAdapter(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (_customCapReached) ...[
-                _CapLine(plan: _plan!, onUpgrade: _openUpgrade),
-                const SizedBox(height: OSpace.m),
-              ],
-              Row(
-                children: [
-                  Expanded(
-                    child: OSearchField(
-                      controller: _search,
-                      hint: 'Search connectors',
-                      onChanged: _onSearch,
+    // The panel is labelled with the active tab so a screen reader announces
+    // which list the rows belong to, not just the tab that was chosen.
+    return Semantics(
+      container: true,
+      label: '${_tab.label} connectors, ${active.length}',
+      child: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (_customCapReached) ...[
+                  _CapLine(plan: _plan!, onUpgrade: _openUpgrade),
+                  const SizedBox(height: OSpace.m),
+                ],
+                Row(
+                  children: [
+                    Expanded(
+                      child: OSearchField(
+                        controller: _search,
+                        hint: 'Search connectors',
+                        onChanged: _onSearch,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: OSpace.s),
-                  _FilterButton(
-                    value: _filter,
-                    onSelected: (value) => setState(() => _filter = value),
-                  ),
-                ],
+                    const SizedBox(width: OSpace.s),
+                    _FilterButton(
+                      value: _filter,
+                      onSelected: (value) => setState(() => _filter = value),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: OSpace.m),
+                _ConnectorTabs(
+                  tab: _tab,
+                  installed: installed.length,
+                  available: available.length,
+                  onChanged: _selectTab,
+                ),
+                const SizedBox(height: OSpace.l),
+              ],
+            ),
+          ),
+          if (catalog.isEmpty)
+            SliverFillRemaining(hasScrollBody: false, child: _catalogEmpty())
+          else if (rows.isEmpty)
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: _emptyState(
+                searching: _query.isNotEmpty,
+                filtering: _filter != _Filter.all,
               ),
-              const SizedBox(height: OSpace.l),
-            ],
-          ),
-        ),
-        if (catalog.isEmpty)
-          SliverFillRemaining(hasScrollBody: false, child: _catalogEmpty())
-        else if (rows.isEmpty)
-          SliverFillRemaining(hasScrollBody: false, child: _searchEmpty())
-        else
-          SliverList(
-            delegate: SliverChildBuilderDelegate((context, index) {
-              final connector = rows[index];
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (index > 0)
-                    Divider(height: 1, color: OColors.of(context).hairline),
-                  _ConnectorRow(
-                    connector: connector,
-                    onTap: () => _openConnector(connector.id),
-                    onToggle: (value) => _toggle(connector.id, value),
-                    onConnect: () => _connect(connector.id),
-                  ),
-                ],
-              );
-            }, childCount: rows.length),
-          ),
-      ],
+            )
+          else
+            SliverList(
+              delegate: SliverChildBuilderDelegate((context, index) {
+                final connector = rows[index];
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (index > 0)
+                      Divider(height: 1, color: OColors.of(context).hairline),
+                    if (_tab == _Tab.installed)
+                      _ConnectorRow(
+                        connector: connector,
+                        onTap: () => _openConnector(connector.id),
+                        onToggle: (value) => _toggle(connector.id, value),
+                      )
+                    else
+                      _AvailableRow(
+                        connector: connector,
+                        onTap: () => _openConnector(connector.id),
+                        onAdd: () => _connect(connector.id),
+                      ),
+                  ],
+                );
+              }, childCount: rows.length),
+            ),
+        ],
+      ),
     );
   }
 
@@ -482,26 +557,248 @@ class _ConnectorsPageState extends State<ConnectorsPage> {
     );
   }
 
-  Widget _searchEmpty() {
-    // Two different empty states: a search that found nothing and a filter
-    // with no rows. Telling someone to "try a different search" when they
-    // never searched is wrong, and the action differs too.
-    final searching = _query.isNotEmpty;
+  /// Three different empty states, because the reason differs: a search or
+  /// filter that hid everything, a person who has not installed anything yet,
+  /// and a catalogue where every entry is already set up.
+  Widget _emptyState({required bool searching, required bool filtering}) {
+    if (searching || filtering) {
+      return OEmptyState(
+        compact: true,
+        icon: searching
+            ? Icons.search_off_rounded
+            : Icons.filter_list_off_rounded,
+        title: searching ? 'Nothing matches' : 'Empty filter',
+        message: searching
+            ? 'Try a different search.'
+            : 'No connector in this filter.',
+        action: OButton(
+          label: searching ? 'Clear search' : 'Show all',
+          variant: OButtonVariant.secondary,
+          onPressed: searching
+              ? _clearSearch
+              : () => setState(() => _filter = _Filter.all),
+        ),
+      );
+    }
+    if (_tab == _Tab.installed) {
+      return OEmptyState(
+        compact: true,
+        icon: Icons.hub_outlined,
+        title: 'No connectors yet',
+        message: 'Connectors you add appear here.',
+        action: OButton(
+          label: 'Browse available',
+          icon: Icons.explore_outlined,
+          variant: OButtonVariant.secondary,
+          onPressed: () => _selectTab(_Tab.available),
+        ),
+      );
+    }
     return OEmptyState(
       compact: true,
-      icon: searching
-          ? Icons.search_off_rounded
-          : Icons.filter_list_off_rounded,
-      title: searching ? 'No matches' : 'Empty filter',
-      message: searching
-          ? 'Try a different search.'
-          : 'No connector in this filter.',
+      icon: Icons.check_circle_outline_rounded,
+      title: 'All connectors installed',
+      message: 'Every connector in the catalogue is already set up.',
       action: OButton(
-        label: searching ? 'Clear search' : 'Show all',
+        label: 'Show installed',
         variant: OButtonVariant.secondary,
-        onPressed: searching
-            ? _clearSearch
-            : () => setState(() => _filter = _Filter.all),
+        onPressed: () => _selectTab(_Tab.installed),
+      ),
+    );
+  }
+}
+
+/// The two tabs, each with the number of rows it holds. Counts are of the
+/// whole tab, not of the current search, so the pair never reads as empty
+/// because a filter is on.
+class _ConnectorTabs extends StatelessWidget {
+  const _ConnectorTabs({
+    required this.tab,
+    required this.installed,
+    required this.available,
+    required this.onChanged,
+  });
+
+  final _Tab tab;
+  final int installed;
+  final int available;
+  final ValueChanged<_Tab> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Container(
+      key: const Key('connector-tabs'),
+      padding: const EdgeInsets.all(OSpace.xs),
+      decoration: BoxDecoration(
+        color: c.surfaceAlt,
+        borderRadius: BorderRadius.circular(ORadius.m),
+        border: Border.all(color: c.hairline),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _TabButton(
+              key: const Key('connector-tab-installed'),
+              label: _Tab.installed.label,
+              count: installed,
+              selected: tab == _Tab.installed,
+              onTap: () => onChanged(_Tab.installed),
+            ),
+          ),
+          const SizedBox(width: OSpace.xs),
+          Expanded(
+            child: _TabButton(
+              key: const Key('connector-tab-available'),
+              label: _Tab.available.label,
+              count: available,
+              selected: tab == _Tab.available,
+              onTap: () => onChanged(_Tab.available),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TabButton extends StatelessWidget {
+  const _TabButton({
+    super.key,
+    required this.label,
+    required this.count,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final int count;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    final color = selected ? c.text : c.textMuted;
+    return Semantics(
+      label: '$label, $count',
+      container: true,
+      button: true,
+      enabled: true,
+      selected: selected,
+      inMutuallyExclusiveGroup: true,
+      onTap: onTap,
+      excludeSemantics: true,
+      child: OPressable(
+        onTap: onTap,
+        child: Container(
+          height: OSpace.touch,
+          padding: const EdgeInsets.symmetric(horizontal: OSpace.s),
+          decoration: BoxDecoration(
+            color: selected ? c.surface : Colors.transparent,
+            borderRadius: BorderRadius.circular(ORadius.s),
+            border: selected ? Border.all(color: c.hairline) : null,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: OType.label.copyWith(color: color),
+                ),
+              ),
+              const SizedBox(width: OSpace.xs),
+              Text('$count', style: OType.caption.copyWith(color: color)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A catalogue row the person has not set up: name, one-line description, and
+/// the Add action that opens the existing setup flow with this entry preset.
+class _AvailableRow extends StatelessWidget {
+  const _AvailableRow({
+    required this.connector,
+    required this.onTap,
+    required this.onAdd,
+  });
+
+  final V2Connector connector;
+  final VoidCallback onTap;
+  final VoidCallback onAdd;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = OColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: OSpace.s),
+      child: Row(
+        children: [
+          Expanded(
+            child: OPressable(
+              onTap: onTap,
+              semanticLabel: '${connector.name}, available',
+              child: ExcludeSemantics(
+                child: Row(
+                  children: [
+                    Container(
+                      width: OSpace.iconTile,
+                      height: OSpace.iconTile,
+                      decoration: BoxDecoration(
+                        color: c.surfaceAlt,
+                        borderRadius: BorderRadius.circular(ORadius.m),
+                        border: Border.all(color: c.hairline),
+                      ),
+                      child: Icon(connector.icon, size: 18, color: c.textMuted),
+                    ),
+                    const SizedBox(width: OSpace.m),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            connector.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: OType.bodyStrong.copyWith(color: c.text),
+                          ),
+                          Text(
+                            connector.description,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: OType.caption.copyWith(color: c.textMuted),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: OSpace.s),
+          // "Add" alone would reach TalkBack as a bare verb; the name makes the
+          // action unambiguous when several rows are on screen.
+          Semantics(
+            label: 'Add ${connector.name}',
+            button: true,
+            enabled: true,
+            onTap: onAdd,
+            excludeSemantics: true,
+            child: OTextAction(
+              key: ValueKey('connector-add-${connector.id}'),
+              label: 'Add',
+              onPressed: onAdd,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -566,31 +863,25 @@ class _FilterButton extends StatelessWidget {
   }
 }
 
-/// One connector: icon, name, one status line, switch.
+/// One installed connector: icon, name, one status line, switch.
 class _ConnectorRow extends StatelessWidget {
   const _ConnectorRow({
     required this.connector,
     required this.onTap,
     required this.onToggle,
-    required this.onConnect,
   });
 
   final V2Connector connector;
   final VoidCallback onTap;
   final ValueChanged<bool> onToggle;
-  final VoidCallback onConnect;
 
   @override
   Widget build(BuildContext context) {
     final c = OColors.of(context);
     // One status line, in the words the person would use: a saved connector is
-    // connected, a connected one that is switched off is paused, and a row
-    // with no saved record is not connected. "On" alone told them nothing.
-    final status = !connector.connected
-        ? 'Not connected'
-        : connector.enabled
-        ? 'Connected'
-        : 'Paused';
+    // connected, and one that is switched off is paused. "On" alone told them
+    // nothing.
+    final status = connector.enabled ? 'Connected' : 'Paused';
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: OSpace.s),
       child: Row(
@@ -649,14 +940,8 @@ class _ConnectorRow extends StatelessWidget {
                 height: OSpace.touch,
                 child: Switch(
                   key: ValueKey('connector-switch-${connector.id}'),
-                  value: connector.connected && connector.enabled,
-                  // A row without a saved connection opens the setup form; the
-                  // switch never shows a state the store does not hold.
-                  onChanged: connector.connected
-                      ? onToggle
-                      : (value) {
-                          if (value) onConnect();
-                        },
+                  value: connector.enabled,
+                  onChanged: onToggle,
                 ),
               ),
             ),

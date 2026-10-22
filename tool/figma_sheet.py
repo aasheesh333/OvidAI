@@ -639,32 +639,6 @@ def build_screens(p: Palette) -> list[Screen]:
     out.append(s)
 
     # 11. Share sheet ------------------------------------------------------
-    s = Screen("share_sheet", "Share sheet", "Collab vs Read only, then the link", palette=p)
-    s.parts.append(rect(0, 0, W, H, p.bg, rx=20, stroke=p.hairline))
-    s.parts.append(rect(W / 2 - 18, 12, 36, 4, p.hairline, rx=2))
-    s.parts.append(text(16, 46, "Share chat", 17, p.text, weight=600))
-    s.parts.append(icon("dots", W - 40, 30, 22, p.muted))
-    yy = 76
-    for title, line_txt, sel in [
-        ("Collab", "Up to 50 people, one at a time", True),
-        ("Read only", "Anyone with the link can fork", False),
-    ]:
-        s.card(16, yy, W - 32, 72, raised=sel)
-        if sel:
-            s.parts.append(rect(16, yy, 2, 72, p.text))
-        s.parts.append(text(34, yy + 28, title, 15, p.text, weight=600))
-        s.parts.append(text(34, yy + 48, line_txt, 12, p.muted))
-        if sel:
-            s.parts.append(icon("check", W - 46, yy + 26, 20, p.text))
-        yy += 84
-    s.parts.append(rect(16, yy + 8, W - 32, 44, p.surface, rx=10, stroke=p.hairline))
-    s.parts.append(text(30, yy + 35, "ovid.ai/s/8f3k…", 12.5, p.text))
-    s.parts.append(icon("share", W - 48, yy + 20, 20, p.muted))
-    s.button(16, yy + 72, W - 32, "Copy link")
-    s.parts.append(text(W / 2, yy + 148, "Stop sharing", 12.5, p.danger, anchor="middle"))
-    out.append(s)
-
-    # 12. Onboarding: welcome ---------------------------------------------
     s = Screen("welcome", "Welcome", "First run · one line, one action", palette=p)
     s.parts.append(rect(0, 0, W, H, p.bg, rx=20, stroke=p.hairline))
     s.agent_mark(W / 2, 260, 34)

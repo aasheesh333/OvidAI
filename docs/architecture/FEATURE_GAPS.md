@@ -565,9 +565,13 @@ not missing infrastructure.
 
 ### 10.7 Account health — 🟡
 
-- Page and device routes exist (`account_health_page.dart`,
-  `/devices` gateway route). “System status” is `notReady`. “Last security
-  check” and revoke are partly presentational.
+- The page reads four real facts: plan (`/usage` tier), today's counters
+  (`/usage` `today`), storage (artifact inventory + this device's transcripts)
+  and the deletion receipt (`lastDeletionReceipt`); the status line is derived
+  from them, never hardcoded. There is no device/session-list endpoint (only
+  `POST`/`DELETE /devices` for the push token) and no 2FA endpoint, so the page
+  renders no devices, sign-ins or revoke section and never mentions them
+  (`docs/audit/FEATURE_GAPS.md` A6).
 
 ---
 

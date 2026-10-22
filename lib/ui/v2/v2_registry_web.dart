@@ -70,7 +70,6 @@ import 'settings_extra/response_wait_page.dart';
 import 'settings_extra/shared_memory_page.dart';
 import 'share/share_chat_sheet.dart';
 import 'share/share_link_card.dart';
-import 'share/share_sheet.dart';
 import 'sidebar/project_detail_page.dart';
 import 'sidebar/project_memory_editor.dart';
 import 'sidebar/projects_page.dart';
@@ -552,14 +551,6 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     builder: (_) => ShareChatSheet(data: previewShareChatData()),
   ),
   V2ScreenEntry(
-    id: 'share_sheet',
-    title: 'Share sheet',
-    group: 'Sharing',
-    summary: 'Read-only link, visibility and share targets',
-    isSheet: true,
-    builder: (_) => ShareSheet(data: previewShareSheetData()),
-  ),
-  V2ScreenEntry(
     id: 'collab_live',
     title: 'Collaboration live',
     group: 'Sharing',
@@ -1036,14 +1027,14 @@ final List<V2ScreenEntry> v2ScreensWeb = <V2ScreenEntry>[
     id: 'run_timeline',
     title: 'Run timeline',
     group: 'Schedules',
-    summary: 'Day groups, outcomes, artifacts and retry on failure',
+    summary: 'Day groups, outcomes, artifacts and run-now on failure',
     builder: (_) => _componentPage(
       'Run timeline',
       'Run history for one schedule',
       RunTimeline(
         data: previewRunTimelineData(),
         onOpenArtifact: (_) {},
-        onRetryRun: (_) {},
+        onRunNow: (_) {},
         onRetry: () {},
         onBackToSchedule: () {},
       ),
