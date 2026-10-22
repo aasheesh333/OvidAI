@@ -25,6 +25,7 @@ class OColors extends ThemeExtension<OColors> {
     required this.accentFill,
     required this.onAccent,
     required this.accentSoft,
+    required this.agent,
     required this.success,
     required this.warn,
     required this.danger,
@@ -43,10 +44,18 @@ class OColors extends ThemeExtension<OColors> {
   final Color textMuted;
   final Color textFaint;
   final Color codeBg;
+  /// Text/icon colour for interactive elements. Ink on Paper, Paper on Ink:
+  /// the system has no coloured accent for ordinary actions.
   final Color accent;
+
+  /// Fill for a primary action: Ink on the light theme, Paper on the dark one.
   final Color accentFill;
   final Color onAccent;
   final Color accentSoft;
+
+  /// Signal Red. Reserved for the agent itself — its mark, its live state and
+  /// its destructive confirmations. Never used for ordinary chrome.
+  final Color agent;
   final Color success;
   final Color warn;
   final Color danger;
@@ -76,13 +85,13 @@ class OColors extends ThemeExtension<OColors> {
     textMuted: Color(0xFF605C55), // Stone, darkened for body-size text
     textFaint: Color(0xFF837F76), // Stone, for captions and icons
     codeBg: Color(0xFFEDE9E0),
-    // Signal Red as text/icon. #E5484D is 3.47:1 on Paper — enough for an icon
-    // or large text, not for a body-size link — so the text token is the same
-    // hue darkened to 4.86:1. `accentFill` keeps the exact brand value.
-    accent: Color(0xFFB32D34),
-    accentFill: Color(0xFFE5484D), // Signal Red
-    onAccent: Color(0xFF0F0F0F), // 4.83:1 on Signal Red
-    accentSoft: Color(0x1AE5484D),
+    // Ordinary actions are Ink on Paper. There is no coloured accent: the
+    // three-colour system spends its one strong colour on the agent.
+    accent: Color(0xFF1B1B1B),
+    accentFill: Color(0xFF1B1B1B),
+    onAccent: Color(0xFFF4F1EA),
+    accentSoft: Color(0x141B1B1B),
+    agent: Color(0xFFE5484D), // Signal Red
     // Status is carried by icon and wording, not by a fourth hue.
     success: Color(0xFF1B1B1B),
     warn: Color(0xFF605C55),
@@ -104,11 +113,12 @@ class OColors extends ThemeExtension<OColors> {
     textMuted: Color(0xFFA8A399), // Stone, lifted for body-size text
     textFaint: Color(0xFF8A867D), // Stone
     codeBg: Color(0xFF0F0F0E),
-    // Signal Red lifted for the Ink page: 6.66:1.
-    accent: Color(0xFFFF6B6F),
-    accentFill: Color(0xFFE5484D),
-    onAccent: Color(0xFF0F0F0F),
-    accentSoft: Color(0x24E5484D),
+    // On the Ink page the primary action inverts to Paper.
+    accent: Color(0xFFF4F1EA),
+    accentFill: Color(0xFFF4F1EA),
+    onAccent: Color(0xFF1B1B1B),
+    accentSoft: Color(0x1FF4F1EA),
+    agent: Color(0xFFFF6B6F), // Signal Red, lifted for the dark page
     success: Color(0xFFF4F1EA),
     warn: Color(0xFFA8A399),
     danger: Color(0xFFFF6B6F),
@@ -139,6 +149,7 @@ class OColors extends ThemeExtension<OColors> {
     Color? accentFill,
     Color? onAccent,
     Color? accentSoft,
+    Color? agent,
     Color? success,
     Color? warn,
     Color? danger,
@@ -161,6 +172,7 @@ class OColors extends ThemeExtension<OColors> {
       accentFill: accentFill ?? this.accentFill,
       onAccent: onAccent ?? this.onAccent,
       accentSoft: accentSoft ?? this.accentSoft,
+      agent: agent ?? this.agent,
       success: success ?? this.success,
       warn: warn ?? this.warn,
       danger: danger ?? this.danger,
@@ -188,6 +200,7 @@ class OColors extends ThemeExtension<OColors> {
       accent: l(accent, other.accent),
       accentFill: l(accentFill, other.accentFill),
       onAccent: l(onAccent, other.onAccent),
+      agent: l(agent, other.agent),
       accentSoft: l(accentSoft, other.accentSoft),
       success: l(success, other.success),
       warn: l(warn, other.warn),

@@ -17,13 +17,17 @@ void main() {
       // The three-colour system, pinned so a theme edit cannot drift it.
       expect(OColors.light.bg.toARGB32(), 0xFFF4F1EA); // Paper
       expect(OColors.light.text.toARGB32(), 0xFF1B1B1B); // Ink
-      expect(OColors.light.accentFill.toARGB32(), 0xFFE5484D); // Signal Red
+      expect(OColors.light.agent.toARGB32(), 0xFFE5484D); // Signal Red
+      // Ordinary actions are Ink on Paper, not Signal Red: the system spends
+      // its one strong colour on the agent.
+      expect(OColors.light.accentFill.toARGB32(), 0xFF1B1B1B);
       expect(OColors.light.inputBorder.toARGB32(), 0xFF8A867D); // Stone
     });
 
     test('dark palette inverts Ink and Paper, keeps Signal Red', () {
       expect(OColors.dark.text.toARGB32(), 0xFFF4F1EA); // Paper on Ink
-      expect(OColors.dark.accentFill.toARGB32(), 0xFFE5484D); // Signal Red
+      expect(OColors.dark.agent.toARGB32(), 0xFFFF6B6F); // Signal Red
+      expect(OColors.dark.accentFill.toARGB32(), 0xFFF4F1EA); // Paper
       // The page is a near-black Ink, not pure black: pure black loses the
       // paper-like softness the light theme is built on.
       expect(OColors.dark.bg.computeLuminance(), lessThan(0.02));

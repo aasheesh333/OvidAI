@@ -230,9 +230,9 @@ void main() {
       final check = OContrast.audit(
         OColors.dark,
       ).firstWhere((check) => check.name == 'accentFill/onAccent');
-      expect(check.ratio, closeTo(4.90, 0.05));
+      expect(check.ratio, closeTo(15.27, 0.05));
       expect(check.passes, isTrue);
-      expect(check.grade, 'AA');
+      expect(check.grade, 'AAA');
       // Regression floor: the fill must never drift back under the gate.
       expect(check.ratio, greaterThanOrEqualTo(4.5));
     });
@@ -298,12 +298,12 @@ void main() {
         // Paper/Ink palette: Ink on Paper is 15.27:1, Paper on Ink 16.34:1.
         expect(pick(light, 'text/bg').ratio, closeTo(15.27, 0.05));
         expect(pick(light, 'textMuted/bg').ratio, closeTo(5.89, 0.05));
-        expect(pick(light, 'accentFill/onAccent').ratio, closeTo(4.90, 0.05));
+        expect(pick(light, 'accentFill/onAccent').ratio, closeTo(15.27, 0.05));
         expect(pick(light, 'danger/onDanger').ratio, closeTo(5.49, 0.05));
 
         expect(pick(dark, 'text/bg').ratio, closeTo(16.34, 0.05));
         expect(pick(dark, 'textMuted/bg').ratio, closeTo(7.34, 0.05));
-        expect(pick(dark, 'accentFill/onAccent').ratio, closeTo(4.90, 0.05));
+        expect(pick(dark, 'accentFill/onAccent').ratio, closeTo(15.27, 0.05));
         expect(pick(dark, 'danger/onDanger').ratio, closeTo(6.92, 0.05));
       },
     );
@@ -317,7 +317,7 @@ void main() {
       expect(report, contains('textMuted/bg'));
       expect(report, contains('accentFill/onAccent'));
       expect(report, contains('danger/onDanger'));
-      expect(report, contains('4.90:1'));
+      expect(report, contains('15.27:1'));
       expect(report, isNot(contains('FAIL')));
     });
 
